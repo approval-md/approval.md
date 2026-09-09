@@ -150,7 +150,10 @@ The anchor asks whether anybody else holds a copy of these bytes, and answers
 from git, so it is exactly as fresh as the last push and says nothing at all on
 a machine with no remote. `--checkpoints` asks a different question: did a key
 that no agent process holds sign this head? It answers from the log plus the
-policy, so it works offline and covers the window nobody has pushed yet.
+policy, so it works offline and covers the window nobody has pushed yet. The
+design behind the mechanism, including why an unknown key is a refusal and why
+the signing key is not the attestation identity, is
+[checkpoints](checkpoints.md).
 
 The two are independent and neither may be weakened to let the other pass. A
 forger who truncates the log and recomputes the chain defeats neither: the
@@ -353,12 +356,16 @@ chain.
 3. **Snapshot, not stash.** The working log is copied aside, atomically, inside
    `.approval/`. `git stash` appears nowhere in the implementation, and the log
    never routes through git state mutation.
-4. **Baseline.** The working file is set to the bytes git already has at `HEAD`,
+4. **Baseline.** The working LOG is set to the bytes git already has at `HEAD`,
    so the path is clean and a fast-forward can move over it. That is a plain
-   write of bytes we are holding, not a checkout.
-5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
-   and refused (`log-sync-not-fast-forward`): a merge commit over the log would
-   be a merge of two hash chains, and chains do not merge.
+   write of bytes we are holding, not a checkout. The log can be baselined this
+   early because nothing can dirty it in between: sync holds the append lock,
+   and appending is the only thing that writes it. The projections cannot, and
+   are handled at the merge instead (see below).
+5. **Fetch, a fast-forward CHECK, the projections are discarded, then the
+   merge.** A non-fast-forward is named and refused
+   (`log-sync-not-fast-forward`): a merge commit over the log would be a merge
+   of two hash chains, and chains do not merge.
 6. **Untracked payload files, between the check and the merge.** `git merge
    --ff-only` refuses to write over an untracked working-tree file, and a records
    advance commits the payload store, so a checkout that already held those
@@ -378,6 +385,21 @@ chain.
    conflict. Nothing is pulled, nothing is appended, and the working tree is left
    as it was found. A local payload the incoming commit does **not** carry blocks
    nothing and is not touched.
+   **The queue projection is discarded, as the last statement before the
+   merge** (APRV-292). A records commit carries `.approval/QUEUE.md` as well as
+   the log, and the daemon re-renders that file every tick under no lock at all
+   (its TTL countdowns move even when the log does not), so a projection cleaned
+   up any earlier can be dirty again by the time `git merge --ff-only` looks at
+   it. That is the refusal of 2026-09-07:
+   "local changes to .approval/QUEUE.md would be overwritten", twice, the second
+   time straight after a hand-run `git checkout` of exactly that file. A
+   projection is a rendering of the log, rebuilt at step 8 from the reconciled
+   log, so sync throws the working copy away rather than reconciling it: no
+   proof, no comparison, nothing to weigh. Discarding late is what makes it
+   stick, and a merge that still fails with a projection dirty again is retried
+   exactly once before it refuses. A projection git neither has at `HEAD` nor
+   carries in the incoming tree can stop no merge and is left alone, which is
+   why the gitignored `.approval/index.sqlite` is never cleared here.
 7. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
    it, or an extension of it. Prefix: the snapshot goes back, because the longer
    chain contains the shorter one whole. Extension: the pulled file stays, for
@@ -387,7 +409,9 @@ chain.
 8. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
    the reconciled log and the index is reindexed from it. The direction is
    load-bearing: a projection restored from before the pull would be a
-   screenshot asserting something the log no longer says.
+   screenshot asserting something the log no longer says. `QUEUE.md` is
+   snapshotted at step 3 all the same, for the refusal path alone, so a sync
+   that refuses leaves the whole working tree as it found it.
 9. **Post-verify**, and only then is the snapshot removed.
 
 Any failure at any step restores the snapshot before exiting, so the working log
@@ -435,6 +459,27 @@ non-fast-forward or opening a second one. `--pr` asks `gh pr list --head <branch
 branch whose log the working log is not a prefix of is refused with the same two
 codes the trunk is, naming the branch.
 
+**`--pr` also arms the merge (APRV-284).** After the pull request is open or
+updated, the verb runs `gh pr merge <records branch> --merge --auto`, so the day's
+records land as a merge commit the moment CI and the branch rules allow it and
+never before. A records pull request is the one shape here that never needed a
+reviewer (it carries exactly the log, `QUEUE.md` and `.approval/payloads/`, the
+three paths CI's protected-path guard exempts), so what it was waiting for at
+CLEAN was a click and not a judgement. The arm is the same command with the same
+class a session's own arm has, `vcs.push.main`, and it runs inside whatever
+authorized the advance; nothing here asks a second question.
+
+Two things it will not do. It WITHHOLDS the arm when the pushed branch carries a
+path outside those three (a commit this verb did not make, sitting on a shared
+branch), naming what it saw — the reasoning that makes a records pull request
+safe to auto-merge is a claim about the diff, so it is checked rather than
+assumed, and anything unreadable withholds too. And an arm `gh` refuses (auto-merge
+disabled on the repository, a merge queue, a pull request already mergeable) is
+reported and never fatal: the records are committed, pushed and open either way.
+`--no-auto-merge` skips the whole step. The outcome is the `auto-merge` row in the
+table and `autoMerge` (`armed` | `withheld` | `refused` | `off` | `null`) plus
+`autoMergeNote` in `--json`.
+
 Five refusals are the point of the verb.
 
 `log-advance-fetch-failed`: the base branch could not be fetched, so there is no
@@ -472,7 +517,8 @@ the record of itself, in git, where a reader can see exactly which bytes moved.
  "head":{"committed":{"seq":38,"hash":"…"},"working":{"seq":41,"hash":"…"}},
  "staged":[".approval/log/events.jsonl",".approval/QUEUE.md",".approval/payloads"],
  "message":"Log advance: seq 39..41 (main)","commit":"…","pushed":true,
- "prUrl":null,"dryRun":false}
+ "prUrl":null,"prCreated":false,"autoMerge":null,"autoMergeNote":null,
+ "dryRun":false}
 ```
 
 ## policy
@@ -592,6 +638,61 @@ refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
 so an exported log leaks no home directory. The event's payload is
 `{"policy_path":"APPROVAL.md","sha256":"<64 hex>"}`.
 
+### `--organ <path>`: the gate's organs (APRV-272)
+
+The ORGANS are the harness files that install the hook: `.claude/settings*`,
+`.cursor/hooks.json`, `.cursor/hooks/` and `.cursor/agents/`. They classify
+`policy.core`, and `policy.core` is human-only in this repository's policy, so
+the gate mints **no** record for a change to one: no request, no grant, no
+token. That is deliberate, and it left a hole. The CI-side protected-path guard
+requires evidence in the committed log for every protected path a pull request
+touches, and for an organ there was no evidence it could ever accept, so a human
+who hand-edited the settings file could not get the change through review. This
+flag closes it.
+
+```
+approval policy attest --organ .claude/settings.json --as human:<id>
+```
+
+One path per call, repository-relative (an absolute path under `--dir` is
+accepted and recorded relative). The runtime hashes the bytes on disk; there is
+no flag for the digest. The record is a **`gate.organ.attested`** event, never a
+`policy.updated`:
+
+```
+{"event":"gate.organ.attested","actor":"human:<id>",
+ "payload":{"organ_path":".claude/settings.json","sha256":"<64 hex>"}}
+```
+
+Nothing in the gate reads it. An organ attestation does not make an unattested
+policy operative and does not change the `policy_sha256` a request or a grant is
+decided under; a separate event type is what makes that true by construction
+rather than by a filter every reader has to remember. What reads it is the
+guard, which passes a guarded organ when the blob at the head commit hashes to a
+digest a human attested **for that same path**. A digest attested for another
+path is not evidence, and bytes edited after the attestation are not attested.
+
+Two refusals are specific to this flag, both exit 2:
+
+```
+path-is-policy   the policy file: use `approval policy attest` with no --organ
+path-not-organ   not one of the gate's organs (an ordinary file, or the
+                 approval home, which is the human's own ceremony surface)
+```
+
+`--policy` and `--organ` together are a usage error rather than a precedence
+puzzle. `--json` adds `organ_path` to the success object:
+
+```
+success  {"ok":true,"seq":7,"sha256":"<64 hex>","path":"/abs/.claude/settings.json",
+          "organ_path":".claude/settings.json"}
+```
+
+`approval doctor`'s `gate-organs` row lists the organ files in a checkout whose
+current bytes carry no attestation. It never moves doctor's exit code: an
+unattested organ breaks nothing on this machine, and the enforcement for one is
+the guard in CI.
+
 ## policy amend
 
 **Progress, on stderr.** The verb re-verifies the whole chain and recovers the
@@ -609,7 +710,8 @@ verifying the log chain before anything is read from it
 recovering the attested baseline and diffing it against the live policy
 fetching origin/main: the amendment is based on the remote, not on this checkout
 verifying that origin/main 4c1d90ab2f77 is this edit's base
-running the policy suite against the amended file (21 pinned resolutions)
+running the policy suite against the amended file (26 pinned resolutions)
+running the dogfood suite against the amended file (tests/dogfood.test.ts)
 building the amendment commit on origin/main 4c1d90ab2f77 (nothing is checked out)
 pushing 9b31c0de51aa to origin policy-amend-7413
 opening the pull request for policy-amend-7413
@@ -639,10 +741,34 @@ amendment) and `base-log-diverged` (the remote's log is not a prefix of yours).
 **The policy suite runs before the push.** Where the policy being amended is
 this repository's own, `--commit` resolves every pinned class against the AMENDED
 file and refuses `policy-suite-failed` when any of them moved, printing the
-expectation diff. Nothing is attested, committed or pushed on that path. The pins
-live in `src/core/policy-expectations.ts`, which the dogfood suite imports too, so
-the check on the laptop and the check in CI are one list: update the pins, run
-`npm run build`, and re-run the ceremony.
+expectation diff and each pin's note. Nothing is attested, committed or pushed on
+that path. The pins live in `src/core/policy-expectations.ts`, which the dogfood
+suite imports too, so the check on the laptop and the check in CI are one list.
+
+The pins are a SAFETY FLOOR, not an inventory (APRV-296). They name the classes
+whose loosening would be a regression (the `human-only` classes, the `manual`
+classes whose effects leave this repository or cannot be undone, and the
+fail-closed default reached through classes the policy deliberately does not
+declare), and each pin's note says what a loosening would cost. A class the
+policy declares and no pin names is ACCEPTED: declaring a new `supervised` or
+`autonomous` class is a policy amendment and not also a code change, and the
+resolution still prints in the semantic diff below for the human who attests it.
+Until APRV-296 every declared class had to be pinned, in both directions, and a
+one-line TTL amendment on 2026-09-07 took three runs to land because of it.
+
+**And then the whole dogfood suite, still before the attestation.** The pin check
+is a subset of `tests/dogfood.test.ts`, and the seq 23351 ceremony passed the pins
+and went red on CI over a dogfood test about the values block. So `--commit` also
+RUNS the built suite (`node --test dist/tests/dogfood.test.js`, from the repo
+root) and refuses `dogfood-suite-failed` naming the failing test. The suite is run
+rather than reimplemented: it reads the live `APPROVAL.md` off disk and imports the
+pins out of `dist/`, so it asks CI's question of this ceremony's own bytes. Three
+things fail closed under that one code, because an unrun suite is not a green one:
+a red suite, a suite present in `tests/` and absent from `dist/` (a stale build,
+whose pins are the previous edit's), and a suite that could not be spawned or ran
+past its five-minute limit. A repository with no `tests/dogfood.test.ts` in source
+skips the whole step, which is what keeps the shipped CLI from running this
+project's tests inside somebody else's checkout.
 
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
@@ -680,6 +806,10 @@ paths (`protected_paths`, `audit.skew_tolerance`, `channels.telegram.token_env`,
 as `before -> after`, so a spec key added tomorrow is covered without an edit
 here. A top-level key the schema does not know is listed as an UNKNOWN KEY
 whether or not its value moved, because it is what makes the policy fail closed.
+Which keys the schema knows is READ FROM `schema/policy.schema.json` (APRV-296),
+so a key the schema admits never reads as unknown: the list used to be a second,
+hand-written copy, and it warned three times about the `daemon.*` block over a
+policy that loaded cleanly.
 `no semantic change` is printed only when the probed classes AND every key
 compared equal; when a side's YAML did not parse there are no keys to walk, and
 the report says the document was not compared instead.
@@ -694,14 +824,26 @@ semantic diff is unavailable, and only the load advisory and the attestation
 run. There is no `--baseline` flag, because a baseline supplied by hand is a
 baseline nobody can verify.
 
-`--commit` carries exactly two files: the policy and the log. It refuses outside
-a git repository, and refuses when the index holds staged changes to anything
-else — a commit that swept in an unrelated staged edit would make "this commit
-is the amendment" false. On the branch flow it also refuses when there is no
-`origin` remote, and when a `--branch` name already exists. Every one of those
-refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
-attested policy without its commit. The same holds for the fetch, the two base
-checks and the policy suite above.
+`--commit` carries exactly these files: the policy, the log, and (APRV-274) the
+pins in `src/core/policy-expectations.ts` when they moved. The pins are part of
+an amendment's contract (CI's dogfood suite resolves the amended policy against
+them, and it reads both out of the same commit), so a rule that took the policy
+and the log and refused the pins was a rule that split one amendment across a
+commit, a hand-run cherry-pick and a second red CI run. "Moved" is measured against the
+commit the amendment is BUILT ON (`origin/<default branch>`, or `HEAD` where
+there is no remote), so a pins file the base already carries stays exactly as the
+base carries it, and a pins edit somebody else landed is not reverted by this
+ceremony. The pin deltas print in the semantic diff beside the class deltas, ride
+in the commit subject, and appear in `--json` as `pins`.
+
+It refuses outside a git repository, and refuses when the index holds staged
+changes to anything beyond those three: a commit that swept in an unrelated
+staged edit would make "this commit is the amendment" false. On the branch flow
+it also refuses when there is no `origin` remote, and when a `--branch` name
+already exists. Every one of those refusals happens BEFORE the attestation, so a
+refused `--commit` never leaves an attested policy without its commit. The same
+holds for the fetch, the two base checks, the policy suite and the dogfood suite
+above.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the
@@ -840,9 +982,9 @@ is the human rendering only.
 4. runs the load advisory;
 5. asks for confirmation (skipped by `--yes` and `--dry-run`);
 6. attests: one `policy.updated` event, identical to `approval policy attest`;
-7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`,
-   a `git commit` citing the attestation seq, and the push (and, on the branch
-   flow, the branch and the pull request);
+7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`
+   (plus the pins when they moved), a `git commit` citing the attestation seq,
+   and the push (and, on the branch flow, the branch and the pull request);
 8. publishes, unless `--no-publish`: a push the remote refuses is answered by
    the branch, push, pull request and auto-merge above, each reported as it
    lands, and a step that fails drops to the runbook from there.
@@ -892,6 +1034,9 @@ attestation may still proceed.
              "commands":["git add ...","git commit -m ...","git push ..."],
              "committed":false,"pushed":false,"prUrl":null|"https://...",
              "output":null|"..."},
+ "pins":null|{"module":"src/core/policy-expectations.ts",
+             "changes":[{"actionClass":"log.sync","before":null|"autonomous/rule",
+               "after":null|"manual/rule"}]},
  "ceremony":{"attested":true|false,"seq":null|2},
  "publishing":null|{"attempted":true,"complete":true,
              "via":"direct"|"branch"|"recovery"|"none",
@@ -910,6 +1055,12 @@ key beside them): `ceremony.attested` is whether THIS run attested, while the
 top-level `attested` remains the attestation it moved from, and `publishing` is
 null until a ceremony reaches its publishing half. `publishing.steps` lists the
 commands the verb RAN, in order, the refused direct push included.
+`pins` (additive, always present) is null when the pins are no part of the
+ceremony, for any of its three reasons: these pins do not govern this policy,
+there is no pins module, the file is what the base carries. Inside `changes`, a
+null `before` or `after` means the class was NOT PINNED on that side, and it is
+the only thing it means: an entry whose resolution the reader could not make out
+reads `"unreadable"` there instead.
 A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr,
 and after the attestation it carries `ceremony` and `publishing` alongside
 `error`, so a machine caller reads "attested, not published" without parsing
@@ -923,9 +1074,22 @@ the message.
 - `load-failed` — `--require-load` and the policy does not load. Nothing was
   appended.
 - `commit-preconditions` — `--commit` outside a git repository, with staged
-  changes beyond the policy and the log, or (branch flow) with no origin remote
-  or a `--branch` name already taken. Checked before the attestation; nothing was
-  appended.
+  changes beyond the policy, the log and the pins, or (branch flow) with no
+  origin remote or a `--branch` name already taken. Checked before the
+  attestation; nothing was appended.
+- `fetch-failed` / `base-policy-diverged` / `base-log-diverged` — the remote the
+  amendment would be based on could not be fetched, carries a policy this edit
+  was not written against, or carries a log this working log does not contain.
+  All three are checked before the attestation; nothing was appended.
+- `policy-suite-failed` — a pinned class resolves differently under the amended
+  policy. Every pin is a class whose loosening would be a regression, so the
+  message carries the expectation diff and the pin's note saying what that
+  loosening would cost. A declared class no pin names is not this refusal
+  (APRV-296). Checked before the attestation; nothing was appended.
+- `dogfood-suite-failed` — the built dogfood suite is red against the amended
+  policy (the message names the failing test), is absent from `dist/` while
+  present in `tests/`, or could not be run at all. Checked before the
+  attestation; nothing was appended.
 - `git-failed` — the attestation WAS appended and git then failed; the message
   names the seq and what to run by hand.
 - `push-rejected` — the attestation was appended and committed, and the remote
@@ -990,6 +1154,13 @@ hash must equal the declared `payload_hash` and it is filed in
 `.approval/payloads/<hash>.json`, which is where render and every channel read the
 bytes from. Supply it here once and no channel needs `--payload-dir` or
 `--payloads` at all.
+
+When the policy permits an unattended action, supplied material is still checked
+against the registered action's task, class and payload hash and retained before
+`proceed:true` is returned. This creates no approval event and does not require
+an extra human grant. The retained bytes let later audits match the execution
+record to the actual edit. Missing bindings, mismatched material or a storage
+failure refuse the request; an existing valid payload is preserved.
 
 **`--json`** (one object on stdout):
 
@@ -1230,9 +1401,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
   policy hash, or against which budget. `withdraw` and `expire` are deliberately
   NOT refused: they are the exits for a request whose class a policy amendment
   raised after it was opened.
-- `loop-escalated` — three consecutive `execution.failed` events escalated the
-  task to manual (SPEC.md §10.2). Its MANUAL actions are unaffected; the streak
-  clears on a completion.
+- `loop-escalated` — three consecutive failed SIDE-EFFECTING executions escalated
+  the task to manual, or a harness session or actor scope reached the same count
+  (amended SPEC.md §10.2, APRV-280). A failed `read.*` action accrues nothing and
+  a successful one clears nothing. Its MANUAL actions are unaffected; the streak
+  clears on a side-effecting completion, and the refusal names the scope and that
+  clearing action.
 - `not-requested` — there is no request to decide or expire.
 - `already-decided` — the request is already granted, rejected, revoked or
   expired.
@@ -1459,10 +1633,31 @@ constructs the child's environment instead:
 never a name and never a value: a variable's name is half of a credential. The
 count is informational, and nothing in the gate reads it back.
 
-This is a scrub and not a sandbox. The child keeps the network, the filesystem,
-and every other ambient capability of the session, so a granted command can
-still reach anything the session could reach. Taking those away is APRV-193's
-subject, and `approval run` says nothing here that pretends otherwise.
+The scrub is not the sandbox, and since APRV-193 the sandbox is here too. A
+child spawned WITHOUT a token runs with outbound network denied by the operating
+system (macOS `sandbox-exec`), and the credential material beside the log
+(`vault.enc`, the `env` source map, the sealing keys) is unreadable to it. A
+child spawned WITH a token keeps the network: the manual path is a human's grant
+over these exact bytes, and `approval run` on a grant is the one door to the
+world: the registry for `deps.add`, the API host for `network.call`. Reading
+the token rather than re-resolving the class keeps the decision on the near side
+of the append, and it widens nothing an agent can reach alone, because a token
+that does not verify runs no command at all.
+
+`execution.started` records which room the child ran in, as `sandbox`:
+
+- `egress-denied`: the child ran with no outbound network.
+- `granted-egress`: a token was presented, so a human approved these bytes.
+- `opted-out`: `--no-sandbox` was passed. Recorded precisely because an opt-out
+  nobody can see afterwards is an opt-out that costs nothing to take.
+- `unsupported`: this platform has no mechanism in this build (anything but
+  macOS today; Linux is the follow-up). The execution proceeded UNPROTECTED, and
+  the field is how an auditor finds every run that did.
+
+On macOS, a sandbox that is present and broken is a refusal: the command is not
+run, nothing is appended, and the same token still spends once it works. See
+`docs/sandboxed-exec.md` for the profile, the survey of what egress denial
+costs, and the carve-outs.
 
 **What it does, in this order.**
 
@@ -1505,8 +1700,9 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
   this action outside agent execution. Refused on both paths, before either is
   chosen, and nothing is appended. Distinct from `token-required`, which is a
   redirection: here there is no token to get and no grant that could mint one.
-- `loop-escalated` — three consecutive `execution.failed` events escalated the
-  task to manual; route it through a human grant instead.
+- `loop-escalated` — three consecutive failed SIDE-EFFECTING executions escalated
+  the task to manual (amended SPEC.md §10.2, APRV-280); route it through a human
+  grant instead. Failed `read.*` actions accrue nothing.
 - `policy-not-attested` — policy unattested or its bytes changed (detail:
   `not-attested` | `hash-mismatch` | `unreadable`).
 - `already-executed` — an `execution.started` already exists for this key.
@@ -1522,6 +1718,61 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
   close, or that execution already has an outcome.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1).
 - `append-failed` — the append itself failed; the exit code follows the cause.
+
+## sandbox
+
+```
+approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+```
+
+Runs a command with outbound network denied by the operating system. It appends
+nothing, authorizes nothing, and exits with the child's own exit code.
+
+**Why it exists.** `approval run` covers the actions the gate SEES. It does not
+cover the commands a harness runs on its own (`npm test`, `node
+scripts/whatever.mjs`), which the hook classifies `files.write.workspace`, allows, and then
+never touches again, because the hook decides and the harness executes. Those
+are exactly the commands that run code an agent wrote a minute ago, so the
+command's NAME has stopped describing its effect, and no classifier over shell
+text can fix that. This verb is where such a command runs when its effects
+cannot leave.
+
+The hook cannot apply the sandbox itself: a `PreToolUse` verdict is allow or
+deny, and it cannot rewrite a command into a wrapper. Two things make the
+wrapper more than a convention:
+
+1. the classifier reads `approval sandbox -- <cmd>` as the class of `<cmd>`, so
+   wrapping neither hides a command from the gate nor is punished by it (before
+   APRV-193, `sandbox-exec …` was `hook-unclassified` and denied, while the bare
+   command was allowed: the hook actively penalised the safe spelling);
+2. `APPROVAL_HOOK_REQUIRE_SANDBOX=1` makes the hook DENY an allowed-class exec
+   that is not written this way, naming the spelling that works. Off by default,
+   and turning it on can only ever refuse more.
+
+**What the child gets.** No outbound network, including loopback (the gate needs
+none: its IPC is a file). No credential-bearing environment variable
+(`core/child-env.ts`, APRV-205). No read of the vault, the `.approval/env`
+source map, or the sealing keys. Everything else (the filesystem, the working
+tree, `PATH`) is untouched, because a sandbox that broke ordinary development
+is a sandbox somebody turns off.
+
+**`--allow-loopback`** carves loopback back in, for a suite that starts its own
+server. It is a real widening: a port is a port, and anything listening on one is
+reachable from inside.
+
+**Exit 127** means the command was NOT run: this machine has no working sandbox
+primitive, or the command is not on `PATH`. Unlike `approval run`, this verb
+fails closed on both: it makes one promise and has nothing else to offer.
+
+**An agent harness cannot run under this.** `claude` and `cursor-agent` talk to
+a model over the network, which is exactly what is denied, so
+`approval sandbox -- claude` is a session that cannot think. A whole-session
+sandbox needs an egress allowlist reaching one host, which Seatbelt cannot
+express by hostname and which the prior art solves with a local proxy. Until
+that exists the unit this verb protects is the command.
+
+See `docs/sandboxed-exec.md` for the profile, the survey of what egress denial
+costs, and the carve-outs.
 
 ## wait
 
@@ -1663,6 +1914,35 @@ a command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
 `hook-unparseable`), since nothing can establish that an opaque string does not
 write into the log; and a log that cannot be read or verified.
 
+**Usage.**
+
+```
+approval gate open   [--for <duration>] --reason "<text>" [--as human:<id>]
+                     [--log <path>]                     (terminal; no --json)
+approval gate close  [--note "<text>"] [--as human:<id>] [--log <path>] [--json]
+approval gate status [--log <path>] [--json]
+```
+
+`--reason` is required, and it is recorded on the `gate.opened` record the
+window derives from: a bypass nobody stated a reason for is a bypass nobody can
+review. An absent flag is a usage error and an empty one is refused
+`gate-reason-required`; there is no minimum length beyond that, since the
+reason is for the person reading the log later. `--for` takes `5m`, `30m`,
+`2h` and the like (default 30m, cap 24h). `--as` names the human opening it and
+falls back to `APPROVAL_HUMAN`, the variable `eval "$(approval env)"` exports.
+`--note` on `close` records what the window was used to learn.
+
+A typical open, from a terminal in the primary checkout, with the confirmation
+typed at the prompt that follows:
+
+```sh
+cd /Users/carter/dev/approval-md
+approval gate open --for 2h --reason "hook denies every command: attestation drifted after the seq 7355 amend"
+understood                      # typed at the prompt the verb prints, not a command
+approval gate status --json     # the window, its reason, and what has bypassed it so far
+approval gate close --note "re-attested; hook answering again"
+```
+
 **The ceremony.** `open` needs a terminal and the word `understood`, typed in
 full and matched exactly after trimming. There is no `--yes` and no `--force`,
 and `--json` is refused: an answer shaped for a machine implies a machine asking
@@ -1771,7 +2051,10 @@ does not know the flag exists.
   were attempted and whose fate nobody has established, with the closed `reason`
   each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
-- `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `loop_escalations` — tasks, harness sessions and harness actors with three
+  consecutive failed side-effecting executions. Each row carries `scope`, the
+  derivation that produced the key, and `clears`, the sentence naming what ends
+  the streak (APRV-280).
 - `coverage` — `{available, reason, observed, covered}` for this branch's own
   commits, as git recorded them. Informational.
 - `reconciliation` — obligations opened by a retrospective denial and not yet
@@ -1793,8 +2076,8 @@ does not know the flag exists.
  "budgets":[{"limit":"global.daily_usd","scope":"global",
    "window":"rolling-24h","consumed":0.02,"requested":0,"remaining":9.98,
    "pass":true}],
- "loop_escalations":[{"task":"task-042","consecutive_failures":3,
-   "escalated":true}],
+ "loop_escalations":[{"task":"task-042","scope":"task","consecutive_failures":3,
+   "escalated":true,"clears":"an execution.completed for task task-042 …"}],
  "coverage":{"available":true,"reason":null,"observed":4,"covered":3},
  "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
    "class":"records.write","obligation":"gated-revert","review_seq":17}],
@@ -1840,9 +2123,31 @@ error, 3 for a torn tail and 4 for a log it could not read, because a log it
 could not read is a report it did not make. It reads only verified records
 (SPEC.md §11.1 invariant 1) and writes nothing anywhere.
 
+### The id rule, which outranks the window
+
+An `execution.completed` may carry `payload.provider_ref`, the identifier the
+provider filed the effect under, written by the adapter contract at the moment
+the execution closed (SPEC.md §8, APRV-251). An observed effect whose source and
+id match one is covered by that record and reported as `match: "provider-ref"`,
+printed in the evidence column as `seq <n> execution.completed (id)`. No window
+is applied to it: an id names one effect, and a class inside a span of time names
+a period.
+
+That is the whole difference the reference buys. Under the window rule below, a
+gated send covers an ungated one of the same class sitting beside it in the same
+day; under this rule, the log answers about the message actually in front of the
+reader, and a message the provider recorded that no record names is a gap no
+window can close.
+
+Absence is not a gap. A send whose adapter names no reference, a send made
+before the amendment, and every effect from `git` and `gh` fall through to the
+class-and-window rule below, which is the same answer this verb has always
+given and is labelled as such.
+
 ### The window rule, stated exactly
 
-For one observed effect, evidence is the EARLIEST record that is all three of:
+For one observed effect with no id-level match above, evidence is the EARLIEST
+record that is all three of:
 
 1. one of `task.registered`, `approval.granted`, `execution.started`,
    `execution.completed` — the four records that mean "this runtime was told
@@ -1873,14 +2178,15 @@ gets. The guard's third verdict, `granted-command`, is deliberately not
 surfaced: it is a run attributed by time rather than by bytes, and printing it
 beside `attested` would flatten the distinction the guard exists to draw.
 
-**The AgentMail join is by class and window, not by message id.** The adapter
-reports the provider's own `message_id` and the report prints it, but the id is
-not matched against anything: `execution.completed` records an `exit_code`, and
-the provider's id reaches only the CLI result, so an id-level binding needs an
-event-schema amendment. Putting the reference on-chain is APRV-251. Until that
-lands, a sent message is covered by a record of its class inside its window,
-exactly like a commit, and the id in the report is there for a person to paste
-into the provider's own console rather than for this verb to match on.
+**The AgentMail join is by message id where the log carries one** (APRV-251). A
+send that went through the adapter records the provider's `message_id` on its
+`execution.completed` as `provider_ref`, and the same id comes back from the
+inbox when this verb asks what was sent, so the two join exactly. A message this
+inbox sent that no record names by id takes the class-and-window rule like a
+commit does: that covers a send made before the amendment, and it covers a send
+made with a credential outside the adapter that happens to sit inside a gated
+send's window. The id stays printed either way, because a person pastes it into
+the provider's own console.
 
 ### The three tiers
 
@@ -1994,7 +2300,25 @@ The checks, at length:
 - **audit-sampling** — sampling fails open by design (SPEC.md §5.2), so an
   unconfigured sampler silently audits nothing; this states the disabled reason
   out loud. A sampler nobody configured skips; a half-configured one fails,
-  because someone intended sampling and is not getting it.
+  because someone intended sampling and is not getting it. On ONE disabled
+  reason, `secret-unset`, the row asks the running daemon over the APRV-208 draw
+  socket instead of answering from its own environment (APRV-271), and names the
+  process that answered: "enabled per the running daemon (pid N, `<socket>`)".
+  That reason is the only one that is a fact about a PROCESS rather than about
+  the policy file, and doctor's process is almost never the right one — the
+  secret lives in the single terminal the operator ran `eval "$(approval env)"`
+  in, and `APPROVAL_*` is stripped from every child, so the row was red on
+  machines where sampling had been running for a fortnight. Every other reason
+  (`rate-absent`, `rate-invalid`, `rate-zero`, `secret-env-unnamed`,
+  `policy-unreadable`) is read from the file here and no daemon's answer softens
+  it. With nothing listening the row keeps its old wording and adds that no
+  daemon answered and that the daemon's shell is what decides. The answer is
+  unauthenticated by construction, since doctor holds no secret to check a MAC
+  with; what bounds who may make the claim is the socket, which must be owned by
+  this user and unreachable by group or other, and what bounds the damage is
+  that a diagnostic authorizes nothing. The secret's VALUE appears on no path:
+  what crosses the socket is the variable's name and the rate, both of which the
+  policy file already states in the open.
 - **envelope-integrity** — every task file whose task the log registered still
   carries an `approval:` envelope. The loss this names was observed live
   (APRV-60): a task-file rewrite by a tool that did not know the key dropped it,
@@ -2013,15 +2337,39 @@ The checks, at length:
   or ACL prompt, and a diagnostic must never hang or ask a human for a password.
   Value-free by construction: it reads each variable's status and source and
   never its value, on any path.
-- **keychain-scope** — whose keystore items this instance's `.approval/env`
-  names, answered from the NAMES alone so that it too can never block on an
-  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
-  another instance: two gates pointed at one credential is how a demo instance
-  ended up sending through the production bot and eating its approval taps.
-  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
-  resolves alike, and for a value inherited from the shell while the file names
-  a source of its own — both are correct configurations that become somebody
-  else's problem the moment a second instance exists.
+- **log-drift** — how the working log stands against the committed one
+  (APRV-125). Since APRV-219 the row IS `approval log verify --anchor`'s check
+  (`cli/log-anchor.ts`), rather than a second comparison written beside it: two
+  implementations of "has this repository forked" were two chances to disagree
+  about the one question where disagreement is intolerable, and the
+  disagreement duly arrived (APRV-210). SKIP where no committed copy resolves at
+  any rev, with no `fix`, because a check that could not look has nothing to
+  prescribe. PASS when the working file extends the committed one, keeping a
+  `fix` while records are still waiting to be published, and PASS when the
+  committed copy is instead ahead, whose fix is `approval log sync`. The one
+  FAIL is a real divergence: hash chains do not merge, nothing in this runtime
+  will re-chain them, and which of the two is the log is a human decision. Reads
+  only, and never fetches or pulls: the committed side comes out of the object
+  store.
+- **reconciliation** — is any retrospective denial still unreconciled
+  (APRV-127)? A denial cannot undo the action it denies. What it opens is an
+  obligation, and an obligation nobody is told about is worth nothing, so doctor
+  FAILS while one is open, in the same voice it uses for a half-configured
+  sampler. It repairs nothing: satisfaction is human-only in the code and in the
+  event schema, and a doctor that could close an obligation would be the runtime
+  closing its own homework. The `fix` is the command a person runs after they
+  have actually done the thing.
+- **harness-hook-outcomes** — whether `.claude/settings.json` registers the
+  harness for the event that reports OUTCOMES (APRV-145), and not only for the
+  one that asks permission. The configuration this exists to name is the one in
+  which loop escalation cannot accrue AT ALL: the pre-execution hook registered
+  and the post-execution one not, so every tool call opens a delegated
+  `execution.started` that nothing ever closes, the harness streaks of amended
+  SPEC.md §10.2 hold at zero, and the guard reads as passing because there is
+  nothing for it to see. A silent control is worse than an absent one. Doctor
+  READS that file and never writes it: a file that configures the gate is part
+  of the gate, so the repair is a line for a human to commit, printed by
+  `approval instructions hook`.
 - **harness-hook-wiring** — whether THIS checkout's `.claude/settings.json`
   registers `approval hook` for PreToolUse over every gated tool (Bash, Edit,
   Write, NotebookEdit). SKIP, named, when the file is absent, unreadable, or
@@ -2034,6 +2382,43 @@ The checks, at length:
   committed log, which since APRV-202 requires every added and removed line of a
   protected path to trace to the bound material of a grant, rather than only
   that the path was granted at some point in the week.
+- **keychain-scope** — whose keystore items this instance's `.approval/env`
+  names, answered from the NAMES alone so that it too can never block on an
+  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
+  another instance: two gates pointed at one credential is how a demo instance
+  ended up sending through the production bot and eating its approval taps.
+  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
+  resolves alike, and for a value inherited from the shell while the file names
+  a source of its own — both are correct configurations that become somebody
+  else's problem the moment a second instance exists.
+- **log-advance-cadence** — how far the log has run ahead of any records branch,
+  and how the daemon's last cadence advance ended (APRV-204). There is no
+  `approval daemon status` subcommand and no status file: the daemon reports
+  live on its own event stream, which is gone the moment nobody is tailing it,
+  and a status file would be a second copy of facts the log already carries. So
+  the answer is read from the log itself (the `daemon-advance-*` cycles the
+  daemon registers) plus local refs, which is why a DIFFERENT process can answer
+  it, and why an operator gets the same answer whether or not a daemon is
+  running at all. Advisory rather than failing: records waiting to be published
+  is the normal state of a checkout that has been recording decisions, and only
+  the reader knows how long is too long. Reads only, and never fetches, which is
+  the rule `log-drift` holds itself to.
+- **dark-sessions** — does the activity in this checkout have log records beside
+  it (APRV-192)? The detective complement to `harness-hook-wiring` above. That
+  row asks this checkout's settings file whether the hook is registered and says
+  plainly that this is not proof a session loaded it; this one asks what
+  happened and asks a session nothing at all. It DOES fail the run, which is
+  where the two part company: a configuration this runtime cannot verify from
+  disk is not a health verdict, while a dark session is an EVENT, work done in
+  this repository that the log was never told about, and a row reporting one in
+  the pass column would be tolerating it quietly in the one place an operator
+  goes to ask whether anything is wrong. An `undetermined` subject is a SKIP and
+  never a fail, named in the detail rather than folded into a pass: what the
+  detector could not see is a gap in the instrument, and a red row for it would
+  train an operator to ignore red rows. Doctor appends nothing, so a subject
+  found here is reported and not recorded; the record is the daemon's, written
+  by the sweep it runs on its own cadence
+  (`approval daemon run --dark-sessions`).
 - **verified-snapshot** — whether the daemon's verified-head snapshot
   (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
   the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
@@ -2086,14 +2471,81 @@ The checks, at length:
   and reduces nothing anywhere, so a match is not proof the hook fired.
 - **live-draw** — whether a daemon is answering `supervised-live` draws for this
   log (APRV-208). SKIP when the policy declares no live class: no draw is ever
-  made, and a missing socket is nothing. PASS when the socket is present and
-  owner-only, naming the classes it keeps live. The one FAIL is a live class
-  declared with no usable socket there, because that is the operator's control
-  not being in force: every action of that class gates to a human, at 100%
-  rather than the declared rate, and the two are indistinguishable from inside
-  the policy file. The fix starts the runtime in a shell where the sampling
-  secret resolves. It asks the daemon nothing — it looks at the socket exactly
-  as an asker does and reports what an asker would conclude.
+  made, and a missing socket is nothing. It FAILS in three shapes, all of them
+  the operator's control not being in force — every action of that class gates
+  to a human at 100% rather than at the declared rate, and the two are
+  indistinguishable from inside the policy file. No socket at all; a socket
+  every asker would refuse on sight (a foreign owner, or a mode that lets
+  somebody else bind it); and, since APRV-282, a socket file that is there and
+  REFUSES CONNECTIONS. That last one is why the row opens a connection and
+  closes it again rather than stopping at a `stat`: a socket file is made by a
+  bind and removed by an orderly shutdown, so the one state its presence cannot
+  report is a daemon that died, which is exactly the state seen on 2026-09-05
+  with a green row and a phone full of unconsumed taps. The detail names the
+  file's mtime, because a leftover socket's last write is when its daemon was
+  last alive, and the fix is `approval up`. PASS means the socket answered a
+  connection, and it still asks the daemon NOTHING: no question is sent and no
+  answer is waited for, so what the row reports is what an asker would conclude
+  before it had said a word.
+- **values-block** — whether the optional `approval-values` block of the policy
+  file parses (APRV-238). Nothing else would ever report a broken one: a values
+  block is guidance and not policy (SPEC.md §5.3, §11.1 invariant 10), so a
+  malformed one changes nothing about what the policy says and deliberately does
+  not appear in `approval policy check`, whose answer is the enforcement trace.
+  Left there, a typo would silently mean the operator's stated values reach no
+  agent while every gate keeps working perfectly. Absence is a PASS, in the
+  words SPEC.md §5.3 fixes: a file with no block is an operator who has declared
+  no values, which is a state and not a fault. The only FAIL is a block that is
+  present and unreadable, and its fix names the code rather than proposing a
+  repair, because what the block should say is the human's to write.
+- **checkpoint** — how this log stands against its own human-signed checkpoints
+  (APRV-257), running the same check as `approval log verify --checkpoints`, so
+  two implementations of "does this log's own signature contradict it" cannot
+  come to different conclusions. SKIP when the policy declares no readable key:
+  nothing was verified, and a check that could not look must never report a
+  pass. FAIL on any refusal, because a signature that does not verify, or one
+  naming a hash that is not the hash at that seq, is a human's key vouching for
+  a chain this file does not carry, and that is the finding the whole mechanism
+  exists to produce. PASS otherwise, INCLUDING when a checkpoint is due: the
+  cadence carries a `fix` rather than a status, since a person who has not
+  signed recently is not evidence of tampering, and a doctor that went red
+  because somebody was on holiday is a doctor whose red people stop reading.
+- **gate-organs** — which gate organs in this checkout carry no attestation of
+  their CURRENT bytes (APRV-272). It never moves the exit code, by design. The
+  enforcement for that fact is the CI-side protected-path guard, which fails the
+  pull request; doctor's job here is to make the state visible BEFORE a pull
+  request fails on it, so a human who has just hand-edited the settings file is
+  told they owe an attestation while they are still at the terminal. A failing
+  row would also be wrong on its own terms: an unattested organ breaks nothing
+  on this machine, unlike an unattested policy, which makes every gated
+  operation refuse. A checkout with no organ files at all is a SKIP, exactly as
+  `harness-hook-wiring` treats the same absence.
+- **sealed-keys** — whether a sealed-delivery private key is one `git add` away
+  from publication, or already past it (APRV-285). `.approval/keys/` holds the
+  X25519 private halves of sealed token delivery, one per request, 0600 in a
+  0700 directory; the log is committed and carries only the ciphertext, so a
+  committed key opens that action's `token_sealed` for anyone holding the
+  history while the token is unspent and inside its TTL. Two questions, worst
+  first, the same reading the vault and environment rows use. A key git already
+  TRACKS is a FAIL, asked of `git ls-files` rather than of the working tree, so
+  a key consumed and unlinked is still reported while it sits in the index. A
+  key present in a store no `.gitignore` line covers is a FAIL naming the line;
+  an empty or absent store with no line covering it is a SKIP that still names
+  it, because the entry an operator needs is the one already there on the day
+  they turn the `token_delivery: sealed` knob. SKIP outside a git checkout,
+  where there is nothing to commit a key to. Neither fix deletes nor commits:
+  `git rm --cached` for a key already in the index is named in the prose and
+  left to you, along with revoking every action whose token is still unspent.
+- **codex-hook-wiring** — whether this checkout's `.codex/hooks.json` carries
+  the reviewed approval.md profile for both `PreToolUse` and `PostToolUse`: the
+  exact `Bash|apply_patch` matcher, a direct synchronous `approval hook codex`
+  command, and a `600` second outer timeout. A PASS establishes only those JSON
+  bytes on disk. Codex trust, loading, and observed execution remain separate
+  facts checked through `/hooks` and the bounded smoke test. TOML-only hook
+  configuration, or JSON combined with `.codex/config.toml`, SKIPS because
+  doctor does not interpret or merge the TOML hook tables. Malformed JSON
+  FAILS; a different valid Codex hook profile SKIPS as undetermined rather than
+  being called broken.
 
 **`--json`** (one object on stdout):
 
@@ -2783,9 +3235,9 @@ to.
 
 | Command  | What it does |
 | -------- | ------------ |
-| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one currently shown. Derived from the verified log at reply time, and it works while a request is on screen. |
-| `/skip`  | Shows the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest. |
-| `/next`  | Shows the next request; this process does not show the passed-over one again. |
+| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
+| `/skip`  | Selects the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest, with a fresh card when it does. |
+| `/next`  | Selects the next request; this process does not offer the passed-over one again, and sends no further card for it. |
 
 **None of the three decides anything.** They have no path to the gate: a
 decision is a button, because a button carries the nonce and action reference
@@ -2793,6 +3245,27 @@ that bind an answer to the bytes you were shown, and a typed word carries
 neither. `/skip` and `/next` leave the message already in the chat live, its
 buttons still deciding the same request, so passing over a question never takes
 it away from you.
+
+**`/queue` is a list, and it says so** (APRV-256). The reply carries no decision
+buttons of its own, and it names no position for the ones it points at: a
+request is decided on its own approval card, wherever that card has ended up in
+the chat. The marker on the selected line reads `selected — card sent earlier`,
+because that is the whole of what the listener knows. Delivery bookkeeping
+records that a send returned success; the Bot API never reports that a message
+is still there, and a card can be deleted, buried, or lost with the chat
+history. So the reply states prior delivery and stops, rather than telling you
+to tap something it cannot see.
+
+**When you cannot find the card, `/skip` is the recovery.** It puts the request
+at the back of the order and lets the next one through. Typing it decides
+nothing, the request stays pending in the log, and a fresh card goes out on a
+later listener cycle once the requests ahead of it have had their turn (a cycle
+can run a little long while a gloss is being written; see `--no-gloss`).
+`/next` is the opposite trade and not a resend: this process moves past the
+request, stops offering it, and sends no new card for it, though the copy
+already in the chat keeps its buttons. With nothing selected at all (before the
+first dispatch, or right after a decision), the reply says so and promises the
+next card on an upcoming cycle, and an empty queue says only that it is empty.
 
 Pacing withholds attention, never the queue: every request stays pending in the
 log whether or not it has been shown, `approval queue` and `/queue` list them
@@ -2813,8 +3286,12 @@ policy decision" above for what a layout may not touch.
 
 `channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
 pending request this process has not sent yet, on every cycle, behind the
-re-delivery banner. Bot commands are not read in that mode, and the listener
-asks Telegram for callback updates only.
+re-delivery banner. Bot commands are not read in that mode. The listener still
+asks Telegram for `message` updates, because a review card's note prompt (below)
+collects the human's words as a reply; a message that is not such a reply is
+ignored under `burst`, exactly as an unrecognised `/command` is. As
+`setup channel telegram` already says, stop the listener before running it —
+two processes long-polling one bot compete for the same updates.
 
 A callback from any chat other than the configured one is ignored: counted as an
 anomaly, answered with a refusal, never turned into a decision and never written
@@ -2864,6 +3341,84 @@ the rest, and the toast says how many landed. Annotation is per member too: a
 decided, expired or withdrawn request marks its own line and loses its own
 buttons, so a partially decided digest shows mixed state.
 
+**The retrospective backlog arrives here too** (APRV-299). The daemon draws
+supervised actions for after-the-fact review (`audit.sampled`, SPEC section
+5.2), and until this the only place to answer one was `approval audit review` in
+a terminal — so sixty of them sat in `QUEUE.md` while the phone showed nothing.
+Each `audit.sampled` with no later `audit.reviewed` now arrives as a **review
+card**.
+
+A card is not a prompt and says so. Its headline is `REVIEW — THIS ALREADY RAN`,
+it carries no payload region and no approve button, and it accepts no token: the
+action has happened, and a card offering an approve would present a settled fact
+as a live authorization. What it carries is the same rows a prompt would show
+for the same action — class, the command breakdown, task, the agent's claimed
+summary, the model gloss where one is attached — plus two the card adds: `ran
+at` (the `execution.started` the sample named) and `verdict` (that the runtime
+allowed this without asking, which autonomy said so, the rate it was drawn at,
+and how the log says it ended). Everything computed is derived from the verified
+log, the payload store and the classifier; the claimed rows sit under the same
+"NOT verified by the runtime" heading a prompt gives them.
+
+Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
+first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,
+😐 indifferent, 👍 liked, ❤️ loved).
+
+| Tap | What is recorded |
+| --- | --- |
+| ✅ | `audit.reviewed` with verdict `ok` and no reaction. |
+| a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
+| 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
+| 🛑 twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| a reaction with deny armed | verdict `denied` with that grade. |
+
+The card does not print this table under itself. It used to, and the paragraph
+of rules pushed the rows a review is actually about off the first screen for a
+reader who had read them on the card before. The two things a tap could get
+wrong say themselves: the first 🛑 is answered `Deny armed — nothing recorded`
+and puts `DENY ARMED` in the card's own headline until it is spent, and a grade
+that wants words sends the prompt that asks for them.
+
+Deny takes two taps because a retrospective denial cannot undo anything: what it
+does is open an obligation a human must later discharge (SPEC section 5.2), and
+a gesture with that consequence should not be one thumb-width from a grade. The
+arming is process memory and appends nothing; losing it to a restart costs a
+tap.
+
+Every other review tap is answered `Heard — recording your review. The card will
+say what the log recorded.`, its own toast, because a request card's `Heard —
+deciding` would tell a reviewer something was pending when nothing is. Like that
+one it claims only that the tap arrived: at the moment it is sent nothing has
+been appended, and a refusal below may mean nothing ever is.
+
+`loved` and `disliked` ask for the human's own words first. The bot sends a
+reply prompt, nothing is appended until the reply arrives, and a blank one is
+refused `note-required` — an inline keyboard has no text input, so the note is
+collected as a reply message and bound to its card by the message id the
+listener issued. A denied review that says `liked` or `loved` is refused
+`reaction-conflicts-verdict` before anything is written, and no note is asked
+for: the two fields say opposite things about one action. Every refusal in
+`audit_refusal_codes` reaches the card as itself — the code on its own line, the
+message under it — and a refused tap leaves the buttons in place, because the
+reviewer has to be able to say which half they meant.
+
+Every append goes through the same `reviewSample` that `approval audit review`
+calls, recorded against the human identity this listener was configured with
+(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. So `approval
+feedback` shows a reaction given on a card exactly as one given at a terminal:
+same record, same `human:<id>`, same everything.
+
+**Review delivery is paced in both modes.** A summary line first (`N awaiting
+review — oldest ran …`) and then one card, and never while a request card is in
+front of you: a pending request is somebody waiting, a sample is work that has
+already finished. `/queue` lists the review backlog under the pending one;
+`/skip` sends the shown card to the back of the review order and a fresh card
+comes round later; `/next` passes over it and sends no further card. Neither
+decides anything, and a card you never see, scroll past, or lose to a restart
+leaves the sample exactly where it was: open, listed by `approval audit list`,
+and reviewable with `approval audit review <seq>`. Nothing in this channel can
+empty the backlog, which is the property a sampled-audit backlog exists to have.
+
 **A settled request stops looking live.** Every terminal state the listener
 observes for a message it sent edits that message: the text becomes the outcome
 (`✓ APPROVED`, `✗ REJECTED`, `✗ REVOKED`, `✗ EXPIRED`, `WITHDRAWN`) with the
@@ -2893,6 +3448,11 @@ rather than a query:
  "ok":true,"seq":7,"state":"granted","token_issued":true}
 {"event":"decision","action_key":"...","decision":"grant","ok":false,
  "code":"already-decided","token_issued":false}
+{"event":"review_offered","sample_seq":12,"action_key":"task-042:draft",
+ "delivery_id":"57"}
+{"event":"review","ok":true,"seq":19,"sample_seq":12,
+ "action_key":"task-042:draft","verdict":"ok","reaction":"liked",
+ "obligation_seq":null}
 {"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
  "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
  "key-mismatch":0}}
@@ -2931,6 +3491,16 @@ bytes are what each approval bound to, and evidence belongs in the history. To
 ignore them instead, add `.approval/payloads/` yourself — the log keeps every
 `payload_hash`, but the bytes behind them stop being rebuildable.
 
+Keys are not. The merged block ignores `.approval/*.sqlite` (a projection),
+`.approval/vault.enc`, `.approval/env`, `.approval/keys/`, `.approval/**/*.tmp-*`
+and `.approval-journal/`. `.approval/keys/` is the one that matters most and is
+easiest to miss: it holds the X25519 private halves of sealed token delivery, and
+because the payload store beside it is tracked on purpose, `.approval/` is a
+directory people `git add` from. A key committed there opens that action's
+`token_sealed` for everyone holding the log. The line is written whether or not
+your policy has opted into `token_delivery: sealed`, and `approval doctor`'s
+`sealed-keys` row reports a key that is tracked or in a store no line covers.
+
 The per-file codes reported in `existing` are `policy-exists`, `log-dir-exists`,
 `queue-exists` and `gitignore-entries-present`. `.gitignore` is the one file that
 is merged, and no existing line is rewritten. A path of the wrong kind is a
@@ -2954,7 +3524,9 @@ the command text and nothing else — never the agent's own `description` field,
 which is self-reported. The hard boundary remains the vault and the execution
 token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the Claude Code
 settings.json entry and `docs/cursor-hook.md` for Cursor's `.cursor/hooks.json`.
-A HUMAN commits those files: they are `policy.edit`.
+A HUMAN commits those files: they are `policy.edit`. `docs/agent-sdk-hook.md`
+is the third caller: a Python Agent SDK application has no settings file, so it
+spawns this same verb from a hook callback (APRV-242).
 
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
@@ -3436,7 +4008,8 @@ daemonizer would.
 
 **It runs `approval up`'s startup preflight first** (APRV-215) — same module,
 same two `--json` lines, same three refusal codes, same `--no-preflight`,
-`--preflight-remote` and `--preflight-base` flags. It is here as well as there
+`--no-build`, `--preflight-remote` and `--preflight-base` flags. It is here as
+well as there
 because the daemon is the writer: a daemon started against a stale checkout is
 exactly what the preflight exists to catch, and `--with-channels` is not the only
 way an operator reaches one. The full description is under [up](#up).
@@ -3500,8 +4073,15 @@ or failed attempt is an `advance` line plus an `advance-refused` warning, and th
 next tick tries again — the cadence interval is the retry bound, so a refusal
 never loops. One records branch and ONE PULL REQUEST PER DAY: the first advance
 of the day opens it, every later one is parented on the branch and updates it in
-place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
-human's act or a session's.
+place. The daemon ARMS that pull request's merge and merges nothing itself
+(APRV-284): the advance runs `gh pr merge <branch> --merge --auto`, which lands
+the records when CI and the branch rules say so and never earlier. The arm is
+`vcs.push.main`, the class the same command carries in a session's hands, and it
+rides the same `log.advance` authorization the cycle already holds rather than
+opening a second question. It is withheld when the branch carries a path an
+advance may not carry, and a `gh` that refuses it is reported, not fatal.
+`--no-advance-auto-merge` turns it off and puts the merge back on a person. The
+outcome is `auto_merge` and `auto_merge_note` on the `advance` line.
 
 Two rules keep that from turning into a loop of its own (APRV-233, APRV-234).
 An advance whose outcome is not yet in the log has still HAPPENED: the daemon
@@ -3629,7 +4209,37 @@ a load problem.
 
 The daemon never wakes itself: the verified-head snapshot it publishes beside
 the log, `QUEUE.md`, and its own task-file write-backs are filtered out of the
-watcher. Any tick you see with no external append is the `--interval` tick.
+watcher. Bookkeeping files are filtered too (APRV-230): the append lockfile
+`events.jsonl.lock` that every writer creates and removes around each append,
+editor swap, autosave, lock and backup files (`.task-042.md.swp`,
+`#task-042.md#`, `.#task-042.md`, `task-042.md~`), and macOS's `.DS_Store` and
+`._*` residue. Those are events about how a change was made rather than about
+the change, and a tick scheduled for one re-derives an answer nothing moved.
+
+**What woke a tick.** Every `tick` line carries `woke_by`: `log` or `tasks` for
+the watcher whose event opened the debounce window, `interval` for the periodic
+tick, the startup tick and `--once`. When the platform named a file, `woke_file`
+carries it. A tick that says `log` at an unchanged head is a watcher event this
+runtime has not learned to attribute, which is exactly the question APRV-230
+opened; the one wake source left deliberately unattributed is a platform event
+that names no file, which is the platform saying "something in this directory
+changed" and could be the log itself.
+
+**`--trace-watch`** prints one line per filesystem watcher event, ignored ones
+included, and changes nothing else about the run. It is the instrument for "why
+is this daemon ticking": each line names the watcher, the platform's own event
+type, the file it named (or `null`), whether a tick was scheduled, and, when it
+was not, the reason (`self-write`, `own-temp`, `bookkeeping`, `not-the-log`). On
+a busy checkout it is several lines per second, so it is off by default and is
+meant to be run for a window and counted, not left on. It is spelled the same on
+`approval up`.
+
+```
+watch: log change events.jsonl — tick scheduled
+watch: log rename events.jsonl.lock — ignored (bookkeeping)
+watch: log rename verified-head.json — ignored (not-the-log)
+watch: tasks change task-042.md — ignored (self-write)
+```
 
 If `tick.ms` times the append rate approaches one core, raise `--debounce`
 (`1s` to `5s` coalesces a burst of appends into one tick at the cost of that much
@@ -3658,10 +4268,18 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
 {"event":"advance","outcome":"advanced","records_pending":7,
  "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "auto_merge":"armed","auto_merge_note":null,
  "rebuilt":false,"rebuilt_on":null,
- "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
+ "code":null,
+ "message":"seq 4..10 is on records-log-2026-09-01 (…), auto-merge armed",
+ "flush":false}
+{"event":"watch","watcher":"log","type":"change","file":"events.jsonl",
+ "action":"scheduled","reason":null}
+{"event":"watch","watcher":"log","type":"rename","file":"events.jsonl.lock",
+ "action":"ignored","reason":"bookkeeping"}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
- "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,
+ "ms":41,"reads":8,"reproof":"full","woke_by":"log","woke_file":"events.jsonl",
+ "phases":{"drift":9,"ttl":3,"audit":6,
  "dark":0,"prune":1,"write_back":4,"advance":0,"escalations":1,"render":12}}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
@@ -3723,7 +4341,9 @@ because `git status` does not say what the upstream range changed. So the verb
 does all four, and `approval daemon run` runs the identical preflight from the
 identical module, printing the identical two lines.
 
-It is allowed exactly two writes: a `--ff-only` merge, and `npm run build`. It
+It is allowed exactly three writes: a `--ff-only` merge, `npm run build`, and
+clearing an untracked `backlog/tasks/` file the incoming commit already contains
+out of the merge's way (APRV-300, described below). It
 never resets, never stashes, never checks anything out, and never touches the
 working log. That list is not caution for its own sake: a working `events.jsonl`
 rewound through git underneath a live appender is fork 2 of 2026-08-20, the
@@ -3739,6 +4359,41 @@ running. When it is not, it refuses, and changes nothing:
 | `up-preflight-behind-ahead` | `origin/<branch>..HEAD` is non-empty: this checkout carries commits the remote has never seen. A fast-forward is not the operation for that state, and choosing a side is a decision. | look at them (`git log --oneline origin/main..HEAD`), then push them or `git reset --keep` |
 | `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
 | `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
+| `up-preflight-task-file-conflict` | an untracked file under `backlog/tasks/` stopped the fast-forward and it holds lines the incoming copy does not. Which version is wanted is a question, and no verb here will pick. | read the two copies, move yours aside, run `approval up` again |
+| `up-preflight-failed` | a write the preflight attempted did not complete: the fast-forward, or the rebuild. Not a judgment, so it is not in the union above; the message names the step, and for a build it names the exit code `npm run build` came back with. | `npm run build` to see the whole error, or `approval up --no-build` if you mean to run the stale one |
+
+**An untracked task file no longer stops it (APRV-300).** A lane files
+`backlog/tasks/aprv-299` on its branch and its pull request merges, while the
+primary checkout holds the same path untracked from its own `backlog task
+create`. `git merge --ff-only` will not write over an untracked file, so on
+2026-09-07 the preflight refused, and its next-steps text pointed at `git
+status`, which cannot say whether the local copy holds anything the incoming one
+does not. That question is answerable, so it is answered. When the merge fails
+over untracked files and every path git names sits under `backlog/tasks/`, each
+one is read alongside `git show <target>:<path>` and given one of three
+verdicts:
+
+- **byte-identical** — the local copy says nothing the incoming copy does not,
+  so it is removed and the merge is retried once;
+- **every line also in the incoming copy** — the ordinary shape, a hand-filed
+  stub against a lane copy that added a plan and criteria. Nothing is lost by
+  letting the incoming copy land, but that is a judgment about an operator's
+  file, so the bytes are moved to a sibling of the checkout named
+  `<repo>-preflight-aside-<YYYY-MM-DD>` (outside the repository, so the next
+  fast-forward cannot collide with it again), the destination is printed on the
+  `preflight_warning` line, and the merge is retried once;
+- **anything else** — `up-preflight-task-file-conflict`, naming your path, the
+  incoming spelling, and how many lines only yours has.
+
+Every file is judged before any file is touched, the same two-pass shape as
+`approval log sync`'s payload reconciliation, so a refusal over the last
+collision cannot have already removed the first. One path outside
+`backlog/tasks/` and the whole set is declined: the merge keeps its old
+`up-preflight-failed` refusal and nothing is cleared, because clearing what was
+understood and then refusing anyway would have moved files for a merge that was
+never going to run. A path git chose to quote (`core.quotePath`) is declined for
+the same reason: guessing the spelling of a file about to be moved is the
+mistake the whole check exists to avoid.
 
 **`git reset --hard` is printed on no path, ever**, and a test asserts it. The
 one reset that appears is `--keep`, which refuses rather than discarding
@@ -3761,7 +4416,28 @@ origin here" is a property of the deployment, not an event in it, and a log-only
 install would otherwise open every start with it. `approval doctor`'s
 `main-behind-origin` row is where that state is visible.
 
-`--no-preflight` opts out, on both spellings of the verb.
+**The rebuild is the deploy (APRV-301).** The freshness question is the same one
+`approval doctor`'s `build-freshness` row answers, from the same predicate in the
+same module, so the two cannot disagree: is `dist/src/cli/main.js` at least as
+new as everything under `src/` and `tsconfig.json`? When it is not, the preflight
+runs `npm run build` in the installation root, with the compiler's output on the
+terminal so a slow build is visible and a failing one is readable. (The build's
+stdout is written to stderr, because under `--json` this process's stdout is the
+event stream and a compiler line in it would break every consumer.) A build that
+fails refuses with `up-preflight-failed` and the exit code `npm run build` came
+back with; nothing starts, since starting would put the writer on exactly the
+code the rebuild existed to replace. Staleness alone is enough, with or without a
+fast-forward: an editor, a branch switch or a half-finished build leaves `dist/`
+behind `src/` just as a merge does, and the daemon and the harness hook run the
+compiled code either way.
+
+`--no-build` opts out of the rebuild alone. The fetch and the fast-forward still
+happen; `dist_stale` still reports the truth; the action reads `build-skipped` or
+`fast-forward+build-skipped`; and a warning on stderr names the stale build in
+words. An operator can mean this. Nothing in the output lets it pass for a clean
+start.
+
+`--no-preflight` opts out of all of it, on both spellings of the verb.
 `--preflight-remote` and `--preflight-base` default to `origin` and the
 checked-out branch. The `--json` stream gains two additive lines and no field on
 any shape that already existed:
@@ -3774,9 +4450,12 @@ any shape that already existed:
 ```
 
 `action` is one of `none`, `rebuild`, `fast-forward`, `fast-forward+rebuild`,
-`refused`, `skipped`, `fetch-failed`. The commit now running is named here rather
-than on `up_started`, so a consumer that already parses `up_started` does not
-have to learn a new key to keep working. A refusal writes one object to stderr
+`build-skipped`, `fast-forward+build-skipped`, `refused`, `skipped`,
+`fetch-failed`. The two `build-skipped` spellings are `--no-build` and only
+`--no-build`: without it, a `dist_stale` of `true` always ends in a rebuild or a
+refusal. The commit now running is named here rather than on `up_started`, so a
+consumer that already parses `up_started` does not have to learn a new key to
+keep working. A refusal writes one object to stderr
 instead: `{"error":{"code":…,"message":…,"next":…},"preflight":{…}}`.
 
 **A rebuild re-execs, so the writer that ends up running is the code that was
@@ -3987,9 +4666,26 @@ the action's `idempotency_key` and its `payload_hash`. An agent that bypasses
 this CLI still cannot send, because the credentials only answer to tokens.
 
 The runtime, not the adapter, owns the sequence: recompute the payload hash,
+read the declared class from the verified log, resolve the credentials the
+adapter says it cannot act without, run the adapter's own pre-token check,
 verify and consume the token, append `execution.started`, call the adapter,
 append the outcome. The adapter implements one method and cannot skip a step,
 because it never holds the sequence.
+
+The two steps that sit BEFORE the token spend are there for one reason: a
+condition that makes the side effect impossible, and that the runtime can
+establish without attempting it, must not cost a human's single-use grant to
+discover. A credential nobody stored refuses `credential-unavailable`; whatever
+the adapter's own check refuses arrives as `adapter-precheck-refused` with the
+adapter's reason in `adapter_code`. Both leave the log exactly as they found it,
+`acted` is `false`, there is no `started_seq` and no `outcome`, and the same
+token executes once the condition is repaired.
+
+The pre-token check is offered only bytes the log binds to the action: the
+grant's `payload_hash` on the manual path, the registered declaration's off it.
+Anything else never reaches an adapter at all and is refused `payload-mismatch`
+by the runtime, in the runtime's own words, with nothing appended and the token
+still live.
 
 Which outcome is decided by where the sequence stopped, and the boundary is the
 moment `act` is invoked. A failure on the way in, or a failure the adapter
@@ -4125,6 +4821,22 @@ fields differ and never what they now hold: a drift message is written to a log
 and read by a human who did not approve the new text, and quoting it there would
 publish unapproved content through the refusal path.
 
+That comparison happens twice, and the first time is before the token is spent
+(APRV-276). In order, for a draft send: the payload's shape, the inbox it names,
+`GET .../drafts/{draft_id}`, and the field comparison, all as the adapter's
+pre-token check, with the sending key read from the vault in the same pre-token
+window the declared credentials resolve in. A drift there refuses
+`adapter-precheck-refused` with `agentmail-draft-drifted` in `adapter_code`,
+appends nothing, and spends nothing, so restoring the approved text and running
+the command again sends under the same token. Then the token is consumed,
+`execution.started` is appended, and the whole comparison runs a second time
+inside the window, immediately before the POST: AgentMail sends a draft by id, so
+something has to bound the gap between the last read and the send. A drift caught
+by that second comparison is `adapter-failed` with `execution.started` and
+`execution.failed` on the log, which is the honest record of a window that was
+open when the far side moved. A direct send has no such object and pays for no
+pre-token read: its bytes are the payload, and the payload hash binds them.
+
 **Failure codes** (in `adapter_code`): `agentmail-payload-invalid`,
 `agentmail-payload-ambiguous`, `agentmail-config-invalid`,
 `agentmail-inbox-mismatch`, `agentmail-from-mismatch`,
@@ -4133,16 +4845,24 @@ publish unapproved content through the refusal path.
 `agentmail-rate-limited`, `agentmail-rejected`, `agentmail-server-error`, and
 the contract's own `credential-unavailable` / `credential-refused`.
 
-Every HTTP refusal is a returned failure, so the contract records
-`execution.failed`: the far side answered, and an answer is knowledge. A throw
-from the SEND call is deliberately not caught — `execution.indeterminate` is the
-honest record of a request that may have left the process. A throw from either
-pre-send GET is `agentmail-unreachable`, because nothing was attempted.
+Every HTTP refusal inside the window is a returned failure, so the contract
+records `execution.failed`: the far side answered, and an answer is knowledge. A
+throw from the SEND call is deliberately not caught, and
+`execution.indeterminate` is the honest record of a request that may have left
+the process. A throw from either pre-send GET is `agentmail-unreachable`, because
+nothing was attempted. The draft read that runs before the token is spent follows
+the same mapping into its own `adapter_code` (`agentmail-draft-missing`,
+`agentmail-server-error`, `agentmail-unreachable`, and the rest), and the
+difference is only that it appends nothing and leaves the grant spendable.
 
 **`--json`** carries the adapter contract's own result, unmodified, exactly as
 `adapter email` does, with `"adapter":"agentmail"` and a `detail` of
-`{"mode":"direct"|"draft","message_id":…,"thread_id":…,"payload_hash":…,
-"recipients":N,"http_status":N}`.
+`{"mode":"direct"|"draft","message_id":…,"provider_ref":…,"thread_id":…,
+"payload_hash":…,"recipients":N,"http_status":N}`. `provider_ref` is the same
+string as `message_id`, under the one key the adapter contract lifts onto
+`execution.completed` (APRV-251), and the result repeats the recorded reference
+as `"provider_ref":{"adapter":"agentmail","id":…}` beside the detail. A send
+whose answer names no id carries neither.
 
 ## env
 
@@ -4168,6 +4888,31 @@ Already-exported values win. A variable set in this shell is reported
 `set-in-environment` and its line in the file is not consulted: your shell is the
 authority, and a file that could override it would be a file that silently
 redirects a gate operation's credentials.
+
+**The export block says what it exported.** Alongside the values it emits one
+more line, which carries no value on any path:
+
+```
+export APPROVAL_ENV_PROVENANCE='1:3f2a9c11:<64 hex>:APPROVAL_TG_TOKEN,APPROVAL_TG_CHAT'
+                                │ │        │        └ the NAMES it exported from the file
+                                │ │        └ sha256 of the env file bytes it read
+                                │ └ the instance whose file that was
+                                └ the format version
+```
+
+`approval up`, `approval doctor` and `--check` below report an exported variable
+whose file line was not consulted, and they read no values by design, so without
+this they could not tell a stranger's export from the one `eval "$(approval
+env)"` had just made from this instance's own file. They reported the documented
+ritual as cross-instance bleed, which is a check asserting something it never
+tested. With the line present, a variable it names is treated as this instance's
+own export and is not reported; an export with no provenance, with another
+instance's id, with a digest that no longer matches the file, or simply not in
+the list is still reported. A value that was already exported in your shell is
+re-exported by the block and is deliberately left out of the list, so passing a
+foreign credential through one `eval` cannot launder it. The line is omitted when
+nothing was resolved from the file. Nothing here changes what wins: your shell
+still does.
 
 Exit 0 even when variables are unresolved, because the output is destined for
 `eval` and a shell function that failed on an unconfigured channel is one nobody

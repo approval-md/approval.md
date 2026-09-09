@@ -1,0 +1,1 @@
+{"command":"approval policy check --json 2>&1 | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa554a09466c9d647"}

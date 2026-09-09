@@ -44,6 +44,8 @@ interface ChildRequest {
   remote: string;
   base: string | null;
   pr: boolean;
+  /** APRV-284. Absent from an older parent's request, which means "arm it". */
+  autoMerge?: boolean;
   branch: string;
   today: string;
 }
@@ -79,6 +81,7 @@ function main(): void {
       remote: requested.remote,
       base: requested.base,
       pr: requested.pr,
+      autoMerge: requested.autoMerge !== false,
       branch: requested.branch,
       today: requested.today,
     });

@@ -5,9 +5,9 @@ title: >-
   laundered side effects fail closed
 status: In Progress
 assignee:
-  - 'agent:opus-lane-k'
+  - '@opus-193'
 created_date: '2026-09-01 03:21'
-updated_date: '2026-09-02 03:33'
+updated_date: '2026-09-06 12:14'
 labels:
   - security
   - dogfood
@@ -29,24 +29,26 @@ Deliverables: the sandbox profile and spawn wiring for dev-fleet agent sessions,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
-- [ ] #2 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
-- [ ] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
-- [ ] #4 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
-- [ ] #5 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
-- [ ] #6 npm test passes; lint clean
+- [x] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
+- [x] #2 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
+- [x] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
+- [x] #4 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
+- [x] #5 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
+- [x] #6 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. DESIGN LANE ONLY: produce design + standalone prototype; the wiring is a later build task after Carter signs off. Protected paths (SPEC.md, CLAUDE.md, APPROVAL.md, .approval/, .claude/, src/core/gate.ts, src/core/execute.ts, .github/) are not touched.
-2. Read the enforcement path as it stands: src/cli/execute.ts commandRun (spawnSync with NO env option, so the child inherits the whole parent environment), src/adapters/contract.ts (CredentialProvider, ExecutionGrant, scopeCredentials, requiredCredentials/APRV-169), src/core/command-class.ts (APRV-194 credential rules), SPEC 7 / 10.4 / 11 / 11.2, the daemon (log-file IPC, no socket).
-3. Prior-art survey with concrete mechanisms: macOS sandbox-exec/SBPL, Linux bwrap --unshare-net / unshare -n / seccomp-bpf socket filtering / Landlock ABI4 / firejail / nsjail, Deno --allow-net and Node --permission (no network permission, stated as the reason we cannot self-sandbox in-process), Claude Code sandbox mode, Codex sandbox_mode x approval_policy, Docker --network=none and iptables egress allowlists. Portability and operator-setup cost for each.
-4. Proposed design, written to design/aprv-193-starve-the-code.md: enforcement at the spawn site with two callers of one module; class-derived egress CEILING intersected with an envelope-declared NARROWING (invariant 4: a self-report may narrow and may never widen); credential custody with the vault passphrase held only by the daemon's environment and never present in an agent session; platform fallback recommendation; drafted SPEC amendment text for 7, 10.4, 11.1 and 11.2 flagged '(Amended APRV-193, pending sign-off.)'.
-5. Prototype scripts/sandbox-probe.mjs: detect the primitive (sandbox-exec on macOS, bwrap then unshare -n on Linux, none elsewhere), --json report, 'run --' wrapper, clean 'sandbox unavailable' exit. Wire NOTHING into the gate.
-6. Test tests/sandbox-probe.test.ts, spawning the script the way tests/classify-tier.test.ts spawns classify-tier.mjs: skip cleanly where the primitive is missing; otherwise prove a file write succeeds inside and that egress is DENIED rather than merely slow, using a non-routable RFC 5737 address as the always-on leg and an opt-in curl https://example.com leg for the recorded demonstration.
-7. Decomposition into build tasks (titles, ACs, dependencies, sizes) and the human sign-off questions, both into the implementation notes. Lint and build clean, npm test green. Leave the task In Progress.
+BUILD LANE (opus-193). The design lane (design/aprv-193-starve-the-code.md, commit a0db1e0) settled the shape; this lane builds it on macOS and states Linux as follow-up.
+1. Re-read the design, scripts/sandbox-probe.mjs, tests/sandbox-probe.test.ts, and the enforcement path as it stands: src/cli/execute.ts commandRun (spawnSync with the APRV-205 childEnvironment), src/cli/hook.ts (decides, never spawns), src/core/child-env.ts, src/core/vault.ts and src/core/env-file.ts for the custody paths.
+2. src/core/sandbox.ts: detectSandbox() probing rather than inferring; an SBPL profile denying network-outbound with the mandatory AF_UNIX exception and every path realpath-resolved; sandboxWrap() building the wrapped argv; deny-read of the credential material (vault.enc, .approval/env, keys/) rather than the whole approval home; an optional loopback carve-out. Pure parts unit-tested without spawning.
+3. Wire approval run: for a class whose autonomy resolves autonomous or supervised, the granted child spawns under the profile. --no-sandbox is the opt-out and is RECORDED on execution.started (sandbox: opted-out); an unavailable primitive means the command is NOT run and execution.failed says so (fail closed, no token on those paths). Manual-class grants (network.call, deps.add, release.publish) keep egress: approval run stays the one door to the world.
+4. approval sandbox -- <argv>: the session launcher the fleet starts a harness under, so every command the hook allows inherits the denial. Verb surface: dispatch, help (25-line cap + reference anchor), verb registry entry, docs/cli-reference.md section.
+5. Hook half: the classifier unwraps sandbox wrappers (sandbox-exec -f p <argv>, approval sandbox -- <argv>, node cli.js sandbox -- <argv>) to the class of the INNER argv, so running safely is not penalised and the wrapper is not a laundering device; unreadable wrapper forms stay unclassified. Plus APPROVAL_HOOK_REQUIRE_SANDBOX=1, default OFF, which denies autonomous/supervised exec when a real capability probe shows egress is still open (a strictness increase only, so a forged marker cannot widen anything).
+6. Tests: tests/sandbox.test.ts with loopback SMTP and HTTP stubs. The laundering script (an allowed node script) reaches both stubs unsandboxed and is refused under the profile, so the test proves the profile does the blocking; the same script cannot read the vault, .approval/env, or a credential-bearing variable. Plus the classifier cases and the approval run record.
+7. docs/sandboxed-exec.md: the legitimate-exec survey as a table (installs, localhost test servers, git/gh, channels, DNS), each row with a carve-out or a documented refusal, and the fleet runbook. docs/proposals/aprv-193-amendments.md carries the SPEC 7/10.4/11.1/11.2 and CLAUDE.md text for human sign-off; SPEC.md and CLAUDE.md are NOT touched.
+8. npm run build, lint, typecheck, and the execute/hook/adapter/classifier suites plus the new ones. One commit, task file included, task left In Progress.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -85,4 +87,41 @@ VERIFICATION: npm run lint clean, npm run build clean, node scripts/run-tests.mj
 FULL SUITE (2026-09-01, this worktree): npm test, 2646 tests, 2644 pass, 1 skip (the opt-in external curl leg), 1 fail. The failure is the known lane-only ci-guard case 'every production dependency's engines.node admits the Node floor', ENOENT on node_modules/@modelcontextprotocol/sdk/package.json, which is this worktree lacking installed production deps and is recorded as lane-only in APRV-185's notes. It classifies nothing and spawns nothing. npm run lint and npm run build clean.
 
 Commit a0db1e0 on branch aprv-193-design. Not pushed, no PR, no merge. The task stays In Progress: it closes when the build lands, and the build is APRV-193a..h in the decomposition above, to be filed after Carter answers the six sign-off questions in design/aprv-193-starve-the-code.md section 6.
+
+BUILD LANE (opus, worktree agent-ac91475ba4619e461), 2026-09-06. Two sessions: a build session cut off by a rate limit mid-verification, and a finishing session that assessed the uncommitted diff against the ACs, closed what was unfinished, and ran the matrix. One commit, task file included, task left In Progress.
+
+WHAT SHIPPED (21 files).
+- src/core/sandbox.ts (new). detectSandbox() PROBES, by applying a trivial profile to /usr/bin/true, rather than inferring from a binary on disk. seatbeltProfile() writes an allow-default SBPL profile that denies network-outbound, excepts AF_UNIX (mandatory: Seatbelt counts a unix connect as network-outbound, and a bare deny kills local IPC before the process can do anything), and denies reads of the vault, the .approval/env source map and the sealing keys, every path realpath-resolved (a profile naming /tmp/x denies nothing, because the kernel matches /private/tmp/x). resolveExecutable() does the PATH lookup up front, so a command that cannot be found never becomes sandbox-exec's exit 71 recorded as the child's own code. sandboxPosture() is a total pure function over (opted-out, granted, detection) returning apply, skip or refuse, and the ORDER of its branches is the policy: a broken mechanism refuses before an opt-out is considered.
+- src/cli/sandbox.ts (new). approval sandbox [--allow-loopback] [--log p] -- cmd: denies egress, scrubs the credential-bearing environment through core/child-env.ts, exits with the child's own code, appends NOTHING (it removes a capability rather than authorizing anything), and refuses with 127 on a machine with no mechanism.
+- src/cli/execute.ts. approval run spawns an UNTOKENED child under the profile; --no-sandbox is the opt-out; the posture is decided BEFORE execution.started, so the record states what was measured. A mechanism present and broken refuses before any append: nothing runs, nothing is written, the token is unspent.
+- src/core/execute.ts and src/core/token.ts. The sandbox field on execution.started, on BOTH start paths (the manual path's start event is written by consumeToken), with values egress-denied, granted-egress, opted-out, unsupported.
+- src/core/command-class.ts. Sandbox wrappers are unwrapped to the class of the INNER argv, with a per-segment marker: runtime (approval sandbox, whose profile this runtime writes) or external (a hand-written sandbox-exec -f profile, trusted for nothing). Both directions matter: a wrapper with a class of its own would launder everything as gate.self, and a wrapper that stayed unclassified meant the hook denied the safe spelling of a command it allowed unwrapped. CODE_EXECUTING_RULES names the three rules that hand control to code this runtime did not author.
+- src/cli/hook.ts. The deny code hook-sandbox-required plus APPROVAL_HOOK_REQUIRE_SANDBOX (default OFF), placed below the human-only deny and above everything that appends, so a refused command leaves the log as it found it.
+- docs. sandboxed-exec.md (mechanism, the three surfaces, the survey, the fleet runbook, and the stated limits), cli-reference.md (a sandbox section and a rewritten run paragraph), claude-code-hook.md and cursor-hook.md (the wrapper rule and the new deny row), and proposals/aprv-193-amendments.md, which carries the SPEC 7 / 10.4 / 11.1 / 11.2 and CLAUDE.md text NOT applied, plus the four questions only Carter can answer.
+- tests. sandbox.test.ts (26 cases: the profile as text, the posture table, the classifier, the hook requirement, the laundering demonstration against loopback SMTP and HTTP stubs, and the approval run record), the hook cases in cli-hook.test.ts, the record shape in cli-run.test.ts, and an amended sandbox-probe control (the design lane asserted a TIMEOUT outside the sandbox, which is a fact about one machine's routing; it now asserts the absence of Seatbelt's EPERM signature, which is the discriminating property).
+
+WHAT THE FINISHING SESSION ADDED. (1) HOOK_HELP now prints hook-sandbox-required: the closed-vocabulary test over HOOK_DENY_CODES was failing, and the deny list was re-wrapped so the verb stays inside the 25-line cap. (2) verb-registry.ts: run declares --no-sandbox and an exit-127 row and says in its purpose which room a child runs in, because the machine-readable contract an agent reads must not omit a flag the parser accepts.
+
+DIVERGENCES FROM THE AC TEXT, named rather than quietly satisfied.
+- AC1 says loopback to the gate daemon excepted. The build denies loopback WITH the rest, because there is nothing to except: the daemon opens no socket, it polls events.jsonl, so the gate stays fully reachable from inside the room. --allow-loopback is the carve-out for the one legitimate case the survey found, a suite that starts its own server. This is stricter than the AC asked for.
+- AC1's wiring into how dev-fleet sessions run commands is the two spawn sites plus a hook requirement that is DEFAULT OFF (question 3 in the proposal). A session-wide sandbox is not possible with this mechanism: an agent harness needs the model API, which is exactly what is denied, and Seatbelt cannot express an allowlist by hostname. That is the largest gap between the design and what is buildable today, and it is recorded in the proposal.
+- The token, not the resolved class, is what keeps the network. A manual grant delivered SEALED presents no --token and therefore runs egress-denied, which is the strict direction and the wrong answer for a granted network.call: pass the token, or take the recorded opt-out. Question 1 in the proposal is where that gets settled.
+
+GLOBAL INVARIANTS TOUCHED (CLAUDE.md requires saying so).
+- Invariant 4, self-reported fields never reduce scrutiny. Both environment variables (APPROVAL_SANDBOX_REQUIRED, APPROVAL_HOOK_REQUIRE_SANDBOX) are read in the strict direction only and can only ever refuse more; the sandbox field is computed at the spawn site from what the machine can do; the single loosening is holding a token, which is a secret a human minted rather than a claim the executing party authors about itself.
+- Invariant 6, refusal unions are frozen public API. Deliberately NOT widened: sandbox-unavailable is drafted for sign-off with its 11.2 registry row, and until then the refusal is a stderr message and exit 127 with nothing appended, which is correct behaviour with an inferior vocabulary.
+- Fail closed. A present-but-broken mechanism refuses on both surfaces, and the refusal is pinned on every platform through APPROVAL_SANDBOX_FORCE_UNAVAILABLE with a witness file that must not exist.
+- The log is append-only, and nothing new reads it back: the sandbox field is informational, no decision turns on it, and log verify runs green inside the new tests.
+- Draft invariant 11, allowed execution is starved by default, is proposed for 11.1 and mirrored into the CLAUDE.md list in the proposal document. It is NOT applied: the property does not exist until a human writes it into both places.
+
+SCHEMA, stated because it is a write boundary. execution.started.payload.sandbox is written but not constrained in schema/event.schema.json (that payload object is open, so the records validate and verify). Constraining it with an enum is its own task per CLAUDE.md, and the proposal's gap table names it.
+
+VERIFICATION (this worktree, macOS 15 on arm64, 2026-09-06).
+- npm run build clean, npm run lint clean, npm run typecheck clean.
+- node scripts/run-tests.mjs --only sandbox: 26 tests, 26 pass, 0 fail.
+- Targeted matrix (sandbox-probe, cli-hook, cli-run, cli-instructions, command-class): 505 tests, 503 pass, 1 skip, 1 fail before the HOOK_HELP fix; cli-hook, cli-long-help and cli-help re-run after it, 125 tests, 125 pass, 0 fail.
+- npm test: 3659 tests, 3657 pass, 1 skip, 1 fail. The skip is the opt-in external curl leg of sandbox-probe (SANDBOX_PROBE_EXTERNAL), which makes no external request in anyone's CI. The failure is the known lane-only ci-guard case, every production dependency's engines.node admits the Node floor, ENOENT on node_modules/@modelcontextprotocol/sdk/package.json. This worktree has NO node_modules at all (tsc and oxlint resolve upward to the primary checkout); the test reads package.json plus node_modules under the repo root; package.json is untouched by this diff; running that suite alone reproduces 31 tests, 30 pass, 1 fail. It is the same failure the design lane recorded and it classifies nothing and spawns nothing.
+- Exercised by hand as well as by the suite: approval sandbox -- npm run lint and approval sandbox -- npm run typecheck both exit 0 inside the profile, which is the survey row claiming ordinary development survives; approval hook classify reads approval sandbox -- npm install left-pad as deps.add marked runtime, sandbox-exec -f p.sb node --version as files.write.workspace marked external, and the -p spelling as unclassified.
+
+NO PROTECTED PATH TOUCHED. SPEC.md, CLAUDE.md, AGENTS.md, APPROVAL.md, .approval/ and .claude/ are unmodified; the amendment text lives in docs/proposals/ and waits for a human.
 <!-- SECTION:NOTES:END -->

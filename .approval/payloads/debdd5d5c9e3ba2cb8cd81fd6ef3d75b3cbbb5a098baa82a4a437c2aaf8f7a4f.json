@@ -1,0 +1,1 @@
+{"command":"npm run build && node scripts/run-tests.mjs --only adapter-agentmail adapters-contract adapter-email token execute vault-provider","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

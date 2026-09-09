@@ -478,9 +478,22 @@ test("three consecutive failures raise a loop escalation in status; a completion
   assert.equal(escalated.code, 1);
   // APRV-145: the entry keeps the three fields every consumer already read and
   // gains `scope`, which names the derivation that produced the key in `task`.
-  assert.deepEqual(escalated.body["loop_escalations"], [
-    { task: "task-042", scope: "task", consecutive_failures: 3, escalated: true },
-  ]);
+  const rows = escalated.body["loop_escalations"] as Record<string, unknown>[];
+  assert.deepEqual(
+    rows.map((entry) => [
+      entry["task"],
+      entry["scope"],
+      entry["consecutive_failures"],
+      entry["escalated"],
+    ]),
+    [["task-042", "task", 3, true]],
+  );
+  // APRV-280: the row says what clears it, and says it in the amended terms —
+  // only a completion in a class that has side effects.
+  assert.match(
+    String(rows[0]?.["clears"]),
+    /an execution\.completed for task task-042 in a class that has side effects/u,
+  );
   // These executions are `approval run`'s own, so none of them is a harness
   // start and the coverage row is all zeroes.
   assert.deepEqual(escalated.body["harness_outcomes"], {

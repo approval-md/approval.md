@@ -102,7 +102,7 @@
  * learn it immediately rather than watch a listener retry forever.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
@@ -132,17 +132,30 @@ import {
   actionRefOf,
   decidedLine,
   groupForDigest,
+  isMessageNotModified,
   isTelegramTerminalState,
   TelegramChannel,
   telegramChatEnvFor,
   telegramTokenEnvFor,
+  TELEGRAM_NOT_RECORDED,
+  TELEGRAM_REVIEW_DENIED,
+  TELEGRAM_REVIEW_RECORDED,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
   type CheckpointTapResponse,
+  type ReviewCard,
+  type ReviewTapResponse,
   type TelegramCommand,
   type TelegramConfig,
   type TelegramTerminalState,
 } from "../channels/telegram.js";
+import { openReviewCards } from "./audit-card.js";
+import { reviewSample } from "../core/audit.js";
+import {
+  abandonedAfterMs,
+  HOOK_DEFAULT_WAIT_MS,
+  HOOK_RETRY_GRACE_MS,
+} from "../core/harness-wait.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { promptLayoutFor } from "../core/prompt-layout.js";
@@ -744,14 +757,46 @@ export function summaryLines(requests: ChannelRequest[], now: string): string[] 
 }
 
 /**
+ * The marker `/queue` puts on the request this listener has selected (APRV-256).
+ *
+ * It says two things and claims no third. "Selected" is this process's memory of
+ * which request it is holding; "card sent earlier" is the delivery bookkeeping
+ * recording that a send once succeeded. Neither is evidence that the card is
+ * still in the chat: Telegram reports a successful send, never a message's
+ * continued existence, and a card can be deleted, buried under a thousand later
+ * messages, or lost with the chat history on a reinstall. The old marker,
+ * "shown now", asserted present visibility from a past delivery, which is the
+ * bug this constant exists to keep fixed.
+ */
+const SELECTED_MARKER = " — selected — card sent earlier";
+
+/**
+ * What `/queue` says about itself, immediately under the summary (APRV-256).
+ *
+ * `/queue` is a summary reply and carries no buttons, so an approver reading it
+ * on a phone must not be left hunting this message for controls that were never
+ * on it. Where the controls DO live is stated without a direction: a card is
+ * somewhere in the chat's history, and "above" was only ever true for the
+ * approver who asked while looking straight at it.
+ */
+const QUEUE_IS_A_LIST =
+  "This is a list of what the log is holding. It has no decision buttons: a request is decided on its own approval card, wherever that card sits in this chat.";
+
+/**
  * `/queue`'s reply: the summary, then one numbered line per pending request.
  *
  * Derived, like the summary, from the verified log at reply time and not from
  * anything this process is holding: the numbering is positional and names no
  * button, so a stale copy of this list cannot be used to decide anything. The
- * marker says which one is currently in front of the approver, because the
- * question `/queue` is usually asked to answer is "what else is there besides
- * the one I am looking at".
+ * marker says which one this listener has selected and once delivered, because
+ * the question `/queue` is usually asked to answer is "what else is there
+ * besides the one I am looking at" — and, since APRV-256, its unhappy twin,
+ * "where is the one I am supposed to be looking at".
+ *
+ * The footer answers that second question the only honest way available to a
+ * process whose knowledge of the chat ends at "a send returned success": it
+ * says what was sent, says it cannot tell whether the card survived, and then
+ * spends its remaining words on recovery rather than reassurance.
  */
 export function queueLines(
   requests: ChannelRequest[],
@@ -763,6 +808,8 @@ export function queueLines(
 
   const nowMs = Date.parse(now);
   const current = new Set(shown);
+  let selected = 0;
+  lines.push(QUEUE_IS_A_LIST);
   requests.forEach((request, index) => {
     const key = request.action_key.value;
     const requestedMs = Date.parse(request.requested_ts.value);
@@ -771,14 +818,40 @@ export function queueLines(
         ? "unknown age"
         : ageText(nowMs - requestedMs);
     const task = request.task.value ?? "no task";
+    const isSelected = current.has(key);
+    if (isSelected) selected += 1;
     lines.push(
       `${String(index + 1)}. ${key} — ${task} — ${request.class.value} — ${age}${
-        current.has(key) ? " — shown now" : ""
+        isSelected ? SELECTED_MARKER : ""
       }`,
     );
   });
+
+  if (selected === 0) {
+    // Nothing selected is an ordinary state, not a fault: a decided or passed
+    // over request leaves the listener holding nothing until the next cycle
+    // picks the next one up. Saying so is what stops the reader searching the
+    // chat for a card this process never claimed to have sent.
+    lines.push(
+      "Nothing is selected right now, so no approval card has been sent for any of these. The next one goes out with its buttons on an upcoming listener cycle.",
+    );
+    return lines;
+  }
+
+  // More than one key is marked when the selection is a digest group, which
+  // Telegram receives as ONE card covering the set. Hence "a single approval
+  // card" in the plural branch and no positional word in either: the reply may
+  // be chunked across several messages, so "above" is not this function's to
+  // promise even about its own lines.
+  const holding =
+    selected === 1
+      ? "The request marked selected is the one this listener is holding, and an approval card for it was sent to this chat earlier. The buttons on that card decide it."
+      : `The ${String(selected)} requests marked selected are what this listener is holding as one digest, and a single approval card for them was sent to this chat earlier. The buttons on that card decide them.`;
+
   lines.push(
-    "Tap the buttons on the message above to decide the one being shown. /skip shows it again later, /next moves past it.",
+    `${holding} This listener cannot tell whether that card is still here.`,
+    "If you cannot find the card, /skip is the recovery: it puts the request at the back of the order and lets the next one through. Nothing is decided by typing it, the request stays pending in the log, and a fresh card is sent on a later listener cycle once the requests ahead of it have had their turn (a cycle can run a little long while a gloss is being written).",
+    "/next gives up your place instead: this listener moves past the request and stops offering it, and no new card is sent for it. It is not a way to ask for the card again.",
   );
   return lines;
 }
@@ -818,6 +891,82 @@ export interface PacedState {
   summarySent: boolean;
   /** The pending count the last summary named, so growth can be recognised. */
   announced: number;
+}
+
+// ---------------------------------------------------------------------------
+// Paced review (APRV-299) — the retrospective backlog, one card at a time
+// ---------------------------------------------------------------------------
+
+/**
+ * The retrospective walkthrough this process is running (APRV-299). **In memory
+ * only**, exactly like {@link PacedState} and under the same rule (SPEC.md
+ * §10.3).
+ *
+ * Its loss is the check that it is not truth: a restarted listener re-derives
+ * the open samples from the verified log, rebuilds the order from log order,
+ * and offers the oldest — which is what a fresh start does anyway. A card that
+ * never arrives, or that a human scrolls past, leaves the sample OPEN: it stays
+ * in `approval audit list`, in `.approval/QUEUE.md`, and reviewable with
+ * `approval audit review <seq>`. Nothing here can empty the backlog, which is
+ * the property a sampled-audit backlog exists to have.
+ */
+export interface ReviewWalkthrough {
+  /** Every open sample's seq, in the order this process will show them. */
+  order: number[];
+  /** The sample whose card is in front of the approver, or `null`. */
+  current: number | null;
+  /** Sample seq -> the message this process sent the card as. */
+  readonly delivered: Map<number, DeliveryId>;
+  /** Whether any review summary has been sent yet. */
+  summarySent: boolean;
+  /** The open count the last summary named, so growth can be recognised. */
+  announced: number;
+  /**
+   * The log's size in bytes when this pass last derived the backlog, or `null`
+   * before the first one.
+   *
+   * A cost guard and nothing else, and it is sound for exactly one reason: the
+   * log is APPEND-ONLY, so a size that has not changed is a record set that has
+   * not changed. It is read only to skip a full verified walk on the cycle
+   * where a card is already in front of the approver and nothing has been
+   * written — which, with a 25-second poll and a human who answers in minutes,
+   * is most cycles. Every other cycle re-derives from the log as usual, and a
+   * lost or stale value costs one extra read rather than a wrong answer.
+   */
+  logSize: number | null;
+}
+
+/**
+ * The summary line that precedes a review card, and `/queue`'s review footer.
+ *
+ * Arithmetic on the verified log at the instant it is written, exactly as
+ * {@link summaryLines} is: how many samples are awaiting review, how old the
+ * oldest is, and which classes they are. The last clause is the one that stops
+ * a reader treating this like the pending queue: nothing here is waiting on
+ * them, because all of it has already happened.
+ */
+export function reviewSummaryLines(cards: ReviewCard[], now: string): string[] {
+  if (cards.length === 0) return ["Nothing awaiting review."];
+
+  const nowMs = Date.parse(now);
+  const ages = cards
+    .map((card) => nowMs - Date.parse(card.ranAtTs))
+    .filter((age) => !Number.isNaN(age) && age >= 0);
+  const oldest = ages.length === 0 ? null : Math.max(...ages);
+
+  const tally = new Map<string, number>();
+  for (const card of cards) {
+    const cls = card.fields.class.value;
+    tally.set(cls, (tally.get(cls) ?? 0) + 1);
+  }
+  const classes = [...tally.entries()]
+    .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
+    .join(", ");
+
+  return [
+    `${String(cards.length)} awaiting review — oldest ran ${oldest === null ? "at an unknown time" : ageText(oldest)} — ${classes}`,
+    "These already ran. Nothing is waiting on you and no card here authorizes anything; a review records what a person thought of work that is already done.",
+  ];
 }
 
 /**
@@ -919,6 +1068,15 @@ export interface DispatchState {
    * is the same direction every other piece of this bookkeeping degrades in.
    */
   readonly checkpoint: { offered: boolean; offeredSince: number | null };
+  /**
+   * The retrospective walkthrough (APRV-299), paced in both delivery modes.
+   *
+   * Always paced, and deliberately so even under `burst`: a review is never
+   * urgent, nobody is blocked on one, and a restart that put sixty of them on a
+   * phone at once would be the flood APRV-287 collapsed in the other direction.
+   * One card at a time, behind a summary, is the whole of the design.
+   */
+  readonly review: ReviewWalkthrough;
 }
 
 export function newDispatchState(): DispatchState {
@@ -931,6 +1089,14 @@ export function newDispatchState(): DispatchState {
     annotated: new Set(),
     paced: { order: [], current: null, summarySent: false, announced: 0 },
     checkpoint: { offered: false, offeredSince: null },
+    review: {
+      order: [],
+      current: null,
+      delivered: new Map(),
+      summarySent: false,
+      announced: 0,
+      logSize: null,
+    },
   };
 }
 
@@ -981,10 +1147,34 @@ export interface DispatchResult {
    */
   pruned: { action_key: string; reason: "settled" | "stale" }[];
   /**
+   * The collapsed re-delivery this cycle sent, when it sent one (APRV-287):
+   * the one message that stood in for a batch of requests nobody is waiting on
+   * any more, and the keys it covers. At most one, on a process's first cycle.
+   */
+  collapsed?: { delivery_id: DeliveryId; action_keys: string[]; oldest_ms: number };
+  /**
    * The `CHECKPOINT DUE` prompt this cycle sent, when it sent one (APRV-257):
    * the message it is on and the head it asks about. At most one per lapse.
    */
   checkpoint?: { delivery_id: DeliveryId; seq: number; hash: string };
+  /**
+   * The review card this cycle sent, when it sent one (APRV-299): the message
+   * it is on, the `audit.sampled` seq it is drawn for, and the action it is
+   * about. At most one per cycle, and none while a request is in front of the
+   * approver.
+   */
+  reviewCard?: { delivery_id: DeliveryId; sample_seq: number; action_key: string };
+  /**
+   * The review summary this cycle sent, when it sent one (APRV-299): the line
+   * saying how many samples are awaiting review and how old the oldest is.
+   */
+  reviewSummary?: { delivery_id: DeliveryId; open: number };
+  /**
+   * The review backlog could not be derived: the log is unreadable or does not
+   * verify. No card was sent. Never fatal — a review is not a decision anyone
+   * is blocked on — and retried on the next cycle.
+   */
+  reviewError?: { code: string; message: string };
 }
 
 /** A delivery whose request the log now says is settled (APRV-106, APRV-113). */
@@ -1218,6 +1408,14 @@ export async function dispatchPending(
         );
       }
     } catch (cause) {
+      // APRV-277. Telegram answers an edit that would change nothing with 400
+      // "message is not modified", and this pass re-derives its annotations
+      // from the verified log rather than remembering which ones landed — so a
+      // message this listener (or a previous one, or the channel's own decision
+      // path) already annotated produces exactly that. The phone shows the
+      // outcome, the annotation stands, and there is nothing to report. Every
+      // other 400 and every other failure still reaches the operator below.
+      if (isMessageNotModified(cause)) continue;
       // Cosmetic, and said so on stderr. The gate refuses a tap on the stale
       // buttons anyway (`already-decided`, `request-withdrawn`, `expired`), so
       // nothing can be decided by one.
@@ -1270,16 +1468,47 @@ export async function dispatchPending(
 
   // Everything the log calls pending that this process has not put on the
   // phone. Both modes start here and differ only in how much of it they send.
-  const undecided = queue.requests.filter(
+  const allUndecided = queue.requests.filter(
     (request) => !state.delivered.has(request.action_key.value),
   );
+
+  // APRV-287. A listener that has just started or reconnected re-derives the
+  // pending set and re-delivers it. For a queue somebody is waiting on that is
+  // exactly right; for one nobody is, it is the flood of 2026-09-06 — a dozen
+  // requests whose hooks had long since given up, one message each. The ones
+  // older than the hook's wait go out as ONE message with a single reject-all,
+  // and the rest are delivered as they always were.
+  //
+  // `state.banner.sent` is this process's own "have I completed a cycle yet",
+  // and it is read here BEFORE the burst banner consumes it: the first cycle of
+  // a process is precisely the re-delivery, and a later cycle carries requests
+  // that have just been asked.
+  // `burst` only, and that is where the harm is. Under `paced` the listener
+  // already puts ONE question at a time in front of the approver behind a
+  // summary line that names the count, the classes and the oldest age
+  // (APRV-216), so a restart there is two messages rather than a dozen and
+  // there is no flood to collapse. Collapsing a paced walkthrough would also
+  // take away the thing it exists for: an approver working deliberately
+  // through an old queue can still approve an old request, and a reject-all
+  // summary offers no way to.
+  const firstCycle = !state.banner.sent && setup.delivery === "burst";
+  const undecided = firstCycle
+    ? await collapseStale(setup, streams, state, result, allUndecided, now)
+    : allUndecided;
 
   // APRV-216. Under `paced` this cycle sends at most ONE unit, and `null` means
   // it sends nothing because a question is already in front of the approver.
   // Under `burst` it sends everything, which is what this file did before.
   const selected =
     setup.delivery === "paced" ? pacedSelection(state, queue.requests, undecided) : undecided;
-  if (selected === null) return result;
+  if (selected === null) {
+    // APRV-299. Nothing to SEND is not nothing to do: either a question is
+    // already in front of the approver (in which case the review pass declines
+    // on its own) or the pending queue is empty, which is exactly when the
+    // retrospective backlog should get the screen.
+    await dispatchReviews(setup, streams, state, result, now);
+    return result;
+  }
 
   // APRV-115. The window is this cycle: whatever is being sent right now is
   // grouped, and a group of similar requests goes out as one digest instead of
@@ -1418,7 +1647,274 @@ export async function dispatchPending(
     state.paced.current = sent.length === 0 ? null : sent;
   }
 
+  // APRV-299, last and least urgent. The retrospective backlog is offered only
+  // when nothing this cycle put a question in front of the approver: a pending
+  // request is somebody waiting, and a sampled action is somebody's work that
+  // already finished. Reconciliation runs even when no card goes out, so a
+  // sample reviewed at a terminal releases the walkthrough on the next cycle.
+  await dispatchReviews(setup, streams, state, result, now);
+
   return result;
+}
+
+/**
+ * One cycle's worth of "put the retrospective backlog in front of the approver"
+ * (APRV-299).
+ *
+ * The same shape as the paced request walkthrough and for the same reasons. The
+ * LOG decides what exists: `openReviewCards` re-derives the open samples from
+ * verified records every cycle, so a sample reviewed anywhere — this card, a
+ * terminal, another listener — leaves the order and the shown slot, and nothing
+ * this process remembers can keep a reviewed sample on the phone or an open one
+ * off it. The ORDER is this process's, seeded from log order and rearranged by
+ * `/skip` alone. And ONE AT A TIME: a card in front of the approver means this
+ * cycle sends nothing.
+ *
+ * Never fatal, at startup or after. A backlog that cannot be derived is a
+ * stderr line and a `reviewError` on the result; a card that fails to send
+ * leaves the sample undelivered and the next cycle retries it. Neither can lose
+ * a review, because the sample is in the log and the log is what is read.
+ */
+/** The log's size in bytes, or `null` when it cannot be stated. */
+function logSizeOf(logPath: string): number | null {
+  try {
+    return statSync(logPath).size;
+  } catch {
+    return null;
+  }
+}
+
+async function dispatchReviews(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  result: DispatchResult,
+  now: string,
+): Promise<void> {
+  const review = state.review;
+
+  // The cost guard. A card is already in front of the approver and the log has
+  // not grown since this pass last ran, so nothing can have been reviewed and
+  // nothing can have been sampled: skip the verified walk. Sound because the
+  // log is append-only; a `null` size, an unreadable stat, or any growth at all
+  // falls through to the ordinary derivation.
+  const size = logSizeOf(setup.logPath);
+  if (review.current !== null && size !== null && size === review.logSize) return;
+
+  const built = openReviewCards(
+    setup.logPath,
+    setup.tagOptions.payload === undefined ? {} : { payload: setup.tagOptions.payload },
+  );
+  if (!built.ok) {
+    result.reviewError = { code: built.code, message: built.message };
+    return;
+  }
+  review.logSize = size;
+
+  const open = built.cards;
+  const openSeqs = new Set(open.map((card) => card.sampleSeq));
+
+  review.order = review.order.filter((seq) => openSeqs.has(seq));
+  const known = new Set(review.order);
+  for (const card of open) {
+    if (!known.has(card.sampleSeq)) review.order.push(card.sampleSeq);
+  }
+  // Deleting the current entry mid-iteration is defined behaviour for a Map.
+  for (const seq of review.delivered.keys()) {
+    if (!openSeqs.has(seq)) review.delivered.delete(seq);
+  }
+  if (review.current !== null && !openSeqs.has(review.current)) review.current = null;
+  // A count the approver was told that is now too high is the number they
+  // watched go down, not growth to announce again.
+  review.announced = Math.min(review.announced, open.length);
+
+  if (review.current !== null) return;
+  if (setup.delivery === "paced" && state.paced.current !== null) return;
+  const nextSeq = review.order.find((seq) => !review.delivered.has(seq));
+  if (nextSeq === undefined) return;
+  const card = open.find((entry) => entry.sampleSeq === nextSeq);
+  if (card === undefined) return;
+
+  if (!review.summarySent || open.length > review.announced) {
+    review.summarySent = true;
+    review.announced = open.length;
+    try {
+      const deliveryId = await setup.channel.announce(reviewSummaryLines(open, now));
+      result.reviewSummary = { delivery_id: deliveryId, open: open.length };
+    } catch (cause) {
+      // Cosmetic, exactly like the request summary: the card below it is the
+      // point, and withholding it because its preamble failed would be the
+      // wrong direction on the only axis that matters.
+      streams.err(
+        `approval: telegram could not send the review summary: ${
+          cause instanceof Error ? cause.message : String(cause)
+        } — the card below is unaffected\n`,
+      );
+    }
+  }
+
+  const actionKey = card.fields.action_key.value;
+  try {
+    const deliveryId = await setup.channel.offerReview(card);
+    review.delivered.set(nextSeq, deliveryId);
+    review.current = nextSeq;
+    result.reviewCard = {
+      delivery_id: deliveryId,
+      sample_seq: nextSeq,
+      action_key: actionKey,
+    };
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "review_offered",
+          sample_seq: nextSeq,
+          action_key: actionKey,
+          delivery_id: deliveryId,
+        })}\n`,
+      );
+    } else {
+      streams.out(
+        `offered a review of sample seq ${String(nextSeq)} (${actionKey}, message ${deliveryId})\n`,
+      );
+    }
+  } catch (cause) {
+    // The sample stays open and undelivered, so the next cycle offers it again.
+    streams.err(
+      `approval: telegram could not offer the review of sample seq ${String(nextSeq)} (${actionKey}): ${
+        cause instanceof Error ? cause.message : String(cause)
+      } — the sample stays open and the next cycle tries again\n`,
+    );
+  }
+}
+
+/**
+ * How old a pending request must be, on a listener's first cycle, to be one
+ * nobody is waiting on (APRV-287).
+ *
+ * The hook's own wait PLUS its retry grace, read from the same module the hook
+ * reads (`core/harness-wait.ts`), because two numbers would be two answers to
+ * "is anybody still holding this". Past the wait alone a hook process has
+ * stopped blocking and a retry can still adopt the question, so those are
+ * ordinary pending requests. Past the wait and the grace together nothing will
+ * adopt it: that is the moment the hook itself takes such a request back, and a
+ * request still pending here is one whose session never came back at all —
+ * exactly the dozen that arrived on a phone behind a dead daemon on
+ * 2026-09-06.
+ *
+ * Collapsing is not deciding. These stay pending, listable by `/queue`, and
+ * decidable from any copy already delivered; what changes is how many messages
+ * it takes to say they are there.
+ */
+export const COLLAPSE_STALE_AFTER_MS = abandonedAfterMs(
+  HOOK_DEFAULT_WAIT_MS,
+  HOOK_RETRY_GRACE_MS,
+);
+
+/**
+ * How many stale requests it takes to collapse them (APRV-287).
+ *
+ * Two. A lone stale request keeps its own card, with its payload and both
+ * buttons, because collapsing it would take away the ability to approve it and
+ * save nobody a message. A flood starts at two.
+ */
+const COLLAPSE_MIN = 2;
+
+/**
+ * A DURATION in words, which is not what {@link ageText} renders.
+ *
+ * `ageText` says how long ago something happened ("5 min ago"), and these two
+ * numbers are lengths of time rather than instants: writing "older than the
+ * hook's 5 min ago retry grace" would be a sentence about the wrong kind of
+ * thing.
+ */
+function durationText(ms: number): string {
+  if (ms < 60_000) return `${String(Math.round(ms / 1000))}s`;
+  const minutes = Math.round(ms / 60_000);
+  return `${String(minutes)}m`;
+}
+
+/** The computed lines a collapsed re-delivery leads with (APRV-287). */
+export function staleLines(requests: ChannelRequest[], now: string): string[] {
+  const nowMs = Date.parse(now);
+  const ages = requests
+    .map((request) => nowMs - Date.parse(request.requested_ts.value))
+    .filter((age) => !Number.isNaN(age));
+  const oldest = ages.length === 0 ? null : Math.max(...ages);
+  const tally = new Map<string, number>();
+  for (const request of requests) {
+    const cls = request.class.value;
+    tally.set(cls, (tally.get(cls) ?? 0) + 1);
+  }
+  return [
+    `${String(requests.length)} pending requests, all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`,
+    `oldest: ${oldest === null ? "unknown age" : ageText(oldest)}`,
+    `classes: ${[...tally.entries()]
+      .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
+      .join(", ")}`,
+    "collapsed into this one message because the tool calls that asked have stopped waiting; a decision on any of them can still authorize an identical retry",
+  ];
+}
+
+/**
+ * Put the requests nobody is waiting on into ONE message, and hand back the
+ * ones that still get a message each (APRV-287).
+ *
+ * Called on a process's first cycle only, which is exactly a daemon start or a
+ * listener reconnect. Everything it does is bookkeeping in the sense SPEC.md
+ * §10.3 fixes: the pending set is re-derived from the verified log every cycle,
+ * so a summary that fails to send, or a process that forgets it sent one,
+ * degrades to showing those requests again, and never to a pending request
+ * nobody is shown.
+ */
+async function collapseStale(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  result: DispatchResult,
+  undecided: ChannelRequest[],
+  now: string,
+): Promise<ChannelRequest[]> {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return undecided;
+  const age = (request: ChannelRequest): number => {
+    const at = Date.parse(request.requested_ts.value);
+    return Number.isNaN(at) ? 0 : nowMs - at;
+  };
+  const stale = undecided.filter((request) => age(request) >= COLLAPSE_STALE_AFTER_MS);
+  if (stale.length < COLLAPSE_MIN) return undecided;
+
+  let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;
+  try {
+    delivered = await setup.channel.notifyStale(stale, { lines: staleLines(stale, now) });
+  } catch (cause) {
+    delivered = null;
+    streams.err(
+      `approval: telegram could not send the collapsed re-delivery of ${String(stale.length)} stale requests: ${
+        cause instanceof Error ? cause.message : String(cause)
+      } — they are delivered one message each instead\n`,
+    );
+  }
+  if (delivered === null || delivered.digestId === null) {
+    // Degrades to showing the requests again, which is this bookkeeping's rule.
+    return undecided;
+  }
+
+  const digestId = delivered.digestId;
+  for (const member of delivered.members) {
+    state.delivered.set(member.action_key, member.delivery_id);
+    remember(state, member.action_key, now);
+    state.attempts.delete(member.action_key);
+    result.delivered.push({ action_key: member.action_key, delivery_id: member.delivery_id });
+  }
+  result.collapsed = {
+    delivery_id: digestId,
+    action_keys: delivered.members.map((member) => member.action_key),
+    oldest_ms: Math.max(...stale.map((request) => age(request))),
+  };
+  report(setup, streams, digestId, delivered.members);
+
+  const collapsedKeys = new Set(delivered.members.map((member) => member.action_key));
+  return undecided.filter((request) => !collapsedKeys.has(request.action_key.value));
 }
 
 /**
@@ -1788,6 +2284,135 @@ export function checkpointHandlerFor(
 }
 
 /**
+ * What a review tap does: the human-only `reviewSample`, and nothing else
+ * (APRV-299).
+ *
+ * The one path from a button on a phone to an `audit.reviewed`, and it is the
+ * SAME path `approval audit review` takes — same function, same refusals, same
+ * record shape — so a reaction given on a card and one given at a terminal are
+ * indistinguishable to `approval feedback`, which is the whole of AC3.
+ *
+ * The actor is `setup.actor`, the human identity this listener was configured
+ * with (`--as` / `APPROVAL_HUMAN`), exactly as a grant's is. It is never read
+ * off the tap, never off the callback, and never out of a payload field: this
+ * channel does not authenticate the person who pressed the button, and SPEC.md
+ * §11's config-declared identity is what a review is recorded against. Anyone
+ * who can reach the configured chat reviews as that actor, which is the same
+ * trust boundary a tapped grant already stands on.
+ *
+ * The reaction is passed through untouched and NOTHING here reads it (SPEC.md
+ * §11.1 invariant 10): it is a field on a record, chosen by a human, on its way
+ * to the log.
+ */
+export function reviewHandlerFor(
+  setup: ListenSetup,
+  streams: Streams,
+): (tap: {
+  sampleSeq: number;
+  verdict: "ok" | "denied";
+  reaction?: "disliked" | "indifferent" | "liked" | "loved";
+  note?: string;
+}) => ReviewTapResponse {
+  return (tap) => {
+    const result = reviewSample(
+      setup.logPath,
+      { kind: "seq", seq: tap.sampleSeq },
+      setup.actor,
+      tap.note ?? null,
+      {
+        ...(setup.gateOptions.policy === undefined ? {} : { policy: setup.gateOptions.policy }),
+        verdict: tap.verdict,
+        ...(tap.reaction === undefined ? {} : { reaction: tap.reaction }),
+      },
+    );
+
+    if (!result.ok) {
+      // SPEC.md §11.1 invariant 6: the code is machine-readable and distinct,
+      // and it reaches the approver as itself. The card carries both halves —
+      // the code on its own line, the message under it — because the codes that
+      // get here are ones a reviewer can act on: `reaction-conflicts-verdict`
+      // asks which half they meant, `note-required` asks for words.
+      streams.err(
+        `approval: telegram review refused (${result.code}): ${result.message}\n`,
+      );
+      if (setup.json) {
+        streams.out(
+          `${JSON.stringify({
+            event: "review",
+            ok: false,
+            sample_seq: tap.sampleSeq,
+            verdict: tap.verdict,
+            reaction: tap.reaction ?? null,
+            code: result.code,
+          })}\n`,
+        );
+      }
+      return {
+        ok: false,
+        headline: TELEGRAM_NOT_RECORDED,
+        detail: [result.code, result.message],
+        toast: "Not recorded — the card says why.",
+      };
+    }
+
+    const obligation = result.obligation;
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "review",
+          ok: true,
+          seq: result.record.seq,
+          sample_seq: result.subject.seq,
+          action_key: result.subject.actionKey,
+          verdict: tap.verdict,
+          reaction: tap.reaction ?? null,
+          obligation_seq: obligation === null ? null : obligation.seq,
+        })}\n`,
+      );
+    } else {
+      streams.out(
+        `reviewed sample at seq ${String(result.subject.seq)} (action ${
+          result.subject.actionKey ?? "-"
+        }) at seq ${String(result.record.seq)} by ${setup.actor} via telegram${
+          tap.verdict === "denied" ? " — DENIED" : ""
+        }${tap.reaction === undefined ? "" : ` — reaction: ${tap.reaction} (guidance, not policy)`}\n`,
+      );
+    }
+
+    const detail = [
+      `recorded at seq ${String(result.record.seq)} by ${setup.actor} · verdict ${tap.verdict}`,
+      ...(tap.reaction === undefined
+        ? []
+        : [`reaction: ${tap.reaction} — guidance, not policy; it changes no verdict and no budget`]),
+      ...(tap.note === undefined || tap.note.trim().length === 0
+        ? []
+        : [`note: ${tap.note.trim()}`]),
+    ];
+    if (obligation !== null) {
+      // APRV-127's reconciliation, said on the reply: a denial cannot undo
+      // anything, and what it DOES is open an obligation somebody has to
+      // discharge. An approver who denied on a phone learns that here rather
+      // than from a health surface later.
+      const shape = String(
+        (obligation.payload as Record<string, unknown> | undefined)?.["obligation"] ?? "",
+      );
+      detail.push(
+        shape === "gated-revert"
+          ? `reconciliation obligation at seq ${String(obligation.seq)}: GATED REVERT. The action was declared reversible, so undo it through the gate and close this with \`approval audit reconcile ${String(obligation.seq)} --revert <action-key> --note "…"\`.`
+          : `reconciliation obligation at seq ${String(obligation.seq)}: POLICY FINDING. Nothing can be reverted, so what is owed is a review of the class that permitted this. Close it with \`approval audit reconcile ${String(obligation.seq)} --note "…"\` once that review has happened.`,
+      );
+    }
+
+    return {
+      ok: true,
+      headline: tap.verdict === "denied" ? TELEGRAM_REVIEW_DENIED : TELEGRAM_REVIEW_RECORDED,
+      detail,
+      toast: tap.verdict === "denied" ? "Recorded — denied." : "Recorded.",
+    };
+  };
+}
+
+/**
  * `/queue`, `/skip`, `/next` — the paced walkthrough's three verbs (APRV-216).
  *
  * **None of them appends anything**, and the reason is structural rather than
@@ -1799,8 +2424,9 @@ export function checkpointHandlerFor(
  * What they do move is process memory:
  *
  * - `/queue` reads the verified log and replies with the summary and a numbered
- *   list. It changes nothing, and it works while an item is shown, because the
- *   list is derived and not held.
+ *   list. It changes nothing, and it works while a request is selected, because
+ *   the list is derived and not held. The reply says outright that it carries no
+ *   buttons and that it cannot vouch for a card it once sent (APRV-256).
  * - `/skip` sends the shown unit to the BACK of this process's order and
  *   forgets having delivered it, so the next cycle shows the next question and
  *   this one comes round again after the rest. The copy already in the chat
@@ -1856,17 +2482,49 @@ export function commandHandlerFor(
         ]);
         return;
       }
-      await say(queueLines(queue.requests, now, state.paced.current ?? []));
+      // APRV-299. The retrospective backlog is part of what the log is holding,
+      // and `/queue` is the verb that says what that is. Appended rather than
+      // interleaved, because the two lists answer different questions: one is
+      // what is waiting on the approver, the other what already happened.
+      const lines = queueLines(queue.requests, now, state.paced.current ?? []);
+      const built = openReviewCards(setup.logPath);
+      if (built.ok && built.cards.length > 0) lines.push(...reviewSummaryLines(built.cards, now));
+      await say(lines);
       return;
     }
 
     const shown = state.paced.current;
     if (shown === null) {
+      // APRV-299. With no request selected, the two verbs act on the review
+      // card if one is in front of the approver. Neither decides anything here
+      // either: the sample stays open in the log whichever way it goes, and
+      // `approval audit review <seq>` still names it from a terminal.
+      const card = state.review.current;
+      if (card !== null) {
+        state.review.current = null;
+        if (command === "skip") {
+          state.review.delivered.delete(card);
+          state.review.order = state.review.order.filter((seq) => seq !== card);
+          state.review.order.push(card);
+        }
+        await say([
+          command === "skip"
+            ? `Review of sample ${String(card)} skipped — it goes to the back of the order and a fresh card is sent once the rest have had their turn.`
+            : `Review of sample ${String(card)} passed over — this listener sends no further card for it.`,
+          "Nothing was recorded. The sample is still open: it is listed by `approval audit list` and reviewable with `approval audit review " +
+            String(card) +
+            "`, and the card already in this chat keeps its buttons.",
+        ]);
+        return;
+      }
       await say([
+        // APRV-256: selection language, matching `/queue`'s. "In front of you"
+        // was a claim about the approver's screen, which this process has never
+        // been able to see.
         command === "skip"
-          ? "Nothing to skip — no request is in front of you."
-          : "Nothing is in front of you right now.",
-        "The next pending request is sent as soon as there is one. /queue lists what the log is holding.",
+          ? "Nothing to skip — this listener has no request selected."
+          : "This listener has no request selected right now.",
+        "The next pending request is sent with its buttons on an upcoming cycle. /queue lists what the log is holding.",
       ]);
       return;
     }
@@ -1925,6 +2583,13 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   // channel's `offerCheckpoint` legal at all: it refuses to send a button
   // nothing is listening for.
   channel.onCheckpoint(checkpointHandlerFor(setup, streams));
+  // APRV-299. Registered unconditionally, for the same reason the checkpoint
+  // handler is: whether a review card is ever OFFERED is the log's answer (an
+  // open `audit.sampled`), and a handler that exists for a card nobody sends
+  // costs nothing. Registering it is also what makes `offerReview` legal at
+  // all, and what makes the channel read the `message` updates a note reply
+  // arrives on.
+  channel.onReview(reviewHandlerFor(setup, streams));
 
   // Delivery bookkeeping is in memory only — channels hold no state (SPEC.md
   // §10.3). A restarted listener therefore re-sends everything still pending.

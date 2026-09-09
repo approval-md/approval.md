@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin main && git show origin/main:SPEC.md | grep -n \"pending sign-off\" | sed 's/\\(.\\{160\\}\\).*/\\1…/'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

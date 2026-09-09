@@ -36,7 +36,7 @@ import { readVerifiedRecords } from "../src/core/state.js";
 import { Daemon, type DaemonEvent, type DaemonOptions } from "../src/daemon/daemon.js";
 import { lastAdvance } from "../src/core/advance-cycle.js";
 import { publishedState } from "../src/cli/log-advance.js";
-import { defaultCadence, type AdvanceCadence } from "../src/daemon/advance.js";
+import { advanceArgv, defaultCadence, type AdvanceCadence } from "../src/daemon/advance.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-daemon-advance-")));
 let counter = 0;
@@ -88,11 +88,13 @@ function git(args: string[], cwd: string): { code: number; stdout: string; stder
 }
 
 /**
- * A `gh` that answers `pr list` and `pr create` and REFUSES `pr merge`.
+ * A `gh` that answers `pr list`, `pr create` and `pr merge`, logging every call.
  *
- * The refusal is the assertion: if any code path ever asks this stub to merge,
- * the case fails on the exit status rather than on a grep. The list answer is
- * stateful — empty until a pull request has been created, one entry after —
+ * `pr merge` answered rather than refused since APRV-284: the daemon arms the
+ * day's records pull request (`--merge --auto`) and still merges nothing, so
+ * the assertion moved from the exit status to the argv — the call log below
+ * distinguishes an arm from a merge, which an exit code cannot. The list answer
+ * is stateful — empty until a pull request has been created, one entry after —
  * which is exactly the state the one-PR-per-day rule reads.
  */
 function ghStub(): { dir: string; log: string } {
@@ -109,7 +111,10 @@ function ghStub(): { dir: string; log: string } {
     '  pr) case "$2" in',
     `    list) if [ -f ${JSON.stringify(marker)} ]; then echo '[{"url":"https://example.invalid/pr/1"}]'; else echo '[]'; fi; exit 0 ;;`,
     `    create) : > ${JSON.stringify(marker)}; echo "https://example.invalid/pr/1"; exit 0 ;;`,
-    '    merge) echo "the daemon must never merge" >&2; exit 3 ;;',
+    // APRV-284: `pr merge --auto` ARMS a merge; it does not perform one. The
+    // stub answers it the way a repository with auto-merge enabled does, and
+    // the cases below assert on the argv rather than on the exit code.
+    '    merge) echo "armed"; exit 0 ;;',
     "  esac ;;",
     "esac",
     "exit 1",
@@ -442,7 +447,74 @@ test("records tier: every path a daemon advance commits is an exempt evidence pa
   }
 });
 
-test("the module never calls `gh pr merge`", () => {
+/**
+ * APRV-284 replaced "the daemon never merges" with "the daemon never merges
+ * ITSELF, and arms the merge instead".
+ *
+ * The source grep that used to stand here (no `"merge"` literal anywhere in
+ * `daemon/advance.ts`) still holds and still means something: the merge argv
+ * lives in `cli/log-advance.ts`, where the session path and the daemon path
+ * share one spelling of it, and this module contributes a boolean. What it no
+ * longer means is that nothing merges, so the behaviour is pinned below on the
+ * calls the stub actually sees.
+ */
+test("the module spells no merge of its own: the argv is `logAdvance`'s, shared with the session path", () => {
   const source = readFileSync(new URL("../../src/daemon/advance.ts", import.meta.url), "utf8");
   assert.equal(/["'`]merge["'`]/u.test(source), false);
+});
+
+test("a cadence advance arms auto-merge on the day's pull request", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "one");
+  const { events } = runDaemon(repo, cadence({ afterRecords: 1, intervalMs: 0 }));
+
+  const advance = advanceEvents(events)[0];
+  assert.equal(advance?.outcome, "advanced", advance?.message ?? "");
+  assert.equal(advance?.auto_merge, "armed");
+  assert.equal(advance?.auto_merge_note, null);
+  assert.match(advance?.message ?? "", /auto-merge armed/u);
+
+  // `--auto`, and never a bare `--merge`: what is armed lands when CI and the
+  // branch rules allow it, which is the whole difference between arming a
+  // records pull request and a daemon merging its own evidence.
+  assert.deepEqual(
+    ghCalls(repo.ghLog).filter((line) => line.startsWith("pr merge")),
+    [`pr merge ${RECORDS_BRANCH} --merge --auto`],
+  );
+});
+
+test("--no-advance-auto-merge: the advance publishes and no merge is armed", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "one");
+  const { events } = runDaemon(repo, cadence({ afterRecords: 1, intervalMs: 0, autoMerge: false }));
+
+  const advance = advanceEvents(events)[0];
+  assert.equal(advance?.outcome, "advanced", advance?.message ?? "");
+  assert.equal(advance?.pr_created, true, "the pull request itself is unaffected");
+  assert.equal(advance?.auto_merge, "off");
+  assert.match(advance?.message ?? "", /auto-merge not armed/u);
+  assert.deepEqual(
+    ghCalls(repo.ghLog).filter((line) => line.startsWith("pr merge")),
+    [],
+    "an arm reached gh even though the cadence option is off",
+  );
+});
+
+test("the argv the payload binds to names the arm only when it is off", () => {
+  // The default cadence's argv must be byte-identical to what it was before the
+  // arm existed: it is what the payload hash and the idempotency key are built
+  // from, and a changed argv under a running daemon re-asks a question that was
+  // already answered.
+  assert.deepEqual(advanceArgv(cadence()), [
+    "approval",
+    "log",
+    "advance",
+    "--pr",
+    "--remote",
+    "origin",
+    "--base",
+    "main",
+  ]);
+  assert.ok(advanceArgv(cadence({ autoMerge: false })).includes("--no-auto-merge"));
+  assert.equal(advanceArgv(cadence({ pr: false, autoMerge: false })).includes("--no-auto-merge"), false);
 });

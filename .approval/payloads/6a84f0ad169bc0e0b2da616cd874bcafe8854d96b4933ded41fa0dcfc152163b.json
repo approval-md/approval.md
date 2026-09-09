@@ -1,0 +1,1 @@
+{"after":"(`.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/`, `.codex/hooks.json`, `.codex/hooks/`, `.codex/config.toml`)","before":"(`.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/`)","file":"SPEC.md","tool":"Edit"}

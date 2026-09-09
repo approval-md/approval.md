@@ -199,6 +199,11 @@ import type {
   TestableChannel,
 } from "./contract.js";
 import type { GateRefusal } from "../core/gate.js";
+// APRV-299. The reaction vocabulary and the verdict type, imported for the
+// reason `core/audit.ts` states where it exports them: they are shown here and
+// decided nowhere. Nothing in this file branches on a reaction, and SPEC.md
+// §11.1 invariant 10's guard scans the modules that decide, which this is not.
+import { REACTIONS, type Reaction, type ReviewVerdict } from "../core/audit.js";
 import {
   TELEGRAM_PROMPT_LAYOUT,
   type PromptLayout,
@@ -591,6 +596,13 @@ export interface TelegramStats {
    * and nothing else.
    */
   commands: number;
+  /**
+   * Review taps handed to the runtime's review handler (APRV-299). Counted
+   * whether the handler recorded or refused, because what this number measures
+   * is how much of the retrospective backlog reached a human's thumb; what
+   * became of each one is in the log and nowhere else.
+   */
+  reviews: number;
 }
 
 /**
@@ -815,6 +827,79 @@ function formatTelegramTtl(ms: number | null): string {
 }
 
 /**
+ * The subset of a request's fields a review card also carries (APRV-299).
+ *
+ * A retrospective review card is not a request and must never be rendered as
+ * one, but the five rows below say exactly what they say on a prompt: which
+ * class this was, what the command did, which task it belonged to, what the
+ * agent claimed it would do, and the model's sentence about it where a listener
+ * attached one. Naming the subset as a type is what lets {@link reviewRow} and
+ * {@link telegramRow} share one implementation of those five without either
+ * side casting: a card supplies exactly these fields, and the compiler refuses
+ * a card that reaches for `budgets`, `fullPayload`, or anything else that only
+ * a pending question has.
+ */
+export type ReviewCardFields = Pick<
+  ChannelRequest,
+  "action_key" | "class" | "task" | "summary"
+> &
+  Partial<Pick<ChannelRequest, "command_breakdown" | "gloss">>;
+
+/** The rows a review card renders, in the order it renders them (APRV-299). */
+export const REVIEW_CARD_ROWS = [
+  "class",
+  "command_breakdown",
+  "task",
+  "summary",
+  "gloss",
+] as const;
+
+export type ReviewCardRow = (typeof REVIEW_CARD_ROWS)[number];
+
+/**
+ * The five rows a prompt and a review card render identically (APRV-299).
+ *
+ * Extracted from {@link telegramRow} rather than copied, so that a card and a
+ * prompt cannot come to describe the same class, the same command or the same
+ * claimed summary in two different ways. The gloss keeps every property
+ * APRV-144 gave it here too: it renders under the CLAIMED heading because its
+ * field says `claimed`, it carries {@link TELEGRAM_GLOSS_SUFFIX} on the line
+ * itself, and nothing branches on what it says.
+ */
+function reviewRow(fields: ReviewCardFields, row: ReviewCardRow): RowCandidate | null {
+  const normal = (line_: Line): RowCandidate => ({ line: line_, abnormal: false });
+  switch (row) {
+    case "task":
+      return normal(line("task", fields.task, "task", fields.task.value ?? "(none)"));
+    case "class":
+      return normal(line("class", fields.class, "class", fields.class.value));
+    case "command_breakdown":
+      return fields.command_breakdown === undefined
+        ? null
+        : normal(
+            line(
+              "command_breakdown",
+              fields.command_breakdown,
+              "commands",
+              fields.command_breakdown.value,
+            ),
+          );
+    case "gloss":
+      return fields.gloss === undefined
+        ? null
+        : normal(
+            line("gloss", fields.gloss, "gloss", `${fields.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`),
+          );
+    case "summary":
+      return normal(
+        line("summary", fields.summary, "summary", fields.summary.value ?? "(none given)"),
+      );
+    default:
+      return null;
+  }
+}
+
+/**
  * One row's line, or `null` when this request does not carry it and when the
  * channel renders it structurally rather than as a bullet.
  *
@@ -823,6 +908,9 @@ function formatTelegramTtl(ms: number | null): string {
  * `ChannelRequest` — the tasks slimmed the phone rendering and nothing else —
  * so an operator turning one back on with `always` is asking for a line this
  * channel can already build, not for a new fact about the log.
+ *
+ * The five rows a review card shares live in {@link reviewRow} since APRV-299
+ * and are delegated to here.
  */
 function telegramRow(request: ChannelRequest, row: PromptRow): RowCandidate | null {
   const normal = (line_: Line): RowCandidate => ({ line: line_, abnormal: false });
@@ -833,20 +921,11 @@ function telegramRow(request: ChannelRequest, row: PromptRow): RowCandidate | nu
     case "action_key":
       return null;
     case "task":
-      return normal(line("task", request.task, "task", request.task.value ?? "(none)"));
     case "class":
-      return normal(line("class", request.class, "class", request.class.value));
     case "command_breakdown":
-      return request.command_breakdown === undefined
-        ? null
-        : normal(
-            line(
-              "command_breakdown",
-              request.command_breakdown,
-              "commands",
-              request.command_breakdown.value,
-            ),
-          );
+    case "gloss":
+    case "summary":
+      return reviewRow(request, row);
     case "protected_path":
       return request.protected_path === undefined
         ? null
@@ -937,24 +1016,15 @@ function telegramRow(request: ChannelRequest, row: PromptRow): RowCandidate | nu
           `$${request.est_cost_usd.value.toFixed(2)}`,
         ),
       );
-    // APRV-144. Under the CLAIMED heading, because a model's sentence is not
-    // something the runtime derived, and labelled on the line as well: the
-    // `(author)` parenthetical every claimed line already carries is small,
-    // uniform and easy to stop seeing, and this is the one line in the message
-    // that NO party — not the runtime, not even the requesting agent — stands
-    // behind. Nothing here or anywhere else branches on what it says, and a
-    // layout cannot move it out from under that heading: the region a line
-    // lands in comes from the field's `kind`, applied after the ordering.
-    case "gloss":
-      return request.gloss === undefined
-        ? null
-        : normal(
-            line("gloss", request.gloss, "gloss", `${request.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`),
-          );
-    case "summary":
-      return normal(
-        line("summary", request.summary, "summary", request.summary.value ?? "(none given)"),
-      );
+    // APRV-144's `gloss` and the `summary` row are two of the five {@link
+    // reviewRow} answers above. Under the CLAIMED heading, because a model's
+    // sentence is not something the runtime derived, and labelled on the line
+    // as well: the `(author)` parenthetical every claimed line already carries
+    // is small, uniform and easy to stop seeing, and the gloss is the one line
+    // in the message that NO party — not the runtime, not even the requesting
+    // agent — stands behind. Nothing here or anywhere else branches on what it
+    // says, and a layout cannot move it out from under that heading: the region
+    // a line lands in comes from the field's `kind`, applied after the ordering.
     case "rationale":
       return request.rationale === undefined
         ? null
@@ -1197,6 +1267,32 @@ export function digestKeyOf(request: ChannelRequest): string {
  * one is returned as a group of one, and the caller sends it as an ordinary
  * prompt.
  */
+/**
+ * The key that makes ONE tool call one question (APRV-287), or `null` for a
+ * request that names no task or no payload.
+ *
+ * A shell command that touches several classes raises one request per class
+ * (`cli/hook.ts` mints `<task>:<class>` keys), and every one of them carries the
+ * same task and the same payload hash: they are one command, asked about once,
+ * with the log keeping a record per class because that is what audit granularity
+ * requires. Grouping them by class the way {@link digestKeyOf} does put five
+ * separate cards on a phone for one `git commit && git push` on 2026-09-06, and
+ * the approver had to tap through three rounds of them.
+ *
+ * The pair is enough on its own. A task id is one tool call, and a payload hash
+ * is the bytes it is about, so two requests sharing both are two classes of one
+ * command and can never be two commands. Both are computed: the task id is
+ * minted by the runtime and the hash is recomputed from the payload bytes
+ * (`channels/contract.ts`), so nothing an agent authors chooses this grouping.
+ */
+function toolCallKeyOf(request: ChannelRequest): string | null {
+  const task = request.task.value;
+  const hash = request.payload_hash.value;
+  if (task === null || task.length === 0) return null;
+  if (typeof hash !== "string" || hash.length === 0) return null;
+  return [task, hash].join("\0");
+}
+
 export function groupForDigest(
   requests: ChannelRequest[],
   max: number = TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -1204,8 +1300,30 @@ export function groupForDigest(
   const groups: ChannelRequest[][] = [];
   const byKey = new Map<string, ChannelRequest[]>();
 
+  // APRV-287, before the class grouping and never instead of it. The classes of
+  // one tool call are one question however many they are; everything else is
+  // grouped as it always was, so a burst of forty separate `network.call`s from
+  // forty tool calls still digests by class.
+  // Only where the classes DIFFER: members of one tool call that share a class
+  // are grouped by the class key already, and the two groupings then agree.
+  // Narrowing it this way keeps every existing grouping exactly as it was and
+  // changes only the case this task is about, the one command a human was asked
+  // about once per class.
+  const oneCall = new Set<string>();
+  const seen = new Map<string, Set<string>>();
   for (const request of requests) {
-    const key = digestKeyOf(request);
+    const key = toolCallKeyOf(request);
+    if (key === null) continue;
+    const classes = seen.get(key) ?? new Set<string>();
+    classes.add(request.class.value);
+    seen.set(key, classes);
+    if (classes.size > 1) oneCall.add(key);
+  }
+
+  for (const request of requests) {
+    const call = toolCallKeyOf(request);
+    const key =
+      call !== null && oneCall.has(call) ? `tool-call\0${call}` : digestKeyOf(request);
     let group = byKey.get(key);
     // A group that has reached the cap is closed and a fresh one opened under
     // the same key: a burst of twenty becomes three digests, never one wall.
@@ -1242,6 +1360,29 @@ export interface DigestMemberState {
   settled: { headline: string; detail: string[] } | null;
 }
 
+/**
+ * The lines a COLLAPSED delivery leads with, and the fact it is one (APRV-287).
+ *
+ * A listener starting or reconnecting re-derives the pending set from the
+ * verified log and re-delivers it, which is right for a queue somebody is
+ * waiting on and was a flood for a queue nobody is: on 2026-09-06 a restarted
+ * daemon put a dozen requests whose hooks had long since given up in front of
+ * an approver, one message each. Those go out as ONE message instead, and this
+ * is what distinguishes it from an ordinary digest.
+ *
+ * It carries a REJECT-ALL button and deliberately no approve. The payloads are
+ * not in this message, and SPEC.md §10.3 requires the canonical rendering of a
+ * manual action's payload in front of the approver before a decision is
+ * collected: an approve-all here would collect a decision for bytes nobody was
+ * shown. A rejection authorizes nothing, so it needs no such showing, and every
+ * one of these requests can still be approved on its own card or from a
+ * terminal.
+ */
+export interface StaleSummary {
+  /** Computed lines: how many, how old the oldest is, which classes. */
+  lines: string[];
+}
+
 /** One digest message, as the delivering process remembers it. */
 export interface DigestState {
   /** The digest message's own id: what every member's annotation edits. */
@@ -1252,6 +1393,11 @@ export interface DigestState {
   allNonce: string;
   /** The computed facts every member shares, already rendered as text. */
   facts: { label: string; text: string; origin: string }[];
+  /**
+   * The collapsed re-delivery this message is, or `null` for an ordinary digest
+   * (APRV-287). See {@link StaleSummary}.
+   */
+  stale?: StaleSummary | null;
   /** Who authored the claimed lines below. */
   author: string;
   members: DigestMemberState[];
@@ -1278,21 +1424,124 @@ export function digestFacts(
 ): { label: string; text: string; origin: string }[] {
   const first = members[0];
   if (first === undefined) return [];
+  // APRV-287. A digest may now carry the several classes of ONE tool call, so
+  // the class line states the set rather than the first member's, and the
+  // grouping line says which of the two groupings put this set together. A
+  // digest whose members share one class reads exactly as it did.
+  const classes = [...new Set(members.map((member) => member.class.value))];
+  const shared = sharedPayload(members);
+  const autonomies = [...new Set(members.map((member) => member.autonomy.value))];
   return [
-    { label: "class", text: first.class.value, origin: originOf(first.class) },
-    { label: "autonomy", text: first.autonomy.value, origin: originOf(first.autonomy) },
+    { label: "class", text: classes.join(", "), origin: originOf(first.class) },
+    { label: "autonomy", text: autonomies.join(", "), origin: originOf(first.autonomy) },
     { label: "task", text: first.task.value ?? "(none)", origin: originOf(first.task) },
     {
       label: "grouped by",
-      text: `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`,
+      text:
+        shared === null
+          ? `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`
+          : `one tool call: one task, one payload, ${String(classes.length)} class(es) of the same command`,
       origin: "grouping",
     },
     {
       label: "payloads",
-      text: `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`,
+      text:
+        shared === null
+          ? `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`
+          : `one payload, shared by all ${members.length} requests, in the prompt above this message`,
       origin: originOf(first.fullPayload),
     },
   ];
+}
+
+/**
+ * The one payload every member is about, or `null` when they differ
+ * (APRV-287).
+ *
+ * The computed hash decides it, never the rendering: two members share a
+ * payload when the bytes the grants bind to are the same bytes. A member whose
+ * full payload the channel was not given in full is not a shared payload
+ * either, because "they are all this one, which you have read" is a claim about
+ * something the approver was shown.
+ */
+function sharedPayload(members: ChannelRequest[]): ChannelRequest | null {
+  const first = members[0];
+  if (first === undefined || members.length < 2) return null;
+  const hash = first.payload_hash.value;
+  if (typeof hash !== "string" || hash.length === 0) return null;
+  if (!members.every((member) => member.payload_hash.value === hash)) return null;
+  const rendering = first.fullPayload.value;
+  if (rendering === null || rendering.truncated) return null;
+  return first;
+}
+
+/**
+ * The collapsed re-delivery's own message: what is waiting, and one way to
+ * clear it (APRV-287).
+ *
+ * Everything above the buttons is computed by the runtime from the verified log
+ * — the count, the ages, the classes — and the per-member lines carry the
+ * agent's own summaries under a heading that says so, exactly as an ordinary
+ * digest does. What it does NOT carry is any payload, and the message says so
+ * in the same breath as it explains why the only button rejects: a decision is
+ * bound to the bytes the approver was shown, and nothing here shows them.
+ */
+function renderStaleSummary(
+  digest: DigestState,
+  stale: StaleSummary,
+  open: number,
+  total: number,
+): { text: string; keyboard: { inline_keyboard: InlineButton[][] } | null } {
+  const lines: string[] = [
+    `<b>${escapeHtml(
+      open === 0
+        ? `ALL ${total} STALE REQUESTS DECIDED`
+        : `${open} STALE REQUEST${open === 1 ? "" : "S"} — NOBODY IS WAITING ON ${open === 1 ? "IT" : "THEM"}`,
+    )}</b>`,
+    "",
+    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
+    ...stale.lines.map((line) => `• ${escapeHtml(line)}`),
+    ...digest.facts.map(
+      (fact) =>
+        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
+    ),
+    "",
+    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+  ];
+
+  for (const [index, member] of digest.members.entries()) {
+    lines.push(
+      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)}`,
+    );
+    if (member.settled !== null) {
+      lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
+      for (const detail of member.settled.detail) lines.push(`   ${escapeHtml(detail)}`);
+    }
+  }
+
+  lines.push(
+    "",
+    escapeHtml(
+      "These asked while a hook waited, and the wait is long over: no tool call is holding the answer. This message carries NO payload, so it offers no approve button — a decision is bound to the bytes you were shown, and nothing here shows them. Rejecting is one log event per request and authorizes nothing. To approve one instead, decide it on its own card or run `approval grant <action key>`; the requests stay listed by /queue either way.",
+    ),
+  );
+
+  const rows: InlineButton[][] =
+    open === 0
+      ? []
+      : [
+          [
+            {
+              text: `🛑 Reject all (${open})`,
+              callback_data: digestCallbackData("R", digest.allNonce),
+            },
+          ],
+        ];
+
+  return {
+    text: lines.join("\n"),
+    keyboard: rows.length === 0 ? null : { inline_keyboard: rows },
+  };
 }
 
 /** The digest's headline, given how much of it is still open. */
@@ -1322,6 +1571,9 @@ export function renderDigest(digest: DigestState): {
 } {
   const open = digest.members.filter((member) => member.settled === null);
   const total = digest.members.length;
+  const stale = digest.stale ?? null;
+
+  if (stale !== null) return renderStaleSummary(digest, stale, open.length, total);
 
   const lines: string[] = [
     `<b>${escapeHtml(digestHeadline(open.length, total))}</b>`,
@@ -1517,6 +1769,348 @@ export function parseCallbackData(data: unknown): ParsedCallback | null {
 }
 
 // ---------------------------------------------------------------------------
+// Review cards (APRV-299)
+// ---------------------------------------------------------------------------
+
+/**
+ * The headline of a retrospective review card.
+ *
+ * Deliberately not {@link TELEGRAM_PROMPT_HEADING} and deliberately not a
+ * question. A sample is an action that ALREADY RAN: nothing is pending, no
+ * token is minted by any button on this message, and a card that said
+ * "APPROVAL REQUIRED" would be telling the approver they are holding something
+ * up. The supervised bargain (SPEC.md §5.2) is "execute now, a fraction is
+ * reviewed after", and this is the "after".
+ */
+export const TELEGRAM_REVIEW_HEADING = "REVIEW — THIS ALREADY RAN";
+
+/** The headline a recorded review puts on the card it settles. */
+export const TELEGRAM_REVIEW_RECORDED = "✓ REVIEWED";
+
+/** The headline a recorded DENIAL puts on the card it settles. */
+export const TELEGRAM_REVIEW_DENIED = "✗ REVIEWED — DENIED";
+
+/**
+ * The headline a card wears while a first Deny tap is armed and nothing has
+ * been recorded.
+ */
+export const TELEGRAM_REVIEW_ARMED = "DENY ARMED — nothing is recorded yet";
+
+/**
+ * What a review tap's single answer says (APRV-302).
+ *
+ * {@link TELEGRAM_ACK_HEARD}'s "deciding" is a request card's word: something is
+ * pending, and the tap just settled it. A review decides nothing — the action
+ * ran, and what the tap does is record what a person thought of it — so a
+ * reviewer told they were "deciding" is being told the wrong thing about the
+ * card in front of them. The load-bearing half is carried over unchanged: this
+ * claims only that the tap ARRIVED, never that anything was appended, because at
+ * the moment it is sent nothing has been and `core/audit.ts` may still refuse.
+ * What became of it is on the card edit that follows.
+ */
+export const TELEGRAM_REVIEW_ACK =
+  "Heard — recording your review. The card will say what the log recorded.";
+
+/** The toast a first Deny tap gets: it says plainly that nothing was written. */
+export const TELEGRAM_REVIEW_ARM_TOAST =
+  "Deny armed — nothing recorded. Tap Deny again to record it, or a reaction to record it with a grade.";
+
+/** The toast a reaction that needs the human's own words gets. */
+export const TELEGRAM_REVIEW_NOTE_TOAST =
+  "Heard — reply to the prompt with why. Nothing is recorded until it arrives.";
+
+/**
+ * What the ForceReply prompt asks for.
+ *
+ * A separate message rather than a second keyboard, because Telegram's inline
+ * keyboards have no text input at all — the same limitation the reject path
+ * documents. The prompt is bound to its card by the message id the reply names,
+ * which this process holds and the network does not.
+ */
+export function reviewNotePromptLines(
+  reaction: Reaction,
+  verdict: ReviewVerdict,
+  actionKey: string,
+): string[] {
+  return [
+    `WHY ${reaction.toUpperCase()}?`,
+    `Reply to this message with the reason. It is recorded verbatim beside a ${verdict} review of ${actionKey}.`,
+    "Nothing has been appended yet, and a blank reply appends nothing: the grade an agent is most likely to act on is the one it can least interpret alone.",
+  ];
+}
+
+/**
+ * What a tap on a review card asks the runtime to record (APRV-299).
+ *
+ * The channel decides none of it. It reports which sample the card was drawn
+ * for, which verdict the taps add up to, the grade if one was given, and the
+ * human's words if a note prompt collected any — and the runtime's handler
+ * calls the human-only `reviewSample`, exactly as {@link ChannelDecision} goes
+ * to the human-only `decide()`. The actor is NOT here, for the reason it is not
+ * on a decision either: it is the identity the LISTENER was configured with,
+ * never a field that arrived from the network.
+ */
+export interface ReviewTap {
+  /** `seq` of the `audit.sampled` record this card was drawn for. */
+  sampleSeq: number;
+  verdict: ReviewVerdict;
+  /** The grade, when the human gave one. Absent means absent. */
+  reaction?: Reaction;
+  /** The human's words, when a note prompt collected any. */
+  note?: string;
+}
+
+/** What the runtime did with a review tap, as it reports it back. */
+export interface ReviewTapResponse {
+  /** Whether an `audit.reviewed` landed. */
+  ok: boolean;
+  /** The headline for the edited card. */
+  headline: string;
+  /** The lines under it: the record, or the refusal code and its message. */
+  detail: string[];
+  /** The toast, which Telegram caps at a short sentence. */
+  toast: string;
+}
+
+export type ReviewTapHandler = (tap: ReviewTap) => ReviewTapResponse | Promise<ReviewTapResponse>;
+
+/**
+ * One retrospective review card, as the runtime hands it over (APRV-299).
+ *
+ * Everything here is derived by the runtime from the verified log, the policy
+ * and the payload store; the channel adds the buttons and nothing else. The
+ * computed/claimed split of SPEC.md §9 is carried by the fields themselves, so
+ * a card cannot render a claimed summary with a computed line's authority any
+ * more than a prompt can.
+ */
+export interface ReviewCard {
+  /** `seq` of the `audit.sampled` record. What a review names. */
+  sampleSeq: number;
+  /** The rows a request prompt renders identically. */
+  fields: ReviewCardFields;
+  /** Computed: when the sampled execution started, and which record says so. */
+  ranAt: TaggedField<string>;
+  /**
+   * The same instant, machine-readable.
+   *
+   * Not displayed and not a {@link TaggedField} for that reason: it exists so
+   * that the runtime's "oldest awaiting review" arithmetic reads an instant off
+   * the log rather than parsing the sentence {@link ReviewCard.ranAt} renders.
+   * A display string is written for a person and is free to be reworded; a
+   * number a summary is computed from is not.
+   */
+  ranAtTs: string;
+  /** Computed: what the runtime did at the time, and why this is being reviewed. */
+  verdict: TaggedField<string>;
+}
+
+/** A review card, as the delivering process remembers it. Never a decision. */
+export interface ReviewCardState {
+  deliveryId: DeliveryId;
+  card: ReviewCard;
+  /** The nonce every button on this card was issued under. */
+  nonce: string;
+  /**
+   * Whether a first Deny tap has armed the card. **Process memory**, exactly
+   * like the digest bookkeeping: it appends nothing, it is stated on the card
+   * so the human can see it, and losing it to a restart costs a tap and can
+   * never cost a denial nobody meant. A card whose arming is lost is a card
+   * whose next Deny tap arms again.
+   */
+  denyArmed: boolean;
+  /**
+   * The outcome, once the runtime has recorded one. Written only from the
+   * handler's answer, never inferred here.
+   */
+  settled: { headline: string; detail: string[] } | null;
+  /**
+   * What the last tap produced without settling anything: the arming, or a
+   * refusal the runtime returned. Rendered under the rows so the card keeps
+   * saying what it is about.
+   */
+  notice: { headline: string; lines: string[] } | null;
+  /** The outstanding note prompt, and what its reply will record. */
+  awaitingNote: { promptId: DeliveryId; verdict: ReviewVerdict; reaction: Reaction } | null;
+  /** When this process delivered the card, on {@link TelegramConfig.now}'s clock. */
+  deliveredAtMs: number;
+}
+
+/**
+ * The six things a review card's buttons can say (APRV-299).
+ *
+ * `ok` and `deny` are the verdict, which is enforcement; the four reactions are
+ * the grade, which is not (SPEC.md §11.1 invariant 10). Both travel in the same
+ * closed vocabulary because they arrive through the same six buttons, and a
+ * seventh word would be a button nobody drew.
+ */
+export const REVIEW_CHOICES = ["ok", "deny", ...REACTIONS] as const;
+
+export type ReviewChoice = (typeof REVIEW_CHOICES)[number];
+
+/**
+ * `callback_data` for one review button: `v:<nonce>:<choice>`.
+ *
+ * Its own verb, for exactly the reason the checkpoint prompt's is its own
+ * (APRV-257): {@link CALLBACK_VERBS} maps every DECISION verb onto a grant or a
+ * reject, so a review button spelled `g` would be handed to the decision path,
+ * where an unresolved nonce falls back to an action-reference lookup and a
+ * gesture about something that already happened would start hunting for a
+ * request to approve. Three vocabularies, three parsers, and none can be read
+ * as another.
+ *
+ * No action reference in the bytes, and no sample seq: the card names a
+ * DELIVERY, and which sample that delivery is about is held by the process that
+ * issued the nonce. Nothing that can reach the bot chooses what gets reviewed.
+ * There is also no stale-copy ladder underneath it: a review is never urgent,
+ * a lost card leaves the sample open, and the next cycle offers it again.
+ */
+export function reviewCallbackData(choice: ReviewChoice, nonce: string): string {
+  return `v:${nonce}:${choice}`;
+}
+
+/** `v:<nonce>:<choice>`, or `null` for anything else. Never throws. */
+export function parseReviewCallback(
+  data: unknown,
+): { nonce: string; choice: ReviewChoice } | null {
+  if (typeof data !== "string") return null;
+  if (data.slice(0, 2) !== "v:") return null;
+  const rest = data.slice(2);
+  const split = rest.indexOf(":");
+  if (split <= 0) return null;
+  const nonce = rest.slice(0, split);
+  const choice = rest.slice(split + 1);
+  const found = REVIEW_CHOICES.find((candidate) => candidate === choice);
+  return found === undefined ? null : { nonce, choice: found };
+}
+
+/**
+ * The label each button carries. Emoji live here and never in message text.
+ *
+ * Bare emoji, no words (APRV-302). The first live cards put a word beside every
+ * glyph, which bought nothing: six labelled buttons on a phone wrap, and the
+ * words repeated what the card had already said in full sentences above them.
+ * The layout is what carries the meaning now: row one is the verdict (record it
+ * as fine, or arm the denial), row two is the grade, worst to best, in the same
+ * order `REACTIONS` gives everywhere else.
+ */
+const REVIEW_BUTTON_LABELS: Record<ReviewChoice, string> = {
+  ok: "✅",
+  deny: "🛑",
+  disliked: "👎",
+  indifferent: "😐",
+  liked: "👍",
+  loved: "❤️",
+};
+
+/**
+ * How much of one refusal message a card carries.
+ *
+ * The audit refusals are paragraphs — they explain what the reviewer meant and
+ * how to say it instead — and a card carrying one whole can overrun Telegram's
+ * message limit, at which point the edit fails and the human is told nothing at
+ * all. So the prose is cut and the cut is marked. The CODE is never cut: it is
+ * the machine-readable half, it is short, and it is on its own line above.
+ */
+const REVIEW_NOTICE_MAX = 900;
+
+function trimNotice(text: string): string {
+  return text.length <= REVIEW_NOTICE_MAX
+    ? text
+    : `${text.slice(0, REVIEW_NOTICE_MAX)}… (cut to fit one message; the whole refusal is on the listener's stderr)`;
+}
+
+/**
+ * The card's message: the rows, whatever notice the last tap produced, and the
+ * keyboard.
+ *
+ * No paragraph explaining the buttons (APRV-302). The heading
+ * ({@link TELEGRAM_REVIEW_HEADING}) is what says a review is not a request, and
+ * the deny latch says itself: the first tap is answered by
+ * {@link TELEGRAM_REVIEW_ARM_TOAST} and the card's own heading becomes
+ * {@link TELEGRAM_REVIEW_ARMED} until it is spent. Four sentences of rules under
+ * every card said the same thing to a reader who had already read them once, and
+ * pushed the rows a review is actually about off the first screen.
+ *
+ * Pure. Two things it deliberately does NOT carry, and both are the same rule
+ * read twice: no payload region, and no approve button. SPEC.md §10.3 requires
+ * the canonical rendering in front of an approver before a DECISION is
+ * collected, and this collects none — the action ran, the review says only what
+ * a person thought of it, and a card that offered an approve would be
+ * presenting a settled fact as a live authorization. A sample is never
+ * delivered as an approval request and never accepts a token.
+ */
+export function renderReviewCard(state: ReviewCardState): {
+  text: string;
+  keyboard: { inline_keyboard: InlineButton[][] } | null;
+} {
+  const card = state.card;
+  const key = card.fields.action_key.value;
+
+  if (state.settled !== null) {
+    return {
+      text: [
+        `<b>${escapeHtml(state.settled.headline)}</b>`,
+        `<code>${escapeHtml(key)}</code>`,
+        "",
+        ...state.settled.detail.map((entry) => escapeHtml(trimNotice(entry))),
+      ].join("\n"),
+      keyboard: null,
+    };
+  }
+
+  const computedLines: Line[] = [];
+  const claimedLines: Line[] = [];
+  for (const row of REVIEW_CARD_ROWS) {
+    const candidate = reviewRow(card.fields, row);
+    if (candidate === null) continue;
+    if (candidate.line.kind === "computed") computedLines.push(candidate.line);
+    else claimedLines.push(candidate.line);
+  }
+  computedLines.push(line("ran_at", card.ranAt, "ran at", card.ranAt.value));
+  computedLines.push(line("verdict", card.verdict, "verdict", card.verdict.value));
+
+  const render = (entry: Line): string =>
+    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
+
+  const author = originOf(card.fields.summary);
+  const lines: string[] = [
+    `<b>${escapeHtml(
+      state.denyArmed ? `${TELEGRAM_REVIEW_HEADING} — ${TELEGRAM_REVIEW_ARMED}` : TELEGRAM_REVIEW_HEADING,
+    )}</b>`,
+    `<code>${escapeHtml(key)}</code>`,
+    "",
+    "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
+    ...computedLines.map(render),
+    "",
+    `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
+    ...claimedLines.map(render),
+  ];
+
+  if (state.notice !== null) {
+    lines.push(
+      "",
+      `<b>${escapeHtml(state.notice.headline)}</b>`,
+      ...state.notice.lines.map((entry) => escapeHtml(trimNotice(entry))),
+    );
+  }
+
+  const button = (choice: ReviewChoice): InlineButton => ({
+    text: REVIEW_BUTTON_LABELS[choice],
+    callback_data: reviewCallbackData(choice, state.nonce),
+  });
+
+  return {
+    text: lines.join("\n"),
+    keyboard: {
+      inline_keyboard: [
+        [button("ok"), button("deny")],
+        REACTIONS.map((reaction) => button(reaction)),
+      ],
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Errors and redaction
 // ---------------------------------------------------------------------------
 
@@ -1525,10 +2119,51 @@ export class TelegramApiError extends Error {
   constructor(
     message: string,
     readonly method: string,
+    /**
+     * The HTTP status, when the failure was an HTTP one. `null` for a transport
+     * failure, an unparseable body, or an `ok: false` envelope that arrived
+     * with a 200 (APRV-277).
+     */
+    readonly status: number | null = null,
+    /**
+     * The Bot API's own `description` for this failure, redacted, when the
+     * error body carried one. `null` when the body was absent, unreadable, not
+     * JSON, or carried no description.
+     */
+    readonly description: string | null = null,
   ) {
     super(message);
     this.name = "TelegramApiError";
   }
+}
+
+/**
+ * Telegram's wording for "that edit would have changed nothing" (APRV-277).
+ *
+ * Matched on the description rather than the status alone, because 400 is also
+ * every malformed edit, every wrong chat and every deleted message.
+ */
+const TELEGRAM_NOT_MODIFIED = /message is not modified/iu;
+
+/**
+ * Whether a failed call is the Bot API saying an edit changed nothing
+ * (APRV-277).
+ *
+ * `editMessageText` answers 400 "Bad Request: message is not modified" when the
+ * text and the keyboard it was handed are already what the message holds. Every
+ * caller here re-annotates from the verified log rather than from memory, so a
+ * message annotated once and derived again produces exactly that: the phone
+ * already shows the outcome, and the operator has nothing to be told. It is the
+ * one 400 that means the intended state stands, which is why it is the only one
+ * that goes unreported.
+ */
+export function isMessageNotModified(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.status === 400 &&
+    cause.description !== null &&
+    TELEGRAM_NOT_MODIFIED.test(cause.description)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1545,6 +2180,12 @@ export interface TelegramPollResult {
   ignored: { kind: TelegramAnomalyKind; detail: string }[];
   /** Bot commands handed to the runtime in this batch, in order (APRV-216). */
   commands: TelegramCommand[];
+  /**
+   * Review taps handed to the runtime in this batch, in order (APRV-299), each
+   * with whether an `audit.reviewed` landed. `ok: false` is a refusal the
+   * runtime returned — the card says which code — and nothing was appended.
+   */
+  reviews: { tap: ReviewTap; ok: boolean }[];
 }
 
 export interface TelegramListenOptions {
@@ -1652,6 +2293,24 @@ export class TelegramChannel implements TestableChannel {
     string,
     { deliveryId: DeliveryId; head: { seq: number; hash: string } }
   >();
+  /**
+   * What to do with a review tap (APRV-299). Absent unless the runtime
+   * registered one, and its absence makes {@link offerReview} refuse, for the
+   * reason {@link offerCheckpoint} refuses: a button nobody is listening for is
+   * a button that spins on a phone.
+   */
+  private reviewHandler: ReviewTapHandler | null = null;
+  /**
+   * Review card message id -> what is on it. Delivery bookkeeping, never truth
+   * (SPEC.md §10.3). Losing it to a restart costs the card its buttons; the
+   * sample stays open in the log, `approval audit list` still names it, and the
+   * next cycle offers a fresh card.
+   */
+  private readonly reviewCards = new Map<DeliveryId, ReviewCardState>();
+  /** Review nonce -> the card message it was issued for. */
+  private readonly reviewNonces = new Map<string, DeliveryId>();
+  /** Note-prompt message id -> the card whose reply it is waiting for. */
+  private readonly reviewNotePrompts = new Map<string, DeliveryId>();
   private readonly deliveries = new Map<string, Delivery>();
   /** Digest message id -> what is on it. Delivery bookkeeping, never truth. */
   private readonly digests = new Map<DeliveryId, DigestState>();
@@ -1678,6 +2337,7 @@ export class TelegramChannel implements TestableChannel {
     },
     staleCopyDecisions: 0,
     commands: 0,
+    reviews: 0,
   };
 
   constructor(config: TelegramConfig) {
@@ -1763,6 +2423,69 @@ export class TelegramChannel implements TestableChannel {
     });
     const deliveryId = String(result.message_id);
     this.checkpointNonces.set(nonce, { deliveryId, head: prompt.head });
+    return deliveryId;
+  }
+
+  /**
+   * Register what to do with a review tap (APRV-299).
+   *
+   * The handler is the runtime's, on the runtime's side of the boundary, and it
+   * is where the human-only `reviewSample` lives — same shape as
+   * {@link onDecision} and {@link onCheckpoint}, for the same reason: a channel
+   * that appended an `audit.reviewed` of its own would be a supervision backlog
+   * emptying itself through its own transport.
+   *
+   * Registering it, like registering a command handler, is what makes this
+   * channel read `message` updates at all: the note a `loved` or `disliked`
+   * asks for arrives as a reply, and an inline keyboard has no text input.
+   */
+  onReview(handler: ReviewTapHandler): void {
+    this.reviewHandler = handler;
+  }
+
+  /**
+   * Put one retrospective review card in the chat (APRV-299).
+   *
+   * A unit like a checkpoint prompt: one thing to read, never grouped into a
+   * digest, and never delivered through {@link notify} — a digest is a set of
+   * similar pending REQUESTS decided together, and a sample is neither pending
+   * nor a request. It sends ONE message: no payload region, and a keyboard
+   * whose six buttons collect a verdict and a grade and mint nothing.
+   *
+   * Refuses when no handler is registered, rather than sending a dead button.
+   */
+  async offerReview(card: ReviewCard): Promise<DeliveryId> {
+    if (this.reviewHandler === null) {
+      throw new Error(
+        "no review handler is registered on the telegram channel; the runtime registers one before offerReview(), and a channel that recorded its own audit.reviewed would be the party under oversight closing its own audit item (SPEC.md §5.2, §10.3)",
+      );
+    }
+    const nonce = this.makeNonce();
+    const state: ReviewCardState = {
+      // Assigned once the message exists; nothing consults it before then.
+      deliveryId: "",
+      card,
+      nonce,
+      denyArmed: false,
+      settled: null,
+      notice: null,
+      awaitingNote: null,
+      deliveredAtMs: this.now(),
+    };
+    const drawn = renderReviewCard(state);
+    const result = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: drawn.text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(drawn.keyboard === null ? {} : { reply_markup: drawn.keyboard }),
+    });
+    const deliveryId = String(result.message_id);
+    state.deliveryId = deliveryId;
+    // Armed only now: until the message with the buttons on it exists there is
+    // nothing a callback could legitimately answer.
+    this.reviewCards.set(deliveryId, state);
+    this.reviewNonces.set(nonce, deliveryId);
     return deliveryId;
   }
 
@@ -1871,16 +2594,37 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * Deliver a set of stale pending requests as ONE message with a reject-all
+   * button (APRV-287).
+   *
+   * Returns `null` when the message would not fit, and the caller then leaves
+   * the members undelivered so the next cycle shows them the ordinary way:
+   * SPEC.md §10.3's rule for this bookkeeping is that losing it degrades to
+   * showing a request again, never to a pending request nobody is shown.
+   */
+  async notifyStale(
+    members: ChannelRequest[],
+    stale: StaleSummary,
+  ): Promise<TelegramBatchDelivery | null> {
+    if (members.length === 0) return null;
+    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, stale);
+  }
+
+  /**
    * The digest itself: every member's prompt and payload, then the one message
    * that carries the buttons.
    *
    * Returns `null` when the digest message would not fit, so the caller falls
    * back — and it decides that BEFORE sending anything, because a fallback
    * discovered after four member prompts had gone out would double them.
+   *
+   * `stale` (APRV-287) makes it the collapsed re-delivery instead: no member
+   * prompts, no payload, one reject-all button. See {@link StaleSummary}.
    */
   private async deliverDigest(
     members: ChannelRequest[],
     batchDeliveryId: DeliveryId,
+    stale: StaleSummary | null = null,
   ): Promise<TelegramBatchDelivery | null> {
     const allNonce = this.makeNonce();
     const deliveredAtMs = this.now();
@@ -1890,7 +2634,8 @@ export class TelegramChannel implements TestableChannel {
       deliveryId: "",
       batchDeliveryId,
       allNonce,
-      facts: digestFacts(members),
+      stale,
+      facts: stale === null ? digestFacts(members) : [],
       author: originOf((members[0] as ChannelRequest).summary),
       members: members.map((member) => ({
         actionKey: member.action_key.value,
@@ -1904,14 +2649,41 @@ export class TelegramChannel implements TestableChannel {
     const drawn = renderDigest(state);
     if (drawn.text.length > TELEGRAM_MAX_MESSAGE_CHARS) return null;
 
+    // APRV-287. When every member binds to the SAME payload — the several
+    // classes of one tool call — the payload is sent once instead of once per
+    // member. The approver still reads every byte they are deciding about
+    // before any button appears (SPEC.md §10.3), because there is one set of
+    // bytes and it is above the digest; what goes away is five copies of one
+    // command, which was five messages of the flood this task is about.
+    // A collapsed re-delivery sends no payload at all, which is the whole of
+    // what makes it one message; its own text says so and offers no approve, so
+    // it renders no request and claims none.
+    const shared = sharedPayload(members);
     const rendered: RenderedRequest[] = [];
-    for (const [index, member] of members.entries()) {
+    if (stale !== null) {
+      // Nothing to render: no prompt goes out for a member here.
+    } else if (shared === null) {
+      for (const [index, member] of members.entries()) {
+        const one = await this.sendPrompt(
+          member,
+          `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+          null,
+        );
+        rendered.push({ ...one.rendered, batchDeliveryId });
+      }
+    } else {
       const one = await this.sendPrompt(
-        member,
-        `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+        shared,
+        `THE COMMAND ALL ${members.length} REQUESTS ARE ABOUT — decide it on the digest below`,
         null,
       );
-      rendered.push({ ...one.rendered, batchDeliveryId });
+      for (const member of members) {
+        rendered.push({
+          ...one.rendered,
+          action_key: member.action_key.value,
+          batchDeliveryId,
+        });
+      }
     }
 
     const result = await this.call<{ message_id: number }>("sendMessage", {
@@ -2146,15 +2918,35 @@ export class TelegramChannel implements TestableChannel {
       deliveries += 1;
     }
 
+    // APRV-299. A review card is droppable on the same pair of conditions read
+    // for a thing that has no TTL: the runtime recorded an answer for it (so no
+    // button on it can still be honoured — the nonce is already gone) AND it is
+    // older than the retention window. An UNSETTLED card is never swept, and
+    // that is the safe direction: its sample stays open in the log whatever
+    // this map holds, so keeping the buttons alive costs a map entry and
+    // dropping them early would cost a human their thumb.
+    for (const [deliveryId, card] of this.reviewCards) {
+      if (card.settled === null || !expired(card.deliveredAtMs)) continue;
+      this.reviewCards.delete(deliveryId);
+      this.reviewNonces.delete(card.nonce);
+      if (card.awaitingNote !== null) this.reviewNotePrompts.delete(card.awaitingNote.promptId);
+    }
+
     return { deliveries, digests };
   }
 
   /** How many entries the bookkeeping holds. For tests and for operators. */
-  bookkeepingSize(): { deliveries: number; digests: number; allNonces: number } {
+  bookkeepingSize(): {
+    deliveries: number;
+    digests: number;
+    allNonces: number;
+    reviewCards: number;
+  } {
     return {
       deliveries: this.deliveries.size,
       digests: this.digests.size,
       allNonces: this.allNonces.size,
+      reviewCards: this.reviewCards.size,
     };
   }
 
@@ -2360,13 +3152,24 @@ export class TelegramChannel implements TestableChannel {
         // registered: see {@link onCommand} for why a listener that reads
         // messages nobody asked for would break `approval setup channel
         // telegram`'s chat discovery.
+        // APRV-299 adds the second reason to read messages: a `loved` or
+        // `disliked` on a review card collects the human's words as a REPLY,
+        // because an inline keyboard has no text input.
         allowed_updates:
-          this.commandHandler === null ? ["callback_query"] : ["callback_query", "message"],
+          this.commandHandler === null && this.reviewHandler === null
+            ? ["callback_query"]
+            : ["callback_query", "message"],
       },
       this.requestTimeoutMs ?? (this.pollTimeoutSeconds + 10) * 1000,
     );
 
-    const result: TelegramPollResult = { updates: 0, outcomes: [], ignored: [], commands: [] };
+    const result: TelegramPollResult = {
+      updates: 0,
+      outcomes: [],
+      ignored: [],
+      commands: [],
+      reviews: [],
+    };
     for (const raw of updates) {
       const update = (raw ?? {}) as Record<string, unknown>;
       const id = update["update_id"];
@@ -2469,13 +3272,22 @@ export class TelegramChannel implements TestableChannel {
     result: TelegramPollResult,
   ): Promise<void> {
     const handler = this.commandHandler;
-    if (handler === null) return;
+    if (handler === null && this.reviewHandler === null) return;
 
     const raw = update["message"];
     if (typeof raw !== "object" || raw === null) return;
     const message = raw as Record<string, unknown>;
     const text = message["text"];
-    if (typeof text !== "string" || !text.trim().startsWith("/")) return;
+    if (typeof text !== "string") return;
+
+    // APRV-299, before the command vocabulary: a reply to an outstanding note
+    // prompt is the human's own words, and it is bound to its card by the
+    // message id THIS process issued, never by anything the reply asserts about
+    // itself. A reply naming a prompt this process is not holding falls through
+    // and is ordinary chat.
+    if (await this.handleNoteReply(message, text, result)) return;
+
+    if (handler === null || !text.trim().startsWith("/")) return;
 
     const chat = (message["chat"] ?? {}) as Record<string, unknown>;
     const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
@@ -2534,6 +3346,17 @@ export class TelegramChannel implements TestableChannel {
     const checkpoint = parseCheckpointCallback(query["data"]);
     if (checkpoint !== null) {
       await this.handleCheckpointTap(checkpoint, callbackId, result);
+      return;
+    }
+
+    // APRV-299, before the decision vocabulary and in a parser of its own, for
+    // the same reason the checkpoint one is: a review button decides no request
+    // and must never reach the ladder below, where an unresolved nonce falls
+    // back to an action reference and a gesture about something that already
+    // happened would start looking for something to approve.
+    const review = parseReviewCallback(query["data"]);
+    if (review !== null) {
+      await this.handleReviewTap(review, callbackId, result);
       return;
     }
 
@@ -2701,6 +3524,8 @@ export class TelegramChannel implements TestableChannel {
         delivery.actionKey,
       );
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not annotate the decided ${delivery.actionKey} (message ${delivery.deliveryId}): ${this.describe(cause)} — the decision is recorded; only the message is stale`,
       );
@@ -2813,6 +3638,8 @@ export class TelegramChannel implements TestableChannel {
     try {
       await this.redraw(digest);
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not redraw the digest (message ${digest.deliveryId}): ${this.describe(cause)} — the decisions are recorded; only the message is stale`,
       );
@@ -2826,6 +3653,10 @@ export class TelegramChannel implements TestableChannel {
    * Every caller on the decision path wants the same thing from a failed edit:
    * say so on the operator's terminal and carry on, because whatever the gate
    * did or did not append has already happened and no chat message changes it.
+   *
+   * The exception is {@link isMessageNotModified}, which says the message
+   * already reads the way this call wanted it to read (APRV-277). Nothing is
+   * printed for it: there is no staleness to warn about.
    */
   private async annotateQuietly(
     deliveryId: DeliveryId,
@@ -2836,6 +3667,8 @@ export class TelegramChannel implements TestableChannel {
     try {
       await this.annotate(deliveryId, headline, detail, actionKey);
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not annotate ${actionKey} (message ${deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
       );
@@ -2935,6 +3768,256 @@ export class TelegramChannel implements TestableChannel {
     });
   }
 
+  /**
+   * A tap on one of a review card's six buttons (APRV-299).
+   *
+   * The nonce is authoritative and there is no fallback ladder underneath it,
+   * for the reason {@link reviewCallbackData} gives: a review is never urgent,
+   * a card this process is not holding leaves its sample open, and the next
+   * cycle offers a fresh one. An unresolvable tap is answered
+   * `unknown-callback` rather than guessed at.
+   *
+   * Which combinations are legal is decided by `core/audit.ts` and by nothing
+   * here. A denied review that says the human loved the work is refused by
+   * `reviewSample` before it reads the log, with the code SPEC.md §11.2 names,
+   * and this method's job is to put that pair in front of it rather than to
+   * re-implement the rule. The one thing this method owns is the ARMING, which
+   * is process memory that appends nothing.
+   */
+  private async handleReviewTap(
+    tap: { nonce: string; choice: ReviewChoice },
+    callbackId: string,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const deliveryId = this.reviewNonces.get(tap.nonce);
+    const state = deliveryId === undefined ? undefined : this.reviewCards.get(deliveryId);
+    if (state === undefined || state.settled !== null) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        `no open review card for nonce ${JSON.stringify(tap.nonce)} (a restarted listener forgets its buttons; the sample stays open and is offered again)`,
+        "This review card is no longer live — the sample is still open, and a fresh card is sent on a later cycle. `approval audit review` names it from a terminal.",
+      );
+      return;
+    }
+    if (this.reviewHandler === null) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        "a review tap arrived before the runtime registered a review handler",
+        "The runtime is not ready to record reviews.",
+      );
+      return;
+    }
+
+    // The first Deny tap arms and writes nothing. Stated on the card, so the
+    // approver reads the state rather than inferring it from a toast.
+    if (tap.choice === "deny" && !state.denyArmed) {
+      state.denyArmed = true;
+      state.notice = null;
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ARM_TOAST);
+      await this.redrawReview(state);
+      return;
+    }
+
+    const verdict: ReviewVerdict = state.denyArmed ? "denied" : "ok";
+    if (tap.choice === "ok" || tap.choice === "deny") {
+      // `ok` with deny armed is a correction, and it disarms: a human who
+      // reached for Deny and then chose OK meant OK, and nothing was written in
+      // between for the change of mind to contradict.
+      const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
+      state.denyArmed = chosen === "denied";
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
+      await this.recordReview(state, { sampleSeq: state.card.sampleSeq, verdict: chosen }, result);
+      return;
+    }
+
+    const reaction = tap.choice;
+    // The two grades that require the human's own words ask for them FIRST, and
+    // nothing is appended until the reply arrives. The exception is the pair
+    // `core/audit.ts` refuses outright: a denied review that says liked or
+    // loved is answered with `reaction-conflicts-verdict` before any log is
+    // read, so asking for a note to go with it would collect words for a record
+    // that was never going to exist.
+    const conflicts = verdict === "denied" && (reaction === "liked" || reaction === "loved");
+    if (!conflicts && (reaction === "loved" || reaction === "disliked")) {
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_NOTE_TOAST);
+      await this.askForNote(state, verdict, reaction);
+      return;
+    }
+
+    await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
+    await this.recordReview(
+      state,
+      { sampleSeq: state.card.sampleSeq, verdict, reaction },
+      result,
+    );
+  }
+
+  /**
+   * Send the ForceReply prompt a `loved` or `disliked` needs, and remember what
+   * its reply will record (APRV-299).
+   *
+   * The pending grade lives HERE and not in the reply's own text, exactly as a
+   * checkpoint's head lives in this process rather than in the callback bytes:
+   * what gets recorded is what this process put on the screen. Losing the map
+   * to a restart costs the reply its meaning — nothing is appended, the sample
+   * stays open, and a fresh card is offered — and can never cost a record
+   * nobody asked for.
+   *
+   * A second prompt replaces the first: only one grade can be outstanding on
+   * one card, and the older prompt stops resolving so a late reply to it lands
+   * nowhere rather than recording a grade the human moved on from.
+   */
+  private async askForNote(
+    state: ReviewCardState,
+    verdict: ReviewVerdict,
+    reaction: Reaction,
+  ): Promise<void> {
+    if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
+    const lines = reviewNotePromptLines(reaction, verdict, state.card.fields.action_key.value);
+    const sent = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: lines
+        .map((entry, index) => (index === 0 ? `<b>${escapeHtml(entry)}</b>` : escapeHtml(entry)))
+        .join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: { force_reply: true },
+    });
+    const promptId = String(sent.message_id);
+    state.awaitingNote = { promptId, verdict, reaction };
+    this.reviewNotePrompts.set(promptId, state.deliveryId);
+  }
+
+  /**
+   * A message replying to an outstanding note prompt (APRV-299).
+   *
+   * Returns `true` when this update was a note reply and has been dealt with,
+   * so the command path below never sees it. Three refusals to act on something
+   * the network said, in order: a reply naming no prompt this process issued is
+   * not ours, a reply from another chat is counted `foreign-chat` and answered
+   * with nothing at all, and the words themselves are passed to the runtime
+   * verbatim — a blank one included, because whether blank is a note is
+   * `core/audit.ts`'s rule and not this channel's.
+   */
+  private async handleNoteReply(
+    message: Record<string, unknown>,
+    text: string,
+    result: TelegramPollResult,
+  ): Promise<boolean> {
+    const replyTo = message["reply_to_message"];
+    if (typeof replyTo !== "object" || replyTo === null) return false;
+    const promptId = String((replyTo as Record<string, unknown>)["message_id"] ?? "");
+    const deliveryId = this.reviewNotePrompts.get(promptId);
+    if (deliveryId === undefined) return false;
+
+    const chat = (message["chat"] ?? {}) as Record<string, unknown>;
+    const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
+    if (chatId !== this.chatId) {
+      this.counters.anomalies["foreign-chat"] += 1;
+      result.ignored.push({
+        kind: "foreign-chat",
+        detail: `note reply from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      });
+      this.complain(
+        `approval: telegram ignored a review note (foreign-chat): from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      );
+      return true;
+    }
+
+    const state = this.reviewCards.get(deliveryId);
+    const pending = state?.awaitingNote ?? null;
+    this.reviewNotePrompts.delete(promptId);
+    if (state === undefined || pending === null || pending.promptId !== promptId) return true;
+    state.awaitingNote = null;
+
+    await this.recordReview(
+      state,
+      {
+        sampleSeq: state.card.sampleSeq,
+        verdict: pending.verdict,
+        reaction: pending.reaction,
+        note: text,
+      },
+      result,
+    );
+    return true;
+  }
+
+  /**
+   * Hand one review tap to the runtime and redraw the card from its answer
+   * (APRV-299).
+   *
+   * A recorded review settles the card and forgets its nonce, so a tap on a
+   * button the edit does not manage to remove resolves to nothing rather than
+   * recording a second human observation of one item. A REFUSAL does neither:
+   * nothing was appended, the sample is still open, and the codes that get here
+   * are ones the reviewer can act on — `reaction-conflicts-verdict` asks them
+   * to say which half they meant, and `note-required` asks for words — so the
+   * buttons stay, with the refusal rendered above them and the arming intact.
+   */
+  private async recordReview(
+    state: ReviewCardState,
+    tap: ReviewTap,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const handler = this.reviewHandler;
+    if (handler === null) return;
+
+    let response: ReviewTapResponse;
+    try {
+      response = await handler(tap);
+    } catch (cause) {
+      state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [TELEGRAM_HANDLER_FAILED] };
+      await this.redrawReview(state);
+      throw cause;
+    }
+
+    this.counters.reviews += 1;
+    result.reviews.push({ tap, ok: response.ok });
+
+    if (response.ok) {
+      state.settled = { headline: response.headline, detail: response.detail };
+      state.notice = null;
+      state.denyArmed = false;
+      this.reviewNonces.delete(state.nonce);
+      if (state.awaitingNote !== null) {
+        this.reviewNotePrompts.delete(state.awaitingNote.promptId);
+        state.awaitingNote = null;
+      }
+    } else {
+      state.notice = { headline: response.headline, lines: response.detail };
+    }
+    await this.redrawReview(state);
+  }
+
+  /** One `editMessageText` that replaces a review card's text and its keyboard. */
+  private async redrawReview(state: ReviewCardState): Promise<void> {
+    const drawn = renderReviewCard(state);
+    try {
+      await this.call("editMessageText", {
+        chat_id: this.chatId,
+        message_id: Number(state.deliveryId),
+        text: drawn.text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        ...(drawn.keyboard === null ? {} : { reply_markup: drawn.keyboard }),
+      });
+    } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
+      // Cosmetic in the same sense every other failed edit here is: whatever
+      // the runtime appended has already happened, and no chat message changes
+      // it. The sample's state is the log's answer, never this card's text.
+      this.complain(
+        `approval: telegram could not redraw the review card for sample seq ${String(state.card.sampleSeq)} (message ${state.deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
+      );
+    }
+  }
+
   private async ignore(
     result: TelegramPollResult,
     callbackId: string,
@@ -3027,6 +4110,34 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * The Bot API's own `description` for a failed response, redacted (APRV-277).
+   *
+   * `null` whenever there is nothing trustworthy to quote: the body could not
+   * be read, it was not JSON, or it carried no description. Every failure mode
+   * here is silent by design, because this runs on a path that is already
+   * reporting a failure and a second one thrown from the diagnostic would
+   * replace the real reason with a worse one.
+   */
+  private async describeFailure(response: { text(): Promise<string> }): Promise<string | null> {
+    let body: string;
+    try {
+      body = await response.text();
+    } catch {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== "object") return null;
+    const description = (parsed as Record<string, unknown>)["description"];
+    if (typeof description !== "string" || description.length === 0) return null;
+    return this.redact(description);
+  }
+
+  /**
    * One Bot API call.
    *
    * The token is in the URL, which is how the Bot API works — there is no
@@ -3052,7 +4163,21 @@ export class TelegramChannel implements TestableChannel {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new TelegramApiError(`${method}: HTTP ${response.status}`, method);
+        // APRV-277. The Bot API puts its reason in the error body's
+        // `description`, and dropping it made every failure read as a bare
+        // status: an edit that changed nothing and an edit into a chat the bot
+        // was thrown out of were the same "HTTP 400" on the operator's
+        // terminal. Read best effort — a status is still worth reporting when
+        // the body is missing, truncated, or not JSON at all.
+        const description = await this.describeFailure(response);
+        throw new TelegramApiError(
+          description === null
+            ? `${method}: HTTP ${response.status}`
+            : `${method}: HTTP ${response.status} (${description})`,
+          method,
+          response.status,
+          description,
+        );
       }
       raw = await response.text();
     } catch (cause) {
@@ -3071,9 +4196,22 @@ export class TelegramChannel implements TestableChannel {
     }
     const envelope = (parsed ?? {}) as Record<string, unknown>;
     if (envelope["ok"] !== true) {
+      const said = envelope["description"];
+      const description = typeof said === "string" && said.length > 0 ? this.redact(said) : null;
+      // Unchanged wording: anything the Bot API put here is still shown, and an
+      // absent one is still "no description". `description` is the narrower
+      // field — a non-empty string only — because that is what a caller is
+      // entitled to match on (APRV-277).
+      const shown =
+        said === undefined || said === null ? "no description" : this.redact(String(said));
       throw new TelegramApiError(
-        `${method}: the Bot API refused (${this.redact(String(envelope["description"] ?? "no description"))})`,
+        `${method}: the Bot API refused (${shown})`,
         method,
+        // No HTTP status: this envelope arrived on a 2xx. The description is
+        // carried anyway so a caller reads the same field whichever shape the
+        // failure took (APRV-277).
+        null,
+        description,
       );
     }
     return envelope["result"] as T;

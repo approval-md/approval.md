@@ -1,0 +1,1 @@
+{"command":"grep -n \"payload re-hashed\\|token verified and consumed\\|vault opened\\|re-fetched and compared\\|adapter agentmail\" docs/*.md examples/*.md README.md | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

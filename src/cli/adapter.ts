@@ -41,7 +41,7 @@
  * | I/O: the payload file or the log could not be read | 4 |
  * | `token-required` — no token was presented | 5 |
  * | `log-torn-tail`, or an append that hit a torn tail | 3 |
- * | anything else the runtime decided: `token-mismatch`, `token-consumed`, `payload-mismatch`, `adapter-class-mismatch`, `adapter-failed` (an SMTP refusal), `adapter-act-threw` | 1 |
+ * | anything else the runtime decided: `token-mismatch`, `token-consumed`, `payload-mismatch`, `adapter-class-mismatch`, `adapter-precheck-refused` (a drifted draft), `adapter-failed` (an SMTP refusal), `adapter-act-threw` | 1 |
  *
  * A refused SEND is exit 1 and not 5: the command was well-formed, the token was
  * good, and the answer from the world was no. Only the absence of a valid token

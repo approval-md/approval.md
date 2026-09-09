@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin && git checkout -q -b finalize-2026-09-07 origin/main && git status --short","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

@@ -24,6 +24,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -33,7 +34,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -51,6 +52,14 @@ after(() => {
 
 const LOG_RELATIVE = ".approval/log/events.jsonl";
 const QUEUE_RELATIVE = ".approval/QUEUE.md";
+
+/** Written by the fixture package's build script, and by nothing else. */
+const BUILT_SENTINEL = "built.sentinel";
+
+/** Did `npm run build` actually run in this fixture root? */
+function didBuild(root: string): boolean {
+  return existsSync(join(root, BUILT_SENTINEL));
+}
 
 const POLICY = [
   "# Policy",
@@ -148,11 +157,19 @@ function head(dir: string): string {
 /**
  * An installation root whose `dist/` is or is not older than its `src/`.
  *
- * `npm run build` here touches the marker rather than compiling anything: the
- * question this suite asks is whether the preflight RUNS the build and reports
- * it, and a real `tsc` would be testing the compiler.
+ * `npm run build` here touches the marker and writes a sentinel rather than
+ * compiling anything: the question this suite asks is whether the preflight
+ * RUNS the build and reports it, and a real `tsc` would be testing the
+ * compiler. The sentinel is what lets a case assert the build did NOT run —
+ * a marker whose mtime moved forward is indistinguishable from one that was
+ * already fresh, and a file that is not there is not ambiguous at all.
+ *
+ * `fails` builds the fourth shape: a build script that exits non-zero, which is
+ * the case where the runtime must refuse rather than start on the stale build
+ * (APRV-301). Exit 7 rather than 1 so the assertion is about THIS script's
+ * status rather than about any failure at all.
  */
-function fixtureRoot(stale: boolean): string {
+function fixtureRoot(stale: boolean, fails = false): string {
   counter += 1;
   const root = join(scratch, `root-${String(counter)}`);
   mkdirSync(join(root, "dist", "src", "cli"), { recursive: true });
@@ -161,13 +178,12 @@ function fixtureRoot(stale: boolean): string {
   writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
   const marker = join(root, "dist", "src", "cli", "main.js");
   writeFileSync(marker, "// build\n", "utf8");
+  const build = fails
+    ? "exit 7"
+    : `touch ${JSON.stringify(marker)} && touch ${JSON.stringify(join(root, BUILT_SENTINEL))}`;
   writeFileSync(
     join(root, "package.json"),
-    `${JSON.stringify(
-      { name: "fixture", private: true, scripts: { build: `touch ${JSON.stringify(marker)}` } },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify({ name: "fixture", private: true, scripts: { build } }, null, 2)}\n`,
     "utf8",
   );
   // Explicit times rather than write order: two writes a millisecond apart can
@@ -297,8 +313,10 @@ test("preflight: fast-forwards a behind checkout, rebuilds a stale dist, and nam
   const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
   assert.notEqual(head(repo.dir), target);
 
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(true)]);
+  const root = fixtureRoot(true);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(didBuild(root), true, "the fixture's build script ran");
 
   const line = preflightLineOf(run);
   assert.equal(line.behind_by, 1);
@@ -417,7 +435,8 @@ test("preflight: a clean working copy plus an upstream change to a protected pat
 test("preflight: an up-to-date checkout with a fresh build does nothing at all", () => {
   const repo = newRepo();
   const before = head(repo.dir);
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  const root = fixtureRoot(false);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
   const line = preflightLineOf(run);
   assert.deepEqual(
@@ -425,6 +444,119 @@ test("preflight: an up-to-date checkout with a fresh build does nothing at all",
     { behind: 0, ahead: 0, stale: false, action: "none" },
   );
   assert.equal(head(repo.dir), before);
+  // Nothing means nothing: a fresh build is not rebuilt "just to be sure",
+  // which on the real package is a `tsc` run at every start.
+  assert.equal(didBuild(root), false);
+});
+
+// ---------------------------------------------------------------------------
+// The build (APRV-301)
+// ---------------------------------------------------------------------------
+
+/**
+ * The case the task is named for, minus the fast-forward.
+ *
+ * A merge is not the only way `dist/` falls behind `src/` — an editor, a
+ * `git checkout` of a branch, a half-finished build — and the primary's daemon
+ * and hook run the compiled code either way. So staleness alone is enough: the
+ * checkout is already at the remote tip here, and the build still runs.
+ */
+test("preflight: at the tip with a stale dist, the build runs and the line says so", () => {
+  const repo = newRepo();
+  const before = head(repo.dir);
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--json", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.deepEqual(
+    { behind: line.behind_by, stale: line.dist_stale, action: line.action },
+    { behind: 0, stale: true, action: "rebuild" },
+  );
+  assert.equal(didBuild(root), true, "the fixture's build script ran");
+  assert.equal(head(repo.dir), before, "no fast-forward was needed or made");
+});
+
+test("preflight: the human line for a rebuild alone names the reason", () => {
+  const repo = newRepo();
+  const run = upOnce(repo, ["--root", fixtureRoot(true)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /up: preflight — rebuilt a stale build/u);
+});
+
+/**
+ * `--no-build` is the opt-out, and it opts out of the BUILD, not of the truth:
+ * the fast-forward still lands, `dist_stale` still says `true`, the action says
+ * the build was skipped rather than that nothing was wrong, and the warning
+ * names the stale build in words. An operator who asked for this gets it; an
+ * operator reading the output afterwards cannot mistake it for a clean start.
+ */
+test("preflight: --no-build fast-forwards, keeps the stale build, and says so", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--json", "--no-build", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.deepEqual(
+    { stale: line.dist_stale, action: line.action, reexec: line.reexec },
+    { stale: true, action: "fast-forward+build-skipped", reexec: false },
+  );
+  assert.equal(didBuild(root), false, "the build must not have run");
+  assert.equal(head(repo.dir), target, "the fast-forward is not what was opted out of");
+  assert.match(run.stderr, /"preflight_warning"/u);
+  assert.match(run.stderr, /STALE BUILD/u);
+});
+
+test("preflight: --no-build at the tip is build-skipped, and the human line admits it", () => {
+  const repo = newRepo();
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--no-build", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /left a stale build alone \(--no-build\)/u);
+  assert.match(run.stderr, /--no-build was given: starting on a STALE BUILD/u);
+  assert.equal(didBuild(root), false);
+});
+
+/**
+ * A build that fails is a refusal, not a warning.
+ *
+ * Starting here would put the daemon and the hook on exactly the code the
+ * rebuild existed to replace, which is the defect (APRV-301). So: exit 1, the
+ * machine-readable `up-preflight-failed`, the script's own exit status in the
+ * message, and no `up_started` line anywhere.
+ */
+test("preflight: a failing build refuses with its exit code, and nothing starts", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
+  const root = fixtureRoot(true, true);
+
+  const run = upOnce(repo, ["--json", "--root", root]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+
+  const refused = refusalOf(run);
+  assert.equal(refused.error.code, "up-preflight-failed");
+  assert.match(refused.error.message, /npm run build/u);
+  assert.match(refused.error.message, /exited 7/u);
+  assert.equal(refused.preflight.action, "refused");
+  assert.equal(refused.preflight.dist_stale, true);
+  // The fast-forward stands — it succeeded — and the runtime still did not start.
+  assert.equal(head(repo.dir), target);
+  assert.doesNotMatch(run.stdout, /up_started/u);
+});
+
+test("preflight: the failing build's runbook names the build, not git status", () => {
+  const repo = newRepo();
+  const run = upOnce(repo, ["--root", fixtureRoot(true, true)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /up-preflight-failed/u);
+  assert.match(run.stderr, /1\. npm run build/u);
+  assert.match(run.stderr, /approval up --no-build/u);
+  assert.doesNotMatch(run.stderr, /reset --hard/u);
 });
 
 // ---------------------------------------------------------------------------
@@ -438,7 +570,8 @@ test("preflight: a checkout ahead of the remote is refused, and nothing moves", 
   git(["commit", "-qm", "local work"], repo.dir);
   const before = head(repo.dir);
 
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(true)]);
+  const root = fixtureRoot(true);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
   const refused = refusalOf(run);
   assert.equal(refused.error.code, "up-preflight-behind-ahead");
@@ -448,6 +581,7 @@ test("preflight: a checkout ahead of the remote is refused, and nothing moves", 
   // Refused BEFORE the build: a preflight that compiled the tree it was
   // declining to reason about would have acted on a state it did not accept.
   assert.equal(run.stdout, "");
+  assert.equal(didBuild(root), false);
 });
 
 test("preflight: an upstream log change over a dirty working log names approval log sync", () => {
@@ -508,6 +642,189 @@ test("preflight: no refusal on any path prints reset --hard", () => {
   assert.match(run.stderr, /up-preflight-behind-ahead/u);
   assert.match(run.stderr, /git reset --keep origin\/main/u);
   assert.doesNotMatch(run.stderr, /reset --hard/u);
+});
+
+// ---------------------------------------------------------------------------
+// Untracked task files in the fast-forward's way (APRV-300)
+// ---------------------------------------------------------------------------
+
+/**
+ * The 2026-09-07 shape, built with plain git: a lane files a Backlog.md task on
+ * its branch and the pull request merges, while the primary checkout holds the
+ * same path untracked from its own `backlog task create`. `git merge --ff-only`
+ * will not write over an untracked file, so the preflight refused and pointed at
+ * `git status`, which cannot say whether the local copy holds anything the
+ * incoming one does not.
+ *
+ * The file name carries a space, as every Backlog.md task file does. That is not
+ * decoration: the collision paths are parsed out of git's own English sentence,
+ * and a parser that split on whitespace would lose exactly these files.
+ */
+const TASK_RELATIVE = "backlog/tasks/aprv-900 - probe.md";
+
+const INCOMING_TASK = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by the lane.",
+  "",
+  "## Implementation Plan",
+  "",
+  "1. Read the code first",
+  "",
+].join("\n");
+
+/** The stub a hand filing produces: every line of it is in {@link INCOMING_TASK}. */
+const LOCAL_STUB = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by the lane.",
+  "",
+].join("\n");
+
+/** Two lines the incoming copy has never carried. Nobody but a human may choose. */
+const LOCAL_DIVERGED = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by hand in the primary, and worded differently.",
+  "",
+  "## Notes only this copy has",
+  "",
+].join("\n");
+
+/** Where a moved-aside file goes: a sibling of the checkout, dated. */
+function asideDir(repo: Repo): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return join(scratch, `${basename(repo.dir)}-preflight-aside-${day}`);
+}
+
+/** The preflight's warning line, which is where what-was-cleared is printed. */
+function warningOf(run: Run): string {
+  const line = run.stderr
+    .split("\n")
+    .filter((candidate) => candidate.trim().startsWith("{"))
+    .map((candidate) => JSON.parse(candidate) as { event?: string; message?: string })
+    .find((entry) => entry.event === "preflight_warning");
+  assert.ok(line !== undefined, `no preflight_warning in:\n${run.stderr}`);
+  return line.message ?? "";
+}
+
+test("preflight: an untracked task file identical to the incoming copy is removed, and the merge runs", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), INCOMING_TASK, "utf8");
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(preflightLineOf(run).action, "fast-forward");
+  assert.equal(head(repo.dir), target);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+  assert.match(warningOf(run), /byte-identical to the incoming copy/u);
+  // Nothing is carried out of the checkout for a file that said nothing new.
+  assert.equal(existsSync(asideDir(repo)), false);
+});
+
+test("preflight: a task file whose every line the incoming copy carries is moved aside, and the path is printed", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), LOCAL_STUB, "utf8");
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(head(repo.dir), target);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+
+  const printed = /moved to (.+), and the fast-forward was retried/u.exec(warningOf(run));
+  assert.ok(printed !== null, `no destination printed in: ${warningOf(run)}`);
+  const kept = printed[1] as string;
+  // Outside the repository, so the next fast-forward cannot collide with it
+  // again, and named in the output rather than left to be found.
+  assert.equal(kept.startsWith(`${repo.dir}/`), false);
+  assert.equal(kept, join(asideDir(repo), TASK_RELATIVE));
+  assert.equal(readFileSync(kept, "utf8"), LOCAL_STUB);
+});
+
+test("preflight: a task file with lines the incoming copy lacks refuses, naming both paths and the count", () => {
+  const repo = newRepo();
+  upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), LOCAL_DIVERGED, "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const refused = refusalOf(run);
+  assert.equal(refused.error.code, "up-preflight-task-file-conflict");
+  assert.match(refused.error.message, /2 lines the incoming copy does not/u);
+  assert.equal(refused.preflight.action, "refused");
+
+  // Refused means refused: HEAD stands, the bytes stand, and nothing was moved.
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), LOCAL_DIVERGED);
+  assert.equal(existsSync(asideDir(repo)), false);
+
+  const human = upOnce(repo, ["--root", fixtureRoot(false)]);
+  assert.equal(human.code, 1, `${human.stdout}${human.stderr}`);
+  assert.match(human.stderr, /up-preflight-task-file-conflict/u);
+  assert.match(human.stderr, /YOUR STATE/u);
+  assert.ok(human.stderr.includes(join(repo.dir, TASK_RELATIVE)), human.stderr);
+  assert.ok(human.stderr.includes(`:${TASK_RELATIVE}`), human.stderr);
+  assert.match(human.stderr, /2 lines only yours has/u);
+  assert.doesNotMatch(human.stderr, /reset --hard/u);
+});
+
+test("preflight: an untracked collision outside backlog/tasks/ keeps the old refusal", () => {
+  const repo = newRepo();
+  upstreamCommit(repo, "docs/note.md", "# upstream\n", "upstream adds a doc");
+  mkdirSync(join(repo.dir, "docs"), { recursive: true });
+  writeFileSync(join(repo.dir, "docs", "note.md"), "# mine\n", "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(refusalOf(run).error.code, "up-preflight-failed");
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, "docs", "note.md"), "utf8"), "# mine\n");
+});
+
+/**
+ * One path outside the prefix and the whole set is declined, including the task
+ * file that would have been cleared on its own. A reconciliation that cleared
+ * what it understood and then refused anyway would have moved an operator's
+ * files for a merge that was never going to run.
+ */
+test("preflight: a mixed collision clears nothing at all", () => {
+  const repo = newRepo();
+  const path = join(repo.peer, TASK_RELATIVE);
+  writeFileSync(path, INCOMING_TASK, "utf8");
+  upstreamCommit(repo, "docs/note.md", "# upstream\n", "a doc and a task in one commit");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), INCOMING_TASK, "utf8");
+  mkdirSync(join(repo.dir, "docs"), { recursive: true });
+  writeFileSync(join(repo.dir, "docs", "note.md"), "# mine\n", "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(refusalOf(run).error.code, "up-preflight-failed");
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+  assert.equal(existsSync(asideDir(repo)), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -610,14 +927,19 @@ test("preflight: approval daemon run shares it, and --no-preflight opts out ther
 
 /**
  * SPEC.md §11.1 invariant 6 in its own small way: the union is frozen public
- * API and is pinned by a test, so a fourth code cannot appear without a line
+ * API and is pinned by a test, so a fifth code cannot appear without a line
  * changing here. These are not gate refusals and do not join one of §11.2's six
  * unions; they are this verb's, and they are distinct by repair.
  */
 test("preflight: the refusal-code union is frozen", () => {
   assert.deepEqual(
     [...PREFLIGHT_REFUSAL_CODES],
-    ["up-preflight-behind-ahead", "up-preflight-log-diverged", "up-preflight-dirty-protected"],
+    [
+      "up-preflight-behind-ahead",
+      "up-preflight-log-diverged",
+      "up-preflight-dirty-protected",
+      "up-preflight-task-file-conflict",
+    ],
   );
 });
 

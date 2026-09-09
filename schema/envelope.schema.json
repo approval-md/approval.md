@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://approval.md/schema/envelope.schema.json",
+  "$comment": "CC0 1.0. See schema/LICENSE.",
   "title": "Task envelope",
   "description": "SPEC.md §6: the value of the `approval:` frontmatter key on a Backlog.md-style task file. This schema governs that value only — sibling board keys (id, title, status) belong to Backlog.md and are out of scope. A task with no envelope is valid markdown; it simply cannot request side-effecting execution (§6).",
   "type": "object",

@@ -48,6 +48,22 @@ configures the gate is part of the gate, and an agent that could write its own
 hook entry could write itself out of it. The hook classifies edits to it as
 `policy.core` for the same reason.
 
+**After editing it, attest it (APRV-272).** Because the class is human-only the
+gate mints nothing for the change (no request, no grant), so the CI-side guard
+below has only one kind of evidence it can accept for this file, and it is this:
+
+```
+approval policy attest --organ .claude/settings.json --as human:<id>
+```
+
+That appends one `gate.organ.attested` record carrying the path and the SHA-256
+of the bytes you just committed, and the guard passes the file when the blob at
+head hashes to a digest attested for that same path. The record is invisible to
+the gate itself: it makes no policy operative and changes no verdict. Skip it
+and the pull request carrying your edit fails `no-evidence`, with the command
+above in the failure text. `approval doctor`'s `gate-organs` row says, before
+you open the pull request, which harness files are in that state.
+
 ```json
 {
   "hooks": {
@@ -103,20 +119,55 @@ and `approval doctor`'s `harness-hook-outcomes` check fails to say so:
 
 One binary, two events, dispatched on `hook_event_name`. The post-execution run
 answers no permission question — it cannot, the tool has already run — so it
-prints an empty stdout, one machine-readable JSON line on stderr, and exits 0.
+prints an empty stdout and one machine-readable JSON line on stderr.
 `--timeout` and `--interval` are meaningless on it; it never waits for anybody.
+
+**Its exit code says whether anybody should read that line (APRV-303).** Claude
+Code discards a hook's stderr when the hook exits 0, and shows a post-execution
+hook's stderr when it exits 2. So the counterpart exits 0 for `post-tool-reported`,
+the one code that means the counterpart landed, and exits 2 for every other code,
+every one of which means a tool call's outcome went unrecorded. Neither exit is a
+verdict and neither blocks anything; 2 here is the harness protocol's "show this",
+not the CLI's usage error.
 
 What it carries, and what it does with it. The event names `session_id` and
 `tool_use_id`, which are the two segments the pre-execution run put in the task
 id, so the task and the action keys are read back out of the VERIFIED log rather
-than out of the report. `tool_response` is an object whose `type` is `text`,
-`base64` or `error`, and the tool's exit code is not exposed to a hook at all: a
-failing Bash call arrives as `PostToolUseFailure` instead. So the reading is
-closed at three cases — `text`/`base64` is a completion, `error` is a failure,
-`PostToolUseFailure` is a failure — and ANYTHING ELSE APPENDS NOTHING. A failure
-nobody observed would trip an escalation on noise; a completion nobody observed
-would clear one on nothing. None of the text inside `tool_response` reaches the
-log, ever (SPEC.md §11.1 invariant 3 has no exception for diagnostics).
+than out of the report.
+
+**THE EVENT NAME IS THE OUTCOME.** `PostToolUse` runs immediately after a tool
+completes successfully; `PostToolUseFailure` runs when a tool that started
+executing fails, and carries `error` plus an optional `is_interrupt` with no
+`tool_response` at all. Claude Code fires exactly one of the two, and neither
+when a permission decision stopped the call before it ran (that is
+`PermissionDenied`). So `PostToolUse` is a completion and `PostToolUseFailure` is
+a failure, read off the harness's own choice of code path.
+
+`tool_response` is the TOOL'S OWN structured output object, verbatim, and it is
+read only to move an answer AWAY from "completed" (SPEC.md §11.1 invariant 4):
+
+| what is read | reading |
+|---|---|
+| `interrupted: true`, or `is_interrupt: true` | UNREADABLE, append nothing. A call somebody stopped neither completed nor failed on its own terms. |
+| `type: "error"`, or a non-empty `error` string | a failure, whatever the event name said. |
+| anything else, on `PostToolUse` | a completion. |
+
+APRV-303 replaced an earlier reading that asked `tool_response.type` to be
+`text`, `base64` or `error`. That is the shape of an API content block and no
+gated tool sends it: `BashOutput` carries `stdout`/`stderr`/`interrupted` and no
+`type`, `FileEditOutput` carries `filePath`/`oldString`/`newString` and no
+`type`, and `FileWriteOutput`'s `type` is `create` or `update`. Every successful
+tool call was therefore reported unreadable and appended nothing, while every
+failure landed, so the §10.2 streak only ever counted up. On this project's own
+log that came to 22062 starts, 10 reports, and not one completion from the
+Claude Code adapter.
+
+An unreadable outcome APPENDS NOTHING and says why on stderr at exit 2. A
+failure nobody observed would trip an escalation on noise; a completion nobody
+observed would clear one on nothing. None of the text inside `tool_response`
+reaches the log, ever (SPEC.md §11.1 invariant 3 has no exception for
+diagnostics): the fields above are inspected for shape and for kind, never
+carried.
 
 A few things about those numbers and paths:
 
@@ -208,11 +259,12 @@ an addition).
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
+| `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir`, which run a command this classifier does not read (APRV-283) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
 | `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
-| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
+| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
@@ -328,7 +380,12 @@ Five overrides sit on top of the table:
   protected again, and a copy FROM credential material INTO the journal is
   still `account.credential`, because that rule reads every argument.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
-  `>>` writes a file, and the class says so.
+  `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
+  DISCARD device is exempt, because it creates nothing: `/dev/null`,
+  `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/<n>`, exactly those.
+  `grep -r TODO src 2>/dev/null` is the read it looks like; `grep -r TODO src
+  2> errors.log` still writes. The set is closed, so any other device node is
+  read as a write.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.
@@ -343,6 +400,30 @@ Five overrides sit on top of the table:
 Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
 remote-branch deletion takes the trunk class rather than the branch one.
+
+### Sandbox wrappers (APRV-193)
+
+A wrapper is a room, not a command, so the class belongs to what runs inside it.
+`approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id
+(`npm-install-package`) the bare command has, and `sandbox-exec -f p.sb npm test`
+is `files.write.workspace` by the `npm-script` row.
+
+Both directions matter. If the wrapper kept a class of its own,
+`approval sandbox -- <anything>` would be `gate.self` — the pass-through
+pseudo-class — and wrapping would BE a laundering device. And before this rule
+existed, every `sandbox-exec` spelling was `hook-unclassified` and denied, so the
+hook penalised the safe form of a command it allowed unwrapped.
+
+What the rule will not do is guess. `sandbox-exec` is read only in the
+`-f <profile>` form: `-p`, `-n` and `-D` change what the profile allows, so a
+command carrying one is `hook-unclassified` rather than read past the part that
+matters. `approval sandbox` with no `--` runs nothing (it prints help) and stays
+`gate.self`.
+
+The wrapper is also recorded per segment as `runtime` (a profile this runtime
+wrote) or `external` (a profile the caller wrote), which is what
+`APPROVAL_HOOK_REQUIRE_SANDBOX=1` reads: only `runtime` satisfies it, because a
+profile a caller wrote can allow everything. See `docs/sandboxed-exec.md`.
 
 ### GET-shaped fetches
 
@@ -620,6 +701,19 @@ early with `approval gate close`; nothing bypassed under it was charged to a
 budget or entered in the retrospective sample, because none of it was
 authorized, only recorded.
 
+**The window a call was decided under is the window it records (APRV-294).** The
+hook derives the window once, near the top of the invocation, and hands that
+verified read to the append, so the same records answer "is a window open" and
+"which head does this record chain onto". A window that ends in between (a human
+closes it, it lapses, a later `gate.opened` supersedes it) is refused
+`hook-gate-refused:gate-window-closed`, naming the `gate.closed` seq or the
+expiry that ended it. That is a different fact from
+`hook-gate-refused:gate-not-open`, which says there was no window to begin with,
+and on 2026-09-07 the second was printed for the first: a call decided under an
+open window was told that no window is open. Nothing is appended on either, the
+command did not run, and neither refusal is an execution, so no loop-safety
+streak accrues (SPEC §10.2); the retry goes down the ordinary gated path.
+
 ## Deny reasons
 
 The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in
@@ -638,6 +732,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
+| `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. The one deny that names a spelling that works: re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -649,9 +744,11 @@ command out, or to run the effect through `approval run` with a granted token.
 
 ### When the wait runs out (APRV-106, revised by APRV-117)
 
-A `hook-timeout` leaves the request **open**. The tool call is denied, nothing is
-withdrawn, and a decision that lands inside the policy's approval TTL authorizes
-a retry of the same command in the same directory, once.
+A `hook-timeout` leaves the request **open** for the retry grace below. The tool
+call is denied, nothing is withdrawn yet, and a decision that lands inside the
+policy's approval TTL authorizes a retry of the same command in the same
+directory, once. Past the grace the hook takes the question back: see [How long
+the question outlives the wait](#how-long-the-question-outlives-the-wait-aprv-287).
 
 This is a change on a change, and both halves are worth saying.
 
@@ -707,6 +804,186 @@ deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
 
+### How long the question outlives the wait (APRV-287)
+
+The open request above is open for a **retry grace**, not forever. `--retry-grace`
+sets it and the default is **5 minutes**, measured from the `approval.requested`
+record's own timestamp; `core/harness-wait.ts` holds the number and the reasoning.
+
+- **Inside the grace** nothing changes: the request stays pending, the prompt
+  keeps its buttons, and a retry of the identical command in the identical
+  directory adopts it or carries its grant exactly as APRV-117 describes.
+- **Past the grace** the hook takes it back. The invocation that runs out of both
+  its wait and the grace appends `approval.withdrawn` with reason `timeout` for
+  the requests it opened, and any later invocation of the same actor sweeps the
+  ones earlier tool calls left behind — the requests it is not itself asking
+  about, whose grace has run out, and which the verified log still shows as
+  pending. Withdrawal stays requester-only, so a hook only ever withdraws
+  questions this actor asked.
+
+The reason is what a stale request costs. On 2026-09-06 three waits expired
+behind a dead daemon, nothing retried them, and a dozen requests sat live until
+the TTL — so the daemon's restart re-delivered every one of them to a phone, one
+message each, and each tap answered a question no tool call was holding. A tap on
+a withdrawn request is refused `request-withdrawn`, authorizes nothing, appends
+nothing, and the channel says so in the approver's own terms: *Withdrawn — the
+requester took this back and is no longer waiting; nothing was recorded.*
+
+The deny text says which of the two happened, in as many words: either
+`NOTHING WAS WITHDRAWN … the request(s) stay open for the 5m retry grace`, or
+`the 5m retry grace has run out: <key> WAS WITHDRAWN (reason timeout)`.
+
+### When the verified view lags its own requests (APRV-294)
+
+Every enforcement read this hook makes is a verified read: the chain is walked
+(or a proved prefix is resumed behind, see [Where the hook's reads come
+from](#where-the-hooks-reads-come-from-aprv-188)) and the records it hands back
+are the records that chain carries. Right after `approval log sync` replaces the
+committed baseline, or right after the daemon restarts, that view can be
+**behind the log this hook just wrote to**.
+
+Seen on 2026-09-07 at 02:00Z, minutes after both. The hook appended its
+requests, re-read, found every one of its own keys in state `none`, and denied
+at once:
+
+```text
+hook-io: the verified log does not show every request for hook:… as granted
+         (states: none, none, none)
+```
+
+The requests were real. They reached the approver's phone a minute later, and
+the tap authorized nothing, because the asker had already been told no.
+
+A log is append-only, so a request that exists does not stop existing. `none` for
+a key **this hook appended** is therefore a fact about the view rather than about
+the request, and the hook treats it as one: it keeps waiting, bounded by the same
+`--timeout` as any other wait, and says so once on stderr:
+
+```text
+approval: the verified log does not yet carry hook:sess-1:tu-9:deps.add
+          (verified head: seq 26931). The request(s) were appended by this hook,
+          so this is a view that lags rather than a decision; the hook keeps
+          waiting for the verification to catch up …
+```
+
+Nothing reads unverified bytes as verified to get there. Waiting is the whole
+remedy, and it is the only one SPEC §11.1 invariant 1 leaves open: the hook
+declines to treat an absence as an answer, and it still allows only on records
+the verified chain carries. If the view is still short when the wait runs out,
+the deny is the ordinary `hook-timeout` and it names the repair (`approval log
+verify`, `approval status`, in the checkout that owns the log) rather than
+reading as a question nobody answered. The APRV-287 retry grace and withdrawal
+are unchanged, and apply to the requests the view does carry.
+
+The same fault has a second face on the bypass path, and it is described under
+[Opening the gate to debug it](#opening-the-gate-to-debug-it-aprv-214): one read
+decided and another acted.
+
+### One command is one decision (APRV-287)
+
+A shell command that touches several classes raises one request per class,
+because the log records a decision per class and audit granularity depends on it.
+It is still **one question**, and the Telegram channel now delivers it as one:
+requests sharing a task id and a payload hash are one tool call, they go out as a
+single card with one `Approve all`, and the command's bytes are sent once above
+it rather than once per class. Seen on 2026-09-06: a commit-and-push produced
+five separate messages and took three rounds of taps.
+
+### A dead queue is one message (APRV-287)
+
+A listener that starts or reconnects re-derives the pending set from the verified
+log and re-delivers it (SPEC §10.3). On its **first cycle**, under `burst`
+delivery, requests older than the hook's wait plus its retry grace — the point at
+which no tool call can still be holding the answer — are delivered as ONE summary
+message: how many, how old the oldest is, which classes, and a single
+`Reject all`. Fresh requests keep one message each.
+
+The summary carries **no payload and no approve button**, deliberately. SPEC
+§10.3 requires the canonical rendering of a manual action's payload in front of
+the approver before a decision is collected, and an approve-all here would
+collect one for bytes nobody was shown; a rejection authorizes nothing, so it
+needs no such showing. Any of those requests can still be approved on its own
+card or with `approval grant <action key>`, and `/queue` lists them all.
+
+Under `paced` delivery nothing is collapsed: that mode already puts one question
+at a time in front of the approver behind a summary line, so a restart is two
+messages rather than a dozen, and collapsing would take away the approve an
+approver walking an old queue deliberately came for. Losing the summary — a
+failed send, a restarted process — degrades to showing the requests again, never
+to a pending request nobody is shown.
+
+### What counts toward the loop floor (APRV-287)
+
+Loop safety (SPEC §10.2) counts consecutive failed side-effecting **tool calls**
+per session and per actor. Three of them route the next command's side-effecting
+classes to a human (see [What a tripped floor
+routes](#what-a-tripped-floor-routes-aprv-297)). What does and does not feed it:
+
+- **An expired wait is not a failure.** It records a withdrawal, never an
+  `execution.failed`, so the escalation cannot be fed by the timeouts it is
+  causing (a floor that routed reads to the phone left unanswered reads to time
+  out, and the timeouts extended the floor).
+- **A harness-side misfire is not an execution.** A command the classifier cannot
+  read, a tool call this hook denied, a tool the hook does not gate: none of them
+  has an `execution.started`, so the completion counterpart refuses
+  `not-delegated` and nothing accrues. A report may only ever close an execution
+  this runtime authorized, and the task and the action key are read from the log
+  rather than from the report.
+- **A completion clears the floor, including a carried one.** The grant a later
+  tool call carries is spent under the REQUESTING tool call's task, so the
+  `execution.started` records `spent_by_task: <spending task id>` and the
+  counterpart finds it from the event reporting how that tool call went. Before
+  this it did not, so a granted commit-and-push that completed cleared nothing
+  and the floor stood over the rest of the session (seen 2026-09-06).
+
+### What a tripped floor routes (APRV-297)
+
+Side effects, and only side effects. A tool call whose classes are **all
+`read.*`** is answered by the policy under a tripped floor exactly as it is under
+a clear one: no request is raised, nothing reaches a phone, and the allow says in
+its own words that a floor is standing and was not applied here.
+
+```text
+allow — autonomous: read.shell (loop-escalated (amended SPEC.md §10.2) NOT
+APPLIED to this call: session hook:sess-1 has 3 consecutive failed
+side-effecting harness tool calls, and every class of this command is a read …)
+```
+
+The floor exists to stop an agent retrying a side effect that keeps failing, and
+a read cannot cause that harm, so routing one buys no safety while costing the
+thing the floor is meant to conserve: an approver's attention, one message per
+`grep`, plus the wait the session spends before being refused anyway. On
+2026-09-06/07 a floor tripped and the session that could not get an answer could
+not read a file either, which is the state this removes. APRV-280 had already
+stopped a read **counting** toward the floor; this stops a tripped floor
+**routing** one.
+
+Three edges are worth knowing:
+
+- **A mixed call is still one question.** `ls -la && mkdir build` under a floor
+  raises the write and leaves the read to the policy, so the approver sees one
+  prompt, for what the command does. The read classes inside it are neither
+  counted nor separately raised.
+- **A read still clears nothing.** The exemption is about routing. A session
+  cannot read its way out from under a floor; what clears one is a side-effecting
+  tool call completing in the same scope, or a human opening the gate window.
+- **The write boundary agrees.** `startHarnessExecution` re-checks the floor when
+  it records an unattended execution, and carves reads out with the same
+  predicate, so what the floor counts and what it routes cannot drift apart.
+- **Every tool kind agrees (APRV-303).** An edit the policy does not protect is
+  `files.write.workspace`, the same class a shell redirect into the workspace
+  gets, and it reaches the floor by the same predicate. With no floor standing it
+  is allowed outright with nothing appended, exactly as before, so ordinary
+  editing costs a policy read and no round trip. With a floor standing it is
+  routed like any other write, and its completion clears the floor like any
+  other write's. Until APRV-303 the file path answered `allow` from above the
+  floor lookup: a session whose Bash calls were all going to a phone went on
+  editing files unrouted and uncounted, which is the disagreement APRV-303 was
+  filed on.
+
+`approval status` says all of this on the escalation row it already prints, in
+the `clears:` line.
+
 ### When the grant can follow the write (APRV-200)
 
 A `hook-timeout` deny and a later grant are the same request seen twice, and that
@@ -732,8 +1009,11 @@ harness boundary, and none of them is reachable from inside this runtime:
    it runs under.
 2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
    reason; every other non-zero code is a non-blocking error and the tool runs.
-   The verb exits 2 only for a misconfigured hook and otherwise exits 0 with a
-   verdict, which is what keeps a deny a deny.
+   On the PRE-execution event the verb exits 2 only for a misconfigured hook and
+   otherwise exits 0 with a verdict, which is what keeps a deny a deny. On the
+   post-execution events exit 2 blocks nothing, because the tool has already
+   run; there it means "show this line", and the counterpart uses it for every
+   report that did not land (APRV-303).
 3. **The binary cannot be launched at all** — an uninstalled CLI, a wrong path
    in `command`. Same reading, same outcome, and `approval doctor` will not know
    to look for it.
@@ -881,6 +1161,22 @@ classify -- <command…>` says which class a command falls under, and the verdic
 line reports how it resolved. A manual class re-records just as well and costs
 one prompt, which is why the supervised one is the ritual.
 
+## The same binary, from a Python Agent SDK app (APRV-242)
+
+An application built on `claude-agent-sdk` has no `.claude/settings.json` to
+commit a hook entry into: it is its own host, and it decides its own permission
+mode. It reaches this verb anyway, because the SDK's `HookMatcher` callbacks
+receive the same PreToolUse event this hook reads on stdin and return the same
+`hookSpecificOutput` object it prints. A shim that serializes the event, spawns
+`approval hook claude-code`, and returns the verdict makes such an application
+gateable with no new surface and no Python client.
+
+The recipe, the one shape difference (`tool_use_id` arrives as a positional
+argument rather than as a key), the fail-closed table for a gate the shim
+cannot reach, and the limits are in `docs/agent-sdk-hook.md`. The Python itself
+is `docs/agent-sdk-hook.py`; `tests/agent-sdk-hook.test.ts` runs this CLI on
+the pinned event and asserts it still prints what the recipe expects.
+
 ## Limits, stated plainly
 
 - **The classifier is best effort.** It reads shell text without being a shell.
@@ -1020,8 +1316,9 @@ such a session is indistinguishable from one that never existed.
 
 The guard asks the same question where the answer cannot depend on session
 wiring: it takes two commits, asks git which protected paths changed between
-them, and requires for each one evidence in the committed hash-chained log that
-a human decided it.
+them, and requires evidence in the committed hash-chained log for each change.
+Human approval follows `APPROVAL.md`: a policy-permitted unattended edit does
+not need an extra human grant merely to satisfy CI.
 
 ```sh
 node scripts/protected-path-guard.mjs --base "$(git merge-base origin/main HEAD)" --head HEAD
@@ -1034,13 +1331,48 @@ read the checkout could be told a different story than the pull request carries.
 
 ### What counts as evidence
 
-Three verdicts pass, ordered by how much they prove.
+Verdicts distinguish human attestation, human grants and policy-authorized file
+execution. Attestation covers two different surfaces.
 
 | verdict | what it establishes |
 |---|---|
 | `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
+| `attested` (a gate ORGAN, APRV-272) | CONTENT-level, and PATH-bound. The organ's bytes at the head commit hash to a digest a `gate.organ.attested` record carries **for that same path**, which is what `approval policy attest --organ <path>` writes. A digest attested for another organ is not evidence for this one. The organs need this more than the policy file does: they are `policy.core`, `policy.core` is human-only, and the gate mints nothing for a human-only class, so `granted-file` and `granted-command` cannot exist for one however carefully a human edited it. PR #300 is that case: hand-committed `PostToolUse` entries that no evidence in the world could have passed. A deleted organ has no bytes at head and so cannot be attested; that fails, which is the fail-closed direction. |
 | `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`, `policy.core` or (since APRV-266) any `policy.edit` sub-class, whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
 | `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
+
+APRV-316 adds `policy-authorized-file` evidence from a verified
+`execution.started`. It requires a preceding unique registration matching the
+task, action, protected-path class and payload hash, then recomputes that hash
+from the stored Edit or Write payload. The same exact before/after anchors and
+hunk coverage apply. The payload must name the exact repository-relative path;
+an absolute path or another directory's file cannot establish that relationship.
+Backslashes are rejected, and conflicting applicable path classes in the
+base/head policy entries leave this evidence tier unavailable, including
+conflicts between directory and file rules.
+The start must precede the change within the permitted
+window, and an unresolved approval cycle cannot become unattended evidence.
+Registration alone, a current policy allowance, an unrelated class, shell
+attribution, raw patch text and changes limited to whitespace or file metadata
+cannot supply this evidence. Human-only organs
+retain their existing protection.
+
+Inline edits can share a line or depend on an earlier approved edit. When
+line coverage is insufficient, the guard can replay eligible exact `Edit`
+records in execution order from the committed base file. Each applied edit
+must have one unique, nonempty before-state match. The result must equal the
+entire committed head file byte for byte. The guard tries no alternative edit
+orders and accepts no input hybrids or replace-all edits. A human grant also needs its
+matching execution start and registered payload binding; the grant alone is
+insufficient for replay. The same class, path, hash and timing restrictions
+apply. An extra unapproved change on an otherwise approved line still fails.
+Replay also refuses decoded text containing Unicode replacement characters,
+where the original bytes cannot be established from the decoded blobs.
+
+This verdict records authorization by the gate, not a human decision or proof
+that execution completed. CI trusts the verified runtime record; it does not
+independently repeat the secret live-sampling calculation. Missing evidence
+still fails closed.
 
 There is deliberately **no class-level pass**. A `policy.edit` grant that exists
 but names some other file is not evidence that anybody saw this edit, and

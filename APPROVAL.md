@@ -17,7 +17,7 @@ version: "0.1"
 defaults:
   autonomy: manual
   channel: telegram        # cli remains a fallback per approvers
-  approval_ttl: 24h
+  approval_ttl: 2h
   on_expiry: reject
   token_delivery: sealed   # APRV-166: grant seals to the requester's ephemeral
                            # key; the channel never carries a usable token and
@@ -28,7 +28,9 @@ approvers:
     channels: [telegram, cli]
 
 protected_paths:            # widens policy.edit; the built-ins hold regardless
-  - SPEC.md
+  - { path: SPEC.md, class: policy.edit.spec }
+  - { path: design/, class: policy.edit.design }
+  - { path: .github/workflows/, class: policy.edit.ci }
 
 channels:
   telegram:
@@ -49,7 +51,15 @@ classes:
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
   release.publish:           { autonomy: manual }       # npm, tags, versions
-  policy.edit:               { autonomy: supervised-live, live_rate: 0.1 }       # this file, CLAUDE.md, CI config
+  policy.edit:               { autonomy: supervised-live, live_rate: 0.01 }       # this file, CLAUDE.md, CI config
+  policy.edit.design:        { autonomy: supervised }   # design docs: read in the PR, sampled after
+  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.01 }
+    # today it is undeclared, so it falls to the default manual: every SPEC amendment
+    # in every task is a tap. The guard, the sign-off convention and retrospective
+    # review already cover SPEC prose; one in five live is plenty.
+  policy.edit.ci:            { autonomy: manual }       # CI and release config: always a tap
+  files.delete.scratch:      { autonomy: autonomous }   # rm confined to the system temp root (APRV-267)
+  vcs.remote.meta:           { autonomy: supervised }   # gh graphql query, pr update-branch, run rerun (APRV-268)
   policy.core:               { autonomy: human-only }   # APPROVAL.md and .approval/* except the log (APRV-198)
   log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
   account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
@@ -60,7 +70,7 @@ budgets:
   global: { daily_actions: 20000 }
 
 audit:
-  supervised_sample_rate: 0.15
+  supervised_sample_rate: 0.01
   sampling_secret_env: APPROVAL_SAMPLING_SECRET   # name only; secret in the env
 
 daemon:
@@ -69,7 +79,6 @@ daemon:
   full_reproof_after: 60s
 ```
 
-````markdown
 Below the policy is a second block the runtime never enforces. It is what I
 value, for agents that want to know; `approval values` prints it.
 
@@ -80,6 +89,7 @@ love:
   - honest thoughts on what we are building, including when you think I am wrong
   - a journal entry of about five points at the end of each milestone
   - "a tight ship loop: task, plan, diff, tests, PR, merge armed, all in one session"
+  - suggestions for changes to APPROVAL.md, tightening or loosening, with the cost you saw that prompted them
 
 like:
   - success reported first, caveats after, in a message that stands on its own
@@ -102,4 +112,3 @@ responds: >-
   Silence is not disapproval. A loved or disliked reaction always carries a
   note saying why; a bare ok means I looked and it was fine.
 ```
-````

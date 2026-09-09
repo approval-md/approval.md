@@ -1,0 +1,1 @@
+{"command":"grep -n \"agentmail\\|adapter\" /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb/README.md | head -80","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

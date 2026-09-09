@@ -1,0 +1,1 @@
+{"command":"grep -n \"adapter\" /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb/docs/cli-reference.md | head -50","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

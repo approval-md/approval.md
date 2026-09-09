@@ -70,11 +70,13 @@ import {
   digestCallbackData,
   digestKeyOf,
   groupForDigest,
+  isMessageNotModified,
   parseCallbackData,
   payloadShapeKey,
   renderTelegram,
   PAYLOAD_CHUNK_LABEL_TAIL,
   TELEGRAM_ANOMALY_MARK,
+  TelegramApiError,
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -84,14 +86,35 @@ import {
   TELEGRAM_HANDLER_FAILED,
   TELEGRAM_NOT_RECORDED,
   TELEGRAM_MAX_CALLBACK_BYTES,
+  TELEGRAM_MAX_MESSAGE_CHARS,
   TELEGRAM_PROMPT_HEADING,
   TELEGRAM_STALE_COPY_PREFIX,
   TELEGRAM_STALE_UNKNOWN,
   parseBotCommand,
+  parseReviewCallback,
+  REVIEW_CHOICES,
   TELEGRAM_COMMANDS,
+  TELEGRAM_REVIEW_ACK,
+  TELEGRAM_REVIEW_ARMED,
+  TELEGRAM_REVIEW_ARM_TOAST,
+  TELEGRAM_REVIEW_DENIED,
+  TELEGRAM_REVIEW_NOTE_TOAST,
+  TELEGRAM_REVIEW_HEADING,
+  TELEGRAM_REVIEW_RECORDED,
+  type ReviewCard,
+  type ReviewChoice,
   type TelegramConfig,
   type TelegramPollResult,
 } from "../src/channels/telegram.js";
+import { openReviewCards } from "../src/cli/audit-card.js";
+import {
+  humanFeedback,
+  openSamples,
+  reviewSample,
+  sampleSupervised,
+  AUDIT_REFUSAL_CODES,
+  type FeedbackEntry,
+} from "../src/core/audit.js";
 import {
   telegramDeliveryFor,
   TELEGRAM_DEFAULT_DELIVERY,
@@ -105,6 +128,7 @@ import {
   glossWiring,
   newDispatchState,
   queueLines,
+  reviewHandlerFor,
   summaryLines,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
@@ -123,15 +147,23 @@ import {
   GLOSS_TRUNCATION_NOTE,
   type GlossRunner,
 } from "../src/cli/gloss.js";
-import type { Streams } from "../src/cli/main.js";
+import { main, type Streams } from "../src/cli/main.js";
 import { appendAttestation } from "../src/core/attest.js";
+import type { EventRecord } from "../src/core/log.js";
 import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { applyPromptBlock, TELEGRAM_PROMPT_LAYOUT } from "../src/core/prompt-layout.js";
 import { readVerifiedRecords } from "../src/core/state.js";
-import { expire, register, request, withdraw } from "./clock-adapters.js";
+import {
+  expire,
+  finishExecution,
+  register,
+  request,
+  startExecution,
+  withdraw,
+} from "./clock-adapters.js";
 import { fakeClaudeEnv, FAKE_GLOSS_SENTENCE } from "./fake-claude.js";
 import {
   assertLocal,
@@ -1408,6 +1440,153 @@ test("a failed edit does not block the decision or the loop", async () => {
   // And the loop is still a loop: the next poll works.
   const next = await channel.pollOnce();
   assert.equal(next.updates, 0);
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// "message is not modified" (APRV-277)
+//
+// The report: after a tap that visibly worked, the listener printed
+//   approval: telegram could not annotate the granted <key> (message N):
+//   editMessageText: HTTP 400 — the buttons are stale but the gate refuses a
+//   tap on them
+// with the phone already showing the annotated message. Telegram answers 400
+// "Bad Request: message is not modified" when an edit would change nothing,
+// which is what a second annotation of an already-annotated message is. The
+// warning was false, and the bare status was why nobody could tell: the
+// transport threw the status away along with the Bot API's own description.
+// ---------------------------------------------------------------------------
+
+/** A fetch that fails `editMessageText` with one Bot API error body. */
+function editFailsWith(
+  status: number,
+  description: string | null,
+): NonNullable<TelegramConfig["fetch"]> {
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  const body =
+    description === null
+      ? "<html>gateway</html>"
+      : JSON.stringify({ ok: false, error_code: status, description });
+  return async (url, init) => {
+    if (url.endsWith("/editMessageText")) {
+      return { ok: false, status, text: async () => body };
+    }
+    return await passthrough(url, init);
+  };
+}
+
+const NOT_MODIFIED_DESCRIPTION = "Bad Request: message is not modified";
+
+test("a 400 that says the message is not modified is not reported (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor({ fetch: editFailsWith(400, NOT_MODIFIED_DESCRIPTION) });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const before = complaints.length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  // Nothing on the operator's terminal: the message already reads the way the
+  // annotation wanted it to read, so there is no staleness to warn about.
+  assert.deepEqual(
+    complaints.slice(before).filter((entry) => entry.includes("could not annotate")),
+    [],
+    "an edit that changed nothing was reported as a failure",
+  );
+
+  // And the silence cost the decision nothing.
+  assert.equal(
+    recordsOf(world.unit.logPath).filter(
+      (record) => record.event === "approval.granted" && record.action_key === key,
+    ).length,
+    1,
+  );
+  const next = await channel.pollOnce();
+  assert.equal(next.updates, 0);
+  assertClean(world.unit);
+});
+
+test("every other 400 is still reported, and says what the Bot API said (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  // Same status, a different reason: this one really is a stale message, and an
+  // operator who is not told cannot know the phone stopped agreeing with the
+  // log.
+  const channel = channelFor({
+    fetch: editFailsWith(400, "Bad Request: message to edit not found"),
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const before = complaints.length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  const said = complaints.slice(before).join("\n");
+  assert.match(
+    said,
+    /could not annotate the decided .* — the decision is recorded; only the message is stale/u,
+  );
+  // The status alone was the whole complaint before this task, which is why the
+  // false one and the real one read identically.
+  assert.match(said, /editMessageText: HTTP 400 \(Bad Request: message to edit not found\)/u);
+  assertClean(world.unit);
+});
+
+test("the not-modified predicate reads the Bot API's own description (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  /** What `annotate` throws when the edit fails this way. */
+  const thrownBy = async (
+    status: number,
+    description: string | null,
+  ): Promise<TelegramApiError> => {
+    const channel = channelFor({ fetch: editFailsWith(status, description) });
+    const messageId = await channel.notify(request_ as ChannelRequest);
+    try {
+      await channel.annotate(messageId, "GRANTED", ["by carter"], key);
+    } catch (cause) {
+      assert.ok(cause instanceof TelegramApiError, `not a TelegramApiError: ${String(cause)}`);
+      return cause;
+    }
+    return assert.fail("the failing edit did not throw");
+  };
+
+  const notModified = await thrownBy(400, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(notModified.status, 400);
+  assert.equal(notModified.description, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(isMessageNotModified(notModified), true);
+
+  // Every other 400, every other status, and a body with nothing quotable in it
+  // are all ordinary failures. The predicate is deliberately narrow: 400 is
+  // also every malformed edit and every message the bot can no longer reach.
+  const otherReason = await thrownBy(400, "Bad Request: message to edit not found");
+  assert.equal(isMessageNotModified(otherReason), false);
+  const otherStatus = await thrownBy(500, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(otherStatus.status, 500);
+  assert.equal(isMessageNotModified(otherStatus), false);
+
+  const noBody = await thrownBy(502, null);
+  assert.equal(noBody.status, 502);
+  assert.equal(noBody.description, null);
+  assert.equal(noBody.message, "editMessageText: HTTP 502");
+  assert.equal(isMessageNotModified(noBody), false);
+
+  // And nothing that is not one of these errors is ever mistaken for one.
+  assert.equal(isMessageNotModified(new Error(NOT_MODIFIED_DESCRIPTION)), false);
+  assert.equal(isMessageNotModified(NOT_MODIFIED_DESCRIPTION), false);
+  assert.equal(isMessageNotModified(null), false);
   assertClean(world.unit);
 });
 
@@ -3852,7 +4031,12 @@ test("a digest is swept once every member is settled and the window has passed",
   // nonce, and every member nonce that was issued under it.
   clock.ms += 1;
   assert.equal(channel.sweep().digests, 1);
-  assert.deepEqual(channel.bookkeepingSize(), { deliveries: 0, digests: 0, allNonces: 0 });
+  assert.deepEqual(channel.bookkeepingSize(), {
+    deliveries: 0,
+    digests: 0,
+    allNonces: 0,
+    reviewCards: 0,
+  });
 });
 
 test("with no approval TTL only settled entries are forgotten (APRV-135)", async () => {
@@ -3911,7 +4095,12 @@ test("memory does not grow across a long run of decided prompts (APRV-135 #2)", 
   // And at rest, once the last window has passed, it is empty.
   clock.ms += TTL_MS;
   channel.sweep();
-  assert.deepEqual(channel.bookkeepingSize(), { deliveries: 0, digests: 0, allNonces: 0 });
+  assert.deepEqual(channel.bookkeepingSize(), {
+    deliveries: 0,
+    digests: 0,
+    allNonces: 0,
+    reviewCards: 0,
+  });
   assert.equal(
     recordsOf(world.unit.logPath).filter((record) => record.event === "approval.granted").length,
     rounds,
@@ -4484,7 +4673,15 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
     assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
   }
   assert.equal(reply.includes(`${a} `), true, "the list is not keyed by action key");
-  assert.equal(reply.includes("shown now"), true, "/queue did not mark the shown request");
+  assert.equal(reply.includes("selected"), true, "/queue did not mark the selected request");
+
+  // APRV-256, over the real wire: the reply an approver actually receives says
+  // it has no buttons and how to recover a card they cannot find, and it still
+  // appends nothing while saying so (asserted against `before` above).
+  assert.equal(reply.includes("no decision buttons"), true, `not self-identified: ${reply}`);
+  assert.equal(reply.includes("/skip is the recovery"), true, `no recovery offered: ${reply}`);
+  assert.equal(reply.includes("shown now"), false, `the old marker reached the chat: ${reply}`);
+  assert.equal(reply.includes("message above"), false, `the old pointer reached the chat: ${reply}`);
 
   // The queue is derived, not held: a decision changes the next reply with no
   // command and no cycle in between.
@@ -4496,6 +4693,89 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   const secondReply = sentSince(secondFrom).join("\n");
   assert.equal(secondReply.includes("2 pending"), true, `stale count: ${secondReply}`);
   assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+/**
+ * The marker `/queue` puts on the request the listener has selected, spelled out
+ * here rather than imported so that a change to the shipped wording has to be
+ * made twice, deliberately (APRV-256).
+ */
+const SELECTED_LINE_MARKER = " — selected — card sent earlier";
+
+/**
+ * APRV-256, at the command level rather than the renderer's. Two states an
+ * approver can reach without doing anything wrong — a pending request nothing
+ * has selected yet, and an empty queue — and in neither may a reply point at an
+ * approval card, since in neither has one been sent.
+ */
+test("the commands answer a queue with nothing selected without naming a card (APRV-256)", async () => {
+  const world = staged(1, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  const commands = commandHandlerFor(setup, streams, state, () => at(70));
+
+  const only = requestAt(world, 0, at(1));
+
+  // Pending, and NOT yet dispatched: the listener holds no selection.
+  const before = recordCount(world);
+  const from = mock.sentTexts().length;
+  await commands("queue");
+  const listing = sentSince(from).join("\n");
+  assert.equal(listing.includes("1 pending"), true, `no summary: ${listing}`);
+  assert.equal(listing.includes(only), true, "the pending request is not listed");
+  assert.equal(listing.includes("no decision buttons"), true, "the reply is not self-identified");
+  assert.equal(
+    listing.includes("no approval card has been sent for any of these"),
+    true,
+    `a card was implied with nothing selected: ${listing}`,
+  );
+  assert.equal(listing.includes(SELECTED_LINE_MARKER), false, "an undelivered request was marked");
+
+  // /skip and /next with no selection: same vocabulary, no card, no decision.
+  for (const command of ["skip", "next"] as const) {
+    const mark = mock.sentTexts().length;
+    await commands(command);
+    const reply = sentSince(mark).join("\n");
+    assert.equal(
+      reply.includes("no request selected"),
+      true,
+      `${command} did not report the empty selection: ${reply}`,
+    );
+    assert.equal(
+      reply.includes("with its buttons on an upcoming cycle"),
+      true,
+      `${command} did not say where buttons come from: ${reply}`,
+    );
+    for (const banned of ["in front of you", "message above", "shown now"]) {
+      assert.equal(reply.includes(banned), false, `${command} said ${banned}: ${reply}`);
+    }
+  }
+
+  // Navigation stayed non-decisional and log-free across all three.
+  assert.equal(recordCount(world), before, "a navigation command appended to the log");
+
+  // And an empty queue says only that, with no card, buttons or verbs offered.
+  channel.onDecision(handlerFor(world, at(71)));
+  await dispatchPending(setup, streams, state, at(72));
+  assert.equal((await press(channel, only, "grant"))?.ok, true);
+  const emptyFrom = mock.sentTexts().length;
+  await commands("queue");
+  const empty = sentSince(emptyFrom).join("\n");
+  // The announce path bolds the first line, so this is `includes` against a
+  // reply whose only content is that line.
+  assert.equal(
+    empty.includes("Nothing pending — the queue is empty."),
+    true,
+    `not the empty reply: ${empty}`,
+  );
+  for (const banned of ["card", "button", "/skip", "/next"]) {
+    assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
+  }
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -4636,7 +4916,12 @@ test("delivery: burst restores the banner and the whole pending set (APRV-216)",
 
   const keys = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2)), requestAt(world, 2, at(3))];
 
-  const cycle = await dispatchPending(setup, streams, state, at(63));
+  // Delivered while the requests are FRESH (APRV-287): past the hook's wait
+  // plus its retry grace a first cycle collapses them into one message
+  // instead, which is that task's own case and has its own tests below. What
+  // this one pins is unchanged — burst restores the banner and the whole
+  // pending set for a queue somebody is still waiting on.
+  const cycle = await dispatchPending(setup, streams, state, at(4));
   assert.notEqual(cycle.banner, undefined, "the burst banner is gone");
   assert.equal(cycle.banner?.pending, 3);
   assert.equal(cycle.summary, undefined, "burst delivery sent the paced summary");
@@ -4730,11 +5015,1142 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
   assert.equal(summary[0]?.includes("2 pending"), true);
   assert.equal(summary[0]?.includes("2h 59m ago"), true, `oldest age wrong: ${String(summary[0])}`);
 
+  // [0] summary, [1] the "this is a list" line (APRV-256), then the items.
   const listed = queueLines(requests, at(180), [world.keys[1] as string]);
-  assert.equal(listed[1]?.startsWith("1. "), true, "the list is not numbered from one");
-  assert.equal(listed[1]?.includes(TASK), true, "the list names no task");
-  assert.equal(listed[2]?.includes("shown now"), true, "the shown request is not marked");
+  assert.equal(listed[2]?.startsWith("1. "), true, "the list is not numbered from one");
+  assert.equal(listed[2]?.includes(TASK), true, "the list names no task");
+  assert.equal(listed[3]?.includes("selected"), true, "the selected request is not marked");
 
   assert.deepEqual(summaryLines([], at(180)), ["Nothing pending — the queue is empty."]);
   assert.deepEqual(queueLines([], at(180), []), ["Nothing pending — the queue is empty."]);
 });
+
+/**
+ * APRV-256. The reported bug was a reply that said "shown now" and "Tap the
+ * buttons on the message above" to an approver who could see no buttons at all:
+ * `/queue` was asserting present visibility from a delivery bookkeeping entry,
+ * which records only that a send once returned success.
+ *
+ * These assertions are about words, and they are worth their space because the
+ * words are the whole product here. Nothing in the queue's derivation changed,
+ * so a test that only checked keys and counts would have passed before the fix
+ * and after it.
+ */
+test("/queue calls itself a list and never claims a card is visible (APRV-256)", () => {
+  const world = staged(3, distinctPayloadFor);
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+  requestAt(world, 2, at(3));
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, at(180));
+  assert.equal(queue.ok, true);
+  const requests = queue.ok ? queue.requests : [];
+
+  // --- Selected item -------------------------------------------------------
+  const selected = queueLines(requests, at(180), [world.keys[0] as string]).join("\n");
+
+  // AC #1: the reply identifies itself as a list without decision buttons, and
+  // points at the card without placing it.
+  assert.equal(selected.includes("no decision buttons"), true, `not self-identified: ${selected}`);
+  assert.equal(selected.includes("its own approval card"), true, "decisions are not directed");
+  assert.equal(
+    selected.includes("wherever that card sits"),
+    true,
+    "the card's position is asserted or omitted",
+  );
+
+  // AC #2: the two reported phrases are gone, and no synonym takes their place.
+  for (const banned of [
+    "shown now",
+    "message above",
+    "the message below",
+    "above to decide",
+    "being shown",
+    "in front of you",
+  ]) {
+    assert.equal(selected.includes(banned), false, `${banned} survived in: ${selected}`);
+  }
+  assert.equal(
+    selected.includes("card sent earlier"),
+    true,
+    "the marker does not describe prior delivery",
+  );
+  assert.equal(
+    selected.includes("cannot tell whether that card is still here"),
+    true,
+    "the reply vouches for a card it cannot see",
+  );
+
+  // AC #3: recovery, and what recovery does not do.
+  assert.equal(selected.includes("/skip is the recovery"), true, "no /skip recovery is offered");
+  assert.equal(selected.includes("Nothing is decided by typing it"), true, "no decision disclaimer");
+  assert.equal(selected.includes("stays pending in the log"), true, "pendingness is not stated");
+  assert.equal(
+    selected.includes("a fresh card is sent on a later listener cycle"),
+    true,
+    "the fresh card is not promised to a later cycle",
+  );
+  assert.equal(selected.includes("gloss is being written"), true, "the gloss delay is unmentioned");
+  assert.equal(
+    selected.includes("It is not a way to ask for the card again."),
+    true,
+    "/next is left readable as a resend",
+  );
+  assert.equal(selected.includes("no new card is sent for it"), true, "/next is not disambiguated");
+
+  // Only the selected key is marked, and it is marked once.
+  assert.equal(
+    selected.split(SELECTED_LINE_MARKER).length - 1,
+    1,
+    `more than one request is marked: ${selected}`,
+  );
+  const markedLine = selected
+    .split("\n")
+    .find((line) => line.includes(SELECTED_LINE_MARKER)) as string;
+  assert.equal(markedLine.includes(world.keys[0] as string), true, "the wrong request is marked");
+
+  // --- A digest selection is still ONE card --------------------------------
+  // `state.paced.current` carries every key of a digest group, and the group
+  // reached Telegram as a single message, so the plural branch must not invite
+  // the approver to hunt for one card per marked line.
+  const grouped = queueLines(requests, at(180), [
+    world.keys[0] as string,
+    world.keys[1] as string,
+  ]).join("\n");
+  assert.equal(grouped.split(SELECTED_LINE_MARKER).length - 1, 2, "both keys were not marked");
+  assert.equal(
+    grouped.includes("a single approval card for them was sent to this chat earlier"),
+    true,
+    `a digest selection implied several cards: ${grouped}`,
+  );
+  assert.equal(grouped.includes("/skip is the recovery"), true, "recovery is singular-only");
+
+  // --- No selected item ----------------------------------------------------
+  const none = queueLines(requests, at(180), []).join("\n");
+  assert.equal(none.includes("no decision buttons"), true, "the list line is selection-dependent");
+  assert.equal(none.includes(SELECTED_LINE_MARKER), false, "an unselected request was marked");
+  assert.equal(
+    none.includes("Nothing is selected right now"),
+    true,
+    `the empty selection is not stated: ${none}`,
+  );
+  assert.equal(
+    none.includes("no approval card has been sent for any of these"),
+    true,
+    "a card is implied with nothing selected",
+  );
+  // With nothing selected there is no lost card to recover, so the recovery
+  // paragraph stays off rather than inviting a /skip that has nothing to skip.
+  assert.equal(none.includes("/skip is the recovery"), false, "recovery offered with no selection");
+  for (const banned of ["shown now", "message above", "in front of you"]) {
+    assert.equal(none.includes(banned), false, `${banned} survived in: ${none}`);
+  }
+
+  // --- Empty queue ---------------------------------------------------------
+  const empty = queueLines([], at(180), []).join("\n");
+  assert.equal(empty, "Nothing pending — the queue is empty.");
+  for (const banned of ["card", "button", "shown now", "message above", "/skip", "/next"]) {
+    assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
+  }
+});
+
+// ===========================================================================
+// APRV-287: one command is one card, and a dead queue is one message
+// ===========================================================================
+
+/**
+ * The button labels on the last message whose text contains `needle`.
+ *
+ * A keyboard is not in `sentTexts()`: it rides in `reply_markup`, which is
+ * where a phone reads it from and where these cases have to look.
+ */
+function buttonsOnMessageContaining(needle: string): string[] {
+  let labels: string[] = [];
+  for (const entry of mock.requests) {
+    if (entry.method !== "sendMessage") continue;
+    if (!String(entry.body["text"] ?? "").includes(needle)) continue;
+    const markup = entry.body["reply_markup"] as
+      | { inline_keyboard?: { text: string }[][] }
+      | undefined;
+    labels = (markup?.inline_keyboard ?? []).flat().map((button) => button.text);
+  }
+  return labels;
+}
+
+/** The bytes a five-class shell command binds to: one command, one payload. */
+const ONE_COMMAND = {
+  command: "git add -A && git commit -m ship && git push origin main",
+  cwd: "/repo",
+};
+
+/**
+ * One tool call's worth of requests: one task, one payload, several classes.
+ *
+ * The shape `cli/hook.ts` produces for a shell command that touches more than
+ * one class — a key per class, all under the tool call's task id, all bound to
+ * the same bytes.
+ */
+function oneCommandWorld(classes: string[]): Live {
+  fixtureCounter += 1;
+  const prefix = `command${fixtureCounter}`;
+  const unit = newScenario(scratch.root, POLICY);
+  attest(unit, T0);
+
+  const hash = payloadHash(ONE_COMMAND);
+  const payloads = new Map<string, unknown>();
+  const keys: string[] = [];
+  const actions = classes.map((cls) => {
+    const key = `${TASK}:${prefix}-${cls}`;
+    keys.push(key);
+    payloads.set(key, ONE_COMMAND);
+    return {
+      class: cls,
+      idempotency_key: key,
+      summary: ONE_COMMAND.command,
+      reversible: false,
+      est_cost_usd: "0.02",
+      payload_hash: hash,
+    };
+  });
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: { origin: { app: "manual", created_by: ACTOR }, state: "awaiting", actions },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  return {
+    unit,
+    keys,
+    payloads,
+    tagOptions: { policy: { file: unit.policyPath }, payload: (key) => payloads.get(key) },
+  };
+}
+
+/** Request one member of {@link oneCommandWorld}, under its own class. */
+function requestClassAt(world: Live, index: number, cls: string, ts: string): string {
+  const key = world.keys[index] as string;
+  const result = request(
+    world.unit.logPath,
+    {
+      task: TASK,
+      actionKey: key,
+      cls,
+      est_cost_usd: "0.02",
+      reversible: false,
+      summary: ONE_COMMAND.command,
+    },
+    ts,
+    ACTOR,
+    world.unit.options,
+  );
+  assert.equal(result.ok, true, `request failed: ${JSON.stringify(result)}`);
+  return key;
+}
+
+test("APRV-287: the five classes of one command are one card with one approve", async () => {
+  // Seen 2026-09-06: a commit-and-push raised five separate Telegram messages
+  // and took three rounds of taps. One tool call is one question, and the log
+  // still records a decision per class.
+  const classes = [
+    "vcs.commit.branch",
+    "vcs.push.main",
+    "files.write.workspace",
+    "network.call",
+    "deps.add",
+  ];
+  const world = oneCommandWorld(classes);
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  classes.forEach((cls, index) => requestClassAt(world, index, cls, at(1)));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(2));
+
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+  assert.deepEqual(
+    [...(cycle.digests[0] as { action_keys: string[] }).action_keys].sort(),
+    [...world.keys].sort(),
+    "the five classes did not become one delivery",
+  );
+
+  const sent = mock.sentTexts().slice(from);
+  assert.equal(
+    sent.filter((text) => text.includes("THE COMMAND ALL 5 REQUESTS ARE ABOUT")).length,
+    1,
+    "the shared payload was not sent once",
+  );
+  assert.equal(
+    sent.filter((text) => text.includes("REQUEST 1 OF 5")).length,
+    0,
+    "the members were prompted one by one",
+  );
+  const digest = sent[sent.length - 1] as string;
+  // ONE gesture decides the command: the all-row is on the one card.
+  const buttons = buttonsOnMessageContaining("REQUESTS AWAITING APPROVAL");
+  assert.equal(
+    buttons.some((label) => label.includes("Approve all (5)")),
+    true,
+    `no approve-all on the card: ${buttons.join(", ")}`,
+  );
+  assert.match(digest, /one payload, shared by all 5 requests/u);
+  assert.match(digest, /one tool call: one task, one payload, 5 class\(es\)/u);
+  for (const cls of classes) {
+    assert.equal(digest.includes(cls), true, `the digest hid the class ${cls}`);
+  }
+  // The whole command reached the approver before any button did: five classes,
+  // one set of bytes, sent above the card that decides them.
+  assert.equal(
+    sent.some((text) => text.includes("git push origin main")),
+    true,
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("APRV-287: a restarted listener collapses the stale queue into one message", async () => {
+  // The flood of 2026-09-06: a daemon restarted behind a stale socket and
+  // re-delivered a dozen requests whose hooks had long since given up, one
+  // message each. They go out as ONE message now, and a request somebody may
+  // still be waiting on keeps its own.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const old = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2))];
+  const fresh = requestAt(world, 2, at(60));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(61));
+
+  assert.notEqual(cycle.collapsed, undefined, "nothing was collapsed");
+  assert.deepEqual(
+    [...(cycle.collapsed as { action_keys: string[] }).action_keys].sort(),
+    [...old].sort(),
+  );
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key).sort(),
+    [...old, fresh].sort(),
+    "every pending request is accounted for, collapsed or not",
+  );
+
+  const sent = mock.sentTexts().slice(from);
+  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
+  assert.match(summary, /2 STALE REQUESTS/u);
+  // One action, and it is a rejection: nothing here shows the payloads, so
+  // nothing here may collect an approval.
+  const buttons = buttonsOnMessageContaining("STALE REQUEST");
+  assert.deepEqual(
+    buttons.map((label) => label.replace(/^\S+\s/u, "")),
+    ["Reject all (2)"],
+    `the collapsed message offered ${buttons.join(", ")}`,
+  );
+  for (const key of old) assert.equal(summary.includes(key), true, `${key} is not named`);
+  assert.equal(summary.includes(fresh), false, "the fresh request was collapsed too");
+  // It carries no payload, and says so where it says why there is no approve.
+  assert.match(summary, /carries NO payload/u);
+  // One message for the two of them, not two.
+  assert.equal(
+    sent.filter((text) => text.includes("STALE REQUEST")).length,
+    1,
+    "more than one collapsed message",
+  );
+  // The fresh one is delivered the ordinary way, buttons and all.
+  assert.equal(
+    sent.some((text) => text.includes(fresh)),
+    true,
+    "the fresh request was not delivered",
+  );
+
+  // Losing the summary degrades to showing the requests again (SPEC.md §10.3):
+  // a listener that forgets everything re-derives the pending set from the
+  // verified log and puts it back in front of the approver.
+  const restarted = await dispatchPending(setup, capture().streams, newDispatchState(), at(62));
+  assert.notEqual(restarted.collapsed, undefined, "a restart showed nothing at all");
+  assert.deepEqual(
+    [...(restarted.collapsed as { action_keys: string[] }).action_keys].sort(),
+    [...old].sort(),
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("APRV-287: a collapsed send that fails leaves every request to be shown again", async () => {
+  const world = staged(2, distinctPayloadFor);
+  const setup = setupFor(world, channelFor());
+  const { streams, err } = capture();
+  const old = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2))];
+
+  mock.fail("500");
+  const failed = await dispatchPending(setup, streams, newDispatchState(), at(61));
+  mock.fail(null);
+
+  assert.equal(failed.collapsed, undefined, "a failed send reported a collapse");
+  assert.deepEqual(failed.delivered, [], "a failed send marked requests as delivered");
+  assert.deepEqual(
+    failed.failed.map((entry) => entry.action_key).sort(),
+    [...old].sort(),
+    "the requests were not left for the next cycle",
+  );
+  assert.equal(
+    err.some((line) => line.includes("collapsed re-delivery")),
+    true,
+    `the operator was not told: ${err.join("")}`,
+  );
+
+  // The next listener puts them back in front of the approver.
+  const again = await dispatchPending(setup, capture().streams, newDispatchState(), at(62));
+  assert.deepEqual(
+    again.delivered.map((entry) => entry.action_key).sort(),
+    [...old].sort(),
+  );
+  assertClean(world.unit);
+});
+
+// ===========================================================================
+// Retrospective review cards (APRV-299)
+// ===========================================================================
+
+/**
+ * The sampling secret, under a TEST-SCOPED variable name that is passed in as
+ * an explicit environment object and never exported into this process — the
+ * same discipline `tests/audit.test.ts` states: a suite that set a
+ * real-looking variable in `process.env` would be one import away from changing
+ * another suite's behaviour.
+ */
+const REVIEW_SECRET_ENV = "APPROVAL_TG_TEST_SAMPLING_SECRET";
+const REVIEW_ENV: NodeJS.ProcessEnv = {
+  [REVIEW_SECRET_ENV]: "operator-held-secret-never-in-the-log",
+};
+
+/**
+ * Rate 1, so every supervised execution is drawn: the lifecycle is exercised
+ * without depending on which subjects a particular secret happens to pick. The
+ * selection function itself is `tests/sampler.test.ts`'s subject.
+ */
+const REVIEW_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "24h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  files.write.*:",
+  "    autonomy: supervised",
+  "audit:",
+  "  supervised_sample_rate: 1",
+  `  sampling_secret_env: ${REVIEW_SECRET_ENV}`,
+  "```",
+  "",
+].join("\n");
+
+interface Sampled extends Live {
+  /** The `audit.sampled` seqs the sweep appended, oldest first. */
+  samples: number[];
+}
+
+/**
+ * `count` supervised executions that ran, finished, and were drawn for review.
+ *
+ * Every record comes from the real append path — `register`, `startExecution`,
+ * `finishExecution`, then `core/audit.ts`'s own sweep. Nothing hand-writes a
+ * log line, so no assertion below rests on a record the write boundary would
+ * have refused, and the cards are built from the same verified log the CLI
+ * reads.
+ */
+function sampledWorld(count: number): Sampled {
+  fixtureCounter += 1;
+  const prefix = `sampled${fixtureCounter}`;
+  const unit = newScenario(scratch.root, REVIEW_POLICY);
+  attest(unit, T0);
+
+  const payloads = new Map<string, unknown>();
+  const keys: string[] = [];
+  const actions = [];
+  for (let index = 0; index < count; index += 1) {
+    const key = actionKeyFor(prefix, index);
+    const payload = {
+      command: `git add -A && git commit -m "wip ${index}"`,
+      cwd: "/repo",
+    };
+    keys.push(key);
+    payloads.set(key, payload);
+    actions.push({
+      class: "files.write.local",
+      idempotency_key: key,
+      summary: `write draft ${index}`,
+      // Declared reversible, and it has to be: SPEC.md §7's irreversibility
+      // floor raises a `reversible: false` supervised action to `manual`, which
+      // takes it off the supervised path entirely and out of the sample pool.
+      // A denial of one of these therefore obliges a gated revert.
+      reversible: true,
+      est_cost_usd: "0.01",
+      payload_hash: payloadHash(payload),
+    });
+  }
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: { origin: { app: "manual", created_by: ACTOR }, state: "awaiting", actions },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  for (const [index, key] of keys.entries()) {
+    const started = startExecution(
+      unit.logPath,
+      key,
+      { ...unit.options, presentedPayloadHash: payloadHash(payloads.get(key)) },
+      at(1 + index * 2),
+      ACTOR,
+    );
+    assert.equal(started.ok, true, `start failed: ${JSON.stringify(started)}`);
+    const finished = finishExecution(
+      unit.logPath,
+      key,
+      0,
+      at(2 + index * 2),
+      ACTOR,
+      unit.options,
+    );
+    assert.equal(finished.ok, true, `finish failed: ${JSON.stringify(finished)}`);
+  }
+
+  const swept = sampleSupervised(unit.logPath, unit.dir, {
+    policy: { file: unit.policyPath },
+    env: REVIEW_ENV,
+    clock: fixedClock(at(60)),
+  });
+  assert.equal(swept.ok, true, `sweep failed: ${JSON.stringify(swept)}`);
+
+  const samples = openSamples(recordsOf(unit.logPath)).map((subject) => subject.seq);
+  assert.equal(samples.length, count, `expected ${count} open samples, got ${samples.length}`);
+
+  return {
+    unit,
+    keys,
+    payloads,
+    samples,
+    tagOptions: { policy: { file: unit.policyPath }, payload: (key) => payloads.get(key) },
+  };
+}
+
+function cardsFor(world: Sampled): ReviewCard[] {
+  const built = openReviewCards(world.unit.logPath, {
+    payload: (key) => world.payloads.get(key),
+  });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  return built.ok ? built.cards : [];
+}
+
+/** A channel with the real review handler wired, exactly as the listener wires it. */
+function reviewChannelFor(
+  world: Sampled,
+  delivery: TelegramDelivery = "paced",
+): { channel: TelegramChannel; setup: ListenSetup; out: string[]; err: string[] } {
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, delivery);
+  const streams = capture();
+  channel.onReview(reviewHandlerFor(setup, streams.streams));
+  return { channel, setup, out: streams.out, err: streams.err };
+}
+
+/**
+ * The `callback_data` of the newest review button for `choice`.
+ *
+ * Read off the keyboards the mock actually received, exactly as a phone would:
+ * nothing here decodes a nonce, and the newest keyboard wins because a redraw
+ * replaces the buttons on the card.
+ */
+function reviewButtonFor(choice: ReviewChoice): string {
+  let found: string | null = null;
+  for (const entry of mock.requests) {
+    if (entry.method !== "sendMessage" && entry.method !== "editMessageText") continue;
+    const markup = entry.body["reply_markup"] as
+      | { inline_keyboard?: { text: string; callback_data: string }[][] }
+      | undefined;
+    for (const row of markup?.inline_keyboard ?? []) {
+      for (const button of row) {
+        const parsed = parseReviewCallback(button.callback_data);
+        if (parsed !== null && parsed.choice === choice) found = button.callback_data;
+      }
+    }
+  }
+  assert.ok(found !== null, `the mock received no review button for ${JSON.stringify(choice)}`);
+  return found;
+}
+
+/** Press one review button. */
+async function tapReview(
+  channel: TelegramChannel,
+  choice: ReviewChoice,
+  chatId: string = CHAT,
+): Promise<TelegramPollResult> {
+  mock.queueUpdate(callbackUpdate({ data: reviewButtonFor(choice), chatId }));
+  return channel.pollOnce();
+}
+
+/** The id of the newest ForceReply note prompt the bot sent. */
+function notePromptId(): number {
+  const prompts = mock
+    .sentMessages()
+    .filter((entry) => (entry.replyMarkup as { force_reply?: boolean } | undefined)?.force_reply === true);
+  const last = prompts[prompts.length - 1];
+  assert.ok(last !== undefined, "no ForceReply note prompt was sent");
+  return last.messageId;
+}
+
+/** Reply to the newest note prompt with `text`. */
+async function replyWithNote(
+  channel: TelegramChannel,
+  text: string,
+  chatId: string = CHAT,
+): Promise<TelegramPollResult> {
+  mock.queueUpdate(
+    messageUpdate({ chatId, text, replyToMessageId: notePromptId() }),
+  );
+  return channel.pollOnce();
+}
+
+/** Every `audit.reviewed` record the log carries. */
+function reviewsIn(world: Sampled): EventRecord[] {
+  return recordsOf(world.unit.logPath).filter((record) => record.event === "audit.reviewed");
+}
+
+test("APRV-299: the card shows what ran, and offers no approval", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const card = cardsFor(world)[0] as ReviewCard;
+
+  const before = mock.sentMessages().length;
+  const deliveryId = await channel.offerReview(card);
+  const sent = mock.sentMessages().slice(before);
+
+  // One message. No payload region: a review collects no decision, so §10.4's
+  // "show the bytes first" has nothing to be first of.
+  assert.equal(sent.length, 1, `a review card sent ${sent.length} messages`);
+  const message = sent[0] as { text: string; replyMarkup: unknown };
+  assert.equal(String(deliveryId), String((sent[0] as { messageId: number }).messageId));
+  assert.ok(message.text.includes(TELEGRAM_REVIEW_HEADING));
+  assert.equal(
+    message.text.includes(TELEGRAM_PROMPT_HEADING),
+    false,
+    "a review card called itself an approval request",
+  );
+  assert.equal(message.text.includes("PAYLOAD"), false, "a review card carried a payload region");
+
+  // The rows the request prompt's own renderer draws, plus the two the card
+  // adds. Same bullets, same computed/claimed split, same origins.
+  assert.ok(message.text.includes("COMPUTED — derived by the runtime"));
+  assert.ok(message.text.includes(`CLAIMED — authored by ${ACTOR}`));
+  for (const label of ["class:", "commands:", "task:", "ran at:", "verdict:", "summary:"]) {
+    assert.ok(message.text.includes(`<b>${label}</b>`), `no ${label} row: ${message.text}`);
+  }
+  assert.ok(message.text.includes("files.write.local"), "the declared class is not on the card");
+  assert.ok(message.text.includes("git add"), "the command breakdown is not on the card");
+  assert.ok(message.text.includes("write draft 0"), "the claimed summary is not on the card");
+  assert.ok(
+    message.text.includes("allowed without asking"),
+    "the card does not say the runtime allowed this unasked",
+  );
+  assert.ok(message.text.includes("rate 1"), "the card does not state the rate it was drawn at");
+  assert.ok(message.text.includes("outcome completed"), "the card does not state the outcome");
+
+  // APRV-302: no paragraph of rules under the card. The heading carries "this
+  // already ran", the arm toast and the armed heading carry the deny latch, and
+  // the prose that used to say both is gone rather than reworded.
+  for (const banned of [
+    "Deny takes two taps",
+    "Nothing here is pending",
+    "no button on this card authorizes anything",
+    "A reaction alone records OK",
+    "ask for a note first",
+  ]) {
+    assert.equal(
+      message.text.includes(banned),
+      false,
+      `the footer rule block survived (${banned}): ${message.text}`,
+    );
+  }
+
+  // Six buttons and not one of them approves anything.
+  const rows = (message.replyMarkup as {
+    inline_keyboard: { text: string; callback_data: string }[][];
+  }).inline_keyboard;
+  const buttons = rows.flat();
+  assert.equal(buttons.length, REVIEW_CHOICES.length);
+
+  // APRV-302: bare emoji, in two rows — verdict above, grade below.
+  assert.deepEqual(
+    rows.map((row) => row.map((button) => button.text)),
+    [
+      ["✅", "🛑"],
+      ["👎", "😐", "👍", "❤️"],
+    ],
+  );
+  assert.deepEqual(
+    buttons.map((button) => parseReviewCallback(button.callback_data)?.choice),
+    [...REVIEW_CHOICES],
+  );
+  for (const button of buttons) {
+    assert.equal(
+      parseCallbackData(button.callback_data),
+      null,
+      `a review button parsed as a DECISION: ${button.callback_data}`,
+    );
+    assert.ok(
+      Buffer.byteLength(button.callback_data, "utf8") <= TELEGRAM_MAX_CALLBACK_BYTES,
+      `callback_data over the cap: ${button.callback_data}`,
+    );
+  }
+
+  assert.deepEqual(reviewsIn(world), [], "rendering a card appended something");
+  assertClean(world.unit);
+});
+
+test("APRV-299: OK records a review through the real path, and settles the card", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const card = cardsFor(world)[0] as ReviewCard;
+  const deliveryId = await channel.offerReview(card);
+
+  const polled = await tapReview(channel, "ok");
+  assert.equal(polled.reviews.length, 1);
+  assert.deepEqual(polled.reviews[0]?.ok, true);
+
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  const record = reviews[0] as EventRecord;
+  assert.equal(record.actor, HUMAN, "the review was not recorded against the listener's human");
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["subject_seq"], card.sampleSeq);
+  assert.equal("reaction" in payload, false, "an omitted reaction wrote a key");
+
+  // The card says so, and its buttons are gone in the same call.
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_RECORDED));
+  assert.equal(last.replyMarkup, undefined, "a settled card kept its buttons");
+
+  // The sample is closed, so nothing offers it again.
+  assert.deepEqual(openSamples(recordsOf(world.unit.logPath)), []);
+  assertClean(world.unit);
+});
+
+test("APRV-299: a reaction alone records ok and that grade", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "liked");
+
+  const record = reviewsIn(world)[0] as EventRecord;
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok", "a reaction alone did not imply ok");
+  assert.equal(payload["reaction"], "liked");
+  assertClean(world.unit);
+});
+
+test("APRV-299: deny takes two taps and the second says what it obliges", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // The first tap arms and writes nothing, and the card says so.
+  await tapReview(channel, "deny");
+  assert.deepEqual(reviewsIn(world), [], "the first Deny tap appended a review");
+  const armed = editsFor(deliveryId);
+  const armedText = (armed[armed.length - 1] as { text: string }).text;
+  assert.ok(armedText.includes(TELEGRAM_REVIEW_ARMED), `the card does not say it is armed: ${armedText}`);
+  assert.ok(armedText.includes("class:"), "an armed card lost the rows it is about");
+
+  // The second records the denial and the obligation it creates.
+  await tapReview(channel, "deny");
+  const record = reviewsIn(world)[0] as EventRecord;
+  assert.equal((record.payload as Record<string, unknown>)["verdict"], "denied");
+
+  const obligations = recordsOf(world.unit.logPath).filter(
+    (entry) => entry.event === "reconciliation.required",
+  );
+  assert.equal(obligations.length, 1, "a denial opened no reconciliation obligation");
+  const settled = editsFor(deliveryId);
+  const settledText = (settled[settled.length - 1] as { text: string }).text;
+  assert.ok(settledText.includes(TELEGRAM_REVIEW_DENIED));
+  assert.ok(
+    settledText.includes("reconciliation obligation at seq"),
+    `the reply does not name the obligation: ${settledText}`,
+  );
+  assertClean(world.unit);
+});
+
+test("APRV-299: deny with loved is refused reaction-conflicts-verdict", async () => {
+  const world = sampledWorld(1);
+  const { channel, err } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "deny");
+  const polled = await tapReview(channel, "loved");
+
+  assert.equal(polled.reviews.length, 1);
+  assert.equal(polled.reviews[0]?.ok, false);
+  assert.deepEqual(reviewsIn(world), [], "a refused pair appended a review");
+  assert.equal(
+    mock
+      .sentMessages()
+      .some((entry) => (entry.replyMarkup as { force_reply?: boolean } | undefined)?.force_reply === true),
+    false,
+    "a refused pair still asked for a note",
+  );
+
+  const edits = editsFor(deliveryId);
+  const text = (edits[edits.length - 1] as { text: string; replyMarkup: unknown }).text;
+  assert.ok(text.includes("reaction-conflicts-verdict"), `the code is not on the card: ${text}`);
+  assert.ok(text.includes(TELEGRAM_NOT_RECORDED));
+  // Nothing was recorded, so the reviewer must still be able to say which half
+  // they meant: the buttons stay and the arming stands.
+  assert.notEqual(
+    (edits[edits.length - 1] as { replyMarkup: unknown }).replyMarkup,
+    undefined,
+    "a refused tap took the buttons away",
+  );
+  assert.ok(text.includes(TELEGRAM_REVIEW_ARMED), "the arming was silently dropped");
+  assert.ok(
+    err.some((line) => line.includes("reaction-conflicts-verdict")),
+    `the operator was not told: ${err.join("")}`,
+  );
+
+  // And the correction lands: disliked is compatible with a denial.
+  await tapReview(channel, "disliked");
+  await replyWithNote(channel, "it pushed to a branch nobody asked for");
+  const record = reviewsIn(world)[0] as EventRecord;
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "disliked");
+  assertClean(world.unit);
+});
+
+test("APRV-299: loved asks for a note first, and a blank one records nothing", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  const asked = await tapReview(channel, "loved");
+  assert.deepEqual(asked.reviews, [], "the tap recorded before the note arrived");
+  assert.deepEqual(reviewsIn(world), [], "the tap appended before the note arrived");
+  const prompt = mock.sentMessages().find((entry) => entry.messageId === notePromptId());
+  assert.ok(prompt?.text.includes("WHY LOVED?"), "the note prompt does not ask why");
+
+  // A blank reply is refused by the real path, with its own code.
+  const blank = await replyWithNote(channel, "   ");
+  assert.equal(blank.reviews[0]?.ok, false);
+  assert.deepEqual(reviewsIn(world), [], "a blank note appended a review");
+  const refused = editsFor(deliveryId);
+  assert.ok(
+    (refused[refused.length - 1] as { text: string }).text.includes("note-required"),
+    "the refusal code is not on the card",
+  );
+
+  // Words land, verbatim, beside the grade.
+  await tapReview(channel, "loved");
+  await replyWithNote(channel, "exactly the cleanup I wanted and nobody asked me for");
+  const record = reviewsIn(world)[0] as EventRecord;
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "loved");
+  assert.equal(payload["note"], "exactly the cleanup I wanted and nobody asked me for");
+  assertClean(world.unit);
+});
+
+test("APRV-299: every audit refusal code reaches the card, whole message and all", async () => {
+  const world = sampledWorld(1);
+  const card = cardsFor(world)[0] as ReviewCard;
+  const channel = channelFor();
+
+  // A stub handler, because the point here is the RENDERING: `reviewSample`
+  // reaches each of these codes from its own conditions (tests/audit.test.ts is
+  // where those live), and what this asserts is that the card is code-agnostic
+  // — no code is special-cased, dropped, or turned into a shrug.
+  let refusal: string = AUDIT_REFUSAL_CODES[0];
+  channel.onReview(() => ({
+    ok: false,
+    headline: TELEGRAM_NOT_RECORDED,
+    detail: [refusal, `the ${refusal} message, which is a paragraph`],
+    toast: "Not recorded — the card says why.",
+  }));
+
+  for (const code of AUDIT_REFUSAL_CODES) {
+    refusal = code;
+    const deliveryId = await channel.offerReview(card);
+    await tapReview(channel, "ok");
+    const edits = editsFor(deliveryId);
+    const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+    assert.ok(last.text.includes(code), `${code} is not on the card: ${last.text}`);
+    assert.ok(last.text.includes(TELEGRAM_NOT_RECORDED));
+    assert.ok(
+      last.text.length <= TELEGRAM_MAX_MESSAGE_CHARS,
+      `a refused card overran the message limit for ${code}`,
+    );
+    // Nothing was recorded, so the card is still answerable.
+    assert.notEqual(last.replyMarkup, undefined, `${code} took the buttons away`);
+  }
+
+  assert.deepEqual(reviewsIn(world), [], "a refused tap appended a review");
+  assertClean(world.unit);
+});
+
+test("APRV-299: delivery is one card at a time behind a summary", async () => {
+  const world = sampledWorld(3);
+  const { channel, setup } = reviewChannelFor(world);
+  const state = newDispatchState();
+  const { streams } = capture();
+
+  const first = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(first.reviewSummary?.open, 3, "no summary named the backlog");
+  assert.equal(first.reviewCard?.sample_seq, world.samples[0], "the oldest sample was not shown");
+  const summary = mock
+    .sentTexts()
+    .find((text) => text.includes("3 awaiting review"));
+  assert.ok(summary !== undefined, "the summary line is not in the chat");
+  assert.ok(summary.includes("oldest ran"), "the summary does not say how old the oldest is");
+
+  // A second cycle sends nothing: a card is in front of the approver.
+  const second = await dispatchPending(setup, streams, state, at(91));
+  assert.equal(second.reviewCard, undefined, "a second card went out under the first");
+  assert.equal(second.reviewSummary, undefined, "the summary was repeated");
+
+  // Reviewing it releases the walkthrough, and the next cycle shows the next.
+  await tapReview(channel, "ok");
+  const third = await dispatchPending(setup, streams, state, at(92));
+  assert.equal(third.reviewCard?.sample_seq, world.samples[1], "the walkthrough did not advance");
+  assertClean(world.unit);
+});
+
+test("APRV-299: /queue lists the backlog and /skip decides nothing", async () => {
+  const world = sampledWorld(2);
+  const { setup } = reviewChannelFor(world);
+  const state = newDispatchState();
+  const { streams } = capture();
+
+  const first = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(first.reviewCard?.sample_seq, world.samples[0]);
+
+  const commands = commandHandlerFor(setup, streams, state, () => at(91));
+  await commands("queue");
+  const listed = mock.sentTexts()[mock.sentTexts().length - 1] as string;
+  assert.ok(listed.includes("2 awaiting review"), `/queue does not list the backlog: ${listed}`);
+  assert.ok(
+    listed.includes("Nothing is waiting on you"),
+    "the review footer does not say a sample is not a pending question",
+  );
+
+  await commands("skip");
+  const answer = mock.sentTexts()[mock.sentTexts().length - 1] as string;
+  assert.equal(state.review.current, null, "/skip did not release the card");
+  assert.ok(answer.includes("Nothing was recorded"), `/skip did not say so: ${answer}`);
+  assert.deepEqual(reviewsIn(world), [], "/skip appended something");
+
+  // The skipped one goes to the BACK: the next card is the other sample, and
+  // the skipped sample is still open, still listed, still reviewable.
+  const next = await dispatchPending(setup, streams, state, at(92));
+  assert.equal(next.reviewCard?.sample_seq, world.samples[1], "/skip did not advance the order");
+  assert.deepEqual(
+    openSamples(recordsOf(world.unit.logPath)).map((subject) => subject.seq),
+    world.samples,
+  );
+  assertClean(world.unit);
+});
+
+test("APRV-299: a lost card leaves the sample pending and reviewable", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const card = cardsFor(world)[0] as ReviewCard;
+  await channel.offerReview(card);
+  const live = reviewButtonFor("ok");
+
+  // A restart: the nonce died with the process that issued it.
+  const restarted = channelFor();
+  restarted.onReview(reviewHandlerFor(reviewChannelFor(world).setup, capture().streams));
+  mock.queueUpdate(callbackUpdate({ data: live, chatId: CHAT }));
+  const polled = await restarted.pollOnce();
+
+  assert.deepEqual(
+    polled.ignored.map((entry) => entry.kind),
+    ["unknown-callback"],
+    "a tap on a lost card was not ignored",
+  );
+  assert.deepEqual(polled.reviews, [], "a tap on a lost card reached the runtime");
+  assert.deepEqual(reviewsIn(world), [], "a tap on a lost card appended a review");
+
+  // The sample is exactly where it was, and the terminal verb still names it.
+  assert.deepEqual(
+    openSamples(recordsOf(world.unit.logPath)).map((subject) => subject.seq),
+    world.samples,
+  );
+  const reviewed = reviewSample(
+    world.unit.logPath,
+    { kind: "seq", seq: card.sampleSeq },
+    HUMAN,
+    null,
+    { verdict: "ok" },
+  );
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  assertClean(world.unit);
+});
+
+test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", async () => {
+  const world = sampledWorld(2);
+  const { channel } = reviewChannelFor(world);
+
+  // One reaction given on the card…
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+  await tapReview(channel, "liked");
+
+  // …and one given at the terminal, through the verb an operator runs.
+  const cli = await runReviewCli(world, [
+    "audit",
+    "review",
+    String(world.samples[1]),
+    "--reaction",
+    "liked",
+    "--as",
+    HUMAN,
+  ]);
+  assert.equal(cli.code, 0, `audit review failed: ${cli.err}`);
+
+  const entries = humanFeedback(recordsOf(world.unit.logPath));
+  assert.equal(entries.length, 2, `expected two feedback entries, got ${entries.length}`);
+  const [fromCard, fromCli] = entries as [FeedbackEntry, FeedbackEntry];
+  for (const entry of [fromCard, fromCli]) {
+    assert.equal(entry.source, "review");
+    assert.equal(entry.event, "audit.reviewed");
+    assert.equal(entry.actor, HUMAN);
+    assert.equal(entry.reaction, "liked");
+    assert.equal(entry.verdict, "ok");
+    assert.equal(entry.class, "files.write.local");
+    assert.equal(entry.agentActor, ACTOR);
+  }
+
+  // Same shape, field for field, once the two identifiers that MUST differ are
+  // set aside: which record it is, and which action it is about.
+  const shapeOf = (entry: FeedbackEntry): Record<string, unknown> => ({
+    ...entry,
+    seq: 0,
+    ts: "",
+    actionKey: "",
+    sampleSeq: 0,
+  });
+  assert.deepEqual(shapeOf(fromCard), shapeOf(fromCli));
+
+  // And the verb an agent is pointed at prints both.
+  const printed = await runReviewCli(world, ["feedback", "--json"]);
+  assert.equal(printed.code, 0, printed.err);
+  const parsed = JSON.parse(printed.out) as { entries: FeedbackEntry[] };
+  assert.equal(parsed.entries.length, 2);
+  assert.deepEqual(
+    parsed.entries.map((entry) => entry.reaction),
+    ["liked", "liked"],
+  );
+  assertClean(world.unit);
+});
+
+test("APRV-302: a review tap is acked as a review, not as a decision", async () => {
+  const world = sampledWorld(4);
+  const { channel } = reviewChannelFor(world);
+  const cards = cardsFor(world) as ReviewCard[];
+  // The mock accumulates across this file, so every claim below is about the
+  // answers THIS test produced.
+  const from = mock.answerTexts().length;
+  const since = (): string[] => mock.answerTexts().slice(from);
+
+  // `ok`, and every path that records straight off a tap, says "recording your
+  // review". TELEGRAM_ACK_HEARD's "deciding" belongs to a card with something
+  // pending on it, and a review has nothing pending by construction.
+  await channel.offerReview(cards[0] as ReviewCard);
+  await tapReview(channel, "ok");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  await channel.offerReview(cards[1] as ReviewCard);
+  await tapReview(channel, "indifferent");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  await channel.offerReview(cards[2] as ReviewCard);
+  await tapReview(channel, "liked");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  // The toast that says something the ack does not is untouched: the first deny
+  // tap still says plainly that nothing was written.
+  await channel.offerReview(cards[3] as ReviewCard);
+  await tapReview(channel, "deny");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ARM_TOAST);
+  await tapReview(channel, "deny");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  assert.equal(reviewsIn(world).length, 4);
+  assert.equal(
+    since().includes(TELEGRAM_ACK_HEARD),
+    false,
+    `a review tap was acked with the request card's toast: ${since().join(" | ")}`,
+  );
+  assertClean(world.unit);
+});
+
+test("APRV-302: the note prompt keeps its toast, and its reply answers no callback", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "disliked");
+  assert.equal(
+    mock.answerTexts().at(-1),
+    TELEGRAM_REVIEW_NOTE_TOAST,
+    "the note prompt lost the toast that says nothing is recorded yet",
+  );
+
+  // The reply is a message, not a callback, so it answers nothing at all: what
+  // the log took is on the card edit that follows.
+  const answers = mock.answerTexts().length;
+  await replyWithNote(channel, "it renamed a file the task never named");
+  assert.equal(mock.answerTexts().length, answers, "a note reply answered a callback");
+  assert.equal(reviewsIn(world).length, 1);
+  assertClean(world.unit);
+});
+
+/** Run one CLI verb against a sampled world's log, in process. */
+async function runReviewCli(
+  world: Sampled,
+  argv: string[],
+): Promise<{ code: number; out: string; err: string }> {
+  let out = "";
+  let err = "";
+  const code = await main([...argv, "--log", world.unit.logPath], {
+    cwd: world.unit.dir,
+    streams: {
+      out: (text) => {
+        out += text;
+      },
+      err: (text) => {
+        err += text;
+      },
+    },
+  });
+  return { code, out, err };
+}

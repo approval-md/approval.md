@@ -53,7 +53,10 @@
  * run these bytes, here" belongs to the bytes rather than to one tool-use id.
  * A retry while the question is pending adopts it instead of asking twice; a
  * retry after a grant lands proceeds on it, once, inside the TTL. That is why
- * the wait no longer ends in a withdrawal: a late tap now authorizes something.
+ * the wait no longer ends in an immediate withdrawal: a late tap authorizes
+ * something. It ends in one once the RETRY GRACE has run out (APRV-287): past
+ * that window nothing is coming back to adopt the question, and a request left
+ * standing is one more dead message a restarted listener re-delivers.
  *
  * **An allow follows its record, and says which window it sits in (APRV-200).**
  * The harness executes and never sees this process's return value, so what
@@ -87,6 +90,7 @@ import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
   commandSegmentWords,
+  CODE_EXECUTING_RULES,
   GATE_SELF_CLASS,
   protectedPathClass,
   type ClassifiedSegment,
@@ -114,16 +118,26 @@ import {
   type HarnessProvenance,
 } from "../core/harness-version.js";
 import {
+  abandonedAfterMs,
+  HOOK_DEFAULT_WAIT,
+  HOOK_RETRY_GRACE_MS,
+} from "../core/harness-wait.js";
+import {
   harnessLoopFloor,
   isLoopEscalated,
+  isSideEffectingClass,
+  loopClearance,
   UNKNOWN_SESSION,
   type HarnessLoopState,
 } from "../core/loop.js";
+import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
+import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import {
+  payloadOf,
   readVerifiedRecords,
   requestState,
   useVerifiedSnapshots,
@@ -137,12 +151,24 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import {
+  checkCodexHookInput,
+  codexBinding,
+  CODEX_POST_TOOL_EVENT,
+  readCodexReportedOutcome,
+} from "./hook-codex.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
-/** Default wait, chosen to sit inside Claude Code's own 60s hook default. */
-const DEFAULT_TIMEOUT = "55s";
+/**
+ * Default wait, chosen to sit inside Claude Code's own 60s hook default.
+ *
+ * Spelled in `core/harness-wait.ts` since APRV-287, where the Telegram
+ * listener reads the same duration to decide which pending requests nobody is
+ * waiting on any more.
+ */
+const DEFAULT_TIMEOUT = HOOK_DEFAULT_WAIT;
 
 /** Poll interval for the decision wait. */
 const DEFAULT_INTERVAL_MS = 1_000;
@@ -207,9 +233,12 @@ export const HOOK_DENY_CODES = [
    */
   "hook-withdrawn",
   /**
-   * The wait elapsed with the request still undecided. The request STAYS OPEN
-   * until the policy's TTL (APRV-117): a decision inside that window authorizes
-   * a retry of the identical command in the identical directory, once.
+   * The wait elapsed with the request still undecided. The request stays open
+   * for the RETRY GRACE (APRV-117, bounded by APRV-287): a decision inside that
+   * window authorizes a retry of the identical command in the identical
+   * directory, once. Past the grace the hook withdraws it (reason `timeout`),
+   * because a question nothing will adopt is a message on a phone that decides
+   * nothing.
    */
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
@@ -229,6 +258,22 @@ export const HOOK_DENY_CODES = [
    * one more prompt on the retry, and nothing authorized meanwhile.
    */
   "hook-grant-unverified",
+  /**
+   * `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the
+   * runtime did not author, unwrapped (APRV-193).
+   *
+   * The one deny in this union that names a spelling that would work rather
+   * than a decision or a fault: re-run it as `approval sandbox -- <cmd>` and it
+   * proceeds, classified exactly as it is now, with no way out to the network.
+   *
+   * It exists because the hook DECIDES and the harness EXECUTES. A verdict
+   * cannot rewrite a command into a wrapper, so the only way for this runtime
+   * to insist on the room is to refuse the spelling that does not ask for it.
+   * Off by default, and turning it on can only ever refuse more — which is why
+   * an environment variable is an acceptable home for it, and why nothing in
+   * the other direction is readable from one.
+   */
+  "hook-sandbox-required",
   /** The policy could not be loaded, so no class can be resolved. */
   "hook-policy-unavailable",
   /**
@@ -337,6 +382,8 @@ interface HarnessAdapter {
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /** Include the native tool name in the bytes a grant binds. */
+  bindToolName?: boolean;
 }
 
 const CLAUDE_ADAPTER: HarnessAdapter = {
@@ -355,6 +402,15 @@ const CURSOR_ADAPTER: HarnessAdapter = {
   fileTools: ["Write", "Delete"],
 };
 
+const CODEX_ADAPTER: HarnessAdapter = {
+  kind: "codex",
+  originApp: "codex-hook",
+  defaultActor: "agent:codex",
+  shellTool: "Bash",
+  fileTools: ["apply_patch"],
+  bindToolName: true,
+};
+
 /**
  * The decision object the harness reads from stdout.
  *
@@ -362,7 +418,12 @@ const CURSOR_ADAPTER: HarnessAdapter = {
  * `{permission, user_message, agent_message}`. One construction site per
  * harness, still never `ask`.
  */
-function decision(permission: Permission, reason: string, harness: HarnessKind): string {
+function decision(
+  permission: Permission,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): string {
   if (harness === "cursor") {
     return `${JSON.stringify({
       permission,
@@ -370,17 +431,32 @@ function decision(permission: Permission, reason: string, harness: HarnessKind):
       agent_message: reason,
     })}\n`;
   }
-  return `${JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: permission,
-      permissionDecisionReason: reason,
-    },
-  })}\n`;
+  const hookSpecificOutput: Record<string, unknown> = {
+    hookEventName: "PreToolUse",
+    permissionDecision: permission,
+    permissionDecisionReason: reason,
+  };
+  if (harness === "codex" && permission === "allow") {
+    if (codexCommand !== undefined) hookSpecificOutput["updatedInput"] = { command: codexCommand };
+  }
+  return `${JSON.stringify({ hookSpecificOutput })}\n`;
 }
 
-function allow(streams: Streams, reason: string, harness: HarnessKind): number {
-  streams.out(decision("allow", reason, harness));
+function allow(
+  streams: Streams,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): number {
+  if (harness === "codex" && codexCommand === undefined) {
+    return deny(
+      streams,
+      "hook-io",
+      "the Codex allow lost its exact bound tool_input.command",
+      harness,
+    );
+  }
+  streams.out(decision("allow", reason, harness, codexCommand));
   return EXIT_OK;
 }
 
@@ -395,6 +471,8 @@ function deny(streams: Streams, code: string, detail: string, harness: HarnessKi
 
 interface HookInput {
   sessionId: string;
+  /** Whether the event supplied the session id, distinct from the strict unknown bucket. */
+  sessionIdPresent: boolean;
   cwd: string;
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -418,6 +496,17 @@ interface HookInput {
    * {@link readReportedOutcome}) — never the text inside it.
    */
   toolResponse: Record<string, unknown> | null;
+  /** `tool_response` verbatim, including strings, for harness-specific readers. */
+  toolResponseRaw: unknown;
+  /**
+   * `is_interrupt`, the post-execution events' own word for "a person stopped
+   * this" (APRV-303).
+   *
+   * `PostToolUseFailure` carries it beside `error`; `PostToolUse` carries the
+   * same fact as `tool_response.interrupted`. Read only to make an outcome
+   * UNREADABLE, never to establish one, so nothing about it can lower scrutiny.
+   */
+  interrupted: boolean;
   /**
    * `version`, when the harness states its own (APRV-227).
    *
@@ -475,23 +564,27 @@ function parseHookInput(raw: string): ParsedInput {
       ? (toolInputValue as Record<string, unknown>)
       : {};
   const responseValue = fields["tool_response"];
+  const sessionId = readString(fields, "session_id");
   return {
     ok: true,
     input: {
       // The ONE shared bucket for an unreadable session (`core/loop.ts`'s
       // `UNKNOWN_SESSION`): absence accrues faster than a readable id and never
       // slower, which is the fail-closed direction.
-      sessionId: readString(fields, "session_id") ?? UNKNOWN_SESSION,
+      sessionId: sessionId ?? UNKNOWN_SESSION,
+      sessionIdPresent: sessionId !== null,
       cwd: readString(fields, "cwd") ?? "",
       toolName,
       toolInput,
       toolUseId: readString(fields, "tool_use_id"),
       hookEventName: readString(fields, "hook_event_name"),
       harnessVersion: readString(fields, "version"),
+      interrupted: fields["is_interrupt"] === true,
       toolResponse:
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
           : null,
+      toolResponseRaw: responseValue,
     },
   };
 }
@@ -1232,9 +1325,29 @@ function tierOf(target: string, cwd: string): FileTier {
   return { rule: PROTECTED_NAME_ELSEWHERE_RULE, worktree: null, root: realRoot };
 }
 
+/**
+ * The class an ordinary file edit is (APRV-303).
+ *
+ * The same string `core/command-class.ts` gives a shell redirect into the
+ * workspace, and spelled here because the file tools reach the same class by a
+ * different road. Until APRV-303 the file path produced no class at all for a
+ * non-protected target, which is why the loop floor could not see an Edit.
+ */
+const WORKSPACE_WRITE_CLASS = "files.write.workspace";
+
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
   cls: string;
+  /**
+   * Is this file one the policy protects? (APRV-303.)
+   *
+   * `false` is an ordinary workspace edit, which is answered by an outright
+   * allow unless a §10.2 floor is standing over the session or the actor. The
+   * class, the payload and the headline are built either way, so that the
+   * floored call asks the same question about the same bytes that a protected
+   * edit does.
+   */
+  protectedPath: boolean;
   rule: string;
   /** The target, absolute and resolved from the hook's own directory. */
   file: string;
@@ -1248,13 +1361,30 @@ interface FileGate {
 }
 
 /**
- * What a non-Bash tool call asks for, or `null` when it is pass-through.
+ * What a non-Bash tool call asks for, or `null` when it names no file at all.
  *
  * Only one thing about a file edit is a gate question at v0.1: whether the file
  * is one only a human may write. Everything else the harness edits is
  * `files.write.workspace`, which this repository's policy makes autonomous, and
  * routing every keystroke of ordinary editing through a gate check would spend
  * latency to reach a foregone conclusion.
+ *
+ * ## The ordinary edit still gets a class (APRV-303)
+ *
+ * It used to get none: an unprotected target returned `null` here, and
+ * `describeToolCall` answered `allow` from a branch that sits ABOVE the loop
+ * floor, above `recordUnattended`, and above everything that appends. So a
+ * session three failed writes deep had its Bash calls routed to a human and its
+ * Edit calls waved through, which is the disagreement APRV-303 was filed on:
+ * eight edits to the same file, under a standing floor, none of them routed and
+ * none of them counted.
+ *
+ * The foregone conclusion is still foregone, and is still answered without
+ * asking anybody: `describeToolCall` marks the call {@link FileGate.protectedPath}
+ * `false`, and `runHarnessHook` allows it outright the moment it establishes
+ * that no floor is standing. What it can no longer do is skip that
+ * establishment. The floor predicate is now one predicate over one class for
+ * every tool kind, which is what amended SPEC.md §10.2 asks for.
  *
  * ## The payload is the change (APRV-124)
  *
@@ -1297,7 +1427,6 @@ function fileToolGate(
   // surface stays `policy.edit`. Editing through the Edit tool must not be a
   // cheaper way to touch the gate than editing through a shell redirect.
   const surface = protectedPathClass(declared, protectedPaths);
-  if (surface === null) return null;
 
   const file = absolute(declared, cwd);
   const tier = tierOf(file, cwd);
@@ -1324,7 +1453,8 @@ function fileToolGate(
   }
 
   return {
-    cls: surface,
+    cls: surface ?? WORKSPACE_WRITE_CLASS,
+    protectedPath: surface !== null,
     rule,
     file,
     worktree: tier.worktree,
@@ -1370,10 +1500,20 @@ interface HookRun {
   actor: string;
   timeoutMs: number;
   intervalMs: number;
+  /**
+   * How long a request outlives the wait before this hook takes it back
+   * (APRV-287, `--retry-grace`).
+   *
+   * `core/harness-wait.ts` holds the default and the reasoning. Zero withdraws
+   * at the moment the wait expires, which is what the tests drive.
+   */
+  graceMs: number;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
   harness: HarnessKind;
   originApp: string;
+  /** Exact native command bytes required in a Codex allow's identity update. */
+  codexCommand?: string;
   /**
    * The version the hook event stated, or `null` (APRV-227).
    *
@@ -1384,6 +1524,17 @@ interface HookRun {
    * nothing for it. See {@link registrationProvenance}.
    */
   eventVersion: string | null;
+  /**
+   * The channel names this policy configures, sorted (APRV-281).
+   *
+   * Read off the policy the caller already loaded, and used for ONE thing: the
+   * line this hook prints when it appends a request, so the agent and the
+   * operator watching its error stream are told where the question went. It
+   * resolves nothing and reaches no verdict. An empty list is a fact worth
+   * printing rather than a default to fill in: a request under a policy that
+   * configures no channel is a question nothing is delivering.
+   */
+  channels: readonly string[];
 }
 
 /**
@@ -1410,12 +1561,13 @@ function registrationProvenance(run: HookRun): HarnessProvenance | null {
  *
  * Two things narrowed under APRV-117, and both are load-bearing.
  *
- * **The timeout no longer calls this.** A request keyed by payload hash can be
- * adopted by the retry, so an answer that lands after this process gave up
- * still authorizes something; retracting it would be throwing away the very
- * decision the human is about to make. What still calls this is every path
- * where nothing will retry: a signal, a thrown failure, an intake refusal that
- * dooms the whole command.
+ * **The timeout no longer calls this immediately.** A request keyed by payload
+ * hash can be adopted by the retry, so an answer that lands after this process
+ * gave up still authorizes something; retracting it at once would be throwing
+ * away the very decision the human is about to make. What still calls this is
+ * every path where nothing will retry: a signal, a thrown failure, an intake
+ * refusal that dooms the whole command, and — since APRV-287 — a wait whose
+ * retry grace has run out (see {@link withdrawAbandoned}).
  *
  * **Only keys this invocation opened.** An ADOPTED key was requested by another
  * process, and `withdraw` is requester-only by design (APRV-106 rule 1): taking
@@ -1448,6 +1600,108 @@ function withdrawPending(
     );
   }
   return withdrawn;
+}
+
+/**
+ * Pending harness requests this actor opened that nothing will ever adopt
+ * (APRV-287).
+ *
+ * ## The state this names
+ *
+ * A wait that expires leaves its question open, because a decision inside the
+ * policy's TTL still authorizes an identical retry (APRV-117). That is right
+ * for as long as a retry is plausible and wrong afterwards: on 2026-09-06 three
+ * waits expired behind a dead daemon, nothing retried them, and the requests sat
+ * live until the TTL — so the daemon's restart re-delivered a dozen dead
+ * questions to a phone, one message each. The grace window
+ * (`core/harness-wait.ts`) is where the two readings meet: inside it the
+ * question is live for the retry, past it the asker is gone.
+ *
+ * ## What it will not name
+ *
+ *  - **A request another actor opened.** `withdraw` is requester-only by design
+ *    (APRV-106 rule 1), so the filter is the same fact stated before the call:
+ *    taking back somebody else's question is the queue-clearing the gate
+ *    refuses.
+ *  - **The bytes this invocation is asking about.** `keepHash` is this
+ *    invocation's payload hash, and a request carrying it is the question this
+ *    process is adopting or waiting on. Sweeping it would be a hook withdrawing
+ *    its own live question.
+ *  - **Anything but a live `approval.requested`.** The state is derived through
+ *    `requestState` from the verified records the caller already read, so a
+ *    decided, expired or already withdrawn request is never touched.
+ *  - **A request younger than the wait plus the grace**, measured from the
+ *    `approval.requested` record's own runtime-assigned timestamp.
+ *
+ * Nothing here appends: the caller decides what to do with the list, and the
+ * append happens through {@link withdrawPending} like every other withdrawal on
+ * this surface.
+ */
+function abandonedRequests(
+  run: HookRun,
+  records: EventRecord[],
+  now: string,
+  keepHash: string | null,
+): { actionKey: string; cls: string; ageMs: number }[] {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return [];
+  const limit = abandonedAfterMs(run.timeoutMs, run.graceMs);
+  const found = new Map<string, { actionKey: string; cls: string; ageMs: number }>();
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    if (record.actor !== run.actor) continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    const payload = payloadOf(record);
+    if (payload["execution"] !== "harness") continue;
+    if (keepHash !== null && payload["payload_hash"] === keepHash) continue;
+    const at = Date.parse(record.ts);
+    if (Number.isNaN(at) || nowMs - at < limit) continue;
+    if (requestState(records, key, now, run.ttlMs).state !== "requested") continue;
+    const cls = payload["class"];
+    found.set(key, {
+      actionKey: key,
+      cls: typeof cls === "string" ? cls : "(no class)",
+      ageMs: nowMs - at,
+    });
+  }
+  return [...found.values()];
+}
+
+/** Minutes, for a sentence a human reads. */
+function minutesText(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes >= 1) return `${String(minutes)}m`;
+  return `${String(Math.max(1, Math.round(ms / 1000)))}s`;
+}
+
+/**
+ * Take back every question this actor opened that the grace window has run out
+ * on (APRV-287).
+ *
+ * Best effort, exactly as {@link withdrawPending} is: a withdrawal that refuses
+ * changes nothing, and `already-decided` — a human answering while this ran —
+ * is passed over in silence there. Returns the keys actually withdrawn.
+ */
+function withdrawAbandoned(
+  run: HookRun,
+  streams: Streams,
+  records: EventRecord[],
+  now: string,
+  keepHash: string | null,
+  only: readonly string[] | null = null,
+): string[] {
+  const abandoned = abandonedRequests(run, records, now, keepHash).filter(
+    (entry) => only === null || only.includes(entry.actionKey),
+  );
+  if (abandoned.length === 0) return [];
+  return withdrawPending(
+    run,
+    streams,
+    abandoned.map((entry) => entry.actionKey),
+    `no retry adopted this question within ${minutesText(abandonedAfterMs(run.timeoutMs, run.graceMs))} of the hook's wait opening it (APRV-287); the asking tool call is gone, so the request is taken back rather than left for a listener to re-deliver`,
+    "timeout",
+  );
 }
 
 /**
@@ -1614,7 +1868,7 @@ function unattendedGuard(
   if (isLoopEscalated(read.records, task)) {
     return {
       code: "hook-gate-refused:loop-escalated",
-      detail: `task ${task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its unattended classes may not run. The escalation clears when an execution.completed for the task lands.`,
+      detail: `loop-escalated: task ${task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2), so its unattended classes may not run. ${loopClearance("task", task)}.`,
     };
   }
 
@@ -1695,6 +1949,63 @@ function recordUnattended(
 }
 
 /**
+ * Say, on STDERR, that a question is now on a human's queue and where it went
+ * (APRV-281).
+ *
+ * The behaviour this replaces: a gated tool call appended its request and then
+ * blocked for the whole wait in complete silence, ending in a `hook-timeout` the
+ * agent read as a refusal and the operator never saw coming. Nine minutes of a
+ * session's clock, with no way to tell "nobody has answered yet" from "nothing
+ * is even delivering this".
+ *
+ * **STDERR, and never stdout.** Stdout carries the verdict object the harness
+ * parses (see this file's header); a second object, or any prose at all, on that
+ * stream is a hook the harness cannot read. Claude Code shows stderr to the
+ * operator, which is exactly the audience for this.
+ *
+ * **It decides nothing.** No verdict, no timeout, no record, no refusal code
+ * turns on any of it. Both lines are printed after the request is appended and
+ * before the poll loop starts, so the state they describe is the state that
+ * exists; a probe that reported nothing (an unreadable directory, a platform
+ * with no euid) simply stays quiet rather than changing what this process does.
+ *
+ * **The listener line names a socket, and claims only what a socket can tell
+ * you.** `drawSocketUsable` is the same predicate an asker consults, and this
+ * connects to nothing: a usable-looking socket therefore prints NOTHING here,
+ * because a `stat` cannot establish that the far side answers. What an absent
+ * or untrustworthy socket does establish is that `approval up` is not running
+ * against this log in this checkout, and `approval up` is the one process that
+ * both serves the channels and consumes the taps. That is worth saying: on
+ * 2026-09-05 taps piled up unconsumed while hooks waited out their windows.
+ */
+function announceWait(
+  streams: Streams,
+  run: HookRun,
+  waiting: readonly GatedAction[],
+): void {
+  const where =
+    run.channels.length === 0
+      ? "no channel (this policy configures none, so nothing is delivering the question)"
+      : `channel ${run.channels.join(", ")}`;
+  for (const action of waiting) {
+    const adopted =
+      action.origin === "adopted"
+        ? " The question was already open for these exact bytes, so this tool call adopts it rather than asking a second time."
+        : "";
+    streams.err(
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${adopted}\n`,
+    );
+  }
+
+  const socket = drawSocketPathFor(run.logPath);
+  const listener = drawSocketUsable(socket);
+  if (listener.ok) return;
+  streams.err(
+    `approval: no listener is running for this log (${listener.reason}: ${socket}), so the request above may sit undelivered and a decision may go unconsumed. Start the gate's ambient runtime in the checkout that owns this log: \`eval "$(approval env)" && approval up\`, which runs the daemon loop and every configured channel in one process.\n`,
+  );
+}
+
+/**
  * The gated half: find what is already open for these bytes, request whatever
  * is not, wait for the decisions, spend the grants. Returns the exit code of
  * whatever verdict it printed.
@@ -1754,19 +2065,59 @@ function gateAndWait(
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
   /**
-   * Loop safety floors every class of this invocation to `manual` (APRV-145).
+   * The harness streak that floors the SIDE-EFFECTING classes of this
+   * invocation to `manual` (APRV-145, narrowed by APRV-297), or `null` where
+   * policy alone sent it here.
    *
-   * Passed into `request` rather than acted on here, so the floored action takes
-   * the identical path a manual class takes — same records, same order, same
-   * wait — and nothing below knows how it got there.
+   * Passed into `request` as a boolean rather than acted on here, so the floored
+   * action takes the identical path a manual class takes — same records, same
+   * order, same wait — and nothing below knows how it got there. What the STATE
+   * adds (APRV-280) is the deny text: an agent whose commands are all suddenly
+   * on the phone is owed the reason and the way out in the same breath, and
+   * before APRV-280 the nine-minute wait ended in a bare `hook-timeout` that
+   * said neither.
+   *
+   * Since APRV-297 the caller passes `null` for a command whose classes are all
+   * reads, and {@link floorApplies} below carves the read classes out of a mixed
+   * one, so a floor never puts a question about looking on a human's phone.
    */
-  loopFloor = false,
+  floor: HarnessLoopState | null = null,
 ): number {
+  /**
+   * Does the floor route THIS class to a human? (APRV-297.)
+   *
+   * Per class rather than per command, because a MIXED tool call is one question
+   * about its side effects and no question at all about its looking. Under a
+   * floor, `ls -la && mkdir build` raises the write and leaves the read to the
+   * policy, so the approver sees one prompt for what the command DOES. Before
+   * this the read class was raised too, and a floored session put two prompts on
+   * a phone for one command, one of which nobody needed to answer.
+   *
+   * The command is still routed as a whole: the verdict waits on the classes
+   * that were raised, and an allow covers the command.
+   */
+  const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
-  const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  const sayAllow = (reason: string): number =>
+    allow(streams, reason, run.harness, run.codexCommand);
+  /**
+   * Every deny this function can print, with the floor's own sentence appended
+   * when a floor is what routed the command here (APRV-280). One wrapper rather
+   * than a sentence bolted onto the timeout alone: a floored invocation that
+   * ends in a rejection, a lapse or an I/O fault leaves the agent in exactly the
+   * same place, and the operator reading the harness's error stream needs the
+   * scope key either way.
+   */
   const sayDeny = (code: string, detail: string): number =>
-    deny(streams, code, detail, run.harness);
+    deny(
+      streams,
+      code,
+      floor === null
+        ? detail
+        : `${detail} This tool call was routed to a human by loop safety rather than by policy — loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls (amended SPEC.md §10.2). ${loopClearance(floor.scope, floor.key)}`,
+      run.harness,
+    );
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
@@ -1775,6 +2126,18 @@ function gateAndWait(
   const intake = readVerifiedRecords(run.logPath);
   if (!intake.ok) return sayDeny("hook-io", intake.message);
   const intakeTs = new Date().toISOString();
+
+  // APRV-287. Before this invocation adds a question of its own, the questions
+  // earlier invocations of this actor left behind are taken back — every one
+  // whose grace window has run out, and never the bytes this one is about to
+  // ask about. The hook is the only writer that can do this: `withdraw` is
+  // requester-only, and the requester of a harness request is this actor.
+  const swept = withdrawAbandoned(run, streams, intake.records, intakeTs, hash);
+  if (swept.length > 0) {
+    streams.err(
+      `approval: withdrew ${String(swept.length)} abandoned harness request(s) nothing retried (${swept.join(", ")}); a tap on one of them now authorizes nothing and the channel says so\n`,
+    );
+  }
 
   const actions: GatedAction[] = classes.map((cls) => {
     const carry = findHarnessCarry(intake.records, hash, cls, intakeTs, run.ttlMs);
@@ -1842,7 +2205,7 @@ function gateAndWait(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
-        ...(loopFloor ? { loopFloor: true } : {}),
+        ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
       },
       run.actor,
       run.options,
@@ -1899,6 +2262,18 @@ function gateAndWait(
     return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
 
+  // Past every early return, so this is reached only where this process is
+  // genuinely about to block on a human (APRV-281). The set it names is the set
+  // it waits on: the keys this invocation opened, plus the ones it adopted from
+  // an earlier tool call, which wait in the same silence and were the case the
+  // announce would most easily have missed. A carried grant is not here because
+  // nothing is waiting on it.
+  announceWait(
+    streams,
+    run,
+    actions.filter((action) => waitKeys.includes(action.actionKey)),
+  );
+
   const deadline = Date.now() + run.timeoutMs;
 
   // A signal arriving mid-wait means the session is going away: nothing will
@@ -1920,6 +2295,14 @@ function gateAndWait(
   process.on("SIGTERM", onTerm);
   process.on("SIGINT", onInt);
 
+  /**
+   * Has this invocation already said, on stderr, that the verified view lags
+   * the requests it is waiting on (APRV-294)? Said once per invocation: the
+   * poll runs every second, and a line per poll would bury the one line that
+   * matters under sixty copies of itself.
+   */
+  let saidLagging = false;
+
   try {
     for (;;) {
       const read = readVerifiedRecords(run.logPath);
@@ -1938,9 +2321,52 @@ function gateAndWait(
       // from the log again would let an empty or foreign result read as
       // "nothing pending" and fall through to allow; the verified log must show
       // every one of these keys granted before the hook says yes.
-      const states = waitKeys.map((key) => requestState(read.records, key, ts, run.ttlMs).state);
+      const derived = waitKeys.map((key) => ({
+        key,
+        state: requestState(read.records, key, ts, run.ttlMs).state,
+      }));
+      const states = derived.map((entry) => entry.state);
 
-      if (!states.includes("requested")) {
+      /**
+       * Keys this process ESTABLISHED exist, that this read does not carry
+       * (APRV-294).
+       *
+       * Every key in `waitKeys` was seen in a verified read by this process:
+       * `ownKeys` because `request` appended it and returned the record,
+       * `adopted` because intake's verified read found the pending request it
+       * is adopting. So `none` here is never the terminal fact "there is no
+       * such request". A log is append-only; a request that existed does not
+       * stop existing. What `none` says is that the view this read produced
+       * does not yet carry a record this process holds, which is a fact about
+       * the view and not about the request.
+       *
+       * On 2026-09-07 02:00Z, minutes after `approval log sync` replaced the
+       * committed baseline and the daemon restarted, a hook read exactly this
+       * and denied at once: `hook-io: the verified log does not show every
+       * request as granted (states: none, none, none)`. The requests were real
+       * and reached the approver's phone; the view had not caught up. Treating
+       * that as terminal spends the human's answer on nothing and, since it is
+       * a deny, hands the agent a refusal for a question still open.
+       *
+       * So a lagging key waits, exactly as `requested` waits, bounded by the
+       * same timeout — and nothing here reads unverified bytes as verified,
+       * which is the only response to a lag that §11.1 invariant 1 leaves open.
+       * The APRV-287 withdrawal still applies at expiry, over the keys whose
+       * requests the view does carry.
+       */
+      const lagging = derived
+        .filter((entry) => entry.state === "none")
+        .map((entry) => entry.key);
+      if (lagging.length > 0 && !saidLagging) {
+        saidLagging = true;
+        streams.err(
+          `approval: the verified log does not yet carry ${lagging.join(", ")} (verified head: ${
+            read.head === null ? "empty" : `seq ${String(read.head.seq)}`
+          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${String(run.timeoutMs)}ms wait. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
+        );
+      }
+
+      if (!states.includes("requested") && lagging.length === 0) {
         // Precedence, as `approval wait` fixes it: a human's "no" outranks a
         // lapse, and both outrank "everything was granted". A withdrawal sits
         // with the refusals: it is not a decision, but it is terminal, and it
@@ -1974,6 +2400,13 @@ function gateAndWait(
         // Not a wait outcome: the log disagrees with itself about keys this
         // process is waiting on. Nothing is retracted, because the state that
         // would justify retracting is the state that could not be established.
+        //
+        // A BACKSTOP since APRV-294, and deliberately kept. `none` no longer
+        // reaches here (it waits, above) and every remaining state is either
+        // terminal and answered above or `granted`, so this is unreachable
+        // through today's `RequestState`. It stands for the state a later
+        // member of that union would arrive as: an outcome this function has no
+        // reading for denies rather than allows.
         return sayDeny(
           "hook-io",
           `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
@@ -1981,14 +2414,32 @@ function gateAndWait(
       }
 
       if (Date.now() >= deadline) {
-        // APRV-117, the behaviour APRV-106 had to get wrong for want of
-        // carryover. The request STAYS OPEN: a decision inside the policy's TTL
-        // authorizes the retry of this exact command in this exact directory,
-        // once. Withdrawing here would discard the answer the human is about to
-        // give.
+        // APRV-117, narrowed by APRV-287. The request stays open for the RETRY
+        // GRACE: a decision inside that window authorizes the retry of this
+        // exact command in this exact directory, once, and withdrawing at the
+        // first expiry would discard the answer the human is about to give.
+        // Past the grace nobody is coming back for it, and a question nothing
+        // will adopt is taken back rather than left for a restarted listener to
+        // re-deliver.
+        const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
+        // APRV-294: a wait that ends with the view still short of its own
+        // requests says so. The deny is the same deny — the wait ran out — and
+        // the repair is different from a queue nobody answered: the log this
+        // hook reads is behind the log it wrote to, and `approval log verify`
+        // in the checkout that owns it is where that is established.
+        const stillLagging =
+          lagging.length === 0
+            ? ""
+            : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
+        if (withdrawn.length > 0) {
+          return sayDeny(
+            "hook-timeout",
+            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
+          );
+        }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open until the policy's approval TTL, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one.`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -2032,10 +2483,24 @@ const POST_TOOL_EVENTS: readonly string[] = ["PostToolUse", "PostToolUseFailure"
  * invariant 7).
  *
  * A post-execution hook cannot deny anything — the tool has already run — so
- * none of these is a verdict, and every one of them exits 0 with an EMPTY
- * STDOUT: a decision object on that stream would be a second answer about a
- * command the harness already ran. The line goes to stderr, where the harness
- * shows it to an operator and to nobody else.
+ * none of these is a verdict, and every one of them prints an EMPTY STDOUT: a
+ * decision object on that stream would be a second answer about a command the
+ * harness already ran. The line goes to stderr instead.
+ *
+ * ## The exit code decides whether anybody reads that line (APRV-303)
+ *
+ * Claude Code's hooks reference states it plainly: stderr from a hook that
+ * exits 0 "goes to the debug log only, never the transcript, and Claude never
+ * sees it", and a post-execution hook that exits 2 has its stderr shown, since
+ * there is nothing left to block. So a refusal reported at exit 0 is a refusal
+ * nobody receives, which is how 22052 unreported starts accumulated on this
+ * project's own log without a single visible complaint.
+ *
+ * Therefore: {@link POST_TOOL_REPORTED} exits 0, because a counterpart that
+ * landed is not news; every other code exits {@link POST_TOOL_SURFACE_EXIT},
+ * because every other code means the outcome of a tool call was not recorded
+ * and somebody has to know. Neither exit is a verdict, and neither blocks
+ * anything.
  */
 export const POST_TOOL_CODES = [
   /** One or more counterparts were appended. */
@@ -2061,7 +2526,28 @@ export const POST_TOOL_CODES = [
 
 export type PostToolCode = (typeof POST_TOOL_CODES)[number];
 
-/** One machine-readable line on stderr, and exit 0. Never a verdict. */
+/** The one code that means the counterpart landed, and the one that exits 0. */
+const POST_TOOL_REPORTED = "post-tool-reported";
+
+/**
+ * The exit code that makes a post-execution hook's stderr visible (APRV-303).
+ *
+ * It is the number Claude Code's hook protocol reserves for "show this line",
+ * and on this one path it means exactly that. It is NOT `EXIT_USAGE`, whose
+ * meaning in `cli/exit-codes.ts` is a malformed invocation: the harness hooks
+ * speak the harness's protocol on both streams already (stdout carries a
+ * decision object no other verb prints), and the exit code is the third field
+ * of that same protocol. Nothing branches on it inside this runtime.
+ */
+const POST_TOOL_SURFACE_EXIT = 2;
+
+/**
+ * One machine-readable line on stderr. Never a verdict, and never blocking.
+ *
+ * Exit 0 for the report that landed, {@link POST_TOOL_SURFACE_EXIT} for every
+ * other code, so that a report which did NOT land is seen rather than written
+ * to a debug log nobody opens (see {@link POST_TOOL_CODES}).
+ */
 function report(
   streams: Streams,
   code: string,
@@ -2071,7 +2557,7 @@ function report(
   streams.err(
     `${JSON.stringify({ approval: { hook: "post-tool-use", code, detail, ...extra } })}\n`,
   );
-  return EXIT_OK;
+  return code === POST_TOOL_REPORTED ? EXIT_OK : POST_TOOL_SURFACE_EXIT;
 }
 
 type OutcomeReading =
@@ -2082,38 +2568,96 @@ type OutcomeReading =
  * Read a tool call's outcome off the reporting event, by a CLOSED set of
  * readings.
  *
- * The pinned contract, from the Claude Code hooks reference: `tool_response` is
- * an object carrying `type`, one of `text`, `error` or `base64`, and it exposes
- * NO exit code for any tool. A failing tool call arrives as the separate
- * `PostToolUseFailure` event instead. So there are exactly three readings, and
- * everything else is unreadable.
+ * ## THE EVENT NAME IS THE OUTCOME (APRV-303)
+ *
+ * The reading this replaces was written against a payload Claude Code does not
+ * send. It asked for `tool_response.type` and accepted `text`, `base64` or
+ * `error`, which is the shape of an API content block. What the event actually
+ * carries under `tool_response` is the TOOL'S OWN structured output, verbatim,
+ * and the hooks reference says so in as many words. From the shipped
+ * declarations in `@anthropic-ai/claude-code/sdk-tools.d.ts`:
+ *
+ * - `BashOutput` has `stdout`, `stderr`, `interrupted`, `isImage` and no `type`;
+ * - `FileEditOutput` (Edit, MultiEdit) has `filePath`, `oldString`,
+ *   `newString`, `structuredPatch` and no `type`;
+ * - `FileWriteOutput` (Write) does have `type`, whose values are `create` and
+ *   `update`;
+ * - `NotebookEditOutput` has no `type` and an optional `error` string.
+ *
+ * So the old reading matched NOTHING a Claude Code session emits, and every
+ * successful tool call was reported unreadable and appended nothing. Measured
+ * on this project's own log on 2026-09-07: 22062 harness starts, 10 reports,
+ * and of the reports the `agent:claude-code` actor filed, nine were failures
+ * and none was a completion. The §10.2 streak became a ratchet that only ever
+ * counts up, so every long session escalated itself to manual and stayed there.
+ *
+ * The contract that IS true is the one the reference states about the events
+ * themselves. `PostToolUse` "runs immediately after a tool completes
+ * successfully". `PostToolUseFailure` runs "when a tool that started executing
+ * fails". Claude Code fires exactly one of the two, neither of them when a
+ * permission decision stopped the call before it ran. The event name is
+ * therefore the whole reading, and it is the reading with the best provenance
+ * available here: it is the harness saying which of its own two code paths ran,
+ * rather than this process inferring an outcome out of a body of text.
+ *
+ * ## The refinements, and their direction
+ *
+ * Two readings of `tool_response` sit on top, and BOTH of them only ever move
+ * the answer away from "completed" (§11.1 invariant 4: a field the reporting
+ * side authors may raise scrutiny and never lower it):
+ *
+ * - `interrupted: true` (`BashOutput`) is UNREADABLE. A command a person
+ *   interrupted neither completed nor failed on its own terms; counting it a
+ *   failure trips an escalation on somebody's ctrl-C, and counting it a
+ *   completion clears a streak on a command that never finished.
+ * - `type: "error"`, or a non-empty `error` string (`NotebookEditOutput`, and
+ *   the MCP error result the reference names) is a FAILURE, whatever the event
+ *   name claimed.
  *
  * Unreadable means append nothing, and that is the safe answer in both
  * directions at once. A failure nobody observed would trip an escalation on
  * noise, and a control that trips on noise is one operators learn to silence
  * (§8 makes this argument about timestamp anomalies). A completion nobody
- * observed would clear a streak on nothing, which §11.1 invariant 4 forbids
- * outright. Appending nothing leaves the path exactly as vacuous as it was
- * before this verb existed, for that tool, and manufactures neither.
+ * observed would clear a streak on nothing. Appending nothing leaves the path
+ * exactly as vacuous as it was before this verb existed, for that tool, and
+ * manufactures neither. Since APRV-303 the unreadable arm also SAYS SO on a
+ * stream somebody reads (see {@link report}).
  *
- * NOTHING OF THE TOOL'S OUTPUT IS READ. Only the shape: the event name, and the
- * value of one enumerated field.
+ * NOTHING OF THE TOOL'S OUTPUT IS READ. Only the shape: the event name, and
+ * whether two enumerated fields are present and what kind of value they hold.
+ * No text from any of them reaches the log or this function's return.
  */
-function readReportedOutcome(input: HookInput): OutcomeReading {
-  if (input.hookEventName === "PostToolUseFailure") return { ok: true, outcome: "failed" };
-  const response = input.toolResponse;
-  if (response === null) {
-    return { ok: false, detail: "the event carries no tool_response object" };
+function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): OutcomeReading {
+  if (adapter.kind === "codex") return readCodexReportedOutcome(input);
+  const event = input.hookEventName;
+  if (event !== "PostToolUse" && event !== "PostToolUseFailure") {
+    return {
+      ok: false,
+      detail: `hook_event_name is ${
+        event === null ? "absent" : JSON.stringify(event)
+      }, which is neither of the two events this adapter reports an outcome for (PostToolUse, PostToolUseFailure)`,
+    };
   }
-  const type = response["type"];
-  if (type === "text" || type === "base64") return { ok: true, outcome: "completed" };
-  if (type === "error") return { ok: true, outcome: "failed" };
-  return {
-    ok: false,
-    detail: `tool_response.type is ${
-      typeof type === "string" ? JSON.stringify(type) : "absent or not a string"
-    }, which is not one of the pinned readings (text, base64, error)`,
-  };
+  const response = input.toolResponse;
+  // The one thing that unreads an event of either name. `PostToolUseFailure`
+  // carries `is_interrupt` for the same fact and no `tool_response` at all, so
+  // both spellings are checked and neither is trusted to say anything else.
+  if (response?.["interrupted"] === true || input.interrupted === true) {
+    return {
+      ok: false,
+      detail:
+        "the tool call was interrupted, so it neither completed nor failed on its own terms; an interruption is somebody stopping the session rather than a loop to escalate or a recovery to credit",
+    };
+  }
+  if (event === "PostToolUseFailure") return { ok: true, outcome: "failed" };
+  const errorText = response?.["error"];
+  if (
+    response?.["type"] === "error" ||
+    (typeof errorText === "string" && errorText.length > 0)
+  ) {
+    return { ok: true, outcome: "failed" };
+  }
+  return { ok: true, outcome: "completed" };
 }
 
 /**
@@ -2152,7 +2696,7 @@ function runPostToolUse(
     );
   }
 
-  const reading = readReportedOutcome(input);
+  const reading = readReportedOutcome(input, adapter);
   if (!reading.ok) {
     return report(streams, "post-tool-unreadable-outcome", `${reading.detail}; nothing was appended`);
   }
@@ -2169,8 +2713,10 @@ function runPostToolUse(
   const finished = finishHarnessExecution(
     logPath,
     {
-      sessionId: input.sessionId,
-      toolUseId: input.toolUseId,
+      sessionId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishSessionId : input.sessionId,
+      toolUseId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishToolUseId : input.toolUseId,
       outcome: reading.outcome,
       // The one member of the closed set at v0.1. It names the untrusted
       // reporter and reduces nothing.
@@ -2187,7 +2733,7 @@ function runPostToolUse(
   }
   return report(
     streams,
-    "post-tool-reported",
+    POST_TOOL_REPORTED,
     `recorded ${reading.outcome} for ${String(finished.records.length)} delegated execution(s) of ${finished.task}`,
     { task: finished.task, outcome: reading.outcome, appended: finished.records.length },
   );
@@ -2214,6 +2760,23 @@ type ToolDescription =
       payload: unknown;
       headline: string;
       notes: string[];
+      /**
+       * The classified segments, on the shell path only (APRV-193). A file edit
+       * has none, and needs none: the sandbox requirement is about commands
+       * that RUN, and an edit runs nothing.
+       */
+      segments?: readonly ClassifiedSegment[];
+      /**
+       * Set for a call the policy does not gate on its own merits, carrying the
+       * reason it would have been allowed outright (APRV-303).
+       *
+       * `runHarnessHook` prints exactly that allow the moment it establishes
+       * that no §10.2 floor stands over this session or actor, and otherwise
+       * routes the call like any other member of its class. It is a description
+       * of the POLICY's answer and never of the floor's, which is why it is
+       * decided here and applied there.
+       */
+      passthrough?: string;
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -2226,6 +2789,25 @@ function describeToolCall(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
+  if (adapter.kind === "codex" && input.toolName === "apply_patch") {
+    const raw = readString(input.toolInput, "command");
+    if (raw === null) {
+      return { kind: "deny", code: "hook-io", detail: "apply_patch tool_input carries no command string" };
+    }
+    const parsed = parseApplyPatch(raw);
+    if (!parsed.ok) return { kind: "deny", code: "hook-io", detail: parsed.detail };
+    const classified = classifyApplyPatch(parsed, cwd, protectedPaths);
+    if (!classified.ok) return { kind: "deny", code: "hook-io", detail: classified.detail };
+    return {
+      kind: "gated",
+      classes: classified.classes,
+      payload: codexBinding(input, cwd).payload,
+      headline: `apply_patch ${classified.operations.length} operation(s)`,
+      notes: classified.targets.map(
+        (target) => `${target.role} ${target.path} (${target.classes.join(", ")})`,
+      ),
+    };
+  }
   if (input.toolName === adapter.shellTool) {
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
@@ -2238,7 +2820,9 @@ function describeToolCall(
     // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
     // carries every byte the harness will execute. Only `summary` is shortened.
-    const payload = { command: raw, cwd: input.cwd };
+    const payload = adapter.bindToolName
+      ? codexBinding(input, cwd).payload
+      : { command: raw, cwd: input.cwd };
     // APRV-108: a local rewrite of history this checkout never published is a
     // commit. APRV-267: a delete confined to the agent's own scratch is not a
     // decision. Both run in the hook's own cwd, after classification and never
@@ -2252,18 +2836,104 @@ function describeToolCall(
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
     }
+    const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    if (adapter.kind === "codex") {
+      // The pure shell classifier sees each segment independently. Preserve
+      // Codex hook organs when an earlier simple `cd` changes the directory or
+      // when the hook itself runs inside an organ directory by resolving every
+      // later side-effecting segment's words from the effective directory.
+      const possibleCwds = new Set([cwd]);
+      for (const segment of classified.segments) {
+        const parsedWords = commandSegmentWords(segment.text)?.[0];
+        if (parsedWords?.bin === "cd" && parsedWords.args.length !== 1) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must use exact `cd <directory>` with no additional words",
+          };
+        }
+        if (
+          parsedWords?.bin === "cd" &&
+          (parsedWords.args[0] === "-" ||
+            (!isAbsolute(parsedWords.args[0] ?? "") &&
+              parsedWords.args[0] !== "." &&
+              parsedWords.args[0] !== ".." &&
+              !(parsedWords.args[0] ?? "").startsWith("./") &&
+              !(parsedWords.args[0] ?? "").startsWith("../")))
+        ) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must name an absolute path, `.`, `..`, `./...`, or `../...`; OLDPWD and CDPATH-dependent operands are unsupported",
+          };
+        }
+        if (isSideEffectingClass(segment.class)) {
+          for (const possibleCwd of possibleCwds) {
+            const cwdSegments = possibleCwd.split(/[/\\]+/u);
+            const cwdClass = cwdSegments.includes(".codex")
+              ? "policy.core"
+              : protectedPathClass(possibleCwd, protectedPaths);
+            if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
+            for (const word of parsedWords === undefined ? [] : [parsedWords.bin, ...parsedWords.args]) {
+              const cls = protectedPathClass(
+                resolvePathSegments(possibleCwd, word),
+                protectedPaths,
+              );
+              if (cls !== null && !classes.includes(cls)) classes.push(cls);
+            }
+          }
+        }
+        if (parsedWords?.bin === "cd" && parsedWords.args.length === 1) {
+          // Lists and conditionals may skip a cd. Retain every prior directory
+          // and add each directory the cd could establish; later writes are
+          // checked against their union.
+          const priorCwds = Array.from(possibleCwds);
+          for (const possibleCwd of priorCwds) {
+            const lexical = resolvePathSegments(possibleCwd, parsedWords.args[0] ?? "");
+            possibleCwds.add(lexical);
+            try {
+              possibleCwds.add(realpathSync(lexical));
+            } catch {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: `Codex Bash cd target ${JSON.stringify(parsedWords.args[0])} could not be resolved`,
+              };
+            }
+            if (possibleCwds.size > 64) {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: "Codex Bash command has more than 64 possible working directories",
+              };
+            }
+          }
+        }
+      }
+    }
     return {
       kind: "gated",
-      classes: classified.classes.filter((cls) => cls !== GATE_SELF_CLASS),
+      classes,
       payload,
       headline: raw,
       notes: refined.notes,
+      segments: classified.segments,
     };
   }
 
   const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
   if (gated === null) {
-    return { kind: "allow", reason: `${input.toolName} is not a gated edit` };
+    return { kind: "allow", reason: `${input.toolName} names no file, so there is nothing to gate` };
+  }
+  if (!gated.protectedPath) {
+    return {
+      kind: "gated",
+      classes: [gated.cls],
+      payload: gated.payload,
+      headline: gated.summary,
+      notes: [],
+      passthrough: `${input.toolName} is not a gated edit`,
+    };
   }
   return {
     kind: "gated",
@@ -2276,6 +2946,49 @@ function describeToolCall(
   };
 }
 
+/** The environment variable that turns the sandbox requirement on (APRV-193). */
+export const REQUIRE_SANDBOX_ENV = "APPROVAL_HOOK_REQUIRE_SANDBOX";
+
+/**
+ * Must this command have been written `approval sandbox -- …`? (APRV-193.)
+ *
+ * Returns the deny detail, or `null` to proceed. Four conditions, and every one
+ * of them is a narrowing, so the answer is `null` for everything the operator
+ * did not deliberately ask about:
+ *
+ * 1. the operator set `APPROVAL_HOOK_REQUIRE_SANDBOX=1`;
+ * 2. some segment runs code this runtime did not author
+ *    (`CODE_EXECUTING_RULES`: `npm test`, `node x.mjs`, `tsc`, `make`…);
+ * 3. that segment is not already inside the runtime's own wrapper. A
+ *    hand-written `sandbox-exec -f mine.sb` does NOT satisfy it, because a
+ *    profile a caller wrote can allow everything, and a requirement met by
+ *    writing your own permission is not a requirement;
+ * 4. no class of the command is manual. A manual command is going to a human,
+ *    and a human's grant over these exact bytes is the authority to reach the
+ *    world — the same line `approval run` draws at the token.
+ *
+ * The environment variable is read in the strict direction only: setting it can
+ * refuse commands that would otherwise run, and nothing an agent can set makes
+ * this function return `null` where it would otherwise deny (SPEC.md §11.1
+ * invariant 4).
+ */
+export function sandboxRequirement(
+  segments: readonly ClassifiedSegment[] | undefined,
+  autonomies: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (env[REQUIRE_SANDBOX_ENV] !== "1") return null;
+  if (segments === undefined) return null;
+  if (autonomies.some((autonomy) => autonomy === "manual")) return null;
+  const unwrapped = segments.filter(
+    (segment) => CODE_EXECUTING_RULES.includes(segment.rule) && segment.sandbox !== "runtime",
+  );
+  if (unwrapped.length === 0) return null;
+  const first = unwrapped[0] as ClassifiedSegment;
+  const external = first.sandbox === "external";
+  return `${REQUIRE_SANDBOX_ENV}=1, and this command runs code the runtime did not author: ${JSON.stringify(first.text)} (rule ${first.rule}), ${external ? "under a profile this runtime did not write, which is a permission you granted yourself" : "with the session's own network"}. A command like this executes whatever is in the files it names, so its class describes what was typed rather than what will happen. Re-run it as \`approval sandbox -- <command>\`: it classifies the same, it is allowed the same, and it runs with no way out to the network (docs/sandboxed-exec.md). Nothing was appended.`;
+}
+
 /** The window standing over `logPath`, and the records it was derived from. */
 interface WindowLookup {
   window: OpenWindow | null;
@@ -2284,8 +2997,15 @@ interface WindowLookup {
    * `unattendedGuard` so the closed path pays for ONE verified read (APRV-209),
    * and `null` where the log could not be read or did not verify — which is
    * also, and not coincidentally, the case where there is no window.
+   *
+   * Since APRV-294 they are handed to the OPEN path too, together with
+   * {@link WindowLookup.head}: the bypass append records the window this read
+   * derived, against the head this read observed, so the decision and the record
+   * are one read rather than two that may disagree.
    */
   records: EventRecord[] | null;
+  /** The chain head that read observed, for the bypass append's precondition. */
+  head: { seq: number; hash: string } | null;
 }
 
 /**
@@ -2305,11 +3025,11 @@ interface WindowLookup {
  */
 function lookupWindow(logPath: string): WindowLookup {
   if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
-    return { window: null, records: null };
+    return { window: null, records: null, head: null };
   }
   const read = readVerifiedRecords(logPath);
-  if (!read.ok) return { window: null, records: null };
-  return { window: openGateWindow(read.records), records: read.records };
+  if (!read.ok) return { window: null, records: null, head: null };
+  return { window: openGateWindow(read.records), records: read.records, head: read.head };
 }
 
 /**
@@ -2373,7 +3093,17 @@ function runBypass(
   flags: Record<string, string | boolean>,
   actor: string,
   window: OpenWindow,
+  /**
+   * The verified read `window` was derived from (APRV-294), handed on to the
+   * append so the same records answer "is a window open" and "which head does
+   * this record chain onto". `null` is not reachable from the caller — a window
+   * implies a read that produced it — and is accepted so the seam has one
+   * shape.
+   */
+  decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
 ): number {
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
   const scope = hookScope(flags, cwd);
   const load = loadPolicy(
     scope.options.policy?.file === undefined
@@ -2394,7 +3124,18 @@ function runBypass(
       adapter.kind,
     );
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
+  if (described.passthrough !== undefined) {
+    // APRV-303. An ordinary workspace edit is allowed by the policy on its own
+    // merits, so there is nothing here for the window to suspend and nothing
+    // for a `gate.bypassed` record to say. The only thing that would have made
+    // this call a question is a §10.2 floor, and a window bypasses the floor
+    // outright. Answered here rather than below so the bypass log stays a
+    // record of calls the window actually let through.
+    return allow(streams, described.passthrough, adapter.kind, codexCommand);
+  }
 
   const classes = described.classes;
   if (classes.length === 0) {
@@ -2406,6 +3147,7 @@ function runBypass(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -2452,11 +3194,20 @@ function runBypass(
     },
     actor,
     {},
+    // APRV-294: the window this verdict was decided under, and the read it was
+    // decided on. The append uses both, so a window that ended in between is
+    // reported as the thing that happened rather than as "no window is open".
+    {
+      openedSeq: window.seq,
+      ...(decidedOn === null ? {} : { read: decidedOn }),
+    },
   );
   if (!recorded.ok) {
     // Invariant 8: the record lands before the allow, so a refusal here is a
     // deny even though a window is open. `append-failed` reaches the caller
-    // through the family reserved for a code the writer produced.
+    // through the family reserved for a code the writer produced, and so does
+    // `gate-window-closed` (APRV-294), which says the window stood when this
+    // process classified the command and does not stand now.
     return deny(
       streams,
       `hook-gate-refused:${recorded.code}`,
@@ -2471,6 +3222,7 @@ function runBypass(
     streams,
     `gate-open: ${classes.join(", ")} bypassed by the window opened at seq ${String(window.seq)} by ${window.openedBy} (expires ${window.expiresAt}); recorded as gate.bypassed seq ${String(recorded.record.seq)}${notes.length === 0 ? "" : ` (${notes.join("; ")})`}`,
     adapter.kind,
+    codexCommand,
   );
 }
 
@@ -2481,6 +3233,8 @@ function runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
 ): number {
+  const configurationError = (message: string): number =>
+    adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
     ...POLICY_FLAGS,
@@ -2488,22 +3242,22 @@ function runHarnessHook(
     "--as": "string",
     "--timeout": "string",
     "--interval": "string",
+    "--retry-grace": "string",
   });
-  if (!parsed.ok) return usageError(streams, parsed.message);
+  if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     streams.out(`${HOOK_HELP}\n`);
     return EXIT_OK;
   }
   const extra = parsed.positionals[0];
   if (extra !== undefined) {
-    return usageError(streams, `unexpected argument ${JSON.stringify(extra)}`);
+    return configurationError(`unexpected argument ${JSON.stringify(extra)}`);
   }
 
   const asFlag = stringFlag(parsed.flags, "--as");
   const actor = asFlag ?? adapter.defaultActor;
   if (!PRINCIPAL_ACTOR.test(actor)) {
-    return usageError(
-      streams,
+    return configurationError(
       `--as expects agent:<id> or human:<id>, got ${JSON.stringify(asFlag)}`,
     );
   }
@@ -2511,23 +3265,38 @@ function runHarnessHook(
   const timeoutText = stringFlag(parsed.flags, "--timeout") ?? DEFAULT_TIMEOUT;
   const timeoutMs = parseDuration(timeoutText);
   if (timeoutMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--timeout expects a duration like 30s, 9m, got ${JSON.stringify(timeoutText)}`,
     );
   }
   const intervalText = stringFlag(parsed.flags, "--interval");
   const intervalMs = intervalText === null ? DEFAULT_INTERVAL_MS : parseDuration(intervalText);
   if (intervalMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`,
+    );
+  }
+  // APRV-287. How long the question outlives the wait, for the retry that
+  // adopts it. The duration grammar has no zero, so the shortest window is
+  // `1ms`, which withdraws as the wait expires.
+  const graceText = stringFlag(parsed.flags, "--retry-grace");
+  const graceMs = graceText === null ? HOOK_RETRY_GRACE_MS : parseDuration(graceText);
+  if (graceMs === null) {
+    return configurationError(
+      `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
   }
 
   const parsedInput = parseHookInput(readStdin());
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
+
+  if (adapter.kind === "codex") {
+    const checked = checkCodexHookInput(input, cwd);
+    if (!checked.ok) return deny(streams, "hook-io", checked.detail, adapter.kind);
+  }
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
 
   // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
   // registered for two events, and they do opposite things — one answers before
@@ -2539,12 +3308,45 @@ function runHarnessHook(
   // harness whose event this runtime does not recognize is a harness about to
   // run a command, and treating an unknown name as a no-op would be an ungated
   // one.
-  if (input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName)) {
-    return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+  const postToolEvent =
+    adapter.kind === "codex"
+      ? input.hookEventName === CODEX_POST_TOOL_EVENT
+      : input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+  if (postToolEvent) {
+    // APRV-303. `commandHarnessHook`'s catch turns a throw into a DENY, which is
+    // the right answer for a call that has not run yet and exactly the wrong one
+    // here: it would print a verdict object about a tool call the harness has
+    // already finished, and the reason the counterpart did not land would be
+    // dressed as a permission decision. A throw on this path is `post-tool-io`,
+    // on stderr, at the exit code that makes the line visible.
+    try {
+      return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+    } catch (cause) {
+      return report(
+        streams,
+        "post-tool-io",
+        `the counterpart failed: ${cause instanceof Error ? cause.message : String(cause)}; nothing was appended, so the start this event would have closed is still open`,
+      );
+    }
+  }
+
+  // Codex 0.152.1 can execute Bash in a per-call working directory that is
+  // absent from tool_input while both the event cwd and this hook process stay
+  // at the session root (APRV-310 native v6). A decision over the visible
+  // `{command, cwd}` would therefore bind different bytes from the action the
+  // harness executes. Refuse before the open-window, gate-self, carry, or
+  // registration paths; none of those can supply the missing directory fact.
+  if (adapter.kind === "codex" && input.toolName === "Bash") {
+    return deny(
+      streams,
+      "hook-io",
+      "Codex Bash is disabled because the native hook contract does not expose the effective per-call working directory; no policy or open window can authorize bytes the hook cannot bind",
+      adapter.kind,
+    );
   }
 
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
-    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
+    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
   }
 
   // APRV-188. From here on this process may resume a verified read behind the
@@ -2578,7 +3380,20 @@ function runHarnessHook(
   // words. The window suspends the POLICY; it never suspends the log.
   const looked = lookupWindow(logPath);
   if (looked.window !== null) {
-    return runBypass(streams, input, adapter, cwd, logPath, parsed.flags, actor, looked.window);
+    return runBypass(
+      streams,
+      input,
+      adapter,
+      cwd,
+      logPath,
+      parsed.flags,
+      actor,
+      looked.window,
+      // APRV-294. The records this window was derived from travel with it: the
+      // bypass record is appended against the head they ended at, so the
+      // verdict and the record are one read of the log.
+      looked.records === null ? null : { records: looked.records, head: looked.head },
+    );
   }
 
   // The policy is read BEFORE the command is classified (APRV-107): the
@@ -2612,7 +3427,9 @@ function runHarnessHook(
   if (described.kind === "deny") {
     return deny(streams, described.code, described.detail, adapter.kind);
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
   const { classes, payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
   const notes: string[] = [...described.notes];
@@ -2622,6 +3439,7 @@ function runHarnessHook(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -2642,7 +3460,10 @@ function runHarnessHook(
 
   // Minted once, here, and carried into `gateAndWait`: the loop-escalation
   // check below and any registration that follows must name the same task.
-  const task = `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
+  const task =
+    adapter.kind === "codex"
+      ? codexBinding(input, cwd).task
+      : `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
   const run: HookRun = {
     logPath,
@@ -2650,10 +3471,18 @@ function runHarnessHook(
     actor,
     timeoutMs,
     intervalMs,
+    graceMs,
     ttlMs: load.durations.approvalTtlMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
+    ...(codexCommand === undefined ? {} : { codexCommand }),
     eventVersion: input.harnessVersion,
+    // Off the policy this function already loaded and validated, so the names
+    // printed are the names a channel process would serve (APRV-281). Sorted
+    // for a stable line; `Object.keys` order is the file's, and a line that
+    // changed when an operator reordered their policy would read as a change of
+    // state.
+    channels: Object.keys(load.policy.channels ?? {}).sort(),
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
@@ -2683,6 +3512,15 @@ function runHarnessHook(
     );
   }
 
+  // APRV-193, and BELOW the human-only deny for the same reason that one sits
+  // above the floor: a class no agent may run is answered before a question
+  // about which room it would run in. Above everything that appends, so a
+  // refused command leaves the log exactly as it found it.
+  const unsandboxed = sandboxRequirement(described.segments, autonomies);
+  if (unsandboxed !== null) {
+    return deny(streams, "hook-sandbox-required", unsandboxed, adapter.kind);
+  }
+
   // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
   // fresh task id per tool call. The floor is applied AFTER class resolution and
   // never inside it, exactly as §7's irreversibility floor is: `resolve` is pure
@@ -2692,19 +3530,55 @@ function runHarnessHook(
   // and `core/loop.ts`'s own header), and the only thing that clears a streak is
   // an execution that completes — so a deny would leave an escalated session
   // with no way back, and a class the policy calls autonomous has no manual
-  // sibling to fall back on. Every class that would otherwise have proceeded is
-  // routed to the human gate for this invocation; a class that already resolves
-  // manual is untouched, because it was already going there.
+  // sibling to fall back on. Every SIDE-EFFECTING class that would otherwise
+  // have proceeded is routed to the human gate for this invocation (APRV-297
+  // narrowed it to those); a class that already resolves manual is untouched,
+  // because it was already going there.
   const floored = harnessFloor(logPath, task, actor, looked.records);
   if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
-  const floor = floored.floor;
+
+  /**
+   * The streak the log shows, before the read carve-out (APRV-297).
+   *
+   * Kept separate from the floor that is APPLIED because the verdict has to be
+   * able to say "a floor is standing and it was not applied here". Collapsing
+   * the two would leave an agent reading an ordinary autonomous allow with no
+   * way to tell that the session it is in is three failed writes deep.
+   */
+  const tripped = floored.floor;
+  /**
+   * Is every class of this command a read? (APRV-297, amended SPEC.md §10.2.)
+   *
+   * The predicate is `core/loop.ts`'s own, the same one that decides what
+   * ACCRUES, so what the floor counts and what it routes cannot come apart. A
+   * class this build has never heard of is side-effecting by construction, so an
+   * unknown class is routed exactly as it is counted.
+   */
+  const readsOnly = classes.every((cls) => !isSideEffectingClass(cls));
+  /**
+   * The floor as this invocation applies it: `null` for a command that only
+   * looks, whatever the streak says.
+   *
+   * A read cannot cause the harm the floor bounds. The floor exists to stop an
+   * agent retrying a side effect that keeps failing, so routing a `grep` to a
+   * phone buys no safety and spends the two things the floor is supposed to be
+   * conserving: a human's attention, and the session's ability to find out what
+   * went wrong. On 2026-09-06/07 a tripped floor sent every read to the gate and
+   * a session that could not get an answer could not even search the repository.
+   */
+  const floor = readsOnly ? null : tripped;
+  if (tripped !== null && floor === null) {
+    notes.push(
+      `loop-escalated (amended SPEC.md §10.2) NOT APPLIED to this call: ${tripped.scope} ${tripped.key} has ${String(tripped.consecutiveFailures)} consecutive failed side-effecting harness tool calls, and every class of this command is a read (${classes.join(", ")}). Escalation raises scrutiny on side effects only, so this command is answered by the policy; the floor still routes the session's side-effecting calls to a human. ${loopClearance(tripped.scope, tripped.key)}`,
+    );
+  }
   if (floor !== null) {
     // The decision trace: the verdict this invocation prints says that a floor
     // rather than the matched rule decided it, and names the scope and the
     // count that tripped, the way `core/execute.ts` names the irreversibility
     // floor beside a resolution's provenance.
     notes.push(
-      `loop floor (SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
+      `loop-escalated (amended SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
     );
   }
   /**
@@ -2712,6 +3586,21 @@ function runHarnessHook(
    * refinement's own words, and the loop floor's when one applied.
    */
   const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
+
+  // APRV-303, and the last thing that can answer without touching the log: an
+  // ordinary workspace edit, which the policy allows on its own merits and which
+  // is a question only while a floor stands.
+  //
+  // The order is the whole fix. Until APRV-303 this allow was printed from
+  // `describeToolCall`'s own branch, several hundred lines above the floor
+  // lookup, so a session whose Bash calls were all being routed to a human went
+  // on editing files unrouted and uncounted. Now the same allow is printed, in
+  // the same words, from BELOW the floor: the fast path is as fast as it was,
+  // and the floored path routes an Edit exactly as it routes an `echo >`,
+  // because both are `files.write.workspace` and one predicate decides.
+  if (described.passthrough !== undefined && floor === null) {
+    return allow(streams, `${described.passthrough}${note}`, adapter.kind, codexCommand);
+  }
 
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");
@@ -2730,7 +3619,12 @@ function runHarnessHook(
     if (charged !== null) {
       return deny(streams, `hook-gate-refused:${charged.code}`, charged.message, adapter.kind);
     }
-    return allow(streams, `autonomous: ${classes.join(", ")}${note}`, adapter.kind);
+    return allow(
+      streams,
+      `autonomous: ${classes.join(", ")}${note}`,
+      adapter.kind,
+      codexCommand,
+    );
   }
 
   // Past here the hook appends. It writes to a log that already exists and
@@ -2747,7 +3641,7 @@ function runHarnessHook(
     headline,
     task,
     note,
-    floor !== null,
+    floor,
   );
 }
 
@@ -2805,6 +3699,8 @@ export function commandHook(
       return commandHarnessHook(rest, streams, cwd, readStdin, CLAUDE_ADAPTER);
     case "cursor":
       return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
+    case "codex":
+      return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

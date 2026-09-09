@@ -438,6 +438,12 @@ const AGENT_FACING: readonly string[] = [
   "withdraw",
   "wait",
   "run",
+  // APRV-193. It REMOVES a capability from a command and establishes nothing:
+  // no record, no token, no authority. Withholding it from agents would leave
+  // the one spelling that starves a command available only to the operator,
+  // which is the opposite of the point — the party under oversight is exactly
+  // who should be able to run its own code where the effects cannot leave.
+  "sandbox",
   "consume",
   "token",
   "queue",
@@ -493,6 +499,7 @@ const AGENT_FACING: readonly string[] = [
   "adapter agentmail",
   "hook claude-code",
   "hook cursor",
+  "hook codex",
   "hook classify",
   // APRV-214. Reporting the window establishes no authority and changes
   // nothing; an agent that can see a bypass window is standing is better placed
@@ -520,6 +527,19 @@ test("registry: the human-only verbs are marked, and only those", () => {
   assert.equal(decided.size, VERB_REGISTRY.length);
 });
 
+test("registry: `policy attest` declares --organ, and stays human-only with it", () => {
+  const spec = findVerb("policy attest");
+  const flags = (
+    spec.input as { properties?: { flags?: { properties?: Record<string, unknown> } } }
+  ).properties?.flags?.properties;
+  assert.ok(flags !== undefined, "policy attest declares no flags");
+  assert.ok("--organ" in flags, "policy attest does not declare --organ (APRV-272)");
+  // The organ route writes an attestation like any other, so the human-only
+  // marking is the same marking on the same verb, not a second decision.
+  assert.equal(spec.human_only, true);
+  assert.match(spec.purpose, /gate\.organ\.attested/u);
+});
+
 test("registry: a human_only decision that needed an argument carries its note", () => {
   for (const label of ["expire", "daemon run", "env", "vault list", "channel cli"]) {
     const spec = findVerb(label);
@@ -534,6 +554,7 @@ test("registry: a human_only decision that needed an argument carries its note",
     "payload agentmail-draft",
     "hook claude-code",
     "hook cursor",
+    "hook codex",
     "consume",
   ]) {
     const spec = findVerb(label);

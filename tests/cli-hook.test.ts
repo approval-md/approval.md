@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,13 +24,14 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import type { ChannelRequest } from "../src/channels/contract.js";
+import { refusedDecisionLine, type ChannelRequest } from "../src/channels/contract.js";
 import {
   CANONICAL_JSON_HEADING,
   DIFF_BEGIN,
@@ -40,9 +42,11 @@ import {
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import { renderTelegram } from "../src/channels/telegram.js";
 import { supervisedExecutions } from "../src/core/audit.js";
+import { startHarnessExecution } from "../src/core/gate.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
-import { closeWindow, openWindow } from "../src/core/gate-window.js";
+import { closeWindow, openWindow, recordGateBypass } from "../src/core/gate-window.js";
+import { DRAW_SOCKET_PATH_LIMIT, drawSocketPathFor } from "../src/core/live-draw.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
@@ -615,6 +619,85 @@ test("an autonomous command is allowed and records only its execution", () => {
   assertClean(dir);
 });
 
+// ---------------------------------------------------------------------------
+// The sandbox requirement (APRV-193), off by default
+// ---------------------------------------------------------------------------
+
+test("APPROVAL_HOOK_REQUIRE_SANDBOX denies unwrapped code execution, and the wrapper passes", () => {
+  const dir = ready();
+
+  // Off by default: this is the behaviour every session has today, and the
+  // whole point of the variable is that turning it on can only refuse MORE.
+  const off = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test")));
+  assert.equal(off.permission, "allow");
+
+  const before = rawLog(dir);
+  const on = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test"), {
+    APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+  }));
+  assert.equal(on.permission, "deny");
+  assert.match(on.reason, /^hook-sandbox-required: /u);
+  // A deny that names the spelling that works, rather than one that leaves an
+  // agent guessing which of its commands offended.
+  assert.match(on.reason, /approval sandbox -- <command>/u);
+  assert.equal(rawLog(dir), before, "a refused command wrote to the log");
+
+  // The wrapped form is allowed, and it is allowed AS `npm test`: the class the
+  // policy resolved is the inner command's own, so wrapping neither hides the
+  // command from the gate nor asks anything extra of it.
+  const wrapped = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("approval sandbox -- npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(wrapped.permission, "allow");
+  assert.match(wrapped.reason, /files\.write\.workspace/u);
+
+  // A hand-written profile satisfies nothing: it is a permission the caller
+  // wrote for itself.
+  const external = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("sandbox-exec -f /tmp/mine.sb npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(external.permission, "deny");
+  assert.match(external.reason, /^hook-sandbox-required: /u);
+
+  // And a command that runs no code of ours is untouched by the requirement.
+  const unrelated = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("mkdir build"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(unrelated.permission, "allow");
+  assertClean(dir);
+});
+
+test("a sandbox wrapper is classified as the command inside it (APRV-193)", () => {
+  const dir = ready();
+  // The hole this closes, on the surface where it mattered: before the
+  // unwrapping, `approval sandbox -- <anything>` was the gate's own CLI
+  // (`gate.self`, pass-through) and `sandbox-exec …` was unclassified, so one
+  // spelling laundered every class and the other was denied for being safe.
+  const laundered = runCli(
+    ["hook", "classify", "--json", "--", "approval sandbox -- npm install left-pad"],
+    dir,
+  );
+  assert.equal(laundered.code, 0, laundered.stderr);
+  const classified = JSON.parse(laundered.stdout) as { classes: string[] };
+  assert.deepEqual(classified.classes, ["deps.add"]);
+
+  // `deps.add` is manual in this fixture policy, so the wrapper reaches the
+  // human gate exactly as the bare command does.
+  const verdict = verdictOf(
+    runCli(["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"], dir,
+      bashEvent("approval sandbox -- npm install left-pad")),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(rawLog(dir), /"class":"deps\.add"/u);
+});
+
 test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () => {
   // APRV-114: the noise this refinement exists to remove. A research fetch is
   // a read under the policy's `read.*` rule and asks nobody; the same binary
@@ -894,18 +977,43 @@ function postEvent(
   });
 }
 
-/** The single JSON line the counterpart prints on stderr. */
+/**
+ * The single JSON line the counterpart prints on stderr, with its exit code
+ * checked against what the code means (APRV-303).
+ *
+ * Claude Code discards a hook's stderr when the hook exits 0 and shows it when
+ * a post-execution hook exits 2. So the counterpart exits 0 for the one code
+ * that means it landed and 2 for every code that means a tool call's outcome
+ * went unrecorded, and this helper pins that for every case in the file at
+ * once. Neither exit is a verdict: stdout is empty on both.
+ */
 function reportOf(run: Run): Record<string, unknown> {
-  assert.equal(run.code, 0, `the counterpart always exits 0: ${run.stderr}`);
   assert.equal(run.stdout, "", "a post-execution hook prints no verdict on stdout");
   const parsed = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
-  return (parsed["approval"] ?? {}) as Record<string, unknown>;
+  const report = (parsed["approval"] ?? {}) as Record<string, unknown>;
+  assert.equal(
+    run.code,
+    report["code"] === "post-tool-reported" ? 0 : 2,
+    `a counterpart that did not land must exit 2 so its line is seen: ${run.stderr}`,
+  );
+  return report;
 }
 
 /** Every record in the log, parsed. */
 function allRecords(dir: string): Record<string, unknown>[] {
   return recordsSince(dir, "");
 }
+
+/**
+ * A tool call that DOES something: `files.write.workspace`, autonomous under
+ * this fixture policy, and the class every loop-safety case below accrues on
+ * since APRV-280. A read would accrue nothing, which is the point of the rule
+ * and is pinned in its own case.
+ */
+const WRITE_COMMAND = "mkdir -p build";
+
+/** A tool call that only looks: `read.shell`, transparent to loop safety. */
+const READ_COMMAND = "ls -la";
 
 /**
  * Run one gated tool call and report an outcome for it, both through the real
@@ -917,6 +1025,7 @@ function toolCall(
   toolUseId: string,
   outcome: "text" | "error",
   session = "sess-1",
+  command = WRITE_COMMAND,
 ): void {
   const pre = runCli(
     ["hook", "claude-code"],
@@ -927,7 +1036,7 @@ function toolCall(
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command },
       tool_use_id: toolUseId,
     }),
   );
@@ -1037,33 +1146,363 @@ test("THE DEFECT: three failed tool calls accrue nothing per task and escalate t
   assertClean(dir);
 });
 
+test("APRV-280: three failed read.* tool calls escalate nothing and the next read still runs", () => {
+  // The incident this rule was filed on. A `grep` that matches nothing and an
+  // `ls` of a path that is not there exit non-zero, the counterpart records
+  // three `execution.failed` for the session, and before APRV-280 that floored
+  // every command the session made afterwards to a phone nobody was holding.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records),
+    [],
+    "a read.* class is transparent to both harness scopes: no state, not even a zero",
+  );
+  assert.deepEqual(loopEscalation(read.records), [], "…and to the per-task streak");
+
+  // The verdict the whole task is about: the fourth read is answered by the
+  // policy, unattended, with nothing asked of anybody.
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.equal(
+    allRecords(dir).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was opened: nothing here needed a human",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a failed read does not clear a side-effecting streak either", () => {
+  // Transparency reads in both directions, and this is the direction that would
+  // be a hole: an agent three failed writes deep must not be able to shed the
+  // streak by running a `grep` that works.
+  const dir = ready();
+  toolCall(dir, "tu-1", "error");
+  toolCall(dir, "tu-2", "error");
+  toolCall(dir, "tu-3", "text", "sess-1", READ_COMMAND);
+  toolCall(dir, "tu-4", "error");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).map((state) => [state.consecutiveFailures, state.escalated]),
+    [
+      [3, true],
+      [3, true],
+    ],
+    "the successful read cleared nothing; the third failed write escalated both scopes",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a floored tool call's deny names loop-escalated, the scope and what clears it", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // Nobody answers, so the wait times out — the nine minutes of silence the
+  // stalled session actually saw, with the timeout cut to a second. The command
+  // is a WRITE since APRV-297: a floor routes side effects and leaves reads to
+  // the policy, so a read here would be allowed at once and never reach a wait.
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-4"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /loop-escalated: session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /one side-effecting tool call completing in this session scope/u);
+  assert.match(verdict.reason, /approval gate open/u);
+  assertClean(dir);
+});
+
 test("an escalated session floors the next autonomous command to the human gate", () => {
   const dir = ready();
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
 
-  // `read.shell` is autonomous under this policy and would have been allowed
-  // with nothing appended. Under the floor it is registered, requested and
-  // waited on like any manual class — and the human's tap authorizes it.
-  const key = "hook:sess-1:tu-4:read.shell";
+  // `files.write.workspace` is autonomous under this policy and would have been
+  // allowed with nothing appended. Under the floor it is registered, requested
+  // and waited on like any manual class — and the human's tap authorizes it.
+  // (A read would not be: APRV-297 leaves those to the policy.)
+  const key = "hook:sess-1:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
     dir,
-    bashEvent("ls -la", "tu-4"),
+    bashEvent(WRITE_COMMAND, "tu-4"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
   // The decision trace: the verdict says a FLOOR rather than the matched rule
   // decided it, and names the scope and the count, the way `core/execute.ts`
   // names the §7 irreversibility floor beside a resolution's provenance.
-  assert.match(verdict.reason, /loop floor \(SPEC\.md §10\.2\)/u);
-  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive failed harness tool calls/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+  assert.match(
+    verdict.reason,
+    /session hook:sess-1 has 3 consecutive failed side-effecting harness tool calls/u,
+  );
 
   const events = allRecords(dir).map((record) => record["event"]);
   assert.ok(
     events.includes("approval.requested"),
     "the floored class asked a human, which the unfloored class never does",
   );
+  assertClean(dir);
+});
+
+/**
+ * The Bash tool's own output object, verbatim from `BashOutput` in
+ * `@anthropic-ai/claude-code/sdk-tools.d.ts` (APRV-303).
+ *
+ * This is what a real `PostToolUse` carries under `tool_response`, and the
+ * point of the fixture is what it does NOT carry: no `type`, no exit code, no
+ * `is_error`. Every counterpart this project has ever run in anger arrived
+ * shaped like this and was reported unreadable.
+ */
+const BASH_OUTPUT = { stdout: "total 0", stderr: "", interrupted: false, isImage: false };
+
+/** `FileEditOutput`, verbatim from the same declarations. No `type` field. */
+const FILE_EDIT_OUTPUT = {
+  filePath: "/repo/SPEC.md",
+  oldString: "old",
+  newString: "new",
+  originalFile: "old\n",
+  structuredPatch: [],
+  userModified: false,
+  replaceAll: false,
+};
+
+/** `FileWriteOutput`. It HAS a `type`, and its values are `create` and `update`. */
+const FILE_WRITE_OUTPUT = {
+  type: "create",
+  filePath: "/repo/SPEC.md",
+  content: "new\n",
+  structuredPatch: [],
+  originalFile: null,
+};
+
+test("APRV-303: the payload Claude Code actually sends closes the start it opened", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-real"))).permission,
+    "allow",
+  );
+
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-real", BASH_OUTPUT));
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-reported", post.stderr);
+  assert.equal(report["outcome"], "completed");
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started", "execution.completed"],
+  );
+  // §11.1 invariant 3, re-pinned for the new reading: the fields are inspected
+  // for shape and none of their text is carried.
+  assert.ok(!rawLog(dir).includes("total 0"), "the tool's output must never reach the log");
+  assertClean(dir);
+
+  // The failure half, with the payload the failure event actually carries:
+  // `error` and no `tool_response` at all.
+  const other = ready();
+  const otherBefore = rawLog(other);
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], other, bashEvent(WRITE_COMMAND, "tu-bad"))).permission,
+    "allow",
+  );
+  const failed = runCli(
+    ["hook", "claude-code"],
+    other,
+    JSON.stringify({
+      session_id: "sess-1",
+      transcript_path: "/dev/null",
+      cwd: "/repo",
+      hook_event_name: "PostToolUseFailure",
+      tool_name: "Bash",
+      tool_input: { command: WRITE_COMMAND },
+      tool_use_id: "tu-bad",
+      error: "Exit code 1\nmkdir: build: Permission denied",
+      is_interrupt: false,
+      duration_ms: 12,
+    }),
+  );
+  assert.equal(reportOf(failed)["outcome"], "failed", failed.stderr);
+  assert.deepEqual(
+    recordsSince(other, otherBefore).map((record) => record["event"]),
+    ["execution.started", "execution.failed"],
+  );
+  assert.ok(
+    !rawLog(other).includes("Permission denied"),
+    "the failure text must never reach the log either",
+  );
+  assertClean(other);
+});
+
+test("APRV-303: a granted Bash completion clears a tripped floor", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // The floor routes the next write to a human. The human grants it, the
+  // command runs, and the counterpart reports what happened — which is exactly
+  // the sequence the refusal text promises clears the escalation.
+  const key = "hook:sess-1:tu-4:files.write.workspace";
+  grantWhenPending(dir, key);
+  const pre = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-4"),
+  );
+  assert.equal(verdictOf(pre).permission, "allow", verdictOf(pre).reason);
+  assert.match(verdictOf(pre).reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-4", BASH_OUTPUT));
+  assert.equal(reportOf(post)["outcome"], "completed", post.stderr);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).filter((state) => state.escalated),
+    [],
+    "one completion in the scope clears every standing escalation",
+  );
+
+  // And the proof an agent can observe: the next write is answered by the
+  // policy, with a short timeout that would have failed under a floor.
+  const next = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-5"),
+  );
+  assert.equal(verdictOf(next).permission, "allow", verdictOf(next).reason);
+  assert.doesNotMatch(verdictOf(next).reason, /loop-escalated/u);
+  assertClean(dir);
+});
+
+test("APRV-303: a granted Edit or Write completion clears a tripped floor too", () => {
+  for (const [tool, toolInput, response] of [
+    ["Edit", { file_path: "SPEC.md", old_string: "old", new_string: "new" }, FILE_EDIT_OUTPUT],
+    ["Write", { file_path: "SPEC.md", content: "new\n" }, FILE_WRITE_OUTPUT],
+  ] as const) {
+    const dir = readyWithProtectedPaths();
+    for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+    const key = "hook:sess-1:tu-edit:policy.edit";
+    grantWhenPending(dir, key);
+    const pre = runCli(
+      ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+      dir,
+      event({ tool_name: tool, tool_input: toolInput, tool_use_id: "tu-edit" }),
+    );
+    assert.equal(verdictOf(pre).permission, "allow", `${tool}: ${verdictOf(pre).reason}`);
+
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent("tu-edit", response, { tool_name: tool, tool_input: toolInput }),
+    );
+    assert.equal(reportOf(post)["outcome"], "completed", post.stderr);
+
+    const read = readVerifiedRecords(join(dir, LOG));
+    assert.equal(read.ok, true);
+    if (!read.ok) throw new Error("unreachable");
+    assert.deepEqual(
+      harnessLoopEscalation(read.records).filter((state) => state.escalated),
+      [],
+      `${tool}: a file tool's completion clears the floor exactly as a shell tool's does`,
+    );
+
+    const next = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent(WRITE_COMMAND, "tu-next"),
+    );
+    assert.equal(verdictOf(next).permission, "allow", `${tool}: ${verdictOf(next).reason}`);
+    assert.doesNotMatch(verdictOf(next).reason, /loop-escalated/u);
+    assertClean(dir);
+  }
+});
+
+test("APRV-303: an ordinary edit is floored exactly as an ordinary shell write is", () => {
+  // AC #2. The predicate is one predicate over one class: `files.write.workspace`
+  // reaches the floor whether it was typed as a redirect or performed by the
+  // Edit tool. Until APRV-303 the file path answered `allow` from above the
+  // floor lookup, so a floored session went on editing unrouted and uncounted.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const floored = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "src/core/x.ts", old_string: "a", new_string: "b" },
+      tool_use_id: "tu-edit",
+    }),
+  );
+  const verdict = verdictOf(floored);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    verdict.reason,
+    /routed to a human by loop safety rather than by policy — loop-escalated: session hook:sess-1 has 3 consecutive failed side-effecting harness tool calls/u,
+  );
+  assert.match(rawLog(dir), /"hook:sess-1:tu-edit:files\.write\.workspace"/u);
+  assertClean(dir);
+
+  // With no floor standing, the same edit is answered as it always was: an
+  // outright allow that appends nothing at all.
+  const clear = ready();
+  const before = rawLog(clear);
+  const ordinary = runCli(
+    ["hook", "claude-code"],
+    clear,
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "src/core/x.ts", old_string: "a", new_string: "b" },
+      tool_use_id: "tu-edit",
+    }),
+  );
+  assert.equal(verdictOf(ordinary).permission, "allow");
+  assert.match(verdictOf(ordinary).reason, /is not a gated edit/u);
+  assert.equal(rawLog(clear), before, "an ungated edit must not touch the log");
+});
+
+test("APRV-303: a report that closes nothing is machine-readable and is not exit 0", () => {
+  // The refusal must reach somebody. Claude Code discards a hook's stderr when
+  // the hook exits 0, so a refusal at exit 0 is a refusal nobody receives.
+  const dir = ready();
+  const before = rawLog(dir);
+  const run = runCli(["hook", "claude-code"], dir, postEvent("tu-never-started", BASH_OUTPUT));
+
+  assert.equal(run.code, 2, "a report that did not land exits 2 so its line is shown");
+  assert.equal(run.stdout, "", "and it is still not a verdict");
+  const line = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
+  const report = line["approval"] as Record<string, unknown>;
+  assert.equal(report["hook"], "post-tool-use");
+  assert.equal(report["code"], "post-tool-gate-refused:not-delegated");
+  assert.match(String(report["detail"]), /no execution\.started record names task/u);
+  assert.equal(rawLog(dir), before, "a refused report appends nothing");
+
+  // The unreadable arm says why, on the same stream and at the same exit code.
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-i"))).permission,
+    "allow",
+  );
+  const unreadable = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-i", { stdout: "", stderr: "", interrupted: true, isImage: false }),
+  );
+  assert.equal(unreadable.code, 2);
+  assert.equal(reportOf(unreadable)["code"], "post-tool-unreadable-outcome");
   assertClean(dir);
 });
 
@@ -1086,8 +1525,10 @@ test("the actor scope backstops a rotated session id", () => {
     "no single session tripped; the actor did",
   );
 
-  // A fourth, fresh session is floored all the same.
-  const key = "hook:sess-d:tu-4:read.shell";
+  // A fourth, fresh session is floored all the same. The command writes: a read
+  // is answered by the policy under any floor since APRV-297, so it would prove
+  // nothing about the actor scope.
+  const key = "hook:sess-d:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
@@ -1097,13 +1538,16 @@ test("the actor scope backstops a rotated session id", () => {
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command: WRITE_COMMAND },
       tool_use_id: "tu-4",
     }),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
-  assert.match(verdict.reason, /actor agent:claude-code has 3 consecutive failed harness tool calls/u);
+  assert.match(
+    verdict.reason,
+    /actor agent:claude-code has 3 consecutive failed side-effecting harness tool calls/u,
+  );
   assertClean(dir);
 });
 
@@ -1119,7 +1563,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PreToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
       }),
     );
@@ -1131,7 +1575,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PostToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
         tool_response: { type: "error", error: "…" },
       }),
@@ -1259,31 +1703,44 @@ test("the counterpart refuses a start that carries no harness marker", () => {
   assertClean(dir);
 });
 
-test("an unreadable outcome appends nothing, and a second report is refused", () => {
+test("an interrupted tool call is unreadable and appends nothing, and a second report is refused", () => {
   const dir = ready();
   assert.equal(verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-x"))).permission, "allow");
 
-  // Unreadable: the pinned readings are text, base64 and error, and nothing else.
-  for (const response of [{ type: "diagnostic" }, {}, "a bare string", null]) {
+  // APRV-303. The one thing that unreads an event of either name: a call
+  // somebody stopped neither completed nor failed on its own terms. Both
+  // spellings, since PostToolUseFailure carries `is_interrupt` and has no
+  // `tool_response` at all.
+  const interrupts: [unknown, Record<string, unknown>][] = [
+    [{ stdout: "", stderr: "", interrupted: true, isImage: false }, {}],
+    [null, { hook_event_name: "PostToolUseFailure", error: "…", is_interrupt: true }],
+  ];
+  for (const [response, extra] of interrupts) {
     const before = rawLog(dir);
-    const run = runCli(["hook", "claude-code"], dir, postEvent("tu-x", response));
+    const run = runCli(["hook", "claude-code"], dir, postEvent("tu-x", response, extra));
+    const report = reportOf(run);
     assert.equal(
-      reportOf(run)["code"],
+      report["code"],
       "post-tool-unreadable-outcome",
-      `${JSON.stringify(response)}: ${run.stderr}`,
+      `${JSON.stringify(extra)}: ${run.stderr}`,
     );
+    assert.match(String(report["detail"]), /interrupted/u, "the line says why nothing was appended");
     assert.equal(rawLog(dir), before, "an unreadable outcome appends nothing");
   }
 
   // Readable: it closes, once.
   assert.equal(
-    reportOf(runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "text", text: "" })))[
-      "code"
-    ],
+    reportOf(
+      runCli(
+        ["hook", "claude-code"],
+        dir,
+        postEvent("tu-x", { stdout: "total 0", stderr: "", interrupted: false, isImage: false }),
+      ),
+    )["code"],
     "post-tool-reported",
   );
   const settled = rawLog(dir);
-  const second = runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "error", error: "" }));
+  const second = runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "error", error: "x" }));
   assert.equal(reportOf(second)["code"], "post-tool-gate-refused:already-finished");
   assert.equal(rawLog(dir), settled, "an execution has exactly one outcome");
   assertClean(dir);
@@ -1338,9 +1795,9 @@ test("a report may not be filed by a non-principal actor", () => {
 test("status reports the harness streaks by scope, and counterpart coverage", () => {
   const dir = ready();
   // One start that nobody reports on: it is not debris, it is a tool call with
-  // no outcome, and the coverage row is the only place it shows. It runs FIRST,
-  // because after the three failures below the floor sends every command to a
-  // human and this one would sit there waiting for a tap.
+  // no outcome, and the coverage row is the only place it shows. It runs first
+  // for the coverage arithmetic below to be readable; since APRV-297 a read
+  // would run under the floor too.
   assert.equal(
     verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-0"))).permission,
     "allow",
@@ -1349,10 +1806,34 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
 
   const run = runCli(["status", "--json"], dir);
   const body = JSON.parse(run.stdout) as Record<string, unknown>;
-  assert.deepEqual(body["loop_escalations"], [
-    { task: "agent:claude-code", scope: "actor", consecutive_failures: 3, escalated: true },
-    { task: "hook:sess-1", scope: "session", consecutive_failures: 3, escalated: true },
-  ]);
+  // APRV-280 added `clears`: the scope alone tells an operator where the floor
+  // is and nothing about how to get out from under it.
+  assert.deepEqual(
+    (body["loop_escalations"] as Record<string, unknown>[]).map((entry) => [
+      entry["task"],
+      entry["scope"],
+      entry["consecutive_failures"],
+      entry["escalated"],
+    ]),
+    [
+      ["agent:claude-code", "actor", 3, true],
+      ["hook:sess-1", "session", 3, true],
+    ],
+  );
+  for (const entry of body["loop_escalations"] as Record<string, unknown>[]) {
+    assert.match(
+      String(entry["clears"]),
+      /one side-effecting tool call completing in this (session|actor) scope/u,
+    );
+    assert.match(String(entry["clears"]), /approval gate open/u);
+    // APRV-297: the row says reads are outside the floor in BOTH directions, so
+    // an operator reading it knows the session can still search the repository.
+    assert.match(
+      String(entry["clears"]),
+      /read\.\* commands are outside this floor in both directions/u,
+    );
+    assert.match(String(entry["clears"]), /does not route them to a human/u);
+  }
   assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
   assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
 
@@ -1360,8 +1841,9 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
   assert.match(human.stdout, /^loop escalations {2,}2$/mu);
   assert.match(
     human.stdout,
-    /hook:sess-1 \(3 consecutive failed tool calls, session\) — escalated to manual/u,
+    /hook:sess-1 \(3 consecutive failed side-effecting tool calls, session\) — escalated to manual/u,
   );
+  assert.match(human.stdout, /clears: one side-effecting tool call completing/u);
   assert.match(human.stdout, /^harness outcomes {2,}4 started, 3 reported, 1 unreported$/mu);
   assertClean(dir);
 });
@@ -1614,10 +2096,15 @@ test("a grant landing after the wait authorizes an identical retry, with no seco
   assert.match(verdict.reason, /carried: hook:sess-1:tu-late:deps\.add/u);
 
   // No second question was ever asked: exactly one approval.requested exists,
-  // and the retry opened no request of its own.
+  // and the retry opened no request and registered no task of its own.
   const log = rawLog(dir);
   assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1);
-  assert.doesNotMatch(log, /hook:sess-1:tu-retry/u);
+  assert.doesNotMatch(log, /"task":"hook:sess-1:tu-retry"/u);
+  assert.doesNotMatch(log, /"idempotency_key":"hook:sess-1:tu-retry/u);
+  // APRV-287: the ONE place the retry is named is the spend, which records
+  // which tool call carried the grant so its outcome can close this start. It
+  // is a second name for the same execution, never a second question.
+  assert.match(log, /"spent_by_task":"hook:sess-1:tu-retry"/u);
 
   // The grant was spent, once, through the ordinary execution vocabulary.
   assert.match(log, /"event":"execution\.started"/u);
@@ -1833,6 +2320,136 @@ test("a mixed command gates on the strictest class it contains", () => {
 });
 
 // ===========================================================================
+// APRV-281: the wait says what it is waiting for, and where
+//
+// The behaviour before this: append the request, then block for the whole
+// window in silence and end in a bare `hook-timeout`. Both lines below go to
+// STDERR and nowhere else, and every case here re-parses stdout as the harness
+// does, because a hook whose verdict stream grew prose is a hook the harness
+// cannot read.
+// ===========================================================================
+
+/** The same policy, with a channel configured for the request to go to. */
+const POLICY_CHANNEL = POLICY.replace(
+  "classes:",
+  ["channels:", "  telegram:", "    token_env: APPROVAL_TG_TOKEN", "classes:"].join("\n"),
+);
+
+/**
+ * A scratch root short enough to hold a bound Unix socket.
+ *
+ * `sun_path` is 104 bytes on macOS, and the suite's own `case-N` directories
+ * under a realpath'd `$TMPDIR` are already close to that before `.approval/
+ * daemon/draw.sock` is appended. The socket case asserts the budget it is
+ * relying on rather than silently testing the path-too-long arm.
+ */
+const socketScratch = realpathSync(mkdtempSync(join(tmpdir(), "ap-")));
+let socketCases = 0;
+
+after(() => {
+  rmSync(socketScratch, { recursive: true, force: true });
+});
+
+/** `ready()`, under the short root. */
+function readyShort(policyText: string): string {
+  socketCases += 1;
+  const dir = join(socketScratch, `c${String(socketCases)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("a manual request announces key, class and channel on stderr before it waits", () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-announce"),
+  );
+
+  // The verdict is unchanged: same wait, same timeout, same code, and stdout
+  // still parses as one decision object.
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.doesNotMatch(run.stdout, /is waiting for a human/u);
+
+  assert.match(
+    run.stderr,
+    /approval: hook:sess-1:tu-announce:deps\.add \(deps\.add\) is waiting for a human on channel telegram;/u,
+    run.stderr,
+  );
+  assert.match(run.stderr, /a decision on the phone releases it/u);
+
+  // AC#2: nothing is serving this log, so the line says so and names the verb
+  // that fixes it.
+  assert.match(run.stderr, /approval: no listener is running for this log/u);
+  assert.match(run.stderr, /approval up/u);
+  assertClean(dir);
+});
+
+test("a policy that configures no channel is told so, in the same line", () => {
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install right-pad", "tu-announce-nochannel"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    run.stderr,
+    /hook:sess-1:tu-announce-nochannel:deps\.add \(deps\.add\) is waiting for a human on no channel \(this policy configures none/u,
+    run.stderr,
+  );
+  assertClean(dir);
+});
+
+test("a usable socket prints the announce line and NO listener line", async () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const socketPath = drawSocketPathFor(join(dir, LOG));
+  assert.ok(
+    socketPath.length <= DRAW_SOCKET_PATH_LIMIT,
+    `the scratch root is too long to bind a socket under (${String(socketPath.length)} bytes): ${socketPath}`,
+  );
+
+  // A socket exactly as `approval up` leaves one: owner-only, in an owner-only
+  // directory. Nothing here answers, and nothing needs to — the hook stats the
+  // file and never dials it, which is the claim this case pins.
+  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(socketPath), 0o700);
+  const server = createServer();
+  await new Promise<void>((settle) => {
+    server.listen(socketPath, settle);
+  });
+  chmodSync(socketPath, 0o600);
+
+  try {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("npm install left-pad", "tu-listening"),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-timeout: /u);
+    assert.match(run.stderr, /is waiting for a human on channel telegram;/u, run.stderr);
+    assert.doesNotMatch(run.stderr, /no listener is running/u);
+  } finally {
+    await new Promise<void>((settle) => {
+      server.close(() => {
+        settle();
+      });
+    });
+    rmSync(socketPath, { force: true });
+  }
+  assertClean(dir);
+});
+
+// ===========================================================================
 // Usage
 // ===========================================================================
 
@@ -1842,6 +2459,7 @@ test("hook --help and the subcommand helps exit 0", () => {
     ["hook", "--help"],
     ["hook", "claude-code", "--help"],
     ["hook", "cursor", "--help"],
+    ["hook", "codex", "--help"],
     ["hook", "classify", "--help"],
   ]) {
     const run = runCli(args, dir);
@@ -1852,7 +2470,7 @@ test("hook --help and the subcommand helps exit 0", () => {
 
 test("an unknown subcommand and an unknown flag are usage errors, not verdicts", () => {
   const dir = caseDir();
-  const unknownSub = runCli(["hook", "codex"], dir);
+  const unknownSub = runCli(["hook", "no-such-harness"], dir);
   assert.equal(unknownSub.code, 2);
   assert.equal(unknownSub.stdout, "");
 
@@ -3005,4 +3623,745 @@ test("the harness hook mints no new deny codes for the window (APRV-214)", () =>
     false,
     "the window introduced no code of its own",
   );
+});
+
+// ===========================================================================
+// APRV-287: the timeout takes its question back, and what a timeout is not
+// ===========================================================================
+
+/**
+ * A wait that expires with the retry grace already spent.
+ *
+ * `--retry-grace 1ms` is the shortest window the duration grammar has, and it
+ * puts the abandonment line at the moment the wait ends: the same code path a
+ * five-minute grace reaches five minutes later, driven in a second.
+ */
+function timedOut(dir: string, command: string, toolUseId: string): Verdict {
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "1ms"],
+    dir,
+    bashEvent(command, toolUseId),
+  );
+  return verdictOf(run);
+}
+
+test("APRV-287: a wait whose retry grace has run out withdraws its own request", () => {
+  const dir = ready();
+  const verdict = timedOut(dir, "npm install left-pad", "tu-grace");
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /WAS WITHDRAWN \(reason timeout\)/u);
+
+  const written = allRecords(dir);
+  const withdrawn = written.filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1, JSON.stringify(written.map((r) => r["event"])));
+  const only = withdrawn[0] as Record<string, unknown>;
+  assert.equal(only["action_key"], "hook:sess-1:tu-grace:deps.add");
+  assert.equal(payloadOf(only)["reason"], "timeout");
+  // The requester took it back: the actor is the hook's own identity, which is
+  // the only actor `withdraw` accepts for it.
+  assert.equal(only["actor"], "agent:claude-code");
+
+  // Nothing is on the human's queue any more, because nothing is waiting.
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-grace/u);
+  assertClean(dir);
+});
+
+test("APRV-287: a tap on a withdrawn request authorizes nothing, and the channel says so", () => {
+  const dir = ready();
+  timedOut(dir, "npm install left-pad", "tu-late-tap");
+  const key = "hook:sess-1:tu-late-tap:deps.add";
+
+  const late = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+  assert.notEqual(late.code, 0, "a grant on a withdrawn request must refuse");
+  assert.match(`${late.stdout}${late.stderr}`, /request-withdrawn/u);
+  // Nothing was recorded: no grant, and no execution to spend it.
+  const events = allRecords(dir).map((record) => record["event"]);
+  assert.equal(events.includes("approval.granted"), false);
+  assert.equal(events.includes("execution.started"), false);
+
+  // The words the approver reads on the channel that collected the tap. One
+  // sentence, one source (APRV-235), and it says the answer did nothing.
+  const line = refusedDecisionLine("request-withdrawn");
+  assert.match(line, /Withdrawn/u);
+  assert.match(line, /nothing was recorded/u);
+  assertClean(dir);
+});
+
+test("APRV-287: inside the grace nothing is withdrawn and the retry adopts the question", () => {
+  // The APRV-117 property this task must not break: a wait that expires with
+  // the grace still open leaves the question in front of the human, and the
+  // retry of the identical command adopts it rather than asking again.
+  const dir = ready();
+  const first = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-inside-1"),
+  );
+  const verdict = verdictOf(first);
+  assert.match(verdict.reason, /NOTHING WAS WITHDRAWN/u);
+  assert.match(verdict.reason, /retry grace/u);
+
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-inside-2"),
+  );
+  assert.match(verdictOf(retry).reason, /^hook-timeout: /u);
+
+  const log = rawLog(dir);
+  assert.doesNotMatch(log, /"event":"approval\.withdrawn"/u);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1, "the retry asked again");
+  assertClean(dir);
+});
+
+test("APRV-287: a later tool call sweeps the questions an earlier one abandoned", () => {
+  // The flood at its source. Three commands time out; the fourth invocation
+  // takes back every one of them whose grace has run out, and leaves its own
+  // question standing.
+  const dir = ready();
+  for (const id of ["tu-a", "tu-b", "tu-c"]) {
+    assert.match(timedOut(dir, `npm install pkg-${id}`, id).reason, /^hook-timeout: /u);
+  }
+  const sweeper = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "1ms"],
+    dir,
+    bashEvent("npm install pkg-last", "tu-d"),
+  );
+  assert.match(verdictOf(sweeper).reason, /^hook-timeout: /u);
+
+  const withdrawn = allRecords(dir)
+    .filter((record) => record["event"] === "approval.withdrawn")
+    .map((record) => String(record["action_key"]));
+  assert.deepEqual(
+    withdrawn.sort(),
+    [
+      "hook:sess-1:tu-a:deps.add",
+      "hook:sess-1:tu-b:deps.add",
+      "hook:sess-1:tu-c:deps.add",
+      "hook:sess-1:tu-d:deps.add",
+    ],
+    "every abandoned question was taken back",
+  );
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-/u, "nothing is left on the human's queue");
+  assertClean(dir);
+});
+
+test("APRV-287: three expired waits leave the loop floor closed", () => {
+  // The feedback loop this task cuts. An expired wait records a WITHDRAWAL and
+  // never an execution.failed, so the escalation that routes commands to a
+  // phone cannot be fed by the timeouts it is causing.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) {
+    assert.match(timedOut(dir, `npm install pkg-${id}`, id).reason, /^hook-timeout: /u);
+  }
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.equal(
+    read.records.some(
+      (record) => record.event === "execution.failed" || record.event === "execution.completed",
+    ),
+    false,
+    "an expired wait wrote an execution outcome",
+  );
+  assert.deepEqual(harnessLoopEscalation(read.records), [], "no scope accrued anything");
+  assert.deepEqual(loopEscalation(read.records), []);
+
+  // The verdict that matters: the next command is answered by the policy.
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assertClean(dir);
+});
+
+test("APRV-287: three execution.failed still open the floor", () => {
+  // The control for the case above: the streak the escalation exists for is
+  // untouched, and three failed side-effecting tool calls still floor a session.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.escalated)
+      .map((state) => state.scope),
+    ["actor", "session"],
+  );
+  assertClean(dir);
+});
+
+test("APRV-287: harness-side misfires are not executions and accrue nothing", () => {
+  // A command the classifier cannot read is denied before anything is
+  // appended, so the tool never ran and there is no start for its outcome to
+  // close. Three of them used to look like a stalled session; they leave the
+  // floor exactly where they found it.
+  const dir = ready();
+  for (const id of ["mis-1", "mis-2", "mis-3"]) {
+    const run = runCli(["hook", "claude-code"], dir, bashEvent('echo "unterminated', id));
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", verdict.reason);
+    assert.match(verdict.reason, /^hook-unparseable: /u);
+
+    // The harness reports the failed tool call, as it does for any failure.
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent(id, { type: "error", error: "…" }, { hook_event_name: "PostToolUseFailure" }),
+    );
+    assert.equal(
+      reportOf(post)["code"],
+      "post-tool-gate-refused:not-delegated",
+      "a report may only close an execution this runtime authorized",
+    );
+  }
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.equal(
+    read.records.some((record) => record.event.startsWith("execution.")),
+    false,
+    "a refused tool call is not an execution",
+  );
+  assert.deepEqual(harnessLoopEscalation(read.records), []);
+
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: /u);
+  assertClean(dir);
+});
+
+test("APRV-287: a completed carried grant clears the floor the refusal promised it would", () => {
+  // The defect of 2026-09-06. A granted commit-and-push completed and the next
+  // command was still escalated, because the grant was CARRIED: the
+  // execution.started went under the requesting tool call, and the completion
+  // counterpart rebuilds the task from the reporting event, found no start
+  // under it and refused. Nothing ever cleared, so the floor stood.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // The floored write asks a human (the floor routes it to the gate), the wait
+  // expires, and the answer lands afterwards.
+  const key = "hook:sess-1:tu-4:files.write.workspace";
+  const first = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-4"),
+  );
+  assert.match(verdictOf(first).reason, /^hook-timeout: /u);
+  const granted = runCli(["grant", key, "--as", "human:alice"], dir);
+  assert.equal(granted.code, 0, granted.stderr);
+
+  // The retry carries the grant, runs the command, and reports that it worked.
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-5"),
+  );
+  assert.equal(verdictOf(retry).permission, "allow", verdictOf(retry).reason);
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-5", { type: "text", text: "…" }));
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-reported", post.stderr);
+  assert.equal(report["outcome"], "completed");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).filter((state) => state.escalated),
+    [],
+    "the completion cleared both scopes",
+  );
+
+  // The verdict the refusal text promised: the next command is routed by
+  // policy, not by loop safety.
+  const before = rawLog(dir);
+  const next = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-6")));
+  assert.equal(next.permission, "allow", next.reason);
+  assert.match(next.reason, /^autonomous: files\.write\.workspace/u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    false,
+    "nothing was asked of a human",
+  );
+  assertClean(dir);
+});
+
+// ===========================================================================
+// The lagging verified view (APRV-294)
+// ===========================================================================
+
+/**
+ * Serve a verified view that LAGS the requests the hook just appended, then let
+ * it catch up and grant (APRV-294).
+ *
+ * The incident, reproduced: minutes after `approval log sync` replaced the
+ * committed baseline and the daemon restarted, a hook appended its requests,
+ * re-read the log, and got a view that did not carry them. So the helper waits
+ * for the request to land, swaps in the log as it stood BEFORE this tool call,
+ * holds it there for `lagMs`, swaps the whole file back, and only then decides.
+ *
+ * Both swaps are a write-then-rename, so the hook never reads a half-written
+ * file: it sees the short log or the long one, each a clean chain, which is
+ * exactly what a lagging view is. Nothing is written by hand — the bytes put
+ * back are the bytes the real CLI wrote — and every case still ends at
+ * `approval log verify`.
+ */
+function lagThenGrant(
+  dir: string,
+  actionKey: string,
+  baseBytes: number,
+  lagMs: number,
+): { report(): Promise<Record<string, unknown> | null> } {
+  const stem = `lag-${counter}`;
+  const helper = join(dir, `${stem}.cjs`);
+  const reportPath = join(dir, `${stem}.json`);
+  writeFileSync(
+    helper,
+    [
+      'const { spawnSync } = require("node:child_process");',
+      'const { readFileSync, renameSync, writeFileSync } = require("node:fs");',
+      `const CLI = ${JSON.stringify(CLI_ENTRY)};`,
+      `const DIR = ${JSON.stringify(dir)};`,
+      `const LOG_PATH = ${JSON.stringify(join(dir, LOG))};`,
+      `const KEY = ${JSON.stringify(actionKey)};`,
+      `const BASE = ${String(baseBytes)};`,
+      `const LAG_MS = ${String(lagMs)};`,
+      `const REPORT = ${JSON.stringify(reportPath)};`,
+      "const DEADLINE = Date.now() + 25000;",
+      "const write = (fields) => {",
+      "  try {",
+      '    writeFileSync(REPORT + ".part", JSON.stringify(fields));',
+      '    renameSync(REPORT + ".part", REPORT);',
+      "  } catch (error) {",
+      "    // The test reports the report's absence; there is nowhere else to say it.",
+      "  }",
+      "};",
+      "const requested = () => {",
+      "  let raw;",
+      '  try { raw = readFileSync(LOG_PATH, "utf8"); } catch (error) { return false; }',
+      '  const lines = raw.split("\\n");',
+      '  if (!raw.endsWith("\\n")) lines.pop();',
+      "  for (const line of lines) {",
+      "    if (line.trim().length === 0) continue;",
+      "    let record;",
+      "    try { record = JSON.parse(line); } catch (error) { continue; }",
+      '    if (record.event === "approval.requested" && record.action_key === KEY) return true;',
+      "  }",
+      "  return false;",
+      "};",
+      "const swap = (bytes, suffix) => {",
+      "  writeFileSync(LOG_PATH + suffix, bytes);",
+      "  renameSync(LOG_PATH + suffix, LOG_PATH);",
+      "};",
+      "const attempt = () => {",
+      "  if (!requested()) {",
+      "    if (Date.now() >= DEADLINE) {",
+      '      write({ lagged: false, reason: "no approval.requested for " + KEY });',
+      "      return;",
+      "    }",
+      "    setTimeout(attempt, 100);",
+      "    return;",
+      "  }",
+      "  const full = readFileSync(LOG_PATH);",
+      '  swap(full.subarray(0, BASE), ".lagging");',
+      "  setTimeout(() => {",
+      '    swap(full, ".caught-up");',
+      '    const run = spawnSync(process.execPath, [CLI, "grant", KEY, "--as", "human:alice"], { cwd: DIR, encoding: "utf8" });',
+      '    write({ lagged: true, status: run.status, stderr: String(run.stderr || "").trim() });',
+      "  }, LAG_MS);",
+      "};",
+      "attempt();",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const child = spawn(process.execPath, [helper], { cwd: dir, stdio: "ignore" });
+  child.unref();
+
+  return {
+    async report(): Promise<Record<string, unknown> | null> {
+      const until = Date.now() + 30_000;
+      for (;;) {
+        if (existsSync(reportPath)) {
+          try {
+            return JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            // A half-written report; the rename makes this vanishingly unlikely.
+          }
+        }
+        if (Date.now() >= until) return null;
+        await delay(50);
+      }
+    },
+  };
+}
+
+test("APRV-294: a view that lags the hook's own requests is waited out, never denied", async () => {
+  // THE DEFECT. 2026-09-07 02:00Z: the hook appended its requests, re-read the
+  // verified log, found state `none` for its own keys and denied at once with
+  // `hook-io: the verified log does not show every request … as granted
+  // (states: none)`. The requests were real and reached the phone; the view had
+  // not caught up. A log is append-only, so `none` for a key this process
+  // appended is a fact about the view, and the honest answer is to keep waiting.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  const helper = lagThenGrant(dir, key, base, 1_500);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag"),
+  );
+  const decided = await helper.report();
+  const trace = `helper: ${JSON.stringify(decided)} | hook stderr: ${run.stderr}`;
+  assert.equal(decided?.["lagged"], true, trace);
+  assert.equal(decided["status"], 0, trace);
+
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", `${verdict.reason} | ${trace}`);
+  assert.match(verdict.reason, /^granted: /u);
+  // The hook SAW the lag and said so, rather than reading it as an answer.
+  assert.match(
+    run.stderr,
+    /the verified log does not yet carry hook:sess-1:tu-lag:deps\.add/u,
+    trace,
+  );
+  assert.match(run.stderr, /this is a view that lags rather than a decision/u, trace);
+  assert.doesNotMatch(run.stdout, /hook-io/u, "the lag is not an I/O verdict");
+
+  // The grant was spent before the allow was printed, exactly as on any other
+  // granted wait: the record is what authorizes the harness (APRV-200).
+  assert.equal(
+    allRecords(dir).some(
+      (record) => record["event"] === "execution.started" && record["action_key"] === key,
+    ),
+    true,
+    trace,
+  );
+  assertClean(dir);
+});
+
+test("APRV-294: a lag that outlives the wait times out and says the view is behind", async () => {
+  // The other ending. The view never catches up inside the wait, so the deny is
+  // the ordinary `hook-timeout` — never `hook-io` — and it names the repair:
+  // the log this hook reads is behind the log it wrote to.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag-2:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  // Longer than the hook's wait below, so the whole wait runs under the lag.
+  const helper = lagThenGrant(dir, key, base, 6_000);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "2s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag-2"),
+  );
+  const verdict = verdictOf(run);
+  const trace = `hook stderr: ${run.stderr}`;
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u, trace);
+  assert.match(verdict.reason, /The verified view still does not carry /u, trace);
+  assert.match(verdict.reason, /approval log verify/u, trace);
+
+  // Let the helper finish so the case leaves a whole log behind.
+  const decided = await helper.report();
+  assert.equal(decided?.["lagged"], true, JSON.stringify(decided));
+  assertClean(dir);
+});
+
+test("APRV-294: a window that ends between the verdict and the record has its own code", () => {
+  // The second half of the same fault: one read decides and another acts. The
+  // hook derived a window, and by the time the bypass record was appended a
+  // human had closed it — which used to be reported as `gate-not-open`, "no
+  // window is open", a state that had never been true for this call.
+  const dir = ready();
+  const opened = openTestWindow(dir);
+
+  // The read the verdict is decided on, exactly as `lookupWindow` makes it.
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  const decidedOn = { records: read.records, head: read.head };
+
+  // …and the human closes the window in between.
+  const closed = closeWindow(join(dir, LOG), "human:alice");
+  assert.equal(closed.ok, true, closed.ok ? "" : closed.message);
+  if (!closed.ok) throw new Error("unreachable");
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+      sessionId: "sess-1",
+      toolUseId: "tu-window-closed",
+      cwd: "/repo",
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq, read: decidedOn },
+  );
+  assert.equal(refused.ok, false, "a window that is gone authorizes nothing");
+  if (refused.ok) throw new Error("unreachable");
+  // Distinct from `gate-not-open`, and it names the record that ended it.
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, new RegExp(`gate\\.closed seq ${String(closed.record.seq)}`, "u"));
+  assert.match(refused.message, new RegExp(`seq ${String(opened.seq)}`, "u"));
+  assert.equal(rawLog(dir), before, "a refused bypass appends nothing");
+
+  // …and the refusal is not a failed side-effecting call. Nothing started, so
+  // the harness's own report of the failed tool call closes nothing and the
+  // floor is exactly where it was (SPEC.md §10.2).
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent(
+      "tu-window-closed",
+      { type: "error", error: "…" },
+      { hook_event_name: "PostToolUseFailure" },
+    ),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-gate-refused:not-delegated", post.stderr);
+  assert.equal(rawLog(dir), before, "the report appended nothing either");
+
+  const after = readVerifiedRecords(join(dir, LOG));
+  assert.equal(after.ok, true);
+  if (!after.ok) throw new Error("unreachable");
+  assert.deepEqual(harnessLoopEscalation(after.records), [], "no streak accrued");
+  assertClean(dir);
+});
+
+test("APRV-294: a lapsed window is named as lapsed, not as no window at all", () => {
+  // The same code, the other way a window ends. Nothing is appended when a
+  // window lapses (SPEC.md §5.2), so there is no closing seq to name and the
+  // refusal names the expiry instead.
+  const dir = ready();
+  const opened = openTestWindow(dir, {
+    durationText: "1m",
+    durationMs: 60_000,
+    at: new Date(Date.now() - 60 * 60_000).toISOString(),
+  });
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq },
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, /lapsed/u);
+  assert.doesNotMatch(refused.message, /gate\.closed seq/u);
+  assert.equal(rawLog(dir), before);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// Escalation raises scrutiny on side effects only (APRV-297)
+// ===========================================================================
+
+test("APRV-297: a tripped floor leaves a read to the policy and still routes a write", () => {
+  // THE DEFECT. Once the floor tripped on 2026-09-06/07 every hook call went to
+  // the human, reads included, so a session that could not get an answer could
+  // not even grep for why. APRV-280 stopped a read ACCRUING the floor; a tripped
+  // floor still ROUTED one, and a read cannot cause the harm the floor bounds.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  // The read: answered by the policy, at once, with nobody asked.
+  const read = runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-read"));
+  const verdict = verdictOf(read);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\) NOT APPLIED/u);
+  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /every class of this command is a read/u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was raised, so no message was sent",
+  );
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+    "the read is charged like any autonomous call and nothing else is written",
+  );
+
+  // The control: a side-effecting call in the same session is still routed.
+  const mid = rawLog(dir);
+  const write = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-write"),
+  );
+  const denied = verdictOf(write);
+  assert.equal(denied.permission, "deny", denied.reason);
+  assert.match(denied.reason, /^hook-timeout: /u);
+  assert.match(denied.reason, /routed to a human by loop safety/u);
+  // AC3: the refusal text says reads are exempt from routing as well as from
+  // counting, so the agent reading this deny knows it can still look at things.
+  assert.match(denied.reason, /read\.\* commands are outside this floor in both directions/u);
+  assert.match(denied.reason, /does not route them to a human/u);
+  assert.deepEqual(
+    recordsSince(dir, mid)
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    ["hook:sess-1:tu-write:files.write.workspace"],
+    "the floor still puts the session's side effects on a human's phone",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: a floor routes a mixed call as one question, and raises no read class", () => {
+  // AC2. The command looks and then writes; the floor is about the writing. The
+  // approver gets one prompt, for the class that does something, and the read
+  // inside the same command is neither counted nor separately raised.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  const key = "hook:sess-1:tu-mixed:files.write.workspace";
+  grantWhenPending(dir, key);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent(`${READ_COMMAND} && ${WRITE_COMMAND}`, "tu-mixed"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+
+  const written = recordsSince(dir, before);
+  assert.deepEqual(
+    written
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    [key],
+    "exactly one question, and it is the one about the side effect",
+  );
+  assert.equal(
+    written.some(
+      (record) =>
+        record["event"] === "approval.requested" && String(record["action_key"]).endsWith("read.shell"),
+    ),
+    false,
+    "the read class inside the command was not raised",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: the write boundary refuses a floored write and records a floored read", () => {
+  // The belt to the hook's braces, narrowed the same way (core/gate.ts). A
+  // caller that reaches startHarnessExecution without asking the hook first
+  // still cannot record an unattended side effect under a floor, and can record
+  // a read, because a read is outside the floor rather than trusted by it.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const refused = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct",
+      actionKey: "hook:sess-1:tu-direct:files.write.workspace",
+      cls: "files.write.workspace",
+      payload_hash: payloadHash({ command: WRITE_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(refused.ok, false, "a floored side effect may not be recorded unattended");
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "loop-escalated");
+
+  const allowed = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct-read",
+      actionKey: "hook:sess-1:tu-direct-read:read.shell",
+      cls: "read.shell",
+      payload_hash: payloadHash({ command: READ_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(allowed.ok, true, allowed.ok ? "" : `${allowed.code}: ${allowed.message}`);
+  assertClean(dir);
+});
+
+test("APRV-297: a read under a floor clears nothing, so the floor still stands", () => {
+  // The direction that would be a hole. The exemption is about ROUTING; a read
+  // that succeeds under a floor must not clear the streak, or a session could
+  // read its way out from under one.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  toolCall(dir, "tu-read", "text", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.escalated)
+      .map((state) => state.scope),
+    ["actor", "session"],
+    "the completed read cleared neither scope",
+  );
+
+  // …and the next write is still routed, which is the fact that matters.
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-after"),
+  );
+  assert.match(verdictOf(run).reason, /^hook-timeout: /u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    true,
+  );
+  assertClean(dir);
+});
+
+test("APRV-294: with no decision stated the bypass still refuses gate-not-open", () => {
+  // The historical code is untouched, which is what "added, never repurposed"
+  // means for a frozen union: a caller that states no window still gets the
+  // refusal that says there is none.
+  const dir = ready();
+  const before = rawLog(dir);
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-not-open");
+  assert.equal(rawLog(dir), before);
+  assertClean(dir);
 });

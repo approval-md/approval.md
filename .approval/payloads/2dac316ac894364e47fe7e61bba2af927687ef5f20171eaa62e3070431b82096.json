@@ -1,0 +1,1 @@
+{"command":"(cd /Users/carter/dev/approval-md && git fetch -q origin main && git worktree add -q -b aprv-284-claude-md /Users/carter/dev/approval-md/.claude/worktrees/lane-284 origin/main && cd /Users/carter/dev/approval-md/.claude/worktrees/lane-284 && git log --oneline -1)","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

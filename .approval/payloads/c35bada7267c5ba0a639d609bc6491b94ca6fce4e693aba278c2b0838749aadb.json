@@ -1,0 +1,1 @@
+{"command":"echo \"=== FILES ===\" && find docs examples conformance design schema src/cli tests -type f 2>/dev/null | sort","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

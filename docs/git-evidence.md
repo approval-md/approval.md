@@ -214,7 +214,8 @@ vault passphrase a human exported into the shell that started it. A checkpoint
 that is due and unsigned is a warning at every layer and a refusal at none: a
 person who has been away is not evidence of tampering. The ceremony, the
 rotation rule and what to do about a lost key are in
-[cli-reference](cli-reference.md#setup-checkpoint).
+[cli-reference](cli-reference.md#setup-checkpoint); the design and the decisions
+inside it are in [checkpoints](checkpoints.md).
 
 ## Demonstrating both layers
 

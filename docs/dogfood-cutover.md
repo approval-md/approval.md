@@ -59,6 +59,26 @@ channel the human used. For a phone grant via the Telegram listener, the token
 reaches the operator terminal running the listener; handing it to the session
 is the human's step, which is what makes the human the gate.
 
+### Before the push: run the tier CI would run (APRV-275)
+
+A lane's last step before `git push` is `npm run ci:local`. It classifies the
+branch's own diff with the classifier the workflow uses, then runs the jobs
+`.github/workflows/ci.yml` declares for that tier, so a red arrives on the
+laptop instead of in the queue. The queue is serial: a red run there costs the
+entry its slot, a re-merge, and the wait again.
+
+```sh
+npm run ci:local              # classify origin/main...HEAD and run that tier
+npm run ci:local -- --dry-run # print the plan, run nothing
+```
+
+It is not a gate and CI never consults it. A green run is a prediction, and the
+three things it cannot prove are printed rather than skipped over: the Node 20
+floor legs on a host that is not Node 20, the platform-sensitive suites on a
+host that is not Linux, and the protected-path cross-check when no merge base or
+no records branch is reachable from this checkout. See the README's "Running the
+checks" for the flags.
+
 ## The daemon, live
 
 The human runs, in the primary checkout:
@@ -141,6 +161,47 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
+### Starting the runtime is the deploy (APRV-215, APRV-301)
+
+Every merge to `main` used to leave the primary's daemon and hook running the
+previous build until somebody remembered `npm run build`. The symptom was never
+legible as "stale build". It was phone weirdness: reads routing oddly, taps that
+seemed to land on nothing, a verb the session had just shipped answering as
+though it had never been written.
+
+So `approval up` does it for you. Before anything starts, it fetches,
+fast-forwards when that is safe, and then dates `dist/src/cli/main.js` against
+`src/` and `tsconfig.json` using the same predicate `approval doctor`'s
+`build-freshness` row reports. When the build is older, it runs `npm run build`
+in the checkout with the compiler's output on your terminal, and the startup
+line says which of the two things it did:
+
+```
+up: preflight — fast-forwarded 3 commits and rebuilt; now running 8246896fd0f1, in a fresh process on the new build
+up: preflight — rebuilt a stale build; now running 8246896fd0f1, in a fresh process on the new build
+```
+
+A merge is not the only way `dist/` falls behind, so staleness alone is enough:
+the second line is a checkout already at the remote tip whose build was old. A
+rebuild always re-execs, because the process that ran the build had already
+loaded the code the build replaced. `approval daemon run` runs the identical
+preflight from the identical module.
+
+Two ways out, both of them explicit:
+
+- `approval up --no-build` fast-forwards and starts on the stale build anyway.
+  It warns on stderr every time, and the `--json` line reports
+  `"action":"build-skipped"` (or `"fast-forward+build-skipped"`) alongside
+  `"dist_stale":true`, so neither a human nor a supervisor can read that start
+  as a clean one.
+- a build that *fails* refuses: `up-preflight-failed`, the exit code `npm run
+  build` came back with, and no daemon. Starting there would put the writer on
+  the exact code the rebuild existed to replace.
+
+The hook runs the same `dist/`, so this covers it too. A session whose commands
+start classifying strangely shortly after a merge is usually a primary that has
+not been restarted since.
+
 ### `supervised-live` needs this process up (APRV-208)
 
 A `supervised-live` class puts a declared fraction of its actions through the
@@ -193,8 +254,11 @@ policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. Th
 next one arrives on the first cycle after you decide that one, `/skip` it (it
 comes round again, last) or `/next` past it (this process does not show it
 again). `/queue` lists everything pending at any time, including while a request
-is on screen, and that list is read from the log rather than from the chat, so it
-is right even when the chat is not.
+is selected, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not. The list carries no decision buttons and
+does not claim to know where the selected request's card ended up; if you cannot
+find that card, `/skip` puts the request at the back of the order without
+deciding it and a fresh card follows on a later cycle.
 
 Nothing is withheld by this. Every request is still pending in the log, still
 listed by `approval queue`, and still decidable from any copy of its message
@@ -278,6 +342,59 @@ decisions run. The digest is then redrawn once, member by member, and that
 redraw is where you read what landed; the tally (`Approved 3 — one log event
 each.`) goes to the listener's stderr for the operator.
 
+### The review card: the other half of "supervised" (APRV-299)
+
+Most of what this repository's agents do is `supervised`, which is the bargain
+"execute now, a fraction is reviewed after". The daemon draws that fraction and
+writes `audit.sampled`. On 2026-09-07 sixty of them were waiting in `QUEUE.md`
+and none had ever reached the phone, which means the after-the-fact half of the
+bargain was not being kept.
+
+They arrive as **review cards** now, on the same channel and under the same
+pacing rules. What to expect:
+
+- A summary line (`4 awaiting review — oldest ran 3h ago — files.write.local
+  ×3, network.call`), then ONE card, and never while a request card is in front
+  of you. A request is somebody waiting on you; a sample is work that already
+  finished, so it always yields.
+- The card says `REVIEW — THIS ALREADY RAN`. It has no payload block and no
+  approve button, because there is nothing left to authorize. It shows what ran
+  (class, the command breakdown, task, the agent's summary), when it ran, and
+  that the runtime allowed it without asking.
+- **Six buttons, bare emoji, two rows.** Verdict on top (✅, 🛑), grade
+  underneath, worst to best (👎, 😐, 👍, ❤️). No words on the buttons and no
+  block of rules under the card: it said the same four sentences every time and
+  pushed what ran off the first screen.
+- **One tap finishes it.** ✅ records "a person looked and was content". A
+  reaction alone records OK and that grade. 🛑 takes two taps: the first arms
+  the card, writes nothing, and puts `DENY ARMED` in its headline, and the
+  second records the denial and names the reconciliation obligation it opens.
+  With deny armed, a reaction records the denial *with* that grade, and
+  👍/❤️ are refused, because those two say opposite things about one action.
+- ❤️ and 👎 ask for a reply first. Reply to the prompt with why; nothing is
+  appended until you do, and a blank reply appends nothing.
+- Every tap that records answers `Heard — recording your review`, and like the
+  request card's toast it means the tap arrived and nothing more. What the log
+  actually took is on the card, which edits itself to say so. The first 🛑 tap
+  is the exception, and says `Deny armed — nothing recorded`.
+
+The card is the values loop made real: the reactions of APRV-237/239 hang off
+this verb, and `approval feedback` shows a grade given on the phone exactly as
+one given at a terminal — same record, same `human:carter`, same everything.
+Nothing on the card reaches enforcement (SPEC section 11.1, invariant 10): a
+reaction moves no verdict, no sample, no budget.
+
+**Nothing here can lose a review.** A card you never see, scroll past, `/skip`,
+`/next` past, or lose to a restart leaves the sample open in the log. It stays
+in `approval audit list` and in `.approval/QUEUE.md`, and the terminal verb is
+always available:
+
+```sh
+approval audit list                                     # what is awaiting review
+approval audit review <sample-seq> --reaction liked     # or --deny, --note "…"
+approval audit obligations                              # what a denial opened
+```
+
 ### When the phone channel misbehaves, decide at the CLI
 
 The phone is one channel, not the gate. Every decision the Telegram listener
@@ -302,7 +419,8 @@ with the outcome the log now carries, so the transcript catches up on its own.
 
 A one-time ceremony, and the only part of this runbook that cannot be delegated
 to an agent by design. It gives the log a second witness beside git anchoring: a
-key no agent process holds, signing the head on a cadence.
+key no agent process holds, signing the head on a cadence. Why it is shaped this
+way is [checkpoints](checkpoints.md); the steps are here.
 
 **Step 1, at a terminal in the primary checkout.** The vault passphrase must be
 in the shell first, because the private half goes into the vault:
@@ -462,8 +580,15 @@ file and still needs committing —
 hand, because an advance that carried it would be the mixed branch the rule
 forbids.
 
-Merge it with a **merge commit**. A branch that exists for one commit and is
-merged the moment CI passes is not a feature branch in the sense the rule
+You do not merge it either (APRV-284). `--pr` arms the merge as it opens the
+pull request (`gh pr merge <branch> --merge --auto`), so it lands as a merge
+commit when CI is green and never before; the verb's `auto-merge` row says
+whether the arm took. `--no-auto-merge` puts it back on you, and so does the
+verb itself when the branch carries a path an advance may not carry.
+
+Merge it with a **merge commit** where the arm did not take. A branch that
+exists for one commit and is merged the moment CI passes is not a feature
+branch in the sense the rule
 forbids: nothing else appends to the log while it is open, so no second chain
 is ever created, which is the property the rule protects. What the rule still
 forbids is a branch that accumulates work alongside the log commit, and two
@@ -517,6 +642,53 @@ versions of one is a question about which bytes were approved, and no verb here
 will pick. A payload you hold that the incoming commit does not carry (recorded
 and not yet advanced, usually) blocks nothing and is left alone.
 
+**Neither does the queue projection, and you no longer stop the daemon for it.**
+A records commit carries `.approval/QUEUE.md` as well as the log, and the daemon
+re-renders that file every tick, under no lock, whether or not anything was
+appended (the TTL countdowns move on their own). So on 2026-09-07,
+after the records pull request merged, sync refused twice:
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        .approval/QUEUE.md
+```
+
+The second refusal came straight after a hand-run `git checkout --
+.approval/QUEUE.md`, because the next tick landed in the same window. The
+workaround was to stop the daemon, check the file out, sync, and start it again.
+That is retired (APRV-292): sync now throws the working projection away as the
+last thing it does before the fast-forward, and rebuilds it from the reconciled
+log afterwards, so a rendering can no longer refuse a pull of the truth it is a
+rendering of. A merge that still fails with the projection dirty again is
+retried once and then refuses, naming the file and telling you to stop whatever
+is writing it. Nothing here weighs the old bytes: unlike a payload, a projection
+is not evidence, and losing the last render costs one render.
+
+**And neither does an untracked task file, in `approval up`'s preflight.** The
+same class of collision, one directory over. A lane files
+`backlog/tasks/aprv-299` on its branch, its pull request merges, and the primary
+checkout is holding that path untracked from its own `backlog task create`, so
+on 2026-09-07 the preflight refused its fast-forward:
+
+```
+error: The following untracked working tree files would be overwritten by merge:
+        backlog/tasks/aprv-299 - ...md
+```
+
+The refusal pointed at `git status`, which cannot say whether the local copy
+holds anything the incoming one does not, and that is the only question worth
+asking. It is asked now (APRV-300). When every path the merge names sits under
+`backlog/tasks/`, each is read against `git show FETCH_HEAD:<path>`: a
+byte-identical copy is removed, a copy whose every line the incoming file
+already carries is moved to a sibling of the checkout named
+`approval-md-preflight-aside-<YYYY-MM-DD>` with the destination printed, and the
+merge is retried once. A copy with lines main lacks refuses
+`up-preflight-task-file-conflict`, naming your path, the incoming spelling and
+how many lines only yours has, and that one is yours to settle. Every file is
+judged before any file is touched, as with the payloads above, and one path
+outside `backlog/tasks/` declines the whole set: the old refusal stands and
+nothing is cleared. Nothing under `.approval/` is ever in scope here.
+
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.
 
@@ -539,6 +711,53 @@ $EDITOR APPROVAL.md
 approval policy amend --commit
 ```
 
+When the amendment needs the pins moved as well, it is still three steps: edit
+both files, run the verb, tap.
+
+```sh
+cd /Users/carter/dev/approval-md
+$EDITOR APPROVAL.md
+$EDITOR src/core/policy-expectations.ts   # only when a PINNED class moved
+npm run build                             # the ceremony runs the BUILT suite
+approval policy amend --commit
+```
+
+### Which classes are pinned, and why (APRV-296)
+
+`src/core/policy-expectations.ts` is a safety floor, not an inventory of the
+policy. A pin exists where LOOSENING the class would be a security regression,
+and every pin's note says what that loosening would cost. Three families, twelve
+pins:
+
+| family | classes | what a loosening would cost |
+| --- | --- | --- |
+| human-only | `vcs.history.rewrite`, `policy.core`, `log.mutate`, `account.credential` | agent authority over shared history, the policy file itself, the log, or the credentials that decide (SPEC.md §11.1 invariant 9) |
+| manual | `deps.add`, `network.call`, `release.publish`, `policy.edit.ci`, `files.delete.out_of_scope` | an effect that leaves this repository or cannot be undone, taken with no human in the path |
+| the fail-closed default | `communicate.email.external`, `deps.upgrade`, bare `read` | the classes nobody wrote a rule for stop reaching a human; these three are pinned at `manual/default` precisely because the policy does not declare them |
+
+Everything else the policy declares carries NO pin, and the ceremony accepts it.
+Declaring a new `supervised` or `autonomous` class, tuning a live rate, or
+changing `approval_ttl` is an amendment and nothing more: no code change, no
+rebuild. The 2026-09-07 ceremony is why. Every declared class was pinned in both
+directions and `tests/dogfood.test.ts` pinned `approval_ttl` at its exact value,
+so a one-line TTL change plus one newly declared class became three failed runs
+against pins that were defending nothing (`vcs.pr.create` as supervised,
+`log.advance` as sampled, a 24h TTL). What still holds without those pins: every
+resolution change prints in the ceremony's semantic diff before you attest it,
+the irreversibility floor keeps `vcs.push.main` manual for an irreversible
+action, and the dogfood suite still asserts the fail-closed defaults
+(`defaults.autonomy: manual`, `on_expiry: reject`, and a TTL that exists and is
+positive).
+
+Adding a pin is a human decision that a class has joined that floor. The line
+takes the shape the list already uses, and it needs a note saying why loosening
+the class would be a regression:
+
+```ts
+{ actionClass: "deps.remove", autonomy: "manual", provenance: "rule",
+  note: "loosened, an agent could uninstall a package the build depends on …" },
+```
+
 No `git fetch` and no `git reset --keep origin/main` first. That instruction used
 to precede every ceremony, and it was both a step to forget and a step that could
 fail on its own (`Entry '…' not uptodate. Cannot merge.` on a task file that had
@@ -551,16 +770,32 @@ protected default branch and switches to the branch flow on its own, creating
 `--direct` forces the in-place commit, and warns before printing a push that
 protection will reject.
 
+Since APRV-274 the pins travel with the amendment. When
+`src/core/policy-expectations.ts` differs from the commit the amendment is built
+on, it joins the amendment commit as a third file, the pin deltas print in the
+semantic diff beside the class deltas, and the pull request is green on the first
+push. The seq 23351 ceremony is what that replaces: the pins had to be fetched
+from a branch, unstaged (the verb refused a commit carrying anything but the
+policy and the log), then cherry-picked onto `policy-amend-<seq>` by an agent
+after the push. A pins file the base already carries stays as the base carries
+it, so a pins edit somebody else landed is never reverted by your ceremony.
+
 Your checkout is left exactly as the verb found it: still on `main`, working tree
-carrying the policy edit you made and nothing else, and the amendment commit held
-on `policy-amend-<seq>`. After the pull request merges, `approval log sync`
-brings main down safely. Four things stop the ceremony, all of them before the
+carrying the edits you made and nothing else, and the amendment commit held on
+`policy-amend-<seq>`. After the pull request merges, `approval log sync`
+brings main down safely. Five things stop the ceremony, all of them before the
 attestation, so nothing is ever half-done: `fetch-failed`,
 `base-policy-diverged` (somebody amended the policy on origin since this edit
 began; bring the checkout up to origin and re-apply the edit),
-`base-log-diverged` (run `approval log sync` first), and `policy-suite-failed`
+`base-log-diverged` (run `approval log sync` first), `policy-suite-failed`
 (the amended policy no longer resolves the way `src/core/policy-expectations.ts`
-pins it: update the pins, `npm run build`, run the verb again).
+pins it: every pin is a class whose loosening is a regression, so read the note
+the refusal prints beside the class, then decide whether the policy or the pin
+is the thing that is wrong; a pin that has to move needs `npm run build` before
+the verb runs again), and `dogfood-suite-failed` (the whole of `tests/dogfood.test.ts` is red
+against the amended file, and the refusal names the failing test; it is also
+what you get from a `dist/` the last edit did not rebuild, because an unrun
+suite is not a green one).
 
 ## If an envelope goes missing
 

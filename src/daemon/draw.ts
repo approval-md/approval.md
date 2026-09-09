@@ -51,15 +51,18 @@ import {
   drawMac,
   drawSocketPathFor,
   isHex64,
+  isSamplingQuery,
   liveClassesOf,
   type DrawAnswer,
   type DrawQuestion,
+  type SamplingAnswer,
 } from "../core/live-draw.js";
 import { loadPolicy, type LoadPolicyOptions } from "../core/policy-load.js";
 import { resolve as resolveClass } from "../core/policy-match.js";
 import {
   isSampled,
   resolveLiveSelector,
+  resolveSampler,
   type LiveSelectorUnavailableReason,
 } from "../core/sampler.js";
 import { readVerifiedRecords } from "../core/state.js";
@@ -383,7 +386,18 @@ export class DrawServer {
       }
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
-      const question = parseQuestion(buffer.slice(0, newline));
+      const line = buffer.slice(0, newline);
+      // APRV-271. The status question comes first because a draw question can
+      // never look like one: it carries no `action_key`, so `parseQuestion`
+      // would refuse it, and an operator would be told their daemon was
+      // malfunctioning when it had been asked something older builds never
+      // defined. Answering it costs no verified read and no MAC.
+      if (isSamplingQuery(line)) {
+        this.answered += 1;
+        answer(this.samplingReport());
+        return;
+      }
+      const question = parseQuestion(line);
       if (question === null) {
         refuse("the question was malformed or declared another protocol version");
         return;
@@ -398,12 +412,49 @@ export class DrawServer {
    * Returns the answer body; refusals go through `refuse` and this returns
    * `undefined`, which `answer` above ignores because `done` is already set.
    */
-  private decide(question: DrawQuestion, refuse: (detail: string) => void): unknown {
+  /** Where this daemon reads its policy from. One spelling, two readers. */
+  private policyWhere(): LoadPolicyOptions {
     const where: LoadPolicyOptions =
       this.options.policy.file !== undefined
         ? { file: this.options.policy.file }
         : { dir: this.options.policy.dir ?? process.cwd() };
     if (this.options.schemaDir !== undefined) where.schemaDir = this.options.schemaDir;
+    return where;
+  }
+
+  /**
+   * This daemon's report on its OWN sampler (APRV-271).
+   *
+   * Read through `core/sampler.ts` from this process's environment, which is
+   * the whole point: the operator exported the secret HERE, and every other
+   * process on the machine has had `APPROVAL_*` stripped from it. It carries
+   * the variable's NAME and the rate, both of which the policy file already
+   * states in the open, and never the value.
+   *
+   * No verified read, no attestation check and no MAC: this answer decides
+   * nothing. `core/live-draw.ts`'s header sets out what a caller may and may
+   * not conclude from it.
+   */
+  private samplingReport(): SamplingAnswer {
+    const load = loadPolicy(this.policyWhere());
+    const sampler = resolveSampler(load);
+    const now = this.options.now ?? ((): string => new Date().toISOString());
+    return {
+      v: DRAW_PROTOCOL_VERSION,
+      sampling: {
+        enabled: sampler.enabled,
+        reason: sampler.enabled ? null : sampler.reason,
+        secret_env: sampler.secretEnv,
+        rate: sampler.rate,
+        live_classes: load.ok ? liveClassesOf(load.policy) : [],
+      },
+      daemon_pid: process.pid,
+      answered_at: now(),
+    };
+  }
+
+  private decide(question: DrawQuestion, refuse: (detail: string) => void): unknown {
+    const where = this.policyWhere();
     const load = loadPolicy(where);
     if (!load.ok) {
       refuse(`this daemon cannot load its policy (${load.code}), so it can derive no rate`);

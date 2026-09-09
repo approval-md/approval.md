@@ -15,7 +15,7 @@
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { LOG_ADVANCE_HELP, LOG_SYNC_HELP } from "./help.js";
-import { logAdvance, type LogAdvanceResult } from "./log-advance.js";
+import { logAdvance, type LogAdvanceReport, type LogAdvanceResult } from "./log-advance.js";
 import { logSync, short, type LogSyncResult } from "./log-sync.js";
 import type { Streams } from "./main.js";
 import { createProgress, silentProgress } from "./progress.js";
@@ -36,6 +36,7 @@ const ADVANCE_FLAGS: Record<string, FlagKind> = {
   "--branch": "string",
   "--base": "string",
   "--pr": "boolean",
+  "--no-auto-merge": "boolean",
   "--dry-run": "boolean",
   "--json": "boolean",
   "--help": "boolean",
@@ -240,6 +241,11 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
     ...(branch === null ? {} : { branch }),
     ...(base === null ? {} : { base }),
     ...(boolFlag(parsed.flags, "--pr") ? { pr: true } : {}),
+    // APRV-284. Armed unless the operator says otherwise, and the flag is read
+    // whether or not `--pr` was passed: `logAdvance` ignores it without a pull
+    // request, and a flag that silently meant nothing in one combination is a
+    // flag somebody will believe they used.
+    ...(boolFlag(parsed.flags, "--no-auto-merge") ? { autoMerge: false } : {}),
     ...(boolFlag(parsed.flags, "--dry-run") ? { dryRun: true } : {}),
   });
 
@@ -265,6 +271,8 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
         pushed: report.pushed,
         prUrl: report.prUrl,
         prCreated: report.prCreated ?? false,
+        autoMerge: report.autoMerge ?? null,
+        autoMergeNote: report.autoMergeNote ?? null,
         dryRun: report.dryRun,
       })}\n`,
     );
@@ -313,6 +321,9 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
         right: report.pushed ? `${report.remote} ${report.recordsBranch}` : "not pushed",
       },
       ...(report.prUrl === null ? [] : [{ left: "pull request", right: report.prUrl }]),
+      ...(report.autoMerge === null || report.autoMerge === undefined
+        ? []
+        : [{ left: "auto-merge", right: autoMergeLine(st, report) }]),
     ])
     .split("\n")) {
     streams.out(`  ${line}\n`);
@@ -325,9 +336,36 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
       streams.out(
         `  ${st.muted("open the pull request and merge it with a MERGE COMMIT (--pr opens it for you)")}\n`,
       );
+    } else if (report.autoMerge !== "armed") {
+      streams.out(
+        `  ${st.muted("merge it with a MERGE COMMIT when CI is green: auto-merge is not armed on it")}\n`,
+      );
     }
   }
   return EXIT_OK;
+}
+
+/**
+ * The `auto-merge` row: what became of the arm, and why when it did not (APRV-284).
+ *
+ * A row rather than a line of prose because the three not-armed outcomes are
+ * different facts an operator acts on differently — `withheld` means read the
+ * branch, `refused` means the remote said no, `off` means you asked for that —
+ * and only `armed` means the pull request needs nothing further from anyone.
+ */
+function autoMergeLine(st: ReturnType<typeof style>, report: LogAdvanceReport): string {
+  const note = report.autoMergeNote ?? null;
+  const because = note === null ? "" : `  ${st.muted(note)}`;
+  switch (report.autoMerge) {
+    case "armed":
+      return `${st.glyph("ok")} armed — it lands as a MERGE COMMIT when CI is green, and never before`;
+    case "off":
+      return `not armed (--no-auto-merge); merge it with a MERGE COMMIT when CI is green`;
+    case "withheld":
+      return `${st.warn("withheld")} by this verb${because}`;
+    default:
+      return `${st.warn("refused")} by gh${because}`;
+  }
 }
 
 function reportAdvanceRefusal(

@@ -394,9 +394,18 @@ test("a supervised action runs with NO token and its budget is charged at the st
   // APRV-205 adds one more field, whose value depends on the environment this
   // suite happens to run in, so it is asserted by shape and lifted out of the
   // exact comparison below. The cases in "the starved child" pin its meaning.
+  // APRV-193 adds a second such field, for the same reason: which room the
+  // child ran in is a fact about the MACHINE this suite runs on (macOS starves
+  // it, a platform with no mechanism records `unsupported`), so it too is
+  // asserted by shape here and pinned by meaning in `tests/sandbox.test.ts`.
   const startedPayload = { ...((logRecords(dir)[2]?.["payload"] ?? {}) as Record<string, unknown>) };
   assert.equal(typeof startedPayload["env_stripped"], "number");
   delete startedPayload["env_stripped"];
+  assert.ok(
+    ["egress-denied", "unsupported"].includes(String(startedPayload["sandbox"])),
+    `an untokened child recorded sandbox: ${String(startedPayload["sandbox"])}`,
+  );
+  delete startedPayload["sandbox"];
   assert.deepEqual(startedPayload, {
     class: "files.write.local",
     est_cost_usd: "0.01",

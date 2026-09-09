@@ -258,6 +258,10 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--interval": "string",
   "--debounce": "string",
   "--once": "boolean",
+  // The watcher trace (APRV-230), spelled identically to `daemon run`'s: the
+  // ambient runtime is the process an operator actually runs, so the diagnostic
+  // for what is waking it has to be reachable from this spelling too.
+  "--trace-watch": "boolean",
   "--git-evidence": "boolean",
   // The cadence advance (APRV-204), spelled identically to `daemon run`'s.
   "--advance": "boolean",
@@ -266,6 +270,7 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  "--no-advance-auto-merge": "boolean",
   // The live draw (APRV-208), spelled identically to `daemon run`'s.
   "--no-draw": "boolean",
   // The dark-session sweep (APRV-192), spelled identically to `daemon run`'s.
@@ -295,6 +300,12 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--no-preflight": "boolean",
   "--preflight-remote": "string",
   "--preflight-base": "string",
+  // The rebuild half of it, alone (APRV-301): fetch and fast-forward as usual,
+  // but leave a stale `dist/` where it is. The preflight then says so on stderr
+  // and reports `"action":"build-skipped"`, because starting on a build older
+  // than the sources is a thing an operator may mean and must never be told is
+  // fine.
+  "--no-build": "boolean",
   // Test-only, spelled exactly as doctor's: retarget the build-freshness half of
   // the preflight at a fixture tree. It moves nothing else, and a wrong value
   // can only make the rebuild decision wrong — never the fast-forward.
@@ -401,8 +412,10 @@ export function commandUp(
   //
   // First, before the log is even opened, because its whole subject is which
   // code and which log this process is about to run against. It reads git, and
-  // at most fast-forwards and rebuilds; it never resets, never stashes, and
-  // never touches the working log. A refusal exits without starting anything.
+  // at most fast-forwards, rebuilds, and clears an untracked `backlog/tasks/`
+  // file the incoming commit already contains out of the merge's way
+  // (APRV-300); it never resets, never stashes, and never touches the working
+  // log. A refusal exits without starting anything.
   //
   // `--json` emission goes through the same `UpEvent` union as everything else,
   // so the stream stays one union of additive shapes. The refusal does NOT: it
@@ -417,6 +430,7 @@ export function commandUp(
       root: rootFlag === null ? null : absolute(rootFlag, cwd),
       remote: stringFlag(flags, "--preflight-remote"),
       branch: stringFlag(flags, "--preflight-base"),
+      build: !boolFlag(flags, "--no-build"),
       json,
       emit: (event) => {
         if (json) {
@@ -620,6 +634,7 @@ export function commandUp(
     intervalMs: interval.ms,
     debounceMs: debounce.ms,
     once,
+    traceWatch: boolFlag(flags, "--trace-watch"),
     sink: {
       emit: (event: DaemonEvent) => {
         if (json) {

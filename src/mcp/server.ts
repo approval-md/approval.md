@@ -110,6 +110,10 @@ export const EXCLUDED_VERBS: ReadonlyMap<string, string> = new Map([
     "hook cursor",
     "it reads one Cursor preToolUse event from STDIN and its registry input schema has nowhere to put that event. On a stdio server, stdin is the JSON-RPC stream: a tool that read it would eat the protocol. It is also the wrong shape for MCP — a harness that can call tools calls `request` and `wait` directly.",
   ],
+  [
+    "hook codex",
+    "it reads one Codex PreToolUse or PostToolUse event from STDIN and its registry input schema has nowhere to put that event. On a stdio server, stdin is the JSON-RPC stream: a tool that read it would eat the protocol. It is also the wrong shape for MCP — a harness that can call tools calls `request` and `wait` directly.",
+  ],
 ]);
 
 /**

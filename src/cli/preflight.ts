@@ -15,7 +15,10 @@
  *
  * ## What it is allowed to do
  *
- * Read git, and at most two writes: a `--ff-only` merge, and `npm run build`.
+ * Read git, and at most three writes: a `--ff-only` merge, `npm run build`,
+ * and, when the merge refused over an untracked file under `backlog/tasks/`
+ * that main already contains, clearing that file out of the way (APRV-300, and
+ * the rules it obeys are in {@link reconcileUntrackedTaskFiles}).
  *
  * It never resets, never stashes, never checks anything out, and never touches
  * the working log. That list is not conservatism for its own sake — it is fork 2
@@ -28,7 +31,8 @@
  *
  * ## Refusals, not repairs
  *
- * Three codes, evaluated in this order, each firing for exactly one condition:
+ * Four codes, each firing for exactly one condition. The first three are
+ * evaluated in this order, before anything is written:
  *
  * - `up-preflight-behind-ahead` — `origin/<branch>..HEAD` is non-empty. Local
  *   commits exist that the remote does not have. A fast-forward is not the
@@ -42,8 +46,23 @@
  *   Named separately because the repair is different: look at the edit and
  *   decide, or start on the current build with `--no-preflight`.
  *
+ * The fourth is answered after the merge has already refused, and only for the
+ * one path shape where two checkouts routinely author one file (APRV-300):
+ *
+ * - `up-preflight-task-file-conflict` — an untracked file under
+ *   `backlog/tasks/` stopped the fast-forward, and it holds lines the incoming
+ *   copy does not. See {@link reconcileUntrackedTaskFiles} for what happens
+ *   when it holds none, and why that is a claim rather than an assumption.
+ *
  * `git reset --hard` appears in none of them, and never will: it is the command
  * that turns "your checkout is confusing" into "your work is gone".
+ *
+ * A fourth refusal reports a write that failed rather than a judgment:
+ * `up-preflight-failed` carries the step and, for the build, the exit code
+ * `npm run build` came back with. The runtime does not start after it, because the whole point
+ * of the rebuild is that a daemon and a hook running compiled-away code is the
+ * defect being fixed (APRV-301); `--no-build` is how an operator says they
+ * meant to run the stale build anyway.
  *
  * ## A fetch that fails is weather
  *
@@ -61,9 +80,18 @@
  * as the last fetch.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { dirname, join, resolve as resolvePathSegments } from "node:path";
+import { basename, dirname, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DoctorCheck } from "./doctor.js";
@@ -75,6 +103,7 @@ import {
   git,
   repoPath,
   repoRoot,
+  showBlob,
 } from "./git-scope.js";
 import { runbook, style, type RunbookStep } from "./style.js";
 
@@ -134,6 +163,55 @@ function newestMtime(path: string): number | null {
   return newest;
 }
 
+/** The four paths a freshness question is asked about. One definition. */
+function installationPaths(root: string): {
+  loader: string;
+  marker: string;
+  sources: string;
+  tsconfig: string;
+} {
+  return {
+    loader: join(root, "cli.js"),
+    marker: join(root, "dist", "src", "cli", "main.js"),
+    sources: join(root, "src"),
+    tsconfig: join(root, "tsconfig.json"),
+  };
+}
+
+/** What the disk says about those four paths. `null` means "not there". */
+interface InstallationDates {
+  loaderMtime: number | null;
+  markerMtime: number | null;
+  sourceMtime: number | null;
+  /** `max(src/, tsconfig.json)`, or `null` when there are no sources at all. */
+  newestSource: number | null;
+}
+
+/**
+ * Date one installation: the single measurement both freshness answers read.
+ *
+ * {@link checkBuildFreshness} (doctor's row) and {@link distStale} (the boolean
+ * the preflight rebuilds on) interpret this differently, because a missing bin
+ * loader is a fault to report and not a reason to compile anything. What they
+ * must never do is disagree about WHAT WAS MEASURED, which is what a second
+ * copy of these four paths would eventually cause: a source added to one list
+ * and not the other means doctor calling a build stale that `approval up` had
+ * just declared fresh, or worse, the other way round (APRV-301).
+ *
+ * Raises {@link ScanError} the way {@link newestMtime} does. Doctor turns that
+ * into an I/O error; the preflight turns it into "cannot tell".
+ */
+function dateInstallation(root: string): InstallationDates {
+  const { loader, marker, sources, tsconfig } = installationPaths(root);
+  const sourceMtime = newestMtime(sources);
+  return {
+    loaderMtime: newestMtime(loader),
+    markerMtime: newestMtime(marker),
+    sourceMtime,
+    newestSource: sourceMtime === null ? null : Math.max(sourceMtime, newestMtime(tsconfig) ?? 0),
+  };
+}
+
 /**
  * Is the built CLI at least as new as the sources it was built from?
  *
@@ -159,13 +237,8 @@ function newestMtime(path: string): number | null {
  * exactly the confusion it exists to name.
  */
 export function checkBuildFreshness(root: string): DoctorCheck {
-  const loader = join(root, "cli.js");
-  const marker = join(root, "dist", "src", "cli", "main.js");
-  const sources = join(root, "src");
-  const tsconfig = join(root, "tsconfig.json");
-
-  const loaderMtime = newestMtime(loader);
-  const markerMtime = newestMtime(marker);
+  const { loader, marker, sources } = installationPaths(root);
+  const { loaderMtime, markerMtime, sourceMtime, newestSource } = dateInstallation(root);
 
   if (markerMtime === null) {
     return {
@@ -188,17 +261,13 @@ export function checkBuildFreshness(root: string): DoctorCheck {
     };
   }
 
-  const sourceMtime = newestMtime(sources);
-  if (sourceMtime === null) {
+  if (sourceMtime === null || newestSource === null) {
     return {
       check: "build-freshness",
       status: "skip",
       detail: `${sources} is absent (a published install carries no sources), so the build cannot be dated against them; ${marker} is present`,
     };
   }
-
-  const configMtime = newestMtime(tsconfig) ?? 0;
-  const newestSource = Math.max(sourceMtime, configMtime);
 
   if (newestSource > markerMtime) {
     return {
@@ -226,29 +295,24 @@ export function checkBuildFreshness(root: string): DoctorCheck {
  * would rebuild a tree it has no business compiling.
  */
 export function distStale(root: string): boolean | null {
-  let loader: number | null;
-  let marker: number | null;
-  let sources: number | null;
-  let config: number | null;
+  let dates: InstallationDates;
   try {
-    loader = newestMtime(join(root, "cli.js"));
-    marker = newestMtime(join(root, "dist", "src", "cli", "main.js"));
-    sources = newestMtime(join(root, "src"));
-    config = newestMtime(join(root, "tsconfig.json"));
+    dates = dateInstallation(root);
   } catch (cause) {
     if (cause instanceof ScanError) return null;
     throw cause;
   }
-  // No sources to date the build against — a published install, or a tree that
+  const { loaderMtime, markerMtime, sourceMtime, newestSource } = dates;
+  // No sources to date the build against: a published install, or a tree that
   // is not an installation at all. Either way "stale" is not a claim that can
   // be made, and a preflight that read "cannot tell" as "stale" would compile a
   // directory nobody asked it to compile.
-  if (sources === null) return null;
-  if (loader === null && marker === null) return null;
+  if (sourceMtime === null || newestSource === null) return null;
+  if (loaderMtime === null && markerMtime === null) return null;
   // A loader with no build behind it: the placeholder-binary shape. `npm run
   // build` is exactly the repair.
-  if (marker === null) return true;
-  return Math.max(sources, config ?? 0) > marker;
+  if (markerMtime === null) return true;
+  return newestSource > markerMtime;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +329,10 @@ export type PreflightAction =
   | "fast-forward"
   /** Both. The ordinary shape after a few days away. */
   | "fast-forward+rebuild"
+  /** The build was older than the sources and `--no-build` said to leave it. */
+  | "build-skipped"
+  /** The checkout was behind, the build is now stale, and `--no-build` said so. */
+  | "fast-forward+build-skipped"
   /** A refusal: nothing was touched. */
   | "refused"
   /** `--no-preflight`, or a checkout git cannot answer questions about. */
@@ -277,6 +345,7 @@ export const PREFLIGHT_REFUSAL_CODES = [
   "up-preflight-behind-ahead",
   "up-preflight-log-diverged",
   "up-preflight-dirty-protected",
+  "up-preflight-task-file-conflict",
 ] as const;
 
 export type PreflightRefusalCode = (typeof PREFLIGHT_REFUSAL_CODES)[number];
@@ -339,6 +408,18 @@ export interface PreflightInput {
   remote?: string;
   /** Defaults to the checked-out branch, or `main` on a detached HEAD. */
   branch?: string;
+  /**
+   * Run the package's build when `dist/` is older than the sources. Defaults to
+   * `true`, which is the whole point of the preflight; `false` is `--no-build`.
+   *
+   * Opting out changes what the preflight DOES, never what it SAYS: the
+   * fast-forward still happens, `dist_stale` still reports the truth, and the
+   * action settles on `build-skipped` so neither the human line nor a machine
+   * caller can read "started" as "started on the code that was merged".
+   *
+   * {@link inspectPreflight} ignores it, because inspection builds nothing.
+   */
+  build?: boolean;
 }
 
 const ZERO: Omit<PreflightFacts, "action"> = {
@@ -650,8 +731,34 @@ export function runPreflight(
     return { ok: true, facts, detail: report.detail, warning: report.warning };
   }
 
+  // What the task-file reconciliation below cleared, or `null` when it had
+  // nothing to do. It rides out on the warning line so the aside directory is
+  // printed where the operator is already looking.
+  let cleared: string | null = null;
+
   if (facts.behind_by > 0 && report.root !== null && report.target !== null) {
-    const merged = git(["merge", "--ff-only", report.target], report.root);
+    const root = report.root;
+    const target = report.target;
+    let merged = git(["merge", "--ff-only", target], root);
+    if (!merged.ok) {
+      const reconciled = reconcileUntrackedTaskFiles(root, target, failureText(merged));
+      if (reconciled.kind === "refused") {
+        return { ok: false, facts: { ...facts, action: "refused" }, refusal: reconciled.refusal };
+      }
+      if (reconciled.kind === "failed") {
+        return {
+          ok: false,
+          facts: { ...facts, action: "refused" },
+          failed: { step: reconciled.step, message: reconciled.message },
+        };
+      }
+      if (reconciled.kind === "cleared") {
+        cleared = reconciled.note;
+        // Once. A second failure is a different failure — the merge was asked
+        // again only because the thing that stopped it is provably gone.
+        merged = git(["merge", "--ff-only", target], root);
+      }
+    }
     if (!merged.ok) {
       return {
         ok: false,
@@ -668,24 +775,40 @@ export function runPreflight(
   // would leave the operator running a binary older than the code just pulled.
   // Doctor's row keeps the pre-merge answer because doctor merges nothing.
   const stale = (report.root === null ? facts.dist_stale : distStale(input.root)) ?? facts.dist_stale;
-  const settled: PreflightFacts = {
-    ...facts,
-    dist_stale: stale,
-    action:
-      facts.behind_by > 0
-        ? stale
-          ? "fast-forward+rebuild"
-          : "fast-forward"
-        : stale
-          ? "rebuild"
-          : "none",
-  };
+  const build = input.build ?? true;
+  const behind = facts.behind_by > 0;
+  const action: PreflightAction = !stale
+    ? behind
+      ? "fast-forward"
+      : "none"
+    : build
+      ? behind
+        ? "fast-forward+rebuild"
+        : "rebuild"
+      : behind
+        ? "fast-forward+build-skipped"
+        : "build-skipped";
+  const settled: PreflightFacts = { ...facts, dist_stale: stale, action };
+
+  // `--no-build` is the only path that starts the runtime on a build it has just
+  // dated as stale, so it is the only path that has to say so. The sentence goes
+  // on the warning channel rather than into `detail`, because it is not what the
+  // preflight found; it is what the operator asked it not to do about it.
+  const warning =
+    stale && !build
+      ? [
+          report.warning,
+          `${join(input.root, "dist")} is older than the sources and --no-build was given: starting on a STALE BUILD, so verbs added since it was compiled are absent`,
+        ]
+          .filter((line): line is string => line !== null)
+          .join("; ")
+      : report.warning;
 
   // Built in the INSTALLATION root, which is the tree whose `dist/` was dated —
   // not in the repository root, which is where the fast-forward happened. In the
   // primary checkout they are the same directory; anywhere they are not, dating
   // one tree and compiling another would be the preflight lying about its work.
-  if (stale) {
+  if (stale && build) {
     const built = spawnBuild(input.root);
     if (!built.ok) {
       return {
@@ -703,14 +826,284 @@ export function runPreflight(
   // this task exists to remove. Hand the caller a plan to re-exec into the
   // fresh build instead. See {@link reexecPlan} for why it is a plan rather
   // than a spawn.
-  const plan = stale ? reexecPlan(input.root) : null;
+  const plan = stale && build ? reexecPlan(input.root) : null;
   return {
     ok: true,
     facts: { ...settled, reexec: plan !== null },
     detail: report.detail,
-    warning: report.warning,
+    warning: [warning, cleared].filter((part) => part !== null).join("; ") || null,
     ...(plan === null ? {} : { reexec: plan }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Untracked task files in the fast-forward's way (APRV-300)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one directory this reconciliation is allowed to touch.
+ *
+ * Backlog.md task files are the only path in this repository where the same
+ * file is routinely authored in two checkouts at once: a lane files a task on
+ * its branch and the primary files it again with `backlog task create`, so the
+ * primary holds untracked bytes at a path the incoming commit carries. Nothing
+ * else has that shape, and widening the prefix would turn a narrow, provable
+ * case into a general licence to move an operator's files.
+ */
+const TASK_FILE_PREFIX = "backlog/tasks/";
+
+/** Git's own sentence when a fast-forward would clobber an untracked file. */
+const UNTRACKED_HEADLINE = "untracked working tree files would be overwritten";
+
+/**
+ * The paths out of that message, or `null` when this was some other failure.
+ *
+ * {@link failureText} has already joined git's lines with ` | `, so the shape
+ * parsed here is `error: The following untracked working tree files would be
+ * overwritten by merge: | <path> | <path> | Please move or remove them…`. A
+ * path git chose to quote (`core.quotePath`, a name with a control byte or a
+ * non-ASCII byte) is answered as `null` rather than unquoted by hand: guessing
+ * the spelling of a file about to be moved is the one mistake this whole
+ * function exists to avoid, and the existing refusal is a fine answer.
+ */
+function untrackedCollisions(message: string): string[] | null {
+  const parts = message.split(" | ").map((part) => part.trim());
+  const start = parts.findIndex((part) => part.includes(UNTRACKED_HEADLINE));
+  if (start < 0) return null;
+  const paths: string[] = [];
+  for (const part of parts.slice(start + 1)) {
+    if (part.length === 0) continue;
+    if (part.startsWith("Please ") || part === "Aborting") break;
+    if (part.startsWith('"')) return null;
+    paths.push(part);
+  }
+  return paths.length === 0 ? null : paths;
+}
+
+/** What one collision turned out to be, once both copies had been read. */
+type TaskVerdict =
+  | { kind: "remove"; relative: string }
+  | { kind: "aside"; relative: string }
+  | { kind: "diverged"; relative: string; only: number };
+
+/** What {@link reconcileUntrackedTaskFiles} decided about the whole set. */
+type TaskReconciliation =
+  | { kind: "declined" }
+  | { kind: "cleared"; note: string }
+  | { kind: "refused"; refusal: PreflightRefusal }
+  | { kind: "failed"; step: string; message: string };
+
+/**
+ * Clear untracked task files out of a fast-forward's way, or refuse saying why.
+ *
+ * The incident (2026-09-07): a lane filed `backlog/tasks/aprv-299` on its
+ * branch and its pull request merged, while the primary checkout held the same
+ * path untracked from its own `backlog task create`. `git merge --ff-only`
+ * refuses to write over an untracked file, so `approval up` refused, and its
+ * next-steps text pointed at `git status`, which cannot say whether the local
+ * copy holds anything the incoming one does not. That is the question, and it
+ * is answerable, so it is answered here.
+ *
+ * Three verdicts, in this order, each with a different claim behind it:
+ *
+ * - **identical bytes** — the local file says nothing the incoming file does
+ *   not say. Removing it loses nothing, so it is removed;
+ * - **every line also in the incoming copy** — the primary's copy is a subset
+ *   of what main now carries (the ordinary shape: a stub filed by hand, then
+ *   the lane's copy with a plan and criteria added). Nothing is lost by
+ *   letting the incoming copy land, but "nothing is lost" is a judgment about
+ *   an operator's file, so the bytes are moved aside rather than deleted and
+ *   the destination is printed;
+ * - **anything else** — the local copy has lines main lacks. That is a
+ *   question about which version is wanted, and no verb here will pick.
+ *
+ * Two passes, and the order is the safety property, exactly as APRV-225's
+ * payload reconciliation in `cli/log-sync.ts`: every file is judged before any
+ * file is touched, so a refusal over the last one cannot have already removed
+ * the first.
+ */
+function reconcileUntrackedTaskFiles(
+  root: string,
+  target: string,
+  message: string,
+): TaskReconciliation {
+  const collisions = untrackedCollisions(message);
+  if (collisions === null) return { kind: "declined" };
+  // One path outside `backlog/tasks/` and the whole set is declined. A
+  // reconciliation that cleared what it understood and then refused anyway
+  // would have moved an operator's files for a merge that was never going to
+  // run (AC3).
+  if (!collisions.every((path) => path.startsWith(TASK_FILE_PREFIX))) return { kind: "declined" };
+
+  const verdicts: TaskVerdict[] = [];
+  for (const relative of collisions) {
+    let local: Buffer | null;
+    try {
+      local = readIfPresent(join(root, relative));
+    } catch (cause) {
+      return {
+        kind: "failed",
+        step: "reading an untracked task file",
+        message: `${relative} stopped the fast-forward and could not be read to judge it: ${detailOf(cause)}. Nothing was moved.`,
+      };
+    }
+    // Gone between the merge's complaint and this read: nothing to clear, and
+    // nothing to weigh either. The retry will find out.
+    if (local === null) continue;
+    const incoming = showBlob(root, target, relative);
+    if (incoming === null) {
+      return {
+        kind: "failed",
+        step: `git show ${target}:${relative}`,
+        message: `the fast-forward stopped on the untracked ${relative} and git could not read the incoming copy to compare it against. Nothing was moved.`,
+      };
+    }
+    if (incoming.equals(local)) {
+      verdicts.push({ kind: "remove", relative });
+      continue;
+    }
+    const only = linesOnlyIn(local, incoming);
+    verdicts.push(only === 0 ? { kind: "aside", relative } : { kind: "diverged", relative, only });
+  }
+
+  const diverged = verdicts.find((verdict) => verdict.kind === "diverged");
+  if (diverged !== undefined) {
+    const local = join(root, diverged.relative);
+    return {
+      kind: "refused",
+      refusal: {
+        code: "up-preflight-task-file-conflict",
+        headline: `the untracked ${diverged.relative} has ${plural(diverged.only, "line")} the incoming copy does not`,
+        state: [
+          `yours: ${local}`,
+          `incoming: ${target.slice(0, 12)}:${diverged.relative}`,
+          `${plural(diverged.only, "line")} only yours has`,
+          "nothing was merged, nothing was moved, and nothing was rebuilt",
+        ],
+        steps: [
+          {
+            command: `git show ${target.slice(0, 12)}:${diverged.relative} | diff - ${JSON.stringify(local)}`,
+            note: "the two copies, side by side",
+          },
+          {
+            command: `mv ${JSON.stringify(local)} ${JSON.stringify(`${local}.mine`)}`,
+            note: "keep yours out of the way, then run approval up again",
+          },
+        ],
+        footer: [
+          "an identical copy is removed and a copy main already contains is moved aside; this one is neither",
+          "what the preflight will and will not do: docs/cli-reference.md#up",
+        ],
+        next: `git show ${target.slice(0, 12)}:${diverged.relative}`,
+      },
+    };
+  }
+
+  const removals = verdicts.filter((verdict) => verdict.kind === "remove");
+  const asides = verdicts.filter((verdict) => verdict.kind === "aside");
+  if (removals.length === 0 && asides.length === 0) return { kind: "declined" };
+
+  // The moves go first and the removals second, so a failure part-way has
+  // preserved every byte it had a reason to preserve. Either way the message
+  // names what already moved: a half-finished clearing an operator cannot see
+  // is worse than the collision it was clearing.
+  const asideRoot = asidePath(root);
+  const moved: string[] = [];
+  const sofar = (): string =>
+    moved.length === 0 ? "" : ` Already moved aside: ${moved.join(", ")}.`;
+  for (const verdict of asides) {
+    const from = join(root, verdict.relative);
+    const to = join(asideRoot, verdict.relative);
+    try {
+      mkdirSync(dirname(to), { recursive: true });
+      moveFile(from, to);
+    } catch (cause) {
+      return {
+        kind: "failed",
+        step: "moving an untracked task file aside",
+        message: `${verdict.relative} could not be moved to ${to}: ${detailOf(cause)}. Nothing was merged.${sofar()}`,
+      };
+    }
+    moved.push(to);
+  }
+  for (const verdict of removals) {
+    try {
+      rmSync(join(root, verdict.relative), { force: true });
+    } catch (cause) {
+      return {
+        kind: "failed",
+        step: "removing an untracked task file",
+        message: `${verdict.relative} is byte-identical to the incoming copy and could not be removed: ${detailOf(cause)}. Nothing was merged.${sofar()}`,
+      };
+    }
+  }
+
+  const said: string[] = [];
+  if (removals.length > 0) {
+    said.push(
+      `${plural(removals.length, "untracked task file")} byte-identical to the incoming copy ${removals.length === 1 ? "was" : "were"} removed`,
+    );
+  }
+  if (moved.length > 0) {
+    said.push(
+      `${plural(moved.length, "untracked task file")} whose every line the incoming copy already carries ${moved.length === 1 ? "was" : "were"} moved to ${moved.join(", ")}`,
+    );
+  }
+  return { kind: "cleared", note: `${said.join("; ")}, and the fast-forward was retried` };
+}
+
+/**
+ * How many lines of `local` do not appear anywhere in `incoming`.
+ *
+ * A set of the incoming lines rather than a diff, and deliberately: the
+ * question is not whether the two files line up, it is whether the local copy
+ * holds any *content* main has not got. A task file reordered by the Backlog.md
+ * CLI, or one whose sections were rewritten in place, is the same information
+ * in a different arrangement, and zero here is exactly the claim that moving
+ * the local copy aside loses nothing.
+ */
+function linesOnlyIn(local: Buffer, incoming: Buffer): number {
+  const carried = new Set(incoming.toString("utf8").split("\n"));
+  return local
+    .toString("utf8")
+    .split("\n")
+    .filter((line) => !carried.has(line)).length;
+}
+
+/**
+ * Where a moved-aside file goes: a sibling of the checkout, dated.
+ *
+ * Outside the repository on purpose. Inside it, the file would still be
+ * untracked, `git status` would still show it, and the next fast-forward could
+ * collide with it all over again — which is to say the move would have solved
+ * nothing. A sibling directory is somewhere `ls ..` finds, the date makes two
+ * runs on two days two directories, and nothing here ever removes one: it is
+ * the operator's copy, kept until they say otherwise.
+ */
+function asidePath(root: string): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return join(dirname(root), `${basename(root)}-preflight-aside-${day}`);
+}
+
+/** `rename`, falling back to copy-and-unlink when the two sit on two devices. */
+function moveFile(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "EXDEV") throw cause;
+    copyFileSync(from, to);
+    rmSync(from, { force: true });
+  }
+}
+
+/** The bytes at `path`, or `null` when there is no file there. */
+function readIfPresent(path: string): Buffer | null {
+  try {
+    return readFileSync(path);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new ScanError(`${path} could not be read: ${detailOf(cause)}`);
+  }
 }
 
 /** Where the fresh build lives, and what to run it with. */
@@ -815,6 +1208,8 @@ export function describePreflightEvent(event: PreflightEvent): { text: string; s
     rebuild: "rebuilt a stale build",
     "fast-forward": `fast-forwarded ${commits}`,
     "fast-forward+rebuild": `fast-forwarded ${commits} and rebuilt`,
+    "build-skipped": "left a stale build alone (--no-build)",
+    "fast-forward+build-skipped": `fast-forwarded ${commits} and left a stale build alone (--no-build)`,
     refused: "refused",
     skipped: "skipped",
     "fetch-failed": "could not reach the remote, so this is the build it already had",
@@ -837,6 +1232,8 @@ export interface StartupPreflightInput {
   root: string | null;
   remote: string | null;
   branch: string | null;
+  /** `false` is `--no-build`: fast-forward, but leave a stale `dist/` alone. */
+  build: boolean;
   emit: PreflightEmit;
   /** Where a refusal is written. One line under `--json`, a runbook otherwise. */
   refuse: (text: string) => void;
@@ -858,6 +1255,7 @@ export function startupPreflight(
     queuePath: input.queuePath,
     root: input.root ?? installationRoot(),
     fetch: true,
+    build: input.build,
     ...(input.remote === null ? {} : { remote: input.remote }),
     ...(input.branch === null ? {} : { branch: input.branch }),
   });
@@ -919,12 +1317,32 @@ export function renderPreflightRefusal(
         preflight: outcome.facts,
       })}\n`;
     }
+    // A failed build is its own shape of this refusal: the fast-forward may
+    // already have landed, so the checkout is current and the BUILD is not, and
+    // the runtime refuses rather than starting the daemon and the hook on the
+    // stale code the rebuild existed to replace. The compiler's own output has
+    // already gone to this terminal (see `npmBuild`), so the runbook quotes the
+    // exit code and points at the command that reproduces it.
+    const build = outcome.failed.step === "npm run build";
     return `${runbook(style({ json }), "up-preflight-failed", message, {
-      state: ["the preflight stopped part-way; nothing was reset and nothing was stashed"],
-      steps: [
-        { command: "git status --short", note: "what this checkout looks like now" },
-        { command: "approval up --no-preflight", note: "start on the current build" },
-      ],
+      state: build
+        ? [
+            "the build failed, so nothing was started: a daemon on a stale build is the defect this preflight exists to remove",
+            "the fast-forward, if there was one, stands; nothing was reset and nothing was stashed",
+          ]
+        : ["the preflight stopped part-way; nothing was reset and nothing was stashed"],
+      steps: build
+        ? [
+            { command: "npm run build", note: "the same build, with the whole error" },
+            {
+              command: "approval up --no-build",
+              note: "ONLY if you mean it: starts on the stale build",
+            },
+          ]
+        : [
+            { command: "git status --short", note: "what this checkout looks like now" },
+            { command: "approval up --no-preflight", note: "start on the current build" },
+          ],
     })}\n`;
   }
   const { refusal } = outcome;
@@ -941,17 +1359,35 @@ export function renderPreflightRefusal(
   })}\n`;
 }
 
+/**
+ * `npm run build`, in the installation root, with its output on the terminal.
+ *
+ * The compile is watched rather than swallowed: a build the operator cannot see
+ * is a pause of unknown length, and a build that FAILS is a compiler error they
+ * need in front of them, not three trimmed lines quoted back inside a runbook.
+ * So both of the child's streams go to this process's stderr — inherited, so
+ * the child writes to the terminal directly and a `tsc` progress line is not
+ * buffered until the end.
+ *
+ * Stdout is deliberately not inherited: under `--json` this process's stdout is
+ * the event stream, and a compiler that printed one line into it would break
+ * every consumer parsing it. Sending the build's stdout to fd 2 keeps the
+ * machine surface exactly as it was while the human still sees the whole build.
+ *
+ * The exit code is the message. `npm run` exits with the script's own status,
+ * so it is the number the operator would have seen running the build by hand,
+ * and it is what the refusal quotes.
+ */
 function npmBuild(root: string): { ok: boolean; message: string } {
-  const result = spawnSync("npm", ["run", "build"], { cwd: root, encoding: "utf8" });
+  const result = spawnSync("npm", ["run", "build"], { cwd: root, stdio: ["ignore", 2, 2] });
   if (result.error !== undefined || result.status === null) {
     return { ok: false, message: detailOf(result.error ?? "npm did not run") };
   }
   if (result.status === 0) return { ok: true, message: "" };
-  const output = `${result.stderr}\n${result.stdout}`
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  return { ok: false, message: output.slice(-3).join(" | ") || "npm run build failed" };
+  return {
+    ok: false,
+    message: `npm run build exited ${String(result.status)} in ${root} (its output is above)`,
+  };
 }
 
 // ---------------------------------------------------------------------------

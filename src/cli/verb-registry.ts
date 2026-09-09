@@ -598,17 +598,31 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it.",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272).",
     human_only: true,
     input: input({
-      flags: { ...POLICY_FLAGS, ...AS_FLAG, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: {
+        ...POLICY_FLAGS,
+        "--organ": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
     }),
-    output: object({ ok: { const: true }, seq: INTEGER, sha256: SHA256, path: STRING }, [
-      "ok",
-      "seq",
-      "sha256",
-      "path",
-    ]),
+    output: object(
+      {
+        ok: { const: true },
+        seq: INTEGER,
+        sha256: SHA256,
+        path: STRING,
+        // Present on an --organ attestation and absent otherwise: the
+        // repository-relative spelling the record carries, which is the
+        // identity the guard matches on and is not derivable from `path`.
+        organ_path: STRING,
+      },
+      ["ok", "seq", "sha256", "path"],
+    ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
   },
@@ -932,13 +946,14 @@ const VERBS: VerbSpec[] = [
   {
     name: "run",
     purpose:
-      "Execute a command behind the gate: append execution.started BEFORE spawning it, spawn it with inherited stdio, append execution.completed or execution.failed carrying the child's real exit code, and exit with that same code. A manual action must present the token its grant printed; supervised and autonomous actions have no token and are enforced here through attestation, loop escalation, idempotency and budgets. The --json summary goes to STDERR, because stdout belongs to the child.",
+      "Execute a command behind the gate: append execution.started BEFORE spawning it, spawn it with inherited stdio, append execution.completed or execution.failed carrying the child's real exit code, and exit with that same code. A manual action must present the token its grant printed; supervised and autonomous actions have no token and are enforced here through attestation, loop escalation, idempotency and budgets. Since APRV-193 a child spawned with NO token also runs with outbound network denied by the operating system and the credential material beside the log unreadable to it, while a child spawned WITH one keeps the network, because a human approved those exact bytes and a grant is the authority to reach the world; execution.started records which of those rooms the child ran in, and --no-sandbox is the recorded opt-out. The --json summary goes to STDERR, because stdout belongs to the child.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
         "--token": "string",
         "--payload-hash": "string",
+        "--no-sandbox": "boolean",
         ...AS_FLAG,
         ...POLICY_FLAGS,
         ...LOG_FLAG,
@@ -983,6 +998,39 @@ const VERBS: VerbSpec[] = [
         code: 5,
         meaning:
           "NO VALID EXECUTION TOKEN: the class resolves to manual and no usable token was presented. Nothing was appended",
+      },
+      {
+        code: 127,
+        meaning:
+          "the child's own 127 (run is transparent), or, before any append, the egress sandbox this machine has is present and broken: the command was NOT run, nothing was appended, and the token is unspent, so the same token executes once the mechanism works (APRV-193)",
+      },
+    ],
+  },
+
+  {
+    name: "sandbox",
+    purpose:
+      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied.",
+    human_only: false,
+    input: input({
+      flags: {
+        "--allow-loopback": "boolean",
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+      trailing: TRAILING,
+    }),
+    // Transparent: stdout and stderr belong to the child, so there is no object
+    // of this verb's own to describe.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the child exited 0 (sandbox is transparent: it exits with the child's code)" },
+      USAGE,
+      {
+        code: 127,
+        meaning:
+          "the command was NOT run: this machine has no working sandbox primitive, or the command is not on PATH. Nothing was appended either way",
       },
     ],
   },
@@ -1761,6 +1809,7 @@ const VERBS: VerbSpec[] = [
         "--full-reproof-every": "string",
         "--full-reproof-after": "string",
         "--once": "boolean",
+        "--trace-watch": "boolean",
         "--git-evidence": "boolean",
         ...JSON_FLAG,
         ...HELP_FLAGS,
@@ -1799,6 +1848,7 @@ const VERBS: VerbSpec[] = [
         "--no-web": "boolean",
         "--restart-backoff": "string",
         "--once": "boolean",
+        "--trace-watch": "boolean",
         "--git-evidence": "boolean",
         ...JSON_FLAG,
         ...HELP_FLAGS,
@@ -2460,6 +2510,33 @@ const VERBS: VerbSpec[] = [
     exit_codes: [
       { code: 0, meaning: "the verdict (allow OR deny) is the JSON object on stdout" },
       { code: 2, meaning: "the hook is misconfigured; the harness blocks and reads stderr" },
+    ],
+  },
+
+  {
+    name: "hook",
+    subcommand: "codex",
+    purpose:
+      "Read one Codex PreToolUse or PostToolUse event on stdin and strictly validate its stable ids, tool, and visible working directory. PreToolUse denies Bash because Codex does not expose its effective per-call workdir; direct apply_patch is an experimental bounded gate surface and receives nested allow or deny JSON. Manual patch classes wait on a log-backed decision. PostToolUse records an outcome only when a native-verified closed reading exists. THE VERDICT IS NEVER 'ask'. Exit 0 carries a pre-tool verdict, while a post-tool diagnostic uses the post-hook status contract.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: Codex invokes it around the agent's own Bash and apply_patch calls. Bash is refused before gate intake; direct patches can record the agent's proposal and wait for a human. It never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        "--retry-grace": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the PreToolUse verdict (allow OR deny) is the JSON object on stdout, or a reported PostToolUse counterpart landed" },
+      { code: 2, meaning: "the hook is misconfigured or a PostToolUse outcome was not recorded; the diagnostic is on stderr" },
     ],
   },
 

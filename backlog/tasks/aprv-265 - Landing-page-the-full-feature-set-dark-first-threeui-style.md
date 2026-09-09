@@ -3,11 +3,16 @@ id: APRV-265
 title: 'Landing page: the full feature set, dark-first, threeui-style'
 status: In Progress
 assignee:
-  - 'agent:opus-lane-d'
+  - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-05 16:23'
+updated_date: '2026-09-08 23:33'
 labels: []
-dependencies: []
+dependencies:
+  - APRV-320
+modified_files:
+  - index.html
+  - llms.txt
+  - llms-full.txt
 ordinal: 200000
 ---
 
@@ -22,7 +27,7 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 - [x] #1 index.html is self-contained: inline CSS and JS, no external scripts, no build step; the only remote asset is the Google Fonts stylesheet for JetBrains Mono, behind a real monospace fallback stack
 - [x] #2 The brand holds: brand/wordmark.svg is unchanged and the inline appr[check]val.md wordmark SVG is still the logo
 - [x] #3 The interactive Try the loop approve/reject card survives, with copy refreshed to today's real event names and record fields
-- [x] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
+- [ ] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
 - [x] #5 Dark-first palette with a light theme and a three-way light/dark/system toggle in the bottom-left, persisted in localStorage and honouring prefers-color-scheme
 - [x] #6 A left sidebar on wide screens with collapsible groups (Documentation, Product, Examples, Compare, Invariants) that becomes a top row on narrow screens
 - [x] #7 A filter-chip row filters a card grid; each card carries a lowercase tag row, a one-sentence claim, and a link into the README section, doc or example
@@ -30,21 +35,18 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 - [x] #9 Mobile-first responsive with no horizontal scroll at 360px
 - [x] #10 The green accent is used only for the approve state and the tick; everything else is monochrome
 - [x] #11 Accessibility: visible focus rings, aria labels on the toggle and the search box, and the tick animation respects prefers-reduced-motion
-- [x] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
+- [ ] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
 - [x] #13 No em dashes and no not-X-but-Y constructions in the page copy
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Read the sources: README.md all eleven sections, docs/cli-reference.md verb list and the 25 doctor rows, docs/claude-code-hook.md, docs/cursor-hook.md, docs/git-evidence.md, every examples/ entry, SPEC.md section 11 and 11.1, package.json. Confirm the policy-key features by grepping schema/ and src/ rather than trusting prose.
-2. Build the content model first: a flat JS array of feature cards, each with id, title, one-sentence claim, tag list (shipped / behind a policy key / example / spec / human-only), chip facets (gate, channels, adapters, hooks, log, daemon, mcp, verification, examples), and a link target. Verify every link target with grep before it goes in the file.
-3. Write index.html as one file: inline CSS tokens for the dark-first palette and the light theme, the three-way theme toggle bottom-left with localStorage plus prefers-color-scheme, the sidebar with collapsible groups, the H1 and subtitle, the search box with Cmd/Ctrl-K, the chip row, the card grid rendered from the array, the refreshed Try the loop card, and the footer.
-4. Keep the wordmark: brand/wordmark.svg untouched, the inline appr[tick]val.md SVG carried over, the green reserved for the approve state and the tick.
-5. Verify in the browser: dark, light, and mobile at 360px. Screenshot each, fix layout and contrast faults, and paste the observations into the notes.
-6. Grep every href in the finished file against the tree to prove no link points at something that is not on main. No test run: no guard covers index.html (grep of tests/ and scripts/ finds no reference).
-
-7. Second pass (prose + agent surface). Rewrite every card claim to one sentence of at most 18 words, cap section intros at two sentences, cut the Try-the-loop copy to labels and event lines, and remove metaphor, rhetorical framing and marketing adjectives while keeping every fact. Add the 2026 agent-readability surface: llms.txt and llms-full.txt at the repo root, canonical/alternate/robots/OpenGraph/Twitter head metadata, JSON-LD SoftwareApplication and BreadcrumbList, semantic landmarks with a skip link and one H1, every card an article with id/data-facet/data-tags/data-href, a machine-readable feature-index JSON block, copy buttons on the command blocks with a select-text fallback, / and Cmd/Ctrl-K search focus, focusable cards, and a print stylesheet. Verify in the browser at desktop dark, desktop light and 360px, and run a DOM count check.
+1. Preserve the reviewed draft structure while reconciling current main facts: npm 0.1.0, Apache 2.0 code, and CC0 specification and schemas.
+2. Refresh index.html, llms.txt, and llms-full.txt together. Present the shipped approval mcp serve route as Codex's supported agent-facing MCP path, while stating that it does not intercept ordinary tools and repository setup awaits human installation and attestation. Keep native direct-patch hooks explicitly experimental. Present the ZZZ thread/reply adapter only after APRV-320 merges and state that verification used mocked HTTP, with no live post.
+3. Preserve the dark/light/system design, search/filter grid, local loop simulation, and machine-readable feature index. Keep visible and machine-readable counts and claims in sync.
+4. Run source checks for conflict markers, stale release/license text, card/index identity and counts, links, and script syntax. Verify desktop/mobile layout, theme, filters, search, and both simulated decisions in a browser.
+5. Leave commit, push, PR mutation, merge queue, and GitHub Pages verification to the parent. Merge APRV-320 first so the ZZZ link and source-checkout claim are true on main before this page deploys.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -132,4 +134,12 @@ Interaction: the mcp chip gives 7 of 66, mcp plus the search term vault gives 1,
 One regression found and fixed in this pass: the sidebar only ever closed groups on a width change, so a page that had been narrow returned to the wide rail with every group collapsed. The groups the document marks open are recorded at load and restored on the transition to wide; verified by resizing 360 to 1180 and reading the open state.
 
 No test run: a grep of tests/, scripts/ and .github/ finds no reference to index.html, llms.txt or llms-full.txt, so no guard covers these files.
+
+2026-09-08 Codex refresh: reconciled the draft with origin/main and updated all three public surfaces to 69 indexed cards. Release facts now say npm 0.1.0, Apache 2.0 code, CC0 specification/schemas, and Node 20+. Added separate Codex surfaces: repository MCP configuration via the safe npm launcher (depends on APRV-319), and native direct-patch hooks explicitly experimental with Bash activation blocked. Added the first-class ZZZ create-thread/reply adapter (depends on APRV-320) and disclosed that its HTTP verification is mocked, with no live post. Removed the stale fixed doctor row count and scoped the harness comparison to approval.md's portable hash-chained record. Marked Try the loop as a local simulation that sends no request, mints no token, and writes no log.
+
+Verification: parent browser review at desktop 1280 found no horizontal overflow; Approve appended the simulated granted/started/completed lines and disabled both decisions; Reject appended only rejected; search codex returned 2 of 68 before the ZZZ card; mobile 390x844 dark layout was clean. Final browser recount/retest is pending after the ZZZ card. Source checks found no merge markers, stale MIT/pre-release/quickstart copy, em dashes, or not-X-but-Y construction. Lint exit 0 and typecheck exit 0. Full npm test outside the sandbox ran 3952 tests: 3949 pass, 2 fail, 1 skip, exit 1; both cli-setup failures came from the ambient APPROVAL_HUMAN identity. Re-running the selected cli-setup file with APPROVAL_HUMAN removed passed 90/90, exit 0. The first sandboxed full-suite attempt was interrupted after loopback EPERM failures and is not product evidence.
+
+Release boundary correction: the feature index describes the current source checkout, while npm remains at 0.1.0 and no package publish is authorized in this wave. The ZZZ adapter, Codex MCP configuration, and experimental Codex hook cards now carry source-checkout tags rather than shipped tags; the install banner and both llms surfaces state the distinction.
+
+Codex delivery fallback: APRV-265 no longer depends on APRV-319. The page links the already shipped approval mcp serve documentation and says Codex may use those agent-facing gate tools. It also says this MCP route does not intercept ordinary tools and repository configuration still awaits human installation and attestation. The pending .codex README link, safe-launcher command, and committed-configuration claim were removed. APRV-319 remains independent and incomplete.
 <!-- SECTION:NOTES:END -->

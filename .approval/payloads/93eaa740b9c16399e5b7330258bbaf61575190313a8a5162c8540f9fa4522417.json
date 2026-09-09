@@ -1,0 +1,1 @@
+{"command":"(cd /Users/carter/dev/approval-md && git worktree remove .claude/worktrees/lane-287n 2>&1 | tail -1; git branch -D task-287-notes 2>&1 | tail -1)","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

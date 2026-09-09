@@ -1,0 +1,1 @@
+{"command":"f='backlog/tasks/aprv-299 - Retrospective-samples-reach-the-approvers-channel-Telegram-review-cards-with-a-verdict-and-a-reaction.md'; git show \"origin/main:$f\" | diff - \"/Users/carter/dev/approval-md/$f\" && echo IDENTICAL","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

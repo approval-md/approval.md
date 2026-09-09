@@ -1,0 +1,1 @@
+{"after":"approval hook codex                # experimental native Codex hook: direct apply_patch\n                                   #   only; Bash is explicitly refused (§10.6)\napproval hook classify -- <cmd…>","before":"approval hook classify -- <cmd…>","file":"SPEC.md","tool":"Edit"}

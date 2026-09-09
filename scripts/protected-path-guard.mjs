@@ -124,7 +124,7 @@ function parseArgs(argv) {
  * edit, and it does not get to take effect before it is approved.
  */
 function protectedPathsFrom(repo, refs, parsePolicy) {
-  const found = new Set();
+  const found = new Map();
   for (const ref of refs) {
     const text = showBlob(repo, ref, POLICY_PATH);
     if (text === null) continue;
@@ -134,9 +134,14 @@ function protectedPathsFrom(repo, refs, parsePolicy) {
     } catch {
       continue;
     }
-    for (const entry of load) found.add(entry);
+    for (const entry of load) {
+      const key = typeof entry === "string"
+        ? `string:${entry}`
+        : `routed:${entry.path}\0${entry.class}`;
+      found.set(key, entry);
+    }
   }
-  return [...found];
+  return [...found.values()];
 }
 
 /**
@@ -347,7 +352,18 @@ async function main() {
     const load = policyModule.loadPolicyText(POLICY_PATH, text);
     if (load.ok !== true) return [];
     const entries = load.policy.protected_paths;
-    return Array.isArray(entries) ? entries.filter((entry) => typeof entry === "string") : [];
+    return Array.isArray(entries)
+      ? entries.filter((entry) =>
+          typeof entry === "string" ||
+          (
+            typeof entry === "object" &&
+            entry !== null &&
+            !Array.isArray(entry) &&
+            typeof entry.path === "string" &&
+            typeof entry.class === "string"
+          ),
+        )
+      : [];
   };
   let policyProtectedPaths = [];
   try {
@@ -394,6 +410,23 @@ async function main() {
     const policyBytes = showBlob(repo, head, POLICY_PATH);
     const policySha256AtHead =
       policyBytes === null ? null : createHash("sha256").update(policyBytes, "utf8").digest("hex");
+
+    // The same digest, per GATE ORGAN, for the `attested` verdict on the
+    // harness files that install the hook (APRV-272). Computed exactly as the
+    // policy digest above is — from the blob at the HEAD COMMIT, never from the
+    // working tree, so the guard hashes the bytes the pull request carries and
+    // not the bytes the machine running CI happens to have. A path the head
+    // tree does not carry (a deletion) is `null`, which the guard reads as "no
+    // attestation can match", the fail-closed direction.
+    const organShaCache = new Map();
+    const organSha256AtHead = (path) => {
+      if (organShaCache.has(path)) return organShaCache.get(path);
+      const blob = showBlob(repo, head, path);
+      const value =
+        blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
+      organShaCache.set(path, value);
+      return value;
+    };
 
     // Bound material, from the payload store beside the log that was chosen and
     // then from head's. A grant only reachable in a records branch has its
@@ -472,6 +505,7 @@ async function main() {
       policyProtectedPaths,
       policySha256AtHead,
       policyPath: POLICY_PATH,
+      organSha256AtHead,
       payloadFor,
       changeTsFor,
       window,

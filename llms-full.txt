@@ -6,7 +6,7 @@
 
 Agents now send emails, spend money, book things, and delete data. There is no
 diff to revert. approval.md is a file-based convention and runtime that gates
-side-effecting agent actions behind your sign-off — from a policy file you write,
+side-effecting agent actions behind your sign-off, from a policy file you write
 to your phone.
 
 ## Install
@@ -19,13 +19,14 @@ npm install -g approval-md
 git clone https://github.com/approval-md/approval.md && cd approval.md && npm ci && npm run build && npm link
 ```
 
-v0.1.0 · MIT · Node 20 or newer. Not on npm yet, so the second line is the one
-that works today.
+npm: v0.1.0 · feature index: current source checkout · Apache 2.0 code · CC0
+specification and schemas · Node 20 or newer.
 
 ## Try the loop
 
-The page carries an interactive approval prompt with the shape a real request
-takes. Its content:
+This is a local simulation. The buttons change the card only: no request is
+sent, no token is minted, and no log is written. The prompt has the shape a
+real request takes. Its content:
 
 ```
 approval.requested · seq 41 · agent:claude-admin · expires 13:07 UTC
@@ -73,8 +74,8 @@ tail continues:
 
 ## The feature set
 
-66 features across nine facets: gate (13), channels (7), adapters (6), hooks
-(6), mcp (5), log (7), daemon (8), verification (7), examples (7). Tags mark
+69 features across nine facets: gate (13), channels (7), adapters (7), hooks
+(7), mcp (6), log (7), daemon (8), verification (7), examples (7). Tags mark
 what is shipped, what is specified, what is an example, what is behind a policy
 key, what is behind a flag, and what is human-only. The same list is embedded in
 index.html as JSON at `script#feature-index`.
@@ -110,6 +111,7 @@ index.html as JSON at `script#feature-index`.
 - **A vault the policy names** [shipped]. `approval vault set` encrypts one credential under a passphrase named by `vault.passphrase_env`; there is no `approval vault get`. https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential
 - **Email over SMTP, inside the token window** [shipped]. `approval adapter email` verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it. https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md
 - **AgentMail, and the two-key split** [shipped]. The agent holds an AgentMail key without `draft_send`, and the key that can send waits in the vault. https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md
+- **ZZZ threads and replies, gated** [new, source checkout]. `approval adapter zzz` calls ZZZ's create-thread or reply operation with a vaulted token and exact payload binding. https://github.com/approval-md/approval.md#first-class-zzzbot-messages
 - **A draft is mutable, so the grant binds its bytes** [shipped]. `approval payload agentmail-draft` snapshots the draft, and one edited after the grant refuses `agentmail-draft-drifted`. https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md
 - **The Message-ID ties the mail to the chain** [shipped]. It is derived from the action key, the payload hash and the sender, so both identify each other later. https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential
 - **Setup fills the vault and proves it** [shipped]. `approval setup adapter email` reads the adapter's credential manifest, then probes the server without sending anything. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter
@@ -118,13 +120,15 @@ index.html as JSON at `script#feature-index`.
 
 - **The Claude Code PreToolUse hook** [shipped]. `approval hook claude-code` classifies commands the harness runs itself and answers allow or deny, never ask. https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md
 - **The Cursor hook** [shipped]. `approval hook cursor` classifies `Shell`, `Write` and `Delete`, and requires `failClosed: true`. https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md
+- **Codex direct patches, normal activation blocked** [experimental, source checkout]. `approval hook codex` experimentally gates direct patches; hidden execution directories keep Bash denied and outcomes diagnostic. https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md
 - **See how a command classifies first** [shipped]. `approval hook classify` prints a command line's class, the union over its segments, and touches nothing. https://github.com/approval-md/approval.md/blob/main/README.md#gate-your-coding-agent
 - **A human commits the hook entry** [shipped]. The entry lives in `.claude/settings.json` or `.cursor/hooks.json`, and the classifier treats both as gate configuration. https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md
 - **Two edges, stated up front** [shipped]. The hook never creates a log, denying `hook-log-unreachable`, and a hook grant mints no token. https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md
-- **The harness path is budgeted and sampled** [shipped]. An allow appends `execution.started` marked `execution: "harness"`, and budgets and the sampler both draw on it. https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md
+- **The harness path is budgeted and sampled** [shipped]. A covered gated action appends `execution.started` marked `execution: "harness"`, and budgets and the sampler both draw on it. https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md
 
 ### mcp
 
+- **Codex over the supported stdio MCP route** [shipped]. Codex can use `approval mcp serve` for gate tools; it does not intercept ordinary tools, and repository setup awaits human installation and attestation. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve
 - **An MCP server over stdio** [shipped]. `approval mcp serve` publishes the agent's verbs as tools built from the registry behind `approval instructions --schemas`. https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md
 - **Grant never travels over MCP** [shipped]. `grant`, `reject`, `revoke`, `policy attest` and `vault set` are absent from the tool list. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve
 - **A tool call cannot name an actor** [shipped]. `--as` is deleted from every published input schema, and the server's identity is appended last to every argv. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve
@@ -154,7 +158,7 @@ index.html as JSON at `script#feature-index`.
 
 ### verification
 
-- **doctor: 25 rows, each with a command to paste** [shipped]. `approval doctor` checks the build, identity, attestation, the chain, the channels, the vault and more, repairing nothing. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#doctor
+- **doctor: one command for the machine** [shipped]. `approval doctor` checks the build, identity, attestation, the chain, the channels, the vault and more, repairing nothing. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#doctor
 - **status reports the system, doctor the machine** [shipped]. `approval status` answers from the log; `approval doctor` answers for this machine, where a stale binary shows up. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#status
 - **coverage joins witnesses this project does not write** [shipped]. `approval coverage` reports effects witnessed by git, `gh` and providers, each with an evidence seq or `none`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#coverage
 - **Conformance vectors for a second implementation** [shipped]. Six language-neutral vector files cover policy, chain, gate verdicts, JCS, refusal unions and schema, under a SHA-256 manifest. https://github.com/approval-md/approval.md/blob/main/conformance/README.md
@@ -180,9 +184,10 @@ gives you and what it leaves to you.
 1. **Harness-native permission prompts** (Claude Code rules and hooks, Cursor
    auto-run, Codex CLI approval modes) enforce inside the harness they ship
    with, and Codex backs its gate with an OS-level sandbox this project does not
-   attempt. They leave no durable record and do not carry to another harness.
-   This project's Claude Code hook is built on the same PreToolUse mechanism and
-   adds those two pieces.
+   attempt. Their product-specific traces do not form approval.md's portable,
+   hash-chained authorization record. This project's Claude Code and Cursor
+   hooks append that record for the actions they cover; its Codex native
+   direct-patch path remains experimental.
 2. **AGENTS.md permissions prose** states the policy in English and trusts the
    agent to obey it. approval.md is the enforcement layer for that convention,
    and reads one as input with `approval import agents-md`.
@@ -274,7 +279,9 @@ token.
 - CLAUDE.md: https://github.com/approval-md/approval.md/blob/main/CLAUDE.md
 - Conformance suite: https://github.com/approval-md/approval.md/blob/main/conformance/README.md
 - GitHub: https://github.com/approval-md/approval.md
+- npm: https://www.npmjs.com/package/approval-md
 - Short index for language models: https://approval.md/llms.txt
 
-MIT licence. Releases of approval.md are approved through approval.md.
+Apache 2.0 code. The specification and schemas are CC0. Releases of approval.md
+are approved through approval.md.
 Contact: hello@approval.md

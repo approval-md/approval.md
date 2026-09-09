@@ -1,0 +1,1 @@
+{"command":"grep -rn \"gate open\" docs/*.md README.md 2>/dev/null | head -20; echo ---; node dist/cli.js gate open --help 2>/dev/null || npx tsx src/cli.ts gate open --help 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

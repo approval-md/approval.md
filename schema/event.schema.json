@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://approval.md/schema/event.schema.json",
+  "$comment": "CC0 1.0. See schema/LICENSE.",
   "title": "Event log record",
   "description": "One line of `.approval/log/events.jsonl` (SPEC.md §8). The log is append-only and is the truth; projections are caches. Every record MUST validate against this schema before append (SPEC.md §8: validation at the write boundary is itself a control). Structural shape only: hash-chain linkage, first-record semantics, and monotonic `seq` are verified by the chain verifier (M1), not expressible here.",
   "type": "object",
@@ -57,9 +58,10 @@
         "gate.opened",
         "gate.closed",
         "gate.bypassed",
+        "gate.organ.attested",
         "log.checkpoint"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of thirty event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, `log.checkpoint` (APRV-220) the thirteenth, and `audit.decision_refused` (APRV-235) the fourteenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of thirty-one event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, `log.checkpoint` (APRV-220) the thirteenth, `audit.decision_refused` (APRV-235) the fourteenth, and `gate.organ.attested` (APRV-272) the fifteenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -110,7 +112,8 @@
           "type": "string",
           "enum": [
             "claude-code",
-            "cursor"
+            "cursor",
+            "codex"
           ],
           "description": "SPEC.md §10.1 (amended, APRV-227): which harness hook wrote this record. A closed set, extended only by a task that adds the case, because it is the discriminator a reader scopes `harness_version` by: one log holds the records of every harness that ever wrote to it, and a version with no binary named beside it is a string nobody can compare against anything. OPTIONAL and additive — every record written before the field existed still validates and still verifies, and the two fields travel together or not at all."
         },
@@ -1170,6 +1173,51 @@
       }
     },
     {
+      "$comment": "SPEC.md §8 (amended, APRV-251): an `execution.completed` MAY carry `provider_ref`, the identifier the provider's own record files this effect under, so that `approval coverage` (§10.1) can join a witness outside this runtime to the log by id instead of by class and time window. Exactly two members and no others: `adapter`, the name of the adapter that executed the action, and `id`, the provider's identifier. `additionalProperties: false` is the whole point of the shape — a reference that could carry a third member is a place to put a message body, and the length and character bounds close the same door on the two members it does have. Both are written by the runtime: `adapter` from the registered adapter, `id` lifted from what the adapter returned, through the same redaction sweep as every other string it returned (§11.1 invariant 3). An id whose bytes that sweep touched is OMITTED by the write path rather than recorded, since a redacted identifier matches nothing and would read like one that does. The field authorizes nothing and no verdict reads it back, so §11.1 invariant 4 is untouched by a value that came in part from the far side. OPTIONAL and additive: an execution whose adapter names no reference records none, and every record written before the field existed still validates and still verifies. Constrained on `execution.completed` alone, because that is the only event a completed side effect's identifier belongs on; a failed execution produced no effect for a provider to file.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.completed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "provider_ref": {
+                "type": "object",
+                "required": [
+                  "adapter",
+                  "id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "adapter": {
+                    "type": "string",
+                    "pattern": "^[\\x21-\\x7e]{1,64}$",
+                    "description": "The name of the adapter that executed the action, as the runtime holds it. Printable ASCII with no spaces, at most 64 characters."
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[\\x21-\\x7e]{1,256}$",
+                    "description": "The provider's own identifier for the effect (an AgentMail `message_id`). Printable ASCII with no spaces, at most 256 characters: an identifier is short, and the bound is what keeps this field from becoming somewhere to put a message."
+                  }
+                },
+                "examples": [{ "adapter": "agentmail", "id": "msg_01JQ2" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.indeterminate` records that a side effect was ATTEMPTED and that its outcome is unknown. It is not a failure — a failure is a fact — and the difference is what stops a blind retry against an action that may already have happened. Two constraints, both about what may be written down. `reason` is required and closed: an unknown outcome that does not say where the unknowing began is not machine-readable, and a free-text reason is where an exception message (and the credential quoted inside it) would arrive. `exit_code` is `null` when present, never a number: nobody observed one, and a fabricated code would read exactly like a measured one. The bytes of the exception are deliberately absent from this record; the executing caller receives them, redacted, and the log holds the closed code.",
       "if": {
         "type": "object",
@@ -1705,6 +1753,54 @@
                 "minLength": 1,
                 "pattern": "^[A-Za-z0-9+/]+={0,2}$",
                 "description": "Base64 Ed25519 signature over `\"approval.md/log-checkpoint/v1\\n\"` followed by the RFC 8785 canonicalization of `{alg, hash, seq}`. Domain-separated, so a signature made here cannot be lifted into another use of the same key and one made elsewhere cannot be presented as a checkpoint."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2/§8 (amended, APRV-272): a human's sign-off on the exact bytes of one of the gate's ORGANS — the harness files that install the hook (`.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/`). Those paths classify `policy.core`, which is human-only, so the gate mints no grant for them and no grant-shaped evidence for a hand edit to one can exist; content attestation is the only evidence there is. The actor MUST be `^human:`, in the schema as well as in `core/attest.ts`, for the reason `gate.opened` carries the same rule: an agent able to attest an organ could vouch for its own way out of the gate. This is NOT a policy attestation and no reader of one sees it: the policy attestation is `policy.updated`, every reader selects on that type, and the two must never be confused. Both payload fields are computed by the runtime — the digest from the file's bytes, the path normalized — and the caller supplies neither. Gate-typed (`gate.` prefix), so `ts` is stamped at the write boundary.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "gate.organ.attested"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "organ_path",
+              "sha256"
+            ],
+            "properties": {
+              "organ_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "pattern": "^[^/\\\\][^\\\\]*$",
+                "description": "The organ's REPOSITORY-RELATIVE, `/`-separated path, for example `.claude/settings.json`. Relative and never absolute, because a permanent record must not leak the writer's home directory and must name the same file on the machine that later reads it. The whole path and not a basename, unlike `policy.updated`'s `policy_path`: there are several organs in several directories, and the guard's rule is that a digest attested for one path is not evidence for another. That the path actually classifies `policy.core` is the runtime's check (`core/attest.ts`), as is the refusal of `..`; a schema sees one record and constrains the shape."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SHA-256 (lowercase hex) of the organ file's exact bytes, computed by the runtime. Bytes, not text: no encoding round-trip and no normalization, so a file differing by trailing whitespace is a different file. The caller has no parameter for this value — one who could supply it could attest bytes nobody read."
               }
             }
           }

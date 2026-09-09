@@ -57,7 +57,8 @@ Usage:
   approval consume    <action-key> --token <t> [--payload-hash <64hex>]
                       [--as <id>] [--json]                            (internal)
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
-                      [--as <id>] [--json] -- <cmd…>
+                      [--as <id>] [--no-sandbox] [--json] -- <cmd…>
+  approval sandbox    [--allow-loopback] [--log <path>] -- <cmd…>
   approval adapter email <action-key> --token <t> --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval adapter agentmail <action-key> --token <t> --payload <file|->
@@ -450,14 +451,14 @@ export const LOG_ADVANCE_HELP = `approval log advance — commit and push the lo
 
 Usage:
   approval log advance [--remote <n>] [--branch <n>] [--base <n>] [--pr]
-                       [--dry-run] [--json]
+                       [--no-auto-merge] [--dry-run] [--json]
 
 Flags:
   --remote <name>  remote to push to (default origin)
   --branch <name>  records branch (default records-log-<date>); never main
   --base <name>    branch to parent the commit on (default: the one you are on)
-  --pr / --dry-run   open the pull request through gh / write nothing at all
-  --json / -h, --help   machine-readable output / this text
+  --pr / --dry-run  open the PR through gh and ARM its merge / write nothing
+  --no-auto-merge / --json / -h, --help  do not arm / JSON output / this text
 
 Verifies the chain under the append lock, FETCHES the base branch, builds a
 commit on <remote>/<base> carrying EXACTLY the log, QUEUE.md and payloads, and
@@ -636,22 +637,22 @@ export const POLICY_TEST_HELP = policyVerbHelp("test", "check");
 export const POLICY_ATTEST_HELP = `approval policy attest — record a human's sign-off on the policy file
 
 Usage:
-  approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>]
-                         [--log <path>] [--json]
+  approval policy attest [--policy <path>] [--dir <path>] [--organ <path>]
+                         [--as human:<id>] [--log <path>] [--json]
 
 Flags:
   --policy <path> / --dir <path>   the policy file, or where to discover it
+  --organ <path>   attest a GATE ORGAN instead; one path per call, under --dir
   --as human:<id>  the human attesting; overrides APPROVAL_HUMAN
   --log <path>     log file to append to (default .approval/log/events.jsonl)
   --json           machine-readable output
   -h, --help       this text
 
 Appends one policy.updated event carrying the SHA-256 of the policy file's exact
-bytes. Gate operations refuse while the live hash differs from the latest
-attestation, with the reason "policy-not-attested". Human-only, and identity is
-CONFIG-DECLARED: the trust boundary is the local machine, so an attestation
-proves that someone with local control signed off, not who. Bytes, not parse:
-the file is hashed as it sits on disk and does not have to be loadable.
+bytes; gate operations refuse while it differs ("policy-not-attested").
+Human-only, identity CONFIG-DECLARED: the trust boundary is the local machine,
+so it proves someone with local control signed off, not who. Bytes, not parse.
+--organ appends gate.organ.attested for a policy.core harness file instead.
 
 JSON shape: docs/cli-reference.md#policy-attest
 ${EXIT_CODES_POINTER}
@@ -672,11 +673,11 @@ Flags:
   --branch <name> / --direct      force the BRANCH or the DIRECT flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the live policy, diffs it against the BASELINE (classes AND every policy key), attests, then
-runs a git ceremony of EXACTLY two files, commit-preconditions first (git-failed, push-rejected,
-pr-failed break after the append). Attested TEXT is NOT recoverable from the log: no blob means
-HASH-ONLY MODE. Flows, in PRECEDENCE, highest first: --branch <name>, --direct; a refused push
-PUBLISHES ITSELF without moving your checkout, dropping to a RUNBOOK; merge by MERGE COMMIT.
+Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then
+commits EXACTLY the policy, the log and the pins when they moved. commit-preconditions, the pins
+and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected, pr-failed break after it.
+Attested TEXT is NOT recoverable from the log: HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
+--branch <name>, --direct; a refused push PUBLISHES ITSELF, dropping to a RUNBOOK. MERGE COMMIT it.
 --as agent: appends policy.proposed; the TAP attests. Fail closed: no-channel, declined, timeout.
 
 ${EXIT_CODES_POINTER}
@@ -940,8 +941,7 @@ export const RUN_HELP = `approval run — execute a command behind the gate
 
 Usage:
   approval run <action-key> [--token <t>] [--payload-hash <64hex>] [--as <id>]
-               [--policy <path>] [--dir <path>] [--log <path>] [--json]
-               -- <cmd> [args…]
+       [--no-sandbox] [--policy <p>] [--dir <p>] [--log <p>] [--json] -- <cmd>…
 
 Flags:
   --token <t>      the raw token "approval grant" printed. REQUIRED for manual
@@ -949,17 +949,42 @@ Flags:
                    always hashes "the argv array and cwd" it is about to spawn;
                    a differing value is refused payload-mismatch, not obeyed
   --as <id>        the executing identity; else APPROVAL_HUMAN
+  --no-sandbox     give the child the session's network. RECORDED (untokened
+                   children otherwise run egress-denied: docs/sandboxed-exec.md)
   --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
   --json / -h, --help   machine-readable summary ON STDERR / this text
 
 Appends execution.started BEFORE spawning the child, then execution.completed or
 execution.failed with the child's real exit code, and exits with that code.
-
 JSON shape and refusal codes: docs/cli-reference.md#run
 ${EXIT_CODES_POINTER}, plus one code this verb alone emits:
   5  NO VALID EXECUTION TOKEN. Nothing was appended.
 ${JSON_ERRORS}
 ${why("run")}`;
+
+export const SANDBOX_HELP = `approval sandbox — run a command with no way out (APRV-193)
+
+Usage:
+  approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+
+Flags:
+  --allow-loopback  also allow connections to localhost. For a suite that
+                    starts its own server. A real widening: a port is a port
+  --log <path>      the log, so the credential material beside it can be made
+                    unreadable to the child (vault, env map, sealing keys)
+  -h, --help        this text ("--help --long" adds the reference section)
+
+Denies the child outbound network (macOS sandbox-exec), scrubs the
+credential-bearing variables out of its environment, and exits with the child's
+own exit code. It appends NOTHING: it removes a capability rather than
+authorizing anything, and the gate stays reachable because its IPC is a file.
+
+The point is laundered exec: "npm test" runs whatever was written a minute ago,
+so the command's NAME stopped describing its effect. An agent HARNESS cannot run
+under this — it needs the model API, which is exactly what is denied.
+
+${EXIT_CODES_POINTER}, plus 127: no sandbox here, the command did NOT run.
+${why("sandbox")}`;
 
 export const WAIT_HELP = `approval wait — block until a task's requests are decided
 
@@ -1072,11 +1097,11 @@ Flags:
   --verbose / --json   never abbreviate a detail / machine-readable output
   -h, --help       this text
 
-Twelve checks, in the order in which their failures cascade: build-freshness,
-identity, attestation, log, telegram, web-port, payload-store, audit-sampling,
-envelope-integrity, vault, environment, log-drift. APPENDS NOTHING, sends
-nothing, repairs nothing: every failure carries a fix that begins with a command
-you can paste, and no value of any credential appears in the output.
+One row per check, in the order in which their failures cascade: the build, your
+identity, the policy, the log, channels, the store, sampling, the vault, the
+environment, harness hooks, evidence sweeps, daemon health, values, checkpoints.
+Each named at docs/cli-reference.md#doctor. APPENDS NOTHING, sends nothing, and
+repairs nothing: every fix opens with a command; no credential value is printed.
 
 JSON shape: docs/cli-reference.md#doctor
 ${EXIT_CODES_POINTER} (1 when ANY check failed; 4 when doctor could not look)
@@ -1384,25 +1409,24 @@ ${why("init")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor [--as agent:<id>] [--timeout <d>]
-                            [--interval <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
   claude-code  Claude Pre/PostToolUse JSON in; decision JSON out. REGISTER BOTH
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
+  codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   classify     print what the classifier makes of a command line and exit
 
-Flags (claude-code, cursor):
-  --as <id>        proposing identity (default agent:claude-code / agent:cursor)
-  --timeout/--interval <d>   wait for a decision / poll it (default 55s / 1s)
+  --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex)
+  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
-Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
-hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-policy-unavailable,
-hook-log-unreachable, hook-io.
+Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
+
+Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
@@ -1701,6 +1725,7 @@ Flags:
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
+Open audit samples arrive as REVIEW CARDS: no payload, no approve, no token; one at a time.
 
 JSON shape: docs/cli-reference.md#channel-telegram-listen
 ${EXIT_CODES_POINTER}
@@ -1761,9 +1786,9 @@ Flags:
   --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
-  --once / --json / --no-preflight  one tick / JSON lines / skip the git check
+  --once / --json / --no-preflight / --no-build  one tick / JSON lines / skip the git check / keep a stale dist/
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
-  --read-proof full|incremental    prefix proof per read; full is the default
+  --read-proof full|incremental (default full) / --trace-watch (watch events)
   --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 
@@ -1784,7 +1809,7 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--poll-timeout <s>] [--no-gloss]
-              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight]
+              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight] [--no-build]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1796,8 +1821,8 @@ Flags (every "daemon run" flag, unchanged, plus):
   --gloss-provider <p> / --gloss-model <id>   choose claude|codex (default claude); Codex requires model; no fallback
   -h, --help       this text
 BEFORE START the preflight ("daemon run" runs it too) fetches, then fast-forwards
-and rebuilds when safe, else refuses and TOUCHES NOTHING;
-opt out with --no-preflight. Credentials come from THE LAUNCH ENVIRONMENT and
+and rebuilds when safe (--no-build keeps a stale dist/), else refuses and TOUCHES
+NOTHING; --no-preflight opts out. Credentials come from THE LAUNCH ENVIRONMENT and
 nowhere else: a channel whose credential is unset is skipped in doctor's words.
 
 ${EXIT_CODES_POINTER} (a clean stop is 0; the daemon's outcome chooses it)
@@ -1914,8 +1939,7 @@ export const ADAPTER_HELP = `approval adapter — execute an approved action thr
 Usage:
   approval adapter email|agentmail <action-key> --token <t> --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
-                      [--policy <path>] [--dir <path>] [--log <path>]
-                      [--timeout <ms>] [--json]
+                      [--policy|--dir|--log <path>] [--timeout <ms>] [--json]
 
 Adapters:
   email   send one RFC 5322 message over SMTP, for actions declared under
@@ -1926,11 +1950,12 @@ Adapters:
 An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
 refuses to act without a valid, unexpired, single-use execution token bound to
 the action's idempotency_key AND its payload_hash. The runtime, not the adapter,
-owns the sequence: recompute the hash, verify and consume the token, append
-execution.started, call the adapter, append the outcome.
+owns the sequence: recompute the hash, resolve the credentials the adapter
+declared, run its pre-token check, verify and consume the token, append
+execution.started, call the adapter, append the outcome. The two steps before
+the spend refuse without appending or spending, so the token stays live.
 
-${EXIT_CODES_POINTER} (5 when no valid token was presented and nothing was sent;
-1 for everything else the runtime decided)
+${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter")}`;
 
@@ -1963,8 +1988,7 @@ export const ADAPTER_AGENTMAIL_HELP = `approval adapter agentmail — send one a
 
 Usage:
   approval adapter agentmail <action-key> --token <t> --payload <file|->
-      [--as <id>] [--vault <p>] [--policy <p>] [--dir <p>] [--log <p>]
-      [--timeout <ms>] [--json]
+      [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
 
 Flags:
   --token <t> / --payload <file|->   the token and the bytes. BOTH REQUIRED
@@ -1975,7 +1999,8 @@ TWO PAYLOAD MODES, told apart by shape and never inferred between:
   direct  {from, to[], cc?, bcc?, subject, body, content_type?}: "from" is
           checked against the inbox's address, since AgentMail has no From
   draft   {inbox_id, draft_id, to[], cc?, bcc?, subject, text}: RE-READ, and
-          refused "agentmail-draft-drifted" if an approved field changed
+          refused "agentmail-draft-drifted" if an approved field changed.
+          Drift is caught BEFORE the spend: restore the text, re-run, SAME token
 
 The VAULT holds agentmail.inbox_id and agentmail.api_key, and that key is the one
 WITH draft_send and message_send; the agent's own key must not have them.
@@ -1997,9 +2022,9 @@ Flags:
   --json           machine-readable output (carries values; --check does not)
   -h, --help       this text
 
-THIS COMMAND IS THE ONLY THING THAT READS .approval/env (invariant 7) and its
-default output CARRIES SECRETS, deliberately. The file is one KEY=VALUE per line
-at mode 0600, and VALUE says WHERE the value lives.
+THIS COMMAND IS THE ONLY THING THAT READS .approval/env (invariant 7), a mode
+0600 file of KEY=VALUE lines saying WHERE each value lives. Its default output
+CARRIES SECRETS by design; its APPROVAL_ENV_PROVENANCE line carries no value.
 
     approval env --check      # look first: no value is printed on this path
     eval "$(approval env)"    # then establish the environment yourself

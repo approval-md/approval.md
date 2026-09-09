@@ -26,7 +26,10 @@
  *    declared class refuses `adapter-class-mismatch` before the log is touched.
  * 4. **`started` precedes the effect.** On the happy path `act` observes an
  *    `execution.started` for its own key already in the verified log at the
- *    moment it is called, and `execution.completed` lands after it returns.
+ *    moment it is called, and `execution.completed` lands after it returns. The
+ *    same check reads the provider reference of APRV-251 off that record: a
+ *    detail naming one is on the record under this adapter's name, and a detail
+ *    naming none leaves the record carrying none.
  * 5. **Single use.** A second execution with the same token and key refuses
  *    without calling `act`.
  * 6. **Credentials are scoped and never leak.** A value handed out inside `act`
@@ -62,11 +65,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { readVerifiedRecords } from "../core/state.js";
+import type { ProviderRef } from "../core/execute.js";
+import { payloadOf, readVerifiedRecords } from "../core/state.js";
 import { verify } from "../core/verify.js";
 import {
   executeThroughAdapter,
   inMemoryCredentials,
+  providerRefFor,
   type ActInput,
   type ActOutcome,
   type Adapter,
@@ -217,6 +222,25 @@ function recordsOf(logPath: string) {
   const read = readVerifiedRecords(logPath);
   assert.equal(read.ok, true, `conformance log does not verify: ${JSON.stringify(read)}`);
   return read.ok ? read.records : [];
+}
+
+/**
+ * What the contract should have lifted from this detail (APRV-251), computed by
+ * the very function that lifts it.
+ *
+ * Asking the contract rather than re-deriving the rule is the point: an adapter
+ * is conformant when the record agrees with the contract's own reading of its
+ * detail, and a suite that spelled the rule a second time would eventually
+ * disagree with the runtime and fail an adapter that had done nothing wrong.
+ *
+ * The detail here is the REDACTED copy the result carried, and this check runs
+ * against an adapter that leaked nothing (check (6) is where a leak is hunted),
+ * so both copies are the same bytes and passing one twice asks the same
+ * question the contract asked.
+ */
+function expectedProviderRef(adapterName: string, detail: JsonValue | undefined): ProviderRef | null {
+  if (detail === undefined) return null;
+  return providerRefFor(adapterName, detail, detail);
 }
 
 function assertClean(logPath: string): void {
@@ -501,6 +525,37 @@ async function checkHappyPath(
     assert.ok(call !== undefined);
     assert.deepEqual(call.payload, unit.payload, "act() was handed different bytes");
     assert.equal(call.actionKey, unit.actionKey, "act() was handed a different action key");
+
+    // The provider reference (APRV-251). An adapter that names one under the
+    // conventional key gets it onto the record, under THIS adapter's name and
+    // with the id unchanged; an adapter that names none gets a record carrying
+    // no reference, which is the pre-amendment record and always valid. Both
+    // directions are checked because both are ways to be wrong: a reference
+    // quietly dropped sends `approval coverage` back to the class-and-window
+    // rule without saying so, and a reference invented for an adapter that
+    // named none puts a value in a join column that means nothing.
+    const expected = expectedProviderRef(spy.adapter.name, result.ok ? result.detail : undefined);
+    const recorded = payloadOf(completed)["provider_ref"];
+    if (expected === null) {
+      assert.equal(
+        recorded,
+        undefined,
+        `execution.completed carries a provider_ref the adapter's detail never named: ${JSON.stringify(recorded)}`,
+      );
+    } else {
+      assert.deepEqual(
+        recorded,
+        { adapter: expected.adapter, id: expected.id },
+        "the detail named a provider reference and the record does not carry it (APRV-251)",
+      );
+      if (result.ok) {
+        assert.deepEqual(
+          result.provider_ref,
+          expected,
+          "the result must name the reference the record carries",
+        );
+      }
+    }
 
     assertClean(unit.logPath);
   } finally {

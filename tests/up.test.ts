@@ -36,6 +36,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -49,6 +50,9 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { servicesFor } from "../src/cli/setup-common.js";
+import { envFileDigest } from "../src/core/env-file.js";
+import { formatEnvProvenance } from "../src/core/instance.js";
 import { payloadHash } from "../src/core/payload.js";
 import { callbackUpdate, startMockBotApi, assertLocal, type MockBotApi } from "./telegram-mock.js";
 import { fakeClaudeEnv } from "./fake-claude.js";
@@ -194,7 +198,15 @@ function cliEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // than spending ~13s per request on a real model — and never depends on
   // whether the machine running the tests has the CLI installed at all.
   const env = { ...process.env, ...fakeClaudeEnv(scratch), ...extra };
-  for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
+  for (const name of [
+    "APPROVAL_HUMAN",
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_TG_CHAT",
+    // APRV-278: whoever runs the suite may have evaluated `approval env` in
+    // their own shell, and an inherited claim would silence the warning the
+    // cross-instance case below asserts.
+    "APPROVAL_ENV_PROVENANCE",
+  ]) {
     if (extra[name] === undefined) delete env[name];
   }
   return env;
@@ -847,6 +859,63 @@ test("daemon run --with-channels is the ambient runtime, flags and all", () => {
   );
   assert.equal(run.code, 0, run.stderr);
   assert.ok(jsonLines(run.stdout).some((line) => line["event"] === "up_started"));
+  assertClean(dir);
+});
+
+// ===========================================================================
+// 6. Whose credentials the runtime picked up (APRV-178, narrowed by APRV-278)
+// ===========================================================================
+
+/** This instance's own `.approval/env`, at the mode the runtime insists on. */
+function writeEnvFile(dir: string, lines: string[]): string {
+  const path = join(dir, ".approval", "env");
+  const text = `${lines.join("\n")}\n`;
+  writeFileSync(path, text, "utf8");
+  chmodSync(path, 0o600);
+  return text;
+}
+
+/**
+ * `up` names a foreign export and says nothing about the documented ritual.
+ *
+ * The warning exists because a token exported in a shell profile wins over this
+ * instance's own line (invariant 7, on purpose) and a long-running process that
+ * quietly picked up another gate's bot should say so at the moment it does. It
+ * fired on `eval "$(approval env)"` too, which is the ONE way the operator is
+ * told to establish that environment: a check that reports the correct ritual
+ * as an incident is a check people learn to skip past. Both halves are asserted
+ * here rather than only the quiet one, because "no warning" proves nothing
+ * unless the same fixture warns without the claim.
+ */
+test("up warns about a foreign export and stays quiet about the documented ritual", () => {
+  const { dir } = ready();
+  const text = writeEnvFile(dir, [
+    `APPROVAL_TG_TOKEN=keychain:${servicesFor(logPath(dir)).telegramToken}`,
+    `APPROVAL_TG_CHAT=${CHAT}`,
+  ]);
+
+  // The shortest legal poll, not `channelArgs`: this case asserts on what the
+  // runtime says as it picks the credential up, and never waits for a decision,
+  // so the room `--once` needs to catch a callback is room spent for nothing.
+  const startup = [...apiBase(), "--poll-timeout", "1", "--payloads", "payloads.json"];
+
+  const foreign = runCli(["up", "--once", "--json", ...startup], dir, configured());
+  assert.equal(foreign.code, 0, foreign.stderr);
+  assert.match(foreign.stderr, /approval: cross-instance: APPROVAL_TG_TOKEN was exported/u);
+  assert.equal(foreign.stderr.includes(TOKEN), false, "the warning carried the value");
+
+  // The same shell after `eval "$(approval env)"`: the values, plus the claim
+  // the export block makes about itself. No value is in that claim, and the
+  // runtime reads none to act on it.
+  const ritual = runCli(["up", "--once", "--json", ...startup], dir, {
+    ...configured(),
+    APPROVAL_ENV_PROVENANCE: formatEnvProvenance(logPath(dir), envFileDigest(text), [
+      "APPROVAL_TG_TOKEN",
+      "APPROVAL_TG_CHAT",
+    ]),
+  });
+  assert.equal(ritual.code, 0, ritual.stderr);
+  assert.doesNotMatch(ritual.stderr, /cross-instance/u);
   assertClean(dir);
 });
 

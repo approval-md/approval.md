@@ -61,7 +61,33 @@ export interface ClassifiedSegment {
    * channel can name it without a second search of its own.
    */
   path?: string;
+  /**
+   * The sandbox wrapper this segment runs inside, when the classifier unwrapped
+   * one (APRV-193). Absent means "not wrapped, as far as this classifier can
+   * tell", which is the direction every caller must fail in: the marker is only
+   * ever read to RELAX a requirement, so an early return that omits it costs a
+   * refusal and never an authorization.
+   *
+   * `runtime` is `approval sandbox -- …`, whose profile this runtime writes.
+   * `external` is a hand-written `sandbox-exec -f <profile> …`, which is
+   * classified honestly (by its inner argv) and trusted for nothing: the
+   * profile is the caller's, and a profile a caller wrote can allow anything.
+   */
+  sandbox?: SandboxWrapper;
 }
+
+/**
+ * Who wrote the profile a wrapped command runs under (APRV-193).
+ *
+ * The distinction is the whole reason this is not a boolean. Classification
+ * treats the two identically — both are unwrapped to the inner argv, because a
+ * wrapper is a room and the class belongs to what runs in it. Enforcement does
+ * not: `APPROVAL_HOOK_REQUIRE_SANDBOX` is satisfied only by `runtime`, because
+ * `sandbox-exec -f /tmp/anything.sb` with a profile whose only line is
+ * `(allow default)` denies nothing at all, and a requirement a caller can meet
+ * by writing their own permission is not a requirement.
+ */
+export type SandboxWrapper = "runtime" | "external";
 
 export type CommandClassification =
   | { ok: true; segments: ClassifiedSegment[]; classes: string[] }
@@ -335,6 +361,17 @@ export function protectedPathClass(
       const next = segments[index + 1];
       if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
     }
+    // Codex installs its hook through these configuration and script paths.
+    if (segment === ".codex") {
+      const next = segments[index + 1];
+      if (
+        next === undefined ||
+        next === "config.toml" ||
+        next === "hooks.json" ||
+        next === "hooks" ||
+        segments.slice(index + 1).includes("..")
+      ) return "policy.core";
+    }
   }
 
   // 3. The policy's own routed entries (APRV-266), above the built-in
@@ -393,6 +430,59 @@ export function isProtectedPath(
   extra: readonly ProtectedPathEntry[] = [],
 ): boolean {
   return protectedPathClass(candidate, extra) !== null;
+}
+
+/**
+ * One path, in the spelling an organ attestation records (APRV-272).
+ *
+ * Segment-wise: separators collapse, `./` noise disappears, a trailing slash
+ * goes, and the result is joined with `/` whatever the caller's platform uses.
+ * Two spellings of one file therefore attest and match as one file, which is
+ * the property the guard needs, since git reports `.claude/settings.json` and a
+ * human at a terminal may type `./.claude/settings.json`.
+ *
+ * Pure and disk-free, like everything else in this file: it never resolves,
+ * never follows a link, and never asks whether the path exists.
+ */
+export function normalizePathSpelling(candidate: string): string {
+  return pathSegments(candidate).join("/");
+}
+
+/**
+ * Is this path one of the gate's ORGANS — a `policy.core` surface a human can
+ * attest by content (APRV-272)?
+ *
+ * The organs are the harness files that install the hook: `.claude/settings*`
+ * and Cursor's `hooks.json`, `hooks/` and `agents/`. They are `policy.core`
+ * because an agent that could write them could write itself out of the gate,
+ * and `policy.core` is human-only, so the gate mints no record for them at all
+ * — which is exactly why the protected-path guard could never pass a hand-made
+ * edit to one, and why {@link normalizePathSpelling}-keyed attestation is the
+ * evidence for them.
+ *
+ * Two `policy.core` surfaces are deliberately NOT organs, and both keep their
+ * own rules:
+ *
+ * - The policy file, which has had content attestation since APRV-15 and whose
+ *   attestation the gate reads on every operation. An organ record must never
+ *   be able to stand in for it.
+ * - Everything under the approval home (`.approval/`): the payload store, the
+ *   vault, the keys, the environment map, the queue. Those are the human's own
+ *   ceremony surface, and the log directory under them is `log.mutate`, which
+ *   is stricter still.
+ *
+ * The question is asked of the BUILT-IN set alone. A policy may not route any
+ * path to `policy.core` (§11.1 invariant 9 and the `policy.edit.*` namespace
+ * close that), so consulting the policy's entries here could only ever widen
+ * the set of files a human may attest by a routing the classifier already
+ * refuses to honor.
+ */
+export function isGateOrganPath(candidate: string): boolean {
+  if (builtinProtectedPathClass(candidate) !== "policy.core") return false;
+  const segments = pathSegments(candidate);
+  const last = segments[segments.length - 1];
+  if (last !== undefined && CORE_FILENAMES.includes(last)) return false;
+  return !segments.includes(".approval");
 }
 
 // ===========================================================================
@@ -995,11 +1085,17 @@ interface RuleContext {
   context: ClassifierContext;
 }
 
-/** A refinement's answer: a class and the rule id that chose it. */
-interface Refinement {
-  class: string;
-  rule: string;
-}
+/**
+ * A refinement's answer: a class and the rule id that chose it, or a statement
+ * that this invocation cannot be read at all.
+ *
+ * The opaque arm is APRV-283's. A refinement that returns `null` is answered
+ * with the interpreter message (`runs inline source`), which is true of
+ * `node -e` and false of `find … -exec`, and a refusal that misdescribes the
+ * command it refuses sends the agent looking for a flag it did not pass. A
+ * refinement that has its own reason states it.
+ */
+type Refinement = { class: string; rule: string } | { opaque: string };
 
 /**
  * One row of the classification table.
@@ -1207,6 +1303,51 @@ function refineNpmInstall(ctx: RuleContext): Refinement {
   return packages.length === 0
     ? { class: "deps.install", rule: "npm-install-lockfile" }
     : { class: "deps.add", rule: "npm-install-package" };
+}
+
+/**
+ * `find` primaries that run another command. Opaque, for the reason `xargs` is
+ * (APRV-283): what `-exec` runs is a command line this classifier is not
+ * reading, so the segment's effect is not in the words it can see.
+ */
+const FIND_EXEC_PRIMARIES: readonly string[] = ["-exec", "-execdir", "-ok", "-okdir"];
+
+/**
+ * `find` primaries that write. `-delete` removes every match; `-fprint`,
+ * `-fprintf` and `-fls` each create or truncate the file named after them.
+ */
+const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprintf", "-fls"];
+
+/**
+ * `find` walks and prints, until a primary makes it act (APRV-283).
+ *
+ * Until this row existed `find` sat in the read table with `ls` and `grep`, so
+ * `find . -type f -delete` and `find . -exec rm {} +` both classified
+ * `read.shell`: a recursive delete answered as a listing. It went unnoticed
+ * because a `2>/dev/null` on the end reclassified the whole segment
+ * `files.write.workspace` by the redirect override, which is the bug this task
+ * fixes; taking that override away without this row would have left the delete
+ * reading as a walk.
+ *
+ * `-delete` is `files.delete.out_of_scope` rather than a workspace write on the
+ * same reasoning `refineRm` uses for `rm -r .`: `find` is recursive by
+ * construction and its start points are usually relative, so the classifier
+ * cannot establish what a delete covers, and a delete whose scope cannot be
+ * established is the manual one.
+ */
+function refineFind(ctx: RuleContext): Refinement {
+  const running = ctx.args.find((arg) => FIND_EXEC_PRIMARIES.includes(arg));
+  if (running !== undefined) {
+    return {
+      opaque: `find ${running} runs a command this classifier does not read`,
+    };
+  }
+  if (ctx.args.includes("-delete")) {
+    return { class: "files.delete.out_of_scope", rule: "find-delete" };
+  }
+  const writing = ctx.args.find((arg) => FIND_WRITE_PRIMARIES.includes(arg));
+  if (writing !== undefined) return { class: "files.write.workspace", rule: "find-write" };
+  return { class: "read.shell", rule: "find-read" };
 }
 
 /** `sed -i` edits in place; every other `sed` reads. */
@@ -1775,6 +1916,8 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   { id: "harness-updater", bins: ["uca"], class: "deps.upgrade" },
 
   // -- workspace tools -----------------------------------------------------
+  // APRV-193: three of the rules below hand control to code the runtime did not
+  // author, and they are named in {@link CODE_EXECUTING_RULES}.
   {
     id: "node",
     bins: ["node"],
@@ -1807,6 +1950,15 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     refine: refineRm,
   },
   { id: "sed", bins: ["sed"], class: "read.shell", emits: ["files.write.workspace"], refine: refineSed },
+  // APRV-283. Its own row rather than a seat in the read table: `find` is the
+  // one reader with primaries that delete, write and run other commands.
+  {
+    id: "find",
+    bins: ["find"],
+    class: "read.shell",
+    emits: ["files.delete.out_of_scope", "files.write.workspace"],
+    refine: refineFind,
+  },
 
   // -- network -------------------------------------------------------------
   // The HTTP clients split on their flags; the transports do not. What `ssh`,
@@ -1858,7 +2010,6 @@ export const COMMAND_RULES: readonly CommandRule[] = [
       "echo",
       "false",
       "file",
-      "find",
       "grep",
       "head",
       "jq",
@@ -1990,6 +2141,34 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 /**
+ * Redirection targets that create no file (APRV-283).
+ *
+ * `> file` is a write because it creates or truncates one. `2>/dev/null` does
+ * neither: the kernel's bit bucket has no contents to lose and no directory
+ * entry to make. The same is true of the standard streams by path
+ * (`/dev/stdout`, `/dev/stderr`), of the controlling terminal, and of
+ * `/dev/fd/<n>`, which names a descriptor this process already holds.
+ *
+ * The set is EXACT and closed. Anything else under `/dev` classifies as a write,
+ * because a device node this list does not know is a device node this file
+ * cannot vouch for, and the strict reading of a redirection is that it writes.
+ */
+const DISCARD_TARGETS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/tty",
+]);
+
+/** `/dev/fd/3`, and nothing that merely starts with it. */
+const DEV_FD = /^\/dev\/fd\/\d+$/u;
+
+/** Does redirecting onto `target` create nothing? (APRV-283.) */
+function isDiscardTarget(target: string): boolean {
+  return DISCARD_TARGETS.has(target) || DEV_FD.test(target);
+}
+
+/**
  * Strictest-first, and the order is normative (APRV-198): a segment naming
  * more than one protected path is answered by the most consequential of them.
  */
@@ -2042,6 +2221,31 @@ function strictestProtected(
 }
 
 /**
+ * The rules whose commands RUN CODE THIS RUNTIME DID NOT AUTHOR (APRV-193).
+ *
+ * Rule ids rather than classes, because the class does not separate them: `npm
+ * test`, `node build.mjs`, `tsc` and `mkdir` all resolve to
+ * `files.write.workspace`, and only the first three execute a file an agent may
+ * have written a minute ago. That is the whole distinction laundering turns on
+ * — the command's NAME stops describing its effect exactly when the effect is
+ * in a file the name does not mention — so it is drawn here, once, where a
+ * future rule's author will see it.
+ *
+ * Read by `APPROVAL_HOOK_REQUIRE_SANDBOX` (`src/cli/hook.ts`) and by nothing
+ * else. It grants nothing and denies nothing on its own: it says which commands
+ * the hook may be asked to require a sandbox for, and the requirement is off
+ * unless an operator turns it on.
+ */
+export const CODE_EXECUTING_RULES: readonly string[] = [
+  /** `npm test`, `npm run <script>`, `npm exec` and the pnpm/yarn/bun spellings. */
+  "npm-script",
+  /** `node <script>` — the plainest spelling of "run what I just wrote". */
+  "node-script",
+  /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
+  "workspace-tool",
+];
+
+/**
  * Every class the table can emit, for docs and for the dogfood test.
  *
  * Fixed, and it does not include the `policy.edit` sub-classes (APRV-266): a
@@ -2092,6 +2296,96 @@ export function emittableClass(
   return protectedPaths.some((entry) => parseProtectedEntry(entry)?.routed === actionClass);
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox wrappers (APRV-193)
+// ---------------------------------------------------------------------------
+
+/** How many nested wrappers are unwrapped before the classifier gives up. */
+const SANDBOX_WRAPPER_DEPTH = 4;
+
+type SandboxWrapperFound =
+  | { kind: "wrapper"; skip: number; wrapper: SandboxWrapper }
+  | { kind: "unreadable"; detail: string };
+
+/**
+ * `sandbox-exec [-f <profile>]… [--] <argv…>`.
+ *
+ * Only `-f` is modelled. `-p` takes a profile inline, `-n` names a built-in
+ * one, `-D` binds a parameter the profile reads: each changes what the room
+ * allows, and a rule that skipped them would be reading past the part that
+ * matters. So they are `unreadable` rather than guessed at, which denies.
+ */
+function seatbeltWrapper(words: readonly string[], start: number): SandboxWrapperFound {
+  let index = start + 1;
+  while (index < words.length) {
+    const word = words[index] as string;
+    if (word === "--") {
+      index += 1;
+      break;
+    }
+    if (word === "-f") {
+      if (words[index + 1] === undefined) {
+        return { kind: "unreadable", detail: "sandbox-exec -f names no profile" };
+      }
+      index += 2;
+      continue;
+    }
+    if (!isFlag(word)) break;
+    return {
+      kind: "unreadable",
+      detail: `sandbox-exec flag ${word} is not modelled; only -f <profile> is read, because -p, -n and -D change what the profile allows`,
+    };
+  }
+  if (words[index] === undefined) {
+    return { kind: "unreadable", detail: "sandbox-exec runs no command" };
+  }
+  return { kind: "wrapper", skip: index - start, wrapper: "external" };
+}
+
+/**
+ * `approval [flags…] sandbox [flags…] -- <argv…>`, and its `node cli.js`
+ * spelling.
+ *
+ * The word `sandbox` is looked for anywhere before the separator rather than
+ * only in the first position, because `approval --log x sandbox -- curl …`
+ * would otherwise keep the pass-through `gate.self` class and BE the laundering
+ * device this whole rule exists to remove. Over-matching is safe in a way
+ * under-matching is not: unwrapping can only move a segment off `gate.self`
+ * (the permissive pseudo-class) and onto the inner command's real one.
+ *
+ * No separator means nothing runs — `approval sandbox --help` prints text — so
+ * that falls through to the ordinary `approval` row rather than refusing.
+ */
+function approvalSandboxWrapper(
+  words: readonly string[],
+  from: number,
+  start: number,
+): SandboxWrapperFound | null {
+  const separator = words.indexOf("--", from);
+  if (separator === -1) return null;
+  if (!words.slice(from, separator).includes("sandbox")) return null;
+  if (words[separator + 1] === undefined) return null;
+  return { kind: "wrapper", skip: separator + 1 - start, wrapper: "runtime" };
+}
+
+/** The wrapper standing at `start`, if any. */
+function sandboxWrapper(words: readonly string[], start: number): SandboxWrapperFound | null {
+  const bin = words[start];
+  if (bin === undefined) return null;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  if (base === "sandbox-exec") return seatbeltWrapper(words, start);
+  if (base === "approval") return approvalSandboxWrapper(words, start + 1, start);
+  if (base === "node") {
+    const script = words[start + 1];
+    if (script === undefined || !isGateEntrypoint(script)) return null;
+    return approvalSandboxWrapper(words, start + 2, start);
+  }
+  // bwrap and unshare are deliberately absent: this build has no Linux
+  // mechanism, so a rule for their wrappers would read commands nothing here
+  // can produce (`docs/sandboxed-exec.md`, and APRV-193's Linux follow-up).
+  return null;
+}
+
 /** Find the first table row matching this binary and subcommand. */
 function matchRule(bin: string, sub: string | null): CommandRule | null {
   for (const rule of COMMAND_RULES) {
@@ -2105,7 +2399,7 @@ function matchRule(bin: string, sub: string | null): CommandRule | null {
 }
 
 type SegmentOutcome =
-  | { ok: true; class: string; rule: string; path?: string }
+  | { ok: true; class: string; rule: string; path?: string; sandbox?: SandboxWrapper }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
 function classifySegment(
@@ -2145,9 +2439,40 @@ function classifySegment(
   let cursor = 0;
   while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
 
+  // APRV-193. A sandbox wrapper is not a command: it is a room, and what
+  // matters is what runs inside it. `approval sandbox -- npm install` is
+  // `deps.add`, and it has to be, in both directions.
+  //
+  // If the wrapper kept a class of its own it would be a laundering device —
+  // wrap anything, get `gate.self`, run unapproved. And if it stayed
+  // unclassified (which is where `sandbox-exec` sat until this task) the hook
+  // would DENY the safe spelling of a command it allows unwrapped, which is a
+  // gate that punishes protection. So the cursor is advanced past the wrapper
+  // and everything below decides on the inner argv, rule id included.
+  //
+  // A wrapper this rule cannot read in full is `unclassified`: it never softens
+  // anything, and a flag the rule does not model could change what runs.
+  let sandbox: SandboxWrapper | null = null;
+  for (let depth = 0; depth < SANDBOX_WRAPPER_DEPTH; depth += 1) {
+    const found = sandboxWrapper(words, cursor);
+    if (found === null) break;
+    if (found.kind === "unreadable") {
+      return { ok: false, code: "unclassified", detail: found.detail };
+    }
+    // The strictest marker wins over nesting: an `approval sandbox` inside a
+    // hand-written `sandbox-exec` is still, at the outermost layer, a profile
+    // this runtime did not write.
+    if (sandbox === null) sandbox = found.wrapper;
+    cursor += found.skip;
+  }
+
   const writeTargets = segment.redirects
     .filter((redirect) => redirect.op !== "<")
-    .map((redirect) => redirect.target.text);
+    .map((redirect) => redirect.target.text)
+    // APRV-283: a redirection to a discard device creates nothing, so it is not
+    // a write. `2>/dev/null` is the suffix an agent writes on half its reads,
+    // and until this it turned every one of them into `files.write.workspace`.
+    .filter((target) => !isDiscardTarget(target));
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
@@ -2223,6 +2548,10 @@ function classifySegment(
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
   }
+  // APRV-283: a refinement that carries its own reason for being unreadable.
+  if (refined !== null && "opaque" in refined) {
+    return { ok: false, code: "opaque", detail: refined.opaque };
+  }
   let cls = refined === null ? rule.class : refined.class;
   let ruleId = refined === null ? rule.id : refined.rule;
 
@@ -2246,7 +2575,7 @@ function classifySegment(
     ruleId = "redirect-write";
   }
 
-  return { ok: true, class: cls, rule: ruleId };
+  return { ok: true, class: cls, rule: ruleId, ...(sandbox === null ? {} : { sandbox }) };
 }
 
 /**
@@ -2298,6 +2627,7 @@ export function classifyCommand(
       class: outcome.class,
       rule: outcome.rule,
       ...(outcome.path === undefined ? {} : { path: outcome.path }),
+      ...(outcome.sandbox === undefined ? {} : { sandbox: outcome.sandbox }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
   }

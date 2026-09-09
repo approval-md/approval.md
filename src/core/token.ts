@@ -101,6 +101,7 @@ import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, type LoadPolicyOptions, type PolicyLoadResult } from "./policy-load.js";
 import { humanOnlyRefusal, resolve } from "./policy-match.js";
+import type { SandboxState } from "./sandbox.js";
 import {
   asSealedToken,
   openSealedToken,
@@ -611,6 +612,13 @@ export interface TokenOptions extends ClockOptions {
    * a name and never a value.
    */
   envStripped?: number;
+  /**
+   * The room the child ran in (APRV-193), recorded on the `execution.started`
+   * this spend appends. The manual path's copy of `ExecuteOptions.sandbox`, for
+   * the same reason the count above is: a field recorded on one of the two
+   * start events and not the other is a field an auditor cannot rely on.
+   */
+  sandbox?: SandboxState;
 }
 
 export type ConsumeResult =
@@ -795,6 +803,11 @@ export function consumeToken(
         // of. Optional and additive; an execution with no child records none,
         // because "none withheld" and "no child" are different facts.
         ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
+        // APRV-193: which room the child ran in. Same additive shape, and the
+        // manual path's usual value is `granted-egress` — a human approved
+        // these exact bytes, and `approval run` on a grant is the one door to
+        // the world the design leaves open.
+        ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       },
     },
     {

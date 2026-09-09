@@ -82,12 +82,12 @@ can open your vault. The trust boundary is the local machine.
 export APPROVAL_MD=~/dev/approval-md
 approval() { node "$APPROVAL_MD/dist/src/cli/main.js" "$@"; }
 
-mkdir -p /tmp/approval-email-demo && cd /tmp/approval-email-demo
+mkdir -p ~/dev/demos/email && cd ~/dev/demos/email
 approval init
 ```
 
 ```
-approval: scaffolded /tmp/approval-email-demo
+approval: scaffolded ~/dev/demos/email
   wrote    APPROVAL.md
   wrote    .approval/log/
   wrote    .approval/QUEUE.md
@@ -261,7 +261,7 @@ approval policy attest --as human:alice
 ```
 
 ```
-attested /tmp/approval-email-demo/APPROVAL.md at seq 1: sha256 f29bac7b373e…
+attested ~/dev/demos/email/APPROVAL.md at seq 1: sha256 f29bac7b373e…
 ```
 
 Attestation records that a human saw these policy bytes. Edit `APPROVAL.md`
@@ -288,7 +288,7 @@ The values go into the VAULT, not into the OS keystore and not into
 .approval/env: what this verb stores is what a gated adapter spends inside a
 verified-token window. Nothing here appends to the log or attests anything.
 
-It will ask for 5 value(s), all of them into /tmp/approval-email-demo/.approval/vault.enc:
+It will ask for 5 value(s), all of them into ~/dev/demos/email/.approval/vault.enc:
   smtp.host (config) — the submission server this runtime connects to
   smtp.port (config) — the TCP port: 587 for STARTTLS submission, 465 for implicit TLS
   smtp.security (choice) — how the connection is protected; this adapter never guesses it
@@ -314,7 +314,7 @@ open an SMTP session to smtp.example.net:587 to check it? Nothing is sent [Y/n] 
 verified: smtp.example.net:587 answered over starttls, and accepted the credential over AUTH PLAIN.
 No message was sent: the session ran to AUTH and then QUIT.
 
-stored 5 value(s) in /tmp/approval-email-demo/.approval/vault.enc: smtp.host, smtp.port, smtp.security, smtp.user, smtp.password
+stored 5 value(s) in ~/dev/demos/email/.approval/vault.enc: smtp.host, smtp.port, smtp.security, smtp.user, smtp.password
 ```
 
 The two wrong answers above are deliberate: a prompt that does not like your
@@ -351,7 +351,7 @@ V="$(security find-generic-password -a "$USER" -s approval-demo-smtp-password -w
 ```
 
 ```
-stored smtp.password in /tmp/approval-email-demo/.approval/vault.enc (5 credential(s); the value is not printed anywhere)
+stored smtp.password in ~/dev/demos/email/.approval/vault.enc (5 credential(s); the value is not printed anywhere)
 ```
 
 `vault set` also accepts the value on stdin, which is what a pipe from a password
@@ -364,7 +364,7 @@ approval vault list --as human:alice
 ```
 
 ```
-/tmp/approval-email-demo/.approval/vault.enc: 5 credential(s)
+~/dev/demos/email/.approval/vault.enc: 5 credential(s)
 smtp.host
 smtp.password
 smtp.port
@@ -471,15 +471,15 @@ approval doctor
 ```
 ✓ build-freshness     …/dist/src/cli/main.js built …, not older than the source tree
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
-✓ attestation         /tmp/approval-email-demo/APPROVAL.md is attested at seq 1 (sha256 f29bac7b373e…)
+✓ attestation         ~/dev/demos/email/APPROVAL.md is attested at seq 1 (sha256 f29bac7b373e…)
 ✓ log                 …/events.jsonl verifies: 1 record(s), head seq 1 c5250281dd91…
 ✓ telegram            getMe on https://api.telegram.org succeeded …
 ✓ web-port            127.0.0.1:4680 is free (bound and released; nothing was left listening)
 ✓ payload-store       …
 – audit-sampling      disabled (rate-absent): APPROVAL.md declares no audit.supervised_sample_rate, so no supervised action is escalated for retrospective review
-– envelope-integrity  no task folder at /tmp/approval-email-demo/backlog/tasks, so no task file can be compared against the log (pass --tasks <dir> if your task files live elsewhere)
-✓ vault               /tmp/approval-email-demo/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
-✓ environment         /tmp/approval-email-demo/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
+– envelope-integrity  no task folder at ~/dev/demos/email/backlog/tasks, so no task file can be compared against the log (pass --tasks <dir> if your task files live elsewhere)
+✓ vault               ~/dev/demos/email/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
+✓ environment         ~/dev/demos/email/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
 9 ok · 2 not applicable · 0 failed
 ```
 
@@ -694,7 +694,7 @@ next step; the note is what survives it.
 ## Cleaning up
 
 ```sh
-cd .. && rm -rf /tmp/approval-email-demo
+cd .. && rm -rf ~/dev/demos/email
 unset APPROVAL_TG_TOKEN APPROVAL_TG_CHAT APPROVAL_HUMAN TOKEN HASH V
 unset APPROVAL_DEMO_VAULT_PASSPHRASE
 

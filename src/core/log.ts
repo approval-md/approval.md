@@ -117,6 +117,25 @@ export const GENESIS_PREV = null;
  * the runtime's statement about its own refusal, and the human whose decision
  * it was is named in the payload. Refusals handed to AGENTS are not recorded;
  * the asymmetry is deliberate, and `core/decision-refusal.ts` states why.
+ * `gate.organ.attested` (APRV-272) is the fifteenth: a human's sign-off on the
+ * exact bytes of one of the gate's ORGANS, the harness files that install the
+ * hook (amended SPEC.md §5.2, §8). Those files are `policy.core`, which is
+ * human-only, so the gate mints no record of any kind for them and no
+ * grant-shaped evidence for a hand edit to one can exist; content attestation
+ * is the only evidence there is, and this is it. `human:` actor and the schema
+ * refuses any other, for the reason `gate.opened` carries the same rule.
+ *
+ * It is a type of its own rather than a `policy.updated` variant, and that is
+ * the load-bearing choice: every reader of the POLICY attestation selects on
+ * `event === "policy.updated"` (`core/attest.ts`, `core/policy-proposal.ts`,
+ * `cli/amend.ts`, `cli/channel-telegram.ts`, `core/protected-path-guard.ts`),
+ * so a distinct type is ignored by all of them by construction rather than by a
+ * filter each one would have to remember. `checkAttestationOfBytes` returns at
+ * the FIRST record carrying a `sha256` as it scans backwards, so an organ
+ * attestation written as a `policy.updated` would have reported a correctly
+ * attested policy as `hash-mismatch` and refused every gate operation until
+ * somebody re-attested it. The `gate.` prefix already carries the write-boundary
+ * clock in `core/verify.ts`, which is what an attestation's `ts` has to be.
  */
 export type EventType =
   | "task.registered"
@@ -148,6 +167,7 @@ export type EventType =
   | "gate.opened"
   | "gate.closed"
   | "gate.bypassed"
+  | "gate.organ.attested"
   | "log.checkpoint";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */

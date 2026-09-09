@@ -109,7 +109,7 @@
  * the marker is `execution.started` and why no completion ever follows it.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -144,10 +144,16 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { HARNESS_TASK_PREFIX, harnessLoopFloor, isLoopEscalated } from "./loop.js";
+import {
+  HARNESS_TASK_PREFIX,
+  harnessLoopFloor,
+  isLoopEscalated,
+  isSideEffectingClass,
+  loopClearance,
+} from "./loop.js";
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
-import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
+import { loadPayload, payloadPath, payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
   loadPolicyText,
   policyUnreadable,
@@ -1796,9 +1802,11 @@ function displayHashField(
  *    reaches a human's queue, never has the live fraction drawn over a hash it
  *    chose for itself, and hears the real reason rather than
  *    `payload-hash-required`.
- * 4. **Off the manual path, stop — unless the live fraction says otherwise.**
- *    `supervised`/`autonomous` append **no event** (amended SPEC.md §6.3) and
- *    return `proceed: true`. Their budget is charged at `execution.started`,
+ * 4. **Off the manual path, retain supplied bound material, then stop — unless
+ *    the live fraction says otherwise.** `supervised`/`autonomous` append **no
+ *    event** (amended SPEC.md §6.3) and return `proceed: true`. When the caller
+ *    supplies payload material, it is checked against the registered declaration
+ *    and retained for the later execution evidence. Their budget is charged at `execution.started`,
  *    which APRV-18 appends — checking budgets here as well would charge them
  *    twice or, worse, pass here and fail there. A `supervised-live` class
  *    (APRV-127) draws its declared fraction here: an action the draw selects
@@ -1977,7 +1985,7 @@ function attemptRequest(
     if (isLoopEscalated(read.records, input.task)) {
       return refuse(
         "loop-escalated",
-        `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and the streak clears when an execution.completed for the task lands.`,
+        `loop-escalated: task ${input.task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and ${loopClearance("task", input.task)}.`,
       );
     }
     // APRV-127. A `supervised-live` class puts a declared fraction of its
@@ -1999,6 +2007,84 @@ function attemptRequest(
       // An UNSAMPLED supervised-live action leaves by exactly this door, so it
       // proceeds as a supervised action always has and enters the retrospective
       // pool on its `execution.started` like any other.
+      //
+      // APRV-316: when exact material is present, retain it before returning.
+      // The verified registration is the declaration; caller fields cannot
+      // substitute for a missing hash or change its class. Existing valid bytes
+      // are left alone, while a corrupt, unreadable, or external-reference entry
+      // is refused rather than overwritten. This writes no approval record and
+      // does not imply that execution later starts or completes.
+      if (input.payload !== undefined) {
+        const registered = registeredAction(read.records, input.task, input.actionKey);
+        if (!registered.ok) return registered;
+        if (registered.action.class !== input.cls) {
+          return refuse(
+            "action-not-registered",
+            `action ${input.actionKey} is registered in class ${registered.action.class}, but this request presents ${input.cls}. The nonmanual payload is retained only for the exact registered action; nothing was stored and nothing was appended.`,
+          );
+        }
+        const declaredHash = registered.action.payload_hash;
+        if (declaredHash === undefined) {
+          return refuse(
+            "payload-hash-required",
+            `action ${input.actionKey} has supplied payload material but its registered declaration carries no payload_hash. Nonmanual material is retained only under the declaration's exact binding; nothing was stored and nothing was appended.`,
+          );
+        }
+        let materialHash: string;
+        try {
+          materialHash = hashOfPayload(input.payload.value);
+        } catch (cause) {
+          return refuse(
+            "payload-store-failed",
+            `the payload material for ${input.actionKey} could not be canonicalized: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }. A payload that cannot be serialized cannot be retained as execution evidence, so nothing was stored and nothing was appended.`,
+          );
+        }
+        if (materialHash !== declaredHash) {
+          return refuse(
+            "payload-mismatch",
+            `the payload material supplied for ${input.actionKey} hashes to ${materialHash} but the registered action declares ${declaredHash}. Nonmanual execution evidence binds to the registered bytes, so nothing was stored and nothing was appended.`,
+          );
+        }
+
+        const storeDir = options.payloadStoreDir ?? payloadStoreDirFor(logPath);
+        const existing = loadPayload(storeDir, declaredHash);
+        if (!existing.ok && existing.code !== "absent") {
+          return refuse(
+            "payload-store-failed",
+            `${existing.message}. Existing invalid payload material is not replaced on the nonmanual path; nothing was stored and nothing was appended.`,
+          );
+        }
+        if (!existing.ok) {
+          // `readFileSync` reports ENOENT for a dangling symlink too. Preserve
+          // every existing store object, including one whose target vanished;
+          // only a true lstat ENOENT is an empty address we may fill.
+          try {
+            lstatSync(payloadPath(storeDir, declaredHash));
+            return refuse(
+              "payload-store-failed",
+              `payload ${declaredHash} has an existing store entry that could not be verified. Existing invalid payload material is not replaced on the nonmanual path; nothing was stored and nothing was appended.`,
+            );
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
+              return refuse(
+                "payload-store-failed",
+                `payload ${declaredHash}'s store address could not be inspected: ${
+                  cause instanceof Error ? cause.message : String(cause)
+                }. Nothing was stored and nothing was appended.`,
+              );
+            }
+          }
+          const stored = storePayload(storeDir, input.payload.value);
+          if (!stored.ok) {
+            return refuse(
+              "payload-store-failed",
+              `${stored.message} Nothing was appended and the nonmanual action was not admitted.`,
+            );
+          }
+        }
+      }
       return {
         ok: true,
         autonomy: resolution.autonomy,
@@ -3237,6 +3323,31 @@ export type HarnessGrantOrigin = "direct" | "carried";
 /** The payload field {@link HarnessGrantOrigin} is recorded under. */
 export const HARNESS_GRANT_ORIGIN = "grant_origin";
 
+/**
+ * The payload field naming the TOOL CALL that spent a carried grant (APRV-287).
+ *
+ * A carried grant's `execution.started` names the task of the request, because
+ * that is the task the log holds the approval lifecycle under. The tool call
+ * that actually ran the command is a different one, and until this field the
+ * runtime had no way back to it: the completion counterpart rebuilds a task id
+ * from the reporting event's session and tool-use id, found no start under it,
+ * and refused `not-delegated`. The consequence was the one an operator saw on
+ * 2026-09-06 — a granted commit-and-push completed, no `execution.completed`
+ * was ever written, and the loop floor the refusal text promises would clear on
+ * a completion stayed shut over the rest of the session.
+ *
+ * DERIVED, never declared: the value is the task id the runtime minted for the
+ * spending invocation from the harness's session and tool-use ids, the same one
+ * {@link HARNESS_GRANT_ORIGIN} is computed against. A reporter cannot name a
+ * bucket with it, because the only thing it can reach is a start this runtime
+ * wrote for that same tool call.
+ *
+ * Absent where the spend is `direct` (the record's own `task` already names the
+ * tool call) and on every record written before this field existed, which is why
+ * every reader treats absence as "no second name" rather than as a fault.
+ */
+export const HARNESS_SPENDING_TASK = "spent_by_task";
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -3506,6 +3617,18 @@ function attemptHarnessConsume(
       ? "direct"
       : "carried") satisfies HarnessGrantOrigin,
   };
+  // APRV-287. A carried spend records WHICH tool call spent it, so the
+  // completion counterpart can find this start from the event that reports how
+  // that tool call went. Written only where the two differ: on a direct spend
+  // the record's own `task` already names it, and a duplicate field would be a
+  // second place for the same fact to be read from.
+  if (
+    options.spendingTask !== undefined &&
+    options.spendingTask.length > 0 &&
+    options.spendingTask !== derivation.task
+  ) {
+    payload[HARNESS_SPENDING_TASK] = options.spendingTask;
+  }
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
 
   const appended = append(
@@ -3664,7 +3787,7 @@ function attemptHarnessStart(
   if (isLoopEscalated(read.records, input.task)) {
     return refuse(
       "loop-escalated",
-      `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. The streak clears when an execution.completed for the task lands.`,
+      `loop-escalated: task ${input.task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. ${loopClearance("task", input.task)}.`,
     );
   }
 
@@ -3676,11 +3799,20 @@ function attemptHarnessStart(
   // record an unattended harness execution for a session or an actor that is
   // three failed tool calls deep. A check in the hook alone is a check-then-
   // append with a window in it (§11.1 invariant 5).
+  //
+  // APRV-297 narrows it exactly as the hook narrows its own: a class that only
+  // READS is outside the floor. The floor bounds the harm of an agent retrying a
+  // side effect that keeps failing, and a read cannot cause that harm, so
+  // refusing to record one buys no safety and takes away the session's ability
+  // to find out what is wrong. The predicate is `core/loop.ts`'s own, the same
+  // one that decides what accrues, so what the floor counts and what it refuses
+  // cannot come apart; a class this build has never heard of is side-effecting
+  // by construction and is refused here as it always was.
   const floor = harnessLoopFloor(read.records, input.task, actor);
-  if (floor !== null) {
+  if (floor !== null && isSideEffectingClass(input.cls)) {
     return refuse(
       "loop-escalated",
-      `${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate, or land an execution.completed in the same ${floor.scope} scope: nothing else clears the streak.`,
+      `loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate; ${loopClearance(floor.scope, floor.key)}`,
     );
   }
 
@@ -3860,6 +3992,23 @@ export type HarnessFinishResult =
  * as it is found. It over-counts failures and under-counts completions, and both
  * are the strict direction.
  */
+/**
+ * Was this `execution.started` written for the tool call `task` names?
+ * (APRV-287.)
+ *
+ * Two ways to be that tool call, and both are the runtime's own writing. The
+ * record's `task` is the ordinary one. {@link HARNESS_SPENDING_TASK} is the
+ * carried spend: the start sits under the REQUESTING tool call, because that is
+ * where the approval lifecycle lives, and the field names the later tool call
+ * that spent the grant and ran the command. Without the second reading a
+ * granted retry could never be closed, so its completion could never clear the
+ * loop floor the refusal text promises it clears.
+ */
+function startsToolCall(record: EventRecord, task: string): boolean {
+  if (record.task === task) return true;
+  return payloadOf(record)[HARNESS_SPENDING_TASK] === task;
+}
+
 export function finishHarnessExecution(
   logPath: string,
   input: HarnessFinishInput,
@@ -3883,7 +4032,7 @@ export function finishHarnessExecution(
     const key = record.action_key;
     if (typeof key !== "string" || key.length === 0) continue;
     if (record.event === "execution.started") {
-      if (record.task !== task) {
+      if (!startsToolCall(record, task)) {
         started.delete(key);
         continue;
       }
@@ -3985,7 +4134,7 @@ function attemptFinishOne(
   for (const record of read.records) {
     if (record.action_key !== actionKey) continue;
     if (record.event === "execution.started") {
-      harness = record.task === task && payloadOf(record)["execution"] === "harness";
+      harness = startsToolCall(record, task) && payloadOf(record)["execution"] === "harness";
       stillOpen = harness;
       continue;
     }

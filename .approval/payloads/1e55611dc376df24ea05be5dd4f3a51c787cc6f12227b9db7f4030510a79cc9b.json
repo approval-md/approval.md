@@ -1,0 +1,1 @@
+{"command":"gh pr checks 308 2>&1 | head -20; gh run list --branch overnight-backlog-wave --limit 3 --json databaseId,status,conclusion,name 2>&1 | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

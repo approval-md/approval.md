@@ -44,6 +44,7 @@ import { TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate } from "../src/core/validate.js";
 import { EXIT_CODE_TABLE } from "../src/cli/exit-codes.js";
 import { makeStyle, refusal as renderRefusal } from "../src/cli/style.js";
+import { DOCTOR_FRESH_SKIPS, DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -302,6 +303,160 @@ test("the README's exit-code table is EXIT_CODE_TABLE verbatim", () => {
     exitRows(readDoc("README.md")),
     EXIT_CODE_TABLE.map(([code, meaning]) => [code, meaning]),
     "README.md's exit-code table drifted from src/cli/exit-codes.ts. The numbers are a frozen public API and the README is where an agent's author reads them.",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The README's APPROVAL.md dictionary, and doctor's roster
+// ---------------------------------------------------------------------------
+
+/**
+ * The autonomy levels, read from the schema rather than listed here.
+ *
+ * `schema/policy.schema.json` is what refuses a policy, so it is the only
+ * honest source for what an author may write. The README's dictionary tells a
+ * reader the whole vocabulary, and the vocabulary has been widened twice
+ * (APRV-127 split `supervised`, APRV-185 added `human-only`) while the prose
+ * kept saying three. Reading the enum here means the next widening fails this
+ * test instead of shipping a README that names five sixths of the levels.
+ */
+function schemaAutonomyLevels(): readonly string[] {
+  const raw: unknown = JSON.parse(readDoc("schema/policy.schema.json"));
+  const defs = (raw as { $defs?: { autonomy?: { enum?: unknown } } }).$defs;
+  const levels = defs?.autonomy?.enum;
+  assert.ok(
+    Array.isArray(levels) && levels.length > 0,
+    "schema/policy.schema.json no longer defines $defs.autonomy.enum; the dictionary guard has nothing to hold the README to",
+  );
+  return (levels as unknown[]).map((level) => {
+    assert.equal(typeof level, "string", "$defs.autonomy.enum holds a non-string level");
+    return level as string;
+  });
+}
+
+/** Small counts as the README spells them, for the one place it spells one. */
+const NUMBER_WORDS: ReadonlyMap<number, string> = new Map([
+  [3, "Three"],
+  [4, "Four"],
+  [5, "Five"],
+  [6, "Six"],
+  [7, "Seven"],
+  [8, "Eight"],
+]);
+
+test("the README's dictionary names every autonomy level the schema admits", () => {
+  const readme = readDoc("README.md");
+  const levels = schemaAutonomyLevels();
+  for (const level of levels) {
+    assert.ok(
+      readme.includes(`\`${level}\``),
+      `README.md never names the autonomy level \`${level}\`, which schema/policy.schema.json admits. A policy author reading the dictionary would not know the level exists, and the schema is what decides.`,
+    );
+  }
+  const word = NUMBER_WORDS.get(levels.length);
+  assert.ok(
+    word !== undefined,
+    `the autonomy enum now holds ${levels.length} levels, which NUMBER_WORDS does not spell; add it and update the README`,
+  );
+  assert.ok(
+    readme.includes(`${word} values, strictest first`),
+    `README.md does not say "${word} values, strictest first" where it introduces autonomy. The schema admits ${levels.length} levels; a count that disagrees is the drift this guard exists for.`,
+  );
+  assert.ok(
+    readme.includes("`live_rate`"),
+    "README.md names `supervised-live` without naming the `live_rate` it requires. A level whose rate the reader never sees is a level they cannot write.",
+  );
+});
+
+test("the README's doctor description matches the doctor roster", () => {
+  const readme = readDoc("README.md");
+  const rows = DOCTOR_ROW_ORDER.length;
+
+  for (const skip of DOCTOR_FRESH_SKIPS) {
+    assert.ok(
+      (DOCTOR_ROW_ORDER as readonly string[]).includes(skip),
+      `DOCTOR_FRESH_SKIPS names ${skip}, which doctor does not emit; the README would name a row nobody sees`,
+    );
+  }
+
+  assert.ok(
+    readme.includes(`${rows} rows`),
+    `README.md does not say doctor prints ${rows} rows. tests/doctor-rows.ts is the roster the doctor suite asserts against, and the prose is what a reader counts their own output against.`,
+  );
+  assert.ok(
+    readme.includes(`of the ${rows} lines`),
+    `README.md's install walkthrough does not say how many of doctor's ${rows} lines it shows`,
+  );
+  assert.ok(
+    readme.includes(`${DOCTOR_FRESH_SKIPS.length} of the ${rows}`),
+    `README.md does not say that ${DOCTOR_FRESH_SKIPS.length} of the ${rows} rows report "not applicable" in a fresh directory`,
+  );
+  for (const skip of DOCTOR_FRESH_SKIPS) {
+    assert.ok(
+      readme.includes(`\`${skip}\``),
+      `README.md does not name the row \`${skip}\` among the ones a fresh directory skips. A reader meeting a dash they cannot place reads a configuration as a fault.`,
+    );
+  }
+
+  // The sample tally is the same claim in arithmetic, so it is held to the same
+  // roster: a run that skipped a different number of rows would print a
+  // different middle figure, and a run over a different roster would not sum.
+  const tally = /^(\d+) ok · (\d+) not applicable · (\d+) failed$/mu.exec(readme);
+  assert.ok(
+    tally !== null,
+    "README.md no longer shows a doctor tally line in the `<n> ok · <n> not applicable · <n> failed` shape doctor prints",
+  );
+  const [ok, skipped, failed] = [tally[1], tally[2], tally[3]].map((part) => Number(part));
+  assert.equal(
+    (ok ?? 0) + (skipped ?? 0) + (failed ?? 0),
+    rows,
+    `README.md's doctor tally sums to something other than the ${rows} rows doctor emits`,
+  );
+  assert.equal(
+    skipped,
+    DOCTOR_FRESH_SKIPS.length,
+    `README.md's doctor tally reports a "not applicable" count that is not the ${DOCTOR_FRESH_SKIPS.length} rows a fresh directory skips`,
+  );
+});
+
+/**
+ * The dictionary is a table of KEYS, so its completeness is checkable against
+ * the schema's own key shape. Every top-level property and every member of a
+ * class rule gets a row; the table's first column is read back and compared.
+ *
+ * `classes` and `defaults` and their kin are containers rather than leaves, so
+ * the check is over the leaf paths the schema actually names, spelled the way
+ * the table spells them.
+ */
+test("the README's dictionary has a row for every policy key the schema defines", () => {
+  const raw: unknown = JSON.parse(readDoc("schema/policy.schema.json"));
+  const schema = raw as {
+    properties?: Record<string, { properties?: Record<string, unknown> }>;
+    $defs?: { classRule?: { properties?: Record<string, unknown> } };
+  };
+  const readme = readDoc("README.md");
+  const keys = new Set<string>();
+  for (const [name, node] of Object.entries(schema.properties ?? {})) {
+    const children = node.properties;
+    if (name === "defaults" || name === "daemon" || name === "vault" || name === "audit") {
+      for (const child of Object.keys(children ?? {})) keys.add(`${name}.${child}`);
+      continue;
+    }
+    if (name === "approvers" || name === "classes" || name === "budgets" || name === "channels") {
+      continue; // pattern-keyed; covered by the class-rule and channel rows below
+    }
+    keys.add(name);
+  }
+  for (const field of Object.keys(schema.$defs?.classRule?.properties ?? {})) {
+    keys.add(`classes.<pattern>.${field}`);
+  }
+  const missing = [...keys].filter((key) => !readme.includes(`| \`${key}\``));
+  assert.deepEqual(
+    missing,
+    [],
+    `README.md's APPROVAL.md dictionary has no row for: ${missing.join(
+      ", ",
+    )}. The table promises every key that can appear in the policy block; a key the schema accepts and the table omits is a policy an author cannot discover.`,
   );
 });
 

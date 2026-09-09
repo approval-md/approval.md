@@ -13,11 +13,12 @@
  * `tests/telegram-mock.ts` plays for the channel suite.
  */
 
-import type {
-  ActInput,
-  ActOutcome,
-  Adapter,
-  JsonValue,
+import {
+  PROVIDER_REF_DETAIL_KEY,
+  type ActInput,
+  type ActOutcome,
+  type Adapter,
+  type JsonValue,
 } from "../src/adapters/contract.js";
 
 /** The class this mock serves. */
@@ -46,6 +47,13 @@ export interface MockAdapterOptions {
   throws?: string;
   /** Put this string in the returned detail — the leak the guard must catch. */
   leak?: string;
+  /**
+   * Name this string as the provider's own reference for the effect (APRV-251),
+   * under the one key the contract lifts onto `execution.completed`. Absent by
+   * default: an adapter that names none is the ordinary case, and the record it
+   * produces must keep validating.
+   */
+  providerRef?: string;
 }
 
 /**
@@ -84,6 +92,9 @@ export function mockAdapter(options: MockAdapterOptions = {}): MockAdapter {
         detail: {
           sent: true,
           ...(options.leak === undefined ? {} : { note: `key=${options.leak}` }),
+          ...(options.providerRef === undefined
+            ? {}
+            : { [PROVIDER_REF_DETAIL_KEY]: options.providerRef }),
         },
       };
     },

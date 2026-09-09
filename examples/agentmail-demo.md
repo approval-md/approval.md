@@ -89,7 +89,7 @@ directory of this demo's own, and come back here.
 export APPROVAL_MD=~/dev/approval-md
 approval() { node "$APPROVAL_MD/dist/src/cli/main.js" "$@"; }
 
-mkdir -p /tmp/approval-agentmail-demo && cd /tmp/approval-agentmail-demo
+mkdir -p ~/dev/demos/agentmail && cd ~/dev/demos/agentmail
 # … init, policy, attest, setup identity / vault / channel telegram, approval env
 ```
 
@@ -124,7 +124,10 @@ prefix rides into a child on a declaration either.
 
 ### Step 5: the agent composes a draft
 
-With AgentMail's own SDK, or with curl:
+With AgentMail's own SDK, or with curl. Put a mailbox you own in `to` before
+running it: the recipient is bound into the approved payload at Step 7, so a
+placeholder left in place cannot be corrected later without a fresh draft and a
+fresh approval, and Step 10 would send to it.
 
 ```sh
 curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts" \
@@ -137,10 +140,10 @@ curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts" \
   }'
 ```
 
-Keep the `draft_id` it returns:
+Keep the `draft_id` it returns. It is a UUID, not a prefixed id:
 
 ```sh
-export DRAFT=dr_…
+export DRAFT=67799b7c-…
 ```
 
 ### Step 6: watch the agent key fail to send
@@ -175,7 +178,7 @@ HASH=$(approval payload hash payload.json)
 ```json
 {
   "inbox_id": "you@agentmail.to",
-  "draft_id": "dr_…",
+  "draft_id": "67799b7c-…",
   "to": ["someone-you-know@example.com"],
   "subject": "Deposit refund: second chaser",
   "text": "The deposit has been due since 12 July.\n\nOne chaser was sent on 21 July with no reply. Please confirm the refund date by return.\n"
@@ -212,10 +215,14 @@ export TOKEN=aceea22f…
 
 ### Step 9: edit the draft, and watch the send refuse
 
-Change the draft through AgentMail (raise the amount, add a recipient, anything):
+Change the draft through AgentMail (raise the amount, add a recipient, anything).
+Editing a draft is `PATCH` on the draft's own path, and it answers with the
+updated draft, so the first command below is also how you confirm the edit landed
+before the adapter is asked about it. `POST` on that same path answers
+`not_found`, which reads like a missing draft and is really a missing route:
 
 ```sh
-curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
+curl -sS -X PATCH "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
   -H "Authorization: Bearer $AGENTMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"subject": "Deposit refund: FINAL notice"}'
@@ -224,6 +231,8 @@ approval adapter agentmail task-042:chaser:2026-09-02 --token "$TOKEN" \
   --payload payload.json --as agent:claude-admin
 echo "exit=$?"
 ```
+
+The `PATCH` echoes the updated draft back, and then the adapter refuses:
 
 ```
 approval: adapter-failed (agentmail-draft-drifted): the draft differs from the snapshot the grant was taken over in: subject. Nothing was sent.
@@ -237,13 +246,22 @@ the grant is untouched.
 
 ### Step 10: restore the text and send it
 
-Put the approved subject back, then run the adapter again:
+Put the approved subject back with the same `PATCH`, then run the adapter again
+with the same token. The refusal in Step 9 spent nothing, so there is no second
+tap here:
 
 ```sh
+curl -sS -X PATCH "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
+  -H "Authorization: Bearer $AGENTMAIL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"subject": "Deposit refund: second chaser"}'
+
 approval adapter agentmail task-042:chaser:2026-09-02 --token "$TOKEN" \
   --payload payload.json --as agent:claude-admin
 echo "exit=$?"
 ```
+
+The `PATCH` echoes the restored draft back, and then the send goes through:
 
 ```
 sent task-042:chaser:2026-09-02 through the agentmail adapter: execution.started at seq 6, execution.completed at seq 7
@@ -251,10 +269,13 @@ exit=0
 ```
 
 In order: the payload was re-hashed against the binding the grant recorded, the
-token was verified and consumed, `execution.started` was appended, the vault was
-opened and the sending key was read **inside the token window**, the draft was
-re-fetched and compared field by field, `POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`
-was called, the window closed, and `execution.completed` was appended. AgentMail
+declared credentials resolved and the sending key was read from the vault, the
+draft was re-fetched and compared field by field **before the token was spent**
+(the refusal in Step 9 came from here, which is why it cost no authority), then
+the token was verified and consumed, `execution.started` was appended, the
+draft was compared once more inside the window, immediately before
+`POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`, the window closed, and
+`execution.completed` was appended. AgentMail
 deletes a draft when it sends, so the draft id is now gone and the mail exists;
 re-running would find nothing to send.
 
@@ -269,12 +290,18 @@ echo "exit=$?"
 ```
 
 ```
-✗ token-consumed  action task-042:chaser:2026-09-02 already executed: execution.started at seq 6 spent this token. A token is single-use and the log is the proof.
+✗ adapter-precheck-refused (agentmail-draft-missing)  agentmail refused action task-042:chaser:2026-09-02 before the token was spent (agentmail-draft-missing): the draft 67799b7c-… in inbox [redacted] no longer exists. A grant is over a snapshot of a draft, and the draft it named is gone; nothing was sent.
 exit=1
 ```
 
-The refusal happens before any HTTP request: a retried agent cannot double-send,
-and it does not need AgentMail's cooperation not to.
+Nothing is sent twice, and two independent checks each guarantee it. The one
+you see here is the adapter's precheck, which runs before the token is
+examined (APRV-276) and finds no draft, because AgentMail deleted it when it
+sent. Had the draft still existed, the token check behind it would have refused
+`token-consumed`: `execution.started` at seq 6 spent this token, a token is
+single-use, and the log is the proof. Either way the refusal happens before any
+sending request: a retried agent cannot double-send, and it does not need
+AgentMail's cooperation not to.
 
 ### Step 12: read the log out
 
@@ -345,7 +372,7 @@ composing surface and the approver's reading surface are the same object.
 ## Cleaning up
 
 ```sh
-cd .. && rm -rf /tmp/approval-agentmail-demo
+cd .. && rm -rf ~/dev/demos/agentmail
 unset AGENTMAIL_API_KEY INBOX DRAFT TOKEN HASH
 ```
 

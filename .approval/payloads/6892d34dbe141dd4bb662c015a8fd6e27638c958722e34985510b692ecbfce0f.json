@@ -1,0 +1,1 @@
+{"command":"grep -n \"ADAPTER_AGENTMAIL_HELP\\|ADAPTER_HELP\\s*=\\|ADAPTER_EMAIL_HELP\" -A 40 /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb/src/cli/help.ts | head -150","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

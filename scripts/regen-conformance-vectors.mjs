@@ -1208,7 +1208,13 @@ const SUITES = [
     // the same documents this does; it names one of them differently, and the
     // suite's whole premise is that a refusal for the wrong reason is a
     // failure, so this is a major.
-    vectors_version: "2.0.0",
+    // 2.1.0 (APRV-272): a MINOR bump. `gate.organ.attested` is a new event type
+    // with four new fixtures (one accepted, three refused: an agent actor, an
+    // absolute `organ_path`, and a missing one). No existing expectation moves
+    // — every document this suite already refused is refused for the same
+    // reason — so an implementation that passed 2.0.0 fails this only by not
+    // knowing a type the enum has gained, which is what a minor bump says.
+    vectors_version: "2.1.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

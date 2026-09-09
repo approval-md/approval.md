@@ -1,0 +1,1 @@
+{"command":"grep -rn \"adapter-class-mismatch\\|payload-unhashable\\|adapter-act-threw\" /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb 2>/dev/null | head -50","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

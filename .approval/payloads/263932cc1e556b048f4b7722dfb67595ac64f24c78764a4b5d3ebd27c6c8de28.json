@@ -1,0 +1,1 @@
+{"command":"grep -n \"ADAPTER_REFUSAL_CODES\" -A 30 tests/adapters-contract.test.ts | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

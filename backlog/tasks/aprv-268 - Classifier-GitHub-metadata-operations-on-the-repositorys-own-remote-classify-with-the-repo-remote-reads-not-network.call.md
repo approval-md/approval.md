@@ -3,11 +3,11 @@ id: APRV-268
 title: >-
   Classifier: GitHub metadata operations on the repository's own remote classify
   with the repo-remote reads, not network.call
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 12:12'
+updated_date: '2026-09-05 16:00'
 labels:
   - classifier
 dependencies: []
@@ -147,3 +147,9 @@ build, `npx oxlint src tests`, command-class 360, command-class-routing 16 (main
 
 `vcs.remote.meta` remains undeclared, and nothing regresses while it is. The ceremony that declares it (supervised is the intent) is what turns the three forms from manual into something cheaper; the SPEC 7 draft above stands, with the noun/action set now read as the three forms rather than the wider list.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Narrowed to the three forms the log showed as network.call: gh api graphql without a mutation, gh pr update-branch and gh run rerun, on the checkout's own origin, classify vcs.remote.meta; every read keeps read.vcs.remote byte for byte and every other network.call stays. Verified by command-class 360 and cli-hook 91 with positive and negative tables, full suite 3566 pass; merged in PR #293. The class pins to the default until Carter declares it supervised.
+<!-- SECTION:FINAL_SUMMARY:END -->

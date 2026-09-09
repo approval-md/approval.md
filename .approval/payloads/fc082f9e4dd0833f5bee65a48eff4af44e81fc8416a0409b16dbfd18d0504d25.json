@@ -1,0 +1,1 @@
+{"command":"npm run build 2>&1 | tail -20 && npm run lint 2>&1 | tail -10 && npx tsx --test tests/channels-telegram.test.ts 2>&1 | tail -25","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa554a09466c9d647"}

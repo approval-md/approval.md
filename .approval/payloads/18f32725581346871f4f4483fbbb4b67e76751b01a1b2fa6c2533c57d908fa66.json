@@ -1,0 +1,1 @@
+{"command":"echo \"---find license/notice---\" && find . -maxdepth 3 -iname \"LICENSE*\" -o -iname \"NOTICE*\" | grep -v node_modules && echo \"---top level---\" && ls -la && echo \"---package.json---\" && cat package.json 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

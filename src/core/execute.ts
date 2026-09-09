@@ -95,6 +95,7 @@ import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { humanOnlyRefusal, resolve } from "./policy-match.js";
+import type { SandboxState } from "./sandbox.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { forgetPrivateKey, keyStoreDirFor } from "./seal.js";
 import { consumeToken, deliveredToken, type TokenRefusal } from "./token.js";
@@ -319,6 +320,21 @@ export interface ExecuteOptions extends ClockOptions {
    * spawns.
    */
   envStripped?: number;
+  /**
+   * The room the child ran in (APRV-193), recorded on `execution.started` as
+   * `sandbox`.
+   *
+   * Computed at the spawn site by `core/sandbox.ts` from what the MACHINE can
+   * do and what the caller was holding, never from a claim about either: the
+   * three interesting values are the runtime's own findings, and the fourth
+   * (`opted-out`) is the operator's `--no-sandbox`, which is recorded precisely
+   * because an opt-out nobody can see afterwards is an opt-out that costs
+   * nothing to take. Informational in the same sense `envStripped` is: nothing
+   * in the gate reads it back and no decision turns on it, which is what keeps
+   * it clear of §11.1's "self-reported fields never reduce scrutiny" — the
+   * field records a decision already made rather than making one.
+   */
+  sandbox?: SandboxState;
   /**
    * Where per-request private keys live (APRV-105). Defaults to `.approval/keys/`
    * beside the log. Read when no `token` is passed and a grant carries a
@@ -823,6 +839,9 @@ function attemptStart(
       // APRV-205: the manual path's `execution.started` is appended by
       // `consumeToken`, so the count travels with the spend.
       ...(options.envStripped === undefined ? {} : { envStripped: options.envStripped }),
+      // APRV-193: and the room it ran in, for the same reason — the manual
+      // path's start event is written by the spend, so both fields travel with it.
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       // One moment for the whole operation: the timestamp already read above is
       // the one the spend records, so `startExecution` and the `execution.started`
       // it produces cannot disagree about when this happened.
@@ -977,6 +996,11 @@ function attemptStart(
         // adapter's `act`, which runs in this process) records no count at all,
         // because "none withheld" and "no child" are different facts.
         ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
+        // APRV-193: the room the child ran in. `egress-denied` is the default
+        // for this path — nobody was asked about this action, so the code it
+        // runs executes into a room with no doors. Optional and additive for
+        // the same reason the count above is.
+        ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       },
     },
     options,
@@ -1018,6 +1042,45 @@ export interface FailureReason {
   message: string;
 }
 
+/**
+ * The provider's own identifier for a completed effect (APRV-251, SPEC.md §8).
+ *
+ * Two strings and no more, because the schema admits two and no more: the
+ * adapter that executed the action, and the id the provider's record files the
+ * effect under. See {@link FinishOptions.providerRef} for who may write one and
+ * what nobody may do with it.
+ */
+export interface ProviderRef {
+  adapter: string;
+  id: string;
+}
+
+/**
+ * The bounds SPEC.md §8 and `schema/event.schema.json` place on a reference.
+ *
+ * Printable ASCII with no spaces, and short. An identifier is short; the bound
+ * is what keeps the field from becoming somewhere to put a message. Stated here
+ * as well as in the schema so that the write path can DECLINE to record a
+ * reference that would not validate, rather than hand the schema a record it
+ * will reject and leave a completed side effect with no outcome in the log.
+ */
+export const PROVIDER_REF_ADAPTER_MAX = 64;
+export const PROVIDER_REF_ID_MAX = 256;
+const PROVIDER_REF_SHAPE = /^[\x21-\x7e]+$/u;
+
+/** Does `value` fit what the schema will accept for a reference member? */
+export function providerRefMemberOk(value: string, max: number): boolean {
+  return value.length > 0 && value.length <= max && PROVIDER_REF_SHAPE.test(value);
+}
+
+/** Is `ref` recordable, in full? A half-recordable reference is not recorded. */
+export function providerRefRecordable(ref: ProviderRef): boolean {
+  return (
+    providerRefMemberOk(ref.adapter, PROVIDER_REF_ADAPTER_MAX) &&
+    providerRefMemberOk(ref.id, PROVIDER_REF_ID_MAX)
+  );
+}
+
 /** {@link ExecuteOptions} plus the reason a non-zero exit carries (APRV-211). */
 export interface FinishOptions extends ExecuteOptions {
   reason?: FailureReason;
@@ -1040,6 +1103,31 @@ export interface FinishOptions extends ExecuteOptions {
    * log.
    */
   note?: FailureReason;
+  /**
+   * The identifier the provider's own record files this effect under
+   * (APRV-251), recorded on `execution.completed` and on nothing else.
+   *
+   * `approval coverage` reads a witness this project does not write (git, `gh`,
+   * an adapter's provider) and asks whether the log ever saw each effect. With
+   * no reference the strongest answer available is a record of a matching class
+   * inside the effect's window, so a gated send covers an ungated one of the
+   * same class beside it. A reference names the exact effect, which is what
+   * turns that answer into one about this action and no other.
+   *
+   * Written by the adapter contract and by nothing else in this runtime: the
+   * `adapter` half is the registered adapter's name, which the contract already
+   * holds, and the `id` half is lifted from what the adapter returned, after
+   * the redaction sweep that scans everything else it returned. The contract
+   * omits a reference whose bytes that sweep touched, because a redacted
+   * identifier matches nothing and would read like one that does.
+   *
+   * A REPORT and never an authorization, exactly as {@link FailureReason} and
+   * `note` are: nothing in the gate reads it back, no decision anywhere turns
+   * on it, and SPEC.md §11.1's rule that self-reported fields never reduce
+   * scrutiny is untouched. Recorded only when the caller states one, so an
+   * execution whose adapter names no reference records none.
+   */
+  providerRef?: ProviderRef;
   /**
    * A test seam and nothing else (APRV-261): called once, between the read that
    * authorizes this outcome and the append that records it.
@@ -1126,6 +1214,23 @@ export function finishExecution(
         event === "execution.completed" && options.note !== undefined
         ? { code: options.note.code, message: options.note.message }
         : {};
+  // APRV-251. The provider's own identifier for the effect, on a completion and
+  // nowhere else: a failed execution produced no effect for a provider to file.
+  // Recorded only when the caller states one, and only when it fits what the
+  // schema admits — handing the write boundary a record it will reject would
+  // leave a side effect that happened with no outcome in the log, which is a
+  // worse outcome than a completion carrying no reference.
+  const providerRef =
+    event === "execution.completed" &&
+    options.providerRef !== undefined &&
+    providerRefRecordable(options.providerRef)
+      ? {
+          provider_ref: {
+            adapter: options.providerRef.adapter,
+            id: options.providerRef.id,
+          },
+        }
+      : {};
   const appended = append(
     logPath,
     {
@@ -1134,7 +1239,7 @@ export function finishExecution(
       actor,
       task: open.task,
       action_key: actionKey,
-      payload: { exit_code: exitCode, ...reason },
+      payload: { exit_code: exitCode, ...reason, ...providerRef },
     },
     options,
     // The head read above, when the not-started / already-finished checks ran.

@@ -86,6 +86,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -431,10 +432,27 @@ export function parseEnvFile(
 // Reading
 // ---------------------------------------------------------------------------
 
+/**
+ * The digest of an env file's bytes, as read.
+ *
+ * Not a secret and not derived from one in the sense that matters: the file may
+ * carry a plaintext literal, so this is a hash and never the text, and it is
+ * one-way. Its only consumer is `core/instance.ts`, which uses it to ask "was
+ * this exported value produced from the file as it now reads?" — a question
+ * about VERSIONS of a file, which needs an identifier for a version and nothing
+ * else (APRV-278).
+ */
+export function envFileDigest(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** An absent file's digest: the digest of the nothing that was read. */
+export const ABSENT_ENV_FILE_DIGEST = envFileDigest("");
+
 /** The file's contents, or the fact that there is no file. */
 export type EnvFileRead =
-  | { ok: true; present: false; path: string; entries: [] }
-  | { ok: true; present: true; path: string; entries: EnvFileEntry[] }
+  | { ok: true; present: false; path: string; entries: []; digest: string }
+  | { ok: true; present: true; path: string; entries: EnvFileEntry[]; digest: string }
   | EnvFileRefusal;
 
 /**
@@ -452,7 +470,7 @@ export function readEnvFile(path: string): EnvFileRead {
     stats = statSync(path);
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-      return { ok: true, present: false, path, entries: [] };
+      return { ok: true, present: false, path, entries: [], digest: ABSENT_ENV_FILE_DIGEST };
     }
     return refuse("env-file-io", path, `${path} could not be stat'd: ${detail(cause)}`);
   }
@@ -479,7 +497,7 @@ export function readEnvFile(path: string): EnvFileRead {
 
   const parsed = parseEnvFile(text, path);
   if (!parsed.ok) return parsed;
-  return { ok: true, present: true, path, entries: parsed.entries };
+  return { ok: true, present: true, path, entries: parsed.entries, digest: envFileDigest(text) };
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +908,12 @@ export interface EnvResolution {
   /** Was there a file at all? */
   present: boolean;
   path: string;
+  /**
+   * {@link envFileDigest} of the bytes this resolution read (APRV-278), or
+   * {@link ABSENT_ENV_FILE_DIGEST} when there was no file. It identifies a
+   * VERSION of the file and carries none of its contents.
+   */
+  digest: string;
   variables: ResolvedVariable[];
 }
 
@@ -1054,7 +1078,7 @@ export function resolveEnvironment(
     variables.push(resolveOne(want, byKey.get(want.name), runner, ambientEnv));
   }
 
-  return { ok: true, present: file.present, path: file.path, variables };
+  return { ok: true, present: file.present, path: file.path, digest: file.digest, variables };
 }
 
 function resolveOne(

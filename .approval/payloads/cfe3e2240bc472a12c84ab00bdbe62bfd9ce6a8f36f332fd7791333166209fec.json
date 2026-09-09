@@ -1,0 +1,1 @@
+{"command":"grep -n \"adapter-class-mismatch\\|adapter_refusal_codes\\|adapter-failed\\|adapter-act-threw\\|payload-unhashable\" SPEC.md | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

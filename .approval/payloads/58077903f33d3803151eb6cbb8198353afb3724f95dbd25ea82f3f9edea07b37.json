@@ -1,0 +1,1 @@
+{"command":"grep -n \"function scopeCredentials\" -A 40 src/adapters/contract.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

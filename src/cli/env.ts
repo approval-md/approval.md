@@ -25,6 +25,18 @@
  * secrets. The help text says which is which, because a verb that emits
  * credentials must never be a surprise.
  *
+ * **The export block says what it exported** (APRV-278). Alongside the values it
+ * emits one `APPROVAL_ENV_PROVENANCE` line carrying a format version, this
+ * instance's id, the sha256 of the env file bytes it read, and the NAMES it
+ * resolved out of that file. No value is in it. It exists because `approval up`
+ * and `approval doctor` report an exported variable whose file line was not
+ * consulted, they read no values by design, and without this they could not tell
+ * a stranger's export from the one the documented `eval "$(approval env)"` had
+ * just made — so they reported the correct ritual as cross-instance bleed. A
+ * value that arrived from the calling shell is re-exported by this block and is
+ * deliberately NOT listed, so passing a foreign token through one `eval` cannot
+ * launder it into "configured by this instance".
+ *
  * **Exit 0 even when variables are unresolved**, on the default path. The output
  * is destined for `eval`, and a shell function that failed because the operator
  * has no Telegram configured would be a shell function nobody puts in their
@@ -44,6 +56,7 @@ import {
   type EnvFileRefusal,
   type ResolvedVariable,
 } from "../core/env-file.js";
+import { ENV_PROVENANCE_VAR, formatEnvProvenance, ownEnvExports } from "../core/instance.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -133,7 +146,8 @@ function pad(text: string, width: number): string {
 
 /**
  * The value came from the ambient environment while this instance's file names
- * a source of its own (APRV-178).
+ * a source of its own, AND this instance's own `approval env` did not put it
+ * there (APRV-178, narrowed by APRV-278).
  *
  * Reported, never failed. The precedence is correct and is invariant 7's whole
  * point; what was missing is that nothing said out loud when the two disagree,
@@ -141,9 +155,16 @@ function pad(text: string, width: number): string {
  * check: a production token exported in a shell profile, a demo instance whose
  * `.approval/env` named its own item, and every fresh terminal quietly using
  * the production bot.
+ *
+ * `eval "$(approval env)"` leaves the same SHAPE behind and is the documented
+ * ritual, so the exempt set comes from `ownEnvExports` — the same function
+ * `approval up` and `approval doctor` answer this question with, so that the
+ * three cannot come to disagree about one shell.
  */
-function overriddenByEnvironment(entry: ResolvedVariable): boolean {
-  return entry.status === "set-in-environment" && entry.fileSource !== undefined;
+function overriddenByEnvironment(entry: ResolvedVariable, own: ReadonlySet<string>): boolean {
+  return (
+    entry.status === "set-in-environment" && entry.fileSource !== undefined && !own.has(entry.name)
+  );
 }
 
 /** Unresolved AND named by the policy: the thing `--check` fails on. */
@@ -212,8 +233,24 @@ export function commandEnv(argv: string[], streams: Streams, cwd: string): numbe
     return check && unmet.length > 0 ? EXIT_INTEGRITY : EXIT_OK;
   }
 
-  if (check) return emitCheck(streams, resolved.path, resolved.present, resolved.variables, unmet);
-  return emitExports(streams, resolved.path, resolved.present, resolved.variables);
+  if (check) {
+    return emitCheck(
+      streams,
+      resolved.path,
+      resolved.present,
+      resolved.variables,
+      unmet,
+      ownEnvExports(logPath, { ambientEnv: process.env, envFileDigest: resolved.digest }),
+    );
+  }
+  return emitExports(
+    streams,
+    logPath,
+    resolved.path,
+    resolved.present,
+    resolved.digest,
+    resolved.variables,
+  );
 }
 
 /**
@@ -227,6 +264,7 @@ function emitCheck(
   present: boolean,
   variables: ResolvedVariable[],
   unmet: ResolvedVariable[],
+  own: ReadonlySet<string>,
 ): number {
   streams.out(
     present
@@ -254,7 +292,7 @@ function emitCheck(
     );
   }
 
-  const bleeding = variables.filter(overriddenByEnvironment);
+  const bleeding = variables.filter((entry) => overriddenByEnvironment(entry, own));
   if (bleeding.length > 0) {
     streams.out(
       `\nCROSS-INSTANCE BLEED: ${bleeding
@@ -262,7 +300,7 @@ function emitCheck(
           (entry) =>
             `${entry.name} is set in this shell, and ${path} line ${String(entry.fileSource?.line ?? 0)} names ${describeDeclaredSource(entry.fileSource as DeclaredSource)} instead`,
         )
-        .join("; ")}. The exported value wins and the file is not consulted, which is deliberate — your shell is the authority — but it means the verbs run from HERE use a credential this instance never configured. That is how a demo gate ends up sending through another instance's bot and eating its approval taps (APRV-178). If that is not what you want, \`unset ${bleeding
+        .join("; ")}. The exported value wins and the file is not consulted, which is deliberate: your shell is the authority. What is reported here is that the export is not one this instance's own \`approval env\` made, so the verbs run from HERE may be using a credential it never configured. That is how a demo gate ends up sending through another instance's bot and eating its approval taps (APRV-178). If that is not what you want, \`unset ${bleeding
         .map((entry) => entry.name)
         .join(" ")}\` and then \`eval "$(approval env)"\` in this shell.\n`,
     );
@@ -285,8 +323,10 @@ function emitCheck(
 /** The export block. This is the path that emits secrets, on purpose. */
 function emitExports(
   streams: Streams,
+  logPath: string,
   path: string,
   present: boolean,
+  digest: string,
   variables: ResolvedVariable[],
 ): number {
   streams.out(`# approval env — the environment a gate operation should run under.\n`);
@@ -306,6 +346,7 @@ function emitExports(
   }
   streams.out(`\n`);
 
+  const fromFile: string[] = [];
   for (const entry of variables) {
     if (entry.status === "unset" || entry.value === undefined) {
       streams.out(`# ${entry.name} unset: ${entry.fix ?? entry.source}\n`);
@@ -316,10 +357,34 @@ function emitExports(
       // that later exports nothing else should produce the same environment
       // whichever way each value arrived, and an operator diffing the block
       // against their shell wants every variable in it.
+      //
+      // Deliberately NOT counted as this instance's own export below (APRV-278).
+      // The value arrived from the calling shell and this command did not read
+      // the file's line for it, so vouching for it here would be how a foreign
+      // token launders itself into "configured by this instance" by passing
+      // through one `eval`.
       streams.out(`export ${entry.name}=${shellSingleQuote(entry.value)}  # already set\n`);
       continue;
     }
+    fromFile.push(entry.name);
     streams.out(`export ${entry.name}=${shellSingleQuote(entry.value)}\n`);
+  }
+
+  // APRV-278. What this block resolved out of the file, so that `approval up`
+  // and `approval doctor` can tell the documented ritual from a stranger's
+  // export instead of reporting both as cross-instance bleed. Names, an
+  // instance id and a file digest; no value, on any path. Omitted entirely when
+  // nothing was resolved from the file, because then there is nothing to claim.
+  if (fromFile.length > 0) {
+    streams.out(
+      `\n# What this block took from the file, for \`approval up\` and \`approval doctor\`.\n`,
+    );
+    streams.out(
+      `# Names and hashes only, no value. Why: \`approval env --help --long\`.\n`,
+    );
+    streams.out(
+      `export ${ENV_PROVENANCE_VAR}=${shellSingleQuote(formatEnvProvenance(logPath, digest, fromFile))}\n`,
+    );
   }
 
   return EXIT_OK;

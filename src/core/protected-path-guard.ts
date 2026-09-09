@@ -17,29 +17,50 @@
  * party under oversight to report its own oversight, which SPEC.md §11 rules
  * out on principle. So this one never talks to a session. It takes two commits,
  * asks git which protected paths changed between them, and requires — for each
- * one — evidence in the committed hash-chained log that a human saw that edit.
- * A change with no evidence fails the pull request. Session wiring is not an
- * input.
+ * one — exact evidence in the committed hash-chained log that either a human
+ * granted that edit or the runtime recorded that policy authorized its
+ * execution. A change with no evidence fails the pull request. Session wiring
+ * is not an input.
  *
  * ## What counts as evidence
  *
  * Evidence is about the CHANGE, not about the path (APRV-202). The guard reads
  * the blob at both commits, reduces the difference to the lines this pull
- * request adds and removes, and requires every one of them to trace back to the
- * bound material of some grant. A path that was granted last Tuesday and edited
- * again today has a grant naming it and no grant covering today's lines, and
- * that fails. Naming remains necessary; it stopped being sufficient.
+ * request adds and removes, and requires every one of them to trace back to
+ * bound material in an authorization record. A path authorized last Tuesday
+ * and edited again today has evidence naming it and none covering today's
+ * lines, and that fails. Naming remains necessary; it stopped being sufficient.
  *
- * Three verdicts pass, and they are ordered by how much they prove:
+ * Four verdicts pass:
  *
- * 1. `attested` — the policy file itself. `approval policy amend --commit`
- *    appends `policy.updated` carrying `{policy_path, sha256}`, the SHA-256 of
- *    the policy bytes a human attested. So for `APPROVAL.md` the guard does not
- *    look for a grant at all: it hashes the file's bytes AT THE HEAD COMMIT and
- *    requires that exact digest in the log. This is the strongest match in the
- *    system — content-level, not path-level — and it is why amendment PRs pass
- *    without a `policy.edit` grant, which they would never have.
- * 2. `granted-file` — a file-tool edit. The hook binds the CHANGE rather than
+ * 1. `attested` — the policy file, and the gate's ORGANS. `approval policy
+ *    amend --commit` appends `policy.updated` carrying `{policy_path, sha256}`,
+ *    the SHA-256 of the policy bytes a human attested. So for `APPROVAL.md` the
+ *    guard does not look for a grant at all: it hashes the file's bytes AT THE
+ *    HEAD COMMIT and requires that exact digest in the log. This is the
+ *    strongest match in the system — content-level, not path-level — and it is
+ *    why amendment PRs pass without a `policy.edit` grant, which they would
+ *    never have.
+ *
+ *    Since APRV-272 the same verdict covers the gate's organs, the harness
+ *    files that install the hook (`.claude/settings.json` and kin), on a
+ *    `gate.organ.attested` record carrying that path and that digest. They need
+ *    it for a stronger reason than the policy file does: an organ is
+ *    `policy.core`, `policy.core` is human-only, and the gate mints NOTHING for
+ *    a human-only class — so `granted-file` and `granted-command` cannot exist
+ *    for one however correctly a human edited it, and before this the guard
+ *    could only ever fail such a change (PR #300). The path is part of the
+ *    match: a digest attested for one organ is not evidence for another, which
+ *    is why the organ record carries a whole relative path where the policy
+ *    record carries a basename.
+ * 2. `policy-authorized-file` — an exact Edit or Write whose verified
+ *    `execution.started` is preceded by its unique matching registration and no
+ *    approval request. The registration, start and recomputed stored payload
+ *    must agree on task, action, class and hash. The start must precede the
+ *    change and the recorded class must be the class this path is routed to.
+ *    This records authorization to execute, not successful completion; the
+ *    exact hunk checks below establish whether those bytes landed.
+ * 3. `granted-file` — a file-tool edit. The hook binds the CHANGE rather than
  *    the touch (APRV-124), so the bound material carries `file` plus the exact
  *    edit: `{before, after}` for an Edit, `{content}` for a Write. That is
  *    HUNK-level evidence, and it is used as such. The granted `after` bytes
@@ -49,7 +70,7 @@
  *    in head is a grant for something that did not land, and covers nothing.
  *    Some payloads carry the `{input}` fallback shape instead, which describes
  *    no bytes; those name the path and cover nothing.
- * 3. `granted-command` — a shell edit. The bound material is `{command, cwd}`
+ * 4. `granted-command` — a shell edit. The bound material is `{command, cwd}`
  *    or `{argv, cwd}`, and the guard re-runs the runtime's own
  *    {@link classifyCommand} over it, requiring a segment that classifies as a
  *    granting class BECAUSE of a word naming this path. A mention is not a
@@ -178,13 +199,19 @@
  * git plumbing and file reads live in the caller.
  */
 
+import { organAttestationOf } from "./attest.js";
+import { parseApplyPatch } from "./apply-patch.js";
 import {
   classifyCommand,
+  isGateOrganPath,
   isProtectedPath,
+  normalizePathSpelling,
   POLICY_EDIT_SUBCLASS,
+  protectedPathClass,
   type ProtectedPathEntry,
 } from "./command-class.js";
 import type { EventRecord } from "./log.js";
+import { payloadHash } from "./payload.js";
 
 /**
  * Classes whose grant authorizes a protected-path write.
@@ -268,8 +295,12 @@ export const GUARD_FAILURE_CODES = [
 
 export type GuardFailureCode = (typeof GUARD_FAILURE_CODES)[number];
 
-/** How strongly the evidence ties a human decision to this exact path. */
-export type EvidenceKind = "attested" | "granted-file" | "granted-command";
+/** How the verified log and bound material authorize this exact path. */
+export type EvidenceKind =
+  | "attested"
+  | "policy-authorized-file"
+  | "granted-file"
+  | "granted-command";
 
 /**
  * How far from the commit that introduced a change a grant may sit and still be
@@ -360,6 +391,26 @@ export interface GuardInput {
   policySha256AtHead: string | null;
   /** The policy file's repository-relative path, e.g. `APPROVAL.md`. */
   policyPath: string;
+  /**
+   * SHA-256 of one GATE ORGAN's bytes at the head commit, or `null` when the
+   * head tree does not carry that path (APRV-272).
+   *
+   * The per-path counterpart of {@link policySha256AtHead}, computed the same
+   * way and from the same place — the blob at the head COMMIT, never the
+   * working tree. Only used for the `attested` verdict on an organ.
+   *
+   * OPTIONAL, and a caller that omits it gets no organ verdict at all rather
+   * than a weaker one: an organ change then falls through to the grant search
+   * and fails like any other unevidenced protected path. That is the
+   * fail-closed direction, and it is what keeps a caller written before this
+   * field existed correct rather than newly permissive.
+   *
+   * A DELETED organ resolves to `null` here, so removing one cannot pass by
+   * attestation: there are no bytes at head for a human to have signed. That is
+   * deliberate — the repair for a deletion is a grant or a human's own commit
+   * outside a pull request, not a record about bytes that no longer exist.
+   */
+  organSha256AtHead?: (path: string) => string | null;
   /**
    * Resolve bound material from the committed payload store, by hash.
    * Returns `null` when the head tree does not carry that payload.
@@ -537,6 +588,21 @@ interface NamingMatch {
   cwd?: string;
 }
 
+interface EvidenceCandidate {
+  record: EventRecord;
+  match: NamingMatch;
+  source: "grant" | "policy";
+  material: unknown;
+  payloadHash: string;
+}
+
+interface ExactEditStep {
+  candidate: EvidenceCandidate;
+  start: EventRecord;
+  before: string;
+  after: string;
+}
+
 /**
  * Does this granted command write THIS repository's copy of the path?
  *
@@ -574,6 +640,35 @@ function evidenceFor(
 ): NamingMatch | null {
   if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
   const map = material as Record<string, unknown>;
+
+  // Codex apply_patch is tagged explicitly. Parse it before the generic
+  // command fallback so patch text is never mistaken for a shell command and
+  // never receives time-based command attribution. Until a patch-to-blob
+  // proof exists, this is deliberately naming-only evidence and covers no
+  // bytes; it remains useful diagnosis without weakening the guard.
+  if (map["tool"] === "apply_patch" && typeof map["command"] === "string") {
+    const parsed = parseApplyPatch(map["command"]);
+    if (parsed.ok) {
+      const operation = parsed.operations.find(
+        (candidate) =>
+          endsWithSegments(candidate.path, path) ||
+          (candidate.kind === "update" &&
+            candidate.moveTo !== undefined &&
+            endsWithSegments(candidate.moveTo, path)),
+      );
+      if (operation !== undefined) {
+        return {
+          kind: "granted-file",
+          detail: `the granted material is a Codex apply_patch operation naming ${path}; patch bytes are not yet guard coverage`,
+          after: null,
+          before: null,
+          whole: false,
+          command: false,
+        };
+      }
+    }
+    return null;
+  }
 
   const file = map["file"];
   if (typeof file === "string" && endsWithSegments(file, path)) {
@@ -642,6 +737,360 @@ function evidenceFor(
   }
 
   return null;
+}
+
+interface RegisteredBinding {
+  record: EventRecord;
+  task: string | null;
+  actionKey: string;
+  cls: string | null;
+  payloadHash: string | null;
+}
+
+/** Every declaration of this action key that existed before the start. */
+function precedingBindings(records: readonly EventRecord[], start: EventRecord): RegisteredBinding[] {
+  const actionKey = start.action_key;
+  if (actionKey === undefined) return [];
+  const found: RegisteredBinding[] = [];
+  for (const record of records) {
+    if (record.seq >= start.seq || record.event !== "task.registered") continue;
+    const actions = payloadOf(record)["actions"];
+    if (!Array.isArray(actions)) continue;
+    for (const raw of actions) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+      const action = raw as Record<string, unknown>;
+      if (action["idempotency_key"] !== actionKey) continue;
+      const cls = action["class"];
+      const hash = action["payload_hash"];
+      // Count malformed declarations too. A malformed entry sharing the key is
+      // ambiguity, never something a later well-formed entry can hide.
+      found.push({
+        record,
+        task: record.task ?? null,
+        actionKey,
+        cls: typeof cls === "string" ? cls : null,
+        payloadHash: typeof hash === "string" ? hash : null,
+      });
+    }
+  }
+  return found;
+}
+
+/** Exact file bytes, excluding fallback, command and apply_patch material. */
+function policyFileEvidence(
+  material: unknown,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): NamingMatch | null {
+  if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
+  const map = material as Record<string, unknown>;
+  const tool = map["tool"];
+  const file = map["file"];
+  if (
+    typeof file !== "string" ||
+    file.startsWith("/") ||
+    file.includes("\\")
+  ) return null;
+  const named = segmentsOf(file);
+  if (named.includes("..") || named.join("/") !== segmentsOf(path).join("/")) return null;
+
+  const keys = Object.keys(map);
+  const hasOnly = (allowed: readonly string[]): boolean => keys.every((key) => allowed.includes(key));
+  if (tool === "Edit") {
+    if (
+      !hasOnly(["tool", "rule", "file", "before", "after", "replace_all"]) ||
+      (map["rule"] !== undefined && typeof map["rule"] !== "string") ||
+      typeof map["before"] !== "string" ||
+      typeof map["after"] !== "string" ||
+      (map["replace_all"] !== undefined && typeof map["replace_all"] !== "boolean")
+    ) return null;
+  } else if (tool === "Write") {
+    if (
+      !hasOnly(["tool", "rule", "file", "content"]) ||
+      (map["rule"] !== undefined && typeof map["rule"] !== "string") ||
+      typeof map["content"] !== "string"
+    ) return null;
+  } else {
+    return null;
+  }
+  const match = evidenceFor(material, path, policyProtectedPaths);
+  if (match === null || match.command || (match.after === null && match.before === null)) return null;
+  return {
+    ...match,
+    kind: "policy-authorized-file",
+    detail: match.detail.replace(
+      /^the granted material is/u,
+      "the policy-authorized material is",
+    ),
+  };
+}
+
+/** Differing applicable routes in an unlabeled policy union carry no single class. */
+function hasAmbiguousRoute(
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): boolean {
+  const candidate = segmentsOf(path);
+  const classes = new Set<string>();
+  for (const entry of policyProtectedPaths) {
+    const raw = typeof entry === "string" ? entry : entry.path;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("/")) continue;
+    const wanted = segmentsOf(trimmed);
+    if (wanted.includes("..") || wanted.length === 0 || wanted.length > candidate.length) continue;
+    const directory = /[/\\]$/u.test(trimmed);
+    const matches = directory
+      ? candidate.some((_, start) =>
+          start + wanted.length <= candidate.length &&
+          wanted.every((segment, offset) => candidate[start + offset] === segment),
+        )
+      : wanted.every(
+          (segment, offset) => candidate[candidate.length - wanted.length + offset] === segment,
+        );
+    if (matches) classes.add(typeof entry === "string" ? "policy.edit" : entry.class);
+  }
+  return classes.size > 1;
+}
+
+/**
+ * Exact-file evidence from an unattended execution authorized by policy.
+ *
+ * The start must reproduce the one declaration that preceded it, and the
+ * committed payload must hash back to that declaration. A prior request means
+ * the action entered the human-decision path, so this tier cannot carry it.
+ */
+function policyAuthorizedEvidence(
+  records: readonly EventRecord[],
+  start: EventRecord,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+  payloadFor: (hash: string) => unknown | null,
+  anchorMs: number | null,
+  lookbackMs: number,
+): NamingMatch | null {
+  if (start.event !== "execution.started") return null;
+  const task = start.task;
+  const actionKey = start.action_key;
+  if (task === undefined || actionKey === undefined) return null;
+  const started = payloadOf(start);
+  const harnessStart = started["execution"] === "harness";
+  const coreStart = !Object.hasOwn(started, "execution");
+  if (
+    (!harnessStart && !coreStart) ||
+    Object.hasOwn(started, "grant_seq") ||
+    Object.hasOwn(started, "token_sha256")
+  ) return null;
+  const cls = started["class"];
+  const hash = started["payload_hash"];
+  if (typeof cls !== "string" || typeof hash !== "string") return null;
+
+  // The exact routed class is authority. Merely living in policy.edit.* is not.
+  if (hasAmbiguousRoute(path, policyProtectedPaths)) return null;
+  const routed = protectedPathClass(path, policyProtectedPaths);
+  if (routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed) {
+    return null;
+  }
+
+  const bindings = precedingBindings(records, start);
+  if (bindings.length !== 1) return null;
+  const binding = bindings[0] as RegisteredBinding;
+  if (
+    binding.task !== task ||
+    binding.actionKey !== actionKey ||
+    binding.cls !== cls ||
+    binding.payloadHash !== hash
+  ) return null;
+
+  if (
+    records.some(
+      (record) =>
+        record.seq < start.seq &&
+        record.action_key === actionKey &&
+        record.event === "approval.requested",
+    )
+  ) return null;
+
+  // A start cannot authorize a change that already happened. This tier also
+  // requires a usable commit timestamp; missing temporal evidence fails closed.
+  if (anchorMs === null) return null;
+  const at = Date.parse(start.ts);
+  if (Number.isNaN(at) || at > anchorMs || anchorMs - at > lookbackMs) return null;
+
+  const material = payloadFor(hash);
+  if (material === null) return null;
+  try {
+    if (payloadHash(material) !== hash) return null;
+  } catch {
+    return null;
+  }
+  return policyFileEvidence(material, path, policyProtectedPaths);
+}
+
+/** The closed, repository-relative Edit shape eligible for byte replay. */
+function exactReplayEdit(material: unknown, path: string): { before: string; after: string } | null {
+  if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
+  const map = material as Record<string, unknown>;
+  const keys = Object.keys(map);
+  const allowed = ["tool", "rule", "file", "before", "after", "replace_all"];
+  if (keys.some((key) => !allowed.includes(key))) return null;
+  if (
+    map["tool"] !== "Edit" ||
+    typeof map["file"] !== "string" ||
+    map["file"].startsWith("/") ||
+    map["file"].includes("\\") ||
+    (map["rule"] !== undefined && typeof map["rule"] !== "string") ||
+    typeof map["before"] !== "string" ||
+    map["before"].length === 0 ||
+    typeof map["after"] !== "string" ||
+    map["before"] === map["after"] ||
+    (map["replace_all"] !== undefined && map["replace_all"] !== false)
+  ) return null;
+  const named = segmentsOf(map["file"]);
+  const changed = segmentsOf(path);
+  if (
+    named.includes("..") ||
+    named.length !== changed.length ||
+    !named.every((segment, index) => segment === changed[index])
+  ) return null;
+  return { before: map["before"], after: map["after"] };
+}
+
+/** The one token or harness spend that proves this manual grant actually ran. */
+function startForReplayGrant(
+  candidate: EvidenceCandidate,
+  records: readonly EventRecord[],
+  anchorMs: number | null,
+  lookbackMs: number,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): EventRecord | null {
+  if (anchorMs === null) return null;
+  const grant = candidate.record;
+  const task = grant.task;
+  const actionKey = grant.action_key;
+  if (task === undefined || actionKey === undefined) return null;
+  const granted = payloadOf(grant);
+  const cls = granted["class"];
+  const hash = granted["payload_hash"];
+  if (typeof cls !== "string" || typeof hash !== "string" || hash !== candidate.payloadHash) return null;
+  if (hasAmbiguousRoute(path, policyProtectedPaths)) return null;
+  const routed = protectedPathClass(path, policyProtectedPaths);
+  if (routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed) {
+    return null;
+  }
+
+  try {
+    if (payloadHash(candidate.material) !== hash) return null;
+  } catch {
+    return null;
+  }
+
+  const grantToken = granted["token_sha256"];
+  const starts = records.filter((record) => {
+    if (
+      record.event !== "execution.started" ||
+      record.seq <= grant.seq ||
+      record.task !== task ||
+      record.action_key !== actionKey
+    ) return false;
+    const started = payloadOf(record);
+    if (started["class"] !== cls || started["payload_hash"] !== hash) return false;
+    if (Object.hasOwn(started, "execution") && started["execution"] !== "harness") return false;
+    const hasGrantLink = Object.hasOwn(started, "grant_seq");
+    const hasTokenLink = Object.hasOwn(started, "token_sha256");
+    if (!hasGrantLink && !hasTokenLink) return false;
+    if (hasGrantLink && started["grant_seq"] !== grant.seq) return false;
+    if (
+      hasTokenLink &&
+      (typeof grantToken !== "string" || started["token_sha256"] !== grantToken)
+    ) return false;
+    const at = Date.parse(record.ts);
+    return !Number.isNaN(at) && at <= anchorMs && anchorMs - at <= lookbackMs;
+  });
+  if (starts.length !== 1) return null;
+  const start = starts[0] as EventRecord;
+
+  const bindings = precedingBindings(records, start);
+  if (bindings.length !== 1) return null;
+  const binding = bindings[0] as RegisteredBinding;
+  if (
+    binding.record.seq >= grant.seq ||
+    binding.task !== task ||
+    binding.actionKey !== actionKey ||
+    binding.cls !== cls ||
+    binding.payloadHash !== hash
+  ) return null;
+  const requested = records.some((record) => {
+    if (
+      record.event !== "approval.requested" ||
+      record.seq <= binding.record.seq ||
+      record.seq >= grant.seq ||
+      record.task !== task ||
+      record.action_key !== actionKey
+    ) return false;
+    const payload = payloadOf(record);
+    return payload["class"] === cls && payload["payload_hash"] === hash;
+  });
+  return requested ? start : null;
+}
+
+/**
+ * Replay authorized exact edits in execution order and demand byte equality.
+ *
+ * A missing `before` is an unrelated historical edit and is skipped once. Two
+ * occurrences are ambiguous and refuse the whole fallback. There is no search,
+ * reordering, substring credit, or partial result: only BASE transformed into
+ * HEAD byte for byte is evidence.
+ */
+function exactEditReplay(
+  candidates: readonly EvidenceCandidate[],
+  records: readonly EventRecord[],
+  base: string | null,
+  head: string | null,
+  anchorMs: number | null,
+  lookbackMs: number,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): ExactEditStep[] | null {
+  if (
+    base === null ||
+    head === null ||
+    base.includes("\uFFFD") ||
+    head.includes("\uFFFD")
+  ) return null;
+  const steps: ExactEditStep[] = [];
+  for (const candidate of candidates) {
+    try {
+      if (payloadHash(candidate.material) !== candidate.payloadHash) continue;
+    } catch {
+      continue;
+    }
+    const edit = exactReplayEdit(candidate.material, path);
+    if (edit === null) continue;
+    const start = candidate.source === "policy"
+      ? candidate.record
+      : startForReplayGrant(
+          candidate,
+          records,
+          anchorMs,
+          lookbackMs,
+          path,
+          policyProtectedPaths,
+        );
+    if (start !== null) steps.push({ candidate, start, ...edit });
+  }
+  steps.sort((left, right) => left.start.seq - right.start.seq);
+
+  let replayed = base;
+  const applied: ExactEditStep[] = [];
+  for (const step of steps) {
+    const first = replayed.indexOf(step.before);
+    if (first === -1) continue;
+    if (replayed.indexOf(step.before, first + 1) !== -1) return null;
+    replayed = `${replayed.slice(0, first)}${step.after}${replayed.slice(first + step.before.length)}`;
+    applied.push(step);
+  }
+  return applied.length > 0 && replayed === head ? applied : null;
 }
 
 /** A blob's lines, with the empty tail a trailing newline leaves dropped. */
@@ -850,6 +1299,17 @@ function attributeRun(
   };
 }
 
+/**
+ * The organ attestation index's key: the normalized path AND the digest.
+ *
+ * One key rather than a map of maps. The digest is a fixed 64 hex characters
+ * and it comes last, so the split point is unambiguous however the path is
+ * spelled: two different (path, digest) pairs cannot collide into one key.
+ */
+function organKey(organPath: string, sha256: string): string {
+  return `${normalizePathSpelling(organPath)}\0${sha256}`;
+}
+
 /** The ordering rule, stated identically on every failure that could be lag. */
 const ORDERING_RULE =
   "the committed log trails the primary checkout's live log, so if this edit WAS granted, " +
@@ -908,6 +1368,17 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     if (typeof sha === "string") attestations.set(sha, record);
   }
 
+  // The ORGAN attestation index (APRV-272), keyed by PATH AND digest, because
+  // a digest attested for one organ is not evidence for another. Kept separate
+  // from the policy index above, and fed by a different event type, so that
+  // neither can ever answer the other's question.
+  const organAttestations = new Map<string, EventRecord>();
+  for (const record of records) {
+    const fields = organAttestationOf(record);
+    if (fields === null) continue;
+    organAttestations.set(organKey(fields.organPath, fields.sha256), record);
+  }
+
   // The grants of a class that can authorize a protected write.
   const grants = records.filter(
     (record) =>
@@ -957,6 +1428,29 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       // valid evidence and a human amendment is not the only way it changes.
     }
 
+    // 1b. A gate organ, by attestation of THAT path's bytes (APRV-272).
+    if (isGateOrganPath(path)) {
+      const digest = input.organSha256AtHead?.(path) ?? null;
+      if (digest !== null) {
+        const attested = organAttestations.get(organKey(path, digest));
+        if (attested !== undefined) {
+          findings.push({
+            path,
+            ok: true,
+            evidence: "attested",
+            seq: attested.seq,
+            ts: attested.ts,
+            actor: attested.actor,
+            detail: `${path} at ${input.window.head} hashes to ${digest}, which ${attested.actor} attested FOR THAT PATH at seq ${attested.seq}. A gate organ is policy.core and policy.core is human-only, so no grant for this edit can exist; content attestation is the evidence`,
+          });
+          continue;
+        }
+      }
+      // Not attested: fall through, exactly as the policy file does. A policy
+      // that does not make policy.core human-only can still produce a grant
+      // naming this path, and that grant is evidence like any other.
+    }
+
     // 2 and 3. A grant whose bound material names this path, close enough in
     // time to the commit that introduced the change to be about it.
     const changeTs = input.changeTsFor(path);
@@ -985,7 +1479,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     // the stronger evidence kind first, then the grant nearest the change.
     const unresolved: string[] = [];
     const stale: EventRecord[] = [];
-    const candidates: { grant: EventRecord; match: NamingMatch }[] = [];
+    const candidates: EvidenceCandidate[] = [];
     for (const grant of grants) {
       const hash = payloadOf(grant)["payload_hash"];
       if (typeof hash !== "string") continue;
@@ -1000,8 +1494,29 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         stale.push(grant);
         continue;
       }
-      candidates.push({ grant, match: found });
+      candidates.push({ record: grant, match: found, source: "grant", material, payloadHash: hash });
     }
+    for (const start of records) {
+      const found = policyAuthorizedEvidence(
+        records,
+        start,
+        path,
+        input.policyProtectedPaths,
+        input.payloadFor,
+        anchorMs,
+        lookbackMs,
+      );
+      const hash = payloadOf(start)["payload_hash"];
+      if (found !== null && typeof hash === "string") {
+        const material = input.payloadFor(hash);
+        if (material !== null) {
+          candidates.push({ record: start, match: found, source: "policy", material, payloadHash: hash });
+        }
+      }
+    }
+    const evidenceNoun = candidates.every((candidate) => candidate.source === "grant")
+      ? `grant${candidates.length === 1 ? "" : "s"}`
+      : `evidence record${candidates.length === 1 ? "" : "s"}`;
 
     /** Distance from the change commit, or 0 when there is no anchor to measure from. */
     const distance = (grant: EventRecord): number => {
@@ -1009,11 +1524,12 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       const at = Date.parse(grant.ts);
       return Number.isNaN(at) ? Number.POSITIVE_INFINITY : Math.abs(at - anchorMs);
     };
-    const rank = (kind: EvidenceKind): number => (kind === "granted-file" ? 0 : 1);
+    const rank = (kind: EvidenceKind): number =>
+      kind === "granted-file" ? 0 : kind === "policy-authorized-file" ? 1 : 2;
     candidates.sort(
       (left, right) =>
         rank(left.match.kind) - rank(right.match.kind) ||
-        distance(left.grant) - distance(right.grant),
+        distance(left.record) - distance(right.record),
     );
 
     // The change this pull request makes to the path. Read before any coverage
@@ -1025,7 +1541,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         path,
         ok: false,
         code: "change-unreadable",
-        detail: `${path} is a protected path and changed between ${input.window.base} and ${input.window.head}, and its bytes could not be read at both commits (git could not show the blob, or it is binary), so no grant could be checked against the change. ${candidates.length} grant${candidates.length === 1 ? "" : "s"} name this path in the window, and naming is not coverage. ${ORDERING_RULE}.`,
+        detail: `${path} is a protected path and changed between ${input.window.base} and ${input.window.head}, and its bytes could not be read at both commits (git could not show the blob, or it is binary), so no evidence could be checked against the change. ${candidates.length} ${evidenceNoun} name this path in the window, and naming is not coverage. ${ORDERING_RULE}.`,
       });
       continue;
     }
@@ -1036,14 +1552,27 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     // Which of those grants covers which lines. A pull request may carry
     // several approved edits to one file, so coverage accumulates and the
     // finding names every contributor.
-    const contributors: { grant: EventRecord; kind: EvidenceKind; why: string; whole: boolean }[] = [];
+    const contributors: {
+      record: EventRecord;
+      kind: EvidenceKind;
+      why: string;
+      whole: boolean;
+      source: "grant" | "policy";
+    }[] = [];
     const rejected: string[] = [];
     const addedCover = new Set<string>();
     const removedCover = new Set<string>();
     let whole = false;
     for (const candidate of candidates) {
-      const { grant, match } = candidate;
-      const at = `the grant at seq ${grant.seq}`;
+      const { record, match, source } = candidate;
+      // An execution start says an exact file action was authorized, not that a
+      // mode-only or whitespace-only change happened. Legacy human grants retain
+      // their narrow no-substantive-hunk behavior; policy starts do not gain it.
+      if (hunks.identical && source === "policy") continue;
+      const at =
+        source === "grant"
+          ? `the grant at seq ${record.seq}`
+          : `the policy-authorized execution at seq ${record.seq}`;
       if (match.command) {
         if (!commandTargetsPath(match.target ?? "", match.cwd, path)) {
           rejected.push(
@@ -1051,7 +1580,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
           );
           continue;
         }
-        const run = attributeRun(grant, runs, anchorMs, attributionMs);
+        const run = attributeRun(record, runs, anchorMs, attributionMs);
         if (!run.ok) {
           rejected.push(run.why);
           continue;
@@ -1059,7 +1588,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         // A command payload describes no bytes, so attribution is all or
         // nothing: the run that wrote this file wrote whatever is in it.
         whole = true;
-        contributors.push({ grant, kind: match.kind, why: `${match.detail}, and ${run.detail}`, whole: true });
+        contributors.push({ record, kind: match.kind, why: `${match.detail}, and ${run.detail}`, whole: true, source });
         continue;
       }
       if (match.after === null && match.before === null) {
@@ -1107,7 +1636,48 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         }
         if (parts.length > 0) contributed = `${match.detail}, and ${parts.join(" and ")}`;
       }
-      if (contributed !== null) contributors.push({ grant, kind: match.kind, why: contributed, whole: wholeHere });
+      if (contributed !== null) {
+        contributors.push({ record, kind: match.kind, why: contributed, whole: wholeHere, source });
+      }
+    }
+
+    // Exact Edit payloads may bind fragments within a line, including several
+    // independent fragments of the same long line. Whole-line set membership
+    // cannot express that safely. Replay is the bounded fallback: genuine
+    // starts, execution order, unique anchors, and final byte equality.
+    const needsReplay =
+      !whole &&
+      !hunks.identical &&
+      (
+        hunks.reordered ||
+        hunks.added.some((line) => !addedCover.has(line)) ||
+        hunks.removed.some((line) => !removedCover.has(line))
+      );
+    const replay = needsReplay
+      ? exactEditReplay(
+          candidates,
+          records,
+          blobs.base,
+          blobs.head,
+          anchorMs,
+          lookbackMs,
+          path,
+          input.policyProtectedPaths,
+        )
+      : null;
+    if (replay !== null) {
+      whole = true;
+      contributors.splice(
+        0,
+        contributors.length,
+        ...replay.map((step) => ({
+          record: step.candidate.record,
+          kind: step.candidate.match.kind,
+          why: `${step.candidate.match.detail}, applied at execution.started seq ${step.start.seq} in an exact BASE-to-HEAD replay`,
+          whole: true,
+          source: step.candidate.source,
+        })),
+      );
     }
 
     // What the bytes alone cover, before any whole-file attribution. If this is
@@ -1138,13 +1708,15 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     const lead = restsOnAttribution
       ? (contributors.find((one) => one.whole) ?? contributors[0])
       : contributors[0];
-    const quiet = hunks.identical ? candidates[0] : undefined;
+    const quiet = hunks.identical
+      ? candidates.find((candidate) => candidate.source === "grant")
+      : undefined;
     const passing: { record: EventRecord; kind: EvidenceKind; why: string } | undefined =
       lead !== undefined
-        ? { record: lead.grant, kind: lead.kind, why: lead.why }
+        ? { record: lead.record, kind: lead.kind, why: lead.why }
         : quiet !== undefined
           ? {
-              record: quiet.grant,
+              record: quiet.record,
               kind: quiet.match.kind,
               why: `${quiet.match.detail}, and this change alters no substantive line (whitespace, mode or metadata only), so there is no hunk to cover`,
             }
@@ -1160,18 +1732,20 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         seq: record.seq,
         ts: record.ts,
         actor: record.actor,
-        coveredBy: contributors.map((one) => one.grant.seq),
-        detail: `${path} was granted by ${record.actor} at seq ${record.seq} (${record.ts}), ${boundText}: ${why}. ${
-          hunks.identical
-            ? "there are no substantive hunks to cover"
-            : whole
-              ? "the whole change is attributed to that grant"
-              : `${hunks.added.length} added and ${hunks.removed.length} removed line(s) all trace to granted material`
-        }${
-          contributors.length > 1
-            ? ` (assembled from ${contributors.length} grants: seq ${contributors.map((one) => one.grant.seq).join(", ")}; the strongest and nearest leads)`
-            : ""
-        }`,
+        coveredBy: contributors.map((one) => one.record.seq),
+        detail: replay !== null
+          ? `${path}'s full change was reconstructed byte-for-byte from ${contributors.length} replayed authorization record${contributors.length === 1 ? "" : "s"} in execution order, ${boundText}. Evidence records in that order: seq ${contributors.map((one) => one.record.seq).join(", ")}. The first record, ${record.actor} at seq ${record.seq} (${record.ts}), leads the finding: ${why}.`
+          : `${path} was ${kind === "policy-authorized-file" ? "authorized by policy for execution" : "granted"} by ${record.actor} at seq ${record.seq} (${record.ts}), ${boundText}: ${why}. ${
+              hunks.identical
+                ? "there are no substantive hunks to cover"
+                : whole
+                  ? "the whole change is attributed to that authorization record"
+                  : `${hunks.added.length} added and ${hunks.removed.length} removed line(s) all trace to authorized material`
+            }${
+              contributors.length > 1
+                ? ` (assembled from ${contributors.length} ${contributors.every((one) => one.source === "grant") ? "grants" : "evidence records"}: seq ${contributors.map((one) => one.record.seq).join(", ")}; the strongest and nearest leads)`
+                : ""
+            }`,
       });
       continue;
     }
@@ -1187,9 +1761,9 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         ok: false,
         code: "uncovered-hunk",
         uncovered: sample,
-        detail: `${path} is a protected path and ${uncovered.length} line(s) of this change trace to no granted material. ${candidates.length} grant${candidates.length === 1 ? "" : "s"} name this path ${boundText}, and naming is not coverage: a grant authorizes the bytes it bound, and a later edit to the same file is a different decision. ${
+        detail: `${path} is a protected path and ${uncovered.length} line(s) of this change trace to no authorized material. ${candidates.length} ${evidenceNoun} name this path ${boundText}, and naming is not coverage: evidence authorizes only the bytes it binds, and a later edit to the same file is a different decision. ${
           contributors.length > 0
-            ? `${contributors.length} grant${contributors.length === 1 ? "" : "s"} covered part of it (seq ${contributors.map((one) => one.grant.seq).join(", ")}); `
+            ? `${contributors.length} evidence record${contributors.length === 1 ? "" : "s"} covered part of it (seq ${contributors.map((one) => one.record.seq).join(", ")}); `
             : ""
         }${
           rejected.length > 0
@@ -1220,6 +1794,19 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     ) {
       diagnosis.push(
         `no policy.updated record attests the bytes this pull request would install (${input.policySha256AtHead}); an amendment lands through \`approval policy amend --commit\`, whose attestation record is the evidence`,
+      );
+    }
+    if (isGateOrganPath(path)) {
+      // The one failure in this guard whose repair is NOT "take the change to
+      // the gate": there is no gate for it. `policy.core` is human-only, the
+      // gate mints nothing for a human-only class, so a grant for this edit
+      // cannot be obtained by anybody. Naming the verb is the whole point of
+      // the message (APRV-272).
+      const digest = input.organSha256AtHead?.(path) ?? null;
+      diagnosis.push(
+        digest === null
+          ? `${path} is one of the gate's organs and no bytes for it could be hashed at ${input.window.head} (this change deletes it, or the caller supplied no digest), so no attestation can match it; a deletion is not evidenced by a record about bytes that no longer exist`
+          : `no gate.organ.attested record attests ${path} at ${digest}, and a digest attested for some OTHER path is not evidence for this one. A gate organ is policy.core, policy.core is human-only, and the gate mints nothing for a human-only class — so no grant for this edit can exist and content attestation is the only evidence there is. The human route, in the PRIMARY checkout: \`approval policy attest --organ ${path} --as human:<id>\`, then a log advance carrying that record`,
       );
     }
 

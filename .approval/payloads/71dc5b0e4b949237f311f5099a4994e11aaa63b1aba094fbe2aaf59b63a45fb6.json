@@ -1,0 +1,1 @@
+{"command":"grep -rn \"is exported in this environment\\|keychain-scope\\|overriddenByEnvironment\\|CROSS-INSTANCE\" src tests docs SPEC.md README.md | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a38e5ac36e6e871ae"}

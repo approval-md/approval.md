@@ -1,0 +1,1 @@
+{"command":"ls backlog/tasks/ | grep -iE \"aprv-27[6-9]\"; echo \"exit=$?\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a38e5ac36e6e871ae"}

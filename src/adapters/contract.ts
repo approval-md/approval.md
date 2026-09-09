@@ -49,6 +49,16 @@
  *    because a configuration fault must not consume a human's single-use
  *    authority. The side effect's own ordering is unchanged: the token is still
  *    consumed and `execution.started` still appended before `act` runs.
+ * 3c. **Ask the adapter what it can learn before the spend** (APRV-276). An
+ *    adapter MAY implement {@link Adapter.precheck}, and the contract calls it
+ *    after the credentials resolve and before the token is consumed. It is the
+ *    home of one specific refusal: the condition that makes the side effect
+ *    impossible, that this runtime can learn without attempting it, and that
+ *    would otherwise cost a human's single-use grant to discover. AgentMail's
+ *    drift check is the worked case. A refusal appends nothing, spends nothing,
+ *    and returns `adapter-precheck-refused`. It does not replace the same check
+ *    inside `act`: the far side can move in between, and the check that binds
+ *    the bytes actually sent is the later one.
  * 4. **Scope the credentials.** The provider handed to `act` is a wrapper that
  *    closes when `act` returns. Inside the verified-token window it answers;
  *    outside it, every `get` refuses `credential-window-closed`. An adapter that
@@ -60,9 +70,12 @@
  *    are replaced with {@link REDACTION_PLACEHOLDER} and counted. SPEC.md §11.1
  *    invariant 3 ("raw secrets never appear in the log") is the reason adapters
  *    exist; here it is a mechanical check rather than a convention. Note what
- *    reaches the log from an adapter: nothing. The outcome events carry
- *    `exit_code` and nothing else, so the adapter's own vocabulary rides in the
- *    returned result, which is scanned before it is handed back.
+ *    reaches the log from an adapter: one bounded field. Since APRV-251 a
+ *    completion may carry `provider_ref`, the identifier the provider files the
+ *    effect under, and the sweep runs BEFORE that record is appended so the id
+ *    is scanned exactly as the rest of the detail is. Everything else in the
+ *    adapter's own vocabulary rides in the returned result, which is scanned
+ *    before it is handed back.
  *
  * ## What is deliberately not here
  *
@@ -97,16 +110,19 @@ import {
   finishExecution,
   findDeclaration,
   indeterminateExecution,
+  providerRefRecordable,
   startExecution,
+  type Declaration,
   type ExecuteOptions,
   type ExecuteRefusal,
+  type ProviderRef,
 } from "../core/execute.js";
 import type { ObservationWindow, ObservedEffect } from "../core/coverage.js";
 import { payloadHash } from "../core/payload.js";
 import type { Autonomy } from "../core/policy-load.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadOf, readVerifiedRecords } from "../core/state.js";
-import { TOKEN_HASH_FIELD, digestsEqual, tokenHash } from "../core/token.js";
+import { PAYLOAD_HASH_FIELD, TOKEN_HASH_FIELD, digestsEqual, tokenHash } from "../core/token.js";
 
 // ---------------------------------------------------------------------------
 // Payload values
@@ -441,6 +457,105 @@ export type ActOutcome =
   | { ok: false; code: string; message: string };
 
 /**
+ * The one key by which a success `detail` NAMES the provider's own identifier
+ * for the effect (APRV-251, SPEC.md §8).
+ *
+ * An adapter that wants its effect joinable by id puts a short printable string
+ * at the top level of its detail under this key, beside whatever else its
+ * receipt says. Everything after that is the contract's: the value passes the
+ * redaction sweep with the rest of the detail, the adapter half of the record
+ * is this runtime's own knowledge of which adapter it called, and the record is
+ * written by {@link finishExecution}.
+ *
+ * ONE conventional key rather than a guess across `message_id`, `sid`, `id` and
+ * whatever the next provider calls it. A contract that guessed would sooner or
+ * later lift the wrong field of some receipt onto a permanent log, and an
+ * adapter that says nothing under this key is treated as naming no reference,
+ * which is the pre-amendment behaviour and always valid.
+ */
+export const PROVIDER_REF_DETAIL_KEY = "provider_ref";
+
+/**
+ * The reference to record for this call, or `null` for none.
+ *
+ * Given BOTH the raw detail the adapter returned and the redacted copy about to
+ * be handed back, because the interesting case is the one where they differ. A
+ * lifted id whose bytes the redaction sweep touched is dropped rather than
+ * recorded: `[redacted]` matches no provider's record, and writing it would put
+ * a value in the join column that reads exactly like one that means something.
+ * The credential itself never reaches the log either way, since what would be
+ * written is the redacted copy.
+ *
+ * Everything else it declines is declined for the same reason the schema would
+ * reject it (an absent key, a value that is not a string, a string that is
+ * empty, too long, or carries a space or a control character). Declining here
+ * rather than at the append is deliberate: a record the write boundary rejects
+ * would leave a side effect that already happened with no outcome in the log,
+ * and a completion carrying no reference is the better failure.
+ */
+export function providerRefFor(
+  adapterName: string,
+  rawDetail: JsonValue | undefined,
+  redactedDetail: JsonValue,
+): ProviderRef | null {
+  const read = (node: JsonValue | undefined): string | null => {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) return null;
+    const named = (node as Record<string, JsonValue>)[PROVIDER_REF_DETAIL_KEY];
+    return typeof named === "string" ? named : null;
+  };
+  const raw = read(rawDetail);
+  if (raw === null) return null;
+  // The redacted copy is what a reader would get, so it is what is compared.
+  if (read(redactedDetail) !== raw) return null;
+  const ref: ProviderRef = { adapter: adapterName, id: raw };
+  return providerRefRecordable(ref) ? ref : null;
+}
+
+/**
+ * Everything an adapter is given for {@link Adapter.precheck}, and nothing else
+ * (APRV-276).
+ *
+ * Shaped like {@link ActInput} and deliberately a separate type, because one
+ * sentence of `ActInput`'s contract does not hold here: the token has NOT been
+ * spent. What has happened is narrower and is exactly what a pre-spend check
+ * may rely on — the payload has been hashed and IS the one the log binds this
+ * action to (the grant's `payload_hash` on the manual path, the registered
+ * declaration's off it; bytes that are anything else never reach a precheck,
+ * see {@link logBindsPayload}), the class has been read from the verified log,
+ * and the declared credentials have resolved inside APRV-168's
+ * `presented`-phase grant, minted only when the caller's token matches the
+ * digest the human's grant recorded. Whether that token may still be SPENT is
+ * `core/token.ts`'s question and is asked after this returns.
+ */
+export interface PrecheckInput {
+  /** The action's idempotency key (SPEC.md §7), for the adapter's own logging. */
+  actionKey: string;
+  /**
+   * The bytes the grant approved, hashed by the contract already. The same
+   * value `act` will be handed: a precheck that read some other version of the
+   * payload would be checking bytes nobody is about to execute.
+   */
+  payload: JsonValue;
+  /** Live only until `precheck` returns, exactly as `act`'s is. */
+  credentials: CredentialProvider;
+  /** Cancellation, when the caller supplied one. */
+  signal?: AbortSignal;
+}
+
+/**
+ * What a precheck reports: may this execution be attempted at all?
+ *
+ * `ok: true` says nothing more than "I found no reason to refuse before the
+ * spend". It is never a promise about the send, and it authorizes nothing:
+ * every check an adapter performs here it still performs inside `act`, where
+ * the window is the binding one.
+ *
+ * The failure vocabulary is the adapter's own, for {@link ActOutcome}'s reason,
+ * and `code` and `message` are scanned for credentials exactly as `act`'s are.
+ */
+export type PrecheckOutcome = { ok: true } | { ok: false; code: string; message: string };
+
+/**
  * A side-effect executor (SPEC.md §4: "an email sender, calendar writer … that
  * holds credentials and refuses to act without a valid token").
  *
@@ -475,6 +590,42 @@ export interface Adapter {
    * keeps none of what comes back.
    */
   requiredCredentials?: readonly string[];
+  /**
+   * Everything this adapter can find out BEFORE the token is spent (APRV-276).
+   *
+   * Optional, and an adapter that omits it behaves exactly as it always did.
+   * It exists for one class of refusal: the condition that makes a send
+   * impossible is knowable before the spend, is not the caller's fault, and
+   * costs a human another tap when a spent token is the price of discovering
+   * it. The worked case is AgentMail's drift check. A draft is server-side
+   * mutable state, so a grant binds the bytes fetched at request time and the
+   * adapter compares them against the live draft before it sends; performing
+   * that comparison after the spend meant an edited draft refused correctly and
+   * burned the grant, and restoring the approved text could not send under the
+   * token the human had already given (the APRV-224 e2e, 2026-09-06).
+   *
+   * Three rules bind an implementation:
+   *
+   * - **Read-only.** It performs no write of any kind against the far side. It
+   *   runs on the strength of a token that has not been verified for spending,
+   *   so a precheck that could send would be a side effect outside the window.
+   * - **It never stands in for a check inside `act`.** Whatever it verifies,
+   *   `act` verifies again inside the consumed-token window. The far side can
+   *   move between the two, and the check that binds the bytes actually sent is
+   *   the later one; this one exists to protect the grant, not to license
+   *   skipping it.
+   * - **Refusing is free and passing is not a promise.** A refusal appends
+   *   nothing and spends nothing ({@link "adapter-precheck-refused"}), so an
+   *   adapter should refuse here whenever it can, and a `true` says only that
+   *   nothing was found — never that the send will succeed.
+   *
+   * The credential window is the pre-token one APRV-169 opens for
+   * {@link requiredCredentials}, with APRV-168's `presented`-phase grant live:
+   * on the manual path it is minted only when the caller's token matches the
+   * digest the human's grant recorded, so a vault read here answers to a
+   * human's decision like every other.
+   */
+  precheck?(input: PrecheckInput): Promise<PrecheckOutcome> | PrecheckOutcome;
   act(input: ActInput): Promise<ActOutcome> | ActOutcome;
   /**
    * What this adapter's PROVIDER recorded happening in `window` (APRV-245).
@@ -571,6 +722,23 @@ export const ADAPTER_REFUSAL_CODES = [
    * vault would not open" are two different repairs.
    */
   "credential-unavailable",
+  /**
+   * The adapter's own {@link Adapter.precheck} answered no (APRV-276). Refused
+   * BEFORE the token is consumed and before `execution.started` is appended, so
+   * the grant survives exactly as it does for `credential-unavailable`: the log
+   * is left as it was found and the same token is spendable once the condition
+   * the precheck named is repaired.
+   *
+   * The adapter's own reason rides in `adapter_code`
+   * (`agentmail-draft-drifted`, say), because the repair belongs to the far
+   * side's vocabulary and this union cannot enumerate it.
+   *
+   * A precheck that throws lands here too, under `adapter_code`
+   * `precheck-threw`: a check that could not be performed is not a check that
+   * passed, and the fail-closed answer costs nothing, since nothing was
+   * attempted.
+   */
+  "adapter-precheck-refused",
 ] as const;
 
 export type AdapterRefusalCode = (typeof ADAPTER_REFUSAL_CODES)[number];
@@ -620,6 +788,12 @@ export interface AdapterExecuteSuccess {
   exit_code: number;
   /** The adapter's own detail, after redaction. */
   detail?: JsonValue;
+  /**
+   * The reference the log now carries for this effect, when one was recorded
+   * (APRV-251). Absent when the adapter's detail named none, or named one the
+   * contract declined to write; see {@link providerRefFor}.
+   */
+  provider_ref?: ProviderRef;
   redactions: number;
 }
 
@@ -680,6 +854,48 @@ function tokenMatchesGrant(
   }
   if (typeof recorded !== "string" || recorded.length === 0) return false;
   return digestsEqual(tokenHash(token), recorded);
+}
+
+/**
+ * Does the log bind this action to exactly the bytes the caller presented?
+ *
+ * Read for one purpose (APRV-276): deciding whether {@link Adapter.precheck}
+ * may run at all. A precheck is handed the payload, and every word of its
+ * contract assumes those bytes are the approved ones — AgentMail compares the
+ * live draft against them and calls a difference drift. Handed bytes no human
+ * approved, the same comparison is a question about the wrong snapshot, and its
+ * answer is noise at best: a refusal naming the caller's own edit as the far
+ * side's drift, or a pass that says a tampered payload matches the draft.
+ *
+ * So this is a precondition and never a verdict. It answers no and the precheck
+ * is SKIPPED, not refused: `startExecution` is the authority on content binding
+ * and refuses `payload-mismatch` in its own words a few lines later, with
+ * nothing appended and the token still live. Two modules refusing the same fact
+ * is two places for the reason to drift.
+ *
+ * The binding it compares against is the one that path's authorization actually
+ * uses, which is why both are read here: the grant's recorded `payload_hash` on
+ * the manual path (`core/token.ts`), and the registered declaration's off it
+ * (`core/execute.ts`), with the declaration standing in for a grant that
+ * recorded none, exactly as `verifyToken` lets it. A binding that exists
+ * nowhere answers no, so the strict path is the default: an action whose bytes
+ * nothing in the log states is one no precheck may reason about.
+ */
+function logBindsPayload(
+  records: readonly EventRecord[],
+  actionKey: string,
+  declared: Declaration,
+  hash: string,
+): boolean {
+  let bound: string | null = declared.payload_hash;
+  for (const record of records) {
+    if (record.event !== "approval.granted") continue;
+    if (record.action_key !== actionKey) continue;
+    const recorded = payloadOf(record)[PAYLOAD_HASH_FIELD];
+    bound = typeof recorded === "string" && recorded.length > 0 ? recorded : declared.payload_hash;
+  }
+  if (bound === null) return false;
+  return digestsEqual(bound, hash);
 }
 
 /**
@@ -782,6 +998,105 @@ function resolveRequiredCredentials(
   }
 }
 
+/** What one pre-token adapter precheck produced. */
+type PrecheckResolution =
+  | { ok: true; issued: ReadonlySet<string> }
+  | {
+      /** The adapter's own reason, carried through to `adapter_code`. */
+      ok: false;
+      adapterCode: string;
+      message: string;
+      redactions: number;
+    };
+
+/**
+ * Ask the adapter what it can find out before the token is spent (APRV-276).
+ *
+ * The ordering this exists to establish, stated once and alongside
+ * {@link resolveRequiredCredentials}'s: a condition that makes the side effect
+ * impossible, and that this runtime can learn without attempting it, must not
+ * cost a human's single-use grant. A credential nobody stored was the first
+ * such condition (APRV-169); a draft the agent edited after the human read it
+ * is the second, and the difference between them is only whose fault it is.
+ * Both refuse with the log untouched and the token spendable.
+ *
+ * What this does NOT reorder is the consume-then-execute sequence for the side
+ * effect itself, for the reason APRV-120 gives: `startExecution` still consumes
+ * the token and appends `execution.started` before `act` is called, so a crash
+ * between the two is an ambiguity the log can SEE. Nor does it move a check OUT
+ * of `act`: an adapter that prechecks a condition checks it again inside the
+ * window, because the far side can move in between and the check that binds the
+ * bytes actually sent is the later one.
+ *
+ * The window is its own and closes immediately, exactly as the credential
+ * resolution's does, and every value the provider handed over joins the
+ * redaction corpus of whatever this returns. So does `inherited`, everything
+ * the resolution above already handed this adapter, and it has to: a precheck
+ * that throws typically throws holding a secret it was given a step earlier and
+ * never asked this window for, so scanning only what THIS window issued would
+ * scan an empty set and print the credential. An adapter that implements no
+ * precheck pays nothing: the function returns at its first line.
+ *
+ * Total: a precheck that throws is reported as a refusal rather than allowed to
+ * escape. A check that could not be performed is not a check that passed, and
+ * failing closed here is free, since nothing has been attempted.
+ */
+async function runPrecheck(
+  adapter: Adapter,
+  actionKey: string,
+  payload: JsonValue,
+  inner: CredentialProvider,
+  inherited: ReadonlySet<string>,
+  signal: AbortSignal | undefined,
+): Promise<PrecheckResolution> {
+  const precheck = adapter.precheck;
+  if (precheck === undefined) return { ok: true, issued: new Set<string>() };
+
+  const scope = scopeCredentials(inner);
+  try {
+    let outcome: PrecheckOutcome;
+    try {
+      const input: PrecheckInput = {
+        actionKey,
+        payload,
+        credentials: scope.provider,
+        ...(signal === undefined ? {} : { signal }),
+      };
+      outcome = await precheck.call(adapter, input);
+    } catch (error) {
+      // The message and nothing else, for `act`'s reason: a stack trace quotes
+      // call arguments, and a credential passed as one would ride out inside an
+      // error report.
+      outcome = {
+        ok: false,
+        code: "precheck-threw",
+        message: `the ${adapter.name} adapter's pre-token check raised instead of answering: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (outcome.ok) return { ok: true, issued: scope.issued };
+
+    // Everything this window issued, plus everything the resolution above
+    // already handed over. A refusal is printed, and both sets are secrets it
+    // could be printing.
+    const secrets = new Set<string>(inherited);
+    for (const secret of scope.issued) secrets.add(secret);
+
+    const code = redactSecrets(outcome.code, secrets);
+    const message = redactSecrets(
+      `${adapter.name} refused action ${actionKey} before the token was spent (${outcome.code}): ${outcome.message}. Nothing was appended and no token was spent: an adapter's pre-token check runs before the token is consumed (SPEC.md §10.4, APRV-276), so this refusal costs no authority and the same token executes once the condition it names is repaired.`,
+      secrets,
+    );
+    return {
+      ok: false,
+      adapterCode: code.text,
+      message: message.text,
+      redactions: code.hits + message.hits,
+    };
+  } finally {
+    scope.close();
+  }
+}
+
 /**
  * Copy the core-relevant options across, and bind the hash the contract
  * computed. Built explicitly rather than spread so that a future field added to
@@ -840,6 +1155,12 @@ function refuse(
  *    `credential-unavailable` here, with the log untouched and the token
  *    unspent, so a missing secret costs no authority and the same token works
  *    once the secret appears. An adapter declaring none skips this entirely.
+ * 3b. **The adapter's own pre-token check** (APRV-276), in a window of its own,
+ *    on the same presented-phase grant. Whatever it refuses is refused with the
+ *    log untouched and the token unspent, so a condition the runtime could
+ *    learn without attempting the side effect costs no authority to discover.
+ *    An adapter implementing none skips this entirely, and so does a payload
+ *    the log does not bind this action to: step 4 owns that refusal.
  * 4. **`startExecution`**, which on the manual path verifies and consumes the
  *    token, refuses `payload-mismatch` against the digest from step 1, and
  *    appends `execution.started`. Any refusal here returns with `acted: false`;
@@ -945,6 +1266,27 @@ export async function executeThroughAdapter(
     });
   }
 
+  // (c2) The adapter's own pre-token check (APRV-276), in a window of its own,
+  //      still on the presented-phase grant. A refusal here appends nothing and
+  //      spends nothing, for the same reason (c) does.
+  //
+  //      Skipped outright unless the log binds this action to the bytes in
+  //      hand: a precheck asked about a payload no human approved is being
+  //      asked the wrong question, and answering it would let an adapter's own
+  //      vocabulary describe what is really a `payload-mismatch`. Those bytes
+  //      get no precheck and no far-side request; `startExecution` refuses them
+  //      below, in core's words, with the log untouched and the token live.
+  const prechecked = logBindsPayload(read.records, actionKey, declared, hash)
+    ? await runPrecheck(adapter, actionKey, payload, provider, resolved.issued, options.signal)
+    : ({ ok: true, issued: new Set<string>() } as PrecheckResolution);
+  if (!prechecked.ok) {
+    tell(provider, null);
+    return refuse(adapter, actionKey, "adapter-precheck-refused", prechecked.message, {
+      adapter_code: prechecked.adapterCode,
+      redactions: prechecked.redactions,
+    });
+  }
+
   // (d) Authorization and the start event. Refused here means act never runs.
   const executeOptions = executeOptionsFrom(options, hash);
   const started = startExecution(logPath, actionKey, executeOptions, actor);
@@ -966,8 +1308,10 @@ export async function executeThroughAdapter(
   const scope = scopeCredentials(provider);
   // Everything the pre-token resolution was handed is already a secret this
   // path may be about to print, so it joins the corpus before `act` runs rather
-  // than only if `act` happens to ask for the same names again.
+  // than only if `act` happens to ask for the same names again. The precheck's
+  // window is closed by now and its values join for the same reason.
   for (const secret of resolved.issued) scope.issued.add(secret);
+  for (const secret of prechecked.issued) scope.issued.add(secret);
 
   // The window is now a GRANTED one, and the provider is told so (APRV-168).
   // Minted here because this is the only place that can: the brand on
@@ -1012,13 +1356,17 @@ export async function executeThroughAdapter(
     tell(provider, null);
   }
 
-  // (f) The outcome event, then the redacted result.
+  // (f) The redaction sweep, THEN the outcome event, then the redacted result.
+  //
+  // The sweep runs first because one thing it produces now goes into the record
+  // rather than only into the result: the provider reference of APRV-251, which
+  // the adapter names inside its own detail and which therefore passes exactly
+  // the scan every other returned string passes before anything writes it down.
+  // Nothing else about the ordering matters — the sweep reads the outcome and
+  // the issued secrets, both settled the moment `act` returned.
   const secrets = scope.issued;
   const unknown = threw !== null && entered;
   const exitCode = outcome.ok ? 0 : ADAPTER_FAILURE_EXIT_CODE;
-  const finished = unknown
-    ? indeterminateExecution(logPath, actionKey, "act-threw", actor, executeOptions)
-    : finishExecution(logPath, actionKey, exitCode, actor, executeOptions);
 
   const failureCode: AdapterRefusalCode = threw === null ? "adapter-failed" : "adapter-act-threw";
   const rawMessage = outcome.ok ? "" : outcome.message;
@@ -1029,6 +1377,21 @@ export async function executeThroughAdapter(
       ? redactJson(outcome.detail, secrets)
       : { value: null, hits: 0 };
   const redactions = message.hits + adapterCode.hits + detail.hits;
+
+  // Only a completion has an effect for a provider to have filed, and only the
+  // adapter can say what its receipt called it. The `adapter` half is this
+  // runtime's own knowledge of which adapter it called, never a claim the
+  // detail makes about itself.
+  const providerRef = outcome.ok
+    ? providerRefFor(adapter.name, outcome.detail, detail.value)
+    : null;
+
+  const finished = unknown
+    ? indeterminateExecution(logPath, actionKey, "act-threw", actor, executeOptions)
+    : finishExecution(logPath, actionKey, exitCode, actor, {
+        ...executeOptions,
+        ...(providerRef === null ? {} : { providerRef }),
+      });
 
   if (!finished.ok) {
     return {
@@ -1094,6 +1457,10 @@ export async function executeThroughAdapter(
     outcome_seq: finished.record.seq,
     exit_code: 0,
     ...(outcome.detail === undefined ? {} : { detail: detail.value }),
+    // What the log now says this effect is called on the provider's side, so a
+    // caller reads the recorded reference rather than re-deriving it from the
+    // detail and reaching a different answer (APRV-251).
+    ...(providerRef === null ? {} : { provider_ref: providerRef }),
     redactions,
   };
 }

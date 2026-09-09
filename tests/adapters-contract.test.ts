@@ -30,6 +30,7 @@ import {
   containsSecret,
   executeThroughAdapter,
   inMemoryCredentials,
+  providerRefFor,
   redactJson,
   redactSecrets,
   type ActInput,
@@ -38,6 +39,7 @@ import {
   type AdapterExecuteOptions,
   type CredentialProvider,
   type JsonValue,
+  type PrecheckOutcome,
 } from "../src/adapters/contract.js";
 import {
   runAdapterConformance,
@@ -51,7 +53,7 @@ import {
 } from "../src/adapters/agentmail.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { payloadHash } from "../src/core/payload.js";
-import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
+import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter, type MockAdapter } from "./adapter-mock.js";
 import {
   assertLocal as assertAgentmailLocal,
   startMockAgentmail,
@@ -243,6 +245,7 @@ test("the adapter refusal union is frozen and a superset of the execute union", 
       "adapter-failed",
       "adapter-act-threw",
       "credential-unavailable",
+      "adapter-precheck-refused",
     ],
     "the adapter refusal union changed; it is frozen public API",
   );
@@ -399,6 +402,136 @@ test("a credential refusal leaves the token spendable, and the same token then s
   assert.equal(third.ok, false, "a spent token executed twice");
   if (!third.ok) assert.equal(third.code, "token-consumed", `wrong refusal: ${third.code}`);
   assert.equal(adapter.sends.length, 1, "a second send happened on a spent token");
+  unit.cleanup?.();
+});
+
+// ---------------------------------------------------------------------------
+// 3c-bis. The pre-token check (APRV-276)
+// ---------------------------------------------------------------------------
+
+test("a precheck refusal appends nothing, spends nothing, and act never runs", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  let asked = 0;
+
+  const refusing: MockAdapter = {
+    ...adapter,
+    precheck(input): PrecheckOutcome {
+      asked += 1;
+      assert.deepEqual(input.payload, unit.payload, "precheck was handed different bytes");
+      assert.equal(input.actionKey, unit.actionKey);
+      // The window is open here too: this is the pre-token one APRV-169 opens.
+      assert.equal(input.credentials.get(MOCK_CREDENTIAL).ok, true);
+      return { ok: false, code: "far-side-moved", message: "the object under the grant changed" };
+    },
+  };
+
+  const result = await run(refusing, unit);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-precheck-refused");
+    assert.equal(result.adapter_code, "far-side-moved");
+    assert.equal(result.acted, false, "act ran after a precheck refusal");
+    assert.equal(result.started_seq, undefined, "an execution was started for a refused precheck");
+    assert.equal(result.outcome, undefined, "an outcome was recorded for an execution never begun");
+    assert.match(result.message, /the object under the grant changed/u);
+  }
+  assert.equal(asked, 1, "the precheck was not called exactly once");
+  assert.equal(adapter.sends.length, 0, "the mock sent after a precheck refusal");
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "a precheck refusal wrote to the log; it must cost no authority",
+  );
+
+  // The grant is intact, so the SAME token executes once the condition clears.
+  const second = await run(adapter, unit);
+  assert.equal(second.ok, true, `the retained token was refused: ${JSON.stringify(second)}`);
+  assert.equal(adapter.sends.length, 1, "the retry did not send exactly once");
+  unit.cleanup?.();
+});
+
+test("a precheck that throws is a refusal, not an exception, and spends nothing", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  const hostile: MockAdapter = {
+    ...adapter,
+    precheck(): PrecheckOutcome {
+      throw new Error(`the far side is unreachable ${SECRET}`);
+    },
+  };
+
+  const result = await run(hostile, unit);
+  assert.equal(result.ok, false, "a check that could not be performed is not a check that passed");
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-precheck-refused");
+    assert.equal(result.adapter_code, "precheck-threw");
+    assert.equal(result.acted, false);
+    assert.equal(JSON.stringify(result).includes(SECRET), false, "the secret survived the refusal");
+  }
+  assert.equal(adapter.sends.length, 0);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a throwing precheck wrote to the log");
+  unit.cleanup?.();
+});
+
+test("an adapter with no precheck keeps the ordering it always had", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  assert.equal(adapter.precheck, undefined, "the mock adapter grew a precheck");
+  const result = await run(adapter, unit);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(
+    logRecords(unit).map((entry) => entry["event"]).slice(-2),
+    ["execution.started", "execution.completed"],
+  );
+  unit.cleanup?.();
+});
+
+/**
+ * The precheck is handed the approved bytes or it is not run at all (APRV-276).
+ *
+ * A precheck reasons ABOUT the payload — AgentMail compares the live draft
+ * against it — so bytes the log never bound make its answer meaningless: a
+ * refusal would describe the caller's own edit in the far side's vocabulary,
+ * and `payload-mismatch` is the runtime's word for that fact. `startExecution`
+ * keeps sole authority over it, and the adapter is not consulted, does not
+ * reach the far side, and cannot dress the refusal up as its own.
+ */
+test("a payload the grant did not bind to never reaches the precheck", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  let asked = 0;
+
+  const watching: MockAdapter = {
+    ...adapter,
+    precheck(): PrecheckOutcome {
+      asked += 1;
+      return { ok: false, code: "far-side-moved", message: "the object under the grant changed" };
+    },
+  };
+
+  const tampered: JsonValue = { approved: unit.payload, tampered: "after the human said yes" };
+  const result = await executeThroughAdapter(
+    watching,
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: tampered, actor: unit.actor },
+    options(unit),
+  );
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "payload-mismatch", `wrong refusal code: ${result.code}`);
+    assert.equal(result.acted, false);
+  }
+  assert.equal(asked, 0, "the precheck was asked about bytes no human approved");
+  assert.equal(adapter.sends.length, 0);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a payload-mismatch wrote to the log");
+
+  // And the grant is intact: the approved bytes still execute under it.
+  const good = await run(adapter, unit);
+  assert.equal(good.ok, true, `the retained token was refused: ${JSON.stringify(good)}`);
   unit.cleanup?.();
 });
 
@@ -727,4 +860,121 @@ test("the agentmail adapter conforms to the adapter contract", async (t) => {
     () => agentmailAdapter({ apiBase: assertAgentmailLocal(agentmailMock.url), timeoutMs: 5_000 }),
     AGENTMAIL_CONFORMANCE,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 3g. The provider reference (APRV-251)
+// ---------------------------------------------------------------------------
+
+/** Every record in this log, parsed. Read back off disk, never assembled. */
+function linesOf(logPath: string): Record<string, unknown>[] {
+  return readFileSync(logPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The `provider_ref` on the last record of `event`, or `undefined`. */
+function refOf(logPath: string, event = "execution.completed"): unknown {
+  const outcome = linesOf(logPath)
+    .filter((record) => record["event"] === event)
+    .at(-1);
+  assert.ok(outcome !== undefined, `no ${event} in the log`);
+  return (outcome["payload"] as Record<string, unknown> | undefined)?.["provider_ref"];
+}
+
+test("a detail naming a reference puts it on the completed record", async () => {
+  const unit = granted();
+  const result = await run(mockAdapter({ providerRef: "msg_01JQ2XKV" }), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // The adapter half is the contract's own knowledge of which adapter it
+  // called, so an adapter cannot file its effect under somebody else's name.
+  assert.deepEqual(refOf(unit.logPath), { adapter: "mock-email", id: "msg_01JQ2XKV" });
+  if (result.ok) {
+    assert.deepEqual(result.provider_ref, { adapter: "mock-email", id: "msg_01JQ2XKV" });
+  }
+});
+
+test("an adapter that names no reference leaves the record carrying none", async () => {
+  const unit = granted();
+  const result = await run(mockAdapter(), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(refOf(unit.logPath), undefined, "a reference was invented for an adapter naming none");
+  if (result.ok) assert.equal(result.provider_ref, undefined);
+});
+
+test("a reference the redaction sweep touched is dropped rather than recorded", async () => {
+  const unit = granted();
+  // The careless adapter of the redaction checks, one field over: the secret is
+  // inside the value that would become the join key.
+  const result = await run(mockAdapter({ providerRef: `msg-${SECRET}` }), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const raw = readFileSync(unit.logPath, "utf8");
+  assert.equal(raw.includes(SECRET), false, "the secret reached the log (SPEC.md §11.1 invariant 3)");
+  assert.equal(
+    raw.includes(REDACTION_PLACEHOLDER),
+    false,
+    "a redacted identifier was written as though it were an identifier",
+  );
+  assert.equal(refOf(unit.logPath), undefined);
+  if (result.ok) {
+    assert.equal(result.provider_ref, undefined);
+    assert.ok(result.redactions > 0, "the sweep did not count the hit inside the reference");
+    const detail = result.detail as Record<string, JsonValue>;
+    assert.equal(
+      String(detail["provider_ref"]).includes(SECRET),
+      false,
+      "the returned detail still carried the secret",
+    );
+  }
+});
+
+for (const [label, id] of [
+  ["a space", "msg 01JQ2XKV"],
+  ["a newline", "msg\n01JQ2XKV"],
+  ["nothing at all", ""],
+  ["more than 256 characters", `msg_${"x".repeat(300)}`],
+] as const) {
+  test(`a reference carrying ${label} is dropped, and the execution still completes`, async () => {
+    const unit = granted();
+    const result = await run(mockAdapter({ providerRef: id }), unit);
+
+    // The side effect happened. A record the write boundary would reject is the
+    // one thing that must not follow it, so the reference is dropped and the
+    // completion is the pre-amendment record.
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(refOf(unit.logPath), undefined, `a reference of ${label} was recorded anyway`);
+    if (result.ok) assert.equal(result.provider_ref, undefined);
+  });
+}
+
+test("a failed execution records no reference even when the adapter named one", async () => {
+  const unit = granted();
+  const result = await run(
+    mockAdapter({ providerRef: "msg_01JQ2XKV", fail: { code: "upstream-said-no", message: "no" } }),
+    unit,
+  );
+
+  assert.equal(result.ok, false, "a reported failure completed");
+  // A failure produced no effect for a provider to file, and a join key on it
+  // would claim the log covers an effect that never happened.
+  assert.equal(refOf(unit.logPath, "execution.failed"), undefined);
+});
+
+test("the reference the contract lifts is the one the record carries", async () => {
+  const unit = granted();
+  const adapter = mockAdapter({ providerRef: "msg_01JQ2XKV" });
+  const result = await run(adapter, unit);
+  assert.equal(result.ok, true, JSON.stringify(result));
+
+  // The same function the contract uses to lift, run over the returned detail:
+  // a suite that spelled the rule a second time would eventually disagree with
+  // the runtime and fail an adapter that had done nothing wrong.
+  if (result.ok) {
+    const detail = result.detail as JsonValue;
+    assert.deepEqual(providerRefFor(adapter.name, detail, detail), result.provider_ref);
+  }
 });

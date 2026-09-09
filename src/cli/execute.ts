@@ -50,7 +50,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePathSegments } from "node:path";
 
@@ -64,6 +64,16 @@ import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import { declaredCredentialsForClass } from "../adapters/registry.js";
 import { childEnvironment, type ChildEnvironment } from "../core/child-env.js";
 import { coverageReport } from "../core/coverage.js";
+import {
+  credentialPathsFor,
+  detectSandbox,
+  resolveExecutable,
+  sandboxPosture,
+  sandboxRequired,
+  wrapForSandbox,
+  type SandboxMechanism,
+  type WrappedSpawn,
+} from "../core/sandbox.js";
 import {
   DEFAULT_TRUNK_REF,
   defaultRange,
@@ -84,7 +94,7 @@ import {
   type ExecuteRefusal,
   type ResolveOutcome,
 } from "../core/execute.js";
-import { harnessLoopEscalation, harnessOutcomeCoverage } from "../core/loop.js";
+import { harnessLoopEscalation, harnessOutcomeCoverage, loopClearance } from "../core/loop.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
@@ -292,6 +302,30 @@ function childEnvFor(
   });
 }
 
+/**
+ * The wrapped spawn for a child that must not reach the network (APRV-193), or
+ * `null` when there is nothing to wrap.
+ *
+ * The allowance is the runtime's, not the caller's: outbound network denied,
+ * loopback with it (the gate's IPC is a file, so there is no socket to except),
+ * and the credential material beside the log unreadable. No flag widens it.
+ * `--no-sandbox` is all or nothing, and it is recorded.
+ */
+function wrapExecutable(
+  mechanism: SandboxMechanism,
+  command: string,
+  args: readonly string[],
+  env: Record<string, string>,
+  logPath: string,
+): WrappedSpawn | null {
+  const resolved = resolveExecutable(command, env);
+  if (resolved === null) return null;
+  return wrapForSandbox(mechanism, resolved, args, {
+    loopback: false,
+    denyRead: credentialPathsFor(logPath),
+  });
+}
+
 /** `defaults.approval_ttl` in force, or `null` when the policy declares none. */
 function ttlOf(flags: Record<string, string | boolean>, cwd: string): number | null {
   const location = policyLocation(flags, cwd);
@@ -402,6 +436,7 @@ export function commandRun(
       "--token": "string",
       "--as": "string",
       "--payload-hash": "string",
+      "--no-sandbox": "boolean",
     },
     RUN_HELP,
     streams,
@@ -498,6 +533,41 @@ export function commandRun(
   // NOT do (it is a scrub, not the sandbox APRV-193 designs).
   const childEnv = childEnvFor(logPath, actionKey, flags, cwd);
 
+  // APRV-193. The room the child runs in, decided BEFORE `execution.started`
+  // for the same reason the count above is: the record says what happened, and
+  // a value written after the fact would be a value nobody measured.
+  //
+  // `granted` is the presence of a token, and it is the whole class test this
+  // verb needs. The manual path is a human's grant over these exact bytes, and
+  // `approval run` on a grant is the one door to the world the design leaves
+  // open (the registry for `deps.add`, the API host for `network.call`). Every
+  // other path — autonomous, and supervised-sampled — is one nobody was asked
+  // about, and that is where the child is starved. Reading the token rather
+  // than re-resolving the class keeps this decision on THIS side of the append,
+  // and it widens nothing an agent can reach on its own: a token that does not
+  // verify runs no command at all, so the loosening needs something a human
+  // minted (SPEC.md §11.1 invariant 4).
+  const posture = sandboxPosture({
+    optedOut: boolFlag(flags, "--no-sandbox"),
+    granted: stringFlag(flags, "--token") !== null,
+    detection: detectSandbox(),
+    ...(sandboxRequired() ? { requireSupported: true } : {}),
+  });
+  if (posture.kind === "refuse") {
+    // Fail closed, and BEFORE anything is appended: a machine that cannot
+    // protect an execution costs no authority, so the same token still spends
+    // once the mechanism works. Not one of `EXECUTE_REFUSAL_CODES` — adding
+    // `sandbox-unavailable` to that union widens frozen public API (§11.1
+    // invariant 6), which is a human's decision and is drafted for sign-off in
+    // `docs/proposals/aprv-193-amendments.md`. Until then this is what it is:
+    // the executor declining to run something it cannot put in the room it
+    // promised, with the exit code that already means "the command did not run".
+    streams.err(
+      `approval: the egress sandbox is unavailable (${posture.reason}); the command was NOT run and nothing was appended. Fix the sandbox, or take the recorded opt-out with \`--no-sandbox\` (docs/sandboxed-exec.md).\n`,
+    );
+    return EXIT_COMMAND_NOT_RUN;
+  }
+
   // execution.started is appended HERE, before the child exists. A crash from
   // this line until the finish below leaves a dangling execution, which
   // `approval status` reports and nothing repairs on its own.
@@ -508,17 +578,37 @@ export function commandRun(
       ...executeOptions(flags, cwd, stringFlag(flags, "--token")),
       presentedPayloadHash: payloadHash,
       envStripped: childEnv.stripped,
+      sandbox: posture.state,
     },
     actor,
   );
   if (!started.ok) return emitRefusal(streams, json, started);
 
-  const child = spawnSync(command, childArgv.slice(1), {
-    cwd,
-    stdio: childIo.stdio,
-    encoding: "utf8",
-    env: childEnv.env,
-  });
+  // APRV-193. The wrapper is built here and not inside `core/sandbox.ts`'s own
+  // spawn, because this verb's spawn is the one place the payload binding, the
+  // starved environment and the stdio contract already meet: a second spawn
+  // site would be a second place for them to drift.
+  //
+  // The command is resolved to an absolute path first. `sandbox-exec` execs
+  // through `execvp`, so the lookup would still happen — but a lookup that
+  // FAILS exits 71, and 71 recorded as the child's exit code is a lie about a
+  // command that never ran. A command that does not resolve is left unwrapped
+  // and fails as the ENOENT it is.
+  const wrapped =
+    posture.kind === "apply"
+      ? wrapExecutable(posture.mechanism, command, childArgv.slice(1), childEnv.env, logPath)
+      : null;
+  const child = spawnSync(
+    wrapped?.command ?? command,
+    wrapped?.args ?? childArgv.slice(1),
+    {
+      cwd,
+      stdio: childIo.stdio,
+      encoding: "utf8",
+      env: childEnv.env,
+    },
+  );
+  if (wrapped !== null) rmSync(wrapped.cleanup, { recursive: true, force: true });
   if (childIo.onOutput !== undefined) {
     childIo.onOutput({ stdout: child.stdout ?? "", stderr: child.stderr ?? "" });
   }
@@ -1196,6 +1286,12 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   // non-empty string an operator can grep the log for and every pre-existing
   // consumer reads the three fields it always read. `scope` is the additive
   // field that says which derivation produced the key.
+  //
+  // APRV-280 adds `clears`, additively: an escalated scope is a repository state
+  // an operator has to get OUT of, and a row that names the scope without naming
+  // the exit is a row that sends them to the source. The sentence is
+  // `core/loop.ts`'s own, so `status`, the gate's refusals and the hook's denies
+  // cannot come to disagree about what recovery is.
   const escalations = [
     ...loopEscalation(records)
       .filter((state) => state.escalated)
@@ -1204,6 +1300,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         scope: "task",
         consecutive_failures: state.consecutiveFailures,
         escalated: true,
+        clears: loopClearance("task", state.task),
       })),
     ...harnessLoopEscalation(records)
       .filter((state) => state.escalated)
@@ -1212,6 +1309,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         scope: state.scope,
         consecutive_failures: state.consecutiveFailures,
         escalated: true,
+        clears: loopClearance(state.scope, state.key),
       })),
   ];
   // Informational, and deliberately outside `healthy` and the exit code, for the
@@ -1431,11 +1529,16 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         ...(escalations.length === 0
           ? {}
           : {
-              under: escalations.map((entry) =>
+              // APRV-280: the scope, then the way out. The clearing sentence is
+              // long and it earns its line — an operator reading this row is
+              // looking at a repository where a floor is routing everything to a
+              // phone, and the next thing they need is what ends that.
+              under: escalations.flatMap((entry) => [
                 entry.scope === "task"
-                  ? `${entry.task} (${entry.consecutive_failures} consecutive execution.failed, task) — escalated to manual`
-                  : `${entry.task} (${entry.consecutive_failures} consecutive failed tool calls, ${entry.scope}) — escalated to manual`,
-              ),
+                  ? `${entry.task} (${entry.consecutive_failures} consecutive failed side-effecting executions, task) — escalated to manual`
+                  : `${entry.task} (${entry.consecutive_failures} consecutive failed side-effecting tool calls, ${entry.scope}) — escalated to manual`,
+                st.muted(`  clears: ${entry.clears}`),
+              ]),
             }),
       },
       {

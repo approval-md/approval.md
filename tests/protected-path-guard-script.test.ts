@@ -23,12 +23,12 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { appendAttestation } from "../src/core/attest.js";
+import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
 import { decide, register, request } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { verify } from "../src/core/verify.js";
@@ -68,6 +68,14 @@ const POLICY = [
   "```",
   "",
 ].join("\n");
+
+const ROUTED_POLICY = POLICY.replace(
+  "  - SPEC.md",
+  "  - { path: SPEC.md, class: policy.edit.spec }",
+).replace(
+  "  policy.edit:\n    autonomy: manual",
+  "  policy.edit:\n    autonomy: manual\n  policy.edit.spec:\n    autonomy: manual",
+);
 
 const roots: Array<() => void> = [];
 after(() => {
@@ -122,10 +130,10 @@ function minutesAgo(minutes: number): string {
  * candidate that disagrees at seq 2 while agreeing at seq 1 is exactly the
  * shape "a different history that is longer" takes.
  */
-function newFixture(label: string): Fixture {
+function newFixture(label: string, policy = POLICY): Fixture {
   const { root, cleanup } = scratchRoot(`guard-script-${label}`);
   roots.push(cleanup);
-  const unit = newScenario(root, POLICY);
+  const unit = newScenario(root, policy);
   for (const minutes of [30, 29]) {
     const attested = appendAttestation(unit.logPath, unit.policyPath, HUMAN, {
       clock: fixedClock(minutesAgo(minutes)),
@@ -293,6 +301,29 @@ test("head alone: the grant in the log the pull request carries still passes", (
   assert.equal(candidate(run, "origin/main").status, "missing");
 });
 
+test("a routed protected-path object is enforced by the script", () => {
+  const fixture = newFixture("routed-object", ROUTED_POLICY);
+  editSpec(fixture);
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(run.report.findings[0]?.path, "SPEC.md");
+  assert.equal(run.report.findings[0]?.code, "no-evidence");
+});
+
+test("a routed protected path removed at head remains enforced from base", () => {
+  const fixture = newFixture("routed-object-removed", ROUTED_POLICY);
+  const withoutProtectedPaths = POLICY.replace("protected_paths:\n  - SPEC.md\n", "");
+  writeFileSync(fixture.unit.policyPath, withoutProtectedPaths, "utf8");
+  editSpec(fixture);
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const spec = run.report.findings.find((finding) => finding.path === "SPEC.md");
+  assert.ok(spec !== undefined, JSON.stringify(run.report.findings));
+  assert.equal(spec.code, "no-evidence");
+});
+
 // ---------------------------------------------------------------------------
 // (b) the grant is on a pushed records branch, not yet merged
 // ---------------------------------------------------------------------------
@@ -437,4 +468,74 @@ test("the guard reads committed trees only: a working-tree log is not evidence",
   const run = runGuard(fixture, ["--head", "main", "--log-ref", "main"]);
   assert.equal(run.code, 1, run.stdout);
   assert.equal(run.report.findings[0]?.code, "no-evidence");
+});
+
+// ---------------------------------------------------------------------------
+// The gate organs, digested per path at the head commit (APRV-272)
+// ---------------------------------------------------------------------------
+
+const ORGAN = join(".claude", "settings.json");
+
+/** Write the harness settings file in the fixture, at `text`. */
+function writeOrgan(fixture: Fixture, text: string): void {
+  mkdirSync(join(fixture.dir, ".claude"), { recursive: true });
+  writeFileSync(join(fixture.dir, ORGAN), text, "utf8");
+}
+
+test("a hand-edited gate organ passes on its attestation, with no grant anywhere", () => {
+  const fixture = newFixture("organ");
+  const text = '{"hooks":{"PreToolUse":[],"PostToolUse":[]}}\n';
+  writeOrgan(fixture, text);
+  // The human's own act: attest the bytes, then commit the change AND the log
+  // advance carrying the record — which is the shape PR #300 could not have.
+  const attested = appendOrganAttestation(
+    fixture.unit.logPath,
+    { path: ".claude/settings.json", root: fixture.dir },
+    HUMAN,
+    { clock: fixedClock(minutesAgo(2)) },
+  );
+  assert.equal(attested.ok, true, JSON.stringify(attested));
+  commit(fixture.dir, "install the PostToolUse entries");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const finding = run.report.findings.find((entry) => entry.path === ".claude/settings.json");
+  assert.ok(finding !== undefined, JSON.stringify(run.report.findings));
+  assert.equal(finding.evidence, "attested");
+  assert.match(finding.detail, /human-only/u);
+});
+
+test("an organ committed without attesting the bytes at head fails, naming the verb", () => {
+  const fixture = newFixture("organ-unattested");
+  writeOrgan(fixture, '{"hooks":{"PreToolUse":[]}}\n');
+  commit(fixture.dir, "install a hook entry nobody signed");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, run.stdout);
+  const finding = run.report.findings.find((entry) => entry.path === ".claude/settings.json");
+  assert.ok(finding !== undefined, JSON.stringify(run.report.findings));
+  assert.equal(finding.code, "no-evidence");
+  assert.match(finding.detail, /approval policy attest --organ \.claude\/settings\.json/u);
+});
+
+test("attesting an organ and then editing it again fails: the digest at head is not signed", () => {
+  const fixture = newFixture("organ-stale");
+  writeOrgan(fixture, '{"hooks":{"PreToolUse":[]}}\n');
+  const attested = appendOrganAttestation(
+    fixture.unit.logPath,
+    { path: ".claude/settings.json", root: fixture.dir },
+    HUMAN,
+    { clock: fixedClock(minutesAgo(3)) },
+  );
+  assert.equal(attested.ok, true, JSON.stringify(attested));
+  // One more edit AFTER the signature, committed with it.
+  writeOrgan(fixture, '{"hooks":{"PreToolUse":[],"PostToolUse":[]}}\n');
+  commit(fixture.dir, "one more entry, unsigned");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, run.stdout);
+  const finding = run.report.findings.find((entry) => entry.path === ".claude/settings.json");
+  assert.ok(finding !== undefined, JSON.stringify(run.report.findings));
+  assert.equal(finding.code, "no-evidence");
+  assert.match(finding.detail, /no gate\.organ\.attested record attests/u);
 });

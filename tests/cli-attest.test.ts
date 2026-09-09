@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -348,4 +349,186 @@ test("policy --help and the root help both mention attest", () => {
   const dir = caseDir();
   assert.match(runCli(["policy", "--help"], dir).stdout, /attest/);
   assert.match(runCli(["--help"], dir).stdout, /policy attest/);
+});
+
+// ---------------------------------------------------------------------------
+// --organ: the gate organs (APRV-272)
+// ---------------------------------------------------------------------------
+
+const SETTINGS_TEXT = `${JSON.stringify(
+  { hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "approval hook claude-code" }] }] } },
+  null,
+  2,
+)}\n`;
+
+/** A case directory carrying a policy file AND one gate organ on disk. */
+function organCaseDir(text = SETTINGS_TEXT, organ = join(".claude", "settings.json")): string {
+  const dir = caseDir();
+  const path = join(dir, organ);
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, text, "utf8");
+  return dir;
+}
+
+test("--organ attests the harness settings file and names it in the record", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--organ", ".claude/settings.json", "--as", "human:carter"],
+    dir,
+  );
+
+  assert.equal(run.code, 0);
+  assert.equal(run.stderr, "");
+  assert.match(
+    run.stdout,
+    /^attested gate organ \.claude\/settings\.json at seq 1: sha256 [a-f0-9]{64}\n$/,
+  );
+
+  const records = logRecords(dir);
+  assert.equal(records.length, 1);
+  // Never `policy.updated`: the gate's policy readers select on that type, and
+  // this record must be invisible to every one of them.
+  assert.equal(records[0]?.["event"], "gate.organ.attested");
+  assert.equal(records[0]?.["actor"], "human:carter");
+  assert.deepEqual(Object.keys(firstPayload(dir)).sort(), ["organ_path", "sha256"]);
+  assert.equal(firstPayload(dir)["organ_path"], ".claude/settings.json");
+
+  // The chain the CLI wrote still verifies.
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+test("--organ computes the digest itself, from the bytes on disk", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--organ", ".claude/settings.json", "--as", "human:carter", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 0);
+  const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(parsed).sort(), ["ok", "organ_path", "path", "seq", "sha256"]);
+  assert.equal(parsed["ok"], true);
+  assert.equal(parsed["seq"], 1);
+  assert.equal(parsed["organ_path"], ".claude/settings.json");
+  assert.equal(
+    parsed["sha256"],
+    createHash("sha256")
+      .update(readFileSync(join(dir, ".claude", "settings.json")))
+      .digest("hex"),
+  );
+  assert.equal(parsed["sha256"], firstPayload(dir)["sha256"]);
+});
+
+test("--organ takes an absolute path under the directory and records it relative", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    [
+      "policy",
+      "attest",
+      "--organ",
+      join(dir, ".claude", "settings.json"),
+      "--as",
+      "human:carter",
+      "--json",
+    ],
+    dir,
+  );
+
+  assert.equal(run.code, 0);
+  assert.equal(firstPayload(dir)["organ_path"], ".claude/settings.json");
+});
+
+test("--organ pointed at the policy file is refused with its own code", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--organ", "APPROVAL.md", "--as", "human:carter", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  assert.equal(run.stdout, "");
+  const parsed = JSON.parse(run.stderr) as { error: { code: string; message: string } };
+  assert.equal(parsed.error.code, "path-is-policy");
+  assert.match(parsed.error.message, /approval policy attest/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--organ pointed at a path that is not an organ is refused", () => {
+  for (const path of ["README.md", ".approval/env", "src/core/gate.ts", "SPEC.md"]) {
+    const dir = organCaseDir();
+    const run = runCli(
+      ["policy", "attest", "--organ", path, "--as", "human:carter", "--json"],
+      dir,
+    );
+
+    assert.equal(run.code, 2, path);
+    const parsed = JSON.parse(run.stderr) as { error: { code: string } };
+    assert.equal(parsed.error.code, "path-not-organ", path);
+    assert.deepEqual(logRecords(dir), [], path);
+  }
+});
+
+test("--organ under an agent actor is refused at exit 2, like every attestation", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--organ", ".claude/settings.json", "--as", "agent:claude-code"],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /human-only|human:<id>/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--organ with no declared identity is refused at exit 2", () => {
+  const dir = organCaseDir();
+  const run = runCli(["policy", "attest", "--organ", ".claude/settings.json"], dir);
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /APPROVAL_HUMAN/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--policy and --organ together are a usage error, never a guess", () => {
+  const dir = organCaseDir();
+  const run = runCli(
+    [
+      "policy",
+      "attest",
+      "--policy",
+      "APPROVAL.md",
+      "--organ",
+      ".claude/settings.json",
+      "--as",
+      "human:carter",
+      "--json",
+    ],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  const parsed = JSON.parse(run.stderr) as { error: { code: string } };
+  assert.equal(parsed.error.code, "usage");
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--organ naming a file that is not there is exit 4, not an attestation", () => {
+  const dir = caseDir();
+  const run = runCli(
+    ["policy", "attest", "--organ", ".claude/settings.json", "--as", "human:carter"],
+    dir,
+  );
+
+  assert.equal(run.code, 4);
+  assert.match(run.stderr, /gate organ/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("the help documents --organ and what it is for", () => {
+  const dir = caseDir();
+  const run = runCli(["policy", "attest", "--help"], dir);
+
+  assert.equal(run.code, 0);
+  assert.match(run.stdout, /--organ <path>/);
+  assert.match(run.stdout, /gate\.organ\.attested/);
+  assert.match(run.stdout, /policy\.core/);
 });
