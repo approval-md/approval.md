@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-09 01:58'
+updated_date: '2026-09-09 03:05'
 labels: []
 dependencies:
   - APRV-320
@@ -35,7 +35,7 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 - [x] #9 Mobile-first responsive with no horizontal scroll at 360px
 - [x] #10 The green accent is used only for the approve state and the tick; everything else is monochrome
 - [x] #11 Accessibility: visible focus rings, aria labels on the toggle and the search box, and the tick animation respects prefers-reduced-motion
-- [ ] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
+- [x] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
 - [x] #13 No em dashes and no not-X-but-Y constructions in the page copy
 <!-- AC:END -->
 
@@ -51,6 +51,8 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 6. Production verification found three older claims needing precision: name policy-not-attested with hash-mismatch detail, preserve human-only in the irreversible floor wording, and describe the optional command sandbox without claiming a whole-harness sandbox. Also describe sealed token delivery without an unconditional printed-once claim. Synchronize visible cards, embedded search index and llms-full before final closeout.
 
 7. Carter requested more spacing below the bold lead and approved making npm the primary install with source instructions collapsed under Latest features / contribute. Keep explicit published-vs-source availability, verify the disclosure and mobile layout, then deploy through PR.
+
+After PR353 API delivery, add the source-only public adapter author API to the visible card grid, embedded search index and llms surfaces. Correct remaining comparison copy to distinguish the optional command sandbox from whole-harness isolation and describe credentials through runtime-verified execution authority without an unconditional human-token claim. Preserve the approved heading, 18px spacing and npm-primary disclosure. Verify card/index parity, source-only release labels, repository links, browser search and 360px overflow, then deliver and verify actual Pages bytes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -150,4 +152,8 @@ Codex delivery fallback: APRV-265 no longer depends on APRV-319. The page links 
 Carter requested the exact bold lead: A harness-agnostic, open-source framework for approving agent actions with a human in the loop, immediately after the existing human approval for agent actions heading. Added the visible lead and synchronized metadata plus llms.txt/llms-full.txt; parent verified actual desktop rendering in the preview. The existing heading remains unchanged.
 
 PR289 mergedc9e071843aaaa692d1d1ccfa81e02f9d5a2ab321; GitHub Pages built successfully and homepage plus llms files byte-matched reviewed source. Browser verified exact bold lead below original heading. Carter then requested18px spacing and npm-primary installation with collapsed Latest features / contribute, implemented in closeout branch. Browser verified disclosure open/closed, source command,18px gap, no overflow at1280px or360px. Precision fixes synchronize visible/search/llms wording for attestation refusal, human-only floor exception, sealed delivery and bounded command sandbox. Final follow-up deployment remains pending.
+
+PR352 merged as 9d16b7f9b3a9d3f47f4bd9c2dc3504aa9f496d33. GitHub Pages reported built at that commit; fetched homepage byte-matched reviewed source, and fresh production browser verification observed 18px gap, npm install primary and source disclosure collapsed. The remaining source catalogue refresh follows API353 merge; future unmerged quickstart/override/log-follow features will not be advertised as shipped.
+
+Source catalogue follow-up: 70 unique visible cards match the embedded index; new approval-md/adapters entry explicitly requires a source checkout. Browser search returned 1 of 70 for the public module, 360px viewport had no horizontal overflow, lead spacing remained 18px and source install disclosure stayed collapsed. Verified 97 repository links and markdown anchors against the merged main baseline, inline JavaScript syntax, and in-page IDs. Build, lint, docs-guard (16/16), and git diff --check exited 0. No runtime changed; main API delivery full suite passed 4000 tests with 1 skip. AC4 remains pending the complete feature-claim audit; this update does not advertise unmerged quickstart, policy override or log subscription work.
 <!-- SECTION:NOTES:END -->
