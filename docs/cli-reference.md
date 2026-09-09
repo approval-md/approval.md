@@ -5588,3 +5588,22 @@ queue, so an unbounded guest wait is one stranger stalling every other session.
 The guest instructions string says so, tells the caller to poll `status`, and
 states plainly that a granted request executes nowhere: the demo is the approval
 flow itself.
+
+## Constrained Codex preparation
+
+approval codex prepare is an artifact generator. It writes one fresh review
+directory and has no activation path. Its requirements, managed config,
+launchers and launchd files are text for a human or MDM workflow to inspect.
+
+approval codex setup --check proves only that those artifacts match their
+closed manifest and hashes. approval codex doctor --strict asks the separate
+host question: are the package and its ancestors root-owned and immutable, are
+the three principals distinct, are the roots disjoint and canonical, and are
+the broker and runner present? POSIX ownership does not establish ACL custody,
+so this slice executes no manifest-selected binary and reports runtime versions
+unchecked. Unknown evidence is a refusal.
+
+The first slice deliberately makes start and serve return codex-not-ready. An
+npm install, generated config, or passing bundle check does not create a
+mandatory boundary. The whole approval codex family is operator-only and absent
+from the ordinary broad MCP catalog.

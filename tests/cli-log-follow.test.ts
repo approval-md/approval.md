@@ -60,16 +60,22 @@ const stdout = process.stdout;
 const originalWrite = stdout.write.bind(stdout);
 let peak = 0;
 let writes = 0;
+let backpressured = false;
+let writesWhileBackpressured = 0;
+stdout.on("drain", () => { backpressured = false; });
 stdout.write = (...args) => {
+  if (backpressured) writesWhileBackpressured += 1;
   const accepted = originalWrite(...args);
   writes += 1;
   peak = Math.max(peak, stdout.writableLength);
+  if (!accepted) backpressured = true;
   return accepted;
 };
 process.on("exit", () => {
   writeFileSync(${JSON.stringify(statsPath)}, JSON.stringify({
     peak,
     writes,
+    writesWhileBackpressured,
     highWaterMark: stdout.writableHighWaterMark,
   }));
 });
@@ -203,12 +209,20 @@ test("a closed downstream pipe cancels the foreground listener cleanly", async (
   append(world.logPath, 1);
   append(world.logPath, 2);
   const child = start(["log", "follow", "--json"], world.cwd);
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const exited = exitOf(child);
   await nextLine(child);
+  const stdoutClosed = once(child.stdout, "close");
   child.stdout.destroy();
-  // The second replay line, or this append if both replay writes fit before the
-  // close, exercises the actual process stdout EPIPE listener.
+  await stdoutClosed;
+  // Appending only after the downstream fd closes exercises the actual process
+  // stdout EPIPE listener without racing the parent-side stream teardown.
   append(world.logPath, 3);
-  assert.equal(await exitOf(child), 0);
+  assert.equal(await exited, 0, `listener stderr: ${stderr}`);
 });
 
 test("a slow native pipe bounds producer output and resumes after an incomplete final fragment", async () => {
@@ -246,9 +260,15 @@ test("a slow native pipe bounds producer output and resumes after an incomplete 
   const stats = JSON.parse(readFileSync(statsPath, "utf8")) as {
     peak: number;
     writes: number;
+    writesWhileBackpressured: number;
     highWaterMark: number;
   };
-  assert.equal(stats.writes, 1, "the iterator advanced while the first record was backpressured");
+  assert.equal(
+    stats.writesWhileBackpressured,
+    0,
+    "the iterator wrote another record before stdout emitted drain",
+  );
+  assert.ok(stats.writes >= 1, "the listener exited without writing the first record");
   assert.ok(
     stats.peak <= largestLineBytes + stats.highWaterMark,
     `producer queued ${String(stats.peak)} bytes, beyond one record plus native buffering`,
