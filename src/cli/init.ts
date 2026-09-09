@@ -196,7 +196,17 @@ export function mergeGitignore(
   return { changed: true, text: parts.join(""), added };
 }
 
-export function commandInit(argv: string[], streams: Streams, cwd: string): number {
+export interface InitDeps {
+  /** Alternate policy bytes for a higher-level human setup ceremony. */
+  policyText?: string;
+}
+
+export function commandInit(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  deps: InitDeps = {},
+): number {
   const json = wantsJson(argv);
   const parsed = parseFlags(argv, FLAGS);
   if (!parsed.ok) return usageError(streams, json, parsed.message);
@@ -275,7 +285,7 @@ export function commandInit(argv: string[], streams: Streams, cwd: string): numb
     });
   } else {
     try {
-      writeFileSync(policyPath, CANONICAL_POLICY, { encoding: "utf8", flag: "wx" });
+      writeFileSync(policyPath, deps.policyText ?? CANONICAL_POLICY, { encoding: "utf8", flag: "wx" });
     } catch (cause) {
       return ioError(streams, json, `APPROVAL.md could not be written: ${detail(cause)}`);
     }

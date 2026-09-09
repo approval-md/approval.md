@@ -1721,6 +1721,9 @@ function isGateEntrypoint(path: string): boolean {
 function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
   const verb = positionals[0];
   const sub = positionals[1];
+  if (verb === "quickstart") {
+    return { class: "policy.core", rule: "approval-quickstart" };
+  }
   if (verb === "log") {
     if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
     if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };

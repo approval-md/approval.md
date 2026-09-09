@@ -44,6 +44,7 @@ Usage:
   approval log export [--log <path>] [--json]
   approval instructions [--schemas] [--json]
   approval init       [--dir <path>] [--json]
+  approval quickstart [--dir <path>] [--api-base <url>]      (interactive; no --json)
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
   approval policy amend  [--policy <path>] [--dir <path>] [--log <path>]
@@ -137,6 +138,10 @@ Set up — make this directory and this machine ready:
             atomic-write temp files. Appends
             nothing, attests nothing, overwrites nothing; a re-run writes
             nothing and reports what already exists
+  quickstart ask three decisions, write a solo policy with the named human as
+            its sole approver, configure identity and an optional Telegram
+            channel, show the exact bytes, then require typed \`understood\`
+            before attesting. HUMAN-ONLY and INTERACTIVE ONLY
   setup     the WRITER for that file: "setup identity|vault|sampling" and
             "setup channel <name>" store each secret in the OS keystore and
             record where it lives, and "setup adapter <name>" fills the VAULT
@@ -1407,6 +1412,31 @@ JSON shape (one object on stdout):
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("init")}`;
+
+export const QUICKSTART_HELP = `approval quickstart — make a small solo gate operative
+
+Usage:
+  approval quickstart [--dir <path>]
+
+Asks three decisions: your human id, terminal or Telegram, and which five class
+families always ask. It refuses a directory that already has policy or .approval
+state, writes a fresh policy, configures identity, and runs doctor before showing
+the exact bytes. The one expected unattested row is ignored at that point; every
+other failed row stops setup before attestation. Typed \`understood\` attests only
+if the file still has the displayed digest. A Telegram token uses the existing
+OS-keystore setup path and is resolved explicitly for that preflight.
+
+Interactive only. Piped stdin and --json exit 2 and print the manual sequence.
+The generated default applies only to classified reversible actions; protected
+controls, fail-closed policy loading and unclassified-command refusal remain.
+
+Flags:
+  --dir <path>      project directory (default: current directory)
+  --api-base <url>  Telegram API base passed to channel setup and doctor
+  -h, --help        this text
+
+${EXIT_CODES_POINTER} (0 success; 1 doctor failure; 2 usage; 4 filesystem failure)
+${why("quickstart")}`;
 
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
