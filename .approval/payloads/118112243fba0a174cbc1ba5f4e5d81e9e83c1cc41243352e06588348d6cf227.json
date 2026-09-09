@@ -1,0 +1,1 @@
+{"after":"approval init                      # scaffold APPROVAL.md, .approval/, gitignore\napproval quickstart                # human-only solo setup, review exact policy\n                                  # bytes, type understood, then attest","before":"approval init                      # scaffold APPROVAL.md, .approval/, gitignore","file":"SPEC.md","tool":"Edit"}
