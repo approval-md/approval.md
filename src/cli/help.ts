@@ -42,6 +42,7 @@ Usage:
   approval log verify [--log <path>] [--json]
   approval log tail   [--log <path>] [-n <count>] [--json]
   approval log export [--log <path>] [--json]
+  approval log follow [--log <path>] [--from <seq>] [--cursor-hash <64hex>] --json
   approval instructions [--schemas] [--json]
   approval init       [--dir <path>] [--json]
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
@@ -405,6 +406,7 @@ Usage:
   approval log verify  [--log <path>] [--json]
   approval log tail    [--log <path>] [-n <count>] [--json]
   approval log export  [--log <path>] [--json]
+  approval log follow  [--log <path>] [--from <seq>] [--cursor-hash <64hex>] --json
   approval log sync    [--remote <name>] [--branch <name>] [--json]
   approval log advance [--branch <name>] [--pr] [--dry-run] [--json]
   approval log checkpoint --as human:<id> [--key-file <path>] [--json]
@@ -412,17 +414,41 @@ Usage:
 Subcommands:
   verify   walk the hash chain end to end; clean | torn-tail | corrupt
   tail / export   the last N records (default 10) / every line, verbatim
+  follow   verified records after an exclusive cursor, then verified appends
   sync     fast-forward pull, with a snapshot and a chain reconcile
   advance  commit the log's new records onto a records branch
   checkpoint  sign the current head with your own key (human-only)
 
-verify, tail and export only read. sync and advance move the FILE and append no
-record; checkpoint appends one. Default log: .approval/log/events.jsonl
-JSON shapes: docs/cli-reference.md
-
-${EXIT_CODES_POINTER}
+verify, tail, export and follow only read. sync and advance move the FILE and append no record;
+checkpoint appends one. Default log: .approval/log/events.jsonl
+JSON shapes: docs/cli-reference.md; ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("log")}`;
+
+export const FOLLOW_HELP = `approval log follow — follow verified records after a cursor
+
+Usage:
+  approval log follow [--log <path>] [--from <seq>] [--cursor-hash <64hex>] --json
+
+Flags:
+  --log <path>          log file to read (default .approval/log/events.jsonl)
+  --from <seq>          exclusive sequence cursor (default 0)
+  --cursor-hash <hex>   hash of record --from, retained by the consumer
+  --json                required; one complete event object per stdout line
+  -h, --help            this text
+
+The complete chain is verified before each emitted batch. Notifications only
+wake another verification. Corrupt, torn, unreadable, truncated or cursor-
+mismatched logs stop the stream before any record from that batch is printed.
+
+Persist seq and hash after the external effect succeeds. Reconnecting from that
+cursor is at-least-once across a crash between the effect and cursor storage;
+exactly-once external effects require the consumer's own idempotency mechanism.
+
+${EXIT_CODES_POINTER} (0 on signal or broken-pipe cancellation; 1 corrupt or cursor
+mismatch; 2 usage; 3 torn tail; 4 I/O)
+${JSON_ERRORS}
+${why("log-follow")}`;
 
 export const LOG_SYNC_HELP = `approval log sync — fast-forward the committed log, safely
 
