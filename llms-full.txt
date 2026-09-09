@@ -76,8 +76,8 @@ tail continues:
 
 ## The feature set
 
-69 features across nine facets: gate (13), channels (7), adapters (7), hooks
-(7), mcp (6), log (7), daemon (8), verification (7), examples (7). Tags mark
+70 feature cards across nine facets: gate, channels, adapters, hooks, mcp,
+log, daemon, verification and examples. A card can have several facets. Tags mark
 what is shipped, what is specified, what is an example, what is behind a policy
 key, what is behind a flag, and what is human-only. The same list is embedded in
 index.html as JSON at `script#feature-index`.
@@ -110,6 +110,7 @@ index.html as JSON at `script#feature-index`.
 
 ### adapters
 
+- **A supported API for adapter authors** [new, source checkout]. `approval-md/adapters` exports the execution contract, credential provider and conformance runner with TypeScript declarations. https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md
 - **A vault the policy names** [shipped]. `approval vault set` encrypts one credential under a passphrase named by `vault.passphrase_env`; there is no `approval vault get`. https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential
 - **Email over SMTP, inside the token window** [shipped]. `approval adapter email` verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it. https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md
 - **AgentMail, and the two-key split** [shipped]. The agent holds an AgentMail key without `draft_send`, and the key that can send waits in the vault. https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md
@@ -185,8 +186,8 @@ gives you and what it leaves to you.
 
 1. **Harness-native permission prompts** (Claude Code rules and hooks, Cursor
    auto-run, Codex CLI approval modes) enforce inside the harness they ship
-   with, and Codex backs its gate with an OS-level sandbox this project does not
-   attempt. Their product-specific traces do not form approval.md's portable,
+   with, and Codex backs its gate with an OS-level sandbox for the harness;
+   approval.md offers an optional command sandbox with platform limits. Their product-specific traces do not form approval.md's portable,
    hash-chained authorization record. This project's Claude Code and Cursor
    hooks append that record for the actions they cover; its Codex native
    direct-patch path remains experimental.
@@ -206,8 +207,8 @@ gives you and what it leaves to you.
    platform's backend.
 5. **What is different here**: policy as a hash-attested markdown file in your
    repo, a hash-chained log you verify locally with one command, and credentials
-   that stay inert until a single-use token is minted at the moment a human
-   decides.
+   scoped to adapter execution, with single-use tokens on paths that require
+   a human grant.
 
 ## Global invariants
 
