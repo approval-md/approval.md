@@ -1,11 +1,11 @@
 ---
 id: APRV-265
 title: 'Landing page: the full feature set, dark-first, threeui-style'
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-09 03:48'
+updated_date: '2026-09-09 04:14'
 labels: []
 dependencies:
   - APRV-320
@@ -162,4 +162,12 @@ Source catalogue follow-up: 70 unique visible cards match the embedded index; ne
 PR356 merged as 3394bee3fc235c2202e542ff0a4629fb822d3b46 after all full CI shards and merge-queue checks passed. GitHub Pages reported built at that commit. Public index.html, llms.txt and llms-full.txt each byte-matched the reviewed source (cmp exit 0). A fresh production browser tab displayed 70 cards, the source-only public adapter API, the exact requested bold lead and the npm-primary install with source disclosure collapsed. The remaining AC4 feature-claim audit continues separately; no unmerged runtime feature is advertised.
 
 2026-09-09 final AC4 audit: corrected source-backed claims across index.html, its embedded feature index, llms.txt and llms-full.txt. Structured email rendering no longer claims a JSON appendix; token display and exit-code prose are conditional on the actual surface; ZZZ distinguishes the execution grant from the vaulted service credential; open-window, policy-loading and adapter-custody claims match current boundaries; comparison prose no longer makes unsupported universal vendor claims. Renamed the log-reading card to `Read and verify the log` so a future subscription does not stale a count-specific title, without advertising unmerged APRV-304, APRV-309, APRV-317 or APRV-322 behavior. Verification: 70 visible cards and 70 embedded entries match by id, title and claim (exit 0); extracted inline JavaScript passes `node --check` (exit 0); docs-guard passes 16/16 (exit 0); `git diff --check` exits 0; stale-title and unmerged-feature grep finds no match (expected rg exit 1). Parent browser verification on the actual preview at 360px observed document scrollWidth equal to innerWidth (360), the source disclosure collapsed, and the requested 18px lead spacing. Status stays In Progress for parent review and final deployment.
+
+Final delivery: PR359 merged15ad041b09b4a62e7f04cd271fdbc31fd128387b after full PR and Node20/22 merge-queue checks. Public homepage,llms.txt,llms-full.txt each downloaded with curl exit0 and byte-matched reviewed source. Fresh production browser at https://approval.md confirmed the exact bold lead,18px gap,npm install -g approval-md,collapsed source disclosure,70cards and Read and verify the log. Preview360px had no horizontal overflow; docs16/16,build/lint/JSsyntax/cardparity/diff checks passed. All acceptance criteria now have verification evidence.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered and verified the full source catalogue with exact requested lead,18px spacing,npm-primary install and collapsed source alternative. All70visible/search entries agree, all public files byte-match, and runtime/security claims distinguish experimental or source-only coverage. PR359 merged15ad041; production browser verified.
+<!-- SECTION:FINAL_SUMMARY:END -->
