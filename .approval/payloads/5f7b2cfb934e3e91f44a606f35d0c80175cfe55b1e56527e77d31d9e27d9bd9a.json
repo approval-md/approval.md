@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/codex-enforcement-proof","--title","test(codex): add read-only command boundary diagnostic","--body-file","/private/tmp/aprv-325-pr.md"],"body_sha256":"808b008d269cfa47cc256b45db8fe7a691a05dd3fd114bb7768e09cc21ea12f7","cwd":"/Users/carter/dev/approval-md"}
