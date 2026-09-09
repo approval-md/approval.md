@@ -510,6 +510,8 @@ The reference vault is the storage half of the same sentence. Named credentials 
 
 For `manual` actions, channels MUST present the full payload or a faithful rendering of it, clearly delineated from any agent-written summary, before collecting a decision.
 
+**Adapter eligibility and supervised-live intake.** Before resolving credentials or running a provider-backed precheck, an adapter MUST verify the principal, registered action and exact payload, current applicable authority, execution custody and idempotency. A successful eligibility preview consumes no token and appends no execution start; budget refusals retain the ordinary budget audit record and compare-and-append race handling. For a direct no-token supervised-live action with no prior approval cycle, the adapter MUST use the existing request intake and daemon draw, deriving request metadata from verified registration and supplying the complete bound payload for retention and display. A selected or unavailable draw follows the ordinary pending human-approval path; it does not count as an unselected verdict. A prior cycle, including a pending, rejected or expired request, MUST NOT be rerolled to avoid that decision. An unselected verdict MUST remain bound to the same attested policy digest through eligibility and final start. After precheck, the execution path MUST revalidate authority, payload, policy binding and concurrency before recording a start or acting. Source-map credential fallback remains restricted to verified token-backed execution. (Amended APRV-317, pending sign-off.)
+
 ### 10.5 MCP wrapper (optional)
 
 A thin MCP server exposing the same verbs as tools for clients where MCP is more ergonomic than shelling out. It shares the CLI's code paths.

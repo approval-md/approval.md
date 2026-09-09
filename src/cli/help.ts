@@ -1968,27 +1968,22 @@ export const ADAPTER_HELP = `approval adapter — execute an action through a si
 
 Usage:
   approval adapter email|agentmail|zzz <action-key> [--token <t>] --payload <file|->
-                      [--as human:<id>|agent:<id>] [--vault <path>]
-                      [--policy|--dir|--log <path>] [--timeout <ms>] [--json]
+      [--as human:<id>|agent:<id>] [--vault <path>] [--policy|--dir|--log <path>]
+      [--timeout <ms>] [--json]
 
 Adapters:
   email   send SMTP for communicate.email.external (SPEC.md §6.1)
-  agentmail  send the same class over the AgentMail API: a direct message, or
-          a draft the agent composed, re-read and refused if it drifted
+  agentmail  send that class through AgentMail, directly or from a re-read draft
   zzz     create a thread or reply for communicate.zzz.external
 
-An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials while
-the runtime recomputes the payload hash and applies attested policy. Manual and
-selected-live actions that request intake selects require a valid, unexpired, single-use --token bound to
-the action key and payload. An explicitly policy-authorized supervised or
-autonomous action has no grant and therefore no token. In that case the vault
-passphrase must already be present in the adapter process environment; the
-token-scoped .approval/env fallback stays unavailable.
+An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds credentials while the
+runtime checks the payload and attested policy. Manual and selected-live actions
+require a valid, single-use --token bound to the action and payload. An explicitly
+policy-authorized nonmanual action has no token; its process must already hold the
+vault passphrase, and the token-scoped .approval/env fallback stays unavailable.
 
-A direct no-token supervised-live call runs the existing request intake first,
-using only the verified declaration. Selected or unavailable draws stop before
-credentials; an unselected draw proceeds. Existing approval cycles are not
-redrawn.
+A no-token supervised-live call runs intake; selected/unavailable draws stop before
+credentials. An unselected draw proceeds. Existing approval cycles are not redrawn.
 
 ${EXIT_CODES_POINTER} (5 when a manual path needs a token; 1 for every refusal)
 ${JSON_ERRORS}
@@ -2002,8 +1997,7 @@ Usage:
                       [--dir <path>] [--log <path>] [--timeout <ms>] [--json]
 
 Flags:
-  --token <t>      the single-use token "approval grant" printed. REQUIRED for
-                   manual or request-selected live; omit on policy-authorized nonmanual
+  --token <t>      REQUIRED for manual or selected-live; omit on authorized nonmanual
   --payload <file|->  the JSON payload the grant bound to. REQUIRED (a body on
                    a command line is a body in the shell history)
   --as <id> / --vault <path>   executing identity / the SMTP credential store
@@ -2027,8 +2021,7 @@ Usage:
       [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
 
 Flags:
-  --token <t>   required for manual or selected-live; omit on policy-authorized
-                nonmanual. --payload <file|-> is always required
+  --token <t> / --payload <file|->   token: manual or selected-live; payload: always
   --as <id> / --vault <p> / --policy <p> / --dir <p> / --log <p>   as email
   --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
 
@@ -2059,9 +2052,8 @@ tags and references, and derives ZZZ's retry-safe Idempotency-Key from the
 action key and payload hash. Actions use communicate.zzz.external. The VAULT
 holds zzz.agent_token.
 
---token is required for manual or selected-live execution and omitted for an
-explicitly policy-authorized nonmanual execution. Without a token, the vault
-passphrase must already be present in the adapter process environment.
+--token is required for manual or selected-live and omitted for explicitly
+authorized nonmanual execution; then the process must already hold the passphrase.
 
 A public-room write needs an invited token with write scope. A private-room
 write also needs current room membership and accepted, unexpired approval.md
