@@ -1,11 +1,11 @@
 ---
 id: APRV-322
 title: Verified resumable event subscription for downstream decision listeners
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 22:51'
-updated_date: '2026-09-09 03:56'
+updated_date: '2026-09-09 04:16'
 labels: []
 dependencies: []
 references:
@@ -44,4 +44,14 @@ Implementation reviewed and frozen: pull-based verified subscription, exclusive 
 Final review added a producer-side test shim around the real process.stdout.write, recording peak writableLength rather than inferring producer memory from the parent read buffer. The real CLI paused-pipe regression bounds output to one record plus native buffering and verifies cancellation-fragment discard followed by replay from the last complete cursor. Native signal cancellation may truncate the final JSON fragment; documentation requires consuming only newline-terminated records. Final build, typecheck, lint, and 67/67 feature/help/docs tests plus diff check exited 0. Runtime and tests are frozen for final-head CI; the earlier full local suite remains honestly recorded as one pre-fix help failure.
 
 Delivery diagnostic: PR358 commit370940cf passed all three full runtime CI shards. Protected-path check failed because primary CLI78baf522 predates APRV316 and retained no exact payload material for the otherwise valid policy-authorized starts30071/30073/30075. Replayed only the existing request calls, with manifest861d5a7f and exact payload hashes, through the current built CLI against primary policy/log; all returned proceed:true/requested:false, exit0. No SPEC rewrite, new grant or execution event was manufactured. Normal gated log advance produced records PR360 commit9e153d8f40de8c40885f98c2582717f8bf2c3124 carrying runtime-stored payloads and genuine records30079..30095. Final protected check and actual merge remain pending.
+
+Final delivery confirmed: PR358 merged33888dd9086022ff9b069c78f1b9a866564bd7b2, headb6b15a4e8503047bf3076964f60183e4c9447156. Current-head full PR CI passed all3Node22shards and protected evidence; merge-group34309591769 passed all3Node22 plus all3Node20floor shards and protected check. Records360 separately merged5aef6d95582509eb82e2dc7b5393bcec66f6fcf6. No additional runtime change followed validation. Existing documented O(N) verification/snapshot cost and partial-final-JSON cancellation caveat remain. GitHub issue139 closeout is a separate pending mutation, not a claim of unimplemented subscription work.
+
+Closeout records validation: build plus milestones-guard/backlog-fixtures/docs-guard passed27/27,exit0; no runtime source changes in this closeout.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered verified resumable log subscription and approval log follow, with backpressure, cursor binding, cancellation and corruption tests. Final PR and Node20/22 queue CI passed; PR358 merged33888dd. Exact SPEC evidence retained by the runtime and delivered in records360. Consumer idempotency, full-history verification cost and discarded partial final lines are documented.
+<!-- SECTION:FINAL_SUMMARY:END -->
