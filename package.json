@@ -34,6 +34,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "codex:mcp": "node .codex/approval-mcp.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "lint": "oxlint src tests",
