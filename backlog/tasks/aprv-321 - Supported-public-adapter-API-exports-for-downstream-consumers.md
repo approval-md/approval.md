@@ -1,10 +1,10 @@
 ---
 id: APRV-321
 title: Supported public adapter API exports for downstream consumers
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-08 22:51'
-updated_date: '2026-09-09 02:01'
+updated_date: '2026-09-09 02:26'
 labels: []
 dependencies: []
 references:
@@ -31,9 +31,9 @@ GitHub issue #140 still requests a supported adapter API beyond the now-publishe
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The intended public exports and semver boundary are documented and a consumer can import them from the packed package without deep internal paths.
-- [ ] #2 Packed-package tests exercise execution binding and conformance through the public API; unsupported internals are not accidentally exported.
-- [ ] #3 Any package metadata or release changes follow the actual primary policy gate and no active release work is overwritten.
+- [x] #1 The intended public exports and semver boundary are documented and a consumer can import them from the packed package without deep internal paths.
+- [x] #2 Packed-package tests exercise execution binding and conformance through the public API; unsupported internals are not accidentally exported.
+- [x] #3 Any package metadata or release changes follow the actual primary policy gate and no active release work is overwritten.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -55,4 +55,12 @@ Added a packed-package test that creates a local tarball with a scratch npm cach
 The exports map intentionally breaks the incidental 0.1.0 dist/src imports. docs/adapter-api.md gives the migration and recommends a breaking minor release while major version is zero. No version, tag, publish, dependency, CI, SPEC, registry or built-in adapter change occurred.
 
 Validation on the frozen bytes: build exit 0; typecheck exit0; lint exit 0 clean; packed-package plus docs guard 21 tests passed, 0 failed; environment-clean npm test exit 0 with 4,001 tests, 4,000 passed, 0 failed and 1 skipped. Complete full-suite output: /private/tmp/aprv321-full-suite.log.
+
+Delivery verified: source commit a8009bcf5e210be80a68cb0ec3a26b3e3f665563 merged through PR #353 as c863d489f7e026efaa1222c8f441ecfde715e3e2. Required PR and merge queue checks passed. Primary gate recorded PR creation at seq 30047 and merge arming at seq 30056. Parent reviewed the export surface and packed-consumer tests; the full suite exited 0 with 4000 pass, 1 skip, 0 fail. Package exports and declaration emission changed without a version, tag, dependency, publication, or primary release-record mutation. npm 0.1.0 remains unchanged; downstream registry availability belongs to the later release ceremony.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered a curated approval-md/adapters ESM and TypeScript API with packed-consumer execution binding and conformance tests. PR #353 merged; full suite, lint, typecheck and CI passed. Available in source and local package builds; not yet published to npm.
+<!-- SECTION:FINAL_SUMMARY:END -->
