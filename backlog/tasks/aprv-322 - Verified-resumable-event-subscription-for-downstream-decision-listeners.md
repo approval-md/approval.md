@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 22:51'
-updated_date: '2026-09-09 03:36'
+updated_date: '2026-09-09 03:56'
 labels: []
 dependencies: []
 references:
@@ -42,4 +42,6 @@ Parent review required native stdout backpressure, capturing the verified cursor
 Implementation reviewed and frozen: pull-based verified subscription, exclusive cursor with optional retained hash, first-read hash binding, native stdout backpressure, signal/broken-pipe cleanup, and finite-MCP exclusion. Feature-focused tests passed 44/44; typecheck/lint/build exit 0. Full local suite completed in 571057ms with 4018 tests: 4016 pass, 1 failure, 1 skip, exit 1. The sole failure was LOG_HELP exceeding the short-help limit at 27 lines. After trimming that text and documenting full verification on every 500ms idle poll, final typecheck/lint/build and 50/50 focused help/docs guards plus diff check exited 0. The full local result is retained at /private/tmp/aprv322-full-suite.log; it is not reported as a passing run. Required GitHub CI must verify the complete final head before task completion. Resource limit: O(N) log verification on every wake/poll and O(N) snapshot memory; downstream consumers own idempotent effects and cursor persistence.
 
 Final review added a producer-side test shim around the real process.stdout.write, recording peak writableLength rather than inferring producer memory from the parent read buffer. The real CLI paused-pipe regression bounds output to one record plus native buffering and verifies cancellation-fragment discard followed by replay from the last complete cursor. Native signal cancellation may truncate the final JSON fragment; documentation requires consuming only newline-terminated records. Final build, typecheck, lint, and 67/67 feature/help/docs tests plus diff check exited 0. Runtime and tests are frozen for final-head CI; the earlier full local suite remains honestly recorded as one pre-fix help failure.
+
+Delivery diagnostic: PR358 commit370940cf passed all three full runtime CI shards. Protected-path check failed because primary CLI78baf522 predates APRV316 and retained no exact payload material for the otherwise valid policy-authorized starts30071/30073/30075. Replayed only the existing request calls, with manifest861d5a7f and exact payload hashes, through the current built CLI against primary policy/log; all returned proceed:true/requested:false, exit0. No SPEC rewrite, new grant or execution event was manufactured. Normal gated log advance produced records PR360 commit9e153d8f40de8c40885f98c2582717f8bf2c3124 carrying runtime-stored payloads and genuine records30079..30095. Final protected check and actual merge remain pending.
 <!-- SECTION:NOTES:END -->
