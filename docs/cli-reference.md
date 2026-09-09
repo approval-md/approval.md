@@ -582,7 +582,8 @@ is not manual:
   policy was read and understood, and it says ask.
 - `irreversibility-floor` — policy granted autonomous or supervised and SPEC §7's
   floor overrode it because `--reversible false` was given. `overridden` records
-  what policy actually said.
+  what policy actually said. The floor remains the default when a class rule
+  omits `allow_irreversible` or writes `false`.
 - `load-failure` — the policy could not be loaded at all, so every class is
   manual. `loadFailure` carries a code and a message.
 
@@ -607,14 +608,26 @@ The exit codes, at length. `policy check|test` uses only 0, 2 and 4:
 key may contain, never something an agent can do.
 
 `--reversible` takes an explicit value because "unstated", "reversible" and
-"irreversible" are three different questions. Only the explicit `false` engages
-SPEC §7's irreversibility floor.
+"irreversible" are three different questions. Explicit `false` asks for the
+effective irreversible answer. It resolves to `manual` by default. A nonmanual
+class retains its autonomy only when every equally most-specific matching rule
+sets `allow_irreversible: true`. Lower-specificity rules do not vote, defaults
+cannot opt in, and neither this flag nor any other action metadata can create
+the permission. Manual remains manual and human-only remains human-only.
+
+For an allowed `supervised-live` class, the existing live sampler decides
+whether this action prompts before execution. Allowed `supervised` and
+`supervised-retro` actions execute first and remain eligible for retrospective
+review. Allowed autonomous actions proceed without either review path. Telegram
+appears only when the effective path actually requests approval through that
+channel; policy-authorized execution is never represented as a human grant.
 
 **`--json`** (one object on stdout):
 
 ```
 {"class":"vcs.push.main","reversible":null,
- "outcome":{"autonomy":"supervised","approvers":null,"limits":null},
+ "outcome":{"autonomy":"supervised","approvers":null,"limits":null,
+            "allowIrreversible":false},
  "provenance":"rule"|"default"|"inherited"|"fail-closed"|"floor",
  "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
  "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
@@ -622,6 +635,9 @@ SPEC §7's irreversibility floor.
                      "message":"..."},
  "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
  "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
+ "irreversibility":"not-applicable"|"policy-allowed"|"floor-applied"|
+                   "already-manual"|"human-only",
+ "irreversiblePatterns":["read.*"],
  "candidates":[{"pattern":"read.*","specificity":[1,1,2],
                 "autonomy":"autonomous","winner":true,
                 "tieBreak":"specificity"|"strictest-autonomy"|
@@ -2747,9 +2763,10 @@ and cannot do. It selects the SHAPE of an obligation that exists either way; it
 cannot remove one, delay one, or decide whether the denial happened. The only
 thing a false `reversible: true` buys is the shape whose discharge this runtime
 checks against the chain, which makes the claimant's own exit harder rather than
-easier. The same reading applies to the irreversibility floor that keeps a
-`reversible: false` action out of `supervised-retro` entirely: it is a floor, not
-a proof — it acts on the acting party's own claim, so it catches the honest
+easier. The same reading applies to the irreversibility floor. By default it
+keeps a `reversible: false` action out of `supervised-retro`; an attested class
+rule may explicitly accept that consequence with `allow_irreversible: true`.
+The field acts on the acting party's own claim, so it catches the honest
 declaration and never the lie. What answers the lie is writing `manual` for the
 class, which no declaration can loosen.
 
@@ -4638,9 +4655,11 @@ is the verb that hands them the unit.
 **There is no `approval vault get`**, and it is not an oversight. A verb that
 printed a credential would put it in a terminal, a scrollback buffer, a CI log
 and — through the shell that ran it — a history file. A credential's only
-sanctioned journey is from the vault into an adapter, inside the verified-token
-window the adapter contract holds open (SPEC.md §10.4: "the credentials only
-answer to tokens"). Names are visible; values are not.
+sanctioned journey is from the vault into an adapter, inside the verified
+execution window the adapter contract holds open. Manual and selected-live
+paths verify and consume a token; an attested class rule may explicitly
+authorize an irreversible supervised or autonomous path. Names are visible;
+values are not.
 
 **What the vault DEFENDS:** credentials at rest, and casual reads by an agent
 that can read files in the working tree — the ciphertext hides the NAMES as well
@@ -4747,26 +4766,47 @@ the check would require this verb to know every adapter a machine might run.
 
 ## adapter
 
-An adapter is the hard boundary of SPEC.md §10.4: it holds the credentials and
-refuses to act without a valid, unexpired, single-use execution token bound to
-the action's `idempotency_key` and its `payload_hash`. An agent that bypasses
-this CLI still cannot send, because the credentials only answer to tokens.
+An adapter is the hard boundary of SPEC.md §10.4: it holds the credentials while
+the runtime recomputes the payload hash and applies attested policy. Manual and
+selected-live paths require a valid, unexpired, single-use execution token bound
+to the action's `idempotency_key` and `payload_hash`. An explicitly opted-in
+supervised or autonomous path has no grant and mints no token, so `--token` is
+optional at the command boundary.
+
+Credential custody does not become implicit on the no-token path. The vault
+passphrase must already be present in the adapter process environment. The
+`.approval/env` source-map fallback remains available only inside a real token
+window: it rejects a null grant and a consumed nonmanual execution carrying no
+token digest. This lets an operator authorize nonmanual execution without
+giving an agent a new way to load credentials.
 
 The runtime, not the adapter, owns the sequence: recompute the payload hash,
-read the declared class from the verified log, resolve the credentials the
-adapter says it cannot act without, run the adapter's own pre-token check,
-verify and consume the token, append `execution.started`, call the adapter,
-append the outcome. The adapter implements one method and cannot skip a step,
-because it never holds the sequence.
+read the declared class from the verified log, check policy eligibility or the
+manual token without appending a start, resolve the credentials the adapter says
+it cannot act without, run the adapter's own pre-token check, then recheck policy
+and, on a manual path, verify and consume the token, append
+`execution.started`, call the adapter, append the outcome. The adapter implements
+one method and cannot skip a step, because it never holds the sequence.
 
-The two steps that sit BEFORE the token spend are there for one reason: a
+`supervised-live` selection still belongs to `approval request`. On a direct
+no-token invocation with no earlier approval cycle, the adapter contract runs
+that existing intake path from the verified declaration before it touches a
+credential. A selected or unavailable draw records the ordinary pending cycle
+and stops for its token. The request retains the exact already-hashed payload
+through the normal payload store, so the selected human sees the bound bytes.
+An unselected draw appends no approval event and continues, bound to the same
+attested policy digest through eligibility and start. Once any cycle exists,
+including a rejected or expired one, the contract never redraws it.
+
+The two steps that sit before authorization starts the execution are there for one reason: a
 condition that makes the side effect impossible, and that the runtime can
 establish without attempting it, must not cost a human's single-use grant to
 discover. A credential nobody stored refuses `credential-unavailable`; whatever
 the adapter's own check refuses arrives as `adapter-precheck-refused` with the
 adapter's reason in `adapter_code`. Both leave the log exactly as they found it,
 `acted` is `false`, there is no `started_seq` and no `outcome`, and the same
-token executes once the condition is repaired.
+token executes once the condition is repaired. On an admitted nonmanual path,
+there is no token to preserve and the same preflight still appends nothing.
 
 The pre-token check is offered only bytes the log binds to the action: the
 grant's `payload_hash` on the manual path, the registered declaration's off it.
@@ -4879,8 +4919,10 @@ The enforcement model it assumes is a split pair of keys. AgentMail keys carry
 `draft_create`, `draft_update`, `draft_read`, `draft_send` and `message_send`
 separately. The agent gets a key WITHOUT the two send permissions, so it can
 compose all day and cannot send; the key WITH them goes in the vault under
-`agentmail.api_key`, readable only inside the verified-token window the contract
-opens. `approval setup adapter agentmail` stores that pair, and
+`agentmail.api_key`, readable only inside the contract's execution window. On a
+nonmanual path, opening the encrypted vault requires its passphrase in the
+adapter process environment; the token-scoped source-map fallback does not run.
+`approval setup adapter agentmail` stores that pair, and
 `approval payload agentmail-draft` is the composing side's own verb.
 
 Two payload modes, told apart by the keys they carry, and a payload carrying
@@ -4955,8 +4997,11 @@ whose answer names no id carries neither.
 
 Creates a zzz.bot thread or reply for `communicate.zzz.external`. The only
 credential is `zzz.agent_token`, an invited principal token with write scope.
-It is read from the vault inside the shared verified-token window and sent only
-as an Authorization Bearer header.
+It is read from the vault inside the shared execution window and sent only as an
+Authorization Bearer header. `--token` is required for manual or selected-live
+execution and omitted for an explicitly policy-authorized supervised or
+autonomous execution. On the no-token path, the vault passphrase must already be
+present in the adapter process environment.
 
 This verb is available from a source checkout containing APRV-320 until the
 next approval.md package release. npm `approval-md@0.1.0` predates the adapter;
@@ -5122,7 +5167,7 @@ channel surfaces requests and collects decisions and holds no state, so its setu
 fills the OS keystore and `.approval/env` — the map of where the values that
 unlock the machine live. An adapter executes side effects and holds credentials,
 so its setup fills `.approval/vault.enc`, which holds the values a gated adapter
-SPENDS, read inside the verified-token window and by nothing else. There is no
+SPENDS, read inside the verified execution window and by nothing else. There is no
 verb that prints one back. (An older build spelled the Telegram one without the
 `channel` noun. That form exits 2 and names this one; there is no alias, because
 two spellings of a distinction the SPEC draws on purpose is how the distinction
@@ -5293,7 +5338,7 @@ unset, nothing is stored and no vault is created.
 
 The values go into the vault, not into the OS keystore and not into
 `.approval/env`: what this verb stores is what a gated adapter spends inside a
-verified-token window.
+verified execution window.
 
 What it reports: the path, the count, the names written and the names left alone.
 Never a value, on any path, including a failed probe. Exit 1 means the service
@@ -5370,7 +5415,7 @@ agentmail.api_key   the key that carries draft_send and message_send
 Store the SENDING key here and give the agent a different one. An AgentMail key
 is a mailbox in one string, so a deployment that hands the agent the sending key
 has an agent that can send without asking anybody, and the gate in front of it is
-decoration. The key in the vault is read only inside the verified-token window
+decoration. The key in the vault is read only inside the verified execution window
 the adapter contract opens.
 
 The probe sends nothing. It is `GET /v0/inboxes/{inbox_id}`, the same read a

@@ -11,7 +11,7 @@
  * credential would put it in a terminal, a scrollback buffer, a `script`
  * capture, a CI log, and — through the shell that invoked it — quite possibly a
  * history file. The value's only sanctioned journey is from `.approval/vault.enc`
- * into an adapter's request, inside the verified-token window the adapter
+ * into an adapter's request, inside the verified execution window the adapter
  * contract holds open (`src/adapters/vault-provider.ts`). Reading it any other
  * way is a thing an operator can do with their own passphrase and their own
  * code; it is not a thing this CLI will do for them, because the moment it
@@ -477,7 +477,7 @@ export function commandVault(argv: string[], streams: Streams, cwd: string): num
     return usageError(
       streams,
       json,
-      "there is no `approval vault get`, and it is not an oversight: a verb that printed a credential would put it in a terminal, a scrollback buffer, a CI log and a shell history. A credential's only sanctioned journey is from the vault into an adapter, inside the verified-token window. Use `approval vault list` to see the names.",
+      "there is no `approval vault get`, and it is not an oversight: a verb that printed a credential would put it in a terminal, a scrollback buffer, a CI log and a shell history. A credential's only sanctioned journey is from the vault into an adapter, inside the verified execution window. Use `approval vault list` to see the names.",
       VAULT_HELP,
     );
   }

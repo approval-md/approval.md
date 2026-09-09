@@ -111,11 +111,13 @@
       "expect": {
         "valid": true,
         "codes": [
+          "actor-invalid",
           "action-not-registered",
           "class-human-only",
           "token-required",
           "loop-escalated",
           "policy-not-attested",
+          "policy-drift",
           "already-executed",
           "budget-exceeded",
           "not-started",

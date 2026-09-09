@@ -1,5 +1,5 @@
 /**
- * `approval adapter <name>` — execute an approved action through the adapter
+ * `approval adapter <name>` — execute an action through the adapter
  * contract (SPEC.md §10.4; APRV-69, generalized in APRV-221).
  *
  * This is the CLI face of the adapters in {@link ADAPTER_CLIS} (`email` at
@@ -15,7 +15,7 @@
  * that reimplemented any of them would be a second implementation of the rule.
  *
  * **Why the payload is a file (or stdin) and never a flag.** The bytes are the
- * thing the grant approved, they routinely contain newlines, quotes and a
+ * thing the grant or registered declaration bound, they routinely contain newlines, quotes and a
  * £-sign, and a message body on a command line is a message body in the shell
  * history and in `ps` output. `approval payload hash <file|->` and
  * `approval request --payload <file>` take the same argument in the same form,
@@ -37,16 +37,16 @@
  * | Situation | Code |
  * |---|---|
  * | the message was accepted by the far side | 0 |
- * | usage: a missing flag, a bad identity, an unparseable payload | 2 |
+ * | usage: a missing required flag, a bad identity, an unparseable payload | 2 |
  * | I/O: the payload file or the log could not be read | 4 |
  * | `token-required` — no token was presented | 5 |
  * | `log-torn-tail`, or an append that hit a torn tail | 3 |
  * | anything else the runtime decided: `token-mismatch`, `token-consumed`, `payload-mismatch`, `adapter-class-mismatch`, `adapter-precheck-refused` (a drifted draft), `adapter-failed` (an SMTP refusal), `adapter-act-threw` | 1 |
  *
- * A refused SEND is exit 1 and not 5: the command was well-formed, the token was
- * good, and the answer from the world was no. Only the absence of a valid token
- * earns 5, which is the distinction `run` already draws and the one an agent's
- * retry logic keys on.
+ * A refused SEND is exit 1 and not 5: the command was well-formed and the
+ * answer from the world was no. Exit 5 is the manual-path redirection to obtain
+ * a grant token, which is the distinction `run` already draws and the one an
+ * agent's retry logic keys on.
  */
 
 import { readFileSync } from "node:fs";
@@ -126,7 +126,7 @@ const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
 /**
  * The flags every adapter verb takes. One set and not one per adapter: what the
- * runtime needs in order to execute an approved action (the token, the bytes,
+ * runtime needs in order to execute an action (the optional token, the bytes,
  * the identity, the log, the vault) is the same question whoever answers it,
  * and a per-adapter flag table would be a per-adapter way to drift from
  * `approval run`. An adapter with a flag of its own adds it here, beside these.
@@ -178,7 +178,7 @@ function refusalExit(result: AdapterExecuteResult & { ok: false }): number {
 }
 
 /**
- * `approval adapter <name> <action-key> --token <t> --payload <file|->`.
+ * `approval adapter <name> <action-key> [--token <t>] --payload <file|->`.
  *
  * One implementation for every entry in {@link ADAPTER_CLIS}: the name and the
  * entry are arguments, and everything this function does (the flags, the
@@ -217,22 +217,18 @@ export async function commandAdapterExecute(
     );
   }
 
+  // Optional for the same reason it is optional on `approval run`: the core
+  // admits an explicitly policy-authorized supervised/autonomous execution
+  // without minting a grant. Manual and selected-live paths still reach
+  // `startExecution` and refuse `token-required`; this CLI never invents one.
   const token = stringFlag(flags, "--token");
-  if (token === null) {
-    return usageError(
-      streams,
-      json,
-      "missing --token <t>: an adapter executes only against the single-use token `approval grant` printed",
-      help,
-    );
-  }
 
   const payloadFlag = stringFlag(flags, "--payload");
   if (payloadFlag === null) {
     return usageError(
       streams,
       json,
-      "missing --payload <file|->: the bytes the grant approved. There is no flag that takes the message inline — a body on a command line is a body in the shell history",
+      "missing --payload <file|->: the bytes the grant or registered declaration bound. There is no flag that takes the message inline — a body on a command line is a body in the shell history",
       help,
     );
   }
@@ -317,7 +313,11 @@ export async function commandAdapterExecute(
   const result = await executeThroughAdapter(
     entry.build(timeoutMs === null ? {} : { timeoutMs }),
     { logPath, actionKey, payload, actor },
-    { token, policy: policyLocation, credentials },
+    {
+      ...(token === null ? {} : { token }),
+      policy: policyLocation,
+      credentials,
+    },
   );
 
   if (!result.ok) {

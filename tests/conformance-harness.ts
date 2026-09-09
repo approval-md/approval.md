@@ -342,6 +342,8 @@ function runPolicyResolution(input: Record<string, unknown>): Expectation {
     provenance: resolution.provenance,
     matched_pattern: resolution.matched === null ? null : resolution.matched.pattern,
     floor_applied: resolution.floorApplied,
+    allow_irreversible: resolution.allowIrreversible,
+    irreversible_patterns: resolution.irreversiblePatterns,
     limits: resolution.limits,
   };
   if (!load.ok) outcome["failure_class"] = load.code;

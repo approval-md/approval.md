@@ -862,6 +862,72 @@ test("a registered manual request is still recorded exactly as before", () => {
   assertClean(unit);
 });
 
+test("explicit irreversible permission reaches the gate's autonomous and retro paths", () => {
+  for (const autonomy of ["autonomous", "supervised-retro"] as const) {
+    const policy = POLICY.replace(
+      "  communicate.email.external:\n    autonomy: manual",
+      `  communicate.email.external:\n    autonomy: ${autonomy}\n    allow_irreversible: true`,
+    );
+    const unit = newCase(policy);
+    attest(unit);
+    registerTask(unit);
+    const result = request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        reversible: false,
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    );
+    assert.equal(result.ok, true, result.ok ? "" : result.message);
+    if (!result.ok) continue;
+    assert.equal(result.proceed, true, autonomy);
+    assert.equal(result.record, null, autonomy);
+    assert.equal(result.resolution.floorApplied, false, autonomy);
+    assert.equal(result.resolution.allowIrreversible, true, autonomy);
+    assert.equal(result.autonomy, autonomy === "autonomous" ? "autonomous" : "supervised");
+    assertClean(unit);
+  }
+});
+
+test("allowed supervised-live still prompts when its existing sampler selects", () => {
+  const policy = POLICY.replace(
+    "classes:\n",
+    `audit:\n  sampling_secret_env: ${LIVE_SECRET_ENV}\nclasses:\n`,
+  ).replace(
+    "  communicate.email.external:\n    autonomy: manual",
+    "  communicate.email.external:\n    autonomy: supervised-live\n    live_rate: 1\n    allow_irreversible: true",
+  );
+  const unit = newCase(policy);
+  attest(unit);
+  registerTask(unit);
+  const result = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
+      cls: "communicate.email.external",
+      reversible: false,
+    },
+    at(1),
+    "agent:claude",
+    { ...unit.options, env: LIVE_ENV },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) return;
+  assert.equal(result.proceed, false);
+  assert.equal(result.resolution.supervision, "live");
+  assert.equal(result.resolution.allowIrreversible, true);
+  assert.equal(result.record?.event, "approval.requested");
+  assertClean(unit);
+});
+
 test("a declaration with no payload_hash still accepts the caller's fallback", () => {
   // Behaviour APRV-147 preserves rather than adds to: where the registration
   // declared no binding there is nothing for the log's declaration to win with,

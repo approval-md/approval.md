@@ -1301,7 +1301,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // The credential verbs (APRV-68). `vault set|list|remove` manage the
     // encrypted store adapters read from, and all three are human-only. There
     // is deliberately no `vault get`: a credential's only sanctioned journey is
-    // from the vault into an adapter inside the verified-token window, and a
+    // from the vault into an adapter inside the verified execution window, and a
     // verb that printed one would put it in a terminal and a shell history.
     // Nothing under this verb appends to the log.
     case "vault": {

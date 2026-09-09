@@ -147,6 +147,7 @@ test("manualBecause is load-failure when the policy file is missing", () => {
     liveRate: null,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
 });
 
@@ -315,6 +316,7 @@ test("approvers and limits ride along from the matched rule", () => {
     liveRate: null,
     approvers: ["carter"],
     limits: { daily_usd: 100 },
+    allowIrreversible: false,
   });
 });
 

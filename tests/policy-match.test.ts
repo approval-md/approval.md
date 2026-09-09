@@ -436,6 +436,8 @@ test("a failed load makes every class manual with provenance fail-closed", () =>
       approvers: null,
       limits: null,
       floorApplied: false,
+      allowIrreversible: false,
+      irreversiblePatterns: [],
       candidates: [],
     } satisfies Resolution);
   }

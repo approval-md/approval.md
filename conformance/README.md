@@ -31,8 +31,8 @@ Every suite file carries an envelope and a flat list of vectors:
 ```json
 {
   "suite": "policy-resolution",
-  "vectors_version": "1.0.0",
-  "algorithm": "SPEC.md §5.2 class matching and specificity, §7 irreversibility floor",
+  "vectors_version": "3.0.0",
+  "algorithm": "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, §7 irreversibility floor",
   "description": "…",
   "provenance": "…",
   "count": 12,
@@ -103,7 +103,7 @@ writes — MUST:
 |---|---|
 | `jcs-canonicalization` | RFC 8785 serialization: key ordering at every level, string escaping, and ECMAScript number formatting named by IEEE-754 bit pattern. The digest of every record in SPEC.md §8 is taken over these bytes. |
 | `refusal-unions` | The seven closed refusal-code unions of SPEC.md §11.1 invariant 6, in definition order. A caller branches on these strings. |
-| `policy-resolution` | SPEC.md §5.2 matching and specificity, §7's irreversibility floor, and the fail-closed rule for a policy that does not parse. |
+| `policy-resolution` | SPEC.md §5.2 matching, specificity and unanimous `allow_irreversible` permission, §7's irreversibility floor, and the fail-closed rule for a policy that does not parse. |
 | `chain-verification` | SPEC.md §8: mutation, reorder, splice, duplication, truncation (anchored and not), a torn tail, and `alg` tampering, each with the reason a verifier must report. |
 | `schema-validation` | Write-boundary validation of every committed schema fixture, with the constraint each refusal violates named — and the APRV-121 read boundary, where a pre-change monetary amount must still validate. |
 | `gate-verdicts` | Scripted gate scenarios: a policy, a sequence of operations, and the verdict of the last one, covering the refusal codes intake and decision can produce. |
@@ -183,6 +183,14 @@ such a class to the default and does not conform. The suite also gained a
 control for the routing floor: a policy whose routing would resolve a built-in
 protected path below what the `policy.edit` line resolves to is refused at load
 with `protected-route-floor`, and every class then resolves to `manual`.
+
+`policy-resolution` reached **3.0.0** at APRV-317. A class rule may now
+explicitly retain autonomous or supervised behavior for a truthful
+`reversible: false` action. Every equally most-specific rule must opt in, and
+the capability is inherited by an unlined `policy.edit` child. The algorithm
+therefore changed, and each expectation now exposes `allow_irreversible` plus
+the `irreversible_patterns` group that governed it. Three vectors cover an
+unanimous tie, a tied omission that preserves the floor, and inheritance.
 
 `schema-validation` reached **2.0.0** in the same change, for two vectors and
 reluctantly. `protected_paths` gained the routed `{path, class}` entry beside

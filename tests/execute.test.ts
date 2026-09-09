@@ -260,6 +260,7 @@ function grantChaser(unit: Case, ts: string = at(1)): string {
 
 test("the execution refusal-code union is frozen public API", () => {
   assert.deepEqual([...EXECUTE_REFUSAL_CODES], [
+    "actor-invalid",
     "action-not-registered",
     // APRV-185: the class is reserved to human hands. Refused on both paths and
     // before either is chosen, so it sits above `token-required` — which is a
@@ -268,6 +269,7 @@ test("the execution refusal-code union is frozen public API", () => {
     "token-required",
     "loop-escalated",
     "policy-not-attested",
+    "policy-drift",
     "already-executed",
     "budget-exceeded",
     "not-started",
