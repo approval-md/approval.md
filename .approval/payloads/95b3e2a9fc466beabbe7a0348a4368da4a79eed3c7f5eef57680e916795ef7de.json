@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/receipt-design-repair","--title","docs: record completed APRV-249 delivery","--body-file","/private/tmp/aprv249-final-record-pr.md"],"body_sha256":"eb703a58f53dad01578737fd76e61d098d5fe60558830cded9e92c847096d88d","cwd":"/Users/carter/dev/approval-md"}
