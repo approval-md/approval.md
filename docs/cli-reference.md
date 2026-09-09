@@ -3536,6 +3536,43 @@ belong to a RUNNING listener: they are on its stderr as they happen, in its
 Which variables are read comes from the policy, so a renamed variable reads back
 as the name you set.
 
+## quickstart
+
+`approval quickstart [--dir <path>] [--api-base <url>]` is the human-only solo setup ceremony. It
+asks three decisions: the human identifier, terminal or Telegram, and which of
+five class families always ask. The default checklist selects `communicate.*`,
+`financial.*`, `files.delete.*`, `public.*`, and `vcs.push.main`.
+
+The command validates the complete generated policy before writing it. It
+creates the same log directory, queue projection, and gitignore entries as
+`init`, writes `APPROVAL_HUMAN` through the existing `.approval/env` writer,
+and uses the existing Telegram setup path when selected. A token therefore
+follows the OS-keystore or no-echo path already documented under [setup channel
+telegram](#setup-channel-telegram). It refuses before prompting when a policy or
+`.approval` instance state already exists, so it cannot silently reuse a log,
+queue, environment map, vault, or channel setup from another ceremony.
+
+Quickstart resolves this new instance's environment map explicitly, without
+borrowing ambient approval credentials, and runs a bounded doctor preflight.
+When `--api-base` is present, the same endpoint is used for Telegram setup and
+that preflight; a local or private Bot API selection never falls through to the
+public endpoint.
+The expected `attestation` failure is the only failed row accepted before the
+ceremony; any other failed row is printed and stops before attestation. It then
+prints the exact policy bytes and requires the operator to type `understood`.
+The append rechecks the live digest and refuses if the file changed after it was
+shown. An abort or failed step therefore leaves the generated policy unattested.
+The final `activate:` line includes `approval env --dir` with the absolute,
+shell-quoted target directory. It is required because no ordinary runtime
+command loads `.approval/env` implicitly, and it still names the right instance
+when the operator starts the next shell elsewhere.
+
+This verb classifies `policy.core` and is omitted from MCP. Piped stdin and
+`--json` exit 2 before any write and print the manual sequence. The generated
+`defaults.autonomy: autonomous` applies to other classified reversible actions.
+Protected controls, fail-closed policy loading, the irreversibility floor, and
+unclassified-command refusal continue to apply.
+
 ## init
 
 `init` holds no authority: the policy it writes authorizes nothing until a human

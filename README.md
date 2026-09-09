@@ -29,40 +29,49 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md) · Package:
 
 ## Five minutes to a working gate
 
-**1. Install.**
+**1. Install.** No source checkout is required for the published CLI.
 
 ```sh
 npm install -g approval-md
 ```
 
-**2. Make a gate.** Three commands in the project directory. `init` writes a
-starting policy that names an approver called alice; make it you, then sign for
-the bytes.
+**2. Make a gate.** For the published 0.1.0 package, run `approval init`, edit
+and read `APPROVAL.md`, run `approval setup identity`, optionally run
+`approval setup channel telegram`, then run `approval policy attest --as human:<id>`.
+
+The upcoming `quickstart` command combines these steps. It is currently
+available from a source checkout (`npm ci` and `npm run build`), pending a
+package release. Run the three-question ceremony in the project directory.
+It asks who you are, whether decisions appear in this terminal or on Telegram,
+and which five class families always ask. It shows the exact policy and requires
+the typed word `understood` before attesting it.
 
 ```sh
-approval init
-sed -i '' 's/alice/yourname/g' APPROVAL.md     # Linux: drop the ''
-approval policy attest --as human:yourname
+node /path/to/approval.md/cli.js quickstart
 ```
 
+Then run the `activate:` command quickstart prints. It includes the absolute
+project directory, so it resolves this instance even if the next shell starts
+somewhere else.
+
 ```
-attested /your/project/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
+ready: 5 selected class families ask human:yourname on cli; other classified reversible actions use the autonomous default
 ```
 
-The gate is operative. Open `APPROVAL.md`: it is a page of YAML you can read in
-a minute, and the classes marked `manual` are the ones that will ask you.
+The gate is operative. `.approval/env` remains inert until you run the explicit
+`eval` line. Protected controls, failed policy loads, irreversible declarations,
+and commands the classifier cannot read still take their stricter paths.
 
-**3. Put the button on your phone.** Message **@BotFather** on Telegram with
-`/newbot`, then:
+**3. Run the local service.** If you chose Telegram, message **@BotFather**
+with `/newbot` before quickstart so you have the token it asks for. Then run:
 
 ```sh
-approval setup channel telegram   # token into the keystore, chat discovery
-eval "$(approval env)"            # the resolved variables, in this shell
-approval up                       # the runtime: one foreground process
+approval up   # the runtime: one foreground process
 ```
 
-Leave `approval up` running. Everything below that needs a decision now
-reaches your phone.
+For a source checkout, use `node /path/to/approval.md/cli.js up` instead.
+Leave the service running. Requests use your configured channel; Telegram
+requests reach your phone.
 
 **4. Pick your first experience.**
 

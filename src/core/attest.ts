@@ -142,7 +142,15 @@ export type AttestationAppendResult =
   | { ok: false; error: AttestError };
 
 /** Options for {@link appendAttestation}: the append's, plus the clock. */
-export interface AttestOptions extends AppendOptions, ClockOptions {}
+export interface AttestOptions extends AppendOptions, ClockOptions {
+  /**
+   * When supplied, append only if the file bytes read by this call have this
+   * digest. A ceremony that displayed bytes before asking for confirmation can
+   * thereby bind the record to what it showed rather than silently signing a
+   * replacement written between display and append.
+   */
+  expectedSha256?: string;
+}
 
 /** The result of comparing the live policy file against the log. */
 export type AttestationStatus =
@@ -244,13 +252,26 @@ export function appendAttestation(
 
   let sha256: string;
   try {
-    sha256 = policyFileHash(policyPath);
+    // One read supplies both the expected-digest check and the recorded digest.
+    // A later edit naturally leaves the live policy hash-mismatched; it cannot
+    // make this record attest bytes other than the ones checked here.
+    sha256 = policyBytesHash(readFileSync(policyPath));
   } catch (cause) {
     return {
       ok: false,
       error: {
         code: "io",
         message: `policy ${policyPath} could not be read for attestation: ${detail(cause)}`,
+      },
+    };
+  }
+
+  if (options.expectedSha256 !== undefined && sha256 !== options.expectedSha256) {
+    return {
+      ok: false,
+      error: {
+        code: "io",
+        message: `policy ${policyPath} changed after the reviewed bytes were shown; expected sha256 ${options.expectedSha256}, found ${sha256}; the log was left unchanged`,
       },
     };
   }

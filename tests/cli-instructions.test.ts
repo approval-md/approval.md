@@ -374,6 +374,7 @@ test("registry: real --json output validates against every declared output schem
 // ---------------------------------------------------------------------------
 
 const HUMAN_ONLY: readonly string[] = [
+  "quickstart",
   "init",
   "policy attest",
   "policy amend",
