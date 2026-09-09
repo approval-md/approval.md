@@ -1343,6 +1343,10 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // through it, and the identity it runs as is fixed before the transport
     // exists. The verb itself is human-only, because starting one is an
     // operator's act.
+    case "codex": {
+      const { commandCodex } = await import("./codex.js");
+      return commandCodex(rest, streams, cwd);
+    }
     case "mcp": {
       const { commandMcp } = await import("./mcp.js");
       return settle(commandMcp(rest, streams, cwd), streams, "MCP server failed");

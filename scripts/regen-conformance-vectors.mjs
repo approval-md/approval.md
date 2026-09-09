@@ -598,7 +598,7 @@ function schemaFixtureVectors(root) {
   // reviewable diff. `values` joined in APRV-237 (SPEC.md §5.3): the block is
   // guidance and never enforcement, but the SHAPE it must have to be shown to a
   // human at all is a write-boundary rule like any other.
-  for (const schema of ["envelope", "event", "policy", "sample-record", "values"]) {
+  for (const schema of ["codex-instance", "envelope", "event", "policy", "sample-record", "values"]) {
     for (const kind of ["valid", "invalid"]) {
       const dir = join(root, schema, kind);
       let entries;
@@ -1214,7 +1214,11 @@ const SUITES = [
     // — every document this suite already refused is refused for the same
     // reason — so an implementation that passed 2.0.0 fails this only by not
     // knowing a type the enum has gained, which is what a minor bump says.
-    vectors_version: "2.1.0",
+    // 2.2.0 (APRV-325.1): a MINOR bump. The constrained Codex instance schema
+    // adds one accepted and one refused fixture. Existing expectations do not
+    // move; implementations conforming to 2.1.0 simply do not know this new
+    // packaged manifest shape.
+    vectors_version: "2.2.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

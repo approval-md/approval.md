@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/codex-instance.schema.json",
+  "$comment": "CC0 1.0. See schema/LICENSE.",
+  "title": "Constrained Codex instance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "instance_id", "platform", "codex_version", "node_version", "package_version", "paths", "principals", "invocation", "components"],
+  "properties": {
+    "schema_version": { "const": "approval.codex.instance.v1" },
+    "instance_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+    "platform": { "const": "darwin" },
+    "codex_version": { "const": "0.152.1" },
+    "node_version": { "type": "string", "pattern": "^(?:2[0-9]|[3-9][0-9])\\.[0-9]+\\.[0-9]+$" },
+    "package_version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$" },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["install_root", "package_root", "workspace", "primary", "policy", "log", "manifest", "codex_executable", "node_executable", "mcp_executable", "broker_executable", "runner_executable"],
+      "properties": {
+        "install_root": { "$ref": "#/$defs/absolute_path" },
+        "package_root": { "$ref": "#/$defs/absolute_path" },
+        "workspace": { "$ref": "#/$defs/absolute_path" },
+        "primary": { "$ref": "#/$defs/absolute_path" },
+        "policy": { "$ref": "#/$defs/absolute_path" },
+        "log": { "$ref": "#/$defs/absolute_path" },
+        "manifest": { "$ref": "#/$defs/absolute_path" },
+        "codex_executable": { "$ref": "#/$defs/absolute_path" },
+        "node_executable": { "$ref": "#/$defs/absolute_path" },
+        "mcp_executable": { "$ref": "#/$defs/absolute_path" },
+        "broker_executable": { "$ref": "#/$defs/absolute_path" },
+        "runner_executable": { "$ref": "#/$defs/absolute_path" }
+      }
+    },
+    "principals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codex", "broker", "runner"],
+      "properties": {
+        "codex": { "const": "_approval_codex" },
+        "broker": { "const": "_approval_broker" },
+        "runner": { "const": "_approval_runner" }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "args"],
+      "properties": {
+        "command": { "$ref": "#/$defs/absolute_path" },
+        "args": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "codex" },
+            { "const": "serve" },
+            { "const": "--manifest" },
+            { "$ref": "#/$defs/absolute_path" }
+          ],
+          "items": false,
+          "minItems": 4,
+          "maxItems": 4
+        }
+      }
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["broker", "runner"],
+      "properties": {
+        "broker": { "const": "required-not-shipped" },
+        "runner": { "const": "required-not-shipped" }
+      }
+    }
+  },
+  "$defs": {
+    "absolute_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/"
+    }
+  }
+}

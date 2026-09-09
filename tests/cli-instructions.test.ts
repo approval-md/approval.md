@@ -425,6 +425,14 @@ const HUMAN_ONLY: readonly string[] = [
   // without a terminal and a typed word.
   "gate open",
   "gate close",
+  // APRV-325.1. These prepare or inspect operator-owned host configuration.
+  // start and serve are reserved for the later strict broker and runner and
+  // currently refuse, but must never enter the broad agent MCP catalogue.
+  "codex prepare",
+  "codex setup",
+  "codex doctor",
+  "codex start",
+  "codex serve",
 ];
 
 const AGENT_FACING: readonly string[] = [
