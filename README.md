@@ -29,16 +29,19 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md) · Package:
 
 ## Five minutes to a working gate
 
-**1. Install.** The published package is currently 0.1.0. `quickstart` is
-available from a source checkout containing APRV-309 until a later package
-release includes it.
+**1. Install.** No source checkout is required for the published CLI.
 
 ```sh
-npm ci
-npm run build
+npm install -g approval-md
 ```
 
-**2. Make a gate.** Run the three-question ceremony in the project directory.
+**2. Make a gate.** For the published 0.1.0 package, run `approval init`, edit
+and read `APPROVAL.md`, run `approval setup identity`, optionally run
+`approval setup channel telegram`, then run `approval policy attest --as human:<id>`.
+
+The upcoming `quickstart` command combines these steps. It is currently
+available from a source checkout (`npm ci` and `npm run build`), pending a
+package release. Run the three-question ceremony in the project directory.
 It asks who you are, whether decisions appear in this terminal or on Telegram,
 and which five class families always ask. It shows the exact policy and requires
 the typed word `understood` before attesting it.
@@ -59,20 +62,16 @@ The gate is operative. `.approval/env` remains inert until you run the explicit
 `eval` line. Protected controls, failed policy loads, irreversible declarations,
 and commands the classifier cannot read still take their stricter paths.
 
-Published 0.1.0 users can follow the existing manual sequence until quickstart
-is released: `approval init`, edit and read `APPROVAL.md`, `approval setup
-identity`, optional `approval setup channel telegram`, then `approval policy
-attest --as human:<id>`.
-
 **3. Run the local service.** If you chose Telegram, message **@BotFather**
 with `/newbot` before quickstart so you have the token it asks for. Then run:
 
 ```sh
-node /path/to/approval.md/cli.js up   # the runtime: one foreground process
+approval up   # the runtime: one foreground process
 ```
 
-Leave `approval up` running. Everything below that needs a decision now
-reaches your phone.
+For a source checkout, use `node /path/to/approval.md/cli.js up` instead.
+Leave the service running. Requests use your configured channel; Telegram
+requests reach your phone.
 
 **4. Pick your first experience.**
 
