@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-08 04:35'
-updated_date: '2026-09-09 21:13'
+updated_date: '2026-09-09 21:15'
 labels:
   - harness
 dependencies: []
@@ -48,5 +48,5 @@ Final delivery evidence: PR #373 merged as 11cceabe75901633d4ad8139a273e6829cea5
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Ordinary Claude Code and Cursor Edit/Write operations now enter the same policy, budget, payload-binding and execution accounting path as other allowed actions. Manual and human-only classes remain gated, open-window bypasses remain explicit, and normal PostToolUse closes exactly one started execution. Verified by 146 focused hook tests, the full 4036-test suite (4035 passed, 1 skipped), lint, typecheck, 293 conformance vectors and 142 controls, exact APRV-326 guard evidence, passing GitHub CI run 34402584048, and merged PR #373 at 11cceabe75901633d4ad8139a273e6829cea5320.
+Supported file-tool calls routed through the shared hook now enter the same policy, budget, payload-binding and execution accounting path as other allowed actions. Manual and human-only classes remain gated, open-window bypasses remain explicit, and normal PostToolUse closes exactly one started execution. Verified by 146 focused hook tests, the full 4036-test suite (4035 passed, 1 skipped), lint, typecheck, 293 conformance vectors and 142 controls, exact APRV-326 guard evidence, passing GitHub CI run 34402584048, and merged PR #373 at 11cceabe75901633d4ad8139a273e6829cea5320.
 <!-- SECTION:FINAL_SUMMARY:END -->
