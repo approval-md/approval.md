@@ -209,12 +209,20 @@ test("a closed downstream pipe cancels the foreground listener cleanly", async (
   append(world.logPath, 1);
   append(world.logPath, 2);
   const child = start(["log", "follow", "--json"], world.cwd);
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const exited = exitOf(child);
   await nextLine(child);
+  const stdoutClosed = once(child.stdout, "close");
   child.stdout.destroy();
-  // The second replay line, or this append if both replay writes fit before the
-  // close, exercises the actual process stdout EPIPE listener.
+  await stdoutClosed;
+  // Appending only after the downstream fd closes exercises the actual process
+  // stdout EPIPE listener without racing the parent-side stream teardown.
   append(world.logPath, 3);
-  assert.equal(await exitOf(child), 0);
+  assert.equal(await exited, 0, `listener stderr: ${stderr}`);
 });
 
 test("a slow native pipe bounds producer output and resumes after an incomplete final fragment", async () => {

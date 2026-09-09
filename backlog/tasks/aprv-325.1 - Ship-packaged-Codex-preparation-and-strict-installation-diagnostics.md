@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 07:39'
-updated_date: '2026-09-09 19:54'
+updated_date: '2026-09-09 20:02'
 labels: []
 dependencies: []
 references:
@@ -48,6 +48,8 @@ Reviewed implementation commit1d7a442 and ordinary main merge113c6c3. Prepared a
 PR366 Node 22 shard 3 failed deterministically under npm 10.9.8 because the packed-install fixture promoted each installed transitive to a direct local file dependency; npm 10 ran express-rate-limit's prepare lifecycle despite --ignore-scripts, then exited 127 because its development-only run-s tool was absent. The focused fix copies only the already-installed production dependency closure into a temporary scratch node_modules tree, removes lifecycle scripts from those temporary dependency copies, and points the offline fixture at those copies. The approval-md tgz remains byte-untouched and is still installed outside the checkout with npm install --ignore-scripts, then invoked from that installed path, so the test continues to verify the shipped artifact while preventing unrelated third-party prepare hooks from rebuilding inside the source checkout. Exact Node 22.23.2/npm 10.9.8 stub-runner check: 6/6 pass, exit 0, /private/tmp/aprv3251-node22-npm10-focused.log. Current Node 24.2.0/npm 11.7.0 stub-runner check: 6/6 pass, exit 0, /private/tmp/aprv3251-node24-npm11-focused.log. Build exit 0: /private/tmp/aprv3251-build.log. Lint exit 0: /private/tmp/aprv3251-lint.log. Typecheck exit 0: /private/tmp/aprv3251-typecheck.log. Original CI failure evidence: /private/tmp/pr366-job102404275904-failed.log.
 
 PR366 follow-up CI run34396418317 job102617206015 confirmed the npm 10 package fix passed; shard 3 instead failed APRV-322's slow native-pipe assertion because Linux emitted drain after accepting the first 524 KiB record and permitted a second write before cancellation (observed writes 2, test expected exactly 1). Exact failed log: /private/tmp/pr366-run34396418317-job102617206015-failed.log. The bounded correction changes only the test instrumentation: it tracks whether any write occurs while stdout is still backpressured and requires zero such writes, while retaining the existing peak-buffer bound, partial-fragment cancellation, and cursor-resume assertions. This tests the Writable contract directly without assuming a platform-specific pipe capacity or drain schedule. Exact Node 22.23.2 focused cli-log-follow suite passed 4/4, exit 0: /private/tmp/aprv3251-pr366-node22-log-follow.log. Build, scoped lint, typecheck and diff checks exit 0. A broader local cli-log-follow plus log-subscribe run first exposed a separate existing closed-pipe cancellation race (exit 4), then the identical focused command passed 17/17; no unrelated source change was included.
+
+Closed-pipe follow-up: the earlier intermittent CLI cancellation failure reported only exit 4 because the test did not capture child stderr, so the underlying error code is unavailable. The test now subscribes to the stdout close event before destroying the parent-side stream, awaits that real close before appending the record that triggers the child write, and captures stderr in the exit assertion. This removes teardown-order ambiguity without broadening the runtime's accepted I/O errors: EPIPE and signal cancellation remain clean, while other output failures still refuse with exit 4. Focused cli-log-follow suite: 4/4 pass, exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
