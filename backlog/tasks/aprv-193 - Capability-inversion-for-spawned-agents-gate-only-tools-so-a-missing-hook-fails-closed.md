@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-193'
 created_date: '2026-09-01 03:21'
-updated_date: '2026-09-06 12:14'
+updated_date: '2026-09-09 03:26'
 labels:
   - security
   - dogfood
@@ -29,9 +29,9 @@ Deliverables: the sandbox profile and spawn wiring for dev-fleet agent sessions,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
+- [ ] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
 - [x] #2 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
-- [x] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
+- [ ] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
 - [x] #4 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
 - [x] #5 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
 - [x] #6 npm test passes; lint clean
@@ -124,4 +124,6 @@ VERIFICATION (this worktree, macOS 15 on arm64, 2026-09-06).
 - Exercised by hand as well as by the suite: approval sandbox -- npm run lint and approval sandbox -- npm run typecheck both exit 0 inside the profile, which is the survey row claiming ordinary development survives; approval hook classify reads approval sandbox -- npm install left-pad as deps.add marked runtime, sandbox-exec -f p.sb node --version as files.write.workspace marked external, and the -p spelling as unclassified.
 
 NO PROTECTED PATH TOUCHED. SPEC.md, CLAUDE.md, AGENTS.md, APPROVAL.md, .approval/ and .claude/ are unmodified; the amendment text lives in docs/proposals/ and waits for a human.
+
+2026-09-09 Codex review against origin/main 5a4c1a1: reopened AC1 and AC3 rather than narrowing the original task to match the implementation. Merged 4c11c66 delivers macOS per-command Seatbelt containment. Hook enforcement remains opt-in/default off, unsupported platforms may run unprotected unless strict mode is set, and an unsandboxed agent harness can still access capabilities outside that child. The network profile also denies loopback by default because the daemon uses files; explicit loopback allowance is documented. Existing sandbox tests prove the bounded child boundary, not fleet-wide or whole-session isolation. AC2/4/5 remain supported by the laundering tests, execution survey and explicitly unapplied draft. AC6 now has newer evidence superseding the old lane dependency failure: APRV321 full suite log /private/tmp/aprv321-full-suite.log records 4001 tests, 4000 pass, 0 fail, 1 skip, actual process exit 0; lint passed. PR356 subsequently passed all full CI shards on the unchanged runtime baseline. No sandbox activation, policy amendment or scope narrowing was performed. Remaining work is the original fleet requirement and explicit decisions on supported-platform enforcement, fallback and class-versus-token egress authority; whole-harness isolation requires a separate constrained model-egress design.
 <!-- SECTION:NOTES:END -->
