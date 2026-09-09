@@ -18,7 +18,7 @@
  * `grant` to it hands the untrusted policy the overseer's pen, and no amount of
  * care inside the tool implementation would undo that. So the tool list is
  * exactly {@link VERB_REGISTRY} filtered by `human_only === false`, minus the
- * two exclusions in {@link EXCLUDED_VERBS}, and the registry's `human_only`
+ * transport exclusions in {@link EXCLUDED_VERBS}, and the registry's `human_only`
  * marker — not a list kept here — is what decides. `verb-registry.ts` says it in
  * its own header: the marker "exists so a wrapper does not offer an agent a door
  * the runtime will only slam".
@@ -101,6 +101,10 @@ export const EXCLUDED_VERBS: ReadonlyMap<string, string> = new Map([
   [
     "consume",
     "internal plumbing: its own purpose says so. `run` wraps it and is published instead, so a client that reached for `consume` would be spending a token outside the verb that records the outcome.",
+  ],
+  [
+    "log follow",
+    "it is an unbounded foreground stream. MCP tool calls share a finite request queue and return one finite result, so publishing this verb would occupy that queue indefinitely; MCP clients can poll log verify or use the CLI stream as a separate process.",
   ],
   [
     "hook claude-code",

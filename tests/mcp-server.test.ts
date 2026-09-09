@@ -183,7 +183,7 @@ function expectedVerbs(): VerbSpec[] {
 // (1) the tool list is the filtered registry
 // ---------------------------------------------------------------------------
 
-test("mcp: the tool list is the registry filtered by human_only, less the two exclusions", async () => {
+test("mcp: the tool list is the registry filtered by human_only and transport exclusions", async () => {
   const dir = newWorld("list");
   const { client, close } = await connect(dir);
   try {
@@ -285,6 +285,7 @@ test("mcp: the exclusions are agent-facing verbs, each with a stated reason", ()
     "hook claude-code",
     "hook codex",
     "hook cursor",
+    "log follow",
   ]);
 });
 

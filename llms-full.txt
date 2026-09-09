@@ -76,8 +76,8 @@ tail continues:
 
 ## The feature set
 
-69 features across nine facets: gate (13), channels (7), adapters (7), hooks
-(7), mcp (6), log (7), daemon (8), verification (7), examples (7). Tags mark
+70 feature cards across nine facets: gate, channels, adapters, hooks, mcp,
+log, daemon, verification and examples. A card can have several facets. Tags mark
 what is shipped, what is specified, what is an example, what is behind a policy
 key, what is behind a flag, and what is human-only. The same list is embedded in
 index.html as JSON at `script#feature-index`.
@@ -85,17 +85,17 @@ index.html as JSON at `script#feature-index`.
 ### gate
 
 - **APPROVAL.md, the policy file** [shipped, spec]. A fenced `yaml approval-policy` block in markdown at your repo root; the runtime ignores the prose. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
-- **Attestation and hash-mismatch** [shipped]. `approval policy attest` stores the file's SHA-256; a later edit refuses every gated operation with `hash-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
+- **Attestation and hash-mismatch** [shipped]. `approval policy attest` stores the file's SHA-256; a later edit refuses with `policy-not-attested`, detail `hash-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
 - **Five autonomy levels** [shipped]. `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`; bare `supervised` is an alias of `supervised-retro`. https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json
-- **The irreversibility floor** [shipped, spec]. An action declared `reversible: false` resolves to `manual` whatever the policy says. https://github.com/approval-md/approval.md/blob/main/SPEC.md
-- **Fail closed on every axis** [shipped]. An unparseable policy resolves every class to `manual`, an unmatched action takes `defaults.autonomy`, and an unknown key fails validation. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
-- **Single-use execution tokens** [shipped]. Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses `token-consumed`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
+- **The irreversibility floor** [shipped, spec]. An action declared `reversible: false` raises nonmanual autonomy to `manual`; `human-only` stays denied. https://github.com/approval-md/approval.md/blob/main/SPEC.md
+- **Policy loading fails closed** [shipped]. An unparseable policy resolves every class to `manual`, an unmatched action takes `defaults.autonomy`, and an unknown key fails validation. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
+- **Single-use execution tokens** [shipped]. Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses `token-consumed`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **An approval binds bytes** [shipped]. The envelope declares a `payload_hash`, and bytes that hash to anything else are refused `payload-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **Class comes from the envelope** [shipped]. Class, cost and reversibility are read from the registered envelope, never from a flag at request time. https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md
 - **Budgets computed from the log** [shipped]. Class `limits` and `budgets` scopes are conjunctive, and consumption is computed from the log over rolling windows. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
 - **Protected paths widen, never narrow** [shipped]. `protected_paths` adds paths, or routes each to a `policy.edit` sub-class, above a floor that never narrows. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
 - **Amend a policy with the verb** [shipped]. `approval policy amend` lands new policy bytes and their attestation together, printing a semantic diff of what changed. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#policy-amend
-- **The open window** [human-only]. `approval gate open` needs a terminal and a typed `understood`, and each bypassed call appends `gate.bypassed`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate
+- **The open window** [human-only]. `approval gate open` requires a terminal and typed `understood`; gated shell and protected-file bypasses append `gate.bypassed`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate
 - **Import your AGENTS.md prose** [shipped]. `approval import agents-md` turns a permissions section into a draft policy block with a fixed keyword table, no model. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md
 
 ### channels
@@ -103,17 +103,18 @@ index.html as JSON at `script#feature-index`.
 - **Telegram, the reference channel** [shipped]. The prompt carries a COMPUTED block, a CLAIMED block marked unverified, the full payload, and two buttons. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **Paced or burst delivery** [behind a policy key]. `channels.telegram.delivery` is `paced` by default, showing one pending request at a time, or `burst`. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
 - **Prompt rows a policy orders** [behind a policy key]. `channels.<name>.prompt.rows` sets order only, never a whitelist, and `.hide` is refused for rows a decision needs. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel
-- **Payloads rendered by shape** [shipped]. An email-shaped payload is laid out field by field, with the canonical JSON and its bound hash underneath. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
-- **A local web queue on loopback** [shipped]. `approval channel web` binds `127.0.0.1` with the host hard-coded, and shows the raw token once. https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it
+- **Payloads rendered by shape** [shipped]. The canonical email view shows every recognized field, its payload hash, and the raw-byte store path. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
+- **A local web queue on loopback** [shipped]. `approval channel web` binds hard-coded `127.0.0.1`; a returned grant token is displayed once, then discarded. https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it
 - **A terminal channel, and withdrawal** [shipped]. `approval channel cli` decides at a terminal, and `approval withdraw` takes a pending request back. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel-cli
 - **A channel in the other direction** [shipped]. `approval journal write`, `approval values` and `approval feedback` carry operator guidance that never reaches enforcement. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#journal
 
 ### adapters
 
+- **A supported API for adapter authors** [new, source checkout]. `approval-md/adapters` exports the execution contract, credential provider and conformance runner with TypeScript declarations. https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md
 - **A vault the policy names** [shipped]. `approval vault set` encrypts one credential under a passphrase named by `vault.passphrase_env`; there is no `approval vault get`. https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential
 - **Email over SMTP, inside the token window** [shipped]. `approval adapter email` verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it. https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md
 - **AgentMail, and the two-key split** [shipped]. The agent holds an AgentMail key without `draft_send`, and the key that can send waits in the vault. https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md
-- **ZZZ threads and replies, gated** [new, source checkout]. `approval adapter zzz` calls ZZZ's create-thread or reply operation with a vaulted token and exact payload binding. https://github.com/approval-md/approval.md#first-class-zzzbot-messages
+- **ZZZ threads and replies, gated** [new, source checkout]. After consuming the execution grant, `approval adapter zzz` sends with a vaulted ZZZ credential and bound payload. https://github.com/approval-md/approval.md#first-class-zzzbot-messages
 - **A draft is mutable, so the grant binds its bytes** [shipped]. `approval payload agentmail-draft` snapshots the draft, and one edited after the grant refuses `agentmail-draft-drifted`. https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md
 - **The Message-ID ties the mail to the chain** [shipped]. It is derived from the action key, the payload hash and the sender, so both identify each other later. https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential
 - **Setup fills the vault and proves it** [shipped]. `approval setup adapter email` reads the adapter's credential manifest, then probes the server without sending anything. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter
@@ -144,7 +145,7 @@ index.html as JSON at `script#feature-index`.
 - **Anchoring, the check a file cannot make about itself** [behind a flag]. `approval log verify --anchor` checks the working file against the newest committed copy this checkout can see. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify
 - **Human-signed checkpoints** [behind a policy key, human-only]. `approval log checkpoint` signs the head with an Ed25519 key from `audit.checkpoint_keys`; a due checkpoint warns, never refuses. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-checkpoint
 - **Git evidence, a second independent record** [behind a flag]. `approval daemon run --git-evidence` commits per tick in the log's own repository, changing no verdict. https://github.com/approval-md/approval.md/blob/main/docs/git-evidence.md
-- **Reading the log is three verbs** [shipped]. `tail` prints the last N records and `export` streams every stored line byte for byte, both read-only. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log
+- **Read and verify the log** [shipped]. `tail` prints the last N records and `export` streams every stored line byte for byte, both read-only. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log
 - **Syncing a log two writers touched** [shipped]. Hash chains do not survive a git merge, so `approval log sync` reconciles a committed copy that moved. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-sync
 
 ### daemon
@@ -164,7 +165,7 @@ index.html as JSON at `script#feature-index`.
 - **status reports the system, doctor the machine** [shipped]. `approval status` answers from the log; `approval doctor` answers for this machine, where a stale binary shows up. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#status
 - **coverage joins witnesses this project does not write** [shipped]. `approval coverage` reports effects witnessed by git, `gh` and providers, each with an evidence seq or `none`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#coverage
 - **Conformance vectors for a second implementation** [shipped]. Six language-neutral vector files cover policy, chain, gate verdicts, JCS, refusal unions and schema, under a SHA-256 manifest. https://github.com/approval-md/approval.md/blob/main/conformance/README.md
-- **Exit codes an agent branches on** [shipped]. Seven frozen numbers; a gate refusal is exit 1 and never 2, because the command was well-formed. See the table below.
+- **Exit codes an agent branches on** [shipped]. Seven frozen CLI codes; ordinary gate refusals use 1, while hook protocols also use 0 and 2. See the table below.
 - **Three check tiers, classified from the diff** [shipped]. `npm run check:changed` classifies the working tree into light, records or full, and ambiguity resolves to full. https://github.com/approval-md/approval.md/blob/main/README.md#running-the-checks
 - **Validate at the write boundary** [shipped]. Every event and envelope passes its JSON Schema before it is appended, and the policy schema is closed. https://github.com/approval-md/approval.md/blob/main/schema/event.schema.json
 
@@ -183,31 +184,11 @@ index.html as JSON at `script#feature-index`.
 Four kinds of tool already cover part of this problem. Each entry says what it
 gives you and what it leaves to you.
 
-1. **Harness-native permission prompts** (Claude Code rules and hooks, Cursor
-   auto-run, Codex CLI approval modes) enforce inside the harness they ship
-   with, and Codex backs its gate with an OS-level sandbox this project does not
-   attempt. Their product-specific traces do not form approval.md's portable,
-   hash-chained authorization record. This project's Claude Code and Cursor
-   hooks append that record for the actions they cover; its Codex native
-   direct-patch path remains experimental.
-2. **AGENTS.md permissions prose** states the policy in English and trusts the
-   agent to obey it. approval.md is the enforcement layer for that convention,
-   and reads one as input with `approval import agents-md`.
-3. **Framework interrupts** (LangGraph `interrupt()`, CrewAI human input,
-   AutoGen `UserProxyAgent`, the OpenAI Agents SDK's `needsApproval`, Temporal
-   signals) give you a pause-and-resume primitive and leave policy, audit
-   format, the human channel and the credential boundary to you. Temporal's
-   event history is a genuine append-only record with crash recovery this
-   project does not claim.
-4. **Hosted approval platforms** (HumanLayer, gotoHuman, Permit.io) are the
-   closest relatives, and add hosted infrastructure, escalation, team routing
-   and compliance certifications a file convention cannot. They put a
-   third-party service in the decision path and keep the audit trail in that
-   platform's backend.
-5. **What is different here**: policy as a hash-attested markdown file in your
-   repo, a hash-chained log you verify locally with one command, and credentials
-   that stay inert until a single-use token is minted at the moment a human
-   decides.
+1. **Harness-native permissions**: Harness permission and isolation controls are product-specific. This project's Claude Code and Cursor hooks append its portable log for covered actions; Codex direct patches remain experimental.
+2. **AGENTS.md permissions prose**: `approval import agents-md` converts permissions prose into a draft policy. Enforcement still depends on wired hooks and adapters.
+3. **Framework approval steps**: A framework integration can call approval.md at its existing pause or approval step. Policy, human channels and the verifiable log remain in approval.md.
+4. **Hosted approval services**: With approval.md, you operate the daemon and channels and keep the log yourself. Hosted services vary in routing, retention and operational support.
+5. **What is different here**: An attested markdown policy and a hash-chained local log, with optional vault-backed adapter credentials and single-use grants on paths that require human approval.
 
 ## Global invariants
 
@@ -248,19 +229,17 @@ one are different facts.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | success |
-| 1 | integrity failure (a corrupt log), and every gate refusal |
-| 2 | usage error |
+| 0 | success; harness pre-execution allow or deny verdict |
+| 1 | integrity failure, or an ordinary gate/runtime refusal |
+| 2 | usage error, or a post-execution hook report that did not land |
 | 3 | torn tail |
 | 4 | I/O error |
-| 5 | no valid execution token (`approval run` only) |
+| 5 | missing execution token (`approval run` only) |
 | 6 | timeout (`approval wait` only) |
 
 ## What this does not defend
 
-From SPEC.md section 11. This is an oversight layer for broadly cooperative
-agents, with hard enforcement at the adapter boundaries that hold the
-credentials. Human identity in v0.1 is config-declared, so the trust boundary is
+From SPEC.md section 11. This is an oversight layer for broadly cooperative agents. Hard enforcement applies where an adapter alone holds the credential. Human identity in v0.1 is config-declared, so the trust boundary is
 the local machine, and anyone who can set that configuration and write to the
 log is inside it. Attestation proves that someone with local control signed off,
 and never who.
@@ -268,10 +247,8 @@ and never who.
 Undefended: an agent with direct credential access outside the adapters, a
 compromised host, collusion between an agent and a careless approver, and
 persuasion about whether bytes you did see should be approved. You run the
-daemon and the listener yourself, there is no OS-level sandbox, and the
-reference phone channel is one app. What holds regardless of what a harness
-believes it is running: the vault, the adapter boundary, and the single-use
-token.
+daemon and listener yourself. The optional command sandbox has platform limits;
+it does not isolate a whole agent harness. The vault and adapter protect actions routed through them; single-use grants bind the payloads that require human approval.
 
 ## Read on
 

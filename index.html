@@ -189,6 +189,7 @@
   .mark .md{color:var(--muted)}
   h1 .claim{margin-left:.7em;color:var(--fg)}
   .sub{margin:0;color:var(--muted);max-width:74ch}
+  .lede > .sub + .sub{margin-top:18px}
   .sub b{color:var(--fg);font-weight:400}
 
   h2.label{
@@ -214,6 +215,11 @@
   .copy:hover{background:var(--hover);color:var(--fg)}
   .install .note{color:var(--muted);font-size:12px;display:block;margin-top:10px}
   .install .note code{color:var(--fg)}
+  .source-install{margin-top:14px}
+  .source-install > summary{cursor:pointer;color:var(--muted);font-size:12px}
+  .source-install > summary:hover{color:var(--fg)}
+  .source-install .note{margin:10px 0}
+  .source-install .cmd{margin-top:10px}
 
   /* ---- the loop card ---- */
   .loop{
@@ -489,11 +495,16 @@
           <pre><code id="cmd-npm">npm install -g approval-md</code></pre>
           <button class="copy" type="button" data-copy="cmd-npm" aria-label="Copy the npm install command">Copy</button>
         </div>
-        <div class="cmd">
-          <pre><code id="cmd-src">git clone https://github.com/approval-md/approval.md &amp;&amp; cd approval.md &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm link</code></pre>
-          <button class="copy" type="button" data-copy="cmd-src" aria-label="Copy the from-source install command">Copy</button>
-        </div>
-        <span class="note">npm: v0.1.0 · feature index: current source checkout · Apache 2.0 code · CC0 specification and schemas · Node 20 or newer.</span>
+        <span class="note">Installs the published v0.1.0 CLI. Node 20 or newer.</span>
+        <details class="source-install">
+          <summary>Latest features / contribute</summary>
+          <p class="note">Use a source checkout for features marked “source checkout,” including the ZZZ adapter, or to contribute. Choose this path instead of the npm install above.</p>
+          <div class="cmd">
+            <pre><code id="cmd-src">git clone https://github.com/approval-md/approval.md &amp;&amp; cd approval.md &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm link</code></pre>
+            <button class="copy" type="button" data-copy="cmd-src" aria-label="Copy the from-source install command">Copy</button>
+          </div>
+        </details>
+        <span class="note">Feature index: current source checkout · Apache 2.0 code · CC0 specification and schemas.</span>
       </div>
     </header>
 
@@ -575,7 +586,7 @@
         <article class="card" id="f-attestation" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Attestation and hash-mismatch</h3>
-          <p><code>approval policy attest</code> stores the file's SHA-256; a later edit refuses every gated operation with <code>hash-mismatch</code>.</p>
+          <p><code>approval policy attest</code> stores the file's SHA-256; a later edit refuses with <code>policy-not-attested</code>, detail <code>hash-mismatch</code>.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
         </article>
 
@@ -589,13 +600,13 @@
         <article class="card" id="f-irreversibility-floor" tabindex="0" data-facet="gate" data-tags="shipped spec" data-href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">
           <div class="tags"><span class="tag">shipped</span><span class="tag">spec</span></div>
           <h3>The irreversibility floor</h3>
-          <p>An action declared <code>reversible: false</code> resolves to <code>manual</code> whatever the policy says.</p>
+          <p>An action declared <code>reversible: false</code> raises nonmanual autonomy to <code>manual</code>; <code>human-only</code> stays denied.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md section 7 →</a>
         </article>
 
         <article class="card" id="f-fail-closed" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">
           <div class="tags"><span class="tag">shipped</span></div>
-          <h3>Fail closed on every axis</h3>
+          <h3>Policy loading fails closed</h3>
           <p>An unparseable policy resolves every class to <code>manual</code>, an unmatched action takes <code>defaults.autonomy</code>, unknown keys fail validation.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
         </article>
@@ -603,7 +614,7 @@
         <article class="card" id="f-tokens" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Single-use execution tokens</h3>
-          <p>Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses <code>token-consumed</code>.</p>
+          <p>Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses <code>token-consumed</code>.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
         </article>
 
@@ -645,7 +656,7 @@
         <article class="card" id="f-gate-open" tabindex="0" data-facet="gate hooks" data-tags="human-only" data-href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate">
           <div class="tags"><span class="tag key">human-only</span></div>
           <h3>The open window</h3>
-          <p><code>approval gate open</code> needs a terminal and a typed <code>understood</code>, and each bypassed call appends <code>gate.bypassed</code>.</p>
+          <p><code>approval gate open</code> requires a terminal and typed <code>understood</code>; gated shell and protected-file bypasses append <code>gate.bypassed</code>.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate">CLI reference: gate →</a>
         </article>
 
@@ -681,14 +692,14 @@
         <article class="card" id="f-payload-render" tabindex="0" data-facet="channels" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Payloads rendered by shape</h3>
-          <p>An email-shaped payload is laid out field by field, with the canonical JSON and its bound hash underneath.</p>
+          <p>The canonical email view shows every recognized field, its payload hash, and the raw-byte store path.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
         </article>
 
         <article class="card" id="f-web-queue" tabindex="0" data-facet="channels" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>A local web queue on loopback</h3>
-          <p><code>approval channel web</code> binds <code>127.0.0.1</code> with the host hard-coded, and shows the raw token once.</p>
+          <p><code>approval channel web</code> binds hard-coded <code>127.0.0.1</code>; a returned grant token is displayed once, then discarded.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it">README: can the agent go around it? →</a>
         </article>
 
@@ -707,6 +718,13 @@
         </article>
 
         <!-- ===== adapters ===== -->
+        <article class="card" id="f-adapter-api" tabindex="0" data-facet="adapters" data-tags="new source" data-href="https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md">
+          <div class="tags"><span class="tag key">new</span><span class="tag">source checkout</span></div>
+          <h3>A supported API for adapter authors</h3>
+          <p><code>approval-md/adapters</code> exports the execution contract, credential provider and conformance runner with TypeScript declarations.</p>
+          <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md">Guide: the public adapter API →</a>
+        </article>
+
         <article class="card" id="f-vault" tabindex="0" data-facet="adapters" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>A vault the policy names</h3>
@@ -731,7 +749,7 @@
         <article class="card" id="f-zzz" tabindex="0" data-facet="adapters" data-tags="new source" data-href="https://github.com/approval-md/approval.md#first-class-zzzbot-messages">
           <div class="tags"><span class="tag key">new</span><span class="tag">source checkout</span></div>
           <h3>ZZZ threads and replies, gated</h3>
-          <p><code>approval adapter zzz</code> calls ZZZ's create-thread or reply operation with a vaulted token and exact payload binding.</p>
+          <p>After consuming the execution grant, <code>approval adapter zzz</code> sends with a vaulted ZZZ credential and bound payload.</p>
           <a class="go" href="https://github.com/approval-md/approval.md#first-class-zzzbot-messages">README: first-class zzz.bot messages →</a>
         </article>
 
@@ -887,7 +905,7 @@
 
         <article class="card" id="f-log-read" tabindex="0" data-facet="log" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log">
           <div class="tags"><span class="tag">shipped</span></div>
-          <h3>Reading the log is three verbs</h3>
+          <h3>Read and verify the log</h3>
           <p><code>tail</code> prints the last N records and <code>export</code> streams every stored line byte for byte, both read-only.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log">CLI reference: log →</a>
         </article>
@@ -988,7 +1006,7 @@
         <article class="card" id="f-exit-codes" tabindex="0" data-facet="verification" data-tags="shipped" data-href="#exit">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Exit codes an agent branches on</h3>
-          <p>Seven frozen numbers; a gate refusal is exit 1 and never 2, because the command was well-formed.</p>
+          <p>Seven frozen CLI codes; ordinary gate refusals use 1, while hook protocols also use 0 and 2.</p>
           <a class="go" href="#exit">The table, below →</a>
         </article>
 
@@ -1067,11 +1085,11 @@
         <p>Four kinds of tool already cover part of this problem. Each entry says what it gives you and what it leaves to you.</p>
       </div>
       <ul class="list">
-        <li><span class="n">1</span><span><b>Harness-native permission prompts</b> (Claude Code rules and hooks, Cursor auto-run, Codex CLI approval modes) enforce inside the harness they ship with, and Codex backs its gate with an OS-level sandbox this project does not attempt. Their product-specific traces do not form approval.md's portable, hash-chained authorization record. This project's Claude Code and Cursor hooks append that record for the actions they cover; its Codex native direct-patch path remains experimental.</span></li>
-        <li><span class="n">2</span><span><b>AGENTS.md permissions prose</b> states the policy in English and trusts the agent to obey it. approval.md is the enforcement layer for that convention, and reads one as input with <code>approval import agents-md</code>.</span></li>
-        <li><span class="n">3</span><span><b>Framework interrupts</b> (LangGraph <code>interrupt()</code>, CrewAI human input, AutoGen <code>UserProxyAgent</code>, the OpenAI Agents SDK's <code>needsApproval</code>, Temporal signals) give you a pause-and-resume primitive and leave policy, audit format, the human channel and the credential boundary to you. Temporal's event history is a genuine append-only record with crash recovery this project does not claim.</span></li>
-        <li><span class="n">4</span><span><b>Hosted approval platforms</b> (HumanLayer, gotoHuman, Permit.io) are the closest relatives, and add hosted infrastructure, escalation, team routing and compliance certifications a file convention cannot. They put a third-party service in the decision path and keep the audit trail in that platform's backend.</span></li>
-        <li><span class="n">5</span><span><b>What is different here</b>: policy as a hash-attested markdown file in your repo, a hash-chained log you verify locally with one command, and credentials that stay inert until a single-use token is minted at the moment a human decides.</span></li>
+        <li><span class="n">1</span><span><b>Harness-native permissions</b>: Harness permission and isolation controls are product-specific. This project's Claude Code and Cursor hooks append its portable log for covered actions; Codex direct patches remain experimental.</span></li>
+        <li><span class="n">2</span><span><b>AGENTS.md permissions prose</b>: <code>approval import agents-md</code> converts permissions prose into a draft policy. Enforcement still depends on wired hooks and adapters.</span></li>
+        <li><span class="n">3</span><span><b>Framework approval steps</b>: A framework integration can call approval.md at its existing pause or approval step. Policy, human channels and the verifiable log remain in approval.md.</span></li>
+        <li><span class="n">4</span><span><b>Hosted approval services</b>: With approval.md, you operate the daemon and channels and keep the log yourself. Hosted services vary in routing, retention and operational support.</span></li>
+        <li><span class="n">5</span><span><b>What is different here</b>: An attested markdown policy and a hash-chained local log, with optional vault-backed adapter credentials and single-use grants on paths that require human approval.</span></li>
       </ul>
     </section>
 
@@ -1104,12 +1122,12 @@
       <table class="exit">
         <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
         <tbody>
-          <tr><td>0</td><td>success</td></tr>
-          <tr><td>1</td><td>integrity failure (a corrupt log), and every gate refusal</td></tr>
-          <tr><td>2</td><td>usage error</td></tr>
+          <tr><td>0</td><td>success; harness pre-execution allow or deny verdict</td></tr>
+          <tr><td>1</td><td>integrity failure, or an ordinary gate/runtime refusal</td></tr>
+          <tr><td>2</td><td>usage error, or a post-execution hook report that did not land</td></tr>
           <tr><td>3</td><td>torn tail</td></tr>
           <tr><td>4</td><td>I/O error</td></tr>
-          <tr><td>5</td><td>no valid execution token (<code>approval run</code> only)</td></tr>
+          <tr><td>5</td><td>missing execution token (<code>approval run</code> only)</td></tr>
           <tr><td>6</td><td>timeout (<code>approval wait</code> only)</td></tr>
         </tbody>
       </table>
@@ -1119,8 +1137,8 @@
     <section id="posture" aria-labelledby="posture-h">
       <h2 class="label" id="posture-h">What this does not defend</h2>
       <div class="prose">
-        <p>From SPEC.md section 11. This is an oversight layer for broadly cooperative agents, with hard enforcement at the adapter boundaries that hold the credentials. Human identity in v0.1 is config-declared, so the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation proves that <b>someone with local control</b> signed off, and never who.</p>
-        <p>Undefended: an agent with direct credential access outside the adapters, a compromised host, collusion between an agent and a careless approver, and persuasion about whether bytes you did see should be approved. You run the daemon and the listener yourself, there is no OS-level sandbox, and the reference phone channel is one app. What holds regardless of what a harness believes it is running: the vault, the adapter boundary, and the single-use token.</p>
+        <p>From SPEC.md section 11. This is an oversight layer for broadly cooperative agents. Hard enforcement applies where an adapter alone holds the credential. Human identity in v0.1 is config-declared, so the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation proves that <b>someone with local control</b> signed off, and never who.</p>
+        <p>Undefended: an agent with direct credential access outside the adapters, a compromised host, collusion between an agent and a careless approver, and persuasion about whether bytes you did see should be approved. You run the daemon and listener yourself. The optional command sandbox has platform limits; it does not isolate a whole agent harness. The vault and adapter protect actions routed through them; single-use grants bind the payloads that require human approval.</p>
       </div>
     </section>
 
@@ -1170,32 +1188,33 @@
   "name": "approval.md feature index",
   "version": "0.1.0",
   "facets": ["gate","channels","adapters","hooks","mcp","log","daemon","verification","examples"],
-  "tags": ["shipped","spec","example","behind-a-policy-key","behind-a-flag","human-only"],
+  "tags": ["shipped","spec","example","behind-a-policy-key","behind-a-flag","human-only","new","source","experimental"],
   "features": [
 {"id":"policy-file","title":"APPROVAL.md, the policy file","facet":["gate"],"tags":["shipped","spec"],"claim":"A fenced yaml approval-policy block in markdown at your repo root; the runtime ignores the prose.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
-{"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses every gated operation with hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
+{"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses with policy-not-attested, detail hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"autonomy-levels","title":"Five autonomy levels","facet":["gate"],"tags":["shipped"],"claim":"human-only, manual, supervised-live, supervised-retro, autonomous; bare supervised is an alias of supervised-retro.","href":"https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json"},
-{"id":"irreversibility-floor","title":"The irreversibility floor","facet":["gate"],"tags":["shipped","spec"],"claim":"An action declared reversible: false resolves to manual whatever the policy says.","href":"https://github.com/approval-md/approval.md/blob/main/SPEC.md"},
-{"id":"fail-closed","title":"Fail closed on every axis","facet":["gate"],"tags":["shipped"],"claim":"An unparseable policy resolves every class to manual, an unmatched action takes defaults.autonomy, unknown keys fail validation.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
-{"id":"tokens","title":"Single-use execution tokens","facet":["gate"],"tags":["shipped"],"claim":"Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses token-consumed.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
+{"id":"irreversibility-floor","title":"The irreversibility floor","facet":["gate"],"tags":["shipped","spec"],"claim":"An action declared reversible: false raises nonmanual autonomy to manual; human-only stays denied.","href":"https://github.com/approval-md/approval.md/blob/main/SPEC.md"},
+{"id":"fail-closed","title":"Policy loading fails closed","facet":["gate"],"tags":["shipped"],"claim":"An unparseable policy resolves every class to manual, an unmatched action takes defaults.autonomy, unknown keys fail validation.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
+{"id":"tokens","title":"Single-use execution tokens","facet":["gate"],"tags":["shipped"],"claim":"Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses token-consumed.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"payload-binding","title":"An approval binds bytes","facet":["gate"],"tags":["shipped"],"claim":"The envelope declares a payload_hash, and bytes that hash to anything else are refused payload-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"envelope-class","title":"Class comes from the envelope","facet":["gate"],"tags":["shipped"],"claim":"Class, cost and reversibility are read from the registered envelope, never from a flag at request time.","href":"https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md"},
 {"id":"budgets","title":"Budgets computed from the log","facet":["gate"],"tags":["shipped"],"claim":"Class limits and budgets scopes are conjunctive, and consumption is computed from the log over rolling windows.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary"},
 {"id":"protected-paths","title":"Protected paths widen, never narrow","facet":["gate"],"tags":["shipped"],"claim":"protected_paths adds paths, or routes each to a policy.edit sub-class, above a floor that never narrows.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"policy-amend","title":"Amend a policy with the verb","facet":["gate"],"tags":["shipped"],"claim":"approval policy amend lands new policy bytes and their attestation together, printing a semantic diff of what changed.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#policy-amend"},
-{"id":"gate-open","title":"The open window","facet":["gate","hooks"],"tags":["human-only"],"claim":"approval gate open needs a terminal and a typed understood, and each bypassed call appends gate.bypassed.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate"},
+{"id":"gate-open","title":"The open window","facet":["gate","hooks"],"tags":["human-only"],"claim":"approval gate open requires a terminal and typed understood; gated shell and protected-file bypasses append gate.bypassed.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate"},
 {"id":"import-agents-md","title":"Import your AGENTS.md prose","facet":["gate","hooks"],"tags":["shipped"],"claim":"approval import agents-md turns permissions prose into a draft policy block with a fixed keyword table, no model.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md"},
 {"id":"telegram","title":"Telegram, the reference channel","facet":["channels"],"tags":["shipped"],"claim":"The prompt carries a COMPUTED block, a CLAIMED block marked unverified, the full payload, and two buttons.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"delivery","title":"Paced or burst delivery","facet":["channels"],"tags":["behind-a-policy-key"],"claim":"channels.telegram.delivery is paced by default, showing one pending request at a time, or burst.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary"},
 {"id":"prompt-rows","title":"Prompt rows a policy orders","facet":["channels"],"tags":["behind-a-policy-key"],"claim":"channels.<name>.prompt.rows sets order only, never a whitelist, and .hide is refused for rows a decision needs.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel"},
-{"id":"payload-render","title":"Payloads rendered by shape","facet":["channels"],"tags":["shipped"],"claim":"An email-shaped payload is laid out field by field, with the canonical JSON and its bound hash underneath.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
-{"id":"web-queue","title":"A local web queue on loopback","facet":["channels"],"tags":["shipped"],"claim":"approval channel web binds 127.0.0.1 with the host hard-coded, and shows the raw token once.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it"},
+{"id":"payload-render","title":"Payloads rendered by shape","facet":["channels"],"tags":["shipped"],"claim":"The canonical email view shows every recognized field, its payload hash, and the raw-byte store path.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
+{"id":"web-queue","title":"A local web queue on loopback","facet":["channels"],"tags":["shipped"],"claim":"approval channel web binds hard-coded 127.0.0.1; a returned grant token is displayed once, then discarded.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it"},
 {"id":"cli-channel","title":"A terminal channel, and withdrawal","facet":["channels"],"tags":["shipped"],"claim":"approval channel cli decides at a terminal, and approval withdraw takes a pending request back.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel-cli"},
 {"id":"journal","title":"A channel in the other direction","facet":["channels","verification"],"tags":["shipped"],"claim":"approval journal write, approval values and approval feedback carry operator guidance that never reaches enforcement.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#journal"},
+{"id":"adapter-api","title":"A supported API for adapter authors","facet":["adapters"],"tags":["new","source"],"claim":"approval-md/adapters exports the execution contract, credential provider and conformance runner with TypeScript declarations.","href":"https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md"},
 {"id":"vault","title":"A vault the policy names","facet":["adapters"],"tags":["shipped"],"claim":"approval vault set encrypts one credential under a passphrase named by vault.passphrase_env; there is no approval vault get.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
 {"id":"email-adapter","title":"Email over SMTP, inside the token window","facet":["adapters"],"tags":["shipped"],"claim":"approval adapter email verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it.","href":"https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md"},
 {"id":"agentmail","title":"AgentMail, and the two-key split","facet":["adapters"],"tags":["shipped"],"claim":"The agent holds an AgentMail key without draft_send, and the key that can send waits in the vault.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
-{"id":"zzz","title":"ZZZ threads and replies, gated","facet":["adapters"],"tags":["new","source"],"claim":"approval adapter zzz calls ZZZ's create-thread or reply operation with a vaulted token and exact payload binding.","href":"https://github.com/approval-md/approval.md#first-class-zzzbot-messages"},
+{"id":"zzz","title":"ZZZ threads and replies, gated","facet":["adapters"],"tags":["new","source"],"claim":"After consuming the execution grant, approval adapter zzz sends with a vaulted ZZZ credential and bound payload.","href":"https://github.com/approval-md/approval.md#first-class-zzzbot-messages"},
 {"id":"draft-drift","title":"A draft is mutable, so the grant binds its bytes","facet":["adapters"],"tags":["shipped"],"claim":"approval payload agentmail-draft snapshots the draft, and one edited after the grant refuses agentmail-draft-drifted.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
 {"id":"message-id","title":"The Message-ID ties the mail to the chain","facet":["adapters","verification"],"tags":["shipped"],"claim":"It is derived from the action key, the payload hash and the sender, so both match months later.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
 {"id":"setup-adapter","title":"Setup fills the vault and proves it","facet":["adapters"],"tags":["shipped"],"claim":"approval setup adapter email reads the adapter's credential manifest, then probes the server without sending anything.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter"},
@@ -1205,7 +1224,7 @@
 {"id":"classify","title":"See how a command classifies first","facet":["hooks"],"tags":["shipped"],"claim":"approval hook classify prints a command line's class, the union over its segments, and touches nothing.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#gate-your-coding-agent"},
 {"id":"hook-entry","title":"A human commits the hook entry","facet":["hooks"],"tags":["shipped"],"claim":"The entry lives in .claude/settings.json or .cursor/hooks.json, and the classifier treats both as gate configuration.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
 {"id":"hook-edges","title":"Two edges, stated up front","facet":["hooks"],"tags":["shipped"],"claim":"The hook never creates a log, denying hook-log-unreachable, and a hook grant mints no token.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
-{"id":"harness-budgeted","title":"The harness path is budgeted and sampled","facet":["hooks","log"],"tags":["shipped"],"claim":"A covered gated action appends execution.started marked execution: harness, and budgets and the sampler both draw on it.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
+{"id":"harness-budgeted","title":"The harness path is budgeted and sampled","facet":["hooks","log"],"tags":["shipped"],"claim":"A covered gated action appends execution.started marked execution: \"harness\", and budgets and the sampler both draw on it.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
 {"id":"codex-mcp","title":"Codex over the supported stdio MCP route","facet":["mcp"],"tags":["shipped"],"claim":"Codex can use approval mcp serve for gate tools; it does not intercept ordinary tools, and repository setup awaits human installation and attestation.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve"},
 {"id":"mcp-stdio","title":"An MCP server over stdio","facet":["mcp"],"tags":["shipped"],"claim":"approval mcp serve publishes the agent's verbs as tools built from the registry behind approval instructions --schemas.","href":"https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md"},
 {"id":"mcp-no-grant","title":"Grant never travels over MCP","facet":["mcp"],"tags":["shipped"],"claim":"grant, reject, revoke, policy attest and vault set are absent from the tool list.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve"},
@@ -1217,7 +1236,7 @@
 {"id":"anchor","title":"Anchoring, the check a file cannot make about itself","facet":["log","verification"],"tags":["behind-a-flag"],"claim":"approval log verify --anchor checks the working file against the newest committed copy this checkout can see.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify"},
 {"id":"checkpoint","title":"Human-signed checkpoints","facet":["log","verification"],"tags":["behind-a-policy-key","human-only"],"claim":"approval log checkpoint signs the head with an Ed25519 key from audit.checkpoint_keys; a due checkpoint warns, never refuses.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-checkpoint"},
 {"id":"git-evidence","title":"Git evidence, a second independent record","facet":["log"],"tags":["behind-a-flag"],"claim":"approval daemon run --git-evidence commits per tick in the log's own repository, changing no verdict.","href":"https://github.com/approval-md/approval.md/blob/main/docs/git-evidence.md"},
-{"id":"log-read","title":"Reading the log is three verbs","facet":["log"],"tags":["shipped"],"claim":"tail prints the last N records and export streams every stored line byte for byte, both read-only.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log"},
+{"id":"log-read","title":"Read and verify the log","facet":["log"],"tags":["shipped"],"claim":"tail prints the last N records and export streams every stored line byte for byte, both read-only.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log"},
 {"id":"log-sync","title":"Syncing a log two writers touched","facet":["log","daemon"],"tags":["shipped"],"claim":"Hash chains do not survive a git merge, so approval log sync reconciles a committed copy that moved.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-sync"},
 {"id":"up","title":"The whole gate in one foreground process","facet":["daemon"],"tags":["shipped"],"claim":"approval up runs the daemon loop and every channel the policy configures, restarting one that falls over.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up"},
 {"id":"up-preflight","title":"A preflight that fast-forwards and rebuilds","facet":["daemon"],"tags":["shipped"],"claim":"approval up fetches, fast-forwards when safe, rebuilds a stale dist/, then re-execs the freshly built binary.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up"},
@@ -1231,7 +1250,7 @@
 {"id":"status","title":"status reports the system, doctor the machine","facet":["verification"],"tags":["shipped"],"claim":"approval status answers from the log; approval doctor answers for this machine, where a stale binary shows up.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#status"},
 {"id":"coverage","title":"coverage joins witnesses this project does not write","facet":["verification"],"tags":["shipped"],"claim":"approval coverage reports effects witnessed by git, gh and providers, each with an evidence seq or none.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#coverage"},
 {"id":"conformance","title":"Conformance vectors for a second implementation","facet":["verification"],"tags":["shipped"],"claim":"Six language-neutral vector files cover policy, chain, gate verdicts, JCS, refusal unions and schema, under a SHA-256 manifest.","href":"https://github.com/approval-md/approval.md/blob/main/conformance/README.md"},
-{"id":"exit-codes","title":"Exit codes an agent branches on","facet":["verification"],"tags":["shipped"],"claim":"Seven frozen numbers; a gate refusal is exit 1 and never 2, because the command was well-formed.","href":"#exit"},
+{"id":"exit-codes","title":"Exit codes an agent branches on","facet":["verification"],"tags":["shipped"],"claim":"Seven frozen CLI codes; ordinary gate refusals use 1, while hook protocols also use 0 and 2.","href":"#exit"},
 {"id":"check-tiers","title":"Three check tiers, classified from the diff","facet":["verification"],"tags":["shipped"],"claim":"npm run check:changed classifies the working tree into light, records or full, and ambiguity resolves to full.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#running-the-checks"},
 {"id":"schema-validation","title":"Validate at the write boundary","facet":["verification","gate"],"tags":["shipped"],"claim":"Every event and envelope passes its JSON Schema before it is appended, and the policy schema is closed.","href":"https://github.com/approval-md/approval.md/blob/main/schema/event.schema.json"},
 {"id":"telegram-demo","title":"Request, a tap on a phone, an executed run","facet":["examples","channels"],"tags":["example"],"claim":"A walkthrough against real Telegram, with a scripted twin that runs in CI against a mock Bot API.","href":"https://github.com/approval-md/approval.md/blob/main/examples/telegram-demo.md"},

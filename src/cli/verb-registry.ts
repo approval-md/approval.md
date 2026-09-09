@@ -448,6 +448,34 @@ const VERBS: VerbSpec[] = [
     exit_codes: [OK, { code: 1, meaning: "the log is corrupt; nothing was printed" }, USAGE, TORN, IO],
   },
 
+  {
+    name: "log",
+    subcommand: "follow",
+    purpose:
+      "Emit one JSON event per line after an exclusive sequence cursor, then follow appends. Every batch is verified from genesis before emission; filesystem notifications only prompt another read. The optional cursor hash binds a resume to the retained prefix. This foreground stream is intentionally excluded from MCP's finite call queue.",
+    human_only: false,
+    input: input({
+      flags: {
+        ...LOG_FLAG,
+        "--from": "string",
+        "--cursor-hash": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    // A stream has no single finite output object for registry/MCP purposes.
+    // Each stdout line is a RECORD, pinned by the CLI end-to-end test.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "cancelled by a signal or downstream pipe closure" },
+      { code: 1, meaning: "corrupt log or cursor mismatch" },
+      USAGE,
+      TORN,
+      IO,
+    ],
+  },
+
   // APRV-125. The two verbs that move the log FILE. `human_only` is false on
   // both: an agent may run them, and the policy decides whether it may — they
   // classify as `log.sync` and `log.advance` rather than as the gate's own

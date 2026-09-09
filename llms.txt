@@ -2,19 +2,20 @@
 
 > Human approval for agent actions. A harness-agnostic, open-source framework for approving agent actions with a human in the loop.
 
-approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 code and a CC0 specification and schemas. Version 0.1.0 is published on npm and runs on Node 20 or newer; the feature index describes the current source checkout, including newer source-only entries. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are reachable only inside a token window opened by a recorded human decision.
+approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 code and a CC0 specification and schemas. Version 0.1.0 is published on npm and runs on Node 20 or newer; the feature index describes the current source checkout, including newer source-only entries. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are scoped to adapter execution, with single-use tokens on paths that require a human grant.
 
 ## Start here
 
 - [README](https://raw.githubusercontent.com/approval-md/approval.md/main/README.md): the full product tour, from the policy file to the phone prompt, the vault and the credential boundary.
-- [Landing page as markdown](https://approval.md/llms-full.txt): this site's whole content, including the 69-entry feature index with claims and links.
+- [Landing page as markdown](https://approval.md/llms-full.txt): this site's whole content, including the 70-entry feature index with claims and links.
 - [SPEC.md](https://raw.githubusercontent.com/approval-md/approval.md/main/SPEC.md): the specification and the source of truth for design decisions, including section 11 on the security posture and section 11.1 on the global invariants.
 - [npm package](https://www.npmjs.com/package/approval-md): published version 0.1.0 of the TypeScript reference runtime.
 
 ## Reference
 
 - [CLI reference](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/cli-reference.md): the reasoning behind each verb, its threat model, and the alternatives rejected.
-- [ZZZ adapter](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/cli-reference.md#adapter-zzz): the source-checkout `approval adapter zzz` creates a thread or reply through zzz.bot with a vaulted token and exact payload binding; its tests use a mock HTTP service, with no live post.
+- [Public adapter API](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/adapter-api.md): source-only ESM and TypeScript exports at `approval-md/adapters`, with packed-consumer execution-binding and conformance tests; not included in npm 0.1.0.
+- [ZZZ adapter](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/cli-reference.md#adapter-zzz): the source-checkout `approval adapter zzz` creates a thread or reply through zzz.bot with a vaulted ZZZ service credential and exact payload binding; its tests use a mock HTTP service, with no live post.
 - [policy.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/policy.schema.json): the closed schema for the `approval-policy` block, including the five autonomy levels.
 - [event.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/event.schema.json): the schema every log record passes before it is appended.
 - [envelope.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/envelope.schema.json): the schema for the action envelope an agent registers.
