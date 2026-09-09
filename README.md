@@ -561,6 +561,13 @@ room prerequisites. A local non-guest MCP server exposes the same adapter verb,
 but MCP use is voluntary; custody is enforced only when the write credential is
 kept solely in the approval.md vault.
 
+### Build a third-party adapter
+
+Adapter authors can import the supported ESM API from `approval-md/adapters`.
+It exposes the shared execution contract, conformance runner, vault credential
+provider, refusal unions, and TypeScript types without making internal package
+paths public. See the [adapter API guide](docs/adapter-api.md).
+
 ## The APPROVAL.md dictionary
 
 Every key that can appear in the policy block. The schema is closed at every
