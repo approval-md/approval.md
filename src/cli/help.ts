@@ -124,6 +124,7 @@ Usage:
                       [--log <path>]                    (reads preToolUse JSON)
   approval hook classify [--json] [--policy <path>] [--dir <path>] -- <command…>
   approval import agents-md <file> [--out <path>] [--json]
+  approval codex      prepare|setup|doctor|start|serve (strict host workflow)
   approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
                       [--policy <path>]              (MCP over stdio; foreground)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
@@ -2394,6 +2395,29 @@ ${why("setup-service")}`;
 // ---------------------------------------------------------------------------
 // The MCP wrapper (APRV-87)
 // ---------------------------------------------------------------------------
+
+export const CODEX_HELP = `approval codex — prepare and inspect a constrained Codex host bundle (INERT)
+
+Usage:
+  approval codex prepare --instance <id> --workspace <abs> --primary <abs>
+      --install-root <abs> --output <new-dir> --codex <abs> --node <abs> [--json]
+  approval codex setup --check <bundle-dir> [--json]
+  approval codex doctor --strict --manifest <abs> [--json]
+  approval codex start|serve --manifest <abs> [--json]
+
+prepare writes a fresh review bundle only. setup --check verifies its closed file
+set, hashes, manifest and generated templates. Neither installs a package, edits
+Codex configuration, creates principals, loads services, reads credentials, or
+changes policy. doctor fails closed on unknown custody, executes no manifest
+binary in this slice, and reports runtime versions as unchecked.
+
+start and serve currently refuse with codex-not-ready. The policy-bound broker
+and confined runner arrive in APRV-325.2 and APRV-325.3. An npm or project
+installation alone is never reported as enforcement.
+
+${EXIT_CODES_POINTER} (1 means the strict boundary is absent or invalid)
+${JSON_ERRORS}
+why: docs/cli-reference.md#constrained-codex-preparation`;
 
 export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (FOREGROUND)
 

@@ -1,0 +1,40 @@
+{
+  "schema_version": "approval.codex.instance.v1",
+  "instance_id": "team",
+  "platform": "darwin",
+  "codex_version": "0.153.0",
+  "node_version": "20.19.0",
+  "package_version": "0.1.0",
+  "paths": {
+    "install_root": "/Library/Application Support/approval-codex",
+    "package_root": "/Library/Application Support/approval-codex/package",
+    "workspace": "/Users/_approval_codex/workspace",
+    "primary": "/Users/operator/approval-primary",
+    "policy": "/Users/operator/approval-primary/APPROVAL.md",
+    "log": "/Users/operator/approval-primary/.approval/log/events.jsonl",
+    "manifest": "/Library/Application Support/approval-codex/instances/team.json",
+    "codex_executable": "/Library/Application Support/approval-codex/bin/codex",
+    "node_executable": "/Library/Application Support/approval-codex/bin/node",
+    "mcp_executable": "/Library/Application Support/approval-codex/bin/approval-codex-mcp",
+    "broker_executable": "/Library/Application Support/approval-codex/bin/approval-codex-broker",
+    "runner_executable": "/Library/Application Support/approval-codex/bin/approval-codex-runner"
+  },
+  "principals": {
+    "codex": "_approval_codex",
+    "broker": "_approval_broker",
+    "runner": "_approval_runner"
+  },
+  "invocation": {
+    "command": "/Library/Application Support/approval-codex/bin/approval-codex-mcp",
+    "args": [
+      "codex",
+      "serve",
+      "--manifest",
+      "/Library/Application Support/approval-codex/instances/team.json"
+    ]
+  },
+  "components": {
+    "broker": "required-not-shipped",
+    "runner": "required-not-shipped"
+  }
+}

@@ -21,7 +21,9 @@
     "SPEC.md",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "docs/codex-enforced-session.md",
+    "templates/codex"
   ],
   "repository": "github:approval-md/approval.md",
   "homepage": "https://approval.md",

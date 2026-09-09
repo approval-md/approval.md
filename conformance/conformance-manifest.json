@@ -8,7 +8,7 @@
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "f6c3d42642877efbbfe12e5d2666ccba5d8e694fb271b18bb4f94aea1c447a81",
     "conformance/vectors/refusal-unions.v1.json": "51fae786bafa63c061a50290e2dd3a10646e85a0f8c695142eac1532dc74e0f2",
-    "conformance/vectors/schema-validation.v1.json": "36a3d2ce7013a9dc64753c68e6d0ad59ed20f8a46dc73a21cfdf8005a4e6f968",
+    "conformance/vectors/schema-validation.v1.json": "53e914b341d78d43896713a4aeffa87649fca27b30f9bfa96e9ccc191208ce2b",
     "tests/conformance-harness.ts": "e26913f7fc872c2b9aa178c53dae331cd7a952fd003fc6cb14f0234a4b3bb1b1"
   }
 }
