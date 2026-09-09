@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 07:39'
-updated_date: '2026-09-09 08:57'
+updated_date: '2026-09-09 19:38'
 labels: []
 dependencies: []
 references:
@@ -44,6 +44,8 @@ Parent security review requires literal shell quoting, a pinned absolute Node in
 Correction to prior pending note: the real primary-gate grant arrived at seq30140. The exact reviewed SPEC amendment was applied through the adapter and recorded at outcome30151. The request used draw-daemon-stale/source unavailable, so it was a real human grant, not an unselected live sample. Parent full npm test exited1 with five integration omissions: registry exit-code invariant, human-only registry allowlist, schema conformance coverage, missing valid and invalid codex-instance fixtures. Sol is fixing these before a fresh full run. Readiness remains false; no installation or activation occurred.
 
 Reviewed implementation commit1d7a442 and ordinary main merge113c6c3. Prepared and installed packed tgz outside repository; manifest/schema/template/docs assets and strict fixed shim were exercised. No lifecycle install scripts or live activation. Parent full npm test after five integration fixes:4035total,4034pass,0fail,1skip exit0. Post-main-merge focused integration79/79 exit0; typecheck0, lint0, conformance295/295 vectors143controls exit0, diff0. Protected-path guard against separate records PR365 exit0. SPEC source grant30140/outcome30151; verbatim merge resolution outcome30174. Doctor executes no manifest-selected binary because ACL/subtree custody remains unproven; broker/runner required-not-shipped, all start/serve attempts explicitly not-ready. This completes packaged preparation only; parent325 and broker/runner tasks remain open. Registry publication and host activation have not occurred. GitHub delivery follows this reviewed task record.
+
+PR366 Node 22 shard 3 failed deterministically under npm 10.9.8 because the packed-install fixture promoted each installed transitive to a direct local file dependency; npm 10 ran express-rate-limit's prepare lifecycle despite --ignore-scripts, then exited 127 because its development-only run-s tool was absent. The focused fix copies only the already-installed production dependency closure into a temporary scratch node_modules tree, removes lifecycle scripts from those temporary dependency copies, and points the offline fixture at those copies. The approval-md tgz remains byte-untouched and is still installed outside the checkout with npm install --ignore-scripts, then invoked from that installed path, so the test continues to verify the shipped artifact while preventing unrelated third-party prepare hooks from rebuilding inside the source checkout. Exact Node 22.23.2/npm 10.9.8 stub-runner check: 6/6 pass, exit 0, /private/tmp/aprv3251-node22-npm10-focused.log. Current Node 24.2.0/npm 11.7.0 stub-runner check: 6/6 pass, exit 0, /private/tmp/aprv3251-node24-npm11-focused.log. Build exit 0: /private/tmp/aprv3251-build.log. Lint exit 0: /private/tmp/aprv3251-lint.log. Typecheck exit 0: /private/tmp/aprv3251-typecheck.log. Original CI failure evidence: /private/tmp/pr366-job102404275904-failed.log.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

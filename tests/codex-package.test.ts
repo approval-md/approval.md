@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -147,6 +147,8 @@ test("packed npm artifact installs without scripts and runs outside the checkout
   const rootPackage = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
     dependencies: Record<string, string>;
   };
+  const dependencyCopies = join(root, "dependency-copies", "node_modules");
+  mkdirSync(dependencyCopies, { recursive: true });
   const localDependencies: Record<string, string> = { "approval-md": `file:${tarball}` };
   const pending = Object.keys(rootPackage.dependencies);
   const seen = new Set<string>();
@@ -156,10 +158,19 @@ test("packed npm artifact installs without scripts and runs outside the checkout
     seen.add(name);
     const path = join(ROOT, "node_modules", name);
     const value = JSON.parse(readFileSync(join(path, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
       dependencies?: Record<string, string>;
       optionalDependencies?: Record<string, string>;
     };
-    localDependencies[name] = `file:${path}`;
+    const copy = join(dependencyCopies, name);
+    mkdirSync(join(copy, ".."), { recursive: true });
+    cpSync(path, copy, { recursive: true, dereference: true });
+    // npm 10 runs `prepare` for local directory dependencies even alongside
+    // --ignore-scripts. These copies supply the already-installed runtime bytes
+    // without letting an unrelated dependency rebuild itself in the checkout.
+    delete value.scripts;
+    writeFileSync(join(copy, "package.json"), `${JSON.stringify(value, null, 2)}\n`);
+    localDependencies[name] = `file:${copy}`;
     pending.push(...Object.keys(value.dependencies ?? {}), ...Object.keys(value.optionalDependencies ?? {}));
   }
   writeFileSync(join(outside, "package.json"), `${JSON.stringify({ private: true, dependencies: localDependencies }, null, 2)}\n`);
