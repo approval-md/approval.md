@@ -13,9 +13,9 @@
  * A provider built here is only ever handed to
  * {@link executeThroughAdapter} through {@link AdapterExecuteOptions.credentials}.
  * The contract wraps it in a window that closes the instant `act` returns, so
- * every read is inside a verified, consumed, single-use token — which is what
- * SPEC.md §10.4 means by "the credentials only answer to tokens". Three things
- * hold that rule up, and none of them is a convention:
+ * every read during `act` is inside a verified execution. Manual and selected
+ * live paths consume a token; explicitly authorized supervised or autonomous
+ * paths do not. Three things hold that rule up, and none is a convention:
  *
  * 1. `core/vault.ts` exports exactly one function that returns a credential
  *    value (`getCredential`), and this module is its only caller in the

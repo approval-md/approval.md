@@ -169,6 +169,10 @@ export interface Resolution {
   approvers: string[] | null;
   limits: Record<string, number> | null;
   floorApplied: boolean;
+  /** Whether every equally most-specific rule explicitly permits irreversibility. */
+  allowIrreversible: boolean;
+  /** The maximum-specificity rule group governing that permission. */
+  irreversiblePatterns: string[];
   candidates: Candidate[];
 }
 
@@ -379,6 +383,8 @@ const FAIL_CLOSED: Readonly<Resolution> = {
   approvers: null,
   limits: null,
   floorApplied: false,
+  allowIrreversible: false,
+  irreversiblePatterns: [],
   candidates: [],
 };
 
@@ -493,6 +499,8 @@ function fromDefaults(
     approvers: null,
     limits: null,
     floorApplied: false,
+    allowIrreversible: false,
+    irreversiblePatterns: [],
     candidates,
   };
 }
@@ -508,8 +516,10 @@ function fromRules(candidates: Candidate[]): Resolution {
   // lexicographically smallest strictest — deterministic regardless of the
   // policy file's key order.
   let winner = best;
+  const governing: Candidate[] = [];
   for (const candidate of candidates) {
     if (compareSpecificity(candidate.specificity, best.specificity) !== 0) break;
+    governing.push(candidate);
     if (STRICTNESS[candidate.rule.autonomy] < STRICTNESS[winner.rule.autonomy]) {
       winner = candidate;
     }
@@ -523,24 +533,29 @@ function fromRules(candidates: Candidate[]): Resolution {
     approvers: winner.rule.approvers ?? null,
     limits: winner.rule.limits ?? null,
     floorApplied: false,
+    // APRV-317: lexicographic order and strictness still select the ordinary
+    // winner, but neither may silently discard a tied rule's refusal to waive
+    // the floor. The capability is the intersection of the governing group.
+    allowIrreversible: governing.every(
+      (candidate) => candidate.rule.allow_irreversible === true,
+    ),
+    irreversiblePatterns: governing.map((candidate) => candidate.pattern),
     candidates,
   };
 }
 
 /**
  * SPEC.md §7 irreversibility floor, applied *after* class resolution: an action
- * declared `reversible: false` MUST NOT execute under `autonomous` or
- * `supervised`. Retrospective sampling cannot undo an irreversible action, so
- * the floor resolves to `manual` and records that it, rather than the matched
- * rule, determined the outcome.
+ * declared `reversible: false` resolves to `manual` unless the attested class
+ * rule group explicitly permits it. When no permission exists, the resolution
+ * records that the floor, rather than the matched rule, determined the outcome.
  *
  * ## The floor is a floor, not a proof (amended SPEC.md §7, APRV-127)
  *
- * This is the enforcement point for APRV-127's rule that `supervised-retro`
- * REFUSES an action declaring `reversible: false`: such an action never resolves
- * supervised at all, in either mode, so there is no retrospective path for it to
- * take. Retrospective review of an irreversible action is regret with a paper
- * trail, and the grammar must not offer it.
+ * This remains the enforcement point for APRV-127's default: a supervised rule
+ * with no APRV-317 opt-in sends a truthful irreversible action to manual. The
+ * only exception is the unanimous capability computed from operator policy
+ * above; action metadata has no field that can supply it.
  *
  * What the floor is NOT is evidence that anything else is reversible.
  * `reversible` is SELF-REPORTED by the action's own declaration. A truthful
@@ -573,6 +588,7 @@ function fromRules(candidates: Candidate[]): Resolution {
 function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution {
   if (options.reversible !== false) return resolution;
   if (resolution.autonomy === "manual" || resolution.autonomy === "human-only") return resolution;
+  if (resolution.allowIrreversible) return resolution;
   return {
     ...resolution,
     autonomy: "manual",

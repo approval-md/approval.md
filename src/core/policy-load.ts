@@ -187,6 +187,13 @@ export function tokenDeliveryOf(load: PolicyLoadResult): TokenDelivery {
 export interface PolicyClassRule {
   autonomy: DeclaredAutonomy;
   /**
+   * Amended SPEC.md §5.2/§7 (APRV-317): explicit operator permission for a
+   * truthful irreversible action to retain this rule's nonmanual autonomy.
+   * Absent and false preserve the manual floor. The schema permits true only
+   * on autonomous and supervised rules; defaults have no corresponding key.
+   */
+  allow_irreversible?: boolean;
+  /**
    * Amended SPEC.md §5.2 (APRV-127): the fraction of `supervised-live` actions
    * that block on the human gate, in (0, 1]. Required by the schema for
    * `supervised-live` and forbidden for every other level, `human-only`
@@ -902,14 +909,27 @@ export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null 
     if (builtin === null) continue;
 
     const routed = resolve(load, parsedEntry.routed);
-    const weaker =
+    const ordinaryWeaker =
       STRICTNESS[routed.declaredAutonomy] > STRICTNESS[line.declaredAutonomy] ||
       (STRICTNESS[routed.declaredAutonomy] === STRICTNESS[line.declaredAutonomy] &&
         routed.liveRate !== null &&
         line.liveRate !== null &&
         routed.liveRate < line.liveRate);
-    if (weaker) {
-      return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in policy.edit path to ${JSON.stringify(parsedEntry.routed)}, which resolves ${describeLevel(routed.declaredAutonomy, routed.liveRate)} — weaker than the \`policy.edit\` line's own ${describeLevel(line.declaredAutonomy, line.liveRate)}. \`protected_paths\` is additive: it may widen the protected surface and may never narrow it, and routing a built-in path to a looser sub-class would narrow it without removing anything from any list. Declare ${JSON.stringify(parsedEntry.routed)} at least as strictly as \`policy.edit\`, or route a path the runtime does not already protect.`;
+    const irreversibleLine = resolve(load, "policy.edit", { reversible: false });
+    const irreversibleRouted = resolve(load, parsedEntry.routed, { reversible: false });
+    const irreversibleWeaker =
+      STRICTNESS[irreversibleRouted.declaredAutonomy] >
+        STRICTNESS[irreversibleLine.declaredAutonomy] ||
+      (STRICTNESS[irreversibleRouted.declaredAutonomy] ===
+        STRICTNESS[irreversibleLine.declaredAutonomy] &&
+        irreversibleRouted.liveRate !== null &&
+        irreversibleLine.liveRate !== null &&
+        irreversibleRouted.liveRate < irreversibleLine.liveRate);
+    if (ordinaryWeaker || irreversibleWeaker) {
+      const comparison = ordinaryWeaker
+        ? `${describeLevel(routed.declaredAutonomy, routed.liveRate)} — weaker than the \`policy.edit\` line's own ${describeLevel(line.declaredAutonomy, line.liveRate)}`
+        : `${describeLevel(irreversibleRouted.declaredAutonomy, irreversibleRouted.liveRate)} for reversible: false — weaker than the \`policy.edit\` line's effective ${describeLevel(irreversibleLine.declaredAutonomy, irreversibleLine.liveRate)} for reversible: false`;
+      return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in policy.edit path to ${JSON.stringify(parsedEntry.routed)}, which resolves ${comparison}. \`protected_paths\` is additive: it may widen the protected surface and may never narrow it, and routing a built-in path to a looser sub-class would narrow it without removing anything from any list. Declare ${JSON.stringify(parsedEntry.routed)} at least as strictly as \`policy.edit\`, or route a path the runtime does not already protect.`;
     }
   }
   return null;

@@ -88,8 +88,9 @@ checks](#running-the-checks), and it is not a step you need on the way in.
   leave. You tap Approve or Reject. A local web page and the terminal are the
   other two channels.
 - **A single-use execution token.** Minted at one place in the code, only as a
-  human decision is recorded, spent once, stored nowhere. An adapter holding a
-  real credential opens it only inside a verified token window.
+  human decision is recorded, spent once, stored nowhere. Manual and selected
+  live executions require it. An attested class rule may instead explicitly
+  authorize an irreversible supervised or autonomous execution.
 - **A log nobody can quietly rewrite.** Every proposal, decision and execution
   is an append-only, hash-chained JSONL record. `approval log verify` answers
   for the chain.
@@ -108,9 +109,11 @@ deterministic code. Models propose; the runtime decides.
 - **Credentials live in an encrypted vault**, never in the policy file and never
   in the agent's environment. `APPROVAL.md` carries the *name* of an environment
   variable, and there is no `approval vault get`.
-- **Adapters answer only to tokens.** The email adapter opens the vault inside a
-  verified token window, sends, and closes it. An agent without a token reaches
-  no credential.
+- **Adapters answer only inside a verified execution.** Manual and selected-live
+  executions present and consume a valid token. An irreversible supervised or
+  autonomous execution must be explicitly enabled by its attested class rule.
+  The adapter opens the credential window only after the runtime authorizes the
+  declared action, then closes it as soon as the adapter returns.
 - **Tokens are minted at one site**, in the path that records a human decision,
   and the log holds only their SHA-256. A second spend is refused
   `token-consumed`.
@@ -386,10 +389,11 @@ an agent with `class-human-only`), `manual` (a human decides before execution),
 `manual` does, and the rest proceed, so the rule carries a `live_rate`),
 `supervised-retro` (executes immediately, a sampled fraction escalated for
 retrospective review), `supervised` (an alias of `supervised-retro`), and
-`autonomous` (executes freely). An email is `reversible: false`, which engages
-section 7's irreversibility floor: the class resolves to `manual` even where the
-policy says `supervised`, because retrospective sampling cannot un-send a
-message.
+`autonomous` (executes freely). A truthful `reversible: false` declaration
+normally engages section 7's manual floor. An operator who deliberately accepts
+irreversible execution for one nonmanual class can add
+`allow_irreversible: true` to that class rule. Every equally most-specific rule
+must opt in, and the edit has no effect until the policy is re-attested.
 
 **3. Set the budgets.** Class `limits` and the `budgets` scopes are conjunctive,
 so an action must pass both, and consumption is computed from the log over
@@ -464,7 +468,7 @@ approval adapter email task-042:chaser --token "$TOKEN" \
 machine come from, and `approval setup vault` writes the passphrase line under
 whatever name `vault.passphrase_env` declares. The SMTP password is an adapter
 credential, so it goes in the vault, where a gated adapter spends it inside a
-verified token window.
+verified execution window.
 
 **2. Setup fills the vault and proves it.** `approval setup adapter email` reads
 the credential manifest the adapter declares, then probes the server without
@@ -477,12 +481,16 @@ the policy names and never carries. The value comes from stdin or `--value-env
 secret in the shell history. There is no `approval vault get`; `approval vault
 list` shows the names.
 
-**4. The send happens inside the token window.** `approval adapter email`
-verifies the token, re-hashes `message.json` against the binding the grant
-recorded, appends `execution.started`, opens the vault, reads the SMTP
+**4. The send happens inside the execution window.** `approval adapter email`
+re-hashes `message.json` against the declaration or grant binding, applies the
+attested policy, appends `execution.started`, opens the vault, reads the SMTP
 settings, sends over STARTTLS, closes the window, and appends
-`execution.completed`. The credential exists for one send and appears in no
-event, output or error message.
+`execution.completed`. Manual and selected-live paths verify and spend the
+grant token; an explicitly opted-in supervised or autonomous path has no grant
+and mints no token. On that no-token path, the vault passphrase must already be
+in the adapter process environment. The `.approval/env` fallback remains
+token-only. The credential exists for one send and appears in no event, output
+or error message.
 
 **5. Check two properties in your own mailbox.** The bytes that left are the
 bytes you approved, since the hash the token spend verified is the hash of the
@@ -584,6 +592,7 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and an alias of `supervised-retro` (§5.2, APRV-127, APRV-185). |
 | `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
 | `classes.<pattern>.retro_rate` | This class's retrospective sampling rate, in (0, 1], overriding `audit.supervised_sample_rate` for it alone. Optional on `supervised`, `supervised-retro` and `supervised-live`, refused on the rest. Absent means the global rate (§5.2, APRV-183). |
+| `classes.<pattern>.allow_irreversible` | Explicit operator permission for a truthful `reversible: false` action to retain this rule's `autonomous` or supervised behavior. Optional boolean; absent or `false` preserves the manual floor. `true` is refused on `manual` and `human-only`, cannot appear in `defaults`, and takes effect only when every equally most-specific matching rule says `true` (§5.2, §7, APRV-317). |
 | `classes.<pattern>.approvers` | Approver ids permitted to decide this class. Absent restricts nobody, since the list is a narrowing and a narrowing nobody wrote narrows nothing; a named list refuses everyone else with `actor-not-approver` (§5.1). |
 | `classes.<pattern>.limits` | Per-class ceilings, every value a positive number: `per_action_usd`, `daily_usd`, and the request-volume counts `max_pending` and `requests_per_hour`. Absent means this class carries no ceiling of its own (§5.1, §5.2). |
 | `budgets.global.daily_usd` | Repo-wide spend ceiling per rolling day, computed from the log. Absent means no spend ceiling (§5.1). |
@@ -685,9 +694,12 @@ the seq of the `execution.started` that spent it.
 
 **Call the adapter or the credential directly?** Credentials live in
 `.approval/vault.enc` under a passphrase the policy names and never carries,
-and an adapter opens the vault only inside a verified token window. There is no
-`approval vault get`. An agent that never held a token never reaches a
-credential. This is where the hard enforcement lives.
+and an adapter opens the vault only inside an execution window admitted by the
+attested policy. There is no `approval vault get`. Manual and selected-live
+paths need a grant token. An explicitly opted-in supervised or autonomous path
+needs the passphrase already present in the adapter process environment; it
+cannot use the token-scoped `.approval/env` fallback. This is where the hard
+enforcement lives.
 
 **Run the side effect from its own shell?** That is what the PreToolUse hook is
 for: it classifies the command text, resolves the class, and answers allow or
@@ -712,16 +724,18 @@ anti-CSRF token.
 **Lie in its self-report?** Self-reported fields never reduce scrutiny (SPEC.md
 section 11.1, invariant 4). They may raise it, inform display, or feed
 retrospective analysis, and they can never downgrade a resolved autonomy level
-or shortcut a refusal path. The prompt keeps them apart: a COMPUTED block the
-runtime derived, and a CLAIMED block marked unverified.
+or supply `allow_irreversible`. Only an explicit class rule in the attested
+operator policy can retain nonmanual autonomy for a truthful `reversible:
+false` declaration. The prompt keeps computed facts apart from claimed fields.
 
 **So what is left?** A fully adversarial agent on a machine it controls.
 Identity in v0.1 is config-declared, so anyone who can set that variable and
 write to the log is inside the trust boundary; cryptographic identity is future
 work ([docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)).
 What holds regardless of what the harness believes it is running: the vault,
-the adapter boundary, and the single-use token. Keep `manual` floors on
-irreversible classes, which SPEC.md section 7 does for you.
+the adapter boundary, and the single-use token. Section 7 keeps irreversible
+classes at `manual` unless the attested policy explicitly opts a class into the
+exception.
 
 ## Running the checks
 

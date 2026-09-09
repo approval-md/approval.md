@@ -20,7 +20,7 @@
  * deployment this adapter is written for gives the agent a key WITHOUT the two
  * send permissions and puts a key WITH them in the vault under
  * {@link DEFAULT_AGENTMAIL_CREDENTIAL_NAMES}.apiKey, where it is readable only
- * inside the verified-token window the contract opens. The agent can therefore
+ * inside the verified execution window the contract opens. The agent can therefore
  * compose all day and cannot send at all; the sending key answers to a grant.
  *
  * ## Two payload modes, discriminated by shape, ambiguity refused
@@ -315,7 +315,7 @@ export type AgentmailConfigOutcome =
  * The single place in the repository that turns a {@link CredentialProvider}
  * into AgentMail settings — the names it asks for, the order, the shape rules —
  * mirroring `readEmailSmtpConfig` for the same reason: `act` calls it inside the
- * verified-token window and `approval setup adapter agentmail` calls it to probe
+ * verified execution window and `approval setup adapter agentmail` calls it to probe
  * a configuration it only partly typed, and a second reader would be a second
  * opinion about what "configured" means.
  */

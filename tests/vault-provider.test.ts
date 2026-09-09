@@ -3,8 +3,8 @@
  * `src/adapters/vault-provider.ts`.
  *
  * `tests/vault.test.ts` proves the file keeps its secrets. This suite proves the
- * other half of SPEC.md §10.4's sentence: that the credentials "only answer to
- * tokens". Nothing here hand-writes a log line or fabricates a grant. The
+ * other half of SPEC.md §10.4: credentials answer only inside an authorized
+ * execution window. Nothing here hand-writes a log line or fabricates a grant. The
  * scenario is built through the real gate exactly as
  * `tests/adapters-contract.test.ts` builds it — attest, register, request, a
  * real human grant — and the token under test is the one that grant printed.
@@ -85,6 +85,8 @@ interface Case {
   options: AdapterExecuteOptions;
 }
 
+type NonManualCase = Omit<Case, "token">;
+
 /**
  * A fresh log holding one granted, unspent manual action, plus a vault beside it
  * holding the credential the mock adapter needs. Both built through their real
@@ -161,6 +163,62 @@ function granted(withCredential = true): Case {
     actionKey,
     payload,
     token: decided.token,
+    options: { policy: { file: unit.policyPath }, clock: fixedClock(at(3)) },
+  };
+}
+
+/** A registered irreversible action whose exact class rule authorizes autonomy. */
+function policyAuthorized(): NonManualCase {
+  counter += 1;
+  const policy = POLICY.replace(
+    "    autonomy: manual\n",
+    "    autonomy: autonomous\n    allow_irreversible: true\n",
+  );
+  const unit = newScenario(scratch.root, policy);
+  attest(unit, T0);
+
+  const actionKey = `${TASK}:autonomous-${String(counter)}:2026-08-17`;
+  const payload: JsonValue = {
+    to: [`vault-${String(counter)}@vendor.example`],
+    subject: `Invoice ${String(counter)}`,
+    body: "Following up.",
+  };
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: {
+        origin: { app: "manual", created_by: AGENT },
+        state: "awaiting",
+        actions: [
+          {
+            class: MOCK_CLASS,
+            idempotency_key: actionKey,
+            summary: `chase invoice ${String(counter)}`,
+            reversible: false,
+            est_cost_usd: "0.02",
+            payload_hash: payloadHash(payload),
+          },
+        ],
+      },
+    },
+    T0,
+    AGENT,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  const home = join(unit.dir, ".approval");
+  mkdirSync(home, { recursive: true });
+  const vaultPath = join(home, VAULT_FILENAME);
+  const written = setCredential(vaultPath, PASSPHRASE, MOCK_CREDENTIAL, SECRET);
+  assert.equal(written.ok, true, `vault setup failed: ${JSON.stringify(written)}`);
+
+  return {
+    logPath: unit.logPath,
+    vaultPath,
+    actionKey,
+    payload,
     options: { policy: { file: unit.policyPath }, clock: fixedClock(at(3)) },
   };
 }
@@ -368,7 +426,7 @@ test("the passphrase is read at open time, not captured at construction", () => 
  * under test here is the reader: a fixture built by the writer would agree with
  * the parser by construction.
  */
-function writeEnvFile(unit: Case, line: string): string {
+function writeEnvFile(unit: Pick<Case, "logPath">, line: string): string {
   const path = envFilePathFor(unit.logPath);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `# fixture\n${line}\n`, "utf8");
@@ -503,7 +561,7 @@ test("the fallback is unreachable without the token that grant minted", async ()
     { ...unit.options, token: "not-the-token", credentials: wrongToken },
   );
   assert.equal(refused.ok, false, "a forged token reached the vault");
-  if (!refused.ok) assert.equal(refused.code, "credential-unavailable");
+  if (!refused.ok) assert.equal(refused.code, "token-mismatch");
 
   // (c) The same provider, after a real execution has closed its window.
   const real = vaultCredentialProvider({ vaultPath: unit.vaultPath }, opts);
@@ -512,6 +570,39 @@ test("the fallback is unreachable without the token that grant minted", async ()
   const late = real.get(MOCK_CREDENTIAL);
   assert.equal(late.ok, false, "the fallback outlived the window that authorized it");
   if (!late.ok) assert.equal(late.code, "credential-unavailable");
+});
+
+test("policy-authorized execution cannot use the token-scoped source map", async () => {
+  const unit = policyAuthorized();
+  writeEnvFile(unit, `${PASS_ENV}=${PASSPHRASE}`);
+
+  const sourceMapped = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    { passphraseEnv: PASS_ENV, env: {}, envFilePath: envFilePathFor(unit.logPath) },
+  );
+  const refused = await executeThroughAdapter(
+    mockAdapter(),
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: unit.payload, actor: AGENT },
+    { ...unit.options, credentials: sourceMapped },
+  );
+  assert.equal(refused.ok, false, "a no-token execution read the token-scoped source map");
+  if (!refused.ok) assert.equal(refused.code, "credential-unavailable");
+
+  const ambient = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    {
+      passphraseEnv: PASS_ENV,
+      env: { [PASS_ENV]: PASSPHRASE },
+      envFilePath: envFilePathFor(unit.logPath),
+    },
+  );
+  const completed = await executeThroughAdapter(
+    mockAdapter(),
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: unit.payload, actor: AGENT },
+    { ...unit.options, credentials: ambient },
+  );
+  assert.equal(completed.ok, true, JSON.stringify(completed));
+  if (completed.ok) assert.equal(completed.autonomy, "autonomous");
 });
 
 test("the ambient environment wins, and an absent env file changes nothing", async () => {

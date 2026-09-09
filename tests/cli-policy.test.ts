@@ -123,12 +123,15 @@ test("a clean rule match answers with the full explanation object", () => {
       liveRate: null,
       approvers: null,
       limits: null,
+      allowIrreversible: false,
     },
     provenance: "rule",
     manualBecause: null,
     loadFailure: null,
     matched: { pattern: "read.*", rule: { autonomy: "autonomous" } },
     overridden: null,
+    irreversibility: "not-applicable",
+    irreversiblePatterns: ["read.*"],
     candidates: [
       {
         pattern: "read.*",
@@ -165,12 +168,15 @@ test("--reversible false engages the floor and records what it overrode", () => 
       liveRate: null,
       approvers: null,
       limits: null,
+      allowIrreversible: false,
     },
     provenance: "floor",
     manualBecause: "irreversibility-floor",
     loadFailure: null,
     matched: { pattern: "read.*", rule: { autonomy: "autonomous" } },
     overridden: { pattern: "read.*", autonomy: "autonomous" },
+    irreversibility: "floor-applied",
+    irreversiblePatterns: ["read.*"],
     candidates: [
       {
         pattern: "read.*",
@@ -186,7 +192,7 @@ test("--reversible false engages the floor and records what it overrode", () => 
       '1 rule(s) matched "read.web", most specific first:',
       "  read.* [literals=1 wildcards=1 segments=2] -> autonomous (winner; tie-break: specificity)",
       "winner: read.* -> autonomous (strictly the most specific match)",
-      "irreversibility floor (SPEC §7): reversible: false overrides read.* (autonomous) -> manual",
+      "irreversibility floor (SPEC §7): the governing rule group did not unanimously opt in (read.*); reversible: false overrides read.* (autonomous) -> manual",
       "final: manual",
     ],
   });
@@ -208,12 +214,15 @@ test("an unmatched class falls to defaults.autonomy", () => {
       liveRate: null,
       approvers: null,
       limits: null,
+      allowIrreversible: false,
     },
     provenance: "default",
     manualBecause: null,
     loadFailure: null,
     matched: null,
     overridden: null,
+    irreversibility: "not-applicable",
+    irreversiblePatterns: [],
     candidates: [],
     decisionPath: [
       'class "physical.order"; reversible: not stated',
@@ -241,6 +250,7 @@ test("a missing policy is answered, not errored: exit 0 and load-failure", () =>
     liveRate: null,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
   assert.equal(answer["provenance"], "fail-closed");
   assert.deepEqual(answer["candidates"], []);
@@ -460,6 +470,7 @@ test("this repo's APPROVAL.md gates its own classes as written", () => {
     liveRate: null,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
   assert.equal(deps["manualBecause"], "matched-rule");
   assert.deepEqual(deps["matched"], { pattern: "deps.add", rule: { autonomy: "manual" } });
@@ -491,6 +502,7 @@ test("this repo's APPROVAL.md gates its own classes as written", () => {
     liveRate: null,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
 });
 
@@ -522,6 +534,7 @@ test("the supervised-live grammar is available to this repo's policy, unused", (
     liveRate: 0.01,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
 
   const retro = runCli(["policy", "check", "records.write", "--dir", dir, "--json"], cwd);
@@ -533,6 +546,7 @@ test("the supervised-live grammar is available to this repo's policy, unused", (
     liveRate: null,
     approvers: null,
     limits: null,
+    allowIrreversible: false,
   });
 });
 

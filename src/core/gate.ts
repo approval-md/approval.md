@@ -112,6 +112,7 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { isPrincipalActor } from "./actor.js";
 import {
   ATTESTATION_REFUSAL,
   attestationRefusal,
@@ -221,9 +222,6 @@ export {
 
 /** Actor stamped on runtime-originated expiry events (SPEC.md §8 `system:`). */
 export const EXPIRY_ACTOR = "system:gate";
-
-/** Actors permitted to request or register: a person or an agent, never the runtime. */
-const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
 /** Actors permitted to decide. Human-only, in code (SPEC.md §10.1). */
 const HUMAN_ACTOR = /^human:.+/u;
@@ -1213,7 +1211,7 @@ function attemptRegister(
   actor: string,
   options: RegisterOptions,
 ): RegisterResult {
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `register requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
@@ -1551,6 +1549,8 @@ export type RequestResult =
       resolution: Resolution;
       /** The `approval.requested` record, or `null` off the manual path. */
       record: EventRecord | null;
+      /** Digest of the attested policy bytes that produced this intake verdict. */
+      policySha256: string;
       /**
        * The live-selection verdict, for a `supervised-live` class only
        * (APRV-127). Absent for every other class: there was no fraction to fall
@@ -1866,7 +1866,7 @@ function attemptRequest(
   options: GateOptions,
 ): RequestResult {
   const ts = tick(options);
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `request requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
@@ -2091,6 +2091,7 @@ function attemptRequest(
         proceed: true,
         resolution,
         record: null,
+        policySha256: attested.sha256,
         ...(live === null ? {} : { live }),
       };
     }
@@ -2377,6 +2378,7 @@ function attemptRequest(
     proceed: false,
     resolution,
     record: appended.record,
+    policySha256: attested.sha256,
     ...(live === null ? {} : { live }),
   };
 }
@@ -3010,7 +3012,7 @@ function attemptWithdraw(
   options: WithdrawOptions,
 ): WithdrawResult {
   const ts = tick(options);
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `withdraw requires a human: or agent: actor, got ${JSON.stringify(actor)}; system: is refused because the runtime's way of ending a request it was not asked to end is the TTL, not a withdrawal`,
@@ -3436,7 +3438,7 @@ function attemptHarnessConsume(
   options: ConsumeHarnessOptions,
 ): ConsumeHarnessResult {
   const ts = tick(options);
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `consuming a harness grant requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
@@ -3743,7 +3745,7 @@ function attemptHarnessStart(
   options: GateOptions,
 ): HarnessStartResult {
   const ts = tick(options);
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `recording a harness execution requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
@@ -4015,7 +4017,7 @@ export function finishHarnessExecution(
   actor: string,
   options: GateOptions = {},
 ): HarnessFinishResult {
-  if (!PRINCIPAL_ACTOR.test(actor)) {
+  if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
       `reporting a harness outcome requires a human: or agent: actor, got ${JSON.stringify(actor)}. The runtime did not observe this exit; the party that did must be named on the record.`,

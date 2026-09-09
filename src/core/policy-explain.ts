@@ -99,7 +99,16 @@ export interface ExplanationOutcome {
   approvers: string[] | null;
   /** Limits carried from the matched rule; `null` when unset or unmatched. */
   limits: Record<string, number> | null;
+  /** Explicit permission supplied by the governing max-specificity rule group. */
+  allowIrreversible: boolean;
 }
+
+export type IrreversibilityDecision =
+  | "not-applicable"
+  | "policy-allowed"
+  | "floor-applied"
+  | "already-manual"
+  | "human-only";
 
 /** One rule that matched the class, with why it did or did not win. */
 export interface ExplanationCandidate {
@@ -135,6 +144,10 @@ export interface Explanation {
    * than a rule. `null` overall when the floor did not apply.
    */
   overridden: { pattern: string | null; autonomy: DeclaredAutonomy } | null;
+  /** How a truthful `reversible: false` declaration affected this answer. */
+  irreversibility: IrreversibilityDecision;
+  /** The equally most-specific rules whose unanimous opt-in governs permission. */
+  irreversiblePatterns: string[];
   /** Every matching rule, most specific first (order from `resolve()`). */
   candidates: ExplanationCandidate[];
   /** Ordered human sentences narrating the decision; what the CLI prints. */
@@ -195,12 +208,15 @@ export function explain(
         liveRate: null,
         approvers: null,
         limits: null,
+        allowIrreversible: false,
       },
       provenance: "fail-closed",
       manualBecause: "load-failure",
       loadFailure: { code: load.code, message: load.message },
       matched: null,
       overridden: null,
+      irreversibility: reversible === false ? "already-manual" : "not-applicable",
+      irreversiblePatterns: [],
       candidates: [],
       decisionPath,
     };
@@ -215,7 +231,15 @@ export function explain(
   const overridden = final.floorApplied
     ? { pattern: final.matched?.pattern ?? null, autonomy: base.declaredAutonomy }
     : null;
-  describeFloor(decisionPath, reversible, final.floorApplied, overridden);
+  describeFloor(
+    decisionPath,
+    reversible,
+    final.autonomy,
+    final.floorApplied,
+    final.allowIrreversible,
+    final.irreversiblePatterns,
+    overridden,
+  );
   // APRV-127: name the mode, because "supervised" no longer says enough. A
   // reader deciding whether to expect a prompt needs to know whether a fraction
   // of this class stops first, and at what rate.
@@ -237,15 +261,29 @@ export function explain(
       liveRate: final.liveRate,
       approvers: final.approvers,
       limits: final.limits,
+      allowIrreversible: final.allowIrreversible,
     },
     provenance: final.provenance,
     manualBecause: manualBecauseOf(final.autonomy, final.floorApplied),
     loadFailure: null,
     matched: final.matched,
     overridden,
+    irreversibility: irreversibilityDecision(reversible, final),
+    irreversiblePatterns: final.irreversiblePatterns,
     candidates,
     decisionPath,
   };
+}
+
+function irreversibilityDecision(
+  reversible: boolean | null,
+  resolution: ReturnType<typeof resolve>,
+): IrreversibilityDecision {
+  if (reversible !== false) return "not-applicable";
+  if (resolution.autonomy === "human-only") return "human-only";
+  if (resolution.floorApplied) return "floor-applied";
+  if (resolution.allowIrreversible) return "policy-allowed";
+  return "already-manual";
 }
 
 /**
@@ -369,10 +407,25 @@ function describeWinner(
 function describeFloor(
   decisionPath: string[],
   reversible: boolean | null,
+  autonomy: Autonomy,
   floorApplied: boolean,
+  allowIrreversible: boolean,
+  governingPatterns: string[],
   overridden: { pattern: string | null; autonomy: DeclaredAutonomy } | null,
 ): void {
   if (reversible !== false) return;
+  if (autonomy === "human-only") {
+    decisionPath.push(
+      "irreversibility floor (SPEC §7): outcome is human-only; neither the floor nor an override can enable agent execution",
+    );
+    return;
+  }
+  if (!floorApplied && allowIrreversible) {
+    decisionPath.push(
+      `irreversibility policy (SPEC §5.2/§7): every equally most-specific rule explicitly allows irreversible execution (${governingPatterns.join(", ")}); the resolved autonomy remains in force`,
+    );
+    return;
+  }
   if (!floorApplied || overridden === null) {
     decisionPath.push(
       "irreversibility floor (SPEC §7): outcome was already manual; the floor changed nothing",
@@ -380,7 +433,11 @@ function describeFloor(
     return;
   }
   const source = overridden.pattern === null ? "defaults.autonomy" : overridden.pattern;
+  const governing =
+    governingPatterns.length === 0
+      ? "defaults cannot opt in"
+      : `the governing rule group did not unanimously opt in (${governingPatterns.join(", ")})`;
   decisionPath.push(
-    `irreversibility floor (SPEC §7): reversible: false overrides ${source} (${overridden.autonomy}) -> manual`,
+    `irreversibility floor (SPEC §7): ${governing}; reversible: false overrides ${source} (${overridden.autonomy}) -> manual`,
   );
 }

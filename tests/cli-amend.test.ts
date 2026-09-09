@@ -689,6 +689,10 @@ test("in a git repo the diff names the class, approver and TTL changes", () => {
       class: "read.*",
       before: { autonomy: "autonomous", provenance: "rule", pattern: "read.*" },
       after: { autonomy: "manual", provenance: "rule", pattern: "read.*" },
+      irreversible: {
+        before: { autonomy: "manual", provenance: "floor", pattern: "read.*" },
+        after: { autonomy: "manual", provenance: "rule", pattern: "read.*" },
+      },
     },
   ]);
   assert.deepEqual(diff["approvers"], [
@@ -790,11 +794,19 @@ test("a class that stops being named falls to defaults, and the diff says so", (
       class: "communicate.*",
       before: { autonomy: "manual", provenance: "rule", pattern: "communicate.*" },
       after: { autonomy: "supervised", provenance: "default", pattern: null },
+      irreversible: {
+        before: { autonomy: "manual", provenance: "rule", pattern: "communicate.*" },
+        after: { autonomy: "manual", provenance: "floor", pattern: null },
+      },
     },
     {
       class: "read.*",
       before: { autonomy: "autonomous", provenance: "rule", pattern: "read.*" },
       after: { autonomy: "supervised", provenance: "default", pattern: null },
+      irreversible: {
+        before: { autonomy: "manual", provenance: "floor", pattern: "read.*" },
+        after: { autonomy: "manual", provenance: "floor", pattern: null },
+      },
     },
   ]);
 });

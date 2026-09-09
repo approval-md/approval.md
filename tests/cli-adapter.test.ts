@@ -338,6 +338,21 @@ test("a token that is not the minted one exits 1 and opens no connection", async
   assert.equal(mock.connections, before, "a refused token opened a socket");
 });
 
+test("an omitted token reaches the manual policy decision and exits 5", async () => {
+  const unit = await ready();
+  const before = mock.connections;
+  const run = await runCli(
+    ["adapter", "email", unit.actionKey, "--payload", unit.payloadFile, "--as", AGENT, "--json"],
+    unit.dir,
+    GREEN,
+  );
+  assert.equal(run.code, 5, run.stderr);
+  const error = jsonErr(run);
+  assert.equal(error["code"], "token-required");
+  assert.equal(error["acted"], false);
+  assert.equal(mock.connections, before, "a manual action without a token opened a socket");
+});
+
 test("a payload the grant did not bind to exits 1 with payload-mismatch", async () => {
   const unit = await ready();
   const before = mock.connections;
@@ -462,11 +477,6 @@ test("usage errors exit 2 and append nothing", async () => {
   const cases: [string, string[], RegExp][] = [
     ["no action key", ["adapter", "email", "--token", "t", "--payload", "p"], /missing <action-key>/u],
     [
-      "no token",
-      ["adapter", "email", unit.actionKey, "--payload", unit.payloadFile],
-      /missing --token/u,
-    ],
-    [
       "no payload",
       ["adapter", "email", unit.actionKey, "--token", unit.token],
       /missing --payload/u,
@@ -563,7 +573,7 @@ test("an unreadable payload file is exit 4 and unparseable bytes are exit 2", as
 test("the help texts state the rules a reader must not have to infer", async () => {
   const unit = await ready();
   for (const [argv, claims] of [
-    [["adapter", "--help"], ["HARD BOUNDARY", "single-use execution token"]],
+    [["adapter", "--help"], ["HARD BOUNDARY", "single-use --token"]],
     [
       ["adapter", "email", "--help"],
       [
@@ -602,10 +612,10 @@ test("the help texts state the rules a reader must not have to infer", async () 
 });
 
 test("the root help lists the adapter verb", async () => {
-  assert.match(ROOT_HELP, /approval adapter email <action-key> --token <t> --payload <file\|->/u);
-  assert.match(ROOT_HELP, /approval adapter agentmail <action-key> --token <t> --payload <file\|->/u);
-  assert.match(ROOT_HELP, /approval adapter zzz <action-key> --token <t> --payload <file\|->/u);
-  assert.match(ROOT_HELP, /\n {2}adapter {3}execute an approved action through a side-effect adapter/u);
+  assert.match(ROOT_HELP, /approval adapter email <action-key> \[--token <t>\] --payload <file\|->/u);
+  assert.match(ROOT_HELP, /approval adapter agentmail <action-key> \[--token <t>\] --payload <file\|->/u);
+  assert.match(ROOT_HELP, /approval adapter zzz <action-key> \[--token <t>\] --payload <file\|->/u);
+  assert.match(ROOT_HELP, /\n {2}adapter {3}execute an action through a side-effect adapter/u);
 });
 
 test("the adapter help and the usage error name every adapter in the table", async () => {

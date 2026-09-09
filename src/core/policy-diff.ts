@@ -150,6 +150,8 @@ export interface ClassResolutionChange {
   class: string;
   before: ResolutionSnapshot;
   after: ResolutionSnapshot;
+  /** Present whenever the truthful irreversible outcome changed. */
+  irreversible?: { before: ResolutionSnapshot; after: ResolutionSnapshot };
 }
 
 /** How an approver entry changed. */
@@ -449,7 +451,19 @@ function failureOf(
 }
 
 function snapshot(load: PolicyLoadResult, probe: string): ResolutionSnapshot {
-  const resolution = resolve(load, probe);
+  return snapshotFor(load, probe, false);
+}
+
+function irreversibleSnapshot(load: PolicyLoadResult, probe: string): ResolutionSnapshot {
+  return snapshotFor(load, probe, true);
+}
+
+function snapshotFor(
+  load: PolicyLoadResult,
+  probe: string,
+  irreversible: boolean,
+): ResolutionSnapshot {
+  const resolution = resolve(load, probe, irreversible ? { reversible: false } : {});
   return {
     autonomy: resolution.autonomy,
     provenance: resolution.provenance,
@@ -603,8 +617,20 @@ export function diffPolicies(
   for (const probe of probes) {
     const previous = snapshot(before, probe);
     const next = snapshot(after, probe);
-    if (sameSnapshot(previous, next)) continue;
-    classes.push({ class: probe, before: previous, after: next });
+    const previousIrreversible = irreversibleSnapshot(before, probe);
+    const nextIrreversible = irreversibleSnapshot(after, probe);
+    const ordinaryChanged = !sameSnapshot(previous, next);
+    const irreversibleChanged = !sameSnapshot(previousIrreversible, nextIrreversible);
+    if (!ordinaryChanged && !irreversibleChanged) continue;
+    const change: ClassResolutionChange = {
+      class: probe,
+      before: previous,
+      after: next,
+    };
+    if (irreversibleChanged) {
+      change.irreversible = { before: previousIrreversible, after: nextIrreversible };
+    }
+    classes.push(change);
   }
 
   const structuralComparable = before.ok && after.ok;
@@ -671,9 +697,16 @@ export function renderDiff(diff: PolicyDiff): string[] {
   if (diff.classes.length > 0) {
     lines.push(`class resolutions changed (${diff.classes.length}):`);
     for (const change of diff.classes) {
-      lines.push(
-        `  ${change.class}: ${describeSnapshot(change.before)} -> ${describeSnapshot(change.after)}`,
-      );
+      if (!sameSnapshot(change.before, change.after)) {
+        lines.push(
+          `  ${change.class}: ${describeSnapshot(change.before)} -> ${describeSnapshot(change.after)}`,
+        );
+      }
+      if (change.irreversible !== undefined) {
+        lines.push(
+          `  ${change.class} (reversible: false): ${describeSnapshot(change.irreversible.before)} -> ${describeSnapshot(change.irreversible.after)}`,
+        );
+      }
     }
   }
   if (diff.approvers.length > 0) {

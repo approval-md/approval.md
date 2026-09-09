@@ -667,6 +667,66 @@ export function humanOnlyClassRefusal(
 }
 
 /**
+ * Verify every read-only condition of a token spend.
+ *
+ * Shared by {@link consumeToken} and adapter execution preflight. It appends
+ * nothing and grants no authority to act; `consumeToken` re-reads and repeats
+ * this check immediately before its compare-and-append.
+ */
+export type TokenSpendStatus = TokenStatus & { task: string; payloadHash: string };
+
+export function verifyTokenSpend(
+  records: EventRecord[],
+  actionKey: string,
+  presentedToken: string,
+  now: string,
+  load: PolicyLoadResult,
+  presentedPayloadHash?: string,
+): TokenSpendStatus | TokenRefusal {
+  const verified = verifyToken(
+    records,
+    actionKey,
+    presentedToken,
+    now,
+    load.ok ? load.durations.approvalTtlMs : null,
+  );
+  if (!verified.ok) return verified;
+
+  const reserved = humanOnlyClassRefusal(
+    load,
+    verified.class,
+    `the token for action ${actionKey}, granted at seq ${verified.grantSeq}, may not be spent and no execution.started was written`,
+  );
+  if (reserved !== null) return reserved;
+
+  if (verified.payloadHash === null) {
+    return refuse(
+      "payload-mismatch",
+      `the approval.granted record for ${actionKey} at seq ${verified.grantSeq} carries no payload_hash: it predates content binding, or was written by something other than this gate. Amended SPEC.md §6.2 makes the hash MUST for manual actions and §10 binds the token to it, so there is nothing here for an execution to be checked against and nothing that can be shown to be the approved bytes. This grant cannot be spent — revoke it and request the action again, which will bind to the payload.`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
+  if (!isPayloadHash(presentedPayloadHash) || !digestsEqual(presentedPayloadHash, verified.payloadHash)) {
+    return refuse(
+      "payload-mismatch",
+      presentedPayloadHash === undefined
+        ? `the grant for ${actionKey} at seq ${verified.grantSeq} binds to payload_hash ${verified.payloadHash} and this consumer presented none. Amended SPEC.md §10: an executor MUST recompute the hash of the payload it is about to execute; a spend that cannot state its bytes cannot be shown to be executing the approved ones.`
+        : `the payload presented for ${actionKey} is not the one approved: the grant at seq ${verified.grantSeq} binds to ${verified.payloadHash}, this consumer presented ${JSON.stringify(presentedPayloadHash)}. A grant approves specific bytes; changing the payload after grant requires a new request. Nothing was appended and the token is still live.`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
+
+  if (verified.task === null) {
+    return refuse(
+      "not-granted",
+      `action ${actionKey} has a grant but no task id in its request cycle; execution.started requires one`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
+  return { ...verified, task: verified.task, payloadHash: verified.payloadHash };
+}
+
+/**
  * Spend a token: verify it, then append `execution.started`.
  *
  * **This is the only sanctioned way to append `execution.started` for a manual
@@ -718,69 +778,15 @@ export function consumeToken(
   // applies and the class check below come from the same bytes.
   const load = tokenPolicy(options);
 
-  const verified = verifyToken(
+  const verified = verifyTokenSpend(
     read.records,
     actionKey,
     presentedToken,
     ts,
-    load.ok ? load.durations.approvalTtlMs : null,
+    load,
+    options.presentedPayloadHash,
   );
   if (!verified.ok) return verified;
-
-  // APRV-185, amended SPEC.md §5.2. The grant exists and the token is the right
-  // one; the class it authorizes is one the policy now reserves to human hands,
-  // so it may not be spent. Checked immediately after verification and before
-  // the binding, because a token that cannot be spent at all should not send its
-  // holder off to reconcile payload hashes. Nothing is appended.
-  const reserved = humanOnlyClassRefusal(
-    load,
-    verified.class,
-    `the token for action ${actionKey}, granted at seq ${verified.grantSeq}, may not be spent and no execution.started was written`,
-  );
-  if (reserved !== null) return reserved;
-
-  // Content binding (amended SPEC.md §10, A1). A grant approves specific bytes,
-  // so the executor must say which bytes it holds and they must be the ones the
-  // human saw. Checked before the append and after token verification: a
-  // mismatch spends nothing, appends nothing, and leaves the token live — the
-  // repair is to request the new payload, not to hunt for the token.
-  //
-  // A grant that recorded NO binding is refused outright, not waved through.
-  // The current gate cannot produce one — `request` refuses
-  // `payload-hash-required` for every manual action — so such a record reached
-  // the log some other way: a hand-built line, or a log predating A1. Accepting
-  // it would make content binding bypassable by log construction, which is the
-  // one attack the binding exists to stop. Ambiguity resolves to the stricter
-  // path: the grant is permanently unspendable, and that is correct for an
-  // authorization this runtime could not have issued.
-  const presented = options.presentedPayloadHash;
-  if (verified.payloadHash === null) {
-    return refuse(
-      "payload-mismatch",
-      `the approval.granted record for ${actionKey} at seq ${verified.grantSeq} carries no payload_hash: it predates content binding, or was written by something other than this gate. Amended SPEC.md §6.2 makes the hash MUST for manual actions and §10 binds the token to it, so there is nothing here for an execution to be checked against and nothing that can be shown to be the approved bytes. This grant cannot be spent — revoke it and request the action again, which will bind to the payload.`,
-      { state: "granted", seq: verified.grantSeq },
-    );
-  }
-  if (!isPayloadHash(presented) || !digestsEqual(presented, verified.payloadHash)) {
-    return refuse(
-      "payload-mismatch",
-      presented === undefined
-        ? `the grant for ${actionKey} at seq ${verified.grantSeq} binds to payload_hash ${verified.payloadHash} and this consumer presented none. Amended SPEC.md §10: an executor MUST recompute the hash of the payload it is about to execute; a spend that cannot state its bytes cannot be shown to be executing the approved ones.`
-        : `the payload presented for ${actionKey} is not the one approved: the grant at seq ${verified.grantSeq} binds to ${verified.payloadHash}, this consumer presented ${JSON.stringify(presented)}. A grant approves specific bytes; changing the payload after grant requires a new request. Nothing was appended and the token is still live.`,
-      { state: "granted", seq: verified.grantSeq },
-    );
-  }
-
-  if (verified.task === null) {
-    // `execution.started` requires `task` (event.schema.json). A granted action
-    // whose cycle names no task cannot produce a valid start event; refusing
-    // here says so in this module's vocabulary rather than as a schema failure.
-    return refuse(
-      "not-granted",
-      `action ${actionKey} has a grant but no task id in its request cycle; execution.started requires one`,
-      { state: "granted", seq: verified.grantSeq },
-    );
-  }
 
   const appended = appendEvent(
     logPath,

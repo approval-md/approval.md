@@ -59,11 +59,11 @@ Usage:
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
                       [--as <id>] [--no-sandbox] [--json] -- <cmd…>
   approval sandbox    [--allow-loopback] [--log <path>] -- <cmd…>
-  approval adapter email <action-key> --token <t> --payload <file|->
+  approval adapter email <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
-  approval adapter agentmail <action-key> --token <t> --payload <file|->
+  approval adapter agentmail <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
-  approval adapter zzz <action-key> --token <t> --payload <file|->
+  approval adapter zzz <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
@@ -153,7 +153,7 @@ Set up — make this directory and this machine ready:
             "vault set|list|remove" are HUMAN-ONLY; list shows NAMES and never
             values, and there is no "vault get" — a credential's only sanctioned
             journey is from .approval/vault.enc into an adapter, inside the
-            verified-token window. The passphrase comes from the environment
+            verified execution window. The passphrase comes from the environment
             variable the policy NAMES (vault.passphrase_env), never from a flag
   env       resolve .approval/env — the environment SOURCE MAP — and print an
             export block for your shell to evaluate. THE ONLY VERB THAT READS
@@ -190,13 +190,15 @@ Ask — an agent declares an action and acts on the answer:
   run       execute a command behind the gate: appends execution.started before
             spawning it, execution.completed/failed with the child's exit code
             after, and exits with that same code
-  adapter   execute an approved action through a side-effect adapter, the hard
+  adapter   execute an action through a side-effect adapter, the hard
             boundary of SPEC.md §10.4. "adapter email" sends one RFC 5322
             message over SMTP for a communicate.email.external action: the
-            credentials come from the vault inside the verified-token window,
-            the payload is the bytes the grant bound to, and the runtime — not
-            the adapter — recomputes the hash, spends the token, and writes both
-            execution events around the send. "adapter agentmail" serves the
+            credentials come from the vault inside the execution window, the
+            payload is the bytes the declaration or grant bound to, and the
+            runtime recomputes the hash, applies policy, and writes both
+            execution events around the send. Manual and selected-live paths
+            require --token; policy-authorized supervised/autonomous paths do
+            not mint one. "adapter agentmail" serves the
             same class over the AgentMail API: a direct send, or the send of a
             draft the agent composed, refused if the draft changed after the
             snapshot a human approved
@@ -1837,7 +1839,7 @@ ${why("up")}`;
 
 /** One line, not a paragraph: the rest of the reasoning is in the reference. */
 const VAULT_NO_GET = `THERE IS NO "approval vault get": a credential's only sanctioned journey is from
-the vault into an adapter, inside the verified-token window.`;
+the vault into an adapter, inside the verified execution window.`;
 
 export const VAULT_HELP = `approval vault — the encrypted credential store adapters read from
 
@@ -1936,10 +1938,10 @@ ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("vault-remove")}`;
 
-export const ADAPTER_HELP = `approval adapter — execute an approved action through a side-effect adapter
+export const ADAPTER_HELP = `approval adapter — execute an action through a side-effect adapter
 
 Usage:
-  approval adapter email|agentmail|zzz <action-key> --token <t> --payload <file|->
+  approval adapter email|agentmail|zzz <action-key> [--token <t>] --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
                       [--policy|--dir|--log <path>] [--timeout <ms>] [--json]
 
@@ -1949,27 +1951,33 @@ Adapters:
           a draft the agent composed, re-read and refused if it drifted
   zzz     create a thread or reply for communicate.zzz.external
 
-An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
-refuses to act without a valid, unexpired, single-use execution token bound to
-the action's idempotency_key AND its payload_hash. The runtime, not the adapter,
-owns the sequence: recompute the hash, resolve the credentials the adapter
-declared, run its pre-token check, verify and consume the token, append
-execution.started, call the adapter, append the outcome. The two steps before
-the spend refuse without appending or spending, so the token stays live.
+An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials while
+the runtime recomputes the payload hash and applies attested policy. Manual and
+selected-live actions that request intake selects require a valid, unexpired, single-use --token bound to
+the action key and payload. An explicitly policy-authorized supervised or
+autonomous action has no grant and therefore no token. In that case the vault
+passphrase must already be present in the adapter process environment; the
+token-scoped .approval/env fallback stays unavailable.
 
-${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+A direct no-token supervised-live call runs the existing request intake first,
+using only the verified declaration. Selected or unavailable draws stop before
+credentials; an unselected draw proceeds. Existing approval cycles are not
+redrawn.
+
+${EXIT_CODES_POINTER} (5 when a manual path needs a token; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter")}`;
 
 export const ADAPTER_EMAIL_HELP = `approval adapter email — send one approved message over SMTP
 
 Usage:
-  approval adapter email <action-key> --token <t> --payload <file|->
+  approval adapter email <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--policy <path>]
                       [--dir <path>] [--log <path>] [--timeout <ms>] [--json]
 
 Flags:
-  --token <t>      the single-use token "approval grant" printed. REQUIRED
+  --token <t>      the single-use token "approval grant" printed. REQUIRED for
+                   manual or request-selected live; omit on policy-authorized nonmanual
   --payload <file|->  the JSON payload the grant bound to. REQUIRED (a body on
                    a command line is a body in the shell history)
   --as <id> / --vault <path>   executing identity / the SMTP credential store
@@ -1982,18 +1990,19 @@ it, and a non-ASCII body goes quoted-printable. The VAULT holds smtp.host,
 smtp.port, smtp.security, smtp.user, smtp.password; failure codes add smtp-<NNN>.
 
 JSON shapes and failure codes: docs/cli-reference.md#adapter-email
-${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${EXIT_CODES_POINTER} (5 when a manual path needs a token; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-email")}`;
 
 export const ADAPTER_AGENTMAIL_HELP = `approval adapter agentmail — send one approved message through AgentMail
 
 Usage:
-  approval adapter agentmail <action-key> --token <t> --payload <file|->
+  approval adapter agentmail <action-key> [--token <t>] --payload <file|->
       [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
 
 Flags:
-  --token <t> / --payload <file|->   the token and the bytes. BOTH REQUIRED
+  --token <t>   required for manual or selected-live; omit on policy-authorized
+                nonmanual. --payload <file|-> is always required
   --as <id> / --vault <p> / --policy <p> / --dir <p> / --log <p>   as email
   --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
 
@@ -2007,14 +2016,14 @@ TWO PAYLOAD MODES, told apart by shape and never inferred between:
 The VAULT holds agentmail.inbox_id and agentmail.api_key, and that key is the one
 WITH draft_send and message_send; the agent's own key must not have them.
 
-${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${EXIT_CODES_POINTER} (5 when a manual path needs a token; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-agentmail")}`;
 
 export const ADAPTER_ZZZ_HELP = `approval adapter zzz — send one approved zzz.bot message
 
 Usage:
-  approval adapter zzz <action-key> --token <t> --payload <file|->
+  approval adapter zzz <action-key> [--token <t>] --payload <file|->
       [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
 
 The tagged payload chooses create_thread or create_reply and production or
@@ -2024,12 +2033,16 @@ tags and references, and derives ZZZ's retry-safe Idempotency-Key from the
 action key and payload hash. Actions use communicate.zzz.external. The VAULT
 holds zzz.agent_token.
 
+--token is required for manual or selected-live execution and omitted for an
+explicitly policy-authorized nonmanual execution. Without a token, the vault
+passphrase must already be present in the adapter process environment.
+
 A public-room write needs an invited token with write scope. A private-room
 write also needs current room membership and accepted, unexpired approval.md
 workflow evidence. zzz.bot intentionally hides missing private access as 404.
 
 JSON shapes and failure codes: docs/cli-reference.md#adapter-zzz
-${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${EXIT_CODES_POINTER} (5 when a manual path needs a token; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-zzz")}`;
 
@@ -2201,7 +2214,7 @@ Usage:
   approval setup adapter email [--as human:<id>] [--log <path>] [--dir <path>]
                                [--policy <path>]
 
-The five names the email adapter reads inside the verified-token window:
+The five names the email adapter reads inside the verified execution window:
 
   smtp.host      the submission server
   smtp.port      587 for STARTTLS submission, 465 for implicit TLS
@@ -2225,7 +2238,7 @@ Usage:
   approval setup adapter agentmail [--as human:<id>] [--log <path>]
       [--dir <path>] [--policy <path>]
 
-The two names the AgentMail adapter reads inside the verified-token window:
+The two names the AgentMail adapter reads inside the verified execution window:
   agentmail.inbox_id  the inbox this runtime sends from; the inbox IS the sender
   agentmail.api_key   the key carrying draft_send and message_send, no echo
 

@@ -78,6 +78,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+import { isPrincipalActor } from "./actor.js";
 import { attestationRefusal, checkAttestation, type AttestationRefusalDetail } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetVerdict } from "./budgets.js";
 import { tick, type ClockOptions } from "./clock.js";
@@ -98,7 +99,12 @@ import { humanOnlyRefusal, resolve } from "./policy-match.js";
 import type { SandboxState } from "./sandbox.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { forgetPrivateKey, keyStoreDirFor } from "./seal.js";
-import { consumeToken, deliveredToken, type TokenRefusal } from "./token.js";
+import {
+  consumeToken,
+  deliveredToken,
+  verifyTokenSpend,
+  type TokenRefusal,
+} from "./token.js";
 
 export {
   isLoopEscalated,
@@ -119,6 +125,8 @@ export {
  * responses.
  */
 export const EXECUTE_REFUSAL_CODES = [
+  /** Execution preflight requires a person or agent principal, never runtime identity. */
+  "actor-invalid",
   /** No `task.registered` record declares this action key (SPEC.md §7). */
   "action-not-registered",
   /**
@@ -144,6 +152,8 @@ export const EXECUTE_REFUSAL_CODES = [
   "loop-escalated",
   /** Policy is unattested or its bytes changed (`core/attest.ts`). */
   "policy-not-attested",
+  /** The attested policy changed after supervised-live intake decided to proceed. */
+  "policy-drift",
   /** An `execution.started` already exists for this key (idempotency). */
   "already-executed",
   /** Budgets refused the start; a `budget.exceeded` event WAS appended. */
@@ -352,6 +362,8 @@ export interface ExecuteOptions extends ClockOptions {
    * back to the runtime's own value. The ceiling is not a caller's to raise.
    */
   retryOnHeadMoved?: number;
+  /** Internal binding from an unrecorded supervised-live intake verdict. */
+  expectedPolicySha256?: string;
 }
 
 function refuse(
@@ -647,6 +659,37 @@ export type StartResult =
     }
   | ExecuteRefusal;
 
+/** Internal adapter preflight result. The token is never rendered or logged. */
+export type ExecutionEligibilityResult =
+  | {
+      ok: true;
+      mode: "token" | "policy";
+      autonomy: Autonomy;
+      /** Explicit or locally delivered token, present only on the token path. */
+      token?: string;
+    }
+  | ExecuteRefusal;
+
+/**
+ * Check whether an adapter execution may proceed to credential resolution.
+ *
+ * This is a preflight, never an execution permit. A successful result appends
+ * nothing, consumes nothing and leaves delivered-token key material in place.
+ * {@link startExecution} must still run after adapter precheck and repeats every
+ * check against a fresh verified read before compare-and-append. A budget
+ * refusal retains `startExecution`'s required `budget.exceeded` audit record.
+ */
+export function checkExecutionEligibility(
+  logPath: string,
+  actionKey: string,
+  options: ExecuteOptions,
+  actor: string,
+): ExecutionEligibilityResult {
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
+    attemptStart(logPath, actionKey, options, actor, true) as ExecutionEligibilityResult,
+  );
+}
+
 /**
  * Begin an execution: the single entry point for appending `execution.started`.
  *
@@ -690,7 +733,7 @@ export function startExecution(
   actor: string,
 ): StartResult {
   return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
-    attemptStart(logPath, actionKey, options, actor),
+    attemptStart(logPath, actionKey, options, actor, false) as StartResult,
   );
 }
 
@@ -718,8 +761,15 @@ function attemptStart(
   actionKey: string,
   options: ExecuteOptions,
   actor: string,
-): StartResult {
+  preflight: boolean,
+): StartResult | ExecutionEligibilityResult {
   const ts = tick(options);
+  if (preflight && !isPrincipalActor(actor)) {
+    return refuse(
+      "actor-invalid",
+      `execution preflight requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
   const read = readVerifiedRecords(
     logPath,
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
@@ -826,7 +876,7 @@ function attemptStart(
           : `action ${actionKey} resolves to ${resolution.autonomy} but the log already carries an approval.requested for it, so a human was asked about this action and it executes on their answer. This is what a supervised-live draw looks like from the executor's side: the gate selected this action into the live fraction and it now follows the manual path. Wait for the decision and pass the token the grant printed.`,
       );
     }
-    const consumed = consumeToken(logPath, actionKey, token, actor, {
+    const tokenOptions = {
       ...(options.policy?.file === undefined ? {} : { policyFile: options.policy.file }),
       ...(options.policy?.file === undefined
         ? { policyDir: options.policy?.dir ?? process.cwd() }
@@ -846,7 +896,20 @@ function attemptStart(
       // the one the spend records, so `startExecution` and the `execution.started`
       // it produces cannot disagree about when this happened.
       clock: () => ts,
-    });
+    };
+    if (preflight) {
+      const verified = verifyTokenSpend(
+        records,
+        actionKey,
+        token,
+        ts,
+        load,
+        options.presentedPayloadHash,
+      );
+      if (!verified.ok) return fromTokenRefusal(verified);
+      return { ok: true, mode: "token", autonomy: "manual", token };
+    }
+    const consumed = consumeToken(logPath, actionKey, token, actor, tokenOptions);
     if (!consumed.ok) return fromTokenRefusal(consumed);
     // APRV-105. The token is spent, so its delivery address is finished. Done
     // AFTER the append rather than before: an unlink before a failed spend would
@@ -866,9 +929,20 @@ function attemptStart(
   }
 
   // --- supervised / autonomous: no grant exists, so no token exists ---------
-  const attestation = attestationRefusal(checkAttestation(records, policyPathOf(options)));
+  const attestationStatus = checkAttestation(records, policyPathOf(options));
+  const attestation = attestationRefusal(attestationStatus);
   if (attestation !== null) {
     return refuse("policy-not-attested", attestation.message, { detail: attestation.detail });
+  }
+  if (
+    options.expectedPolicySha256 !== undefined &&
+    attestationStatus.status === "attested" &&
+    attestationStatus.sha256 !== options.expectedPolicySha256
+  ) {
+    return refuse(
+      "policy-drift",
+      `the attested policy changed after supervised-live intake decided action ${actionKey} could proceed (intake ${options.expectedPolicySha256}, current ${attestationStatus.sha256}). No credential or side effect may rely on an unrecorded draw under different rules; retry so intake can draw under the current policy.`,
+    );
   }
 
   if (isLoopEscalated(records, declared.task)) {
@@ -959,6 +1033,7 @@ function attemptStart(
     const message = `budget refused the execution: ${failed
       .map((entry) => `${entry.limit} (${entry.scope})`)
       .join(", ")}`;
+    if (!logged.ok && logged.append?.code === "head-moved") return logged;
     return logged.ok
       ? refuse("budget-exceeded", message, { verdicts: failed, record: logged.record })
       : refuse(
@@ -966,6 +1041,10 @@ function attemptStart(
           `${message}; the budget.exceeded event could not be appended: ${logged.message}`,
           { verdicts: failed },
         );
+  }
+
+  if (preflight) {
+    return { ok: true, mode: "policy", autonomy: resolution.autonomy };
   }
 
   const appended = append(
