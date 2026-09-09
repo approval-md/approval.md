@@ -1,11 +1,11 @@
 ---
 id: APRV-317
 title: Let explicit operator policy govern irreversible action autonomy
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 20:26'
-updated_date: '2026-09-09 20:56'
+updated_date: '2026-09-09 22:12'
 labels: []
 dependencies: []
 references:
@@ -29,11 +29,11 @@ This intentionally requests a change to SPEC section 7, which currently forbids 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An explicit operator-authored policy can select manual, supervised modes, or autonomous execution for an irreversible action, with documented precedence and migration behavior.
-- [ ] #2 Omitted or malformed override configuration fails safely; agent action metadata alone cannot authorize reduced scrutiny, and human-only and protected-policy controls remain enforced.
-- [ ] #3 Policy check/explain and execution agree on effective autonomy and identify the governing policy decision; all supported entry points apply the same semantics.
-- [ ] #4 Tests cover explicit manual, supervised live/retro where supported, autonomous, missing/invalid configuration, policy attestation changes, and attempts to relax policy through action metadata.
-- [ ] #5 SPEC, schema, CLI documentation and examples explain the new contract, including when Telegram approval occurs versus sampled or retrospective review; ZZZ compatibility requirements are recorded.
+- [x] #1 An explicit operator-authored policy can select manual, supervised modes, or autonomous execution for an irreversible action, with documented precedence and migration behavior.
+- [x] #2 Omitted or malformed override configuration fails safely; agent action metadata alone cannot authorize reduced scrutiny, and human-only and protected-policy controls remain enforced.
+- [x] #3 Policy check/explain and execution agree on effective autonomy and identify the governing policy decision; all supported entry points apply the same semantics.
+- [x] #4 Tests cover explicit manual, supervised live/retro where supported, autonomous, missing/invalid configuration, policy attestation changes, and attempts to relax policy through action metadata.
+- [x] #5 SPEC, schema, CLI documentation and examples explain the new contract, including when Telegram approval occurs versus sampled or retrospective review; ZZZ compatibility requirements are recorded.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -56,4 +56,12 @@ Resumed delivery checkpoint: the additional eligibility SPEC amendment is now ap
 Carter completed the human-only original-payload restore. Read-only verification proved all four stored payloads match their frozen hashes and historical starts; no new approval or log event was fabricated. Supported log advance published them in records PR369, commit eb76dd09e305d0c2884b55d8a396b9f469b5cdea. Existing protected-path guard now passes exit0 with that log-ref (/private/tmp/aprv317-restored-current-guard.json); APRV326 guard also passes exit0. APRV317 does not depend on the replay fix. Feature delivery can now proceed with the already-passing full and post-main checks.
 
 PR 370 integration evidence, pending delivery: parent executed the reviewed merge of incoming commit 55ecb464d62a41a444bec66e275e67f4ba592e5a through the primary gate under registration seq 30253 and successful outcome seq 30255. The exact whole merged SPEC.md is SHA-256 ead455359392f68f3d6399ec5cb7d5a2f7a8f87f7668e85d5045482048bd3ce3. The incoming .approval tree was identical to its merge base, and both worktree and staged .approval diffs after integration exited 0, preserving the current APRV-317 records unchanged. The sole generated conflict, conformance/conformance-manifest.json, was regenerated twice from the combined source with byte-identical output, staged as the resolution, and has SHA-256 7e0fcc02c4ebdd0b390f65dee4ad6381a0ca95b9503999a6cb475682c083a182; no unresolved conflict remains. Validation on the integrated tree: build exit 0 (/private/tmp/aprv317-pr370-build.log); focused APRV-317 and Codex preparation tests passed 256/256, exit 0 (/private/tmp/aprv317-pr370-focused-unrestricted.log); lint exit 0 (/private/tmp/aprv317-pr370-lint.log); typecheck exit 0 (/private/tmp/aprv317-pr370-typecheck.log); conformance passed 298/298 vectors with 0 failures and 143 controls, exit 0 (/private/tmp/aprv317-pr370-conformance.log); the sole full npm test passed 4,075, failed 0, skipped 1 of 4,076 total, exit 0 (/private/tmp/aprv317-pr370-full.log). The first focused attempt inside the restricted sandbox passed 209/212 and failed only on denied loopback listeners and sandbox-exec; the identical authorized unrestricted rerun is the 256/256 passing result above. These are local integrated-tree results and do not claim a merge commit, push, pull-request update, or GitHub merge.
+
+Final delivery evidence (2026-09-09): PR 370 merged at 2026-09-09T21:35:00Z as 059327e40c1d3af6e4ddf4bf74e1186d82e1895b from feature head 3cd9146cba89eb6d3cccc0736b39832f7f420f75. Git ancestry verification exited 0. Focused APRV-317 reconciliation validation passed 491/491, exit 0 (/private/tmp/aprv317-reconcile-focused.log), covering opted-in autonomous and supervised-retro execution, selected and unselected supervised-live intake, manual token behavior, fail-closed absent/false and malformed policy, human-only preservation, policy and attestation drift, payload binding, action-metadata forgery, provider ordering, adapter outcomes, and ZZZ integration. Build, lint, and typecheck exited 0. Conformance passed 298/298 vectors with 143 controls, exit 0. The earlier integrated full run passed 4,075, failed 0, skipped 1 of 4,076 total, exit 0 (/private/tmp/aprv317-pr370-full.log). Final GitHub PR CI run 34406081095 and merge-group run 34406741680 completed successfully; the merge group ran all Node 22 and Node 20 shards, build, lint, classification, and protected-path checks. The exact protected-path guard passed exit 0 against the merged primary records (/private/tmp/aprv317-reconcile-protected-guard.json), with no .approval feature changes. This delivers the runtime, schema, CLI and adapter documentation contract; it does not claim package publication, runtime activation, or completion of downstream ZZZ operator configuration.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Explicit operator-authored class rules can now permit irreversible autonomous, supervised-retro, or supervised-live execution while absent or false permission retains the manual floor and human-only controls remain closed. Policy explanation, gate execution, adapters, schema, documentation, and conformance share the same decision; supervised-live uses the existing sampled request path, and selected actions still require a real human grant token. Verified by the 491/491 focused suite, 298/298 conformance vectors with 143 controls, the 4,075-pass local full suite, protected-path guard, successful PR and merge-group CI including Node 20, and merged PR 370 at 059327e40c1d3af6e4ddf4bf74e1186d82e1895b.
+<!-- SECTION:FINAL_SUMMARY:END -->
