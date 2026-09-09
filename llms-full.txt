@@ -85,11 +85,11 @@ index.html as JSON at `script#feature-index`.
 ### gate
 
 - **APPROVAL.md, the policy file** [shipped, spec]. A fenced `yaml approval-policy` block in markdown at your repo root; the runtime ignores the prose. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
-- **Attestation and hash-mismatch** [shipped]. `approval policy attest` stores the file's SHA-256; a later edit refuses every gated operation with `hash-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
+- **Attestation and hash-mismatch** [shipped]. `approval policy attest` stores the file's SHA-256; a later edit refuses with `policy-not-attested`, detail `hash-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
 - **Five autonomy levels** [shipped]. `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`; bare `supervised` is an alias of `supervised-retro`. https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json
-- **The irreversibility floor** [shipped, spec]. An action declared `reversible: false` resolves to `manual` whatever the policy says. https://github.com/approval-md/approval.md/blob/main/SPEC.md
+- **The irreversibility floor** [shipped, spec]. An action declared `reversible: false` raises nonmanual autonomy to `manual`; `human-only` stays denied. https://github.com/approval-md/approval.md/blob/main/SPEC.md
 - **Fail closed on every axis** [shipped]. An unparseable policy resolves every class to `manual`, an unmatched action takes `defaults.autonomy`, and an unknown key fails validation. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
-- **Single-use execution tokens** [shipped]. Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses `token-consumed`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
+- **Single-use execution tokens** [shipped]. Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses `token-consumed`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **An approval binds bytes** [shipped]. The envelope declares a `payload_hash`, and bytes that hash to anything else are refused `payload-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **Class comes from the envelope** [shipped]. Class, cost and reversibility are read from the registered envelope, never from a flag at request time. https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md
 - **Budgets computed from the log** [shipped]. Class `limits` and `budgets` scopes are conjunctive, and consumption is computed from the log over rolling windows. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
@@ -268,8 +268,8 @@ and never who.
 Undefended: an agent with direct credential access outside the adapters, a
 compromised host, collusion between an agent and a careless approver, and
 persuasion about whether bytes you did see should be approved. You run the
-daemon and the listener yourself, there is no OS-level sandbox, and the
-reference phone channel is one app. What holds regardless of what a harness
+daemon and listener yourself. The optional command sandbox has platform limits;
+it does not isolate a whole agent harness. What holds regardless of what a harness
 believes it is running: the vault, the adapter boundary, and the single-use
 token.
 
