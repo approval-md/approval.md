@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/file-policy-enforcement","--title","docs: finalize APRV-304 after verified merge","--body-file","/private/tmp/aprv304-final-record-pr.md"],"body_sha256":"70f4d635bec3215a7a3cc8d3362f9684f6818ce6f9e3e4b274fd12e612d1638c","cwd":"/Users/carter/dev/approval-md"}

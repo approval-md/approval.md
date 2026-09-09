@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/protected-edit-replay","--title","docs: finalize APRV-326 after verified merge","--body-file","/private/tmp/aprv326-final-record-pr.md"],"body_sha256":"87cc9bfb37edf9c16e483b627c2edac58efd4673bf32f72855fd1e55ff9e342f","cwd":"/Users/carter/dev/approval-md"}
