@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-09 00:56'
+updated_date: '2026-09-09 01:58'
 labels: []
 dependencies:
   - APRV-320
@@ -47,6 +47,10 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 3. Preserve the dark/light/system design, search/filter grid, local loop simulation, and machine-readable feature index. Keep visible and machine-readable counts and claims in sync.
 4. Run source checks for conflict markers, stale release/license text, card/index identity and counts, links, and script syntax. Verify desktop/mobile layout, theme, filters, search, and both simulated decisions in a browser.
 5. Leave commit, push, PR mutation, merge queue, and GitHub Pages verification to the parent. Merge APRV-320 first so the ZZZ link and source-checkout claim are true on main before this page deploys.
+
+6. Production verification found three older claims needing precision: name policy-not-attested with hash-mismatch detail, preserve human-only in the irreversible floor wording, and describe the optional command sandbox without claiming a whole-harness sandbox. Also describe sealed token delivery without an unconditional printed-once claim. Synchronize visible cards, embedded search index and llms-full before final closeout.
+
+7. Carter requested more spacing below the bold lead and approved making npm the primary install with source instructions collapsed under Latest features / contribute. Keep explicit published-vs-source availability, verify the disclosure and mobile layout, then deploy through PR.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -144,4 +148,6 @@ Release boundary correction: the feature index describes the current source chec
 Codex delivery fallback: APRV-265 no longer depends on APRV-319. The page links the already shipped approval mcp serve documentation and says Codex may use those agent-facing gate tools. It also says this MCP route does not intercept ordinary tools and repository configuration still awaits human installation and attestation. The pending .codex README link, safe-launcher command, and committed-configuration claim were removed. APRV-319 remains independent and incomplete.
 
 Carter requested the exact bold lead: A harness-agnostic, open-source framework for approving agent actions with a human in the loop, immediately after the existing human approval for agent actions heading. Added the visible lead and synchronized metadata plus llms.txt/llms-full.txt; parent verified actual desktop rendering in the preview. The existing heading remains unchanged.
+
+PR289 mergedc9e071843aaaa692d1d1ccfa81e02f9d5a2ab321; GitHub Pages built successfully and homepage plus llms files byte-matched reviewed source. Browser verified exact bold lead below original heading. Carter then requested18px spacing and npm-primary installation with collapsed Latest features / contribute, implemented in closeout branch. Browser verified disclosure open/closed, source command,18px gap, no overflow at1280px or360px. Precision fixes synchronize visible/search/llms wording for attestation refusal, human-only floor exception, sealed delivery and bounded command sandbox. Final follow-up deployment remains pending.
 <!-- SECTION:NOTES:END -->

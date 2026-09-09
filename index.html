@@ -189,6 +189,7 @@
   .mark .md{color:var(--muted)}
   h1 .claim{margin-left:.7em;color:var(--fg)}
   .sub{margin:0;color:var(--muted);max-width:74ch}
+  .lede > .sub + .sub{margin-top:18px}
   .sub b{color:var(--fg);font-weight:400}
 
   h2.label{
@@ -214,6 +215,11 @@
   .copy:hover{background:var(--hover);color:var(--fg)}
   .install .note{color:var(--muted);font-size:12px;display:block;margin-top:10px}
   .install .note code{color:var(--fg)}
+  .source-install{margin-top:14px}
+  .source-install > summary{cursor:pointer;color:var(--muted);font-size:12px}
+  .source-install > summary:hover{color:var(--fg)}
+  .source-install .note{margin:10px 0}
+  .source-install .cmd{margin-top:10px}
 
   /* ---- the loop card ---- */
   .loop{
@@ -489,11 +495,16 @@
           <pre><code id="cmd-npm">npm install -g approval-md</code></pre>
           <button class="copy" type="button" data-copy="cmd-npm" aria-label="Copy the npm install command">Copy</button>
         </div>
-        <div class="cmd">
-          <pre><code id="cmd-src">git clone https://github.com/approval-md/approval.md &amp;&amp; cd approval.md &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm link</code></pre>
-          <button class="copy" type="button" data-copy="cmd-src" aria-label="Copy the from-source install command">Copy</button>
-        </div>
-        <span class="note">npm: v0.1.0 · feature index: current source checkout · Apache 2.0 code · CC0 specification and schemas · Node 20 or newer.</span>
+        <span class="note">Installs the published v0.1.0 CLI. Node 20 or newer.</span>
+        <details class="source-install">
+          <summary>Latest features / contribute</summary>
+          <p class="note">Use a source checkout for features marked “source checkout,” including the ZZZ adapter, or to contribute. Choose this path instead of the npm install above.</p>
+          <div class="cmd">
+            <pre><code id="cmd-src">git clone https://github.com/approval-md/approval.md &amp;&amp; cd approval.md &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm link</code></pre>
+            <button class="copy" type="button" data-copy="cmd-src" aria-label="Copy the from-source install command">Copy</button>
+          </div>
+        </details>
+        <span class="note">Feature index: current source checkout · Apache 2.0 code · CC0 specification and schemas.</span>
       </div>
     </header>
 
@@ -575,7 +586,7 @@
         <article class="card" id="f-attestation" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Attestation and hash-mismatch</h3>
-          <p><code>approval policy attest</code> stores the file's SHA-256; a later edit refuses every gated operation with <code>hash-mismatch</code>.</p>
+          <p><code>approval policy attest</code> stores the file's SHA-256; a later edit refuses with <code>policy-not-attested</code>, detail <code>hash-mismatch</code>.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
         </article>
 
@@ -589,7 +600,7 @@
         <article class="card" id="f-irreversibility-floor" tabindex="0" data-facet="gate" data-tags="shipped spec" data-href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">
           <div class="tags"><span class="tag">shipped</span><span class="tag">spec</span></div>
           <h3>The irreversibility floor</h3>
-          <p>An action declared <code>reversible: false</code> resolves to <code>manual</code> whatever the policy says.</p>
+          <p>An action declared <code>reversible: false</code> raises nonmanual autonomy to <code>manual</code>; <code>human-only</code> stays denied.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md section 7 →</a>
         </article>
 
@@ -603,7 +614,7 @@
         <article class="card" id="f-tokens" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Single-use execution tokens</h3>
-          <p>Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses <code>token-consumed</code>.</p>
+          <p>Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses <code>token-consumed</code>.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
         </article>
 
@@ -1120,7 +1131,7 @@
       <h2 class="label" id="posture-h">What this does not defend</h2>
       <div class="prose">
         <p>From SPEC.md section 11. This is an oversight layer for broadly cooperative agents, with hard enforcement at the adapter boundaries that hold the credentials. Human identity in v0.1 is config-declared, so the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation proves that <b>someone with local control</b> signed off, and never who.</p>
-        <p>Undefended: an agent with direct credential access outside the adapters, a compromised host, collusion between an agent and a careless approver, and persuasion about whether bytes you did see should be approved. You run the daemon and the listener yourself, there is no OS-level sandbox, and the reference phone channel is one app. What holds regardless of what a harness believes it is running: the vault, the adapter boundary, and the single-use token.</p>
+        <p>Undefended: an agent with direct credential access outside the adapters, a compromised host, collusion between an agent and a careless approver, and persuasion about whether bytes you did see should be approved. You run the daemon and listener yourself. The optional command sandbox has platform limits; it does not isolate a whole agent harness. What holds regardless of what a harness believes it is running: the vault, the adapter boundary, and the single-use token.</p>
       </div>
     </section>
 
@@ -1173,11 +1184,11 @@
   "tags": ["shipped","spec","example","behind-a-policy-key","behind-a-flag","human-only"],
   "features": [
 {"id":"policy-file","title":"APPROVAL.md, the policy file","facet":["gate"],"tags":["shipped","spec"],"claim":"A fenced yaml approval-policy block in markdown at your repo root; the runtime ignores the prose.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
-{"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses every gated operation with hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
+{"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses with policy-not-attested, detail hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"autonomy-levels","title":"Five autonomy levels","facet":["gate"],"tags":["shipped"],"claim":"human-only, manual, supervised-live, supervised-retro, autonomous; bare supervised is an alias of supervised-retro.","href":"https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json"},
-{"id":"irreversibility-floor","title":"The irreversibility floor","facet":["gate"],"tags":["shipped","spec"],"claim":"An action declared reversible: false resolves to manual whatever the policy says.","href":"https://github.com/approval-md/approval.md/blob/main/SPEC.md"},
+{"id":"irreversibility-floor","title":"The irreversibility floor","facet":["gate"],"tags":["shipped","spec"],"claim":"An action declared reversible: false raises nonmanual autonomy to manual; human-only stays denied.","href":"https://github.com/approval-md/approval.md/blob/main/SPEC.md"},
 {"id":"fail-closed","title":"Fail closed on every axis","facet":["gate"],"tags":["shipped"],"claim":"An unparseable policy resolves every class to manual, an unmatched action takes defaults.autonomy, unknown keys fail validation.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
-{"id":"tokens","title":"Single-use execution tokens","facet":["gate"],"tags":["shipped"],"claim":"Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses token-consumed.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
+{"id":"tokens","title":"Single-use execution tokens","facet":["gate"],"tags":["shipped"],"claim":"Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses token-consumed.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"payload-binding","title":"An approval binds bytes","facet":["gate"],"tags":["shipped"],"claim":"The envelope declares a payload_hash, and bytes that hash to anything else are refused payload-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"envelope-class","title":"Class comes from the envelope","facet":["gate"],"tags":["shipped"],"claim":"Class, cost and reversibility are read from the registered envelope, never from a flag at request time.","href":"https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md"},
 {"id":"budgets","title":"Budgets computed from the log","facet":["gate"],"tags":["shipped"],"claim":"Class limits and budgets scopes are conjunctive, and consumption is computed from the log over rolling windows.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary"},
