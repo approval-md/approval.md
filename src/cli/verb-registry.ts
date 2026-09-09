@@ -2462,6 +2462,34 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "adapter",
+    subcommand: "zzz",
+    purpose:
+      "Execute one approved zzz.bot create-thread or create-reply action. The tagged payload selects a fixed production or preview origin and binds the destination, body, metadata, tags and references. The write-capable Bearer token leaves the vault only inside the verified-token window, and the provider Idempotency-Key is derived from the action key and payload hash.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing because the shared adapter contract verifies and spends a token for the exact payload before the vault credential can be used.",
+    input: input({
+      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
+      flags: {
+        "--token": "string", "--payload": "string", ...AS_FLAG, "--vault": "string",
+        ...POLICY_FLAGS, ...LOG_FLAG, "--timeout": "string", ...JSON_FLAG, ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true }, adapter: { const: "zzz" }, action_key: STRING,
+        task: STRING, class: STRING, autonomy: STRING, payload_hash: SHA256,
+        started_seq: INTEGER, outcome: { enum: ["execution.completed", "execution.failed"] },
+        outcome_seq: INTEGER, exit_code: nullable(INTEGER), detail: OPEN_OBJECT, redactions: INTEGER,
+      },
+      ["ok", "adapter", "action_key", "task", "class", "autonomy", "payload_hash", "started_seq", "outcome", "outcome_seq", "exit_code"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, TORN, IO, { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" }],
+  },
+
+  {
     name: "hook",
     subcommand: "claude-code",
     purpose:
