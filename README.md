@@ -339,6 +339,14 @@ That is `approval log tail`, tab-separated for `cut` when piped, aligned and
 coloured on a terminal. `approval log verify` answers for the chain: `clean: 6
 record(s), head seq 6 843705c6bbea…`.
 
+Downstream services can follow the same channel-independent record with
+`approval log follow --from <seq> --cursor-hash <hash> --json`. The sequence is
+exclusive and the hash binds the resume point to the prefix already consumed.
+Each JSON line is emitted only after a complete chain verification. Delivery
+across reconnects is at least once: apply an idempotent effect, then persist the
+event's `seq` and `hash`. See [the CLI reference](docs/cli-reference.md#log-follow)
+for failure behavior, resource costs, and the weaker sequence-only bootstrap.
+
 **8. Review what ran without you.** Supervised actions the sampler picks arrive
 on the same chat as review cards, after the fact: what ran, when, and that the
 runtime allowed it unasked. ✅ records that you looked, 🛑 twice records a

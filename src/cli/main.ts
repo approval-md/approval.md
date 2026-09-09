@@ -55,6 +55,7 @@ import {
 } from "./exit-codes.js";
 import {
   EXPORT_HELP,
+  FOLLOW_HELP,
   LOG_HELP,
   REINDEX_HELP,
   ROOT_HELP,
@@ -664,6 +665,146 @@ async function commandExport(argv: string[], streams: Streams, cwd: string): Pro
   return EXIT_OK;
 }
 
+/** Long-lived, line-delimited verified event stream (APRV-322). */
+async function commandFollow(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  nativeOutput: boolean,
+): Promise<number> {
+  const front = prelude(
+    argv,
+    { "--log": "string", "--json": "boolean", "--from": "string", "--cursor-hash": "string" },
+    FOLLOW_HELP,
+    streams,
+    cwd,
+  );
+  if (front.kind === "handled") return front.code;
+  const { flags, logPath, json } = front;
+  if (!json) {
+    return usageError(streams, false, "log follow requires --json", FOLLOW_HELP);
+  }
+  const fromResult = countFlag(flags, "--from");
+  if (!fromResult.ok) return usageError(streams, true, fromResult.message, FOLLOW_HELP);
+  const from = fromResult.value ?? 0;
+  const expectedHash = stringFlag(flags, "--cursor-hash");
+  if (expectedHash !== null && from === 0) {
+    return usageError(streams, true, "--cursor-hash requires --from greater than zero", FOLLOW_HELP);
+  }
+  if (expectedHash !== null && !/^[a-f0-9]{64}$/u.test(expectedHash)) {
+    return usageError(
+      streams,
+      true,
+      "--cursor-hash expects a lowercase 64-character SHA-256 digest",
+      FOLLOW_HELP,
+    );
+  }
+
+  const check = preflightLog(logPath);
+  if (!check.ok) return ioError(streams, true, check.message);
+
+  const controller = new AbortController();
+  let brokenPipe = false;
+  let signalCancellation = false;
+  const outputFailures: Error[] = [];
+  const stop = (): void => {
+    signalCancellation = true;
+    controller.abort();
+    // A stalled downstream reader can leave one bounded chunk pending. The
+    // foreground command is ending by signal, so close that native write side
+    // rather than making shutdown depend on the reader resuming.
+    if (nativeOutput) {
+      process.stdout.destroy();
+      // A pipe-backed stdout can retain an outstanding libuv write even after
+      // destroy. Give the abort microtasks one turn to close the iterator and
+      // its watcher, then finish the signal-requested process without waiting
+      // for a downstream reader that has explicitly stopped reading.
+      setImmediate(() => process.exit(EXIT_OK));
+    }
+  };
+  const outputError = (cause: Error): void => {
+    if (signalCancellation) {
+      controller.abort();
+      return;
+    }
+    if ((cause as NodeJS.ErrnoException).code === "EPIPE") brokenPipe = true;
+    else outputFailures.push(cause);
+    controller.abort();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  if (nativeOutput) process.stdout.on("error", outputError);
+
+  const writeRecord = async (record: EventRecord): Promise<void> => {
+    const line = `${JSON.stringify(record)}\n`;
+    if (!nativeOutput) {
+      streams.out(line);
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (cause?: Error): void => {
+        if (settled) return;
+        settled = true;
+        process.stdout.removeListener("drain", drained);
+        controller.signal.removeEventListener("abort", cancelled);
+        if (cause === undefined) resolve();
+        else reject(cause);
+      };
+      const drained = (): void => finish();
+      const cancelled = (): void => finish();
+      controller.signal.addEventListener("abort", cancelled, { once: true });
+      process.stdout.once("drain", drained);
+      try {
+        // A false return is the Writable contract's backpressure signal. Do
+        // not ask the iterator for another record until `drain`; otherwise
+        // Node accepts the whole verified snapshot into its stdout queue.
+        if (process.stdout.write(line)) finish();
+      } catch (cause) {
+        finish(cause instanceof Error ? cause : new Error(String(cause)));
+      }
+    });
+  };
+
+  try {
+    const { subscribeVerifiedLog } = await import("../core/log-subscribe.js");
+    const options =
+      expectedHash === null
+        ? { from, signal: controller.signal }
+        : { from, expectedHash, signal: controller.signal };
+    for await (const record of subscribeVerifiedLog(logPath, options)) {
+      try {
+        await writeRecord(record);
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "EPIPE") {
+          brokenPipe = true;
+          controller.abort();
+          break;
+        }
+        throw cause;
+      }
+    }
+    if (brokenPipe || signalCancellation) return EXIT_OK;
+    const outputFailure = outputFailures[0];
+    if (outputFailure !== undefined) return ioError(streams, true, outputFailure.message);
+    return EXIT_OK;
+  } catch (cause) {
+    const { LogSubscriptionError } = await import("../core/log-subscribe.js");
+    if (!(cause instanceof LogSubscriptionError)) throw cause;
+    if (cause.kind === "torn-tail") {
+      streams.err(`${JSON.stringify({ error: { code: "torn-tail", message: cause.message } })}\n`);
+      return EXIT_TORN_TAIL;
+    }
+    return cause.kind === "io"
+      ? ioError(streams, true, cause.message)
+      : integrityError(streams, true, cause.message);
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    if (nativeOutput) process.stdout.removeListener("error", outputError);
+  }
+}
+
 async function commandReindex(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
@@ -727,7 +868,12 @@ async function commandReindex(argv: string[], streams: Streams, cwd: string): Pr
   }
 }
 
-async function commandLog(argv: string[], streams: Streams, cwd: string): Promise<number> {
+async function commandLog(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  nativeOutput: boolean,
+): Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 
@@ -746,6 +892,8 @@ async function commandLog(argv: string[], streams: Streams, cwd: string): Promis
       return commandTail(rest, streams, cwd);
     case "export":
       return commandExport(rest, streams, cwd);
+    case "follow":
+      return commandFollow(rest, streams, cwd, nativeOutput);
     // APRV-125. The two verbs that move the log FILE rather than reading it: a
     // fast-forward pull with a chain reconcile, and the commit-and-push of what
     // the chain has grown since. Neither appends an event.
@@ -940,7 +1088,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       return commandInit(rest, streams, cwd);
     }
     case "log":
-      return commandLog(rest, streams, cwd);
+      return commandLog(rest, streams, cwd, options.streams === undefined);
     case "policy": {
       const { commandPolicy } = await import("./policy.js");
       return commandPolicy(rest, streams, cwd);

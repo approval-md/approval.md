@@ -39,11 +39,12 @@ resolved, and nothing is written.
 
 ## log
 
-The three subcommands open the log for reading only. `verify` walks the hash chain
+Four subcommands open the log for reading only. `verify` walks the hash chain
 end to end and reports clean | torn-tail | corrupt, `tail` prints the last N
-records (default 10), and `export` streams every stored line to stdout, byte for
-byte. The default log path is `.approval/log/events.jsonl`, relative to the
-working directory.
+records (default 10), `export` streams every stored line to stdout byte for
+byte, and `follow` emits verified records after an exclusive cursor before
+waiting for appends. The default log path is `.approval/log/events.jsonl`,
+relative to the working directory.
 
 ## log verify
 
@@ -300,6 +301,47 @@ that is due to a refusal of anything: it is a warning on `log verify`, a
 `checkpoint-due` warning on the daemon's tick, and a `fix` line on `approval
 doctor`'s `checkpoint` row. A gate that held up an action for want of a tap is a
 gate whose operator turns the check off.
+
+## log follow
+
+`approval log follow --from <seq> --json` is the channel-independent decision
+listener. `--from` is exclusive and defaults to zero, so a new consumer first
+receives the entire verified log. Output is JSON Lines: one complete stored
+event object per line. It emits every event type in chain order; a refund or
+queue consumer selects the decisions relevant to its own work. The command then
+remains in the foreground and exits 0 on SIGINT, SIGTERM, or a closed downstream
+pipe. Signal cancellation may interrupt the final native stdout write. Consumers
+must process only newline-terminated JSON records, discard any incomplete final
+fragment, and reconnect from the cursor of the last complete record they
+processed.
+
+Filesystem notifications only prompt another read. On every notification wake
+and every bounded 500ms fallback poll, the runtime rereads and verifies the
+complete chain from genesis through the observed head, even when the log has not
+changed. It emits nothing from a corrupt, torn, unreadable, truncated, or
+cursor-mismatched snapshot. Pull backpressure means a slow consumer holds one
+verified snapshot and no growing notification or event queue. Each check costs
+O(N) verification time and O(N) snapshot memory for a log of N records. This
+bounded initial implementation is not an incremental, low-overhead tail.
+
+`--cursor-hash <64hex>` supplies the hash of record `--from`. Store both the
+sequence and hash outside the log and pass both on reconnect. That binding
+detects a truncated or replaced prefix. A sequence alone is a weaker bootstrap:
+an internally valid rewritten prefix with the same sequence numbers cannot be
+distinguished from the original, for the same reason an unanchored hash chain
+cannot detect a fully recomputed forgery.
+
+Delivery across reconnects is at least once. Apply the external effect first,
+then persist the emitted event's `seq` and `hash`; a crash between those steps
+replays the event. Consumers that require exactly-once external effects must
+make their own effect idempotent or transact it with cursor storage. Persisting
+the cursor before the effect instead risks silently losing that effect.
+
+The stream uses the existing exit classes: 1 for corrupt or mismatched cursor,
+2 for usage, 3 for a torn tail, and 4 for I/O. Its error object is written to
+stderr and no event from the refused batch is written to stdout. `log follow`
+is deliberately absent from MCP because one unbounded call would occupy the
+finite MCP call queue; run it as a separate CLI process.
 
 ## log tail
 
