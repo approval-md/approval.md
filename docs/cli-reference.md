@@ -14,6 +14,10 @@ a gate refusal is exit 1 and not 2, approval events are exclusive to the manual
 path, the raw token is shown once, a channel is transport — are stated once at
 the top of `approval --help` and are not repeated here.
 
+`approval --version`, `approval -v`, and `approval version` print the package
+version and exit 0. These aliases apply only at the top level; a version-looking
+flag after a verb remains that verb's argument.
+
 Each section below is what the corresponding `--help` points at with its
 `why: docs/cli-reference.md#…` footer.
 
@@ -3558,7 +3562,11 @@ gate.self          the "approval" CLI itself is pass-through
 ```
 
 Bash (Claude Code) and Shell (Cursor) commands are classified into SPEC.md §7
-action classes. Claude file tools (Edit, Write, MultiEdit, NotebookEdit) and
+action classes. A `git push` that names `refs/tags/*`, a bare `v`-prefixed
+semantic-version-shaped tag, `tag <name>`, `--tags`, or `--follow-tags` is
+`release.publish`; force and mirror pushes remain `vcs.history.rewrite`, and
+ordinary branch pushes retain their branch or trunk class. Claude file tools
+(Edit, Write, MultiEdit, NotebookEdit) and
 Cursor Write/Delete are gated only when the file is policy-protected
 (`APPROVAL.md`, `.approval/`, `CLAUDE.md`, `AGENTS.md`, `.claude/settings*`,
 `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/`,

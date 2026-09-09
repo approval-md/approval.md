@@ -94,6 +94,11 @@ function tornTailMessage(path: string): string {
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 /** dist/tests/cli.test.js -> <repo>/cli.js */
 const BIN_ENTRY = fileURLToPath(new URL("../../cli.js", import.meta.url));
+const PACKAGE_VERSION = (
+  JSON.parse(readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8")) as {
+    version: string;
+  }
+).version;
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-cli-"));
 let counter = 0;
@@ -607,6 +612,25 @@ test("reindex: unreadable log is an I/O error, not an integrity failure", { skip
 // --------------------------------------------------------------------------
 // usage errors
 // --------------------------------------------------------------------------
+
+test("version: all top-level aliases print the package version and exit 0", () => {
+  const dir = caseDir();
+  for (const argv of [["--version"], ["-v"], ["version"]]) {
+    const run = runCli(argv, dir);
+    assert.equal(run.code, 0, `approval ${argv.join(" ")} exited ${String(run.code)}`);
+    assert.equal(run.stdout, `${PACKAGE_VERSION}\n`);
+    assert.equal(run.stderr, "");
+  }
+});
+
+test("version: a nested version-looking flag remains the verb's argument", () => {
+  const dir = caseDir();
+  const run = runCli(["log", "tail", "-v"], dir);
+  assert.equal(run.code, 2);
+  assert.equal(run.stdout, "");
+  assert.match(run.stderr, /unknown flag -v/u);
+  assert.doesNotMatch(run.stderr, new RegExp(`^${PACKAGE_VERSION}$`, "mu"));
+});
 
 test("usage: unknown command exits 2 with usage on stderr", () => {
   const dir = caseDir();

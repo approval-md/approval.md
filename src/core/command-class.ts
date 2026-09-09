@@ -1148,27 +1148,51 @@ function isUnknownValue(word: string): boolean {
   return word.includes("$") || word.includes("*") || word.includes("?") || word.startsWith("~");
 }
 
-/** `git push` — the three push classes turn on flags and refspecs. */
+/** A bare release tag: the conventional `v` plus a semantic-version-shaped value. */
+const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+
+/** Does one side of a push refspec explicitly name a tag? */
+function isTagRef(name: string): boolean {
+  if (name.startsWith("refs/tags/")) return true;
+  if (name.startsWith("refs/heads/")) return false;
+  return V_PREFIXED_SEMVER.test(name);
+}
+
+/** Does either source or destination of this refspec explicitly name a tag? */
+function isTagRefspec(refspec: string): boolean {
+  const colon = refspec.indexOf(":");
+  if (colon === -1) return isTagRef(refspec);
+  return isTagRef(refspec.slice(0, colon)) || isTagRef(refspec.slice(colon + 1));
+}
+
+/** `git push` — force, release, trunk and branch classes turn on flags and refspecs. */
 function refineGitPush(ctx: RuleContext): Refinement {
   const args = ctx.args.slice(1);
-  if (hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes"])) {
+  if (hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"])) {
     return { class: "vcs.history.rewrite", rule: "git-push-force" };
   }
   const positionals = args.filter((arg) => !isFlag(arg));
-  // A deletion, or a push with no refspec at all: the destination is either the
-  // trunk or unknown, and unknown resolves to the stricter class.
+  const refspecs = positionals.slice(1);
+  if (refspecs.some((refspec) => refspec.startsWith("+"))) {
+    return { class: "vcs.history.rewrite", rule: "git-push-force" };
+  }
+  if (
+    hasFlag(args, ["--tags", "--follow-tags"]) ||
+    refspecs.some(isTagRefspec) ||
+    refspecs.some((word, index) => word === "tag" && index + 1 < refspecs.length)
+  ) {
+    return { class: "release.publish", rule: "git-push-tag" };
+  }
+  // A non-tag deletion, or a push with no refspec at all: the destination is
+  // either the trunk or unknown, and unknown resolves to the stricter class.
   if (hasFlag(args, ["--delete", "-d"])) {
     return { class: "vcs.push.main", rule: "git-push-delete" };
   }
-  const refspecs = positionals.slice(1);
   if (refspecs.length === 0) {
     return { class: "vcs.push.main", rule: "git-push-implicit" };
   }
   let sawMain = false;
   for (const refspec of refspecs) {
-    if (refspec.startsWith("+")) {
-      return { class: "vcs.history.rewrite", rule: "git-push-force" };
-    }
     const colon = refspec.indexOf(":");
     const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
     // `:branch` (empty source) and `src:` (empty destination) both delete a
