@@ -288,15 +288,16 @@ carelessly, coercion, a relying service that fails to pin the key.
 recovery story that is itself a security-critical design (§4.5). This is the cost
 that keeps the hardened path opt-in and per-class.
 
-**Log schema delta.** One new gate-typed event, proposed name
-`approval.countersigned`, carrying `granted_seq`, `key_id`, `alg`, `sig`, and the
-digest that was signed. It never replaces `approval.granted`, and a grant with no
-countersignature is an ordinary grant that behaves exactly as it does today.
+**Log schema delta.** None is required for a detached signed receipt. If durable
+issuance evidence is later required in the log, one new gate-typed event, proposed
+name `approval.countersigned`, carries `granted_seq`, `key_id`, `alg`, `sig`, and
+the digest that was signed. It never replaces `approval.granted`, and a grant with
+no countersignature is an ordinary grant that behaves exactly as it does today.
 
-**Verification delta.** A new verb, proposed `approval receipt verify`, plus the
-`approval log verify` walk gaining an optional `--countersigned` mode that behaves
-like `--checkpoints`: refuse an invalid signature, skip on an absent one, and
-never turn a skip into a pass.
+**Verification delta.** A new verb, proposed `approval receipt verify`. If a later
+task adds the optional log record, `approval log verify` may gain a
+`--countersigned` mode that behaves like `--checkpoints`: refuse an invalid
+signature, skip on an absent one, and never turn a skip into a pass.
 
 **How ZZZ verifies without trusting the repo owner.** ZZZ holds the enrolled
 public key from its own enrollment ceremony, in its own store. It verifies the
@@ -341,11 +342,11 @@ the credential is a passkey the operator already knows how to create. Higher in
 infrastructure, because WebAuthn needs an origin and an RP ID, which is the
 local-first tension of §9.2.
 
-**Log schema delta.** The same `approval.countersigned` record, with `alg` naming
-a WebAuthn assertion and the payload carrying `credential_id`, `authenticator_data`,
-`client_data_json`, and `signature`. The record is larger than an Ed25519 one,
-which matters for a log that is kept forever (APRV-217 is already about log size),
-so §5.5 keeps the assertion out of the log by default and in the receipt only.
+**Log schema delta.** None is required when the assertion lives in the detached
+receipt. A future `approval.countersigned` record could retain its digest and
+signature, but a full WebAuthn assertion is larger than an Ed25519 signature,
+which matters for a log kept forever (APRV-217 is already about log size). Section
+5.5 therefore keeps the assertion out of the log by default.
 
 **Verification delta.** A WebAuthn assertion verifier. This is the one place the
 proposal contemplates a dependency, and CLAUDE.md requires each new dependency to
@@ -370,22 +371,31 @@ decision reuses all of that.
 
 Two sub-shapes, and the difference matters:
 
-- **C1, decision countersignature.** A new record signs the digest of one
-  `approval.granted`. Direct, and it needs a signing act per decision.
+- **C1, decision countersignature.** A signing act produces a detached signature
+  over one receipt body derived from an `approval.granted`. A later task may also
+  retain a countersignature record in the log, but the detached signature is the
+  receipt's authentication. Direct, and it needs a signing act per decision.
 - **C2, checkpoint as a covering witness.** No new record at all. A checkpoint at
   seq N witnesses every record below N, so a grant at seq M < N is inside a signed
-  prefix. A receipt for that grant carries the grant record, the chain of hashes
-  from M to N, and the checkpoint signature over N. The verifier walks the
-  hashes and checks one signature.
+  prefix. A distinct `approval-log-witness/v1` artifact for that grant carries
+  every complete canonical record from the earliest record it relies on through
+  N, plus the checkpoint signature over N. The verifier recomputes every record
+  hash, walks `seq` and `prev`, and checks one signature under a public key supplied
+  by the relying service. A list of hashes is not an inclusion proof for this hash
+  chain: without each record's complete hash preimage, a verifier cannot establish
+  that one listed hash leads to the next.
 
-C2 is the smaller change and the weaker claim, and the difference is worth being
-exact about. It proves "a key the agent does not hold signed a chain that
-contains this grant", and the signature happened after the fact, at checkpoint
-cadence. It does not prove the key holder saw the grant, and it does not prove
-freshness at decision time. It is closer to a countersigned audit log than to an
-authorization. For a relying service that wants evidence a decision was not
-inserted after the fact by a party who then recomputed the chain, C2 is real and
-cheap. For the target claim in §0, C2 is insufficient on its own.
+C2 is the smaller cryptographic change and the weaker claim, and the difference is
+worth being exact about. It proves "a key signed a chain prefix containing this
+grant", and the signature happened after the fact, at checkpoint cadence. Whether
+the agent could reach that key remains a deployment assumption. C2 does not prove
+the key holder saw the grant, does not prove freshness at decision time, and does
+not authenticate any audience, challenge, scope, agent key, or expiry added by an
+exporter. It is retrospective log evidence, not an authorization receipt. For a
+relying service that wants evidence a decision was not inserted after a checkpoint
+by a party that recomputed the chain, C2 is real. It is not cheap in disclosure or
+size: the proof reveals every complete intervening record and grows with the
+distance to the checkpoint. For the target claim in §0, C2 is insufficient.
 
 **What C1 proves.** A key held outside agent reach signed this decision digest.
 Under vault custody, "outside agent reach" means the listener process holds the
@@ -397,28 +407,81 @@ operator can copy and an attacker who owns the listener host can extract. User
 presence, since nothing in the signing path requires a person at the moment of
 signing. Any of the freshness properties of Option B.
 
-**Threat model.** Defends: an agent with log write access, an agent with the
-identity variable, a forger who truncates and recomputes the chain, replay across
-audiences when the message is bound. Does not defend: a compromised listener host,
+**Threat model.** C1 defends against an agent with log write access, an agent with
+the identity variable, a forger who truncates and recomputes the chain, and replay
+across audiences when the signed receipt body carries the audience. C2 defends
+only the signed-prefix claim above. Neither defends a compromised listener host,
 key exfiltration from the vault, or an operator who automates the signing.
 
 **Cost to operators.** The lowest of the four. The key ceremony already exists
 (`approval setup checkpoint`), the cadence prompt already exists (APRV-257), and
-the rotation rule already exists. An operator who runs checkpoints today gets C2
-for free and C1 for one policy key.
+the rotation rule already exists. An existing checkpoint provides C2's signing
+primitive without a new ceremony, but exporting its proof has privacy and size
+costs and is therefore deferred. C1 requires a per-decision signing path.
 
-**Log schema delta.** C2: none. C1: one new event type, as in §4.1.
+**Log schema delta.** C2: none. C1: none for a detached receipt; one new event
+type, as in §4.1, only if durable issuance evidence is later required in the log.
 
-**Verification delta.** C2: a receipt exporter and a verifier that reuses the
-existing checkpoint verification. C1: one more branch in the same verifier.
+**Verification delta.** C2: a separately versioned log-witness exporter and
+verifier, if the disclosure tradeoff later justifies one. C1: a receipt verifier
+that verifies a signature over the complete receipt body.
 
-**How ZZZ verifies without trusting the repo owner.** ZZZ enrolls the checkpoint
-public key at integration time and pins it. It then verifies the signature and the
-hash walk offline. The weakness is that `audit.checkpoint_keys` lives in the
-operator's own policy file, so a verifier that reads the key from the log's policy
-is trusting the party under scrutiny. **The enrolled key must come from ZZZ's own
-registry, and the policy list is a local convenience only.** This is the single
-most important implementation detail of this option.
+**How ZZZ verifies without trusting the repo owner.** For C1, ZZZ enrolls the
+receipt-signing public key and verifies the signature over the complete receipt
+body. For a future C2 witness, ZZZ pins the checkpoint public key independently and
+verifies the full record walk offline. `audit.checkpoint_keys` lives in the
+operator's own policy file, so it is never an authority for ZZZ. **The enrolled key
+must come from ZZZ's own registry, and the policy list is a local convenience
+only.** This is the single most important implementation detail of either option.
+
+#### C2 is a different artifact: `approval-log-witness/v1`
+
+A checkpoint witness is deliberately not a branch of `approval-receipt/v1`. Its
+minimal shape is:
+
+```text
+{
+  v: "approval-log-witness/v1",
+  decision_seq: integer,
+  records: EventRecord[],
+  checkpoint: {
+    alg: "ed25519",
+    key_sha256: lowercase-hex SHA-256 of verifier-supplied DER SPKI,
+    signed_seq: integer,
+    signed_hash: lowercase-hex SHA-256,
+    signature: base64 Ed25519 signature
+  }
+}
+```
+
+This is schema notation rather than a literal JSON fixture. Each `records` array
+member is one complete event object exactly as the log records it. A verifier
+schema rejects receipt-only security fields such as `aud`,
+`challenge`, `scope`, `sub_key`, `exp`, and `jti`. The verifier receives a public
+key through its API, checks that its fingerprint equals `key_sha256`, validates and
+hashes every record, requires consecutive `seq` and `prev` linkage through
+`signed_seq`, requires `signed_hash` there, and verifies the checkpoint-domain
+signature. It then locates `decision_seq` and derives its result only from those
+records. It never reads a key from the artifact or from `APPROVAL.md` as authority.
+
+The witness may derive the decision, action key, decision sequence, grant payload
+hash, and policy hash from `approval.granted` or `approval.rejected`. For a grant,
+it may derive `display_hash` only from the matching `approval.requested`, because
+the current grant record does not copy that field. The request and grant actors are
+recorded strings, not authenticated persons or agent keys. The relying service's
+externally pinned verification-key fingerprint is the authenticated issuer
+reference; the signed head authenticates the covered log prefix. The checkpoint
+record's own actor, channel, and timestamp are not signed by that checkpoint,
+which signs an earlier head.
+
+This format has two unavoidable costs under the current linear hash chain. First,
+every intervening record is disclosed, including unrelated notes and sealed-token
+ciphertexts. Second, proof size grows with the distance to the checkpoint. A list
+of record hashes would hide the contents but prove nothing about linkage, because
+the verifier would lack the preimages needed to recompute those hashes. The design
+therefore defers a witness exporter until a concrete consumer accepts both costs.
+Compact selective disclosure would require a different commitment structure, and
+belongs in a separate design.
 
 ### 4.4 Option D: third-party receipts
 
@@ -471,21 +534,23 @@ gives ZZZ evidence about what the operator did *not* tell it.
 
 | | A: device key | B: WebAuthn | C1: countersign | C2: checkpoint cover | D: third-party |
 | --- | --- | --- | --- | --- | --- |
-| binds a specific decision | yes | yes | yes | prefix only | inherits |
-| fresh at decision time | yes | yes | yes | no | inherits |
+| binds a specific decision | yes | yes | yes | proves inclusion in a prefix only | inherits |
+| fresh at decision time | yes | yes | per-decision signing only; no fresh human authentication | no | inherits |
 | user verification signal | device-dependent | flag, verifiable | none | none | none |
 | survives host compromise | yes | yes | no | no | no |
 | detects equivocation | no | no | no | no | yes (D2) |
 | new dependency | maybe | likely | none | none | likely |
-| operator effort | high | medium | low | lowest | medium |
-| code already in repo | none | none | most | all | none |
+| operator effort | high | medium | low | low to sign, high disclosure to export | medium |
+| code already in repo | none | none | most | checkpoint primitive only | none |
 
 ---
 
 ## 5. The receipt: `approval-receipt/v1`
 
 A receipt is a self-contained, signed statement about one decision, exported from
-a log and verified by somebody who has never seen that log.
+a log and verified by somebody who has never seen that log. Every security-bearing
+body field is covered by one domain-separated signature or WebAuthn assertion. A
+checkpoint signature is not a receipt signature and is never accepted as one.
 
 ### 5.1 The field set
 
@@ -495,7 +560,7 @@ parse at all.
 | field | req | meaning |
 | --- | --- | --- |
 | `v` | MUST | `"approval-receipt/v1"`. A verifier that does not know the value refuses rather than guesses. |
-| `iss` | MUST | The issuing credential's stable identifier: a key fingerprint for A and C, a WebAuthn credential id for B. This is what a relying service enrolled. |
+| `iss` | MUST | The issuing credential's stable identifier: a key fingerprint for A and C1, a WebAuthn credential id for B. This is what a relying service enrolled. |
 | `iss_instance` | SHOULD | An identifier for the log instance, informational, marked as a claimed field. It helps an operator's own audit and carries no trust. |
 | `approver` | SHOULD | The `human:<id>` the local runtime recorded. **Always a claimed field.** A verifier may display it and may never derive assurance from it. |
 | `sub` | MUST | The agent identity the grant authorizes: `agent:<id>`. |
@@ -507,8 +572,8 @@ parse at all.
 | `iat`, `nbf`, `exp` | MUST | Issuance, not-before, expiry, RFC 3339 UTC. `exp` is required and short by default. |
 | `challenge` | MUST | A nonce chosen by the relying service, echoed here. See §5.4. |
 | `jti` | MUST | A unique receipt identifier, used for single-use enforcement and revocation. |
-| `binding` | MUST | The signature material: `{alg, sig}` for A and C1, `{alg, credential_id, authenticator_data, client_data_json, sig}` for B, `{alg, checkpoint_seq, checkpoint_sig, chain: [...]}` for C2. |
-| `witness` | MAY | A timestamp countersignature or transparency inclusion proof (Option D). |
+| `binding` | MUST | The signature material: `{alg, sig}` for A and C1, or `{alg, credential_id, authenticator_data, client_data_json, sig}` for B. Every permitted variant covers the complete body under §5.2. C2 is not a permitted variant; its retrospective evidence uses `approval-log-witness/v1`. |
+| `witness` | MAY | A timestamp countersignature or transparency inclusion proof (Option D). This optional receipt field is not an `approval-log-witness/v1` checkpoint artifact and cannot replace `binding`. |
 | `assurance` | MUST | A label from the closed set in §7. **The verifier recomputes this from what it validated and refuses a receipt whose stated label exceeds what the evidence supports.** It is present so a human reading a receipt sees the claim in words, and it is never an input to a verdict. |
 
 Two fields are deliberately absent. There is no `human_verified` boolean, because
@@ -531,6 +596,12 @@ existing conformance vectors for it. The domain-separation prefix is the same
 device `CHECKPOINT_DOMAIN` uses, and for the same reason: a signature made for a
 receipt can never be lifted into a checkpoint, and a checkpoint signature can
 never be presented as a receipt.
+
+The last sentence is an acceptance rule, not only a property of domain separation.
+A verifier must reject a checkpoint signature or `approval-log-witness/v1` object
+where an `approval-receipt/v1` binding is required. Otherwise an exporter could add
+an audience, challenge, scope, agent key, or expiry after the checkpoint and obtain
+an authorization claim the checkpoint signer never made.
 
 For Option B the WebAuthn `challenge` is `SHA-256` of that same message, so the
 authenticator's signature transitively covers the whole body. This matters: an
@@ -575,7 +646,8 @@ the party being checked is choosing the nonce.
 
 ### 5.5 Coexistence with execution tokens and the log
 
-These are three different artifacts and they must stay three.
+The execution token, log, receipt, and optional log witness are distinct artifacts
+and must stay distinct.
 
 - **The execution token** authorizes one local side effect through one adapter,
   once, bound to `idempotency_key` and `payload_hash`. It is secret, single-use,
@@ -588,16 +660,21 @@ These are three different artifacts and they must stay three.
   and never imported: a receipt an agent presents to the local runtime is a
   claimed field under invariant 4, may raise local scrutiny, and may never lower
   it or satisfy a local gate.
-- **The countersignature record** (§4.1) is the only new thing in the log, is
-  additive, and is written after `approval.granted` rather than instead of it. A
-  reader that does not know the type sees a grant that behaves exactly as grants
-  behaved before, which is SPEC §8's additive-change rule.
+- **The optional log witness** proves inclusion in a signed historical prefix and
+  carries no receipt authority. It is exported only, and its complete-record
+  disclosure is the reason §4.3 defers it.
+- **A future countersignature record** (§4.1), if durable receipt issuance is
+  required in the log, is additive and is written after `approval.granted` rather
+  than instead of it. A reader that does not know the type sees a grant that
+  behaves exactly as grants behaved before, which is SPEC §8's additive-change
+  rule. A detached receipt does not require this record to authenticate its body.
 
 Receipt bodies are kept out of the log by default. §11.1 invariant 3 keeps raw
 secrets out, and a receipt holds none, so the reason here is different: a
 WebAuthn assertion is kilobytes, a log is kept forever, and APRV-217 is already
-about log size. The exported receipt is the artifact; the log holds the digest
-and the signature.
+about log size. The exported, fully signed receipt is the artifact. A later
+countersignature-record task may choose to retain its digest and signature in the
+log, but phase 1 does not require or propose that schema change.
 
 ### 5.6 Proof of possession
 
@@ -656,6 +733,29 @@ Four mechanisms, in order of reliability:
 The honest statement for documentation: **a receipt with a long expiry and no
 service-side revocation channel is a bearer authorization for its whole lifetime.**
 Short expiry with re-issuance is the recommended default.
+
+### 5.9 Receipt verification order
+
+A conforming relying-service verifier performs these checks without reading the
+operator's log or policy:
+
+1. Parse against the closed `approval-receipt/v1` schema and reject unknown
+   versions, fields, algorithms, or binding shapes.
+2. Resolve `iss` only in the service's enrolled-key registry and verify the
+   binding over the exact §5.2 message. No later check runs on an unsigned body.
+3. Recompute the maximum assurance supported by that binding and enrollment
+   metadata, and refuse an overclaim.
+4. Check the expected `aud`, service-issued `challenge`, `nbf`, `exp`, `jti`, and
+   service-side credential and scope revocation state.
+5. Validate the structured scope under the service's own schema, then require
+   proof of possession of `sub_key` before granting the named capability.
+
+Every refusal is terminal for this receipt. A caller may separately present lower
+assurance evidence, but the verifier never converts a failed receipt into an
+accepted lower rung. The signing surface has the complementary obligation: derive
+the grant block from verified records, bind any retained payload bytes to
+`payload_hash`, display the complete receipt body on the trusted surface, and sign
+exactly those bytes.
 
 ---
 
@@ -782,7 +882,7 @@ carried as a claim. Names are provisional.
 | `none` | nothing, or an unverifiable assertion | no evidence |
 | `disclosed-workflow` | the integrator states they use approval.md | "the integrator says they gate this class." A self-report about intent. |
 | `local-grant` | a chain-verified log shows a grant over these bytes | "a party with write access to that log recorded a human decision over these exact bytes." Useful for audit, self-asserted. |
-| `witnessed-log` | the above, inside a signed checkpoint prefix (C2), or against an anchor | "the grant was inside a prefix signed by a key the agent does not hold, or held by a party the operator does not control." |
+| `witnessed-log` | a complete record suffix proves the grant is inside a checkpoint prefix signed by a key the relying service independently pins, or the grant verifies against an independent anchor | "the grant was inside a prefix authenticated by this enrolled witness key or independent anchor." Whether the agent could reach the signing key is a deployment fact, not something the witness proves. |
 | `countersigned` | a per-decision signature under an enrolled key (A or C1) | "an enrolled operator credential signed this exact decision." |
 | `operator-verified` | a fresh, user-verified assertion bound to the decision digest under an enrolled credential (B) | "an enrolled operator credential authorized this specific grant through a verification path outside the requesting agent's control." The §0 claim, exactly. |
 | `attested-authenticator` | the above, with registration attestation checked against a trusted authenticator set | "and the credential lives on an authenticator of a known model." |
@@ -808,35 +908,39 @@ Documentation changes this implies, all of them proposals for later tasks:
 
 ## 8. The recommended path
 
-Four phases. The first is deliberately small, uses code that already exists, adds
-no dependency, and is independently useful even if nothing after it ships.
+Four phases. This design task implements none of them. The first freezes the
+smallest authorization format that can honestly carry the target fields.
 
-### Phase 1: exportable receipts over what the log already proves
+### Phase 1: a full-body detached receipt contract
 
-Ship `approval receipt export` and `approval receipt verify` at `assurance:
-witnessed-log`, built entirely on Option C2. No new event type, no schema change,
-no new dependency, no policy key. The exporter assembles the grant record, the
-hash chain up to the newest covering checkpoint, and that checkpoint's signature.
-The verifier is offline, takes the issuer key as an argument rather than reading
-it from the operator's policy, and refuses on every negative in §9.
+Freeze `approval-receipt/v1`, its canonicalization, and an offline verifier
+contract. Every permitted binding signs the complete body. The verifier receives
+the issuer key through the relying service's enrollment registry, never through
+the receipt or the operator's policy, recomputes `assurance`, and refuses on every
+negative in §10. This phase is design only in APRV-249. A separately authorized
+implementation may use a detached Ed25519 signature and does not need a new event
+type merely to make the exported artifact authentic.
 
-Why this first. It forces the receipt format, the canonicalization, the audience
-and challenge binding, the verification contract, and the label discipline
-through a real implementation while the cryptography is code the repository has
-already tested. It gives ZZZ something to integrate against in a week rather than
-a quarter. And it produces the honest baseline sentence, which is worth having on
-its own: "a key the agent does not hold signed a chain containing this grant."
+Why this first. Audience, challenge, scope, agent-key, and expiry claims matter to
+a relying service only when the signature covers them. Freezing that contract
+before choosing the signing surface prevents a small implementation from becoming
+a large claim. A detached signature under an enrolled key supports the
+`countersigned` rung. It does not support the §0 target unless the signing act is
+bound to a fresh, trusted per-decision authentication outside the requesting
+agent's control.
 
-Estimated shape: one new CLI verb pair, one conformance vector file, a doc page,
-no `src/core` change beyond a receipt module that reads existing ones.
+Estimated later implementation shape: one receipt module and conformance vectors,
+followed by a separately reviewed signing surface and credential-enrollment flow.
+There is no runtime work in this proposal task.
 
 ### Phase 2: per-decision countersignature
 
-Add `approval.countersigned` (Option C1) and a policy key naming which classes
-require one. This is the first schema change and the first new event type, so it
-is its own task with its own schema work, and it lifts the label to
-`countersigned`. Custody stays the vault, which means the claim stays honest
-about host compromise.
+Decide whether durable issuance needs `approval.countersigned` (Option C1) and a
+policy key naming which classes require one. This is the first schema change and
+the first new event type, so it is its own task with its own schema work. The
+detached receipt signature, rather than the existence of this record, is what
+authenticates the receipt. Vault custody supports a host-bounded `countersigned`
+claim and no claim of fresh human presence.
 
 ### Phase 3: the hardened surface
 
@@ -849,15 +953,17 @@ should not begin before phases 1 and 2 have a real consumer.
 ### Phase 4, optional and independent
 
 Authenticator attestation and an AAGUID allowlist (`attested-authenticator`), and
-a transparency witness (Option D2). Either can land without the other. A
+a transparency witness (Option D2). A C2 `approval-log-witness/v1` exporter also
+belongs here and remains deferred unless a consumer accepts complete intervening
+record disclosure and linear proof size. Any can land without the others. A
 dedicated approval app and hardware attestation stay explicitly later work, as
 the task frames them.
 
-**Recommendation in one paragraph.** Build phase 1 now, because it is small,
-dependency-free, and forces every hard interface decision. Treat WebAuthn on a
-separately controlled surface as the destination for the assurance tier ZZZ
-should actually require, and treat everything before it as honestly labelled
-lesser rungs rather than as approximations of it.
+**Recommendation in one paragraph.** Review and freeze phase 1 before authorizing
+runtime work. Treat WebAuthn or another trusted per-decision signing surface as the
+destination for the assurance tier ZZZ should actually require. Treat a detached
+vault-key signature as `countersigned`, and a future checkpoint witness as
+retrospective `witnessed-log` evidence only.
 
 ---
 
@@ -868,9 +974,9 @@ lesser rungs rather than as approximations of it.
 | section | assessment |
 | --- | --- |
 | §3 principles | Files stay the interface, the log stays the truth, receipts are projections. Deterministic core is unaffected: signature verification is deterministic and no model touches it. |
-| §5.2 | Phase 1 adds nothing. Phase 2 proposes one policy key naming classes that require a countersignature, which is a narrowing and cannot widen autonomy. Attestation semantics are untouched. |
+| §5.2 | Phase 1 is format design and adds nothing. Phase 2 may propose one policy key naming classes that require a countersignature, which is a narrowing and cannot widen autonomy. Attestation semantics are untouched. |
 | §6.2–6.3 | The envelope is unchanged. `payload_hash` and `idempotency_key` semantics are relied on and not modified. The lifecycle gains no state: a countersignature is an additional record about a grant that already reached `approved`. |
-| §8 | Additive event types only, each validating against its own schema before append, each gate-typed and taking `ts` from the runtime. The chain is untouched. |
+| §8 | Phase 1 adds no event. If phase 2 adds `approval.countersigned`, it is additive, validates before append, is gate-typed, and takes `ts` from the runtime. The chain is untouched. A deferred log witness reads existing records and writes no event. |
 | §9 | The canonical renderer is reused verbatim. The computed and claimed split is load-bearing in the receipt (`approver` is claimed, `grant` is computed). |
 | §10.3–10.5 | Channels stay transport. The hardened surface is a new surface beside them, and no channel gains authority. The MCP surface gains nothing human-only. |
 | §11 and §11.1 | Invariant 1: verification reads verified records. Invariant 2: new events are gate-typed. Invariant 3: no secret enters the log; a receipt holds no token. Invariant 4: an incoming receipt is a claimed field that may only raise local scrutiny. Invariant 5: any check-then-append goes through compare-and-append, exactly as `log checkpoint` already does. Invariant 6: new refusal codes are their own frozen union with conformance vectors. Invariant 9: enrollment, rotation, and revocation are human-only ceremonies and no verb mints authority for them. Invariant 10: the assurance label is computed and never read from guidance. |
@@ -957,8 +1063,9 @@ ceremonies at both ends.
 ### 9.4 Unresolved decisions requiring review
 
 1. The RP-ID question of §9.2.
-2. Whether the countersignature record carries the full assertion or only its
-   digest, weighed against log size (APRV-217).
+2. Whether durable issuance needs a countersignature record at all. If it does,
+   whether that record carries only the receipt digest and signature, weighed
+   against audit usefulness and log size (APRV-217).
 3. Whether `assurance` belongs in the signed body at all, given that a verifier
    recomputes it. The argument for keeping it is that a human reading a receipt
    should see the claim in words; the argument against is that any field a
@@ -969,6 +1076,29 @@ ceremonies at both ends.
    justify-each-one rule.
 6. Whether a transparency witness (Option D2) is worth its privacy cost for a
    personal-scale tool.
+
+### 9.5 Identity and quorum dependencies
+
+APRV-324 should settle channel attribution before APRV-323 defines quorum. Today
+the Telegram listener checks the configured chat but records every callback under
+one process identity from `--as` or `APPROVAL_HUMAN`; it does not map
+`callback_query.from.id` to an attested approver. APRV-324 should add an
+operator-attested mapping from Telegram's stable numeric sender id to an existing
+approver id, refuse unknown or ambiguous senders before a decision, and record the
+provider sender id as bounded channel audit evidence. That proves what Telegram
+reported to the credential-holding listener inside the existing machine trust
+boundary. It is not an enrolled-credential receipt and must not raise the assurance
+label above `local-grant` by itself.
+
+APRV-323 can then define distinct approvers in terms of those mapped identities.
+Quorum must not count repeated decisions under the shared listener identity. Its
+design must settle concurrent endorsements, rejection, expiry, revocation, budget
+charging, and token minting. The additive direction is a non-authorizing
+endorsement record followed by one final `approval.granted` only when the quorum
+is met; endorsement events mint no token and spend no action budget. That event and
+state-machine design needs its own SPEC and schema review. Neither APRV-323 nor
+APRV-324 supplies the independent signing evidence required by
+`approval-receipt/v1`; they improve local attribution and quorum semantics only.
 
 ---
 
@@ -981,40 +1111,52 @@ control. Refusal codes are provisional and would be frozen in their own union pe
 
 | # | attack | setup | expected |
 | --- | --- | --- | --- |
-| 1 | fabricated local approval | a log with a valid chain and a hand-written `approval.granted` under any `human:` id, no countersignature | verify refuses `receipt-unsigned`; the ladder resolves to `local-grant` at best and never above it |
-| 2 | forged countersignature | a countersignature under a key the relying service did not enroll | `issuer-unknown`, and specifically not a downgrade to a lower rung |
-| 3 | truncate and recompute | truncate the log below the grant and recompute the chain | the C2 hash walk fails, or the covering checkpoint's signed hash is absent: `chain-mismatch` |
-| 4 | altered scope | flip `may_delegate` to true after signing | JCS body differs, signature fails: `signature-invalid` |
-| 5 | altered audience | change `aud` from one service to another | `signature-invalid`; and even under a valid signature, `audience-mismatch` at the second service |
-| 6 | replay at the same service | present a valid receipt twice | `challenge-consumed` on the second, and `jti-replayed` where single-use is enforced |
-| 7 | replay after expiry | present a valid receipt after `exp` | `receipt-expired` |
-| 8 | wrong agent key | a valid receipt presented by an agent that cannot answer the possession challenge for `sub_key` | `possession-failed`; the receipt itself still verifies, which is the point of separating the two checks |
-| 9 | revoked grant | `jti` in the service's revocation set | `receipt-revoked` |
-| 10 | retired credential | a receipt under a credential the service retired for new issuance | accepted for verification of past receipts within their `exp`, refused for new authorization: `issuer-retired` |
-| 11 | untrusted issuer via the policy file | a verifier fed the issuer key from the operator's `APPROVAL.md` rather than its own registry | the verifier API must make this impossible to express; the test asserts the verifier has no code path that reads a key from receipt or policy input |
-| 12 | virtual authenticator | a WebAuthn assertion from a software authenticator with UV set | verifies, and resolves to `operator-verified` and never `attested-authenticator` |
-| 13 | enrollment abuse | a credential registered by an agent-driven browser | undetectable at the receipt layer by construction; the test is a documentation assertion that the integration guide states this |
-| 14 | recovery bypass | a credential added through account recovery, then used immediately for a high-assurance scope | the relying service's cooling-off rule refuses: `credential-too-new` |
-| 15 | downgrade by unavailability | the hardened surface is unreachable and a Telegram tap is recorded | the tap produces an ordinary grant at `local-grant`; a test asserts no code path labels a channel tap above that rung |
-| 16 | downgrade by policy edit | the operator sets the class to `autonomous` locally | the relying service's minimum is unchanged; a test asserts the verifier reads no operator policy at all |
-| 17 | agent-supplied flag | a receipt carrying `human_verified: true` and no binding | the field does not exist in the schema, so this is `receipt-malformed`; the test asserts the field name appears nowhere in the verifier |
-| 18 | label inflation | a receipt whose `assurance` says `operator-verified` with a C2 binding | `assurance-overclaimed`, refused rather than silently downgraded |
-| 19 | cross-protocol signature lift | a `log.checkpoint` signature presented as a receipt binding | domain separation makes the message differ: `signature-invalid` |
-| 20 | payload change after review | the payload edited after the grant | `payload-mismatch` at execution (existing behavior), and a receipt whose `grant.payload_hash` no longer matches the executed bytes |
+| 1 | fabricated local approval | a chain-valid `approval.granted` under any `human:` id is exported with no receipt signature | `receipt-unsigned`; local evidence never rises above `local-grant` |
+| 2 | unknown signer | a valid body is signed by a key the relying service did not enroll | `issuer-unknown`, never a downgrade to a lower rung |
+| 3 | altered scope | flip `may_delegate` after signing | JCS body differs: `signature-invalid` |
+| 4 | altered audience | change `aud` after signing | `signature-invalid`; a correctly signed receipt for another audience is `audience-mismatch` |
+| 5 | altered challenge | replace the relying service's nonce after signing | `signature-invalid`; a correctly signed but unissued challenge is `challenge-unknown` |
+| 6 | altered validity | move `nbf` or `exp` after signing | `signature-invalid` |
+| 7 | challenge replay | present a valid receipt after its challenge was retired | `challenge-consumed` |
+| 8 | identifier replay | present a valid single-use `jti` twice | `jti-replayed` on the second use |
+| 9 | wrong agent key | the presenter cannot answer the possession challenge for `sub_key` | `possession-failed`; receipt verification itself remains a separate result |
+| 10 | expired receipt | present after `exp` | `receipt-expired` |
+| 11 | revoked receipt | `jti` is in the service's revocation set | `receipt-revoked` |
+| 12 | retired credential | a receipt uses a credential retired for new authorization | past verification follows the service's retained-key policy; new authorization is `issuer-retired` |
+| 13 | untrusted issuer source | attempt to obtain the verification key from the receipt or operator's `APPROVAL.md` | the verifier API has no such input path; only the relying service's enrolled-key registry supplies it |
+| 14 | virtual authenticator | a software authenticator returns a valid assertion with UV | at most `operator-verified`, never `attested-authenticator` without accepted registration attestation |
+| 15 | enrollment abuse | an agent-driven browser registers its own credential | undetectable by receipt verification; documentation must state the relying service's enrollment ceremony is the control |
+| 16 | recovery bypass | a newly recovered credential authorizes a high-assurance scope during its cooling-off window | `credential-too-new` |
+| 17 | downgrade by unavailability | the trusted surface is unreachable and a Telegram tap is recorded | the tap remains an ordinary local grant and never becomes a receipt |
+| 18 | downgrade by policy edit | local policy makes the class `autonomous` | the relying service's minimum is unchanged; the receipt verifier reads no operator policy |
+| 19 | agent-supplied flag | add `human_verified: true` | closed receipt schema: `receipt-malformed` |
+| 20 | label inflation | a valid vault-key signature claims `operator-verified` without fresh per-decision authentication | `assurance-overclaimed`, refused rather than silently downgraded |
+| 21 | cross-protocol signature lift | present a `log.checkpoint` signature as a receipt binding | unsupported binding or `signature-invalid`; checkpoint and receipt domains differ |
+| 22 | hashes-only witness | `approval-log-witness/v1` carries hashes from the decision to the signed head but omits complete records | `witness-malformed`; hashes without preimages prove no linkage |
+| 23 | broken witness suffix | remove, reorder, duplicate, or alter an intervening record | `witness-chain-mismatch` at the first bad record |
+| 24 | non-covering checkpoint | the decision is after `signed_seq`, or `signed_hash` is absent from the supplied suffix | `witness-not-covered` |
+| 25 | wrong witness key or signature | verify under a key outside the relying service's registry, or alter signed head/signature | `issuer-unknown` or `witness-signature-invalid` |
+| 26 | receipt fields smuggled into witness | add `aud`, `challenge`, `scope`, `sub_key`, `exp`, or `jti` to a witness | closed witness schema: `witness-malformed`; no field is silently treated as authenticated |
+| 27 | request/grant mismatch in witness | the relied-on request has another action key or payload hash, or its display hash does not re-render from supplied payload bytes | `witness-decision-mismatch` or `payload-mismatch`; no value is filled from exporter metadata |
+| 28 | payload change after review | mutate payload bytes after grant or receipt signature | existing execution remains `payload-mismatch`; receipt verification fails its signed digest binding |
+| 29 | witness disclosure understated | integration documentation omits that every intervening canonical record is exported and proof size is linear | documentation guard fails; the witness feature is not releasable |
 
-Rows 13 and 16 are worth reading twice. Row 13 is a real attack the mechanism
+Rows 15 and 18 are worth reading twice. Row 15 is a real attack the mechanism
 cannot detect, and saying so in the test plan is more useful than a test that
-pretends otherwise. Row 16 is a property of where verification happens rather than
-of any check, and the test is structural.
+pretends otherwise. Row 18 is a property of where verification happens rather than
+of any cryptographic check, and the test is structural. Rows 22 through 29 belong
+to the deferred witness format and prevent it from being mistaken for a receipt.
 
 ---
 
 ## 11. Summary of what this proposal asks for
 
-Nothing, yet. It asks a reviewer to decide whether phase 1 is worth a task, and
-to settle the RP-ID question before phase 3 is scheduled. Every schema change,
-policy key, SPEC amendment, and dependency named above requires its own task and
-its own human sign-off, and none of them is authorized by this document.
+Nothing, yet. It asks a reviewer to freeze the full-body detached receipt contract
+before authorizing implementation, defer the complete-record checkpoint witness
+until a consumer accepts its disclosure and size costs, and settle the RP-ID
+question before phase 3 is scheduled. Every schema change, policy key, SPEC
+amendment, dependency, and runtime verb named above requires its own task and its
+own human sign-off, and none is authorized by this document.
 
 The one sentence to carry away: the hardened tier's value is that a relying
 service can check evidence against a key it enrolled itself, and every honest
