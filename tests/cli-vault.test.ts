@@ -246,7 +246,7 @@ test("there is no `vault get`, and the refusal says why", () => {
   const run = runCli(["vault", "get", "api-key"], home, GREEN);
   assert.equal(run.code, 2);
   assert.match(run.stderr, /there is no `approval vault get`/u);
-  assert.match(run.stderr, /verified-token window/u);
+  assert.match(run.stderr, /verified execution window/u);
   assert.equal(run.stdout, "");
 });
 

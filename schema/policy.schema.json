@@ -369,7 +369,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["autonomy"],
-      "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form adds `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
+      "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form may add rates, `allow_irreversible`, `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
       "allOf": [
         {
           "$comment": "SPEC.md §5.2 (amended, APRV-127): `live_rate` belongs to `supervised-live` and to nothing else. Required there, because a live mode with no fraction declares a control without saying how much of it runs, and the runtime would have to invent the number an author did not write. Forbidden everywhere else, because a rate sitting on a `manual`, `supervised-retro` or `autonomous` rule is a fraction its author believes is in force that nothing reads — the same silent no-op this schema's closed shape exists to prevent. APRV-185 adds `human-only` to that everywhere-else, and the `else` branch below already carries it with no new clause: a level whose actions no agent may take has no fraction of them to gate, so a `live_rate` written there is a control its author believes is running over a population of size zero.",
@@ -405,6 +405,22 @@
             "type": "object",
             "properties": { "retro_rate": false }
           }
+        },
+        {
+          "$comment": "SPEC.md §5.2/§7 (amended, APRV-317): `allow_irreversible: true` is an explicit operator-authored capability for a nonmanual class rule. It is valid only where there is agent execution to retain: autonomous and the three supervised spellings. False is admitted on every level as the explicit spelling of the backward-compatible default. Manual needs no exception and human-only must never acquire one.",
+          "if": {
+            "type": "object",
+            "properties": { "allow_irreversible": { "const": true } },
+            "required": ["allow_irreversible"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "autonomy": {
+                "enum": ["supervised-live", "supervised", "supervised-retro", "autonomous"]
+              }
+            }
+          }
         }
       ],
       "properties": {
@@ -414,6 +430,10 @@
         },
         "live_rate": { "$ref": "#/$defs/liveRate" },
         "retro_rate": { "$ref": "#/$defs/retroRate" },
+        "allow_irreversible": {
+          "type": "boolean",
+          "description": "SPEC.md §5.2/§7 (amended, APRV-317): explicit permission for truthful `reversible: false` actions matching this rule to retain its nonmanual autonomy. Omission or false preserves the manual floor. Every equally most-specific matching rule must say true; defaults and action metadata cannot supply it."
+        },
         "approvers": {
           "type": "array",
           "minItems": 1,

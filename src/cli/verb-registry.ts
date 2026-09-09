@@ -286,8 +286,17 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
         liveRate: nullable(NUMBER),
         approvers: nullable(arrayOf(STRING)),
         limits: nullable(OPEN_OBJECT),
+        allowIrreversible: BOOLEAN,
       },
-      ["autonomy", "declaredAutonomy", "supervision", "liveRate", "approvers", "limits"],
+      [
+        "autonomy",
+        "declaredAutonomy",
+        "supervision",
+        "liveRate",
+        "approvers",
+        "limits",
+        "allowIrreversible",
+      ],
     ),
     // `inherited` since APRV-266: a `policy.edit` sub-class the policy declares
     // no rule for, decided by the `policy.edit` line it is a sub-class of.
@@ -300,6 +309,16 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     overridden: nullable(
       object({ pattern: nullable(STRING), autonomy: STRING }, ["pattern", "autonomy"]),
     ),
+    irreversibility: {
+      enum: [
+        "not-applicable",
+        "policy-allowed",
+        "floor-applied",
+        "already-manual",
+        "human-only",
+      ],
+    },
+    irreversiblePatterns: arrayOf(STRING),
     candidates: arrayOf(
       object(
         {
@@ -323,6 +342,8 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     "loadFailure",
     "matched",
     "overridden",
+    "irreversibility",
+    "irreversiblePatterns",
     "candidates",
     "decisionPath",
   ],
@@ -595,7 +616,7 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "check",
     purpose:
-      "Explain what APPROVAL.md does with one action class: the resolved autonomy, the rule that matched, every candidate with its specificity, and the decision path that produced the answer. Nothing is executed, requested or logged. A policy that fails to load is not an error here: a broken policy IS a manual-everything policy, and that answer is delivered on stdout at exit 0, so branch on manualBecause and provenance rather than on the exit code.",
+      "Explain what APPROVAL.md does with one action class: the resolved autonomy, the rule that matched, every candidate with its specificity, the unanimous max-specificity allow_irreversible decision, and the decision path that produced the answer. Nothing is executed, requested or logged. A policy that fails to load is not an error here: a broken policy IS a manual-everything policy, and that answer is delivered on stdout at exit 0, so branch on manualBecause and provenance rather than on the exit code.",
     human_only: false,
     input: input({
       positionals: positionals(
@@ -2380,10 +2401,10 @@ const VERBS: VerbSpec[] = [
     name: "adapter",
     subcommand: "email",
     purpose:
-      "Execute one approved action through the email adapter: send a single RFC 5322 message over SMTP for a communicate.email.external action. The runtime — not the adapter — recomputes the payload hash, spends the token, and writes both execution events around the send, and the credentials leave the vault only inside that verified-token window. This is the hard boundary of SPEC.md §10.4.",
+      "Execute one action through the email adapter: send a single RFC 5322 message over SMTP for a communicate.email.external action. The runtime recomputes the payload hash, applies attested policy, and writes both execution events around the send. Manual and selected-live paths spend a grant token; an explicitly policy-authorized supervised or autonomous path has no token. Credentials leave the vault only inside the execution window. This is the hard boundary of SPEC.md §10.4.",
     human_only: false,
     human_only_note:
-      "Agent-facing on purpose. It executes inside the token window with a token a human granted for these exact bytes, which is the authority an executing agent is meant to hold; the adapter refuses everything else. Making it human-only would move the send back to a human and leave the token doing nothing.",
+      "Agent-facing on purpose. Manual and selected-live execution uses a token a human granted for these exact bytes. Explicitly opted-in supervised and autonomous execution follows attested policy without minting a token. The adapter refuses every path the core does not admit.",
     input: input({
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
@@ -2435,7 +2456,7 @@ const VERBS: VerbSpec[] = [
       USAGE,
       TORN,
       IO,
-      { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" },
+      { code: 5, meaning: "the effective manual path needs a valid execution token; nothing was appended and nothing was sent" },
     ],
   },
 
@@ -2443,10 +2464,10 @@ const VERBS: VerbSpec[] = [
     name: "adapter",
     subcommand: "agentmail",
     purpose:
-      "Execute one approved action through the AgentMail adapter: a direct send over the AgentMail API, or the send of a draft the agent already composed. The draft mode re-reads the draft and refuses `agentmail-draft-drifted` when any approved field changed, because a grant is over a snapshot of the words and not over a mutable draft id. AgentMail has no per-message From — the inbox is the sender — so the approved `from` is checked against the inbox's own address before anything is sent. The runtime, not the adapter, recomputes the payload hash, spends the token and writes both execution events, and the vault's sending key leaves it only inside that window.",
+      "Execute one action through the AgentMail adapter: a direct send over the AgentMail API, or the send of a draft the agent already composed. The draft mode re-reads the draft and refuses `agentmail-draft-drifted` when any bound field changed, because authority covers a snapshot of the words and not a mutable draft id. AgentMail has no per-message From — the inbox is the sender — so the bound `from` is checked against the inbox's own address before anything is sent. The runtime recomputes the payload hash, applies attested policy and writes both execution events. Manual and selected-live paths spend a grant token; explicitly opted-in supervised and autonomous paths do not mint one.",
     human_only: false,
     human_only_note:
-      "Agent-facing for the reason `adapter email` is: it executes inside the token window with a token a human granted for these exact bytes. The split that makes it safe is in the keys, not in the caller — the agent's own AgentMail key cannot send, and the one that can lives in the vault.",
+      "Agent-facing for the reason `adapter email` is. Manual and selected-live paths use a token granted for the exact bytes; explicitly opted-in supervised and autonomous paths follow attested policy without one. The split that makes it safe is in the keys: the agent's own AgentMail key cannot send, and the one that can lives in the vault.",
     input: input({
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
@@ -2498,7 +2519,7 @@ const VERBS: VerbSpec[] = [
       USAGE,
       TORN,
       IO,
-      { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" },
+      { code: 5, meaning: "the effective manual path needs a valid execution token; nothing was appended and nothing was sent" },
     ],
   },
 
@@ -2506,10 +2527,10 @@ const VERBS: VerbSpec[] = [
     name: "adapter",
     subcommand: "zzz",
     purpose:
-      "Execute one approved zzz.bot create-thread or create-reply action. The tagged payload selects a fixed production or preview origin and binds the destination, body, metadata, tags and references. The write-capable Bearer token leaves the vault only inside the verified-token window, and the provider Idempotency-Key is derived from the action key and payload hash.",
+      "Execute one zzz.bot create-thread or create-reply action. The tagged payload selects a fixed production or preview origin and binds the destination, body, metadata, tags and references. The runtime applies attested policy before the write-capable Bearer token leaves the vault. Manual and selected-live paths spend a grant token; explicitly opted-in supervised and autonomous paths do not mint one. The provider Idempotency-Key is derived from the action key and payload hash.",
     human_only: false,
     human_only_note:
-      "Agent-facing because the shared adapter contract verifies and spends a token for the exact payload before the vault credential can be used.",
+      "Agent-facing because the shared adapter contract verifies the exact payload and applies attested policy before the vault credential can be used. It spends a token on manual and selected-live paths.",
     input: input({
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
@@ -2527,7 +2548,7 @@ const VERBS: VerbSpec[] = [
       ["ok", "adapter", "action_key", "task", "class", "autonomy", "payload_hash", "started_seq", "outcome", "outcome_seq", "exit_code"],
     ),
     error: ERROR_SCHEMA,
-    exit_codes: [OK, INTEGRITY, USAGE, TORN, IO, { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" }],
+    exit_codes: [OK, INTEGRITY, USAGE, TORN, IO, { code: 5, meaning: "the effective manual path needs a valid execution token; nothing was appended and nothing was sent" }],
   },
 
   {

@@ -86,6 +86,27 @@ const POLICY = [
   "",
 ].join("\n");
 
+const POLICY_IRREVERSIBLE = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  "classes:",
+  "  work.*:",
+  "    autonomy: autonomous",
+  "    allow_irreversible: true",
+  "  '*.run':",
+  "    autonomy: supervised-retro",
+  "    allow_irreversible: true",
+  "  policy.edit:",
+  "    autonomy: supervised-retro",
+  "    allow_irreversible: true",
+  "```",
+  "",
+].join("\n");
+
 /**
  * A policy that routes protected paths to `policy.edit` sub-classes (APRV-266).
  *
@@ -377,7 +398,7 @@ const policyVectors = [
   {
     id: "floor-irreversible-blocks-autonomous",
     description:
-      "SPEC.md §7 irreversibility floor: `reversible: false` cannot resolve `autonomous` however the policy is written, and the resolution says the floor applied",
+      "SPEC.md §7 default irreversibility floor: `reversible: false` under an autonomous rule without explicit permission resolves manual, and the resolution says the floor applied",
     input: { policy: POLICY, class: "read.file", reversible: false },
   },
   {
@@ -386,9 +407,9 @@ const policyVectors = [
     input: { policy: POLICY, class: "read.file", reversible: true },
   },
   {
-    id: "floor-leaves-supervised-alone",
+    id: "floor-irreversible-blocks-supervised-without-opt-in",
     description:
-      "the floor bounds `autonomous` only: an irreversible action under a supervised rule stays supervised",
+      "the default floor also sends an irreversible supervised action to manual when its rule does not explicitly opt in",
     input: { policy: POLICY, class: "files.write.remote", reversible: false },
   },
   {
@@ -396,6 +417,31 @@ const policyVectors = [
     description:
       "an action that does not say whether it is reversible does not engage the floor; the claim is the agent's to make and its absence is not a permission",
     input: { policy: POLICY, class: "read.file" },
+  },
+  {
+    id: "irreversible-explicit-unanimous-tie-allows",
+    description:
+      "every equally most-specific rule explicitly opts in, so reversible: false retains the strictest tied supervised-retro resolution",
+    input: { policy: POLICY_IRREVERSIBLE, class: "work.run", reversible: false },
+  },
+  {
+    id: "irreversible-tie-omission-denies",
+    description:
+      "removing the opt-in from either equally most-specific rule preserves the manual floor; lexical ordering cannot discard the denial",
+    input: {
+      policy: POLICY_IRREVERSIBLE.replace(
+        "  '*.run':\n    autonomy: supervised-retro\n    allow_irreversible: true",
+        "  '*.run':\n    autonomy: supervised-retro",
+      ),
+      class: "work.run",
+      reversible: false,
+    },
+  },
+  {
+    id: "irreversible-policy-edit-inherits-capability",
+    description:
+      "an unmatched policy.edit child inherits both the parent's supervised-retro resolution and its explicit irreversible capability",
+    input: { policy: POLICY_IRREVERSIBLE, class: "policy.edit.docs", reversible: false },
   },
   {
     id: "limits-travel-with-the-matched-rule",
@@ -1140,9 +1186,13 @@ const SUITES = [
     // vectors move no existing expectation, but the general rule they narrow is
     // one a second implementation was required to implement, so a run that
     // passed 1.0.0 does not pass this.
-    vectors_version: "2.0.0",
+    // 3.0.0 (APRV-317): explicit class-rule permission may now retain a
+    // nonmanual result for reversible:false, and every expectation exposes the
+    // governing capability and max-specificity rule group. Both the algorithm
+    // and the frozen output shape changed, so this is a major version.
+    vectors_version: "3.0.0",
     algorithm:
-      "SPEC.md §5.2 class matching and specificity, the policy.edit sub-class inheritance rule, §7 irreversibility floor",
+      "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, §7 irreversibility floor",
     description:
       "Which rule governs an action, what autonomy it resolves to, where a routed policy.edit sub-class inherits from, and where the floor, the protected-path routing floor and the fail-closed rule bind.",
     vectors: policyVectors,

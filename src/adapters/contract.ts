@@ -3,13 +3,13 @@
  *
  * An **adapter** is a side-effect executor: the thing that actually sends the
  * email, writes the calendar entry, moves the file. SPEC.md §10.4 makes it the
- * hard boundary of the whole system, and says why in one sentence: "an agent
- * that bypasses the CLI still cannot send, spend, or delete, because the
- * credentials only answer to tokens."
+ * hard boundary of the whole system: credentials reach an adapter only inside
+ * a runtime-authorized execution window.
  *
- * That sentence describes a *sequence*, not a property of any one function:
- * recompute the payload hash, verify and consume the token, record that the
- * execution started, act, record how it ended. An adapter that owned that
+ * That boundary describes a *sequence*, not a property of any one function:
+ * recompute the payload hash, verify the applicable authority and consume a
+ * token where required, record that the execution started, act, record how it
+ * ended. An adapter that owned that
  * sequence could skip a step — and the step it would skip is whichever one was
  * inconvenient the week the adapter was written. So the sequence lives here,
  * once, and an adapter implements exactly one method:
@@ -60,11 +60,10 @@
  *    inside `act`: the far side can move in between, and the check that binds
  *    the bytes actually sent is the later one.
  * 4. **Scope the credentials.** The provider handed to `act` is a wrapper that
- *    closes when `act` returns. Inside the verified-token window it answers;
+ *    closes when `act` returns. Inside the verified execution window it answers;
  *    outside it, every `get` refuses `credential-window-closed`. An adapter that
  *    stashes the provider and reads it later gets a refusal rather than a
- *    secret, so "credentials only answer to tokens" is a mechanism instead of an
- *    intention.
+ *    secret, so the execution window is a mechanism instead of an intention.
  * 5. **Redact.** Every string the contract is about to return is scanned for
  *    each credential value the provider handed out during the window, and hits
  *    are replaced with {@link REDACTION_PLACEHOLDER} and counted. SPEC.md §11.1
@@ -106,6 +105,7 @@
 
 import {
   EXECUTE_REFUSAL_CODES,
+  checkExecutionEligibility,
   declaringTasks,
   finishExecution,
   findDeclaration,
@@ -116,10 +116,13 @@ import {
   type ExecuteOptions,
   type ExecuteRefusal,
   type ProviderRef,
+  hasApprovalCycle,
 } from "../core/execute.js";
+import { request as requestApproval, type GateOptions } from "../core/gate.js";
 import type { ObservationWindow, ObservedEffect } from "../core/coverage.js";
 import { payloadHash } from "../core/payload.js";
-import type { Autonomy } from "../core/policy-load.js";
+import { loadPolicy, type Autonomy } from "../core/policy-load.js";
+import { resolve } from "../core/policy-match.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadOf, readVerifiedRecords } from "../core/state.js";
 import { PAYLOAD_HASH_FIELD, TOKEN_HASH_FIELD, digestsEqual, tokenHash } from "../core/token.js";
@@ -161,7 +164,7 @@ export const CREDENTIAL_REFUSAL_CODES = [
   /** The provider knows it and declined: policy, a locked vault, a human's no. */
   "credential-refused",
   /**
-   * The verified-token window has closed: `act` has already returned, and the
+   * The verified execution window has closed: `act` has already returned, and the
    * provider it was handed is no longer live. Distinct from the two above
    * because nothing is wrong with the credential or the configuration — the
    * adapter asked at the wrong time, which is a defect in the adapter and is
@@ -318,7 +321,7 @@ function scopeCredentials(inner: CredentialProvider): ScopedCredentials {
           return {
             ok: false,
             code: "credential-window-closed",
-            message: `credential ${JSON.stringify(name)} was requested after act() returned. Credentials are reachable only inside the verified-token window: the execution has already been recorded, so a secret handed over now would be one no token authorized.`,
+            message: `credential ${JSON.stringify(name)} was requested after act() returned. Credentials are reachable only inside the verified execution window: the execution has already been recorded, so a secret handed over now would be outside the authority that opened the call.`,
           };
         }
         const result = inner.get(name);
@@ -429,9 +432,9 @@ export interface ActInput {
   /** The action's idempotency key (SPEC.md §7), for the adapter's own logging. */
   actionKey: string;
   /**
-   * The bytes the grant approved. The contract has already hashed this value
-   * and the token spend has already checked that digest against the grant, so
-   * an adapter acting on exactly this value is acting on approved bytes. An
+   * The bytes the grant or registered declaration bound. The contract has
+   * already hashed this value and checked that digest against the applicable
+   * authority, so an adapter acting on exactly this value is acting on bound bytes. An
    * adapter that reaches past it for "the current version" of anything has left
    * the binding behind.
    */
@@ -531,7 +534,7 @@ export interface PrecheckInput {
   /** The action's idempotency key (SPEC.md §7), for the adapter's own logging. */
   actionKey: string;
   /**
-   * The bytes the grant approved, hashed by the contract already. The same
+   * The bytes the grant or registered declaration bound, hashed by the contract already. The same
    * value `act` will be handed: a precheck that read some other version of the
    * payload would be checking bytes nobody is about to execute.
    */
@@ -678,6 +681,20 @@ export interface Adapter {
  */
 export const ADAPTER_REFUSAL_CODES = [
   ...EXECUTE_REFUSAL_CODES,
+  /** Request intake could not find the task registration. */
+  "not-registered",
+  /** A concurrent caller opened the live-selected request first. */
+  "duplicate-request",
+  /** Live-selected intake reached the approver queue ceiling. */
+  "queue-full",
+  /** Live-selected intake reached the origin's request rate limit. */
+  "rate-limited",
+  /** A selected live action had no declaration hash to bind. */
+  "payload-hash-required",
+  /** A selected live self-delivery address could not be created. */
+  "token-delivery-unavailable",
+  /** Live intake could not retain the exact payload for human display or audit. */
+  "payload-store-failed",
   /**
    * The adapter does not serve the class this action was declared under.
    * Refused before anything is appended: routing an action to the wrong
@@ -822,6 +839,8 @@ export interface AdapterExecuteOptions extends ExecuteOptions {
   credentials?: CredentialProvider;
   /** Forwarded to `act` for cancellation. */
   signal?: AbortSignal;
+  /** Test/embedded seams for supervised-live request intake. CLI callers omit it. */
+  liveIntake?: Pick<GateOptions, "env" | "drawAsk">;
 }
 
 /** The exit code recorded for an execution the adapter did not complete. */
@@ -949,7 +968,7 @@ type CredentialResolution =
  * provider handed here is never left live outside a scope, and every value it
  * hands over joins the redaction corpus of the refusal this may return. Nothing
  * read here is kept or returned: what comes back is whether the name resolved,
- * and `act` asks for the values itself inside the verified-token window.
+ * and `act` asks for the values itself inside the verified execution window.
  *
  * Note what an unauthorized caller learns by invoking this path: whether the
  * names THIS ADAPTER statically declared are present in a provider the caller
@@ -1113,7 +1132,28 @@ function executeOptionsFrom(
     ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
     ...(options.append === undefined ? {} : { append: options.append }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.keyStoreDir === undefined ? {} : { keyStoreDir: options.keyStoreDir }),
+    ...(options.retryOnHeadMoved === undefined
+      ? {}
+      : { retryOnHeadMoved: options.retryOnHeadMoved }),
     presentedPayloadHash,
+  };
+}
+
+function liveIntakeOptionsFrom(options: AdapterExecuteOptions): GateOptions {
+  return {
+    ...(options.policy === undefined ? {} : { policy: options.policy }),
+    ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
+    ...(options.append === undefined ? {} : { append: options.append }),
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.keyStoreDir === undefined ? {} : { keyStoreDir: options.keyStoreDir }),
+    ...(options.retryOnHeadMoved === undefined
+      ? {}
+      : { retryOnHeadMoved: options.retryOnHeadMoved }),
+    ...(options.liveIntake?.env === undefined ? {} : { env: options.liveIntake.env }),
+    ...(options.liveIntake?.drawAsk === undefined
+      ? {}
+      : { drawAsk: options.liveIntake.drawAsk }),
   };
 }
 
@@ -1199,7 +1239,7 @@ export async function executeThroughAdapter(
       adapter,
       actionKey,
       "payload-unhashable",
-      `the payload for ${actionKey} has no RFC 8785 canonical serialization (${error instanceof Error ? error.message : String(error)}), so it cannot be hashed and cannot be shown to be the bytes the grant approved. Nothing was appended.`,
+      `the payload for ${actionKey} has no RFC 8785 canonical serialization (${error instanceof Error ? error.message : String(error)}), so it cannot be hashed and cannot be shown to be the bytes the grant or registered declaration bound. Nothing was appended.`,
     );
   }
 
@@ -1237,6 +1277,79 @@ export async function executeThroughAdapter(
     );
   }
 
+  // Supervised-live selection belongs to gate intake. Its unselected result is
+  // intentionally absent from the log, so an adapter cannot infer that intake
+  // happened merely because no approval.requested exists. On a genuinely
+  // no-token, no-cycle call, invoke the existing request path from fields read
+  // exclusively from the verified declaration. Selected or unavailable draws
+  // create the ordinary pending cycle; an unselected draw appends no approval
+  // event and continues. A prior cycle, including a rejected or expired one,
+  // is never redrawn here.
+  const policyOptions = options.policy ?? {};
+  const load = loadPolicy({
+    ...(policyOptions.file === undefined
+      ? { dir: policyOptions.dir ?? process.cwd() }
+      : { file: policyOptions.file }),
+    ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
+  });
+  const initialResolution = resolve(
+    load,
+    declared.class,
+    declared.reversible === null ? {} : { reversible: declared.reversible },
+  );
+  let livePolicySha256: string | undefined;
+  if (
+    (options.token === undefined || options.token.length === 0) &&
+    initialResolution.supervision === "live" &&
+    !hasApprovalCycle(read.records, actionKey)
+  ) {
+    const intake = requestApproval(
+      logPath,
+      {
+        task: declared.task,
+        actionKey,
+        cls: declared.class,
+        est_cost_usd: declared.est_cost_usd,
+        ...(declared.reversible === null ? {} : { reversible: declared.reversible }),
+        ...(declared.summary === null ? {} : { summary: declared.summary }),
+        ...(declared.payload_hash === null ? {} : { payload_hash: declared.payload_hash }),
+        payload: { value: payload },
+        delivery: "self",
+      },
+      actor,
+      liveIntakeOptionsFrom(options),
+    );
+    if (!intake.ok) {
+      return refuse(adapter, actionKey, intake.code as AdapterRefusalCode, intake.message);
+    }
+    if (intake.proceed && intake.live !== undefined) {
+      livePolicySha256 = intake.policySha256;
+    }
+  }
+
+  // A no-token path must prove that core would admit this exact execution
+  // before credentials or a provider-backed precheck are touched. This result
+  // is only a preflight: startExecution repeats every check after precheck and
+  // remains the sole writer of execution.started.
+  const eligibilityOptions: ExecuteOptions = {
+    ...executeOptionsFrom(options, hash),
+    ...(livePolicySha256 === undefined
+      ? {}
+      : { expectedPolicySha256: livePolicySha256 }),
+  };
+  const eligibility = checkExecutionEligibility(
+    logPath,
+    actionKey,
+    eligibilityOptions,
+    actor,
+  );
+  if (!eligibility.ok) {
+    return refuse(adapter, actionKey, eligibility.code, eligibility.message, {
+      execute: eligibility,
+    });
+  }
+  const effectiveToken = eligibility.mode === "token" ? eligibility.token : undefined;
+
   // (c) The credentials the adapter declared it cannot act without, resolved
   //     BEFORE the token is consumed (APRV-169). See
   //     {@link resolveRequiredCredentials} for why this sits here and why the
@@ -1251,7 +1364,7 @@ export async function executeThroughAdapter(
   const presented: ExecutionGrant | null = tokenMatchesGrant(
     read.records,
     actionKey,
-    options.token,
+    effectiveToken,
   )
     ? ({ phase: "presented", actionKey, startedSeq: null, autonomy: null } as unknown as ExecutionGrant)
     : null;
@@ -1288,7 +1401,10 @@ export async function executeThroughAdapter(
   }
 
   // (d) Authorization and the start event. Refused here means act never runs.
-  const executeOptions = executeOptionsFrom(options, hash);
+  const executeOptions: ExecuteOptions = {
+    ...eligibilityOptions,
+    ...(effectiveToken === undefined ? {} : { token: effectiveToken }),
+  };
   const started = startExecution(logPath, actionKey, executeOptions, actor);
   if (!started.ok) {
     tell(provider, null);

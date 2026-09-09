@@ -541,7 +541,7 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
     specs: EMAIL_CREDENTIAL_SPECS,
     check: (values, kept) => checkEmailCredentialSet(values, DEFAULT_CREDENTIAL_NAMES, kept),
     summary:
-      "the SMTP settings `approval adapter email` reads inside the verified-token window",
+      "the SMTP settings `approval adapter email` reads inside the verified execution window",
     help: SETUP_ADAPTER_EMAIL_HELP,
     hint: (context) => manifestHint(EMAIL_CREDENTIAL_SPECS, context),
     verify: verifyEmail,
@@ -550,13 +550,13 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
       ``,
       `  approval vault list --as human:<id>`,
       ``,
-      `The adapter reads them itself, inside the token window; nothing else does.`,
+      `The adapter reads them itself, inside the verified execution window; nothing else does.`,
     ],
   },
   agentmail: {
     specs: AGENTMAIL_CREDENTIAL_SPECS,
     summary:
-      "the AgentMail inbox and sending key `approval adapter agentmail` reads inside the verified-token window",
+      "the AgentMail inbox and sending key `approval adapter agentmail` reads inside the verified execution window",
     help: SETUP_ADAPTER_AGENTMAIL_HELP,
     hint: (context) => manifestHint(AGENTMAIL_CREDENTIAL_SPECS, context),
     verify: verifyAgentmail,
@@ -572,7 +572,7 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
   },
   zzz: {
     specs: ZZZ_CREDENTIAL_SPECS,
-    summary: "the invited zzz.bot agent token `approval adapter zzz` reads inside the verified-token window",
+    summary: "the invited zzz.bot agent token `approval adapter zzz` reads inside the verified execution window",
     help: SETUP_ADAPTER_ZZZ_HELP,
     hint: (context) => manifestHint(ZZZ_CREDENTIAL_SPECS, context),
     verify: verifyZzz,
