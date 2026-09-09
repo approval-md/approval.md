@@ -324,6 +324,11 @@ export const DEFAULT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const DEFAULT_COMMAND_ATTRIBUTION_MS = 6 * 60 * 60 * 1000;
 
+/** Fail-closed resource bounds for exact protected-edit reconstruction. */
+export const EXACT_REPLAY_MAX_CANDIDATES = 128;
+export const EXACT_REPLAY_MAX_STATES = 2_048;
+export const EXACT_REPLAY_MAX_EXAMINED_BYTES = 64 * 1024 * 1024;
+
 export interface GuardFinding {
   /** The changed path, repository-relative. */
   path: string;
@@ -601,6 +606,13 @@ interface ExactEditStep {
   start: EventRecord;
   before: string;
   after: string;
+}
+
+type ExactReplayBound = "candidate-limit" | "state-limit" | "byte-limit";
+
+interface ExactReplayResult {
+  steps: ExactEditStep[] | null;
+  bound: ExactReplayBound | null;
 }
 
 /**
@@ -1037,10 +1049,17 @@ function startForReplayGrant(
 /**
  * Replay authorized exact edits in execution order and demand byte equality.
  *
- * A missing `before` is an unrelated historical edit and is skipped once. Two
- * occurrences are ambiguous and refuse the whole fallback. There is no search,
- * reordering, substring credit, or partial result: only BASE transformed into
- * HEAD byte for byte is evidence.
+ * The log may contain older edits whose anchors survive in BASE but which did
+ * not produce this change. Search deterministic ordered subsequences: skip a
+ * candidate first, and apply it only when its anchor occurs exactly once in the
+ * current state. An ambiguous candidate cannot be applied, but it does not make
+ * an independent later proof ambiguous. Only a non-empty sequence that turns
+ * BASE into HEAD byte for byte is evidence; there is no reordering, substring
+ * credit, or partial result.
+ *
+ * Search is bounded by candidate count, distinct states, and cumulative bytes
+ * examined. Crossing any bound refuses the fallback rather than pruning a
+ * potentially valid branch and claiming the remaining search was complete.
  */
 function exactEditReplay(
   candidates: readonly EvidenceCandidate[],
@@ -1051,14 +1070,14 @@ function exactEditReplay(
   lookbackMs: number,
   path: string,
   policyProtectedPaths: readonly ProtectedPathEntry[],
-): ExactEditStep[] | null {
+): ExactReplayResult {
   if (
     base === null ||
     head === null ||
     base.includes("\uFFFD") ||
     head.includes("\uFFFD")
-  ) return null;
-  const steps: ExactEditStep[] = [];
+  ) return { steps: null, bound: null };
+  const gathered: ExactEditStep[] = [];
   for (const candidate of candidates) {
     try {
       if (payloadHash(candidate.material) !== candidate.payloadHash) continue;
@@ -1077,20 +1096,100 @@ function exactEditReplay(
           path,
           policyProtectedPaths,
         );
-    if (start !== null) steps.push({ candidate, start, ...edit });
+    if (start !== null) gathered.push({ candidate, start, ...edit });
   }
-  steps.sort((left, right) => left.start.seq - right.start.seq);
+  gathered.sort((left, right) => left.start.seq - right.start.seq);
 
-  let replayed = base;
-  const applied: ExactEditStep[] = [];
-  for (const step of steps) {
-    const first = replayed.indexOf(step.before);
-    if (first === -1) continue;
-    if (replayed.indexOf(step.before, first + 1) !== -1) return null;
-    replayed = `${replayed.slice(0, first)}${step.after}${replayed.slice(first + step.before.length)}`;
-    applied.push(step);
+  // A verified execution record can authorize at most one application. Collapse
+  // duplicate evidence views of the same binding. If two views give one start
+  // conflicting edit bytes, neither representation of that start is usable.
+  const byStart = new Map<number, ExactEditStep>();
+  const conflictingStarts = new Set<number>();
+  for (const step of gathered) {
+    const prior = byStart.get(step.start.seq);
+    if (prior === undefined) {
+      byStart.set(step.start.seq, step);
+      continue;
+    }
+    if (prior.before !== step.before || prior.after !== step.after) {
+      conflictingStarts.add(step.start.seq);
+    }
   }
-  return applied.length > 0 && replayed === head ? applied : null;
+  const steps = [...byStart.values()].filter((step) => !conflictingStarts.has(step.start.seq));
+  if (steps.length > EXACT_REPLAY_MAX_CANDIDATES) {
+    return { steps: null, bound: "candidate-limit" };
+  }
+
+  const headBytes = Buffer.byteLength(head, "utf8");
+  let examinedBytes = Buffer.byteLength(base, "utf8") + headBytes;
+  if (examinedBytes > EXACT_REPLAY_MAX_EXAMINED_BYTES) {
+    return { steps: null, bound: "byte-limit" };
+  }
+  let visitedStates = 0;
+  let exceeded: ExactReplayBound | null = null;
+  // State equality is exact string equality, not a digest or lossy cache key.
+  // Empty/non-empty histories stay distinct because an empty replay is never
+  // evidence even when BASE already equals HEAD.
+  const visited = Array.from(
+    { length: steps.length + 1 },
+    () => [new Set<string>(), new Set<string>()] as const,
+  );
+
+  const search = (
+    index: number,
+    replayed: string,
+    applied: readonly ExactEditStep[],
+  ): ExactEditStep[] | null => {
+    if (exceeded !== null) return null;
+    const replayedBytes = Buffer.byteLength(replayed, "utf8");
+    // Charge exact-state hashing/equality and the HEAD comparison before either
+    // can retain or accept this state.
+    const stateBytes = replayedBytes + headBytes;
+    if (examinedBytes + stateBytes > EXACT_REPLAY_MAX_EXAMINED_BYTES) {
+      exceeded = "byte-limit";
+      return null;
+    }
+    examinedBytes += stateBytes;
+    const seen = visited[index]?.[applied.length === 0 ? 0 : 1];
+    if (seen === undefined || seen.has(replayed)) return null;
+    seen.add(replayed);
+    visitedStates += 1;
+    if (visitedStates > EXACT_REPLAY_MAX_STATES) {
+      exceeded = "state-limit";
+      return null;
+    }
+    if (applied.length > 0 && replayed === head) return [...applied];
+    if (index === steps.length) return null;
+
+    // Deterministic skip-first DFS finds a late witness quickly and
+    // prevents irrelevant historical edits from polluting a valid proof.
+    const skipped = search(index + 1, replayed, applied);
+    if (skipped !== null || exceeded !== null) return skipped;
+
+    const step = steps[index] as ExactEditStep;
+    const scanBytes = replayedBytes * 2 +
+      Buffer.byteLength(step.before, "utf8");
+    if (examinedBytes + scanBytes > EXACT_REPLAY_MAX_EXAMINED_BYTES) {
+      exceeded = "byte-limit";
+      return null;
+    }
+    examinedBytes += scanBytes;
+    const first = replayed.indexOf(step.before);
+    if (first === -1 || replayed.indexOf(step.before, first + 1) !== -1) return null;
+    // Bound the next allocation before constructing it. `replayed + after` is
+    // a conservative upper bound because the replacement removes `before`.
+    const prospectiveBytes = replayedBytes + Buffer.byteLength(step.after, "utf8");
+    if (examinedBytes + prospectiveBytes > EXACT_REPLAY_MAX_EXAMINED_BYTES) {
+      exceeded = "byte-limit";
+      return null;
+    }
+    examinedBytes += prospectiveBytes;
+    const next = `${replayed.slice(0, first)}${step.after}${replayed.slice(first + step.before.length)}`;
+    return search(index + 1, next, [...applied, step]);
+  };
+
+  const proof = search(0, base, []);
+  return { steps: proof, bound: exceeded };
 }
 
 /** A blob's lines, with the empty tail a trailing newline leaves dropped. */
@@ -1664,13 +1763,18 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
           path,
           input.policyProtectedPaths,
         )
-      : null;
-    if (replay !== null) {
+      : { steps: null, bound: null };
+    if (replay.bound !== null) {
+      rejected.unshift(
+        `exact BASE-to-HEAD replay refused after reaching its ${replay.bound.replace("-", " ")}`,
+      );
+    }
+    if (replay.steps !== null) {
       whole = true;
       contributors.splice(
         0,
         contributors.length,
-        ...replay.map((step) => ({
+        ...replay.steps.map((step) => ({
           record: step.candidate.record,
           kind: step.candidate.match.kind,
           why: `${step.candidate.match.detail}, applied at execution.started seq ${step.start.seq} in an exact BASE-to-HEAD replay`,
@@ -1733,7 +1837,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         ts: record.ts,
         actor: record.actor,
         coveredBy: contributors.map((one) => one.record.seq),
-        detail: replay !== null
+        detail: replay.steps !== null
           ? `${path}'s full change was reconstructed byte-for-byte from ${contributors.length} replayed authorization record${contributors.length === 1 ? "" : "s"} in execution order, ${boundText}. Evidence records in that order: seq ${contributors.map((one) => one.record.seq).join(", ")}. The first record, ${record.actor} at seq ${record.seq} (${record.ts}), leads the finding: ${why}.`
           : `${path} was ${kind === "policy-authorized-file" ? "authorized by policy for execution" : "granted"} by ${record.actor} at seq ${record.seq} (${record.ts}), ${boundText}: ${why}. ${
               hunks.identical

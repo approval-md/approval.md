@@ -37,6 +37,8 @@ import {
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import {
+  EXACT_REPLAY_MAX_CANDIDATES,
+  EXACT_REPLAY_MAX_EXAMINED_BYTES,
   evaluateProtectedPaths,
   isGuardedPath,
   renderGuardReport,
@@ -698,10 +700,22 @@ test("exact replay composes fragmented policy and manual edits in execution orde
     const unit = world(root, UNATTENDED_POLICY);
     const first = { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" };
     const second = { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" };
-    authorizeEdit(unit, "replay-policy", first, 1);
-    attestPolicy(unit, POLICY, 3);
-    grantEdit(unit, "replay-grant", second, 4);
-    spendGrant(unit, "replay-grant", second, 6);
+    authorizeEdit(
+      unit,
+      "unrelated-before",
+      { tool: "Edit", file: "SPEC.md", before: "prefix", after: "polluted" },
+      1,
+    );
+    authorizeEdit(unit, "replay-policy", first, 3);
+    authorizeEdit(
+      unit,
+      "unrelated-between",
+      { tool: "Edit", file: "SPEC.md", before: "middle", after: "changed-middle" },
+      5,
+    );
+    attestPolicy(unit, POLICY, 7);
+    grantEdit(unit, "replay-grant", second, 8);
+    spendGrant(unit, "replay-grant", second, 10);
 
     const report = evaluateProtectedPaths(
       inputFor(unit, ["SPEC.md"], {
@@ -709,12 +723,187 @@ test("exact replay composes fragmented policy and manual edits in execution orde
           base: "prefix old-one middle old-two suffix\n",
           head: "prefix new-one middle new-two suffix\n",
         }),
-        changeTsFor: () => at(8),
+        changeTsFor: () => at(12),
       }),
     );
     assert.equal(report.ok, true, JSON.stringify(report.findings));
     assert.match(report.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
-    assert.deepEqual(report.findings[0]?.coveredBy, [3, 7]);
+    assert.deepEqual(report.findings[0]?.coveredBy, [5, 11]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay skips one applicable historical edit that would pollute the authorized head", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-pollution");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(
+      unit,
+      "historical",
+      { tool: "Edit", file: "SPEC.md", before: "surviving", after: "historical-change" },
+      1,
+    );
+    const intended = authorizeEdit(
+      unit,
+      "intended",
+      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      3,
+    );
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "prefix surviving middle old suffix\n",
+          head: "prefix surviving middle new suffix\n",
+        }),
+        changeTsFor: () => at(6),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.deepEqual(report.findings[0]?.coveredBy, [intended.seq]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay skips an ambiguous historical edit and uses an independent unique proof", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-ambiguous-skip");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(
+      unit,
+      "ambiguous-old",
+      { tool: "Edit", file: "SPEC.md", before: "repeat", after: "changed" },
+      1,
+    );
+    authorizeEdit(
+      unit,
+      "intended",
+      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      3,
+    );
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "repeat prefix old suffix repeat\n",
+          head: "repeat prefix new suffix repeat\n",
+        }),
+        changeTsFor: () => at(6),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay cannot consume one execution twice", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-single-consumption");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(
+      unit,
+      "once",
+      { tool: "Edit", file: "SPEC.md", before: "x", after: "xy" },
+      1,
+    );
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({ base: "prefix x suffix\n", head: "prefix xyy suffix\n" }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay refuses when candidate, state, or examined-byte bounds are reached", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-bounds");
+  try {
+    const candidateUnit = world(join(root, "candidates"), UNATTENDED_POLICY);
+    for (let index = 0; index < EXACT_REPLAY_MAX_CANDIDATES; index += 1) {
+      authorizeEdit(
+        candidateUnit,
+        `irrelevant-${String(index)}`,
+        { tool: "Edit", file: "SPEC.md", before: `missing-${String(index)}`, after: `changed-${String(index)}` },
+        1 + index * 2,
+      );
+    }
+    authorizeEdit(
+      candidateUnit,
+      "candidate-target",
+      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      1 + EXACT_REPLAY_MAX_CANDIDATES * 2,
+    );
+    const candidateReport = evaluateProtectedPaths(
+      inputFor(candidateUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
+        changeTsFor: () => at(1 + EXACT_REPLAY_MAX_CANDIDATES * 2 + 2),
+        lookbackMs: Number.POSITIVE_INFINITY,
+      }),
+    );
+    assert.equal(candidateReport.ok, false, JSON.stringify(candidateReport.findings));
+    assert.match(candidateReport.findings[0]?.detail ?? "", /candidate limit/u);
+
+    const stateUnit = world(join(root, "states"), UNATTENDED_POLICY);
+    const stateBase = Array.from({ length: 12 }, (_, index) => `a${String(index)}`).join(" ");
+    for (let index = 0; index < 12; index += 1) {
+      authorizeEdit(
+        stateUnit,
+        `branch-${String(index)}`,
+        { tool: "Edit", file: "SPEC.md", before: `a${String(index)}`, after: `b${String(index)}` },
+        1 + index * 2,
+      );
+    }
+    const stateReport = evaluateProtectedPaths(
+      inputFor(stateUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base: `${stateBase}\n`, head: "unapproved state\n" }),
+        changeTsFor: () => at(30),
+      }),
+    );
+    assert.equal(stateReport.ok, false, JSON.stringify(stateReport.findings));
+    assert.match(stateReport.findings[0]?.detail ?? "", /state limit/u);
+
+    const byteUnit = world(join(root, "bytes"), UNATTENDED_POLICY);
+    authorizeEdit(
+      byteUnit,
+      "large",
+      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      1,
+    );
+    const prefix = "p".repeat(Math.floor(EXACT_REPLAY_MAX_EXAMINED_BYTES / 2));
+    const byteReport = evaluateProtectedPaths(
+      inputFor(byteUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base: `${prefix}old\n`, head: `${prefix}new\n` }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(byteReport.ok, false, JSON.stringify(byteReport.findings));
+    assert.match(byteReport.findings[0]?.detail ?? "", /byte limit/u);
+
+    const outputUnit = world(join(root, "prospective-output"), UNATTENDED_POLICY);
+    authorizeEdit(
+      outputUnit,
+      "large-after",
+      {
+        tool: "Edit",
+        file: "SPEC.md",
+        before: "old",
+        after: "n".repeat(EXACT_REPLAY_MAX_EXAMINED_BYTES + 1),
+      },
+      1,
+    );
+    const outputReport = evaluateProtectedPaths(
+      inputFor(outputUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix changed suffix\n" }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(outputReport.ok, false, JSON.stringify(outputReport.findings));
+    assert.match(outputReport.findings[0]?.detail ?? "", /byte limit/u);
   } finally {
     cleanup();
   }
