@@ -5,9 +5,9 @@ title: >-
   report refuses not-delegated
 status: In Progress
 assignee:
-  - '@codex-sol'
+  - '@codex'
 created_date: '2026-09-08 04:35'
-updated_date: '2026-09-09 03:49'
+updated_date: '2026-09-09 19:37'
 labels:
   - harness
 dependencies: []
@@ -30,11 +30,15 @@ Since APRV-303 the post-execution hook surfaces its refusals at exit 2. Every Ed
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Remove hardcoded ordinary-file passthrough from the shared normal hook path. Keep the existing fileToolGate classifier and full Edit/Write payload binding; use the matched APPROVAL.md autonomy, attestation, budgets and loop floor exactly as Bash does. An allowed normal file mutation must record execution.started, and its post hook closes that runtime-authored start. 2. Remove the ordinary-file shortcut from the open-window path so authorized bypasses record gate.bypassed before allow. Preserve existing human-only, log-mutation and malformed-command boundaries. 3. Keep finishHarnessExecution unchanged. Only after its precise not-delegated refusal may the CLI acknowledge one exact verified gate.bypassed record matching harness kind, tool, session, tool-use ID, execution directory and recomputed full payload hash. Missing or ambiguous binding remains a visible refusal; acknowledgement appends no outcome and does not claim a delegated execution completed. Parent owns the narrow SPEC amendment for this counterpart and reconciliation of stale M8 accounting prose. 4. Test ordinary Edit/Write pre/post and failure outcomes, every autonomy level, exact payload changes, duplicate delivery, missing/wrong identifiers, unknown tool/outcome, protected paths, corrupt/unavailable logs and loop floors. Test exact recorded bypass acknowledgement versus mismatches without changing Bash execution behavior. 5. Update Claude hook documentation, run focused hook/regression checks plus build/lint/typecheck, then coordinate a full suite. Parent reviews the diff, processes protected SPEC edits and separate records delivery, commits with Codex co-author, opens/arms PR and verifies CI/merge.
+1. Remove ordinary Edit/Write passthrough from the shared hook description and both closed/open-window early returns; reuse existing policy, human-only, loop, budget, registration and execution paths. 2. Add real append-path Pre/Post tests for Edit and Write, manual and human-only restrictions, budgets, payload changes, duplicate reports and open-window bypass evidence, preserving Bash and protected-path behavior. 3. Update hook documentation; parent separately reviews the stale SPEC M8 autonomous-accounting sentence through the primary gate. 4. Run focused tests, then integrated full suite, lint/typecheck and CI parity, deliver reviewed task commit and PR. Do not add replayable quiet acknowledgement of bypassed posts.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09 checkpoint: reviewed implementation proposal is at /private/tmp/aprv304-review-proposal/APRV304-rejected-source.patch with README.md. Automatic approval review rejected the first source patch as a security-critical hook accounting change requiring explicit APRV-304 authorization. No implementation source or SPEC change was applied. The exact proposal has been presented to Carter; awaiting reply. Preserve normal failure diagnostics and require exactly one verified, fully bound gate.bypassed record before acknowledging an unstarted completion. No execution outcome may be fabricated.
+
+Fresh user authorization to handle all outstanding tasks explicitly picks up this task. Read-only review found a policy bypass beyond missing accounting: closed ordinary-file passthrough skips manual/supervised/budget checks; open-window passthrough precedes even the human-only check and emits no required gate.bypassed. Existing SPEC requires those checks. Prior scratch bypass-ack proposal rejected for missing replay consumption and incomplete actor/version binding. New isolated tree /private/tmp/approval-file-policy-enforcement, branch codex/file-policy-enforcement, base23a343a; old tree preserved. Sol owns hook source, tests and public hook docs; Astra owns protected amendments, task records and delivery.
+
+Implemented and parent-reviewed: ordinary Edit/Write now uses the shared policy and execution path. Real append-path tests cover autonomous/supervised starts and completed/failed posts, manual waiting, human-only denial including an open window, budgets, payload binding, and duplicate outcome refusal. Open-window actions remain gate.bypassed records with visible unstarted-post diagnostics; the prior quiet-acknowledgement proposal was not implemented. Exact SPEC M8 correction completed through the primary gate at outcome seq30168. Fresh full npm test exit0: 4036 tests, 4035 passed, 1 skipped, 0 failed. Focused harness tests 146/146 exit0. Lint, typecheck, conformance (293 vectors, 142 controls), and diff checks exit0. Delivery remains pending; keep In Progress until GitHub confirms delivery.
 <!-- SECTION:NOTES:END -->

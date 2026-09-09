@@ -184,14 +184,19 @@ test("Shell uses the same classifier as Bash, and Bash itself is not a gated Cur
   assert.equal(rawLog(dir), afterLs, "a deny and a pass-through both write nothing");
 });
 
-test("a Cursor Write to an ordinary file passes through; a protected path does not", () => {
+test("a Cursor Write to an ordinary file is accounted for; a protected path waits", () => {
   const dir = ready();
+  const ordinaryBefore = rawLog(dir);
   const ordinary = runCli(
     ["hook", "cursor"],
     dir,
     event({ tool_name: "Write", tool_input: { path: "src/core/x.ts", contents: "ok" } }),
   );
   assert.equal(verdictOf(ordinary).permission, "allow");
+  assert.match(
+    rawLog(dir).slice(ordinaryBefore.length),
+    /^\{[^\n]*"event":"execution\.started"[^\n]*\n$/u,
+  );
 
   const before = rawLog(dir);
   const protectedEdit = runCli(

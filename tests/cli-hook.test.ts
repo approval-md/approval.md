@@ -567,14 +567,19 @@ test("a non-gated tool passes through", () => {
   assert.equal(rawLog(dir), before, "a pass-through must not touch the log");
 });
 
-test("an ordinary file edit passes through; a policy file does not", () => {
+test("an ordinary file edit is accounted for; a policy file still waits", () => {
   const dir = ready();
+  const ordinaryBefore = rawLog(dir);
   const ordinary = runCli(
     ["hook", "claude-code"],
     dir,
     event({ tool_name: "Write", tool_input: { file_path: "src/core/x.ts" } }),
   );
   assert.equal(verdictOf(ordinary).permission, "allow");
+  assert.deepEqual(
+    recordsSince(dir, ordinaryBefore).map((record) => record["event"]),
+    ["execution.started"],
+  );
 
   const before = rawLog(dir);
   const protectedEdit = runCli(
@@ -1457,8 +1462,8 @@ test("APRV-303: an ordinary edit is floored exactly as an ordinary shell write i
   assert.match(rawLog(dir), /"hook:sess-1:tu-edit:files\.write\.workspace"/u);
   assertClean(dir);
 
-  // With no floor standing, the same edit is answered as it always was: an
-  // outright allow that appends nothing at all.
+  // With no floor standing, the same edit follows its autonomous policy rule
+  // and records the execution before allowing it.
   const clear = ready();
   const before = rawLog(clear);
   const ordinary = runCli(
@@ -1471,8 +1476,186 @@ test("APRV-303: an ordinary edit is floored exactly as an ordinary shell write i
     }),
   );
   assert.equal(verdictOf(ordinary).permission, "allow");
-  assert.match(verdictOf(ordinary).reason, /is not a gated edit/u);
-  assert.equal(rawLog(clear), before, "an ungated edit must not touch the log");
+  assert.match(verdictOf(ordinary).reason, /^autonomous: files\.write\.workspace/u);
+  assert.deepEqual(
+    recordsSince(clear, before).map((record) => record["event"]),
+    ["execution.started"],
+  );
+});
+
+test("APRV-304: ordinary Edit and Write record starts and real post outcomes", () => {
+  for (const [tool, toolInput, response, eventName, outcome] of [
+    [
+      "Edit",
+      { file_path: "src/core/x.ts", old_string: "old", new_string: "new" },
+      FILE_EDIT_OUTPUT,
+      "PostToolUse",
+      "completed",
+    ],
+    [
+      "Write",
+      { file_path: "src/core/y.ts", content: "new\n" },
+      { error: "disk full" },
+      "PostToolUseFailure",
+      "failed",
+    ],
+  ] as const) {
+    const dir = ready();
+    const before = rawLog(dir);
+    const id = `tu-aprv304-${tool.toLowerCase()}`;
+    const pre = runCli(
+      ["hook", "claude-code"],
+      dir,
+      event({ tool_name: tool, tool_input: toolInput, tool_use_id: id }),
+    );
+    assert.equal(verdictOf(pre).permission, "allow", `${tool}: ${verdictOf(pre).reason}`);
+    assert.match(verdictOf(pre).reason, /^autonomous: files\.write\.workspace/u);
+
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent(id, response, {
+        hook_event_name: eventName,
+        tool_name: tool,
+        tool_input: toolInput,
+      }),
+    );
+    assert.equal(reportOf(post)["outcome"], outcome, post.stderr);
+    assert.deepEqual(
+      recordsSince(dir, before).map((record) => record["event"]),
+      ["execution.started", `execution.${outcome}`],
+    );
+
+    const duplicate = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent(id, response, {
+        hook_event_name: eventName,
+        tool_name: tool,
+        tool_input: toolInput,
+      }),
+    );
+    assert.equal(reportOf(duplicate)["code"], "post-tool-gate-refused:already-finished");
+    assertClean(dir);
+  }
+});
+
+const POLICY_FILE_MANUAL = POLICY.replace(
+  "  files.write.workspace:\n    autonomy: autonomous",
+  "  files.write.workspace:\n    autonomy: manual",
+);
+const POLICY_FILE_SUPERVISED = POLICY.replace(
+  "  files.write.workspace:\n    autonomy: autonomous",
+  "  files.write.workspace:\n    autonomy: supervised",
+);
+const POLICY_FILE_HUMAN_ONLY = POLICY.replace(
+  "  files.write.workspace:\n    autonomy: autonomous",
+  "  files.write.workspace:\n    autonomy: human-only",
+);
+
+test("APRV-304: ordinary file tools obey supervised, manual, and human-only policy", () => {
+  const input = event({
+    tool_name: "Edit",
+    tool_input: { file_path: "src/x.ts", old_string: "a", new_string: "b" },
+    tool_use_id: "tu-file-policy",
+  });
+
+  const supervised = ready(POLICY_FILE_SUPERVISED);
+  const supervisedBefore = rawLog(supervised);
+  const supervisedRun = runCli(["hook", "claude-code"], supervised, input);
+  assert.equal(verdictOf(supervisedRun).permission, "allow");
+  assert.match(verdictOf(supervisedRun).reason, /^granted: files\.write\.workspace/u);
+  assert.deepEqual(
+    recordsSince(supervised, supervisedBefore).map((record) => record["event"]),
+    ["task.registered", "execution.started"],
+  );
+
+  const manual = ready(POLICY_FILE_MANUAL);
+  const manualBefore = rawLog(manual);
+  const manualRun = runCli(
+    ["hook", "claude-code", "--timeout", "1ms", "--interval", "1ms"],
+    manual,
+    input,
+  );
+  assert.equal(verdictOf(manualRun).permission, "deny");
+  assert.match(verdictOf(manualRun).reason, /^hook-timeout: /u);
+  assert.deepEqual(
+    recordsSince(manual, manualBefore).map((record) => record["event"]),
+    ["task.registered", "approval.requested"],
+  );
+
+  for (const withWindow of [false, true]) {
+    const reserved = ready(POLICY_FILE_HUMAN_ONLY);
+    if (withWindow) openTestWindow(reserved);
+    const reservedBefore = rawLog(reserved);
+    const reservedRun = runCli(["hook", "claude-code"], reserved, input);
+    assert.equal(verdictOf(reservedRun).permission, "deny");
+    assert.match(verdictOf(reservedRun).reason, /^hook-class-human-only: /u);
+    assert.equal(rawLog(reserved), reservedBefore, "human-only file writes append nothing");
+    assertClean(reserved);
+  }
+  assertClean(supervised);
+  assertClean(manual);
+});
+
+test("APRV-304: ordinary file writes are budgeted and bind their full payload", () => {
+  const budgeted = ready(POLICY_ONE_ACTION);
+  const first = runCli(
+    ["hook", "claude-code"],
+    budgeted,
+    event({
+      tool_name: "Write",
+      tool_input: { file_path: "src/a.ts", content: "one\n" },
+      tool_use_id: "tu-file-budget-1",
+    }),
+  );
+  assert.equal(verdictOf(first).permission, "allow");
+  const beforeSecond = rawLog(budgeted);
+  const second = runCli(
+    ["hook", "claude-code"],
+    budgeted,
+    event({
+      tool_name: "Write",
+      tool_input: { file_path: "src/a.ts", content: "two\n" },
+      tool_use_id: "tu-file-budget-2",
+    }),
+  );
+  assert.equal(verdictOf(second).permission, "deny");
+  assert.match(verdictOf(second).reason, /^hook-gate-refused:budget-exceeded: /u);
+  assert.deepEqual(
+    recordsSince(budgeted, beforeSecond).map((record) => record["event"]),
+    ["budget.exceeded"],
+  );
+
+  const bound = ready();
+  const before = rawLog(bound);
+  for (const [id, oldString, newString, replaceAll] of [
+    ["tu-bind-1", "a", "b", false],
+    ["tu-bind-2", "a", "c", false],
+    ["tu-bind-3", "a", "b", true],
+  ] as const) {
+    const run = runCli(
+      ["hook", "claude-code"],
+      bound,
+      event({
+        tool_name: "Edit",
+        tool_input: {
+          file_path: "src/bound.ts",
+          old_string: oldString,
+          new_string: newString,
+          replace_all: replaceAll,
+        },
+        tool_use_id: id,
+      }),
+    );
+    assert.equal(verdictOf(run).permission, "allow");
+  }
+  const hashes = recordsSince(bound, before)
+    .filter((record) => record["event"] === "execution.started")
+    .map((record) => payloadOf(record)["payload_hash"]);
+  assert.equal(new Set(hashes).size, 3, "edit bytes and replace_all each change the binding");
+  assertClean(budgeted);
+  assertClean(bound);
 });
 
 test("APRV-303: a report that closes nothing is machine-readable and is not exit 0", () => {
@@ -2599,7 +2782,7 @@ function readyWithProtectedPaths(): string {
   return dir;
 }
 
-test("an edit to a policy-listed file is gated; the same file is ungated without the list", () => {
+test("an edit to a policy-listed file waits; the same file is autonomous without the list", () => {
   const listed = readyWithProtectedPaths();
   const before = rawLog(listed);
   const gated = runCli(
@@ -2614,7 +2797,8 @@ test("an edit to a policy-listed file is gated; the same file is ungated without
   assert.match(rawLog(listed), /"class":"policy\.edit"/u);
   assertClean(listed);
 
-  // Same file, a policy that never named it: an ordinary workspace edit.
+  // Same file, a policy that never named it: an ordinary workspace edit whose
+  // autonomous class is still accounted for.
   const plain = ready();
   const plainBefore = rawLog(plain);
   const ungated = runCli(
@@ -2623,7 +2807,10 @@ test("an edit to a policy-listed file is gated; the same file is ungated without
     event({ tool_name: "Edit", tool_input: { file_path: "SPEC.md" } }),
   );
   assert.equal(verdictOf(ungated).permission, "allow");
-  assert.equal(rawLog(plain), plainBefore, "an ungated edit must not touch the log");
+  assert.deepEqual(
+    recordsSince(plain, plainBefore).map((record) => record["event"]),
+    ["execution.started"],
+  );
 });
 
 test("a listed directory prefix gates a Bash write beneath it", () => {
@@ -2662,7 +2849,10 @@ test("an unlisted workspace file is still autonomous under a widened policy", ()
     event({ tool_name: "Write", tool_input: { file_path: "src/core/x.ts" } }),
   );
   assert.equal(verdictOf(run).permission, "allow");
-  assert.equal(rawLog(dir), before);
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+  );
 });
 
 test("hook classify reads the policy, and --dir scopes which policy", () => {
@@ -3402,6 +3592,43 @@ test("an open window allows a manual-class command, having recorded it (APRV-214
   // The raw command never rides on the record: the summary is a headline and
   // the hash is the binding (SPEC.md §11.1 invariant 3).
   assert.equal(payload["cwd"], "/repo");
+  assertClean(dir);
+});
+
+test("APRV-304: an open window records an ordinary manual Edit bypass and its post stays visible", () => {
+  const dir = ready(POLICY_FILE_MANUAL);
+  const opened = openTestWindow(dir);
+  const before = rawLog(dir);
+  const toolInput = {
+    file_path: "src/core/x.ts",
+    old_string: "old",
+    new_string: "new",
+    replace_all: false,
+  };
+  const pre = runCli(
+    ["hook", "claude-code"],
+    dir,
+    event({ tool_name: "Edit", tool_input: toolInput, tool_use_id: "tu-file-window" }),
+  );
+  assert.equal(verdictOf(pre).permission, "allow");
+  assert.match(verdictOf(pre).reason, /^gate-open: files\.write\.workspace/u);
+  const appended = recordsSince(dir, before);
+  assert.deepEqual(appended.map((record) => record["event"]), ["gate.bypassed"]);
+  assert.equal(payloadOf(appended[0]!)["opened_seq"], opened.seq);
+  assert.equal(payloadOf(appended[0]!)["tool"], "Edit");
+  assert.deepEqual(payloadOf(appended[0]!)["classes"], ["files.write.workspace"]);
+
+  const beforePost = rawLog(dir);
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-file-window", FILE_EDIT_OUTPUT, {
+      tool_name: "Edit",
+      tool_input: toolInput,
+    }),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-gate-refused:not-delegated");
+  assert.equal(rawLog(dir), beforePost, "a bypassed call has no execution outcome to close");
   assertClean(dir);
 });
 
