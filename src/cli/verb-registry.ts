@@ -373,6 +373,19 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "quickstart",
+    purpose:
+      "Interactive solo setup: asks for a human id, terminal or Telegram, and five manual class families; writes a new policy and identity configuration, shows the exact bytes, requires typed understood, then attests. It classifies policy.core, refuses non-terminal input and --json, and never overwrites an existing policy.",
+    human_only: true,
+    human_only_note:
+      "This command authors and attests APPROVAL.md and declares APPROVAL_HUMAN. It is reserved to a person at a terminal and is never exposed through MCP.",
+    input: input({ flags: { "--dir": "string", "--api-base": "string", ...HELP_FLAGS } }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "log",
     subcommand: "verify",
     purpose:

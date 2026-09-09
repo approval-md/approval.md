@@ -1087,6 +1087,10 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandInit } = await import("./init.js");
       return commandInit(rest, streams, cwd);
     }
+    case "quickstart": {
+      const { commandQuickstart } = await import("./quickstart.js");
+      return settle(commandQuickstart(rest, streams, cwd), streams, "quickstart failed");
+    }
     case "log":
       return commandLog(rest, streams, cwd, options.streams === undefined);
     case "policy": {
