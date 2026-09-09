@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-09 03:05'
+updated_date: '2026-09-09 03:48'
 labels: []
 dependencies:
   - APRV-320
@@ -27,7 +27,7 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 - [x] #1 index.html is self-contained: inline CSS and JS, no external scripts, no build step; the only remote asset is the Google Fonts stylesheet for JetBrains Mono, behind a real monospace fallback stack
 - [x] #2 The brand holds: brand/wordmark.svg is unchanged and the inline appr[check]val.md wordmark SVG is still the logo
 - [x] #3 The interactive Try the loop approve/reject card survives, with copy refreshed to today's real event names and record fields
-- [ ] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
+- [x] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
 - [x] #5 Dark-first palette with a light theme and a three-way light/dark/system toggle in the bottom-left, persisted in localStorage and honouring prefers-color-scheme
 - [x] #6 A left sidebar on wide screens with collapsible groups (Documentation, Product, Examples, Compare, Invariants) that becomes a top row on narrow screens
 - [x] #7 A filter-chip row filters a card grid; each card carries a lowercase tag row, a one-sentence claim, and a link into the README section, doc or example
@@ -53,6 +53,8 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 7. Carter requested more spacing below the bold lead and approved making npm the primary install with source instructions collapsed under Latest features / contribute. Keep explicit published-vs-source availability, verify the disclosure and mobile layout, then deploy through PR.
 
 After PR353 API delivery, add the source-only public adapter author API to the visible card grid, embedded search index and llms surfaces. Correct remaining comparison copy to distinguish the optional command sandbox from whole-harness isolation and describe credentials through runtime-verified execution authority without an unconditional human-token claim. Preserve the approved heading, 18px spacing and npm-primary disclosure. Verify card/index parity, source-only release labels, repository links, browser search and 360px overflow, then deliver and verify actual Pages bytes.
+
+Complete AC4 with the source-backed audit corrections: remove the nonexistent structured JSON appendix; qualify web token display and hook exit codes; distinguish the ZZZ service credential from its execution grant; scope policy fail-closed and adapter-custody claims; describe open-window recording without advertising the unmerged ordinary-file fix. Replace unsupported universal competitor claims with concrete statements of this project and provider-varying boundaries. Synchronize cards, embedded index and both llms surfaces, preserve 70 cards and approved hero/install layout, then run source/link/script checks and browser verification before GitHub delivery.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -156,4 +158,8 @@ PR289 mergedc9e071843aaaa692d1d1ccfa81e02f9d5a2ab321; GitHub Pages built success
 PR352 merged as 9d16b7f9b3a9d3f47f4bd9c2dc3504aa9f496d33. GitHub Pages reported built at that commit; fetched homepage byte-matched reviewed source, and fresh production browser verification observed 18px gap, npm install primary and source disclosure collapsed. The remaining source catalogue refresh follows API353 merge; future unmerged quickstart/override/log-follow features will not be advertised as shipped.
 
 Source catalogue follow-up: 70 unique visible cards match the embedded index; new approval-md/adapters entry explicitly requires a source checkout. Browser search returned 1 of 70 for the public module, 360px viewport had no horizontal overflow, lead spacing remained 18px and source install disclosure stayed collapsed. Verified 97 repository links and markdown anchors against the merged main baseline, inline JavaScript syntax, and in-page IDs. Build, lint, docs-guard (16/16), and git diff --check exited 0. No runtime changed; main API delivery full suite passed 4000 tests with 1 skip. AC4 remains pending the complete feature-claim audit; this update does not advertise unmerged quickstart, policy override or log subscription work.
+
+PR356 merged as 3394bee3fc235c2202e542ff0a4629fb822d3b46 after all full CI shards and merge-queue checks passed. GitHub Pages reported built at that commit. Public index.html, llms.txt and llms-full.txt each byte-matched the reviewed source (cmp exit 0). A fresh production browser tab displayed 70 cards, the source-only public adapter API, the exact requested bold lead and the npm-primary install with source disclosure collapsed. The remaining AC4 feature-claim audit continues separately; no unmerged runtime feature is advertised.
+
+2026-09-09 final AC4 audit: corrected source-backed claims across index.html, its embedded feature index, llms.txt and llms-full.txt. Structured email rendering no longer claims a JSON appendix; token display and exit-code prose are conditional on the actual surface; ZZZ distinguishes the execution grant from the vaulted service credential; open-window, policy-loading and adapter-custody claims match current boundaries; comparison prose no longer makes unsupported universal vendor claims. Renamed the log-reading card to `Read and verify the log` so a future subscription does not stale a count-specific title, without advertising unmerged APRV-304, APRV-309, APRV-317 or APRV-322 behavior. Verification: 70 visible cards and 70 embedded entries match by id, title and claim (exit 0); extracted inline JavaScript passes `node --check` (exit 0); docs-guard passes 16/16 (exit 0); `git diff --check` exits 0; stale-title and unmerged-feature grep finds no match (expected rg exit 1). Parent browser verification on the actual preview at 360px observed document scrollWidth equal to innerWidth (360), the source disclosure collapsed, and the requested 18px lead spacing. Status stays In Progress for parent review and final deployment.
 <!-- SECTION:NOTES:END -->
