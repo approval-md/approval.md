@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","api","--method","PATCH","repos/approval-md/approval.md","-f","merge_commit_title=MERGE_MESSAGE","-f","merge_commit_message=PR_BODY"],"cwd":"/Users/carter/dev/approval-md"}

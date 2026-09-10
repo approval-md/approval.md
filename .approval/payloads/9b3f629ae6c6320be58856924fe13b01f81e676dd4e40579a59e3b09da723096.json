@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/node","/private/tmp/approval-generated-commit-attribution/cli.js","log","advance","--base","main","--pr","--no-auto-merge","--co-author","Codex <noreply@openai.com>","--json"],"cwd":"/Users/carter/dev/approval-md"}
