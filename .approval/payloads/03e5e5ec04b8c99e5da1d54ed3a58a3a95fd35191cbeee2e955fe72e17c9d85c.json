@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/project-codex-config","--title","docs: finalize verified Codex project integration","--body-file","/private/tmp/aprv319-record-pr.md"],"body_sha256":"defc073395b22f6ffb8f45eb572f7de9a4014a9e4e1c6387fea6834a7f7e3122","cwd":"/Users/carter/dev/approval-md"}

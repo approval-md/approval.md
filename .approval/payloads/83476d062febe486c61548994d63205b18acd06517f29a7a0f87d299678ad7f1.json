@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/irreversible-delivery-reconcile","--title","docs: finalize APRV-317 after verified merge","--body-file","/private/tmp/aprv317-final-record-pr.md"],"body_sha256":"60f7a4b704f9772d93c7812171e3047dc4b5eaf337f37fe6941dbb85b1835576","cwd":"/Users/carter/dev/approval-md"}

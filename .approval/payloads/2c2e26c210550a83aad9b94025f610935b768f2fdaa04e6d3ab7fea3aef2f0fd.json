@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/project-codex-config","--title","feat: add first-class Codex project MCP configuration","--body-file","/private/tmp/aprv319-feature-pr.md"],"body_sha256":"f8887aa75ce47b8afa528264d2e58b814bc538c9b484a19ff9561af262b7d4b1","cwd":"/Users/carter/dev/approval-md"}

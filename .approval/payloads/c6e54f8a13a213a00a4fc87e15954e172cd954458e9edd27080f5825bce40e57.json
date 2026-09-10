@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","merge","380","--merge","--repo","approval-md/approval.md","--match-head-commit","3a664c44e3af0b3e8d778b9316b9ea6eb52445d1","--body-file","/private/tmp/aprv32521-feature-pr.md"],"body_sha256":"1d3a73ada7e298040ae40dfc2b927d963d825adae44b65a21ad6d390d31c19cc","cwd":"/Users/carter/dev/approval-md"}
