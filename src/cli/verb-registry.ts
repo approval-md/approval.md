@@ -566,6 +566,7 @@ const VERBS: VerbSpec[] = [
         "--remote": "string",
         "--branch": "string",
         "--pr": "boolean",
+        "--co-author": "string",
         "--dry-run": "boolean",
         ...JSON_FLAG,
         ...HELP_FLAGS,
