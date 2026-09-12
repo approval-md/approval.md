@@ -1,0 +1,17 @@
+name: release candidate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  relay:
+    if: github.repository == 'approval-md/approval.md'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Complete inert relay
+        run: ':'
