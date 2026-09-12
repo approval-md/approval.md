@@ -85,3 +85,5 @@ Decided along the way: the bypass token is a one-release measure and is deleted 
 
 AC3 closed 2026-09-08: from /tmp, `npx -y approval-md@0.1.0 --version` fetched the package from the registry and ran the `approval` binary (it printed the usage, since the CLI has no --version command; APRV-308 filed for that). Task Done.
 <!-- SECTION:NOTES:END -->
+
+2026-09-12 clarification: the current release ceremony is a gated annotated tag, a separately gated tag push, then protected-main publish.yml using npm Trusted Publishing; the bypass-token procedure above is historical and retired.
