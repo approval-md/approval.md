@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 06:18'
-updated_date: '2026-09-12 20:05'
+updated_date: '2026-09-12 20:09'
 labels:
   - release
 dependencies:
@@ -25,7 +25,7 @@ The 0.1.0 publish (2026-09-08) needed a granular npm token with 'Bypass 2FA' bec
 <!-- AC:BEGIN -->
 - [ ] #1 An inert release-candidate.yml relay runs on a pushed v* tag; protected-main publish.yml runs on its verified successful first-attempt workflow_run completion, builds and runs the full checks without OIDC, then publishes the bound tarball with npm provenance via an environment-bound OIDC job; no NPM_TOKEN secret is configured
 - [x] #2 The package is configured for Trusted Publishing on npmjs.com for this repository and workflow (recorded in the notes; the setting itself is the human’s)
-- [ ] #3 docs/dogfood-cutover.md and the APRV-199 notes describe the release ceremony as: gated git tag, gated tag push, protected-main workflow publishes; the bypass-2FA token path is retired and the token deleted
+- [x] #3 docs/dogfood-cutover.md and the APRV-199 notes describe the release ceremony as: gated git tag, gated tag push, protected-main workflow publishes; the bypass-2FA token path is retired and the token deleted
 - [x] #4 APRV-305 lands first so a tag push classifies release.publish without an envelope declaring it
 <!-- AC:END -->
 
@@ -61,4 +61,6 @@ Operational proof 2026-09-12: human-confirmed npm Trusted Publisher settings suc
 Registry artifact SHA-256 423ea865ee8c5f46a9e58302e5927448046a4fc3f8442dd02caf01a1eb885a60 matches CI. Actual installed registry acceptance exited 0. Parent npm audit signatures exited 0, verified 131 signatures and 14 attestations, and parsed signed SLSA provenance binding artifact, exact commit and main publish.yml run/attempt.
 
 AC1 remains pending explicit human confirmation that no NPM_TOKEN secret is configured. Credentials and secret values were not accessed. AC3 remains pending because APRV-199 notes were preserved: Backlog CLI 1.49.3 demonstrably strips their existing approval envelope during an edit, proven only in scratch. Carter reported restrictive npm token settings saved and no active tokens visible. Keep this task In Progress until the remaining configuration confirmation and historical record update are complete.
+
+Carter explicitly authorized a one-time CLI-only exception for the exact dated APRV-199 clarification. The sentence was appended without changing any pre-existing byte; original frontmatter SHA256 c0859521c0bd3c44bb4cb9992d3d579a2ba3d0b9fcd4e68afed3fdd375572903 remained identical. The current runbook, historical clarification and operator-confirmed token retirement satisfy AC3. AC1 still awaits confirmation that no obsolete NPM_TOKEN secret is configured.
 <!-- SECTION:NOTES:END -->
