@@ -1,0 +1,11 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+# This is the supported approval.md entry point for Codex. It exposes the
+# existing agent-facing MCP surface; it does not install native tool hooks.
+[mcp_servers.approval]
+command = "npm"
+args = ["run", "--silent", "codex:mcp"]
+enabled = true
+required = false
+startup_timeout_sec = 10
+tool_timeout_sec = 600

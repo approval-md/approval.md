@@ -487,12 +487,12 @@ export const LOG_ADVANCE_HELP = `approval log advance — commit and push the lo
 
 Usage:
   approval log advance [--remote <n>] [--branch <n>] [--base <n>] [--pr]
-                       [--no-auto-merge] [--dry-run] [--json]
-
+             [--co-author "Name <email>"] [--no-auto-merge] [--dry-run] [--json]
 Flags:
   --remote <name>  remote to push to (default origin)
   --branch <name>  records branch (default records-log-<date>); never main
   --base <name>    branch to parent the commit on (default: the one you are on)
+  --co-author <id> append Name <email> display credit to commit and PR body
   --pr / --dry-run  open the PR through gh and ARM its merge / write nothing
   --no-auto-merge / --json / -h, --help  do not arm / JSON output / this text
 

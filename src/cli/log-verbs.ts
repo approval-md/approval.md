@@ -15,7 +15,12 @@
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { LOG_ADVANCE_HELP, LOG_SYNC_HELP } from "./help.js";
-import { logAdvance, type LogAdvanceReport, type LogAdvanceResult } from "./log-advance.js";
+import {
+  logAdvance,
+  validateCoAuthor,
+  type LogAdvanceReport,
+  type LogAdvanceResult,
+} from "./log-advance.js";
 import { logSync, short, type LogSyncResult } from "./log-sync.js";
 import type { Streams } from "./main.js";
 import { createProgress, silentProgress } from "./progress.js";
@@ -37,6 +42,7 @@ const ADVANCE_FLAGS: Record<string, FlagKind> = {
   "--base": "string",
   "--pr": "boolean",
   "--no-auto-merge": "boolean",
+  "--co-author": "string",
   "--dry-run": "boolean",
   "--json": "boolean",
   "--help": "boolean",
@@ -231,6 +237,9 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
   if (base !== null && base.trim().length === 0) {
     return usageError(streams, json, "--base expects a branch name", LOG_ADVANCE_HELP);
   }
+  const requestedCoAuthor = stringFlag(parsed.flags, "--co-author");
+  const coAuthor = validateCoAuthor(requestedCoAuthor ?? undefined);
+  if (!coAuthor.ok) return usageError(streams, json, coAuthor.message, LOG_ADVANCE_HELP);
 
   const result = logAdvance({
     cwd,
@@ -240,6 +249,7 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
     ...(remote === null ? {} : { remote }),
     ...(branch === null ? {} : { branch }),
     ...(base === null ? {} : { base }),
+    ...(coAuthor.value === null ? {} : { coAuthor: coAuthor.value }),
     ...(boolFlag(parsed.flags, "--pr") ? { pr: true } : {}),
     // APRV-284. Armed unless the operator says otherwise, and the flag is read
     // whether or not `--pr` was passed: `logAdvance` ignores it without a pull

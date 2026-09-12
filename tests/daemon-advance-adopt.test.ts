@@ -82,6 +82,72 @@ async function until<T>(probe: () => T | null, limitMs: number): Promise<T> {
   }
 }
 
+/** Run every cleanup, then preserve the test failure when cleanup succeeded. */
+async function withReliableCleanup(
+  body: () => Promise<void>,
+  cleanups: readonly (() => void | Promise<void>)[],
+): Promise<void> {
+  let bodyFailed = false;
+  let bodyError: unknown;
+  try {
+    await body();
+  } catch (error) {
+    bodyFailed = true;
+    bodyError = error;
+  }
+
+  const cleanupErrors: unknown[] = [];
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (bodyFailed) {
+    if (cleanupErrors.length === 0) throw bodyError;
+    throw new AggregateError(
+      [bodyError, ...cleanupErrors],
+      "daemon adoption test and resource cleanup both failed",
+      { cause: bodyError },
+    );
+  }
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(cleanupErrors, "multiple daemon adoption cleanups failed");
+  }
+}
+
+test("cleanup runs every resource closer and preserves a prior test failure", async () => {
+  const original = new Error("original assertion");
+  const called: string[] = [];
+  await assert.rejects(
+    withReliableCleanup(
+      async () => { throw original; },
+      [
+        async () => { called.push("daemon"); },
+        async () => { called.push("mock"); },
+      ],
+    ),
+    (error: unknown) => error === original,
+  );
+  assert.deepEqual(called.sort(), ["daemon", "mock"]);
+
+  called.length = 0;
+  await assert.rejects(
+    withReliableCleanup(
+      async () => {},
+      [
+        async () => { called.push("daemon"); throw new Error("stop failed"); },
+        async () => { called.push("mock"); },
+      ],
+    ),
+    /stop failed/u,
+  );
+  assert.deepEqual(called.sort(), ["daemon", "mock"]);
+});
+
 /** Every advance stops for a human, which is the shape the incident had. */
 const POLICY_MANUAL = [
   "# Policy",
@@ -491,41 +557,50 @@ test("off the loop: a tap is answered while an advance is in flight", async () =
     log: () => {},
   });
 
-  // The tick runs on this stack: it adopts the grant, appends
-  // `execution.started`, spawns the child, and returns to the loop.
-  const stopped = daemon.run();
-  const advancesSoFar = (): number => events.filter((event) => event.event === "advance").length;
-  assert.equal(advancesSoFar(), 0, "the advance settled on the tick's own stack");
-  assert.equal(
-    records(repo).filter((record) => record.event === "execution.started").length,
-    1,
-    "the tick did not start the execution it was authorised for",
+  let stopped: ReturnType<Daemon["run"]> | null = null;
+  await withReliableCleanup(
+    async () => {
+      stopped = daemon.run();
+      // The tick runs on this stack: it adopts the grant, appends
+      // `execution.started`, spawns the child, and returns to the loop.
+      const advancesSoFar = (): number => events.filter((event) => event.event === "advance").length;
+      assert.equal(advancesSoFar(), 0, "the advance settled on the tick's own stack");
+      assert.equal(
+        records(repo).filter((record) => record.event === "execution.started").length,
+        1,
+        "the tick did not start the execution it was authorised for",
+      );
+
+      // A tap arrives. Nothing about it touches the log — an unplaceable callback is
+      // acked and dropped — because what is being measured is the LOOP, and a loop
+      // held by a synchronous advance answers nothing at all.
+      mock.queueUpdate(callbackUpdate({ data: "not-a-callback", chatId: CHAT }));
+      const asked = performance.now();
+      await channel.pollOnce();
+      const waited = performance.now() - asked;
+
+      assert.equal(mock.answerTexts().length, 1, "the tap was never answered");
+      assert.ok(waited < 1_000, `the tap waited ${String(Math.round(waited))}ms for an ack`);
+      assert.equal(advancesSoFar(), 0, "the advance had already finished; nothing was in flight");
+
+      // And it does settle, in the daemon's own process, with the child's refusal
+      // reason carried onto the event stream and into the log.
+      const settled = await until(() => (advancesSoFar() > 0 ? events : null), 20_000);
+      const advance = settled.find(
+        (event): event is Extract<DaemonEvent, { event: "advance" }> => event.event === "advance",
+      );
+      assert.equal(advance?.outcome, "failed");
+      assert.equal(advance?.code, "log-advance-push-rejected");
+
+    },
+    [
+      async () => {
+        daemon.stop("test over");
+        if (stopped !== null) await stopped;
+      },
+      async () => mock.close(),
+    ],
   );
-
-  // A tap arrives. Nothing about it touches the log — an unplaceable callback is
-  // acked and dropped — because what is being measured is the LOOP, and a loop
-  // held by a synchronous advance answers nothing at all.
-  mock.queueUpdate(callbackUpdate({ data: "not-a-callback", chatId: CHAT }));
-  const asked = performance.now();
-  await channel.pollOnce();
-  const waited = performance.now() - asked;
-
-  assert.equal(mock.answerTexts().length, 1, "the tap was never answered");
-  assert.ok(waited < 1_000, `the tap waited ${String(Math.round(waited))}ms for an ack`);
-  assert.equal(advancesSoFar(), 0, "the advance had already finished; nothing was in flight");
-
-  // And it does settle, in the daemon's own process, with the child's refusal
-  // reason carried onto the event stream and into the log.
-  const settled = await until(() => (advancesSoFar() > 0 ? events : null), 20_000);
-  const advance = settled.find(
-    (event): event is Extract<DaemonEvent, { event: "advance" }> => event.event === "advance",
-  );
-  assert.equal(advance?.outcome, "failed");
-  assert.equal(advance?.code, "log-advance-push-rejected");
-
-  daemon.stop("test over");
-  await stopped;
-  await mock.close();
 
   const failure = records(repo).find((record) => record.event === "execution.failed");
   assert.ok(failure !== undefined, "the child's outcome was never recorded");
