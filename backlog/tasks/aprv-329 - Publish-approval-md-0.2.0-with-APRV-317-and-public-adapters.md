@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-astra'
 created_date: '2026-09-12 18:04'
-updated_date: '2026-09-12 18:17'
+updated_date: '2026-09-12 19:13'
 labels: []
 dependencies:
   - APRV-307
@@ -20,8 +20,8 @@ The npm registry remains at 0.1.0 and lacks merged APRV-317 irreversible policy 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Version and lockfile agree on 0.2.0 with unchanged dependencies; release notes identify APRV-317, ZZZ/public adapters, deep-import migration and Codex limitations.
-- [ ] #2 Packed and clean-installed artifact exposes the public adapters API and CLI; tests prove explicit irreversible policy authorization and retained manual/human-only controls.
+- [x] #1 Version and lockfile agree on 0.2.0 with unchanged dependencies; release notes identify APRV-317, ZZZ/public adapters, deep-import migration and Codex limitations.
+- [x] #2 Packed and clean-installed artifact exposes the public adapters API and CLI; tests prove explicit irreversible policy authorization and retained manual/human-only controls.
 - [ ] #3 Required repository checks and protected delivery checks pass for the release commit; GitHub PR is merged.
 - [ ] #4 Authorized trusted publication completes and registry version, integrity, provenance and clean-install behavior are verified.
 <!-- AC:END -->
@@ -42,4 +42,8 @@ Installed-artifact acceptance script added at scripts/installed-artifact-accepta
 Required repository validation completed 2026-09-12 on current unchanged 0.1.0 manifest/release source plus unpublished changelog/script/task: npm test actual exit 0 (suite duration 261972.695541 ms; 4099 total, 4098 passed, 1 skipped, 0 failed); npm run lint exit 0; npm run typecheck exit 0; built node conformance/run.mjs exit 0 with all 298 vectors and 143 controls. Durable ignored logs: private/aprv329-validation/{npm-test,lint,typecheck,conformance}.log. git diff --check exit 0. No installed-probe rerun after the earlier focused pass; version0.2 manual gate approval remains pending, so final version/registry artifact acceptance and protected delivery remain outstanding. Sole broad-suite slot released after actual npm test completion; no further tests or commits by worker.
 
 Correction to the immediately preceding summary: actual npm test banner is 4108 total, 4107 passed, 1 skipped, 0 failed (not 4099/4098). Actual exit 0 and duration 261972.695541 ms unchanged. Log SHA-256 91fe06866ecd409f11db1f3212a9141ac3af752c14fc01481a852abd4f7df09c is authoritative.
+
+Approved package/lock version0.2 validation at HEAD3e35945161f4b964e819f94ba7f678270f67d0cb exposed runtime version constants still0.1: installed-artifact probe exit1 because CLI --version returns0.1.0. Required npm test actual exit1:4114 total,4110 passed,3 failed,1 skipped,duration262561.288667ms; failures exactly wordmark VERSION equals package, CLI version aliases equal package, and daemon APPROVALD_VERSION equals package. Assertions retained. Supplemental source proposals only stored ignored private/aprv329-runtime-version-proposal for wordmark VERSION/example and daemon APPROVALD_VERSION; actual source unchanged pending exact supplemental gate grant30461. Build/lint/typecheck/conformance exit0;298vectors143controls; ci:local working-tree dry-run exit0 selectsfull with no missing local steps, while Node20 floor and commit protected guard remain GitHub checks. Logs private/aprv329-validation/*-0.2.*; full failed-log SHA24ddfd3eeb7784908957b073febcff791dc4a8bd183739333b5e2382c4517fac. Hold further tests until parent applies granted supplemental versions.
+
+Corrected approved0.2 candidate validation complete after supplemental runtime grant30462 and execution30463/30464. Frozenpackage/lock/wordmark/daemonversions agree0.2; only approvedversionvalues/commentchanged, dependencies unchanged; unpublishedCHANGELOG accuratelydescribes317/publicadapters/deepimports/Codexlimits (AC1). Build exit0; focusedCLIwordmark/daemonversion64/64 exit0; installed-artifact acceptance exit0 atversion0.2.0 with cleanofflineconsumer/nativeSQLite/ESM/TS/deepdenial/autonomous+supervised irreversibleacts/manualfloor/manualtokenrequired/humanonlyzeroact/replay/verifiedsyntheticlog (AC2). Final npmtest actualexit0:4114total4113pass1skip0fail,duration260020.96775ms; lint0,typecheck0,conformance0 (298vectors143controls),diffcheck0. Freshcorrectedlogs private/aprv329-validation/*-0.2-final.log preserve earlierfailedlogs. Installedtarballintegrity sha512-FWfJKa4qo24OBRLThL/m8BUvyd1bjtxcvzY//l2Rp8pc0v4WwAkQavrDRt11i8D+I/GpqSTYFDTiBlQ8onP6Ww==; package remainsunpublished. AC3/4 and taskstatusremainpendingGitHubdelivery/trustedpublication/registryacceptance. Solebroadslotreleased; parenttask307edits preserved.
 <!-- SECTION:NOTES:END -->
