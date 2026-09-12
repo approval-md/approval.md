@@ -63,15 +63,35 @@ The gate is operative. `.approval/env` remains inert until you run the explicit
 and commands the classifier cannot read still take their stricter paths.
 
 **3. Run the local service.** If you chose Telegram, message **@BotFather**
-with `/newbot` before quickstart so you have the token it asks for. Then run:
+with `/newbot` before quickstart so you have the token it asks for. After setup
+and human attestation, start the full runtime from this policy project's directory:
 
 ```sh
-approval up   # the runtime: one foreground process
+cd /path/to/your/project
+eval "$(approval env)"   # explicitly load this instance's environment
+approval up             # daemon and configured channels, one foreground process
 ```
 
-For a source checkout, use `node /path/to/approval.md/cli.js up` instead.
+For a source checkout, use `node /path/to/approval.md/cli.js env` inside the
+`eval` line and `node /path/to/approval.md/cli.js up` to start the service.
 Leave the service running. Requests use your configured channel; Telegram
-requests reach your phone.
+requests reach your phone. `up` does not load `.approval/env` itself. An already
+exported approval variable wins over the environment map, so start with a clean
+shell or unset another instance's approval variables before evaluating it.
+
+Use `approval up` for normal operation. `approval channel telegram listen` runs
+only the Telegram component, for focused use or diagnosis. Never run both
+against the same bot, or run two instances polling that bot: Telegram returns
+HTTP 409. Stop the polling runtime before rerunning `approval setup channel
+telegram`, then reload the environment and start `up` again.
+
+By default the daemon scans `backlog/tasks/`. If your envelopes live elsewhere,
+use `approval up --tasks /path/to/existing/task-folder`. The scan reads `.md`
+files directly inside that folder, without descending into subdirectories.
+Creating an empty default folder does not monitor envelopes stored elsewhere.
+A missing default folder warns about envelope drift coverage; TTL sweeping,
+queue rendering and configured channels can still run. See [runtime startup
+checks](docs/cli-reference.md#up) for the draw socket and optional web channel.
 
 **4. Pick your first experience.**
 
@@ -233,7 +253,10 @@ channel telegram` puts the bot token in the OS keystore (macOS Keychain, or
 verbs are interactive by refusal: a pipe or `--json` exits 2 and prints the
 non-interactive commands, because a setup a CI job could drive would let a CI
 job declare a human identity. `approval env` is the only command that reads
-that file, and evaluating it is a step a human takes. Full walkthrough:
+that file, and evaluating it is a step a human takes. Stop any `approval up`
+process or standalone listener polling this bot before setup, because setup
+also polls to discover the chat. After setup, from this project's directory run
+`eval "$(approval env)"` and `approval up`. Full walkthrough:
 [examples/telegram-demo.md](examples/telegram-demo.md).
 
 **2. A request binds to exact bytes.** The payload lives in a file, the
