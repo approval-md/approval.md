@@ -3286,6 +3286,11 @@ would put a bot token into a shell history or a process listing.
 
 ## channel telegram listen
 
+This starts the standalone Telegram component. For normal operation, use
+[`approval up`](#up), which also runs the daemon. Do not run this listener beside
+`up` or another listener polling the same bot, even for a different policy
+project: competing `getUpdates` calls produce Telegram HTTP 409.
+
 **Delivery is per cycle, not only at startup.** Before every `getUpdates` the
 listener re-derives the pending queue from the verified log and sends whatever
 it has not already sent, so a request appended while this listener is running
@@ -4437,6 +4442,47 @@ when the log does not.
 
 ## up
 
+**Normal startup after setup and human attestation.** Run from the intended
+policy project's directory, load its environment explicitly, then leave this
+foreground process running:
+
+```sh
+cd /path/to/your/project
+eval "$(approval env)"
+approval up
+```
+
+For a source build, replace `approval` in both commands with
+`node /path/to/approval.md/cli.js`. `--as human:<id>` may name the configured
+approver explicitly; it does not perform identity setup or policy attestation.
+`up` reads credentials from its launch environment and does not load
+`.approval/env`. Existing exported approval variables take precedence over that
+map, so use a clean shell or unset another instance's variables first. Changing
+only `--dir` selects the policy; it does not relocate every log, environment or
+task path. Starting in the intended project keeps the default paths together.
+
+**Startup messages describe separate parts.** The default task directory is
+`backlog/tasks/`. If envelopes live elsewhere, pass
+`--tasks /path/to/existing/task-folder`. The daemon scans regular `.md` files
+immediately inside that directory, without recursion; an empty default folder
+does not cover envelopes in nested bundle directories. A missing default folder
+warns about absent drift coverage while TTL sweeping and queue rendering still
+run. An explicitly supplied missing directory is an error. `watch-unavailable`
+reports a failed watcher; the daemon still scans on its interval. Neither
+warning proves Telegram failed: check the channel's own startup line.
+
+A `live-draw` doctor failure needs a daemon serving this instance's draw socket.
+`up` starts that daemon, but serving draws also requires a `supervised-live`
+policy class and the configured sampling secret resolved in this process's
+launch environment, with `--no-draw` absent. Starting `up` alone cannot supply a
+missing secret. Without usable draws, every supervised-live action gates to a
+human. A policy with no `channels.web.port` and no explicit `--port` serves no
+web queue; that informational message is legitimate configuration.
+
+Stop `up` before running Telegram setup or a standalone listener for its bot.
+One bot must have one polling runtime. After setup changes, reload the instance
+environment before starting `up` again.
+
 **The ambient runtime: the daemon loop and every configured channel in one
 supervised foreground process.** `approval daemon run --with-channels` is the
 same verb spelled from the other side, and it reaches the same function before
@@ -5475,9 +5521,11 @@ credentials, so `approval setup adapter <name>` fills the vault instead.
 
 ## setup channel telegram
 
-Stop `approval channel telegram listen` first. Two processes long-polling one bot
-is a 409 from the Bot API, and the loser is whichever asked second. This is a
-configuration verb; it is not meant to run beside the listener.
+Stop any `approval up` process or `approval channel telegram listen` polling
+this bot first. Setup also uses `getUpdates` to discover the approver chat.
+Competing polls produce HTTP 409 from the Bot API. This is a configuration verb;
+after it finishes, reload the instance environment and use `approval up` for
+normal operation.
 
 The token is never typed into this process on a machine with a keystore: the
 helper's own no-echo prompt collects it, and this runtime reads it back on stdout
