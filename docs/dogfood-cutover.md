@@ -79,6 +79,39 @@ host that is not Linux, and the protected-path cross-check when no merge base or
 no records branch is reachable from this checkout. See the README's "Running the
 checks" for the flags.
 
+## Publishing a release through Trusted Publishing (APRV-307)
+
+A release is a manual `release.publish` action under `APPROVAL.md`. Land the
+reviewed version and release notes on protected `main`, obtain separate gate
+authorization for the exact annotated tag creation and tag push, then observe
+the workflows and verify the public package. The tag must equal the package's
+stable `X.Y.Z` version and point to current remote main.
+
+The pushed `vX.Y.Z` tag starts `release-candidate.yml`, an inert relay with no
+checkout, artifact, repository permission or npm authority. Its successful
+first-attempt completion triggers `publish.yml` through `workflow_run` from
+protected main. The verifier binds the tag, upstream event, downstream workflow,
+checkout and freshly fetched main to the same commit, runs the full checks and
+packs the tarball without OIDC. Only the `npm` environment-bound publish job has
+OIDC permission; it verifies the independently bound tarball digest and publishes
+with scripts disabled.
+
+Before a live release, visibly verify the main-only, zero-tag `npm` environment,
+immutable `v*` tag ruleset without bypass actors, and npm Trusted Publisher
+configuration for `approval-md/approval.md`, `publish.yml`, environment `npm`.
+The operator must confirm that no repository, organization or environment token
+supplies `NPM_TOKEN` or `NODE_AUTH_TOKEN`, and retire the old bypass-2FA token.
+These are prerequisites, not changes made by this document or proof supplied by
+workflow files. Agents do not inspect or delete credentials.
+
+Keep main fixed until the publish workflow's identity binding passes. Do not
+move or delete a failed immutable release tag. Read back the exact npm version,
+inspect provenance, install it in a clean directory, and verify its CLI and
+public adapter behavior. See [the Trusted Publishing runbook](trusted-publishing-runbook.md)
+for the complete configuration order, recovery limits and audit boundary.
+Historical APRV-199 and APRV-306 describe the earlier token-based 0.1.0 ceremony;
+those records remain historical evidence.
+
 ## The daemon, live
 
 The human runs, in the primary checkout:

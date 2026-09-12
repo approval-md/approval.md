@@ -1,11 +1,14 @@
-# APRV-307 Trusted Publishing review bundle
+# Trusted Publishing release runbook (APRV-307)
 
-This directory is a scratch proposal. It changes no repository workflow, GitHub
-setting, npm setting, package version, tag, credential, or published package.
-Both proposed workflow files are protected `policy.edit.ci` paths and require the
-repository's normal approval and protected-path evidence before they can merge.
+This runbook describes `.github/workflows/release-candidate.yml` and
+`.github/workflows/publish.yml` in this repository. Workflow implementation,
+GitHub delivery, account configuration, and publication are separate steps.
+Files present in a checkout do not establish that npm trust is configured or
+that a package has been published. Both workflow files are protected
+`policy.edit.ci` paths and require the repository's normal approval and
+protected-path evidence before they can merge.
 
-## Proposed trust boundary
+## Trust boundary
 
 `release-candidate.yml` is an inert tag relay. Its committed form has empty
 permissions, performs no checkout, uploads no artifact, calls no API, and runs
@@ -101,8 +104,8 @@ Publishing remains a manual `release.publish` operation governed by
 publish.
 
 1. Land the separately reviewed version and release notes on protected `main`.
-   The version must be a stable `X.Y.Z`; prereleases and dist-tags are outside
-   this proposal.
+   The version must be a stable `X.Y.Z`; prereleases and custom dist-tags are
+   outside this release ceremony.
 2. Pause merges briefly and verify the local release commit equals current
    remote main.
 3. Perform the separately gated annotated `vX.Y.Z` tag creation and tag push.
@@ -132,7 +135,7 @@ It does not prove that a GitHub tag creator passed approval.md's local gate. A
 principal allowed to create a new `v*` tag can trigger a release at a
 version-matching current-main commit. Enforcing a hash-chained approval record at
 GitHub would require a separate server-side deployment protection or committed
-release-evidence contract. This proposal adds no such mechanism and adds no
+release-evidence contract. These workflows add no such mechanism and add no
 second GitHub reviewer.
 
 Repository and organization administrators can change rulesets, environments,
