@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 06:18'
-updated_date: '2026-09-12 19:15'
+updated_date: '2026-09-12 20:05'
 labels:
   - release
 dependencies:
@@ -24,9 +24,9 @@ The 0.1.0 publish (2026-09-08) needed a granular npm token with 'Bypass 2FA' bec
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 An inert release-candidate.yml relay runs on a pushed v* tag; protected-main publish.yml runs on its verified successful first-attempt workflow_run completion, builds and runs the full checks without OIDC, then publishes the bound tarball with npm provenance via an environment-bound OIDC job; no NPM_TOKEN secret is configured
-- [ ] #2 The package is configured for Trusted Publishing on npmjs.com for this repository and workflow (recorded in the notes; the setting itself is the human’s)
+- [x] #2 The package is configured for Trusted Publishing on npmjs.com for this repository and workflow (recorded in the notes; the setting itself is the human’s)
 - [ ] #3 docs/dogfood-cutover.md and the APRV-199 notes describe the release ceremony as: gated git tag, gated tag push, protected-main workflow publishes; the bypass-2FA token path is retired and the token deleted
-- [ ] #4 APRV-305 lands first so a tag push classifies release.publish without an envelope declaring it
+- [x] #4 APRV-305 lands first so a tag push classifies release.publish without an envelope declaring it
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -55,4 +55,10 @@ Pre-push parity inspection 2026-09-12: npm run ci:local -- --dry-run actualexit0
 2026-09-12 operator-confirmed configuration: Carter reported the npm Trusted Publisher settings saved after receiving exact GitHub owner approval-md, repository approval.md, workflow publish.yml, environment npm, and direct npm publish permission. GitHub environment readback is main-only with no tag deployment patterns. Immutable tag ruleset 23080384 is active for refs/tags/v*, restricts updates/deletion, and has no bypass actors; exact human grant 30454 executed at 30456/30457. Workflow PR383 merged at 03319592595f6962135facad3b7807b918e12c92 with PR and merge-group checks passing. This is configuration evidence; OIDC publication/provenance and old bypass-token retirement remain pending. Credentials were not accessed.
 
 2026-09-12 operator follow-up: Carter confirmed selecting and saving Require two-factor authentication and disallow bypass 2fa tokens, and reported no active access tokens visible. This closes the pending operator token-access configuration check on human testimony; no account credentials were inspected. Actual OIDC publication and provenance remain pending.
+
+Operational proof 2026-09-12: human-confirmed npm Trusted Publisher settings successfully published approval-md 0.2.0 through protected-main publish.yml run 34714965168, attempt 1, after inert relay 34714959959. PR 386 merged at 205432683ccb8a671cba22a8f884208bd2ffdf61; the approved annotated tag and fixed artifact bind that commit. APRV-305 had already landed, and tag push routed as release.publish through the primary gate. AC2 and AC4 are checked.
+
+Registry artifact SHA-256 423ea865ee8c5f46a9e58302e5927448046a4fc3f8442dd02caf01a1eb885a60 matches CI. Actual installed registry acceptance exited 0. Parent npm audit signatures exited 0, verified 131 signatures and 14 attestations, and parsed signed SLSA provenance binding artifact, exact commit and main publish.yml run/attempt.
+
+AC1 remains pending explicit human confirmation that no NPM_TOKEN secret is configured. Credentials and secret values were not accessed. AC3 remains pending because APRV-199 notes were preserved: Backlog CLI 1.49.3 demonstrably strips their existing approval envelope during an edit, proven only in scratch. Carter reported restrictive npm token settings saved and no active tokens visible. Keep this task In Progress until the remaining configuration confirmation and historical record update are complete.
 <!-- SECTION:NOTES:END -->

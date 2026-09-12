@@ -4,11 +4,12 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
-## 0.2.0 — Unpublished candidate
+## 0.2.0 — 2026-09-12
 
-This minor release prepares changes merged since 0.1.0 for npm. Publication,
-registry integrity and provenance, and a clean registry installation remain
-release acceptance checks (APRV-329).
+Published to npm as `approval-md@0.2.0`, tagged `v0.2.0` at commit
+`205432683ccb8a671cba22a8f884208bd2ffdf61`. Separately approved tag creation
+and push triggered the protected-main Trusted Publishing workflow. Registry
+bytes, installed behavior and signed provenance were verified (APRV-329).
 
 - **Explicit irreversible policy permission (APRV-317).** An attested class rule
   may set `allow_irreversible: true` to retain declared autonomous or supervised

@@ -1,11 +1,11 @@
 ---
 id: APRV-329
 title: Publish approval-md 0.2.0 with APRV-317 and public adapters
-status: In Progress
+status: Done
 assignee:
   - '@codex-astra'
 created_date: '2026-09-12 18:04'
-updated_date: '2026-09-12 19:13'
+updated_date: '2026-09-12 20:05'
 labels: []
 dependencies:
   - APRV-307
@@ -22,8 +22,8 @@ The npm registry remains at 0.1.0 and lacks merged APRV-317 irreversible policy 
 <!-- AC:BEGIN -->
 - [x] #1 Version and lockfile agree on 0.2.0 with unchanged dependencies; release notes identify APRV-317, ZZZ/public adapters, deep-import migration and Codex limitations.
 - [x] #2 Packed and clean-installed artifact exposes the public adapters API and CLI; tests prove explicit irreversible policy authorization and retained manual/human-only controls.
-- [ ] #3 Required repository checks and protected delivery checks pass for the release commit; GitHub PR is merged.
-- [ ] #4 Authorized trusted publication completes and registry version, integrity, provenance and clean-install behavior are verified.
+- [x] #3 Required repository checks and protected delivery checks pass for the release commit; GitHub PR is merged.
+- [x] #4 Authorized trusted publication completes and registry version, integrity, provenance and clean-install behavior are verified.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -46,4 +46,18 @@ Correction to the immediately preceding summary: actual npm test banner is 4108 
 Approved package/lock version0.2 validation at HEAD3e35945161f4b964e819f94ba7f678270f67d0cb exposed runtime version constants still0.1: installed-artifact probe exit1 because CLI --version returns0.1.0. Required npm test actual exit1:4114 total,4110 passed,3 failed,1 skipped,duration262561.288667ms; failures exactly wordmark VERSION equals package, CLI version aliases equal package, and daemon APPROVALD_VERSION equals package. Assertions retained. Supplemental source proposals only stored ignored private/aprv329-runtime-version-proposal for wordmark VERSION/example and daemon APPROVALD_VERSION; actual source unchanged pending exact supplemental gate grant30461. Build/lint/typecheck/conformance exit0;298vectors143controls; ci:local working-tree dry-run exit0 selectsfull with no missing local steps, while Node20 floor and commit protected guard remain GitHub checks. Logs private/aprv329-validation/*-0.2.*; full failed-log SHA24ddfd3eeb7784908957b073febcff791dc4a8bd183739333b5e2382c4517fac. Hold further tests until parent applies granted supplemental versions.
 
 Corrected approved0.2 candidate validation complete after supplemental runtime grant30462 and execution30463/30464. Frozenpackage/lock/wordmark/daemonversions agree0.2; only approvedversionvalues/commentchanged, dependencies unchanged; unpublishedCHANGELOG accuratelydescribes317/publicadapters/deepimports/Codexlimits (AC1). Build exit0; focusedCLIwordmark/daemonversion64/64 exit0; installed-artifact acceptance exit0 atversion0.2.0 with cleanofflineconsumer/nativeSQLite/ESM/TS/deepdenial/autonomous+supervised irreversibleacts/manualfloor/manualtokenrequired/humanonlyzeroact/replay/verifiedsyntheticlog (AC2). Final npmtest actualexit0:4114total4113pass1skip0fail,duration260020.96775ms; lint0,typecheck0,conformance0 (298vectors143controls),diffcheck0. Freshcorrectedlogs private/aprv329-validation/*-0.2-final.log preserve earlierfailedlogs. Installedtarballintegrity sha512-FWfJKa4qo24OBRLThL/m8BUvyd1bjtxcvzY//l2Rp8pc0v4WwAkQavrDRt11i8D+I/GpqSTYFDTiBlQ8onP6Ww==; package remainsunpublished. AC3/4 and taskstatusremainpendingGitHubdelivery/trustedpublication/registryacceptance. Solebroadslotreleased; parenttask307edits preserved.
+
+Publication completed 2026-09-12. PR 386 merged at 205432683ccb8a671cba22a8f884208bd2ffdf61. PR CI 34713718933 and merge-group CI 34714127019 passed all Node 20/22 checks; protected delivery checks passed. Final local build, npm test (4,114 total; 4,113 passed; one skipped), lint, typecheck and conformance exited 0, as recorded above.
+
+Human-approved annotated v0.2.0 object 6114f778178804784ae33d8822ce53f22527c367 binds that commit. Inert relay 34714959959 and protected-main publish run 34714965168 succeeded on attempt 1. Registry SHA-256 423ea865ee8c5f46a9e58302e5927448046a4fc3f8442dd02caf01a1eb885a60 equals the approved CI artifact. SHA-512 agrees with registry metadata and npm pack: sha512-6o4jjqy2I9sVz8glbbVuEuWxUdaquHp4bmO9QUz8kxfDYk6v4A8o7ibWEG3SfNgWhpk1UajvxLFvIiMLmuVjGQ==.
+
+Actual registry artifact acceptance exited 0: isolated offline consumer, explicit native SQLite rebuild, CLI 0.2.0, ESM/TypeScript public imports, deep-import denial, autonomous and supervised irreversible acts with explicit attested class permission, default/manual/human-only refusal, single use and genuine synthetic log verification. Log private/aprv329-validation/registry-artifact-0.2-published-final.log SHA-256 1ca6c9e7b5a055101da9e9eaf0795920726a2157953acc447b9366d840218bd1. Initial E404 failures remain preserved; a fresh scratch registry cache resolved stale metadata. This verifies actual published bytes with offline dependencies and explicit native rebuild, rather than standard online installation.
+
+Parent npm audit signatures exited 0 in /private/tmp/aprv329-provenance-BYQcmY: 131 registry signatures and 14 attestations verified. Parsed signed SLSA provenance matches the release SHA-512, exact merged commit, main publish.yml run 34714965168 and attempt 1. Registry gitHead is absent; signed provenance provides commit binding. CHANGELOG records publication on 2026-09-12. Mandatory Codex confinement and live activation remain unfinished and are not claimed. No redundant broad tests were run for records finalization.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Published approval-md 0.2.0 with APRV-317 class-scoped irreversible policy controls and public adapters, including ZZZ. PR 386 merged at 205432683ccb8a671cba22a8f884208bd2ffdf61; checks and trusted publication 34714965168 passed. Actual registry bytes match approved CI bytes; installed behavior and signed provenance were verified. Codex preparation remains inert and provides no mandatory confinement.
+<!-- SECTION:FINAL_SUMMARY:END -->
