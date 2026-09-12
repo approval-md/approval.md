@@ -1,11 +1,11 @@
 ---
 id: APRV-319
 title: First-class Codex project configuration and verified MCP onboarding
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 22:43'
-updated_date: '2026-09-09 22:25'
+updated_date: '2026-09-09 22:59'
 labels: []
 dependencies: []
 priority: high
@@ -21,11 +21,11 @@ Carter expects a version-controlled .codex folder and a usable Codex entry point
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A committed .codex configuration provides a supported usable Codex MCP entry point with stable agent identity and explicit gate root.
-- [ ] #2 Configuration and launcher behavior are verified with the installed Codex parser and scratch MCP discovery/execution, including nested directories and linked worktrees or a tested explicit setup path.
-- [ ] #3 No repository configuration weakens native approval or sandbox settings, enables failing-open hooks by default, reads credentials, or impersonates a human.
-- [ ] #4 Docs and diagnostics distinguish MCP availability, trust, observed gated operation and known native Bash/outcome limits; tests cover refusals and malformed setup.
-- [ ] #5 Reviewed changes and protected-file evidence pass applicable checks and are delivered to GitHub with Codex co-author attribution.
+- [x] #1 A committed .codex configuration provides a supported usable Codex MCP entry point with stable agent identity and explicit gate root.
+- [x] #2 Configuration and launcher behavior are verified with the installed Codex parser and scratch MCP discovery/execution, including nested directories and linked worktrees or a tested explicit setup path.
+- [x] #3 No repository configuration weakens native approval or sandbox settings, enables failing-open hooks by default, reads credentials, or impersonates a human.
+- [x] #4 Docs and diagnostics distinguish MCP availability, trust, observed gated operation and known native Bash/outcome limits; tests cover refusals and malformed setup.
+- [x] #5 Reviewed changes and protected-file evidence pass applicable checks and are delivered to GitHub with Codex co-author attribution.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -46,4 +46,12 @@ Actual support files installed through parent gate evidence: README outcome30258
 Correction after the old launcher task identity collided at seq29994: the final fresh launcher declaration is codex-aprv-319-launcher-current, action key codex-aprv-319-launcher-current:0271dfc2aed0f1e0aa315e14edb9e5cfddc2ba3d16d0d481cdf8f6676c537560, and superseding delivery manifest SHA-256 a3e2a04ead3f2ab56c87604206dd04dfa5d7de84b8aca7771d92d96080cc03bf. Its prepare validation exited0 before parent registration/execution; launcher outcome30277 records the final action. The earlier 025988d9 manifest is historical and must not be reused.
 
 Final integrated verification after the human-owned project config installation: .codex/config.toml SHA-256 af5e3218df1277aae52ab250da759125d00d73a713427f90a09bfaff450eeb9c; primary organ attestation seq 30313, event hash 5cc6b1d6e823d0842baf98439d65c49d971516b6c5e503f54a46165efd61ff7e. In /private/tmp/approval-project-codex-config, npm run build exited 0 (/private/tmp/aprv319-integrated-build.log); all 7 tests in tests/codex-project-config.test.ts exited 0 (/private/tmp/aprv319-integrated-config-tests.log); npm run lint exited 0 (/private/tmp/aprv319-integrated-lint.log); npm run typecheck exited 0 (/private/tmp/aprv319-integrated-typecheck.log). The first sandboxed full npm test attempt was interrupted with exit 130 after loopback listeners conclusively failed with outer-sandbox EPERM (/private/tmp/aprv319-full-npm-test.log). The identical authorized unrestricted env -u APPROVAL_HUMAN npm test rerun exited 0: 4,039 tests, 4,038 passed, 1 skipped, 0 failed, duration 441108.431542 ms (/private/tmp/aprv319-full-npm-test-unrestricted.log). Existing parser and read-only MCP handshake coverage was not redundantly repeated beyond the integrated 7-test suite. Voluntary MCP setup does not gate Codex built-in tools and makes no enforced-session claim.
+
+GitHub delivery verified: feature commit 8ce98275f82732e23bb4f9d300c68e3c624620e7 merged through PR378 at c53108f6af892e1d1acb1fbca7f43055b86e9d4c on 2026-09-09T22:53:57Z. PR CI34412970927 and merge-group34413680899 exited0, including Node20 floor; exact protected guard exited0 using human attestation30313 in merged recordsPR377. GitHub GraphQL recognizes feature commit coauthor Codex<noreply@openai.com> as @codex. Merge queue discarded the custom merge-body trailer; APRV327 separately tracks generated-record and merge attribution. No npm publication or mandatory confinement claim.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered optional Codex project MCP configuration with stable agent identity, explicit primary gate paths, nested/worktree resolution, and refusal and lifecycle tests. The human installed and attested the config at sequence 30313. The local full suite passed 4,038 tests with one skip and no failures; all seven focused tests, build, lint, typecheck and the protected-path guard passed. PR #378 and its merge-group checks passed, merging at c53108f6. This is voluntary MCP access; mandatory enforcement remains APRV-325.
+<!-- SECTION:FINAL_SUMMARY:END -->
