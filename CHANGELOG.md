@@ -4,6 +4,44 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
+## 0.2.0 — Unpublished candidate
+
+This minor release prepares changes merged since 0.1.0 for npm. Publication,
+registry integrity and provenance, and a clean registry installation remain
+release acceptance checks (APRV-329).
+
+- **Explicit irreversible policy permission (APRV-317).** An attested class rule
+  may set `allow_irreversible: true` to retain declared autonomous or supervised
+  behavior for an action truthfully marked `reversible: false`. Omission or
+  `false` retains the manual floor. Manual and human-only controls, budgets,
+  payload binding, live selection and policy-drift checks remain in force.
+  Policy-authorized executions carry no fabricated human grant.
+- **Public adapter-author API (APRV-321).** Import `executeThroughAdapter`,
+  adapter conformance helpers and the scoped vault provider from
+  `approval-md/adapters`, with TypeScript declarations. The exports map closes
+  incidental deep imports such as `approval-md/dist/src/adapters/contract.js`;
+  migrate them to `approval-md/adapters`. This compatibility change requires a
+  minor pre-1.0 release. See [Adapter API](docs/adapter-api.md).
+- **ZZZ threads and replies (APRV-320).** The built-in `zzz` adapter routes exact
+  `communicate.zzz.external` payloads through the shared execution contract and
+  a scoped `zzz.agent_token` credential. ZZZ authentication, room access and
+  workflow evidence remain separate requirements. This package applies no ZZZ
+  database migrations and does not deploy zzz.bot.
+- **Codex preparation and limits (APRV-311–313, APRV-325.1, APRV-325.2.1).**
+  `approval codex prepare` produces inert configuration templates. Preparation
+  installs no trusted hook and provides no mandatory confinement. The
+  experimental native hook covers direct patches, refuses Bash, and has
+  observed native crash/timeout fail-open gaps. The internal workspace planner
+  binds proposed operations and applies no writes. A broker, exclusive
+  operating-system custody and live activation evidence remain unfinished.
+- **File gating and protected replay (APRV-304, APRV-326).** Ordinary Claude Code
+  and Cursor writes use policy and execution accounting; protected edit evidence
+  is checked against the exact authorized change.
+- **Operator tools.** Human-only reviewed `approval quickstart` setup (APRV-309),
+  verified cursor-based `approval log follow` streaming (APRV-322), and explicit
+  `approval log advance --co-author` credit in records commits and PR bodies
+  (APRV-327). Co-author credit grants no authority.
+
 ## 0.1.0 — 2026-09-08
 
 Published to npm as `approval-md@0.1.0` and tagged `v0.1.0`, through the gate:
