@@ -805,11 +805,25 @@ approval up</code></pre>
       dim = rgb(css.getPropertyValue('--muted').trim()) || dim;
       bright = rgb(css.getPropertyValue('--fg').trim()) || bright;
     }
+    /* The field covers the hero as it stands with the source-install details
+       closed. Opening it grows the hero; the field keeps its height so the
+       dots neither stretch nor spill down behind the expanded text. */
+    var details = hero.querySelector('details.source-install');
+    function fieldHeight(box) {
+      var extra = 0;
+      if (details && details.open) {
+        var summary = details.querySelector('summary');
+        extra = details.getBoundingClientRect().height -
+          (summary ? summary.getBoundingClientRect().height : 0);
+      }
+      return Math.max(1, Math.round(box.height - extra));
+    }
     function resize() {
       var box = hero.getBoundingClientRect();
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       w = Math.max(1, Math.round(box.width) + 32);
-      h = Math.max(1, Math.round(box.height));
+      h = fieldHeight(box);
+      canvas.style.height = h + 'px';
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -877,6 +891,9 @@ approval up</code></pre>
       window.clearTimeout(pending);
       pending = window.setTimeout(function () { resize(); start(); }, 120);
     });
+    if (details) {
+      details.addEventListener('toggle', function () { resize(); start(); });
+    }
     new MutationObserver(function () { readColours(); start(); })
       .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     var scheme = window.matchMedia('(prefers-color-scheme: dark)');
