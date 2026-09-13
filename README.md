@@ -35,19 +35,20 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md) · Package:
 npm install -g approval-md
 ```
 
-**2. Make a gate.** For the published 0.1.0 package, run `approval init`, edit
+**2. Make a gate.** For the published 0.2.0 package, run `approval init`, edit
 and read `APPROVAL.md`, run `approval setup identity`, optionally run
 `approval setup channel telegram`, then run `approval policy attest --as human:<id>`.
 
-The upcoming `quickstart` command combines these steps. It is currently
-available from a source checkout (`npm ci` and `npm run build`), pending a
-package release. Run the three-question ceremony in the project directory.
+The `quickstart` command combines these steps and ships in the published
+package. Run the three-question ceremony in the project directory.
 It asks who you are, whether decisions appear in this terminal or on Telegram,
 and which five class families always ask. It shows the exact policy and requires
-the typed word `understood` before attesting it.
+the typed word `understood` before attesting it. From a source checkout, build
+first (`npm ci` and `npm run build`) and run the same verb through your linked
+binary.
 
 ```sh
-node /path/to/approval.md/cli.js quickstart
+approval quickstart
 ```
 
 Then run the `activate:` command quickstart prints. It includes the absolute
