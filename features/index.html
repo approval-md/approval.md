@@ -3,22 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>approval.md: human approval for agent actions</title>
-<meta name="description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
+<title>approval.md feature set: the reference page</title>
+<meta name="description" content="The approval.md feature set and reference page: every capability of the runtime as a searchable card, with how it compares, the global invariants, the frozen exit codes and what it does not defend.">
 <meta name="robots" content="index,follow">
 <meta name="color-scheme" content="dark light">
-<link rel="canonical" href="https://approval.md/">
+<link rel="canonical" href="https://approval.md/features/">
 <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt: index for language models">
 <link rel="alternate" type="text/markdown" href="/llms-full.txt" title="llms-full.txt: this page as markdown">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://approval.md/">
+<meta property="og:url" content="https://approval.md/features/">
 <meta property="og:site_name" content="approval.md">
 <meta property="og:locale" content="en">
-<meta property="og:title" content="approval.md: human approval for agent actions">
-<meta property="og:description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
+<meta property="og:title" content="approval.md feature set: the reference page">
+<meta property="og:description" content="The approval.md feature set and reference page: every capability of the runtime as a searchable card, with how it compares, the global invariants, the frozen exit codes and what it does not defend.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="approval.md: human approval for agent actions">
-<meta name="twitter:description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
+<meta name="twitter:title" content="approval.md feature set: the reference page">
+<meta name="twitter:description" content="The approval.md feature set and reference page: every capability of the runtime as a searchable card, with how it compares, the global invariants, the frozen exit codes and what it does not defend.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -34,7 +34,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Command line tool",
       "operatingSystem": "macOS, Linux",
-      "softwareVersion": "0.1.0",
+      "softwareVersion": "0.2.0",
       "softwareRequirements": "Node.js 20 or newer",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
       "installUrl": "https://www.npmjs.com/package/approval-md",
@@ -50,6 +50,16 @@
       "inLanguage": "en",
       "description": "Human approval for agent actions.",
       "about": { "@id": "https://approval.md/#app" }
+    },
+    {
+      "@type": "WebPage",
+      "@id": "https://approval.md/features/#page",
+      "name": "approval.md feature set",
+      "url": "https://approval.md/features/",
+      "inLanguage": "en",
+      "description": "The approval.md feature set and reference page: every capability of the runtime as a searchable card, with how it compares, the global invariants, the frozen exit codes and what it does not defend.",
+      "isPartOf": { "@id": "https://approval.md/#site" },
+      "about": { "@id": "https://approval.md/#app" }
     }
   ]
 }
@@ -63,22 +73,6 @@
         document.documentElement.setAttribute('data-theme', saved);
       }
     } catch (e) { /* private mode, blocked storage: the system theme is the answer */ }
-  })();
-</script>
-<script>
-  /* The feature set and the reference sections live at /features/ since
-     APRV-331. A link or bookmark to one of their old fragments on this page
-     is sent there, keeping the fragment, and replacing this entry so Back
-     still leaves the site. */
-  (function () {
-    var moved = ['#loop', '#features', '#compare', '#invariants', '#exit', '#posture', '#readon'];
-    var hash = window.location.hash;
-    for (var i = 0; i < moved.length; i++) {
-      if (hash === moved[i]) {
-        window.location.replace('features/' + hash);
-        return;
-      }
-    }
   })();
 </script>
 <style>
@@ -204,6 +198,9 @@
   .mark svg{height:.82em;width:auto;display:block;margin:0 .02em}
   .mark .md{color:var(--muted)}
   h1 .claim{margin-left:.7em;color:var(--fg)}
+  /* The wordmark is the way back to the landing page, and it keeps its own
+     colour on hover so the green stays the approve state. */
+  h1 a.home,h1 a.home:hover{color:inherit}
   .sub{margin:0;color:var(--muted);max-width:74ch}
   .lede > .sub + .sub{margin-top:18px}
   .sub b{color:var(--fg);font-weight:400}
@@ -453,7 +450,7 @@
         <summary>Product</summary>
         <ul class="grp-links">
           <li><a href="#loop">Try the loop</a></li>
-          <li><a href="#install">Install</a></li>
+          <li><a href="../#install">Install</a></li>
           <li><a href="#features">The feature set</a></li>
           <li><a href="#exit">Exit codes</a></li>
           <li><a href="#posture">What it does not defend</a></li>
@@ -500,28 +497,9 @@
 
     <header class="lede">
       <h1>
-        <span class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></span>
+        <a class="home" href="../" title="approval.md, the landing page"><span class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></span></a>
         <span class="claim">human approval for agent actions</span>
       </h1>
-      <p class="sub"><strong>A harness-agnostic, open-source framework for approving agent actions with a human in the loop</strong></p>
-      <p class="sub">Agents now send emails, spend money, book things, and delete data. There is no diff to revert. approval.md is a file-based convention and runtime that gates side-effecting agent actions behind your sign-off, from a policy file you write to your phone.</p>
-
-      <div class="install" id="install">
-        <div class="cmd">
-          <pre><code id="cmd-npm">npm install -g approval-md</code></pre>
-          <button class="copy" type="button" data-copy="cmd-npm" aria-label="Copy the npm install command">Copy</button>
-        </div>
-        <span class="note">Installs the published v0.1.0 CLI. Node 20 or newer.</span>
-        <details class="source-install">
-          <summary>Latest features / contribute</summary>
-          <p class="note">Use a source checkout for features marked “source checkout,” including the ZZZ adapter, or to contribute. Choose this path instead of the npm install above.</p>
-          <div class="cmd">
-            <pre><code id="cmd-src">git clone https://github.com/approval-md/approval.md &amp;&amp; cd approval.md &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm link</code></pre>
-            <button class="copy" type="button" data-copy="cmd-src" aria-label="Copy the from-source install command">Copy</button>
-          </div>
-        </details>
-        <span class="note">Feature index: current source checkout · Apache 2.0 code · CC0 specification and schemas.</span>
-      </div>
     </header>
 
     <section id="loop" aria-labelledby="loop-h">
@@ -734,8 +712,8 @@
         </article>
 
         <!-- ===== adapters ===== -->
-        <article class="card" id="f-adapter-api" tabindex="0" data-facet="adapters" data-tags="new source" data-href="https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md">
-          <div class="tags"><span class="tag key">new</span><span class="tag">source checkout</span></div>
+        <article class="card" id="f-adapter-api" tabindex="0" data-facet="adapters" data-tags="new shipped" data-href="https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md">
+          <div class="tags"><span class="tag key">new</span><span class="tag">shipped in 0.2.0</span></div>
           <h3>A supported API for adapter authors</h3>
           <p><code>approval-md/adapters</code> exports the execution contract, credential provider and conformance runner with TypeScript declarations.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md">Guide: the public adapter API →</a>
@@ -762,8 +740,8 @@
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md">Example: an AgentMail draft →</a>
         </article>
 
-        <article class="card" id="f-zzz" tabindex="0" data-facet="adapters" data-tags="new source" data-href="https://github.com/approval-md/approval.md#first-class-zzzbot-messages">
-          <div class="tags"><span class="tag key">new</span><span class="tag">source checkout</span></div>
+        <article class="card" id="f-zzz" tabindex="0" data-facet="adapters" data-tags="new shipped" data-href="https://github.com/approval-md/approval.md#first-class-zzzbot-messages">
+          <div class="tags"><span class="tag key">new</span><span class="tag">shipped in 0.2.0</span></div>
           <h3>ZZZ threads and replies, gated</h3>
           <p>After consuming the execution grant, <code>approval adapter zzz</code> sends with a vaulted ZZZ credential and bound payload.</p>
           <a class="go" href="https://github.com/approval-md/approval.md#first-class-zzzbot-messages">README: first-class zzz.bot messages →</a>
@@ -805,8 +783,8 @@
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md">docs: the Cursor hook →</a>
         </article>
 
-        <article class="card" id="f-codex-hook" tabindex="0" data-facet="hooks" data-tags="experimental source" data-href="https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md">
-          <div class="tags"><span class="tag key">experimental</span><span class="tag">source checkout</span></div>
+        <article class="card" id="f-codex-hook" tabindex="0" data-facet="hooks" data-tags="experimental shipped" data-href="https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md">
+          <div class="tags"><span class="tag key">experimental</span><span class="tag">shipped in 0.2.0</span></div>
           <h3>Codex direct patches, normal activation blocked</h3>
           <p><code>approval hook codex</code> experimentally gates direct patches; hidden execution directories keep Bash denied and outcomes diagnostic.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md">docs: the Codex hook experiment →</a>
@@ -1174,7 +1152,7 @@
     </section>
 
     <footer>
-      <span>Apache 2.0 code · CC0 specification and schemas · releases approved through approval.md.</span>
+      <span>Feature index for approval-md 0.2.0 · Apache 2.0 code · CC0 specification and schemas · releases approved through approval.md.</span>
       <span>hello@approval.md</span>
     </footer>
 
@@ -1202,9 +1180,9 @@
 <script type="application/json" id="feature-index">
 {
   "name": "approval.md feature index",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "facets": ["gate","channels","adapters","hooks","mcp","log","daemon","verification","examples"],
-  "tags": ["shipped","spec","example","behind-a-policy-key","behind-a-flag","human-only","new","source","experimental"],
+  "tags": ["shipped","spec","example","behind-a-policy-key","behind-a-flag","human-only","new","experimental"],
   "features": [
 {"id":"policy-file","title":"APPROVAL.md, the policy file","facet":["gate"],"tags":["shipped","spec"],"claim":"A fenced yaml approval-policy block in markdown at your repo root; the runtime ignores the prose.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses with policy-not-attested, detail hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
@@ -1226,17 +1204,17 @@
 {"id":"web-queue","title":"A local web queue on loopback","facet":["channels"],"tags":["shipped"],"claim":"approval channel web binds hard-coded 127.0.0.1; a returned grant token is displayed once, then discarded.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it"},
 {"id":"cli-channel","title":"A terminal channel, and withdrawal","facet":["channels"],"tags":["shipped"],"claim":"approval channel cli decides at a terminal, and approval withdraw takes a pending request back.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel-cli"},
 {"id":"journal","title":"A channel in the other direction","facet":["channels","verification"],"tags":["shipped"],"claim":"approval journal write, approval values and approval feedback carry operator guidance that never reaches enforcement.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#journal"},
-{"id":"adapter-api","title":"A supported API for adapter authors","facet":["adapters"],"tags":["new","source"],"claim":"approval-md/adapters exports the execution contract, credential provider and conformance runner with TypeScript declarations.","href":"https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md"},
+{"id":"adapter-api","title":"A supported API for adapter authors","facet":["adapters"],"tags":["new","shipped"],"claim":"approval-md/adapters exports the execution contract, credential provider and conformance runner with TypeScript declarations.","href":"https://github.com/approval-md/approval.md/blob/main/docs/adapter-api.md"},
 {"id":"vault","title":"A vault the policy names","facet":["adapters"],"tags":["shipped"],"claim":"approval vault set encrypts one credential under a passphrase named by vault.passphrase_env; there is no approval vault get.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
 {"id":"email-adapter","title":"Email over SMTP, inside the token window","facet":["adapters"],"tags":["shipped"],"claim":"approval adapter email verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it.","href":"https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md"},
 {"id":"agentmail","title":"AgentMail, and the two-key split","facet":["adapters"],"tags":["shipped"],"claim":"The agent holds an AgentMail key without draft_send, and the key that can send waits in the vault.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
-{"id":"zzz","title":"ZZZ threads and replies, gated","facet":["adapters"],"tags":["new","source"],"claim":"After consuming the execution grant, approval adapter zzz sends with a vaulted ZZZ credential and bound payload.","href":"https://github.com/approval-md/approval.md#first-class-zzzbot-messages"},
+{"id":"zzz","title":"ZZZ threads and replies, gated","facet":["adapters"],"tags":["new","shipped"],"claim":"After consuming the execution grant, approval adapter zzz sends with a vaulted ZZZ credential and bound payload.","href":"https://github.com/approval-md/approval.md#first-class-zzzbot-messages"},
 {"id":"draft-drift","title":"A draft is mutable, so the grant binds its bytes","facet":["adapters"],"tags":["shipped"],"claim":"approval payload agentmail-draft snapshots the draft, and one edited after the grant refuses agentmail-draft-drifted.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
 {"id":"message-id","title":"The Message-ID ties the mail to the chain","facet":["adapters","verification"],"tags":["shipped"],"claim":"It is derived from the action key, the payload hash and the sender, so both match months later.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
 {"id":"setup-adapter","title":"Setup fills the vault and proves it","facet":["adapters"],"tags":["shipped"],"claim":"approval setup adapter email reads the adapter's credential manifest, then probes the server without sending anything.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter"},
 {"id":"claude-code-hook","title":"The Claude Code PreToolUse hook","facet":["hooks"],"tags":["shipped"],"claim":"approval hook claude-code classifies commands the harness runs itself and answers allow or deny, never ask.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
 {"id":"cursor-hook","title":"The Cursor hook","facet":["hooks"],"tags":["shipped"],"claim":"approval hook cursor classifies Shell, Write and Delete, and requires failClosed: true.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md"},
-{"id":"codex-hook","title":"Codex direct patches, normal activation blocked","facet":["hooks"],"tags":["experimental","source"],"claim":"approval hook codex experimentally gates direct patches; hidden execution directories keep Bash denied and outcomes diagnostic.","href":"https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md"},
+{"id":"codex-hook","title":"Codex direct patches, normal activation blocked","facet":["hooks"],"tags":["experimental","shipped"],"claim":"approval hook codex experimentally gates direct patches; hidden execution directories keep Bash denied and outcomes diagnostic.","href":"https://github.com/approval-md/approval.md/blob/main/docs/codex-hook.md"},
 {"id":"classify","title":"See how a command classifies first","facet":["hooks"],"tags":["shipped"],"claim":"approval hook classify prints a command line's class, the union over its segments, and touches nothing.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#gate-your-coding-agent"},
 {"id":"hook-entry","title":"A human commits the hook entry","facet":["hooks"],"tags":["shipped"],"claim":"The entry lives in .claude/settings.json or .cursor/hooks.json, and the classifier treats both as gate configuration.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
 {"id":"hook-edges","title":"Two edges, stated up front","facet":["hooks"],"tags":["shipped"],"claim":"The hook never creates a log, denying hook-log-unreachable, and a hook grant mints no token.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
