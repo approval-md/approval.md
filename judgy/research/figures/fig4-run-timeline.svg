@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="918" viewBox="0 0 1600 918" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="figtitle figdesc">
+<title id="figtitle">Fig 4 — run timeline, metered tokens by role</title>
+<desc id="figdesc">Cumulative metered tokens against wall-clock UTC for the whole session, stacked by role: worker, reviewer and one improvement call. Every call belongs to one of seven labelled run bands, the cumulative totals stated by the run artefacts are marked, and the axis is broken across the fifty-minute gap in which no calls were metered.</desc>
+<style>
+text{font-family:"Instrument Sans",system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+.bg{fill:#FFFFFF;fill:var(--surface,#FFFFFF);}
+.fog{fill:#F2F4F7;fill:var(--fog,#F2F4F7);}
+.ink{fill:#161B26;fill:var(--ink,#161B26);}
+.muted{fill:#6B7382;fill:var(--muted,#6B7382);}
+.f-model{fill:#5B45D6;fill:var(--c-model,#5B45D6);}
+.f-runtime{fill:#0E7A76;fill:var(--c-runtime,#0E7A76);}
+.f-human{fill:#B3651B;fill:var(--c-human,#B3651B);}
+.f-effect{fill:#556072;fill:var(--c-effect,#556072);}
+.f-evidence{fill:#8A93A3;fill:var(--c-evidence,#8A93A3);}
+.f-line{fill:#D9DEE7;fill:var(--line,#D9DEE7);}
+.s-line{stroke:#D9DEE7;stroke:var(--line,#D9DEE7);}
+.s-ink{stroke:#161B26;stroke:var(--ink,#161B26);}
+.s-muted{stroke:#6B7382;stroke:var(--muted,#6B7382);}
+.s-model{stroke:#5B45D6;stroke:var(--c-model,#5B45D6);}
+.s-runtime{stroke:#0E7A76;stroke:var(--c-runtime,#0E7A76);}
+.s-human{stroke:#B3651B;stroke:var(--c-human,#B3651B);}
+.s-effect{stroke:#556072;stroke:var(--c-effect,#556072);}
+.s-evidence{stroke:#8A93A3;stroke:var(--c-evidence,#8A93A3);}
+.ring{stroke:#FFFFFF;stroke:var(--surface,#FFFFFF);}
+.t-title{font-size:27px;font-weight:600;}
+.t-panel{font-size:17px;font-weight:600;}
+.t-sub{font-size:14px;}
+.t-small{font-size:13px;}
+.t-foot{font-size:12px;}
+.t-tick{font-size:12px;}
+</style>
+<defs><marker id="arrow-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-model" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-runtime" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-runtime" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-human" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-human" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-effect" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-effect" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-evidence" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-evidence" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-line" d="M0 0L10 5L0 10Z"/></marker><pattern id="hatch-baseline" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)"><rect class="f-evidence" width="7" height="7" fill-opacity="0.16"/><line class="s-evidence" x1="0" y1="0" x2="0" y2="7" stroke-width="2.6"/></pattern><pattern id="hatch-protected" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)"><rect class="fog" width="10" height="10"/><line class="s-evidence" x1="0" y1="0" x2="0" y2="10" stroke-width="1" stroke-opacity="0.55"/></pattern></defs>
+<rect class="bg" x="0" y="0" width="1600" height="918"/>
+<text class="ink t-title" x="56" y="58">Run timeline — cumulative metered tokens by role</text>
+<text class="muted t-sub" x="56" y="86" xml:space="preserve"><tspan>session ledger </tspan><tspan class="mono">73 calls</tspan><tspan>  ·  </tspan><tspan class="mono">2026-09-13</tspan><tspan> UTC  ·  accounting_method: </tspan><tspan class="mono">tokens</tspan><tspan>  ·  integration_mode: </tspan><tspan class="mono">simulated</tspan></text>
+<text class="muted t-sub" x="56" y="107" xml:space="preserve"><tspan>session token cap </tspan><tspan class="mono">2 000 000</tspan><tspan>  ·  metered </tspan><tspan class="mono">437 399</tspan><tspan> (21.9% of the cap)</tspan><tspan>  ·  models </tspan><tspan class="mono">moonshotai/Kimi-K2.7-Code</tspan><tspan>  ·  </tspan><tspan class="mono">deepseek-ai/DeepSeek-V4-Pro-0813</tspan></text>
+<line class="s-line" x1="132" y1="630" x2="1544" y2="630" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="634" text-anchor="end">0</text>
+<line class="s-line" x1="132" y1="583.33" x2="1544" y2="583.33" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="587.33" text-anchor="end">50</text>
+<line class="s-line" x1="132" y1="536.67" x2="1544" y2="536.67" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="540.67" text-anchor="end">100</text>
+<line class="s-line" x1="132" y1="490" x2="1544" y2="490" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="494" text-anchor="end">150</text>
+<line class="s-line" x1="132" y1="443.33" x2="1544" y2="443.33" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="447.33" text-anchor="end">200</text>
+<line class="s-line" x1="132" y1="396.67" x2="1544" y2="396.67" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="400.67" text-anchor="end">250</text>
+<line class="s-line" x1="132" y1="350" x2="1544" y2="350" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="354" text-anchor="end">300</text>
+<line class="s-line" x1="132" y1="303.33" x2="1544" y2="303.33" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="307.33" text-anchor="end">350</text>
+<line class="s-line" x1="132" y1="256.67" x2="1544" y2="256.67" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="260.67" text-anchor="end">400</text>
+<line class="s-line" x1="132" y1="210" x2="1544" y2="210" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="120" y="214" text-anchor="end">450</text>
+<text class="muted t-tick" x="120" y="186" text-anchor="end">thousand tokens</text>
+<line class="s-line" x1="305.86" y1="630" x2="305.86" y2="636" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="305.86" y="652" text-anchor="middle">18:40</text>
+<line class="s-line" x1="529.7" y1="630" x2="529.7" y2="636" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="529.7" y="652" text-anchor="middle">18:45</text>
+<line class="s-line" x1="753.55" y1="630" x2="753.55" y2="636" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="753.55" y="652" text-anchor="middle">18:50</text>
+<line class="s-line" x1="977.4" y1="630" x2="977.4" y2="636" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="977.4" y="652" text-anchor="middle">18:55</text>
+<line class="s-line" x1="1258.46" y1="630" x2="1258.46" y2="636" stroke-width="1" fill="none"/>
+<text class="muted t-tick" x="1258.46" y="652" text-anchor="middle">19:50</text>
+<rect class="fog" x="132" y="210" width="468.59" height="420" fill-opacity="0.75"/>
+<line class="s-line" x1="132" y1="210" x2="132" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="136" y="218" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="147" y="233" text-anchor="middle" font-weight="600">A</text>
+<line class="s-line" x1="602.83" y1="210" x2="602.83" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="606.83" y="244" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="617.83" y="259" text-anchor="middle" font-weight="600">B</text>
+<rect class="fog" x="816.23" y="210" width="264.14" height="420" fill-opacity="0.75"/>
+<line class="s-line" x1="816.23" y1="210" x2="816.23" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="820.23" y="218" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="831.23" y="233" text-anchor="middle" font-weight="600">C</text>
+<line class="s-line" x1="1081.86" y1="210" x2="1081.86" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="1085.86" y="244" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="1096.86" y="259" text-anchor="middle" font-weight="600">D</text>
+<rect class="fog" x="1220.48" y="210" width="10" height="420" fill-opacity="0.75"/>
+<line class="s-line" x1="1220.48" y1="210" x2="1220.48" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="1224.48" y="218" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="1235.48" y="233" text-anchor="middle" font-weight="600">E</text>
+<line class="s-line" x1="1248.61" y1="210" x2="1248.61" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="1252.61" y="244" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="1263.61" y="259" text-anchor="middle" font-weight="600">F</text>
+<rect class="fog" x="1390.68" y="210" width="153.32" height="420" fill-opacity="0.75"/>
+<line class="s-line" x1="1390.68" y1="210" x2="1390.68" y2="630" stroke-width="1" fill="none"/>
+<rect class="bg s-line" x="1394.68" y="218" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="1405.68" y="233" text-anchor="middle" font-weight="600">G</text>
+<path class="f-effect" d="M132 630 L132 630 L132 627.09 L190.95 627.09 L190.95 627.09 L192.44 627.09 L192.44 624.91 L243.18 624.91 L243.18 624.91 L244.67 624.91 L244.67 622.26 L402.11 622.26 L402.11 622.26 L403.6 622.26 L403.6 619.41 L433.45 619.41 L433.45 619.41 L434.2 619.41 L434.2 617.43 L443.15 617.43 L443.15 617.43 L444.64 617.43 L444.64 614.64 L491.65 614.64 L491.65 614.64 L493.89 614.64 L493.89 612.17 L501.35 612.17 L501.35 612.17 L505.08 612.17 L505.08 608.83 L534.18 608.83 L534.18 608.83 L534.93 608.83 L534.93 605.96 L540.9 605.96 L540.9 605.96 L564.77 605.96 L564.77 603.05 L600.59 603.05 L600.59 603.05 L602.83 603.05 L602.83 600.12 L611.04 600.12 L611.04 600.12 L619.24 600.12 L619.24 597.29 L661.77 597.29 L661.77 597.29 L662.52 597.29 L662.52 595.15 L702.81 595.15 L702.81 595.15 L705.8 595.15 L705.8 592.26 L728.93 592.26 L728.93 592.26 L730.42 592.26 L730.42 589.27 L735.64 589.27 L735.64 589.27 L736.39 589.27 L736.39 587.26 L744.6 587.26 L744.6 587.26 L746.09 587.26 L746.09 584.35 L764.75 584.35 L764.75 584.35 L766.24 584.35 L766.24 581.98 L772.21 581.98 L772.21 581.98 L775.94 581.98 L775.94 578.57 L796.08 578.57 L796.08 578.57 L797.58 578.57 L797.58 575.75 L803.55 575.75 L803.55 575.75 L816.23 575.75 L816.23 573.51 L819.96 573.51 L819.96 573.51 L822.2 573.51 L822.2 570.11 L855.78 570.11 L855.78 570.11 L856.52 570.11 L856.52 567.39 L860.25 567.39 L860.25 567.39 L866.22 567.39 L866.22 562.96 L1080.37 562.96 L1080.37 562.96 L1081.86 562.96 L1081.86 560.88 L1088.58 560.88 L1088.58 560.88 L1089.33 560.88 L1089.33 558.17 L1109.47 558.17 L1109.47 558.17 L1111.71 558.17 L1111.71 555.33 L1123.65 555.33 L1123.65 555.33 L1125.14 555.33 L1125.14 552.35 L1156.48 552.35 L1156.48 552.35 L1156.48 552.35 L1156.48 630L132 630Z" fill-opacity="0.1"/>
+<path class="s-effect" d="M132 630 L132 630 L132 627.09 L190.95 627.09 L190.95 627.09 L192.44 627.09 L192.44 624.91 L243.18 624.91 L243.18 624.91 L244.67 624.91 L244.67 622.26 L402.11 622.26 L402.11 622.26 L403.6 622.26 L403.6 619.41 L433.45 619.41 L433.45 619.41 L434.2 619.41 L434.2 617.43 L443.15 617.43 L443.15 617.43 L444.64 617.43 L444.64 614.64 L491.65 614.64 L491.65 614.64 L493.89 614.64 L493.89 612.17 L501.35 612.17 L501.35 612.17 L505.08 612.17 L505.08 608.83 L534.18 608.83 L534.18 608.83 L534.93 608.83 L534.93 605.96 L540.9 605.96 L540.9 605.96 L564.77 605.96 L564.77 603.05 L600.59 603.05 L600.59 603.05 L602.83 603.05 L602.83 600.12 L611.04 600.12 L611.04 600.12 L619.24 600.12 L619.24 597.29 L661.77 597.29 L661.77 597.29 L662.52 597.29 L662.52 595.15 L702.81 595.15 L702.81 595.15 L705.8 595.15 L705.8 592.26 L728.93 592.26 L728.93 592.26 L730.42 592.26 L730.42 589.27 L735.64 589.27 L735.64 589.27 L736.39 589.27 L736.39 587.26 L744.6 587.26 L744.6 587.26 L746.09 587.26 L746.09 584.35 L764.75 584.35 L764.75 584.35 L766.24 584.35 L766.24 581.98 L772.21 581.98 L772.21 581.98 L775.94 581.98 L775.94 578.57 L796.08 578.57 L796.08 578.57 L797.58 578.57 L797.58 575.75 L803.55 575.75 L803.55 575.75 L816.23 575.75 L816.23 573.51 L819.96 573.51 L819.96 573.51 L822.2 573.51 L822.2 570.11 L855.78 570.11 L855.78 570.11 L856.52 570.11 L856.52 567.39 L860.25 567.39 L860.25 567.39 L866.22 567.39 L866.22 562.96 L1080.37 562.96 L1080.37 562.96 L1081.86 562.96 L1081.86 560.88 L1088.58 560.88 L1088.58 560.88 L1089.33 560.88 L1089.33 558.17 L1109.47 558.17 L1109.47 558.17 L1111.71 558.17 L1111.71 555.33 L1123.65 555.33 L1123.65 555.33 L1125.14 555.33 L1125.14 552.35 L1156.48 552.35 L1156.48 552.35 L1156.48 552.35" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<path class="f-effect" d="M1220.48 552.35 L1220.48 552.35 L1220.48 552.35 L1248.61 552.35 L1248.61 550.19 L1257.05 550.19 L1257.05 550.19 L1258.46 550.19 L1258.46 547.46 L1311.91 547.46 L1311.91 547.46 L1314.72 547.46 L1314.72 544.47 L1320.35 544.47 L1320.35 544.47 L1325.98 544.47 L1325.98 541.01 L1389.27 541.01 L1389.27 541.01 L1390.68 541.01 L1390.68 539.07 L1418.81 539.07 L1418.81 539.07 L1421.63 539.07 L1421.63 535.96 L1456.79 535.96 L1456.79 535.96 L1459.6 535.96 L1459.6 533.01 L1463.82 533.01 L1463.82 533.01 L1469.45 533.01 L1469.45 529.98 L1544 529.98 L1544 529.98 L1544 529.98 L1544 630L1220.48 630Z" fill-opacity="0.1"/>
+<path class="s-effect" d="M1220.48 552.35 L1220.48 552.35 L1220.48 552.35 L1248.61 552.35 L1248.61 550.19 L1257.05 550.19 L1257.05 550.19 L1258.46 550.19 L1258.46 547.46 L1311.91 547.46 L1311.91 547.46 L1314.72 547.46 L1314.72 544.47 L1320.35 544.47 L1320.35 544.47 L1325.98 544.47 L1325.98 541.01 L1389.27 541.01 L1389.27 541.01 L1390.68 541.01 L1390.68 539.07 L1418.81 539.07 L1418.81 539.07 L1421.63 539.07 L1421.63 535.96 L1456.79 535.96 L1456.79 535.96 L1459.6 535.96 L1459.6 533.01 L1463.82 533.01 L1463.82 533.01 L1469.45 533.01 L1469.45 529.98 L1544 529.98 L1544 529.98 L1544 529.98" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<path class="f-model" d="M132 630 L132 630 L132 627.09 L190.95 627.09 L190.95 608.61 L192.44 608.61 L192.44 606.42 L243.18 606.42 L243.18 593.9 L244.67 593.9 L244.67 591.25 L402.11 591.25 L402.11 573.03 L403.6 573.03 L403.6 570.18 L433.45 570.18 L433.45 561.93 L434.2 561.93 L434.2 559.94 L443.15 559.94 L443.15 555.12 L444.64 555.12 L444.64 552.33 L491.65 552.33 L491.65 537.76 L493.89 537.76 L493.89 535.3 L501.35 535.3 L501.35 530.85 L505.08 530.85 L505.08 527.51 L534.18 527.51 L534.18 518.66 L534.93 518.66 L534.93 515.8 L540.9 515.8 L540.9 511 L564.77 511 L564.77 508.09 L600.59 508.09 L600.59 496.94 L602.83 496.94 L602.83 494.02 L611.04 494.02 L611.04 488.95 L619.24 488.95 L619.24 486.12 L661.77 486.12 L661.77 472.84 L662.52 472.84 L662.52 470.69 L702.81 470.69 L702.81 458.78 L705.8 458.78 L705.8 455.9 L728.93 455.9 L728.93 447.88 L730.42 447.88 L730.42 444.9 L735.64 444.9 L735.64 440.19 L736.39 440.19 L736.39 438.17 L744.6 438.17 L744.6 433.66 L746.09 433.66 L746.09 430.74 L764.75 430.74 L764.75 423.29 L766.24 423.29 L766.24 420.92 L772.21 420.92 L772.21 416.84 L775.94 416.84 L775.94 413.43 L796.08 413.43 L796.08 405.49 L797.58 405.49 L797.58 402.66 L803.55 402.66 L803.55 397.52 L816.23 397.52 L816.23 395.28 L819.96 395.28 L819.96 391.6 L822.2 391.6 L822.2 388.2 L855.78 388.2 L855.78 378.49 L856.52 378.49 L856.52 375.77 L860.25 375.77 L860.25 371.55 L866.22 371.55 L866.22 367.12 L1080.37 367.12 L1080.37 357.3 L1081.86 357.3 L1081.86 355.22 L1088.58 355.22 L1088.58 350.95 L1089.33 350.95 L1089.33 348.24 L1109.47 348.24 L1109.47 340.8 L1111.71 340.8 L1111.71 337.96 L1123.65 337.96 L1123.65 333.24 L1125.14 333.24 L1125.14 330.26 L1156.48 330.26 L1156.48 321.07 L1156.48 321.07 L1156.48 552.35L1156.48 552.35L1156.48 552.35L1125.14 552.35L1125.14 552.35L1123.65 552.35L1123.65 555.33L1111.71 555.33L1111.71 555.33L1109.47 555.33L1109.47 558.17L1089.33 558.17L1089.33 558.17L1088.58 558.17L1088.58 560.88L1081.86 560.88L1081.86 560.88L1080.37 560.88L1080.37 562.96L866.22 562.96L866.22 562.96L860.25 562.96L860.25 567.39L856.52 567.39L856.52 567.39L855.78 567.39L855.78 570.11L822.2 570.11L822.2 570.11L819.96 570.11L819.96 573.51L816.23 573.51L816.23 573.51L803.55 573.51L803.55 575.75L797.58 575.75L797.58 575.75L796.08 575.75L796.08 578.57L775.94 578.57L775.94 578.57L772.21 578.57L772.21 581.98L766.24 581.98L766.24 581.98L764.75 581.98L764.75 584.35L746.09 584.35L746.09 584.35L744.6 584.35L744.6 587.26L736.39 587.26L736.39 587.26L735.64 587.26L735.64 589.27L730.42 589.27L730.42 589.27L728.93 589.27L728.93 592.26L705.8 592.26L705.8 592.26L702.81 592.26L702.81 595.15L662.52 595.15L662.52 595.15L661.77 595.15L661.77 597.29L619.24 597.29L619.24 597.29L611.04 597.29L611.04 600.12L602.83 600.12L602.83 600.12L600.59 600.12L600.59 603.05L564.77 603.05L564.77 603.05L540.9 603.05L540.9 605.96L534.93 605.96L534.93 605.96L534.18 605.96L534.18 608.83L505.08 608.83L505.08 608.83L501.35 608.83L501.35 612.17L493.89 612.17L493.89 612.17L491.65 612.17L491.65 614.64L444.64 614.64L444.64 614.64L443.15 614.64L443.15 617.43L434.2 617.43L434.2 617.43L433.45 617.43L433.45 619.41L403.6 619.41L403.6 619.41L402.11 619.41L402.11 622.26L244.67 622.26L244.67 622.26L243.18 622.26L243.18 624.91L192.44 624.91L192.44 624.91L190.95 624.91L190.95 627.09L132 627.09L132 627.09L132 630Z" fill-opacity="0.1"/>
+<path class="s-model" d="M132 630 L132 630 L132 627.09 L190.95 627.09 L190.95 608.61 L192.44 608.61 L192.44 606.42 L243.18 606.42 L243.18 593.9 L244.67 593.9 L244.67 591.25 L402.11 591.25 L402.11 573.03 L403.6 573.03 L403.6 570.18 L433.45 570.18 L433.45 561.93 L434.2 561.93 L434.2 559.94 L443.15 559.94 L443.15 555.12 L444.64 555.12 L444.64 552.33 L491.65 552.33 L491.65 537.76 L493.89 537.76 L493.89 535.3 L501.35 535.3 L501.35 530.85 L505.08 530.85 L505.08 527.51 L534.18 527.51 L534.18 518.66 L534.93 518.66 L534.93 515.8 L540.9 515.8 L540.9 511 L564.77 511 L564.77 508.09 L600.59 508.09 L600.59 496.94 L602.83 496.94 L602.83 494.02 L611.04 494.02 L611.04 488.95 L619.24 488.95 L619.24 486.12 L661.77 486.12 L661.77 472.84 L662.52 472.84 L662.52 470.69 L702.81 470.69 L702.81 458.78 L705.8 458.78 L705.8 455.9 L728.93 455.9 L728.93 447.88 L730.42 447.88 L730.42 444.9 L735.64 444.9 L735.64 440.19 L736.39 440.19 L736.39 438.17 L744.6 438.17 L744.6 433.66 L746.09 433.66 L746.09 430.74 L764.75 430.74 L764.75 423.29 L766.24 423.29 L766.24 420.92 L772.21 420.92 L772.21 416.84 L775.94 416.84 L775.94 413.43 L796.08 413.43 L796.08 405.49 L797.58 405.49 L797.58 402.66 L803.55 402.66 L803.55 397.52 L816.23 397.52 L816.23 395.28 L819.96 395.28 L819.96 391.6 L822.2 391.6 L822.2 388.2 L855.78 388.2 L855.78 378.49 L856.52 378.49 L856.52 375.77 L860.25 375.77 L860.25 371.55 L866.22 371.55 L866.22 367.12 L1080.37 367.12 L1080.37 357.3 L1081.86 357.3 L1081.86 355.22 L1088.58 355.22 L1088.58 350.95 L1089.33 350.95 L1089.33 348.24 L1109.47 348.24 L1109.47 340.8 L1111.71 340.8 L1111.71 337.96 L1123.65 337.96 L1123.65 333.24 L1125.14 333.24 L1125.14 330.26 L1156.48 330.26 L1156.48 321.07 L1156.48 321.07" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<path class="f-model" d="M1220.48 321.07 L1220.48 321.07 L1220.48 321.07 L1248.61 321.07 L1248.61 318.91 L1257.05 318.91 L1257.05 315.14 L1258.46 315.14 L1258.46 312.41 L1311.91 312.41 L1311.91 302.59 L1314.72 302.59 L1314.72 299.6 L1320.35 299.6 L1320.35 295.3 L1325.98 295.3 L1325.98 291.84 L1389.27 291.84 L1389.27 282.08 L1390.68 282.08 L1390.68 280.14 L1418.81 280.14 L1418.81 273.92 L1421.63 273.92 L1421.63 270.81 L1456.79 270.81 L1456.79 263.28 L1459.6 263.28 L1459.6 260.34 L1463.82 260.34 L1463.82 256.19 L1469.45 256.19 L1469.45 253.15 L1544 253.15 L1544 240.95 L1544 240.95 L1544 529.98L1544 529.98L1544 529.98L1469.45 529.98L1469.45 529.98L1463.82 529.98L1463.82 533.01L1459.6 533.01L1459.6 533.01L1456.79 533.01L1456.79 535.96L1421.63 535.96L1421.63 535.96L1418.81 535.96L1418.81 539.07L1390.68 539.07L1390.68 539.07L1389.27 539.07L1389.27 541.01L1325.98 541.01L1325.98 541.01L1320.35 541.01L1320.35 544.47L1314.72 544.47L1314.72 544.47L1311.91 544.47L1311.91 547.46L1258.46 547.46L1258.46 547.46L1257.05 547.46L1257.05 550.19L1248.61 550.19L1248.61 550.19L1220.48 550.19L1220.48 552.35L1220.48 552.35Z" fill-opacity="0.1"/>
+<path class="s-model" d="M1220.48 321.07 L1220.48 321.07 L1220.48 321.07 L1248.61 321.07 L1248.61 318.91 L1257.05 318.91 L1257.05 315.14 L1258.46 315.14 L1258.46 312.41 L1311.91 312.41 L1311.91 302.59 L1314.72 302.59 L1314.72 299.6 L1320.35 299.6 L1320.35 295.3 L1325.98 295.3 L1325.98 291.84 L1389.27 291.84 L1389.27 282.08 L1390.68 282.08 L1390.68 280.14 L1418.81 280.14 L1418.81 273.92 L1421.63 273.92 L1421.63 270.81 L1456.79 270.81 L1456.79 263.28 L1459.6 263.28 L1459.6 260.34 L1463.82 260.34 L1463.82 256.19 L1469.45 256.19 L1469.45 253.15 L1544 253.15 L1544 240.95 L1544 240.95" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<path class="f-human" d="M1220.48 321.07 L1220.48 321.07 L1220.48 301.88 L1248.61 301.88 L1248.61 299.72 L1257.05 299.72 L1257.05 295.95 L1258.46 295.95 L1258.46 293.23 L1311.91 293.23 L1311.91 283.4 L1314.72 283.4 L1314.72 280.41 L1320.35 280.41 L1320.35 276.11 L1325.98 276.11 L1325.98 272.65 L1389.27 272.65 L1389.27 262.89 L1390.68 262.89 L1390.68 260.95 L1418.81 260.95 L1418.81 254.74 L1421.63 254.74 L1421.63 251.62 L1456.79 251.62 L1456.79 244.09 L1459.6 244.09 L1459.6 241.15 L1463.82 241.15 L1463.82 237 L1469.45 237 L1469.45 233.96 L1544 233.96 L1544 221.76 L1544 221.76 L1544 240.95L1544 240.95L1544 240.95L1469.45 240.95L1469.45 253.15L1463.82 253.15L1463.82 256.19L1459.6 256.19L1459.6 260.34L1456.79 260.34L1456.79 263.28L1421.63 263.28L1421.63 270.81L1418.81 270.81L1418.81 273.92L1390.68 273.92L1390.68 280.14L1389.27 280.14L1389.27 282.08L1325.98 282.08L1325.98 291.84L1320.35 291.84L1320.35 295.3L1314.72 295.3L1314.72 299.6L1311.91 299.6L1311.91 302.59L1258.46 302.59L1258.46 312.41L1257.05 312.41L1257.05 315.14L1248.61 315.14L1248.61 318.91L1220.48 318.91L1220.48 321.07L1220.48 321.07Z" fill-opacity="0.1"/>
+<path class="s-human" d="M1220.48 321.07 L1220.48 321.07 L1220.48 301.88 L1248.61 301.88 L1248.61 299.72 L1257.05 299.72 L1257.05 295.95 L1258.46 295.95 L1258.46 293.23 L1311.91 293.23 L1311.91 283.4 L1314.72 283.4 L1314.72 280.41 L1320.35 280.41 L1320.35 276.11 L1325.98 276.11 L1325.98 272.65 L1389.27 272.65 L1389.27 262.89 L1390.68 262.89 L1390.68 260.95 L1418.81 260.95 L1418.81 254.74 L1421.63 254.74 L1421.63 251.62 L1456.79 251.62 L1456.79 244.09 L1459.6 244.09 L1459.6 241.15 L1463.82 241.15 L1463.82 237 L1469.45 237 L1469.45 233.96 L1544 233.96 L1544 221.76 L1544 221.76" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<rect class="bg" x="1156.48" y="210" width="64" height="420"/>
+<line class="s-evidence" x1="1156.48" y1="321.07" x2="1220.48" y2="321.07" stroke-width="1" stroke-dasharray="3 5" fill="none"/>
+<line class="s-line" x1="1150.48" y1="638" x2="1162.48" y2="622" stroke-width="2" fill="none"/>
+<line class="s-line" x1="1214.48" y1="638" x2="1226.48" y2="622" stroke-width="2" fill="none"/>
+<text class="muted t-foot" x="1188.48" y="200" text-anchor="middle">50 min</text>
+<text class="muted t-foot" x="1188.48" y="184" text-anchor="middle">no calls</text>
+<circle class="f-effect ring" cx="803.55" cy="397.52" r="5.5" stroke-width="2"/>
+<text class="ink t-foot" x="803.55" y="381.52" text-anchor="middle">249 088</text>
+<circle class="f-effect ring" cx="1080.37" cy="357.3" r="5.5" stroke-width="2"/>
+<text class="ink t-foot" x="1080.37" y="387.3" text-anchor="middle">292 183</text>
+<circle class="f-effect ring" cx="1156.48" cy="321.07" r="5.5" stroke-width="2"/>
+<text class="ink t-foot" x="1156.48" y="305.07" text-anchor="middle">330 998</text>
+<circle class="f-effect ring" cx="1389.27" cy="262.89" r="5.5" stroke-width="2"/>
+<text class="ink t-foot" x="1389.27" y="246.89" text-anchor="middle">393 329</text>
+<circle class="f-effect ring" cx="1544" cy="221.76" r="5.5" stroke-width="2"/>
+<text class="ink t-foot" x="1536" y="205.76" text-anchor="end">437 399</text>
+<rect class="bg s-line" x="56" y="667" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="67" y="682" text-anchor="middle" font-weight="600">A</text>
+<text class="muted t-foot" x="88" y="682">calls 0–19 · baseline-v1-initial · 142 559 tokens</text>
+<rect class="bg s-line" x="56" y="691" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="67" y="706" text-anchor="middle" font-weight="600">B</text>
+<text class="muted t-foot" x="88" y="706">calls 20–39 · baseline-v1-fixed · 106 529 tokens</text>
+<rect class="bg s-line" x="56" y="715" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="67" y="730" text-anchor="middle" font-weight="600">C</text>
+<text class="muted t-foot" x="88" y="730">calls 40–47 · first comparison, baseline reviewer-v1 · 43 095 tokens</text>
+<rect class="bg s-line" x="552" y="667" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="563" y="682" text-anchor="middle" font-weight="600">D</text>
+<text class="muted t-foot" x="584" y="682">calls 48–55 · first comparison, candidate reviewer-v2 · 38 815 tokens</text>
+<rect class="bg s-line" x="552" y="691" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="563" y="706" text-anchor="middle" font-weight="600">E</text>
+<text class="muted t-foot" x="584" y="706">call 56 · improvement agent, cand-c9880d02f1f4 · 20 558 tokens</text>
+<rect class="bg s-line" x="552" y="715" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="563" y="730" text-anchor="middle" font-weight="600">F</text>
+<text class="muted t-foot" x="584" y="730">calls 57–64 · structural comparison, baseline reviewer-v1 · 41 773 tokens</text>
+<rect class="bg s-line" x="1048" y="667" width="22" height="20" rx="5" stroke-width="1"/>
+<text class="muted t-foot" x="1059" y="682" text-anchor="middle" font-weight="600">G</text>
+<text class="muted t-foot" x="1080" y="682">calls 65–72 · structural comparison, candidate reviewer-v2 · 44 070 tokens</text>
+<rect class="f-effect" x="56" y="766" width="14" height="14" rx="3"/>
+<text class="muted t-small" x="77" y="777">worker</text>
+<rect class="f-model" x="147.95" y="766" width="14" height="14" rx="3"/>
+<text class="muted t-small" x="168.95" y="777">reviewer</text>
+<rect class="f-human" x="253.55" y="766" width="14" height="14" rx="3"/>
+<text class="muted t-small" x="274.55" y="777">improvement</text>
+<circle class="f-effect" cx="386.62" cy="773" r="5"/>
+<text class="muted t-small" x="400.62" y="777">cumulative total stated by a run summary</text>
+<line class="s-line" x1="56" y1="810" x2="1544" y2="810" stroke-width="1" fill="none"/>
+<text class="muted t-foot" x="56" y="832">USD unknown: prices {} — accounting_method=tokens (budget.py never converts tokens to a dollar figure)</text>
+<text class="muted t-foot" x="56" y="851">the cap is off this scale: 437 399 metered against a session cap of 2 000 000 tokens (21.9%)</text>
+<text class="muted t-foot" x="56" y="870">the time axis is broken at the fifty-minute gap and the two segments are scaled separately; within a segment the scale is linear and the tick labels carry the real times</text>
+<text class="muted t-foot" x="56" y="889">every metered call belongs to one of the seven bands; the roles are the ledger's own role field, and the band totals are sums over it</text>
+</svg>

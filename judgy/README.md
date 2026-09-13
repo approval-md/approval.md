@@ -12,6 +12,14 @@ The shipped `data/*.json` are hand-written samples labelled `simulated` /
 `replay` / `not run`. Wiring the real thing means `reviewer-demo episode` and
 `reviewer-demo compare` writing real documents of the same shape into `data/`.
 
+`research/` is the research report (the page version of the repository's
+`RESEARCH.md`). Its figures under `research/figures/` are the SVG files that
+`scripts/build_report_figures.py` generates from the tracked `results/`
+directory; they are fetched at load time so the page's colour scheme applies.
+Regenerate them with `--out demo/site/research/figures` whenever
+`docs/figures/` is regenerated; a unit test asserts the two copies are
+identical, and no number on the page is typed by hand.
+
 ## Preview locally
 
 ```bash
