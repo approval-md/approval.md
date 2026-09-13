@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-13 17:26'
-updated_date: '2026-09-13 18:44'
+updated_date: '2026-09-13 18:48'
 labels: []
 dependencies:
   - APRV-331
@@ -152,6 +152,8 @@ on the landing page, which is true of `features/` now; rewriting that file's
 structure is larger than this task's "small edits only" and wants its own task.
 
 Finalization 2026-09-13: Carter approved the page in the Browser pane and asked for three copy edits (version note reads v0.2.0 only, source-checkout sentence trimmed, shortcut line reads 'Alternatively run approval quickstart for a walkthrough'), applied. Added tests/site-version-guard.test.ts binding the landing page note, both pages' JSON-LD softwareVersion and llms.txt to package.json version (3 tests pass). Spacing fixes after review: gate height 178 to 150 with the rail at 96px, email graphic phone-wrap and logs margins tightened, white-space:pre moved from .logs to .logs div (line gap 54px to 18px). AC 2 left unchecked: approval init ran as written against the installed CLI in a scratch directory and wrote APPROVAL.md plus .approval/, and every other verb on the page exists in the CLI help, but the interactive identity, attest, channel and up ceremony was not executed end to end. Verified: npm test 4113 pass 0 fail, lint clean, no console errors, scrollWidth equals innerWidth at 375.
+
+2026-09-13, after Done at Carter's request: llms-full.txt restructured to mirror the shipped pages. Top section is the landing page (install, the seven onboarding steps with the harness list and links, a one-paragraph description of the three graphics); a new heading marks everything from Try the loop onward as the content of approval.md/features/. Pushed to the PR 388 branch before merge. site-version-guard and docs-guard pass (19 tests).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
