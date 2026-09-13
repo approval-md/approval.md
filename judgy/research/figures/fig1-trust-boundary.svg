@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1131" viewBox="0 0 1600 1131" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="figtitle figdesc">
+<title id="figtitle">Fig 1 — the trust boundary and the two loops</title>
+<desc id="figdesc">Four authority lanes: the model recommends, the runtime authorizes, the human decides at the gate, and the effect lane records what happened. Below them the outer loop runs right to left: Weave traces, W&amp;B MCP retrieval, the improvement agent, one bounded prompt patch, the promotion gate and the active reviewer pointer. The patch bound is structural: one editable section, every other byte frozen. Policy, labels, permissions, the scorer and the gate itself sit in a hatched protected region and are digest-checked before and after every cycle.</desc>
+<style>
+text{font-family:"Instrument Sans",system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+.bg{fill:#FFFFFF;fill:var(--surface,#FFFFFF);}
+.fog{fill:#F2F4F7;fill:var(--fog,#F2F4F7);}
+.ink{fill:#161B26;fill:var(--ink,#161B26);}
+.muted{fill:#6B7382;fill:var(--muted,#6B7382);}
+.f-model{fill:#5B45D6;fill:var(--c-model,#5B45D6);}
+.f-runtime{fill:#0E7A76;fill:var(--c-runtime,#0E7A76);}
+.f-human{fill:#B3651B;fill:var(--c-human,#B3651B);}
+.f-effect{fill:#556072;fill:var(--c-effect,#556072);}
+.f-evidence{fill:#8A93A3;fill:var(--c-evidence,#8A93A3);}
+.f-line{fill:#D9DEE7;fill:var(--line,#D9DEE7);}
+.s-line{stroke:#D9DEE7;stroke:var(--line,#D9DEE7);}
+.s-ink{stroke:#161B26;stroke:var(--ink,#161B26);}
+.s-muted{stroke:#6B7382;stroke:var(--muted,#6B7382);}
+.s-model{stroke:#5B45D6;stroke:var(--c-model,#5B45D6);}
+.s-runtime{stroke:#0E7A76;stroke:var(--c-runtime,#0E7A76);}
+.s-human{stroke:#B3651B;stroke:var(--c-human,#B3651B);}
+.s-effect{stroke:#556072;stroke:var(--c-effect,#556072);}
+.s-evidence{stroke:#8A93A3;stroke:var(--c-evidence,#8A93A3);}
+.ring{stroke:#FFFFFF;stroke:var(--surface,#FFFFFF);}
+.t-title{font-size:27px;font-weight:600;}
+.t-panel{font-size:17px;font-weight:600;}
+.t-sub{font-size:14px;}
+.t-small{font-size:13px;}
+.t-foot{font-size:12px;}
+.t-tick{font-size:12px;}
+</style>
+<defs><marker id="arrow-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-model" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-runtime" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-runtime" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-human" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-human" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-effect" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-effect" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-evidence" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-evidence" d="M0 0L10 5L0 10Z"/></marker><marker id="arrow-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-line" d="M0 0L10 5L0 10Z"/></marker><pattern id="hatch-baseline" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)"><rect class="f-evidence" width="7" height="7" fill-opacity="0.16"/><line class="s-evidence" x1="0" y1="0" x2="0" y2="7" stroke-width="2.6"/></pattern><pattern id="hatch-protected" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)"><rect class="fog" width="10" height="10"/><line class="s-evidence" x1="0" y1="0" x2="0" y2="10" stroke-width="1" stroke-opacity="0.55"/></pattern></defs>
+<rect class="bg" x="0" y="0" width="1600" height="1131"/>
+<text class="ink t-title" x="56" y="58">The trust boundary and the two loops</text>
+<text class="muted t-sub" x="56" y="86" xml:space="preserve"><tspan>run </tspan><tspan class="mono">eval-development-reviewer-v1-20260913T184656Z-f032f2</tspan><tspan>  ·  split </tspan><tspan class="mono">development</tspan><tspan>  ·  dataset </tspan><tspan class="mono">dev-2026-09-13.3</tspan><tspan>  ·  integration_mode: </tspan><tspan class="mono">simulated</tspan></text>
+<text class="muted t-sub" x="56" y="107" xml:space="preserve"><tspan>models  worker </tspan><tspan class="mono">moonshotai/Kimi-K2.7-Code</tspan><tspan>  ·  reviewer </tspan><tspan class="mono">deepseek-ai/DeepSeek-V4-Pro-0813</tspan><tspan>  ·  improvement </tspan><tspan class="mono">deepseek-ai/DeepSeek-V4-Pro-0813</tspan></text>
+<rect class="f-model" x="56" y="150" width="1488" height="66" rx="8" fill-opacity="0.04"/>
+<circle class="f-model" cx="70" cy="175" r="5"/>
+<text class="ink t-small" x="84" y="180" font-weight="600">model</text>
+<text class="muted t-foot" x="84" y="197">recommends</text>
+<rect class="f-runtime" x="56" y="236" width="1488" height="66" rx="8" fill-opacity="0.04"/>
+<circle class="f-runtime" cx="70" cy="261" r="5"/>
+<text class="ink t-small" x="84" y="266" font-weight="600">runtime</text>
+<text class="muted t-foot" x="84" y="283">authorizes</text>
+<rect class="f-human" x="56" y="322" width="1488" height="60" rx="8" fill-opacity="0.04"/>
+<circle class="f-human" cx="70" cy="344" r="5"/>
+<text class="ink t-small" x="84" y="349" font-weight="600">human</text>
+<text class="muted t-foot" x="84" y="366">decides</text>
+<rect class="f-effect" x="56" y="402" width="1488" height="46" rx="8" fill-opacity="0.04"/>
+<circle class="f-effect" cx="70" cy="417" r="5"/>
+<text class="ink t-small" x="84" y="422" font-weight="600">effect</text>
+<text class="muted t-foot" x="84" y="439">observed</text>
+<rect class="f-model s-model" x="220" y="157" width="210" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="325" y="179" text-anchor="middle">worker_propose</text>
+<text class="muted t-foot" x="325" y="199" text-anchor="middle">drafts one action</text>
+<rect class="f-model s-model" x="478" y="157" width="210" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="583" y="179" text-anchor="middle">reviewer_review</text>
+<text class="muted t-foot" x="583" y="199" text-anchor="middle">advisory verdict</text>
+<rect class="f-runtime s-runtime" x="736" y="243" width="260" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="866" y="265" text-anchor="middle">runtime_check</text>
+<text class="muted t-foot" x="866" y="285" text-anchor="middle">approval.md gate</text>
+<rect class="f-runtime s-runtime" x="1044" y="243" width="230" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="1159" y="265" text-anchor="middle">controlled_execute</text>
+<text class="muted t-foot" x="1159" y="285" text-anchor="middle">bounded tools</text>
+<rect class="f-human s-human" x="736" y="328" width="260" height="48" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="866" y="357" text-anchor="middle">human decision</text>
+<rect class="f-effect s-effect" x="1322" y="405" width="222" height="44" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="1433" y="432" text-anchor="middle">observed effect</text>
+<line class="s-model" x1="430" y1="183" x2="470" y2="183" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-model)" fill="none"/>
+<path class="s-runtime" d="M688 183H712V269H728" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<line class="s-runtime" x1="728" y1="269" x2="734" y2="269" stroke-width="2" marker-end="url(#arrow-runtime)" fill="none"/>
+<line class="s-runtime" x1="996" y1="269" x2="1040" y2="269" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-runtime)" fill="none"/>
+<path class="s-effect" d="M1274 269H1298V427H1314" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<line class="s-effect" x1="1314" y1="427" x2="1320" y2="427" stroke-width="2" marker-end="url(#arrow-effect)" fill="none"/>
+<line class="s-human" x1="866" y1="328" x2="866" y2="301" stroke-width="2" marker-end="url(#arrow-human)" fill="none"/>
+<text class="muted t-foot" x="878" y="322">the only crossing: a recorded human decision at the gate</text>
+<text class="muted t-foot" x="1050" y="177">READY is a recommendation, not permission</text>
+<text class="muted t-foot" x="1050" y="197">the runtime decides independently of the verdict</text>
+<line class="s-evidence" x1="325" y1="209" x2="325" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<line class="s-evidence" x1="583" y1="209" x2="583" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<line class="s-evidence" x1="866" y1="295" x2="866" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<line class="s-evidence" x1="1159" y1="295" x2="1159" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<line class="s-evidence" x1="1433" y1="449" x2="1433" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<line class="s-evidence" x1="325" y1="486" x2="1433" y2="486" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" fill="none"/>
+<text class="muted t-foot" x="56" y="491">every stage traced</text>
+<rect class="f-evidence s-evidence" x="1322" y="520" width="222" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="1433" y="551" text-anchor="middle">Weave traces</text>
+<rect class="f-evidence s-evidence" x="1020" y="520" width="250" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="1145" y="551" text-anchor="middle">W&amp;B MCP retrieval</text>
+<rect class="f-model s-model" x="676" y="520" width="282" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text class="ink t-small mono" x="817" y="551" text-anchor="middle">improvement agent</text>
+<rect class="f-model s-model" x="56" y="520" width="560" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="336" y="551" text-anchor="middle">bounded patch → prompts/reviewer_v{n}.md only</text>
+<line class="s-evidence" x1="1433" y1="486" x2="1433" y2="520" stroke-width="1" stroke-dasharray="2 5" stroke-opacity="0.9" marker-end="url(#arrow-evidence)" fill="none"/>
+<line class="s-evidence" x1="1318" y1="546" x2="1276" y2="546" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-evidence)" fill="none"/>
+<line class="s-evidence" x1="1016" y1="546" x2="964" y2="546" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-evidence)" fill="none"/>
+<line class="s-model" x1="672" y1="546" x2="622" y2="546" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-model)" fill="none"/>
+<rect class="f-runtime s-runtime" x="56" y="620" width="250" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="181" y="651" text-anchor="middle">promotion gate</text>
+<rect class="f-runtime s-runtime" x="366" y="620" width="280" height="52" rx="10" fill-opacity="0.1" stroke-width="1.5"/>
+<text class="ink t-small mono" x="506" y="651" text-anchor="middle">prompts/ACTIVE_REVIEWER</text>
+<path class="s-model" d="M96 572V610" fill="none" stroke-width="2" stroke-linejoin="round"/>
+<line class="s-model" x1="96" y1="610" x2="96" y2="616" stroke-width="2" marker-end="url(#arrow-model)" fill="none"/>
+<line class="s-runtime" x1="310" y1="646" x2="360" y2="646" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-runtime)" fill="none"/>
+<path class="s-runtime" d="M646 646H662V219" fill="none" stroke-width="1.5" stroke-dasharray="5 5" stroke-linejoin="round"/>
+<line class="s-runtime" x1="662" y1="219" x2="662" y2="213" stroke-width="1.5" marker-end="url(#arrow-runtime)" fill="none"/>
+<text class="muted t-foot" x="670" y="249">next cycle</text>
+<text class="ink t-small" x="56" y="712" font-weight="600">the bound on a patch is structural, not a line count</text>
+<text class="muted t-small" x="56" y="734">one editable section, ## Adjustable guidance; every other byte of the reviewer prompt is frozen</text>
+<text class="muted t-small" x="56" y="754">at most 25 changed lines · at most 1500 added characters · at most 200 characters per line</text>
+<text class="muted t-small" x="56" y="774">ASCII only · no new headings · no approving, granting, tokens, bypassing, the gate</text>
+<rect x="676" y="620" width="868" height="244" rx="10" fill="url(#hatch-protected)"/>
+<rect class="f-evidence s-evidence" x="676" y="620" width="868" height="244" rx="10" fill-opacity="0" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text class="ink t-small" x="694" y="646" font-weight="600">protected: digests checked before and after every cycle</text>
+<text class="muted t-foot mono" x="694" y="674">src/approval_reviewer/**</text>
+<text class="muted t-foot mono" x="694" y="698">src/approval_reviewer/promotion.py</text>
+<text class="muted t-foot mono" x="694" y="722">src/approval_reviewer/scoring.py</text>
+<text class="muted t-foot mono" x="694" y="746">src/approval_reviewer/budget.py</text>
+<text class="muted t-foot mono" x="694" y="770">src/approval_reviewer/policy_bridge.py</text>
+<text class="muted t-foot mono" x="694" y="794">src/approval_reviewer/controlled_tools.py</text>
+<text class="muted t-foot mono" x="1124" y="674">datasets/**</text>
+<text class="muted t-foot mono" x="1124" y="698">datasets/validation_manifest.json</text>
+<text class="muted t-foot mono" x="1124" y="722">prompts/**</text>
+<text class="muted t-foot mono" x="1124" y="746">.env</text>
+<text class="muted t-foot mono" x="1124" y="770">pyproject.toml</text>
+<text class="muted t-foot" x="694" y="848">the improvement agent writes none of these: the single write target is excluded from the prompts glob by name, at call time</text>
+<text class="ink t-small mono" x="56" y="904" font-weight="600">cand-a8f86c5e2339</text>
+<text class="muted t-small" x="202.6" y="904">first cycle, under the earlier line-count bound</text>
+<text class="muted t-foot" x="56" y="926">14 changed lines, budget 25 · 3 cited call ids · written to prompts/reviewer_v2.md</text>
+<text class="muted t-foot" x="56" y="950">cited Weave call ids, retrieved through the W&amp;B MCP server:</text>
+<text class="muted t-foot mono" x="56" y="970">01a09bc7-08a2-7069-9f11-1df756f9a02d</text>
+<text class="muted t-foot mono" x="56" y="988">01a09be2-8df2-77d7-b7da-6229116e37b5</text>
+<text class="muted t-foot mono" x="56" y="1006">01a09be3-5e09-7b06-b0d6-f56d30d4a9ee</text>
+<text class="ink t-small mono" x="816" y="904" font-weight="600">cand-c9880d02f1f4</text>
+<text class="muted t-small" x="962.6" y="904">second cycle, under the structural bound</text>
+<text class="muted t-foot" x="816" y="926">5 changed lines, budget 25 · 335 added characters, budget 1500 · 2 cited call ids · written to prompts/reviewer_v2.md</text>
+<text class="muted t-foot" x="816" y="950">cited Weave call ids, retrieved through the W&amp;B MCP server:</text>
+<text class="muted t-foot mono" x="816" y="970">01a09bc7-08a2-7069-9f11-1df756f9a02d</text>
+<text class="muted t-foot mono" x="816" y="988">01a09c10-73a6-780e-ad36-3022e68857db</text>
+<line class="s-line" x1="56" y1="1042" x2="1544" y2="1042" stroke-width="1" fill="none"/>
+<text class="muted t-foot" x="56" y="1064">integration_mode=simulated: a fixture-backed human decision stands in for a person; not evidence of real human authorization (spec 2.3)</text>
+<text class="muted t-foot" x="56" y="1083">the improvement agent writes exactly one file, prompts/reviewer_v{n}.md, and only inside its editable section; policy, labels, permissions, the scorer and the gate are digest-checked before and after every cycle</text>
+<text class="muted t-foot" x="56" y="1102">diagram of the implemented control flow, not a measurement: the constants on it are read from the source tree and the counts from the improvement records</text>
+</svg>

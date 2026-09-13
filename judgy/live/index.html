@@ -437,6 +437,26 @@ footer p { margin: 0; }
 .for .amark { font-size: 13px; vertical-align: -1px; }
 
 
+
+/* ---------- research figures pane (right-hand, wide screens only) ---------- */
+
+.figs { margin: 14px 0 0; }
+.figs-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; margin: 0 0 6px; }
+.figs-head h2 { font-size: 17px; }
+.figs-head a { font-size: 13px; color: var(--muted); }
+.figcard { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px; margin: 0 0 10px; overflow-x: auto; }
+.figcard svg { display: block; width: 100%; height: auto; }
+.figcard img { display: block; width: 100%; height: auto; }
+.figcap { margin: 4px 4px 0; color: var(--muted); font-size: 12px; }
+.fig-loading { padding: 18px 8px; color: var(--muted); font-size: 12px; text-align: center; }
+
+@media (min-width: 1280px) {
+  .page { max-width: 1840px; display: grid; grid-template-columns: minmax(0, 1fr) 680px; column-gap: 24px; align-items: start; }
+  .page > header, .page > footer, .page > .chiprow, .page > .unreachable { grid-column: 1 / -1; }
+  .page > main { grid-column: 1; min-width: 0; }
+  .page > .figs { grid-column: 2; margin: 10px 0 0; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
@@ -447,7 +467,7 @@ footer p { margin: 0; }
 
   <header>
     <h1 class="wordmark">judgy<span class="live-word">live</span></h1>
-    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a>. <a href="../">Back to the case ledger</a></p>
+    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a>. <a href="../">Back to the case ledger</a> · <a href="../research/">Research report</a></p>
 
     <div class="strip">
       <div class="strip-cell">
@@ -489,6 +509,18 @@ footer p { margin: 0; }
     </div>
     <p class="waiting" id="empty">Waiting for the first event.</p>
   </main>
+
+  <aside class="figs" id="figs" aria-label="research figures">
+    <div class="figs-head"><h2>Research figures</h2><a href="../research/">full report</a></div>
+    <div class="figcard" data-fig="fig3-promotion-comparison"><div class="fig-loading">loading…</div></div>
+    <p class="figcap">Fig 3. Both reviewer-v2 candidates against v1 on the validation split: one accepted on efficiency only, one rejected. Active reviewer unchanged.</p>
+    <div class="figcard" data-fig="fig2-baseline-scorecard"><div class="fig-loading">loading…</div></div>
+    <p class="figcap">Fig 2. Baseline reviewer-v1 on the development split, n=9, Wilson 95% whiskers.</p>
+    <div class="figcard" data-fig="fig1-trust-boundary"><div class="fig-loading">loading…</div></div>
+    <p class="figcap">Fig 1. The trust boundary and the two loops.</p>
+    <div class="figcard" data-fig="fig4-run-timeline"><div class="fig-loading">loading…</div></div>
+    <p class="figcap">Fig 4. Metered tokens by role over the session; cost in dollars unknown by design.</p>
+  </aside>
 
   <footer>
     <p>Renders <span class="mono">data/live/feed.json</span> as written.</p>
@@ -986,6 +1018,32 @@ footer p { margin: 0; }
   } else {
     start();
   }
+})();
+</script>
+<script>
+(function () {
+  "use strict";
+  var holders = document.querySelectorAll("[data-fig]");
+  Array.prototype.forEach.call(holders, function (holder) {
+    var name = holder.getAttribute("data-fig");
+    var url = "../research/figures/" + name + ".svg";
+    fetch(url, { cache: "no-cache" })
+      .then(function (r) { if (!r.ok) { throw new Error(r.status); } return r.text(); })
+      .then(function (text) {
+        var doc = new DOMParser().parseFromString(text, "image/svg+xml");
+        var svg = doc.documentElement;
+        if (!svg || svg.nodeName.toLowerCase() !== "svg" || doc.querySelector("parsererror")) { throw new Error("not an svg"); }
+        svg.setAttribute("role", "img");
+        holder.textContent = "";
+        holder.appendChild(document.importNode(svg, true));
+      })
+      .catch(function () {
+        holder.innerHTML = "";
+        var img = document.createElement("img");
+        img.src = url; img.alt = "figure " + name;
+        holder.appendChild(img);
+      });
+  });
 })();
 </script>
 </body>
