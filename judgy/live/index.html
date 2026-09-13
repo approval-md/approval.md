@@ -70,8 +70,8 @@ body {
   background: var(--fog);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.5;
   font-synthesis-weight: none;
 }
 
@@ -80,7 +80,7 @@ body {
   margin: 0 auto;
   padding-left: 20px;
   padding-right: 20px;
-  padding-block: 40px 64px;
+  padding-block: 24px 44px;
 }
 
 a {
@@ -101,35 +101,26 @@ a:hover { text-decoration-color: currentColor; }
 h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
 
 .wordmark {
-  font-size: 40px;
+  font-size: 32px;
   line-height: 1.05;
   letter-spacing: -0.015em;
   font-weight: 600;
   font-variation-settings: "SOFT" 60;
-  margin: 0 0 4px;
+  margin: 0 0 2px;
 }
 
 .wordmark .live-word {
   font-style: italic;
   font-weight: 400;
-  font-size: 30px;
+  font-size: 22px;
   letter-spacing: 0;
   color: var(--muted);
-  margin-left: 8px;
+  margin-left: 7px;
 }
-
-.tagline {
-  margin: 0 0 6px;
-  color: var(--muted);
-  font-size: 17px;
-  max-width: 44em;
-}
-
-.backlink { margin: 0 0 22px; font-size: 15px; color: var(--muted); }
 
 .mono {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -141,10 +132,10 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
   display: inline-block;
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 1px 7px;
+  padding: 0 6px;
   font-family: var(--sans);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
@@ -161,11 +152,15 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
   border-radius: 6px;
   background: var(--surface);
   overflow: hidden;
-  margin: 0 0 12px;
+  margin: 0 0 6px;
 }
 
 .strip-cell {
-  padding: 12px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  padding: 5px 10px;
   border-left: 1px solid var(--line);
   min-width: 0;
 }
@@ -174,31 +169,30 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
 .strip-key {
   font-family: var(--serif);
   font-style: italic;
-  font-size: 15px;
+  font-size: 13px;
   color: var(--muted);
-  margin-bottom: 6px;
 }
 
 .strip-val {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 10px;
-  align-items: center;
-  font-size: 15px;
+  gap: 4px 8px;
+  align-items: baseline;
+  font-size: 13px;
   min-width: 0;
 }
 
-.strip-val .id { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.strip-val .id { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 
 .toggle {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--ink);
   background: transparent;
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 2px 10px;
+  padding: 0 8px;
   cursor: pointer;
 }
 .toggle:hover { border-color: var(--muted); }
@@ -209,67 +203,66 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
   .strip-cell:nth-child(n + 3) { border-top: 1px solid var(--line); }
 }
 
-/* ---------- banners ---------- */
+/* ---------- provenance line ---------- */
 
-.banner {
-  margin: 0 0 12px;
-  padding: 8px 14px;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--c-evidence);
-  border-radius: 4px;
-  background: var(--surface);
+.chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin: 0 0 6px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .unreachable {
   border: 1px solid var(--c-human);
   border-radius: 6px;
   background: var(--surface);
-  padding: 14px 16px;
-  margin: 0 0 12px;
-  font-size: 15px;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+  font-size: 13px;
 }
 
-.unreachable h2 { font-size: 19px; color: var(--c-human); margin-bottom: 6px; }
+.unreachable h2 { font-size: 17px; color: var(--c-human); margin-bottom: 2px; }
 
-.unreachable p { margin: 4px 0 0; }
+.unreachable p { margin: 2px 0 0; }
 
 .unreachable pre {
-  margin: 10px 0 0;
-  padding: 10px 12px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
   background: var(--fog);
   border: 1px solid var(--line);
   border-radius: 4px;
   overflow-x: auto;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* ---------- the feed grid ---------- */
 
 .feed {
   display: grid;
-  grid-template-columns: 1.3fr 1fr 0.8fr;
+  grid-template-columns: 1.4fr 1fr 0.7fr;
   align-items: start;
-  margin: 18px 0 0;
+  margin: 10px 0 0;
 }
 
 .head-cell {
   font-family: var(--serif);
   font-style: italic;
-  font-size: 19px;
+  font-size: 16px;
   line-height: 1.2;
-  padding: 0 14px 8px;
+  padding: 0 10px 4px;
 }
 
-.head-actions { color: var(--ink); padding-left: 14px; }
+.head-actions { color: var(--ink); padding-left: 10px; }
 .head-judge { color: var(--c-model); }
 .head-human { color: var(--c-human); }
 
 .cell {
   border-top: 1px solid var(--line);
-  padding: 14px 14px 18px;
+  padding: 7px 10px 9px;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -278,17 +271,21 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
 .cell-judge { border-left: 2px dashed var(--c-model); }
 .cell-human { border-left: 6px double var(--c-human); }
 
+/* One episode can hold several attempts, linked by `revises`. The line between
+   two episodes is heavier than the line between two attempts of one episode. */
+.row-ep-start > .cell { border-top-width: 2px; }
+
 /* No human was needed: the cell keeps the row's hairline and nothing else, so
    an empty cell never reads as a lane that was used. */
-.cell-human.cell-quiet { border-left: 0; padding-left: 20px; }
+.cell-human.cell-quiet { border-left: 0; padding-left: 16px; }
 .cell-quiet .cell-lane { display: none; }
 
 .cell-lane {
   display: none;
   font-family: var(--serif);
   font-style: italic;
-  font-size: 14px;
-  margin-bottom: 4px;
+  font-size: 13px;
+  margin-bottom: 2px;
 }
 .cell-action .cell-lane { color: var(--ink); }
 .cell-judge .cell-lane { color: var(--c-model); }
@@ -299,13 +296,13 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
 .act-verb {
   font-family: var(--sans);
   font-weight: 600;
-  font-size: 17px;
+  font-size: 15px;
   line-height: 1.3;
 }
 
-.args { margin: 6px 0 0; display: flex; flex-direction: column; gap: 2px; }
+.args { margin: 3px 0 0; display: flex; flex-direction: column; gap: 1px; }
 
-.arg { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.arg { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .arg .k { color: var(--muted); }
 .arg .v { color: var(--ink); }
 
@@ -315,64 +312,86 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
   padding-bottom: 1px;
 }
 
-.revises { margin-top: 8px; font-size: 14px; color: var(--muted); }
-.revises .id { font-family: var(--mono); font-size: 13px; }
+/* Worker-authored assertions. They are not evidence, and the chip says so. */
+.claims { margin-top: 4px; }
+.claims-head { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.claim { font-family: var(--mono); font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
 
-.act-meta { margin-top: 8px; font-size: 14px; color: var(--muted); }
-.act-ts { margin-top: 2px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.revises { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.revises .id { font-family: var(--mono); font-size: 12px; }
+
+.act-meta { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.act-ep { margin-top: 1px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.act-ts { margin-top: 1px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.act-trace { margin-top: 1px; font-family: var(--mono); font-size: 12px; }
+
+/* The observed effect, the fourth authority: what actually happened. */
+.effect {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 5px solid var(--c-effect);
+}
+
+.effect-line { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; font-size: 12px; }
+.effect-key { color: var(--muted); }
+.effect-word { font-weight: 600; color: var(--c-effect); }
+.effect-ref { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* ---------- judge cell ---------- */
 
-.verdict-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.verdict-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 
 .verdict {
   font-family: var(--serif);
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.2;
   color: var(--c-model);
 }
 
-.raw { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.raw { font-family: var(--mono); font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
 
-.reason { margin: 4px 0 0; font-size: 15px; }
+.reason { margin: 2px 0 0; font-size: 13px; }
 
-.cites { margin-top: 6px; font-size: 14px; color: var(--muted); }
+.cites { margin-top: 3px; font-size: 12px; color: var(--muted); }
 
-.reviewer-version { margin-top: 4px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.reviewer-version { margin-top: 2px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
 .runtime {
-  margin-top: 12px;
-  padding-top: 10px;
-  padding-left: 10px;
+  margin-top: 6px;
+  padding-top: 5px;
+  padding-left: 8px;
   border-top: 1px solid var(--line);
   border-left: 2px solid var(--c-runtime);
 }
 
-.runtime-key { color: var(--muted); font-size: 15px; }
+/* The runtime was never consulted, so its lane is not drawn. */
+.runtime-quiet { border-left: 0; padding-left: 0; color: var(--muted); font-size: 12px; }
+
+.runtime-key { color: var(--muted); font-size: 13px; }
 
 .runtime-word {
   font-family: var(--sans);
   font-weight: 600;
-  font-size: 15px;
+  font-size: 13px;
   color: var(--c-runtime);
 }
 
-.runtime-rules { margin-top: 2px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.runtime-rules { margin-top: 1px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
-.waiting { color: var(--muted); font-style: italic; font-size: 15px; }
+.waiting { color: var(--muted); font-style: italic; font-size: 13px; }
 
 /* ---------- human cell ---------- */
 
 .human-status {
   font-family: var(--serif);
-  font-size: 20px;
+  font-size: 17px;
   line-height: 1.2;
   color: var(--c-human);
 }
 
-.human-line { margin-top: 4px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.human-line { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 3px 6px; align-items: baseline; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
-.human-chip { margin-top: 8px; }
+.human-chip { margin-top: 4px; }
 
 /* ---------- new row wash ---------- */
 
@@ -389,22 +408,24 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
   .feed { grid-template-columns: minmax(0, 1fr); }
   .head-cell { display: none; }
   .cell-lane { display: block; }
-  .cell { padding: 10px 0 10px 12px; border-top: 0; }
-  .cell-action { border-top: 1px solid var(--line); padding-top: 16px; }
-  .cell-human { padding-bottom: 20px; }
+  .cell { padding: 7px 0 7px 10px; border-top: 0; }
+  .cell-action { border-top: 1px solid var(--line); padding-top: 10px; }
+  .cell-human { padding-bottom: 12px; }
+  .row-ep-start > .cell { border-top: 0; }
+  .row-ep-start > .cell-action { border-top: 2px solid var(--line); }
 }
 
 /* ---------- footer ---------- */
 
 footer {
-  margin-top: 40px;
-  padding-top: 18px;
+  margin-top: 24px;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 
-footer p { margin: 0 0 4px; }
+footer p { margin: 0; }
 /* approval.md wordmark, carried over from approval.md's own page: the o is a checked box. */
 .amark { display: inline-flex; align-items: center; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; letter-spacing: -.5px; color: var(--ink); text-decoration: none; }
 .amark svg { height: .82em; width: auto; display: block; margin: 0 .02em; }
@@ -412,8 +433,8 @@ footer p { margin: 0 0 4px; }
 .amark .md { color: var(--muted); }
 .amark:hover { color: #17A15E; }
 .amark:hover .bx { fill: #17A15E; }
-.for { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
-.for .amark { font-size: 15px; vertical-align: -1px; }
+.for { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.for .amark { font-size: 13px; vertical-align: -1px; }
 
 
 @media (prefers-reduced-motion: reduce) {
@@ -426,9 +447,7 @@ footer p { margin: 0 0 4px; }
 
   <header>
     <h1 class="wordmark">judgy<span class="live-word">live</span></h1>
-    <p class="tagline">every proposed action, what the judge said, and what the human said</p>
-    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a></p>
-    <p class="backlink"><a href="../">Back to the case ledger</a></p>
+    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a>. <a href="../">Back to the case ledger</a></p>
 
     <div class="strip">
       <div class="strip-cell">
@@ -453,14 +472,13 @@ footer p { margin: 0 0 4px; }
     </div>
   </header>
 
-  <p class="banner" id="banner" hidden>This feed is synthetic. Human rows marked simulated are stand-ins, not decisions.</p>
+  <p class="chiprow" id="synthetic" hidden></p>
 
   <section class="unreachable" id="unreachable" hidden>
     <h2>Feed unreachable</h2>
     <p id="unreachable-detail"></p>
-    <p>Most often this page was opened straight from disk. Serve the folder over http instead:</p>
+    <p class="muted">Serve the folder over http:</p>
     <pre>python3 -m http.server 8765 -d demo/site</pre>
-    <p class="muted">The rows already fetched stay on screen, and the page keeps retrying.</p>
   </section>
 
   <main>
@@ -473,8 +491,7 @@ footer p { margin: 0 0 4px; }
   </main>
 
   <footer>
-    <p>A pure renderer: every word below is read from <span class="mono">data/live/feed.json</span> and shown as it was written there.</p>
-    <p>Synthetic events come from <span class="mono">scripts/feed_simulator.py</span>.</p>
+    <p>Renders <span class="mono">data/live/feed.json</span> as written.</p>
   </footer>
 
 </div>
@@ -483,10 +500,11 @@ footer p { margin: 0 0 4px; }
 (function () {
   "use strict";
 
-  /* This page is a pure renderer. It never decides a verdict, an authorization
-     or a human decision; it reads them from the feed document and shows them,
-     each in its own lane. The only computation is presentational: casing, and
-     a diff of two arg objects so a revision shows what changed. */
+  /* This page is a pure renderer. It never decides a verdict, an authorization,
+     a human decision or an effect; it reads them from the feed document and
+     shows them, each in its own lane. The only computation is presentational:
+     casing, a diff of two arg objects so a revision shows what changed, and the
+     episode grouping of rows. */
 
   var FEED_URL = "../data/live/feed.json";
   var POLL_MS = 1000;
@@ -495,7 +513,7 @@ footer p { margin: 0 0 4px; }
 
   var feedEl = document.getElementById("feed");
   var emptyEl = document.getElementById("empty");
-  var bannerEl = document.getElementById("banner");
+  var syntheticEl = document.getElementById("synthetic");
   var unreachableEl = document.getElementById("unreachable");
   var unreachableDetailEl = document.getElementById("unreachable-detail");
   var modeValEl = document.getElementById("mode-val");
@@ -508,6 +526,7 @@ footer p { margin: 0 0 4px; }
     feedId: null,
     lastSeq: 0,
     rows: {},
+    order: [],
     firstRow: null,
     paused: false,
     timer: null
@@ -576,7 +595,34 @@ footer p { margin: 0 0 4px; }
     return changed;
   }
 
-  function renderAction(cell, event, previousArgs) {
+  function claimsBlock(claims) {
+    var wrap = el("div", "claims");
+    var head = el("div", "claims-head");
+    head.appendChild(el("span", null, "claims:"));
+    head.appendChild(chip("untrusted"));
+    wrap.appendChild(head);
+    claims.forEach(function (claim) {
+      wrap.appendChild(el("div", "claim", formatValue(claim)));
+    });
+    return wrap;
+  }
+
+  /* The observed effect of the action: what the environment reports happened.
+     It is its own authority, never inferred from the verdict. */
+  function effectBlock(event) {
+    var wrap = el("div", "effect");
+    var line = el("div", "effect-line");
+    line.appendChild(el("span", "effect-key", "ran:"));
+    line.appendChild(el("span", "effect-word", displayWord(event.outcome)));
+    if (event.simulated === true) { line.appendChild(chip("simulated")); }
+    wrap.appendChild(line);
+    (event.artifact_refs || []).forEach(function (ref) {
+      wrap.appendChild(el("div", "effect-ref", formatValue(ref)));
+    });
+    return wrap;
+  }
+
+  function renderAction(cell, event, previousArgs, effectEvent) {
     clear(cell);
     cell.appendChild(el("div", "cell-lane", "action"));
 
@@ -599,6 +645,10 @@ footer p { margin: 0 0 4px; }
     });
     cell.appendChild(argsWrap);
 
+    if (Array.isArray(event.claims) && event.claims.length) {
+      cell.appendChild(claimsBlock(event.claims));
+    }
+
     if (event.revises) {
       var revises = el("div", "revises");
       revises.appendChild(document.createTextNode("revises "));
@@ -611,7 +661,21 @@ footer p { margin: 0 0 4px; }
     if (event.scenario) { meta.push(String(event.scenario)); }
     if (meta.length) { cell.appendChild(el("div", "act-meta", meta.join(", "))); }
 
+    if (event.episode_id) { cell.appendChild(el("div", "act-ep", String(event.episode_id))); }
+
     cell.appendChild(el("div", "act-ts", String(event.ts)));
+
+    /* Only a trace the feed carries is linked. Nothing here invents one. */
+    if (typeof event.trace_url === "string" && event.trace_url) {
+      var traceWrap = el("div", "act-trace");
+      var link = el("a", null, "trace");
+      link.href = event.trace_url;
+      link.rel = "noopener noreferrer";
+      traceWrap.appendChild(link);
+      cell.appendChild(traceWrap);
+    }
+
+    if (effectEvent) { cell.appendChild(effectBlock(effectEvent)); }
   }
 
   /* ---------- judge cell ---------- */
@@ -644,8 +708,15 @@ footer p { margin: 0 0 4px; }
     }
 
     /* The runtime decided this on its own. It is a separate authority from the
-       reviewer's recommendation, so it never shares a word with it. */
-    var runtime = event.runtime || {};
+       reviewer's recommendation, so it never shares a word with it, and when
+       the feed carries no runtime decision the page says so rather than
+       filling the gap. */
+    var runtime = event.runtime;
+    if (!runtime || runtime.decision === undefined || runtime.decision === null) {
+      cell.appendChild(el("div", "runtime runtime-quiet", "runtime not consulted"));
+      return;
+    }
+
     var block = el("div", "runtime");
     var first = el("div");
     first.appendChild(el("span", "runtime-key", "runtime: "));
@@ -677,10 +748,17 @@ footer p { margin: 0 0 4px; }
 
     cell.appendChild(el("div", "human-status", capitalize(displayWord(humanEvent.status))));
 
-    var parts = [];
-    if (humanEvent.channel) { parts.push(String(humanEvent.channel)); }
-    if (humanEvent.request_id) { parts.push(String(humanEvent.request_id)); }
-    if (parts.length) { cell.appendChild(el("div", "human-line", parts.join(" "))); }
+    /* The channel is printed as the feed wrote it. A fixture channel is a
+       pre-authored answer, so it carries the simulated label. */
+    var channelLine = el("div", "human-line");
+    if (humanEvent.channel) {
+      channelLine.appendChild(el("span", null, String(humanEvent.channel)));
+      if (humanEvent.channel === "fixture") { channelLine.appendChild(chip("simulated")); }
+    }
+    if (humanEvent.request_id) {
+      channelLine.appendChild(el("span", null, String(humanEvent.request_id)));
+    }
+    if (channelLine.childNodes.length) { cell.appendChild(channelLine); }
 
     if (humanEvent.decided_at) {
       cell.appendChild(el("div", "human-line", "decided " + String(humanEvent.decided_at)));
@@ -700,13 +778,24 @@ footer p { margin: 0 0 4px; }
   /* ---------- rows ---------- */
 
   function resetGrid() {
-    Object.keys(state.rows).forEach(function (id) {
-      var row = state.rows[id];
+    state.order.forEach(function (row) {
       if (row.wrapper.parentNode) { row.wrapper.parentNode.removeChild(row.wrapper); }
     });
     state.rows = {};
+    state.order = [];
     state.firstRow = null;
     state.lastSeq = 0;
+  }
+
+  /* Rows run newest first, so row i sits under row i-1. A boundary between two
+     episodes gets the heavier line; attempts inside one episode keep the
+     hairline. */
+  function restyleEpisodeBoundaries() {
+    state.order.forEach(function (row, index) {
+      var above = index > 0 ? state.order[index - 1] : null;
+      var starts = Boolean(above && row.episodeId !== above.episodeId);
+      row.wrapper.classList.toggle("row-ep-start", starts);
+    });
   }
 
   function makeRow(actionId) {
@@ -721,7 +810,9 @@ footer p { margin: 0 0 4px; }
       human: el("div", "cell cell-human"),
       actionEvent: null,
       verdictEvent: null,
-      humanEvent: null
+      humanEvent: null,
+      effectEvent: null,
+      episodeId: null
     };
     wrapper.appendChild(row.action);
     wrapper.appendChild(row.judge);
@@ -736,9 +827,10 @@ footer p { margin: 0 0 4px; }
     feedEl.insertBefore(wrapper, state.firstRow);
     state.firstRow = wrapper;
     state.rows[actionId] = row;
+    state.order.unshift(row);
 
-    wrapper.className = "feed-row row-new";
-    window.setTimeout(function () { wrapper.className = "feed-row"; }, 400);
+    wrapper.classList.add("row-new");
+    window.setTimeout(function () { wrapper.classList.remove("row-new"); }, 400);
 
     if (emptyEl) { emptyEl.hidden = true; }
     return row;
@@ -753,13 +845,23 @@ footer p { margin: 0 0 4px; }
     return previous && previous.actionEvent ? previous.actionEvent.args : null;
   }
 
+  function redrawAction(row) {
+    var event = row.actionEvent;
+    renderAction(row.action, event, event ? previousArgsFor(event) : null, row.effectEvent);
+  }
+
   function applyEvent(event) {
     if (!event || !event.action_id) { return; }
     var row = rowFor(event.action_id);
 
+    if (event.episode_id && row.episodeId !== event.episode_id) {
+      row.episodeId = String(event.episode_id);
+      restyleEpisodeBoundaries();
+    }
+
     if (event.kind === "action") {
       row.actionEvent = event;
-      renderAction(row.action, event, previousArgsFor(event));
+      redrawAction(row);
     } else if (event.kind === "verdict") {
       row.verdictEvent = event;
       renderJudge(row.judge, event);
@@ -768,6 +870,9 @@ footer p { margin: 0 0 4px; }
       /* The latest human event for an action is the one that stands. */
       row.humanEvent = event;
       renderHuman(row.human, event, row.verdictEvent);
+    } else if (event.kind === "effect") {
+      row.effectEvent = event;
+      redrawAction(row);
     }
   }
 
@@ -776,7 +881,15 @@ footer p { margin: 0 0 4px; }
   function setMode(mode) {
     clear(modeValEl);
     modeValEl.appendChild(chip(mode));
-    bannerEl.hidden = mode !== "simulated";
+
+    clear(syntheticEl);
+    if (mode === "simulated") {
+      syntheticEl.appendChild(chip("simulated", "synthetic feed"));
+      syntheticEl.appendChild(el("span", null, "human rows marked simulated are stand-ins"));
+      syntheticEl.hidden = false;
+    } else {
+      syntheticEl.hidden = true;
+    }
   }
 
   function setPollState(text) {
