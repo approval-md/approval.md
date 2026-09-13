@@ -65,8 +65,8 @@ body {
   background: var(--fog);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.5;
   font-synthesis-weight: none;
 }
 
@@ -75,7 +75,7 @@ body {
   margin: 0 auto;
   padding-left: 20px;
   padding-right: 20px;
-  padding-block: 48px 64px;
+  padding-block: 28px 44px;
 }
 
 a {
@@ -96,36 +96,29 @@ a:hover { text-decoration-color: currentColor; }
 h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; }
 
 .wordmark {
-  font-size: clamp(46px, 13vw, 64px);
+  font-size: clamp(32px, 9vw, 40px);
   line-height: 1.02;
   letter-spacing: -0.015em;
   font-weight: 600;
   font-variation-settings: "SOFT" 60;
-  margin: 0 0 6px;
-}
-
-.tagline {
-  margin: 0 0 28px;
-  color: var(--muted);
-  font-size: 17px;
-  max-width: 34em;
+  margin: 0 0 2px;
 }
 
 h2 {
-  font-size: clamp(26px, 5.4vw, 32px);
+  font-size: clamp(20px, 4.4vw, 24px);
   line-height: 1.15;
-  margin: 0 0 18px;
+  margin: 0 0 10px;
 }
 
 h3 {
-  font-size: 20px;
+  font-size: 17px;
   line-height: 1.25;
-  margin: 0 0 10px;
+  margin: 0 0 6px;
 }
 
 .mono {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -143,10 +136,10 @@ h3 {
   display: inline-block;
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 1px 7px;
+  padding: 0 6px;
   font-family: var(--sans);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
@@ -165,11 +158,15 @@ h3 {
   border-radius: 6px;
   background: var(--surface);
   overflow: hidden;
-  margin: 0 0 34px;
+  margin: 0 0 16px;
 }
 
 .docket-cell {
-  padding: 12px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  padding: 5px 10px;
   border-left: 1px solid var(--line);
   min-width: 0;
 }
@@ -178,16 +175,15 @@ h3 {
 .docket-key {
   font-family: var(--serif);
   font-style: italic;
-  font-size: 15px;
+  font-size: 13px;
   color: var(--muted);
-  margin-bottom: 6px;
 }
 
-.docket-val { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.docket-val { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; min-width: 0; }
 
 .docket-val .id {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -199,30 +195,30 @@ h3 {
 
 /* ---------- brief ---------- */
 
-.brief { padding: 18px 20px; margin: 0 0 34px; }
+.brief { padding: 10px 12px; margin: 0 0 16px; }
 
 .brief-label {
   font-family: var(--serif);
   font-style: italic;
-  font-size: 15px;
+  font-size: 13px;
   color: var(--muted);
 }
 
-.task-line { margin: 2px 0 18px; font-size: 18px; }
+.task-line { margin: 1px 0 8px; font-size: 15px; }
 
-.policy-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.policy-list { list-style: none; margin: 2px 0 0; padding: 0; }
 
 .policy-item {
   display: grid;
-  grid-template-columns: 48px 1fr;
-  gap: 10px;
-  padding: 4px 0;
+  grid-template-columns: 40px 1fr;
+  gap: 8px;
+  padding: 1px 0;
   align-items: baseline;
 }
 
-.policy-id { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.policy-id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
-.policy-text { font-size: 15px; }
+.policy-text { font-size: 13px; }
 
 @media (max-width: 479px) {
   .policy-item { grid-template-columns: 1fr; gap: 0; }
@@ -230,22 +226,22 @@ h3 {
 
 /* ---------- ledger ---------- */
 
-.episode { margin: 0 0 34px; padding: 18px 20px 8px; }
+.episode { margin: 0 0 16px; padding: 10px 12px 4px; }
 
-.episode-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.episode-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 2px; }
 
-.episode-id { font-family: var(--mono); font-size: 15px; }
+.episode-id { font-family: var(--mono); font-size: 13px; }
 
-.episode-scenario { color: var(--muted); font-size: 15px; }
+.episode-scenario { color: var(--muted); font-size: 13px; }
 
-.episode-task { margin: 0 0 16px; color: var(--muted); font-size: 15px; }
+.episode-task { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 
-.ledger { margin: 0 0 4px; }
+.ledger { margin: 0 0 2px; }
 
 .row {
   display: grid;
-  grid-template-columns: 110px 8px 1fr;
-  column-gap: 14px;
+  grid-template-columns: 88px 8px 1fr;
+  column-gap: 10px;
   --lane-color: var(--c-effect);
   --rail-style: solid;
   --rail-width: 2px;
@@ -260,34 +256,34 @@ h3 {
 .lane {
   font-family: var(--serif);
   font-style: italic;
-  font-size: 16px;
+  font-size: 14px;
   color: var(--lane-color);
-  padding-top: 12px;
+  padding-top: 6px;
   min-width: 0;
 }
 
 .rail { border-left: var(--rail-width) var(--rail-style) var(--lane-color); }
 
-.content { padding: 12px 0 14px; min-width: 0; }
+.content { padding: 6px 0 7px; min-width: 0; }
 
-.tier { font-size: 15px; }
+.tier { font-size: 13px; }
 
-.verdict-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 2px 0 2px; }
+.verdict-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin: 1px 0; }
 
 .verdict {
   font-family: var(--serif);
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.2;
   color: var(--lane-color);
 }
 
-.raw { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.raw { font-family: var(--mono); font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
 
-.action { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.action { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 
-.args { margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.args { margin: 2px 0 0; display: flex; flex-wrap: wrap; gap: 2px 12px; }
 
-.arg { font-family: var(--mono); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.arg { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .arg .k { color: var(--muted); }
 .arg .v { color: var(--ink); }
 
@@ -297,15 +293,15 @@ h3 {
   padding-bottom: 1px;
 }
 
-.note { color: var(--muted); font-size: 14px; margin-top: 6px; }
+.note { color: var(--muted); font-size: 13px; margin-top: 3px; }
 
-.reasons { margin: 6px 0 0; padding-left: 18px; font-size: 15px; }
-.reasons li { margin: 2px 0; }
+.reasons { margin: 3px 0 0; padding-left: 16px; font-size: 13px; }
+.reasons li { margin: 1px 0; }
 
-.ev-list { list-style: none; margin: 2px 0 0; padding: 0; }
-.ev-item { padding: 3px 0; font-size: 15px; }
-.ev-source { font-family: var(--mono); font-size: 13px; }
-.ev-text { color: var(--muted); font-size: 14px; }
+.ev-list { list-style: none; margin: 1px 0 0; padding: 0; }
+.ev-item { padding: 1px 0; font-size: 13px; }
+.ev-source { font-family: var(--mono); font-size: 12px; }
+.ev-text { color: var(--muted); font-size: 13px; }
 
 .cost-group { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
 .cost-unit { display: inline-flex; gap: 5px; align-items: baseline; }
@@ -313,10 +309,10 @@ h3 {
 .meta-line {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 18px;
-  padding: 12px 0 10px;
+  gap: 4px 14px;
+  padding: 6px 0 5px;
   border-top: 1px solid var(--line);
-  font-size: 14px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -329,8 +325,8 @@ h3 {
     padding-left: 12px;
   }
   .row .rail { display: none; }
-  .lane { padding-top: 12px; }
-  .content { padding-top: 2px; }
+  .lane { padding-top: 6px; }
+  .content { padding-top: 1px; }
 }
 
 /* ---------- improvement ---------- */
@@ -338,56 +334,56 @@ h3 {
 .columns {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  margin: 0 0 28px;
+  gap: 10px;
+  margin: 0 0 14px;
 }
 
 @media (max-width: 699px) {
   .columns { grid-template-columns: 1fr; }
 }
 
-.col { padding: 14px 16px; min-width: 0; }
+.col { padding: 9px 11px; min-width: 0; }
 
-.col-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 8px; }
+.col-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 4px; }
 
-.col-title { font-family: var(--serif); font-size: 19px; }
+.col-title { font-family: var(--serif); font-size: 16px; }
 
-.col-version { font-family: var(--mono); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin-bottom: 10px; }
+.col-version { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin-bottom: 6px; }
 
 .metrics { list-style: none; margin: 0; padding: 0; }
 
 .metric {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: 2px 10px;
   justify-content: space-between;
   align-items: baseline;
-  padding: 4px 0;
+  padding: 2px 0;
   border-top: 1px solid var(--line);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .metric-name { color: var(--muted); }
-.metric-val { font-family: var(--mono); font-size: 13px; }
+.metric-val { font-family: var(--mono); font-size: 12px; }
 
-.col-empty { color: var(--muted); font-size: 15px; }
+.col-empty { color: var(--muted); font-size: 13px; }
 
-.block { padding: 16px 18px; margin: 0 0 14px; }
+.block { padding: 10px 12px; margin: 0 0 10px; }
 
-.block-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 8px; }
+.block-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 4px; }
 
-.kv { margin: 6px 0 0; font-size: 15px; }
+.kv { margin: 3px 0 0; font-size: 13px; }
 .kv .kv-key { font-family: var(--serif); font-style: italic; color: var(--muted); }
 
 pre.diff {
-  margin: 10px 0 0;
-  padding: 12px 14px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
   background: var(--fog);
   border: 1px solid var(--line);
   border-radius: 4px;
   overflow-x: auto;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   tab-size: 2;
 }
@@ -398,7 +394,7 @@ pre.diff .hunk { color: var(--muted); display: block; }
 
 .decision-word {
   font-family: var(--serif);
-  font-size: 30px;
+  font-size: 22px;
   line-height: 1.15;
   color: var(--c-effect);
 }
@@ -409,36 +405,37 @@ pre.diff .hunk { color: var(--muted); display: block; }
   border: 1px solid var(--c-human);
   border-radius: 6px;
   background: var(--surface);
-  padding: 16px 18px;
-  margin: 0 0 28px;
+  padding: 10px 12px;
+  margin: 0 0 16px;
+  font-size: 13px;
 }
 
-.error h2 { font-size: 22px; color: var(--c-human); margin-bottom: 8px; }
+.error h2 { font-size: 18px; color: var(--c-human); margin-bottom: 4px; }
+
+.error p { margin: 2px 0 0; }
 
 .error pre {
-  margin: 10px 0 0;
-  padding: 10px 12px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
   background: var(--fog);
   border: 1px solid var(--line);
   border-radius: 4px;
   overflow-x: auto;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
 }
-
-.error ul { margin: 8px 0 0; padding-left: 18px; font-size: 15px; }
 
 /* ---------- footer ---------- */
 
 footer {
-  margin-top: 48px;
-  padding-top: 18px;
+  margin-top: 24px;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 
-footer p { margin: 0 0 4px; }
+footer p { margin: 0; }
 /* approval.md wordmark, carried over from approval.md's own page: the o is a checked box. */
 .amark { display: inline-flex; align-items: center; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; letter-spacing: -.5px; color: var(--ink); text-decoration: none; }
 .amark svg { height: .82em; width: auto; display: block; margin: 0 .02em; }
@@ -446,11 +443,10 @@ footer p { margin: 0 0 4px; }
 .amark .md { color: var(--muted); }
 .amark:hover { color: #17A15E; }
 .amark:hover .bx { fill: #17A15E; }
-.for { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
-.for .amark { font-size: 15px; vertical-align: -1px; }
+.for { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.for .amark { font-size: 13px; vertical-align: -1px; }
 
-
-.loading { color: var(--muted); font-size: 15px; }
+.loading { color: var(--muted); font-size: 13px; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
@@ -462,8 +458,7 @@ footer p { margin: 0 0 4px; }
 
   <header>
     <h1 class="wordmark">judgy</h1>
-    <p class="tagline">a reviewer that helps agents finish inside their existing authority</p>
-    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a>. <a href="live/">Watch the live feed.</a></p>
+    <p class="for">built on <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a>. <a href="live/">Watch the live feed</a></p>
     <div id="docket" class="docket" hidden></div>
   </header>
 
@@ -483,16 +478,15 @@ footer p { margin: 0 0 4px; }
     </section>
 
     <section id="improvement-section" hidden>
-      <h2>Does the reviewer get better?</h2>
+      <h2>Improvement loop</h2>
       <div id="improvement"></div>
     </section>
 
-    <p id="loading" class="loading">Loading the sample documents.</p>
+    <p id="loading" class="loading">Loading.</p>
   </main>
 
   <footer>
-    <p>Prior work: <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a> (<a href="https://github.com/approval-md/approval.md">source</a>), pinned at <span class="mono">78baf52</span>.</p>
-    <p>New this weekend: the reviewer, the evaluation suite and the improvement loop, written up in <span class="mono">PRIOR_WORK.md</span>.</p>
+    <p>Prior work: <a class="amark" href="https://approval.md" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></a> (<a href="https://github.com/approval-md/approval.md">source</a>) pinned <span class="mono">78baf52</span>. New this weekend: reviewer, evaluation, improvement loop.</p>
   </footer>
 
 </div>
@@ -955,12 +949,8 @@ footer p { margin: 0 0 4px; }
     var box = el("section", "error");
     box.appendChild(el("h2", null, "Could not load " + path));
     box.appendChild(el("p", null, reason));
-    box.appendChild(el("p", null, "Most often this page was opened straight from disk. Serve this folder over http instead:"));
+    box.appendChild(el("p", "muted", "Serve the folder over http:"));
     box.appendChild(el("pre", null, "python3 -m http.server 8765 -d demo/site"));
-    var list = el("ul");
-    list.appendChild(el("li", null, "Then open http://localhost:8765/ in a browser."));
-    list.appendChild(el("li", null, "Check that " + path + " exists next to index.html and is valid JSON."));
-    box.appendChild(list);
     document.getElementById("errors").appendChild(box);
   }
 

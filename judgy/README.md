@@ -111,18 +111,49 @@ rows as they appear. It is a pure renderer like the ledger page.
 | `events[]` | append-only, ordered by `seq` |
 
 Every event has `seq` (int), `ts` (ISO string), `action_id` (string, groups the
-three panes), `source`: `simulated` \| `runtime` \| `approval_cli`, and `kind`:
+panes), `episode_id` (string), `source`: `simulated` \| `runtime` \| `approval_cli`,
+and `kind`:
 
 | `kind` | Pane | Fields |
 |---|---|---|
-| `action` | left | `actor`, `action`, `args{}`, `scenario`, optional `revises` (the `action_id` this replaces) |
-| `verdict` | middle | `verdict: APPROVE \| REVISE \| ESCALATE`, `reason`, `evidence_refs[]`, `reviewer_version`, `runtime: {decision: permitted \| blocked \| needs_human, rule_ids[]}` |
-| `human` | right | `status: pending \| granted \| denied \| expired`, `channel` (e.g. `telegram`), optional `request_id`, optional `decided_at` |
+| `action` | left | `actor`, `action`, `args{}`, `scenario`, optional `revises` (the `action_id` this replaces), optional `trace_url` (a real Weave URL or absent, never invented), optional `claims[]` (worker-authored assertions, shown as untrusted) |
+| `verdict` | middle | `verdict: APPROVE \| REVISE \| ESCALATE \| ABORT`, `reason`, `evidence_refs[]`, `reviewer_version`, optional `runtime: {decision: permitted \| blocked \| needs_human \| error, rule_ids[]}` (absent when the runtime was not consulted, e.g. the reviewer escalated first) |
+| `human` | right | `status: pending \| granted \| denied \| expired`, `channel`: `telegram` \| `approval.md` \| `fixture`, optional `request_id`, optional `decided_at` |
+| `effect` | left, under the action | `outcome: succeeded \| failed \| refused \| not_run`, `simulated: bool`, `artifact_refs[]` |
 
-A `human` event with `source: simulated` is a synthetic stand-in and renders
-with a `simulated` chip. A real grant only ever arrives with
-`source: approval_cli`, observed from approval.md; nothing in this repo mints
-one.
+Source rules:
+
+- `simulated`: synthetic events from the simulator, and any human decision that
+  came from a scenario fixture (a pre-authored answer, not a live human).
+- `runtime`: observed from a real `reviewer-demo episode` run (proposals,
+  reviewer verdicts, gate verdicts, executions).
+- `approval_cli`: a human request or decision the approval.md CLI itself
+  reported. A `granted` row with this source is the only kind that means a
+  human really granted something; nothing in this repo mints one.
+
+`mode` is `live` only when **no** event has `source: simulated` **and** no
+`effect` event has `simulated: true`; otherwise `simulated`. A dry-run
+execution is a real runtime observation of something that never happened, so a
+feed containing one is never badged `live`.
+
+A `request_id` is the human request's own correlation id (`request_ref`) or is
+absent. No authorization handle or token is ever published into the feed, on
+any row.
+
+### Real episodes
+
+```bash
+reviewer-demo episode --scenario preview-basic --feed demo/site/data/live/feed.json
+reviewer-demo feed --episodes artifacts/episodes --out demo/site/data/live/feed.json
+```
+
+The first appends one episode's events to the feed as it finishes, continuing
+the existing `seq`; the second is a rebuild — it reads only `*.json` files at
+the top level of the directory and renumbers `seq` from 1. Both render
+`development`-split episodes only: `reviewer-demo feed` skips a validation-split
+file with a line on stderr, and `--feed` refuses and exits non-zero without
+writing the feed. The mapping lives in `approval_reviewer.feed_view` and is a
+pure function of the record.
 
 ### Synthetic feed
 
