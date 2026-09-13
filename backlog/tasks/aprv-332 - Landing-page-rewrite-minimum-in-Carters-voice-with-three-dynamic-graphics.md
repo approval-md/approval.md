@@ -1,11 +1,11 @@
 ---
 id: APRV-332
 title: 'Landing page rewrite: minimum, in Carter''s voice, with three dynamic graphics'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-13 17:26'
-updated_date: '2026-09-13 18:22'
+updated_date: '2026-09-13 18:44'
 labels: []
 dependencies:
   - APRV-331
@@ -20,14 +20,14 @@ Replace the reference-style index.html with the shortest page that explains the 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 index.html opens with the wordmark, the tagline, Carter's one-line description, and the install block reading 0.2.0, in that order
+- [x] #1 index.html opens with the wordmark, the tagline, Carter's one-line description, and the install block reading 0.2.0, in that order
 - [ ] #2 The onboarding steps are the text Carter approved in chat, each step one short line plus at most one command, and every command runs as written against approval-md@0.2.0 (init, setup identity, policy attest, setup channel telegram, env, up, hook)
-- [ ] #3 The APPROVAL.md step and graphic B show both fenced blocks, yaml approval-policy and yaml approval-values, and say the policy block is the only thing that changes what an agent may do
-- [ ] #4 Graphics A, B and C are inline CSS/SVG/vanilla JS, loop or trigger on scroll, and render their final state under prefers-reduced-motion
-- [ ] #5 If a Three.js component is used it loads from one pinned cdnjs URL, the page renders fully without it, and the dependency is justified in the implementation notes
-- [ ] #6 The feature set, compare, invariants, exit codes and posture are absent from index.html and linked from one line of links to features/, README, GitHub and npm
-- [ ] #7 README quickstart text no longer says approval quickstart is source-checkout only
-- [ ] #8 No horizontal scroll at 375px; light and dark themes both correct; every link resolves; npm test and lint pass
+- [x] #3 The APPROVAL.md step and graphic B show both fenced blocks, yaml approval-policy and yaml approval-values, and say the policy block is the only thing that changes what an agent may do
+- [x] #4 Graphics A, B and C are inline CSS/SVG/vanilla JS, loop or trigger on scroll, and render their final state under prefers-reduced-motion
+- [x] #5 If a Three.js component is used it loads from one pinned cdnjs URL, the page renders fully without it, and the dependency is justified in the implementation notes
+- [x] #6 The feature set, compare, invariants, exit codes and posture are absent from index.html and linked from one line of links to features/, README, GitHub and npm
+- [x] #7 README quickstart text no longer says approval quickstart is source-checkout only
+- [x] #8 No horizontal scroll at 375px; light and dark themes both correct; every link resolves; npm test and lint pass
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -150,4 +150,12 @@ executed; the commands were checked against the CLI reference and the README, no
 run. llms-full.txt still narrates the loop card and the feature grid as if they sat
 on the landing page, which is true of `features/` now; rewriting that file's
 structure is larger than this task's "small edits only" and wants its own task.
+
+Finalization 2026-09-13: Carter approved the page in the Browser pane and asked for three copy edits (version note reads v0.2.0 only, source-checkout sentence trimmed, shortcut line reads 'Alternatively run approval quickstart for a walkthrough'), applied. Added tests/site-version-guard.test.ts binding the landing page note, both pages' JSON-LD softwareVersion and llms.txt to package.json version (3 tests pass). Spacing fixes after review: gate height 178 to 150 with the rail at 96px, email graphic phone-wrap and logs margins tightened, white-space:pre moved from .logs to .logs div (line gap 54px to 18px). AC 2 left unchecked: approval init ran as written against the installed CLI in a scratch directory and wrote APPROVAL.md plus .approval/, and every other verb on the page exists in the CLI help, but the interactive identity, attest, channel and up ceremony was not executed end to end. Verified: npm test 4113 pass 0 fail, lint clean, no console errors, scrollWidth equals innerWidth at 375.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Rewrote index.html to the hero, install block, Carter's seven steps and three inline graphics (gate, APPROVAL.md terminal with both fenced blocks, held-then-delivered email) plus a Canvas 2D signal field behind the hero; no external scripts. README no longer calls quickstart source-only; llms files say 0.2.0; a new site-version guard test binds the pages to package.json. Verified in the Browser pane at 1280 and 375 in both themes, npm test and lint.
+<!-- SECTION:FINAL_SUMMARY:END -->

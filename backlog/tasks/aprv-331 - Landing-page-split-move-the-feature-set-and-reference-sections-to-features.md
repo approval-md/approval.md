@@ -1,11 +1,11 @@
 ---
 id: APRV-331
 title: 'Landing page split: move the feature set and reference sections to /features'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-13 17:26'
-updated_date: '2026-09-13 17:39'
+updated_date: '2026-09-13 18:44'
 labels: []
 dependencies: []
 ordinal: 249000
@@ -19,11 +19,11 @@ The approval.md landing page (index.html) carries the sidebar, the 70-card featu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 features/index.html exists with the sidebar, feature grid, search, filter chips, compare, invariants, exit codes, posture, read-on, footer, the hidden feature-index JSON and its drift-check script, and the three-way theme toggle, moved from index.html
-- [ ] #2 Every card href on the features page resolves to a real README, docs or examples anchor (grep-verified), and relative paths are corrected for the features/ directory
-- [ ] #3 Old landing-page anchors (#features, #compare, #invariants, #exit, #posture, #readon, #loop) keep working: a small script on index.html redirects a matching location.hash to features/#<id>
-- [ ] #4 Version strings on the moved page say 0.2.0 (install note, JSON-LD softwareVersion, feature-index version)
-- [ ] #5 No horizontal scroll at 375px; theme toggle works in both directions; npm test and lint pass
+- [x] #1 features/index.html exists with the sidebar, feature grid, search, filter chips, compare, invariants, exit codes, posture, read-on, footer, the hidden feature-index JSON and its drift-check script, and the three-way theme toggle, moved from index.html
+- [x] #2 Every card href on the features page resolves to a real README, docs or examples anchor (grep-verified), and relative paths are corrected for the features/ directory
+- [x] #3 Old landing-page anchors (#features, #compare, #invariants, #exit, #posture, #readon, #loop) keep working: a small script on index.html redirects a matching location.hash to features/#<id>
+- [x] #4 Version strings on the moved page say 0.2.0 (install note, JSON-LD softwareVersion, feature-index version)
+- [x] #5 No horizontal scroll at 375px; theme toggle works in both directions; npm test and lint pass
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -55,4 +55,12 @@ The approval.md landing page (index.html) carries the sidebar, the 70-card featu
 `npm test`: 4114 tests, 4113 pass, 1 skipped, 0 fail, exit 0. `npm run lint`: exit 0.
 
 **Left for a later task.** `llms.txt` and `llms-full.txt` still say "Version 0.1.0" and still mark those same three features "source checkout", and index.html's install note still says v0.1.0 and points at "features marked source checkout". Both sit outside this task's one-change-to-index.html scope: the llms files need their own task, and the install note is APRV-332's.
+
+Finalization 2026-09-13: verified in the Browser pane over HTTP at 1280 and 375 wide, dark and light; scrollWidth equals innerWidth at 375; no console output; npm test 4113 pass 0 fail; lint clean. Commit f98c48d on branch claude/approval-md-redesign-56faf1.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Moved the sidebar, loop card, 70-card feature grid, compare, invariants, exit codes, posture, read-on and feature-index JSON verbatim to features/index.html; index.html forwards the old fragments. Three cards corrected from source checkout to shipped in 0.2.0 per CHANGELOG. Verified with a href/anchor checker script (65 links, 0 misses), a redirect checker (7 of 7), browser checks at desktop and 375px in both themes, npm test and lint.
+<!-- SECTION:FINAL_SUMMARY:END -->
