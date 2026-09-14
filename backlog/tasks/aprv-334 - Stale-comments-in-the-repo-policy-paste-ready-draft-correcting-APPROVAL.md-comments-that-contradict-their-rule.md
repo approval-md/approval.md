@@ -3,11 +3,11 @@ id: APRV-334
 title: >-
   Stale comments in the repo policy: paste-ready draft correcting APPROVAL.md
   comments that contradict their rule
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-14 04:04'
-updated_date: '2026-09-14 04:05'
+updated_date: '2026-09-14 04:07'
 labels: []
 dependencies: []
 references:
@@ -23,10 +23,10 @@ The comment under policy.edit.spec in APPROVAL.md (lines 57-59) says the class i
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 docs/proposals/approval-md-2026-09.md exists with a "Before you paste" runbook (approval policy amend, approval doctor) and the APRV-273 wrapper-fence warning
-- [ ] #2 Every APPROVAL.md line the draft replaces is quoted byte-for-byte from the current file, next to its replacement, so the paste is unambiguous
-- [ ] #3 The policy.edit.spec comment is corrected to describe live_rate 0.01; every other class comment in the block is checked against its rule and any contradiction is corrected in the draft
-- [ ] #4 npm test and lint are unchanged by this task (docs only)
+- [x] #1 docs/proposals/approval-md-2026-09.md exists with a "Before you paste" runbook (approval policy amend, approval doctor) and the APRV-273 wrapper-fence warning
+- [x] #2 Every APPROVAL.md line the draft replaces is quoted byte-for-byte from the current file, next to its replacement, so the paste is unambiguous
+- [x] #3 The policy.edit.spec comment is corrected to describe live_rate 0.01; every other class comment in the block is checked against its rule and any contradiction is corrected in the draft
+- [x] #4 npm test and lint are unchanged by this task (docs only)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -37,3 +37,15 @@ The comment under policy.edit.spec in APPROVAL.md (lines 57-59) says the class i
 3. Leave placeholders for the APRV-335 and APRV-336 sections so the doc is one paste.
 4. npm test, lint, commit as its own commit on the PR stack.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Found three stale comments, not one: vcs.push.main (comment describes manual), policy.edit (this file is policy.core since APRV-198 and CI routes to policy.edit.ci; built-in set is CLAUDE.md, AGENTS.md, .npmrc per src/core/command-class.ts PROTECTED_FILENAMES), and policy.edit.spec (undeclared/one in five vs declared 0.01). Quoted lines were extracted with sed, never retyped; verified each of lines 46,54,56-59 appears exactly once in the doc (grep -cxF). Lint clean (oxlint). Docs-only change, so npm test is unaffected. Left placeholder sections for APRV-335 and APRV-336 so the human pastes once. No SPEC §11 invariant touched.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added docs/proposals/approval-md-2026-09.md: paste-and-attest runbook plus byte-exact current/replacement pairs for three stale APPROVAL.md comments. Verified quoted lines match the live file, lint clean. Commit bc8402e.
+<!-- SECTION:FINAL_SUMMARY:END -->
