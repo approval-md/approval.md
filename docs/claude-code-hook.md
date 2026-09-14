@@ -1345,9 +1345,18 @@ APRV-316 adds `policy-authorized-file` evidence from a verified
 `execution.started`. It requires a preceding unique registration matching the
 task, action, protected-path class and payload hash, then recomputes that hash
 from the stored Edit or Write payload. The same exact before/after anchors and
-hunk coverage apply. The payload must name the exact repository-relative path;
-an absolute path or another directory's file cannot establish that relationship.
-Backslashes are rejected, and conflicting applicable path classes in the
+hunk coverage apply. The payload's `file` must name this checkout's copy of the
+path: the hook binds an ABSOLUTE path (`fileToolGate` resolves the declared
+target against the session's `cwd`, so a worktree edit of SPEC.md is recorded as
+`/…/.claude/worktrees/<name>/SPEC.md`), and since APRV-337 this tier accepts
+that shape by matching its trailing segments, as well as the bare
+repository-relative path, because for Edit and Write material the bytes are the
+proof (`before` in the blob at base, `after` in the blob at head, the replay
+reaching HEAD byte-identical), so a scratch copy holding other bytes covers
+nothing; a relative path with extra leading directories such as `dry/SPEC.md`
+still names nothing here, and `granted-command` keeps its stricter `cwd`-join
+rule because a command payload describes no bytes.
+Backslashes and `..` segments are rejected, and conflicting applicable path classes in the
 base/head policy entries leave this evidence tier unavailable, including
 conflicts between directory and file rules.
 The start must precede the change within the permitted
