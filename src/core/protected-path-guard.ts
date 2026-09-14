@@ -176,6 +176,18 @@
  * several approved edits to one file; the finding names every contributing
  * grant and puts the strongest and nearest at the head.
  *
+ * A bound Edit may describe LESS than a line, because the hook binds exactly
+ * what the tool replaced: rewriting part of a long paragraph binds a fragment
+ * and covers neither the line it removed nor the line it added. So before the
+ * replay below there is a line-local step (APRV-340). A fragment that occurs
+ * exactly once in exactly one line of the blob at base has one possible
+ * effect — that line, rewritten — and when the line it rewrites is one this
+ * change removes and the line it produces is one this change adds, both lines
+ * are credited to it. It is a one-step replay that needs no search, and it
+ * carries every eligibility condition the replay carries; what it does not
+ * carry is the replay's budget, which a 200 KB file with forty naming
+ * candidates exhausts before reaching a proof (PR #393).
+ *
  * Three properties of that choice are worth stating, because each is a limit:
  *
  * - A blob that differs while its line multiset does not is a REORDERING, and
@@ -1322,6 +1334,38 @@ function linesOf(text: string): string[] {
   return parts;
 }
 
+/**
+ * Where a fragment anchors in the blob at base, and what replacing it yields.
+ *
+ * `null` unless the fragment sits inside ONE line and occurs exactly once in
+ * the whole file: a fragment with two homes does not say which occurrence the
+ * human approved, and a guess is not evidence. A fragment carrying a newline is
+ * not line-local at all and belongs to the global replay.
+ *
+ * Applying a uniquely-anchored edit to base can only produce base with that one
+ * line rewritten, so this is a one-step replay stated as the line it changes —
+ * the arithmetic the caller then checks against the hunks (APRV-340).
+ */
+function lineLocalReplacement(
+  baseLines: readonly string[],
+  edit: { before: string; after: string },
+): { removed: string; added: string } | null {
+  if (edit.before.includes("\n")) return null;
+  let found: { line: string; at: number } | null = null;
+  for (const line of baseLines) {
+    const first = line.indexOf(edit.before);
+    if (first === -1) continue;
+    if (found !== null || line.indexOf(edit.before, first + 1) !== -1) return null;
+    found = { line, at: first };
+  }
+  if (found === null) return null;
+  const { line, at } = found;
+  return {
+    removed: line,
+    added: `${line.slice(0, at)}${edit.after}${line.slice(at + edit.before.length)}`,
+  };
+}
+
 /** A line that carries content. Blank lines neither need coverage nor give it. */
 function substantive(line: string): boolean {
   return line.trim().length > 0;
@@ -1872,6 +1916,75 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       }
       if (contributed !== null) {
         contributors.push({ record, kind: match.kind, why: contributed, whole: wholeHere, source });
+      }
+    }
+
+    // One fragment inside one line, credited by bytes alone (APRV-340).
+    //
+    // The hook binds exactly what the Edit tool replaced, so an edit that
+    // rewrites part of a long paragraph binds a fragment and whole-line set
+    // membership cannot credit either line. That used to leave only the global
+    // replay, which on a 200 KB file with forty naming candidates refuses on
+    // its byte limit before it can reach a proof (PR #393, the fragment inside
+    // SPEC.md line 139). A uniquely-anchored fragment needs no search: applying
+    // it to base can only produce base with that ONE line rewritten, so if the
+    // line it rewrites is a line this change removes and the line it produces
+    // is a line this change adds, the bytes have proved both lines at the cost
+    // of one scan. Every eligibility condition is the global replay's own — the
+    // material rehashed, the Edit shape naming this path, and the same start
+    // resolution, which for a grant is the registration, the request, the
+    // class, the spend and the timing. A line-local step substitutes for none
+    // of them; it only spends less to ask the same question.
+    //
+    // Bytes that did not decode are not bytes anyone can prove anything about,
+    // so a blob carrying U+FFFD is refused here exactly as the replay refuses
+    // it: byte equality against a lossy decoding says nothing.
+    if (
+      !whole &&
+      !hunks.identical &&
+      !baseText.includes("\uFFFD") &&
+      !headText.includes("\uFFFD")
+    ) {
+      const baseLines = linesOf(baseText);
+      const addsLine = new Set(hunks.added);
+      const removesLine = new Set(hunks.removed);
+      for (const candidate of candidates) {
+        const edit = exactReplayEdit(candidate.material, path);
+        if (edit === null) continue;
+        try {
+          if (payloadHash(candidate.material) !== candidate.payloadHash) continue;
+        } catch {
+          continue;
+        }
+        const start = candidate.source === "policy"
+          ? candidate.record
+          : startForReplayGrant(
+              candidate,
+              records,
+              anchor,
+              lookbackMs,
+              path,
+              input.policyProtectedPaths,
+            );
+        if (start === null) continue;
+        const local = lineLocalReplacement(baseLines, edit);
+        if (local === null) continue;
+        if (!removesLine.has(local.removed) || !addsLine.has(local.added)) continue;
+        addedCover.add(local.added);
+        removedCover.add(local.removed);
+        const why = `replacing that fragment in the one line of the blob at base that carries it yields a line this change adds, and that base line is one this change removes (line-local replay at execution.started seq ${start.seq})`;
+        const already = contributors.find((one) => one.record.seq === candidate.record.seq);
+        if (already === undefined) {
+          contributors.push({
+            record: candidate.record,
+            kind: candidate.match.kind,
+            why: `${candidate.match.detail}, and ${why}`,
+            whole: false,
+            source: candidate.source,
+          });
+          continue;
+        }
+        already.why = `${already.why}, and ${why}`;
       }
     }
 

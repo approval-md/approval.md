@@ -731,8 +731,9 @@ test("an amended commit's two dates are asked different questions (APRV-339)", (
       false,
     );
 
-    // The granted tier reaches the same question through the replay, whose
-    // spend has to have run before the bytes were committed.
+    // The granted tier reaches the same question through the fragment paths
+    // (line-local since APRV-340, the global replay behind it), whose spend has
+    // to have run before the bytes were committed.
     const granted = world(join(root, "granted"), POLICY);
     const fragment = { tool: "Edit", file: "SPEC.md", before: "quick", after: "swift" };
     grantEdit(granted, "granted", fragment, 1);
@@ -745,7 +746,7 @@ test("an amended commit's two dates are asked different questions (APRV-339)", (
       }),
     );
     assert.equal(replayed.ok, true, JSON.stringify(replayed.findings));
-    assert.match(replayed.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.match(replayed.findings[0]?.detail ?? "", /line-local replay/u);
     assert.equal(
       evaluateProtectedPaths(
         inputFor(granted, ["SPEC.md"], {
@@ -852,6 +853,8 @@ test("exact replay composes fragmented policy and manual edits in execution orde
 test("exact replay skips one applicable historical edit that would pollute the authorized head", () => {
   const { root, cleanup } = scratchRoot("guard-exact-replay-pollution");
   try {
+    // TWO fragments of the one line, so the line-local step (APRV-340) credits
+    // neither on its own and the global replay is the route under test.
     const unit = world(root, UNATTENDED_POLICY);
     authorizeEdit(
       unit,
@@ -859,23 +862,30 @@ test("exact replay skips one applicable historical edit that would pollute the a
       { tool: "Edit", file: "SPEC.md", before: "surviving", after: "historical-change" },
       1,
     );
-    const intended = authorizeEdit(
+    const first = authorizeEdit(
       unit,
-      "intended",
-      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      "intended-one",
+      { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" },
       3,
+    );
+    const second = authorizeEdit(
+      unit,
+      "intended-two",
+      { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" },
+      5,
     );
     const report = evaluateProtectedPaths(
       inputFor(unit, ["SPEC.md"], {
         blobsFor: () => ({
-          base: "prefix surviving middle old suffix\n",
-          head: "prefix surviving middle new suffix\n",
+          base: "prefix surviving middle old-one and old-two suffix\n",
+          head: "prefix surviving middle new-one and new-two suffix\n",
         }),
-        changeTsFor: () => at(6),
+        changeTsFor: () => at(8),
       }),
     );
     assert.equal(report.ok, true, JSON.stringify(report.findings));
-    assert.deepEqual(report.findings[0]?.coveredBy, [intended.seq]);
+    assert.match(report.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.deepEqual(report.findings[0]?.coveredBy, [first.seq, second.seq]);
   } finally {
     cleanup();
   }
@@ -947,16 +957,27 @@ test("exact replay refuses when candidate, state, or examined-byte bounds are re
         1 + index * 2,
       );
     }
+    // Two fragments of the one line, so the change needs the replay: a single
+    // fragment is credited line-locally and never reaches the bound (APRV-340).
     authorizeEdit(
       candidateUnit,
-      "candidate-target",
-      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      "candidate-target-one",
+      { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" },
       1 + EXACT_REPLAY_MAX_CANDIDATES * 2,
+    );
+    authorizeEdit(
+      candidateUnit,
+      "candidate-target-two",
+      { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" },
+      3 + EXACT_REPLAY_MAX_CANDIDATES * 2,
     );
     const candidateReport = evaluateProtectedPaths(
       inputFor(candidateUnit, ["SPEC.md"], {
-        blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
-        changeTsFor: () => at(1 + EXACT_REPLAY_MAX_CANDIDATES * 2 + 2),
+        blobsFor: () => ({
+          base: "prefix old-one and old-two suffix\n",
+          head: "prefix new-one and new-two suffix\n",
+        }),
+        changeTsFor: () => at(5 + EXACT_REPLAY_MAX_CANDIDATES * 2),
         lookbackMs: Number.POSITIVE_INFINITY,
       }),
     );
@@ -985,15 +1006,24 @@ test("exact replay refuses when candidate, state, or examined-byte bounds are re
     const byteUnit = world(join(root, "bytes"), UNATTENDED_POLICY);
     authorizeEdit(
       byteUnit,
-      "large",
-      { tool: "Edit", file: "SPEC.md", before: "old", after: "new" },
+      "large-one",
+      { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" },
       1,
+    );
+    authorizeEdit(
+      byteUnit,
+      "large-two",
+      { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" },
+      3,
     );
     const prefix = "p".repeat(Math.floor(EXACT_REPLAY_MAX_EXAMINED_BYTES / 2));
     const byteReport = evaluateProtectedPaths(
       inputFor(byteUnit, ["SPEC.md"], {
-        blobsFor: () => ({ base: `${prefix}old\n`, head: `${prefix}new\n` }),
-        changeTsFor: () => at(4),
+        blobsFor: () => ({
+          base: `${prefix}old-one and old-two\n`,
+          head: `${prefix}new-one and new-two\n`,
+        }),
+        changeTsFor: () => at(6),
       }),
     );
     assert.equal(byteReport.ok, false, JSON.stringify(byteReport.findings));
@@ -1298,6 +1328,169 @@ test("PR #393: a granted hunk and an unattended hunk, both bound absolutely", ()
     const coveredBy = report.findings[0]?.coveredBy ?? [];
     assert.ok(coveredBy.includes(granted.seq), JSON.stringify(report.findings));
     assert.ok(coveredBy.includes(start.seq), JSON.stringify(report.findings));
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the line-local step: one fragment, one line, no search (APRV-340)
+// ---------------------------------------------------------------------------
+
+/** A SPEC-sized paragraph on one line, which is what the hook edits fragments of. */
+const LONG_LINE = `${"A protected paragraph that runs on for a while. ".repeat(40)}It ends here.`;
+
+test("a single fragment edit credits both its lines without the global replay", () => {
+  const { root, cleanup } = scratchRoot("guard-line-local");
+  try {
+    const base = `head\nthe quick brown fox jumps over it\ntail\n`;
+    const head = `head\nthe swift brown fox jumps over it\ntail\n`;
+    const fragment = { tool: "Edit", file: "SPEC.md", before: "quick", after: "swift" };
+
+    // The unattended tier.
+    const policyUnit = world(join(root, "policy"), UNATTENDED_POLICY);
+    const start = authorizeEdit(policyUnit, "fragment", fragment, 1);
+    const byPolicy = evaluateProtectedPaths(
+      inputFor(policyUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base, head }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(byPolicy.ok, true, JSON.stringify(byPolicy.findings));
+    assert.equal(byPolicy.findings[0]?.evidence, "policy-authorized-file");
+    assert.deepEqual(byPolicy.findings[0]?.coveredBy, [start.seq]);
+    assert.match(
+      byPolicy.findings[0]?.detail ?? "",
+      new RegExp(`line-local replay at execution\\.started seq ${String(start.seq)}`, "u"),
+    );
+    assert.doesNotMatch(byPolicy.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+
+    // The granted tier, through the same start resolution the replay uses.
+    const grantUnit = world(join(root, "grant"), POLICY);
+    const grant = grantEdit(grantUnit, "fragment", fragment, 1);
+    spendGrant(grantUnit, "fragment", fragment, 3);
+    const byGrant = evaluateProtectedPaths(
+      inputFor(grantUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base, head }),
+        changeTsFor: () => at(5),
+      }),
+    );
+    assert.equal(byGrant.ok, true, JSON.stringify(byGrant.findings));
+    assert.equal(byGrant.findings[0]?.evidence, "granted-file");
+    assert.deepEqual(byGrant.findings[0]?.coveredBy, [grant.seq]);
+    assert.match(byGrant.findings[0]?.detail ?? "", /line-local replay/u);
+    assert.doesNotMatch(byGrant.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+
+    // And it does not spend the replay's budget: blobs of exactly the size the
+    // replay refuses on (see the bounds test above) are credited here.
+    const hugeUnit = world(join(root, "huge"), UNATTENDED_POLICY);
+    authorizeEdit(hugeUnit, "huge", fragment, 1);
+    const prefix = "p".repeat(Math.floor(EXACT_REPLAY_MAX_EXAMINED_BYTES / 2));
+    const huge = evaluateProtectedPaths(
+      inputFor(hugeUnit, ["SPEC.md"], {
+        blobsFor: () => ({ base: `${prefix}quick\n`, head: `${prefix}swift\n` }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(huge.ok, true, JSON.stringify(huge.findings.map((one) => one.path)));
+    assert.match(huge.findings[0]?.detail ?? "", /line-local replay/u);
+    assert.doesNotMatch(huge.findings[0]?.detail ?? "", /byte limit/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a fragment with two homes, or one whose result is no added line, is not line-local", () => {
+  const { root, cleanup } = scratchRoot("guard-line-local-refusals");
+  try {
+    const fragment = { tool: "Edit", file: "SPEC.md", before: "quick", after: "swift" };
+
+    // Two base lines carry the fragment: which occurrence did the human see?
+    // The step refuses, and the global replay behind it refuses the same
+    // ambiguity, so the change is uncovered exactly as it was before APRV-340.
+    const ambiguous = world(join(root, "ambiguous"), UNATTENDED_POLICY);
+    authorizeEdit(ambiguous, "ambiguous", fragment, 1);
+    const twoHomes = evaluateProtectedPaths(
+      inputFor(ambiguous, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "the quick fox\nthe quick hound\n",
+          head: "the swift fox\nthe quick hound\n",
+        }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(twoHomes.ok, false, JSON.stringify(twoHomes.findings));
+    assert.equal(twoHomes.findings[0]?.code, "uncovered-hunk");
+
+    // The replacement yields a line this change does not add: the approved
+    // edit is not the edit that landed.
+    const elsewhere = world(join(root, "elsewhere"), UNATTENDED_POLICY);
+    authorizeEdit(elsewhere, "elsewhere", fragment, 1);
+    const noMatch = evaluateProtectedPaths(
+      inputFor(elsewhere, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "the quick fox\n",
+          head: "the swift fox and a hound\n",
+        }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(noMatch.ok, false, JSON.stringify(noMatch.findings));
+    assert.equal(noMatch.findings[0]?.code, "uncovered-hunk");
+
+    // The base line the fragment anchors in survives at head: nothing was
+    // removed, so nothing landed.
+    const survives = world(join(root, "survives"), UNATTENDED_POLICY);
+    authorizeEdit(survives, "survives", fragment, 1);
+    const kept = evaluateProtectedPaths(
+      inputFor(survives, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "the quick fox\n",
+          head: "the quick fox\nthe swift fox\n",
+        }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(kept.ok, false, JSON.stringify(kept.findings));
+    assert.equal(kept.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("PR #393: a fragment appended to a long line, bound absolutely and unattended", () => {
+  const { root, cleanup } = scratchRoot("guard-line-local-393");
+  try {
+    // Seq 31614 on PR #393's log: an unattended Edit inside SPEC.md line 139,
+    // binding the fragment the tool replaced (the tail of the sentence plus
+    // what was appended to it) with the ABSOLUTE path the hook writes. Whole-
+    // line coverage cannot credit a fragment, and the global replay refused on
+    // its byte limit, so the line stayed uncovered.
+    const unit = world(root, UNATTENDED_POLICY);
+    const appended = {
+      tool: "Edit",
+      rule: "protected path",
+      file: HOOK_ABSOLUTE,
+      before: "It ends here.",
+      after: "It ends here. And then it says one more thing.",
+    };
+    const start = authorizeEdit(unit, "appended", appended, 1);
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: `# Heading\n\n${LONG_LINE}\n\nunrelated tail\n`,
+          head: `# Heading\n\n${LONG_LINE} And then it says one more thing.\n\nunrelated tail\n`,
+        }),
+        changeTsFor: () => at(4),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "policy-authorized-file");
+    assert.deepEqual(report.findings[0]?.coveredBy, [start.seq]);
+    assert.match(
+      report.findings[0]?.detail ?? "",
+      new RegExp(`line-local replay at execution\\.started seq ${String(start.seq)}`, "u"),
+    );
   } finally {
     cleanup();
   }
