@@ -29,7 +29,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
-import { decide, register, request } from "../src/core/gate.js";
+import { decide, register, request, startHarnessExecution } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { verify } from "../src/core/verify.js";
 import { fixedClock, newScenario, scratchRoot, type Scenario } from "./scenario.js";
@@ -69,6 +69,12 @@ const POLICY = [
   "",
 ].join("\n");
 
+/** The same policy with `policy.edit` unattended: PR #393's supervised-live shape. */
+const UNATTENDED_POLICY = POLICY.replace(
+  "  policy.edit:\n    autonomy: manual",
+  "  policy.edit:\n    autonomy: autonomous",
+);
+
 const ROUTED_POLICY = POLICY.replace(
   "  - SPEC.md",
   "  - { path: SPEC.md, class: policy.edit.spec }",
@@ -88,7 +94,7 @@ interface Run {
   stderr: string;
 }
 
-function git(args: string[], cwd: string): Run {
+function git(args: string[], cwd: string, dates: Record<string, string> = {}): Run {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
@@ -98,14 +104,15 @@ function git(args: string[], cwd: string): Run {
       GIT_AUTHOR_EMAIL: "test@example.invalid",
       GIT_COMMITTER_NAME: "Test",
       GIT_COMMITTER_EMAIL: "test@example.invalid",
+      ...dates,
     },
   });
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-function commit(dir: string, message: string): string {
+function commit(dir: string, message: string, dates: Record<string, string> = {}): string {
   assert.equal(git(["add", "-A"], dir).code, 0, `git add failed in ${dir}`);
-  const made = git(["commit", "-qm", message], dir);
+  const made = git(["commit", "-qm", message], dir, dates);
   assert.equal(made.code, 0, `git commit failed: ${made.stderr}`);
   return git(["rev-parse", "HEAD"], dir).stdout.trim();
 }
@@ -223,6 +230,86 @@ function grantSpecEdit(fixture: Fixture, key: string): void {
 }
 
 /**
+ * The unattended shape: no human in it at all (APRV-339, PR #393).
+ *
+ * Under a policy that routes `policy.edit` to `autonomous` this is what the
+ * hook writes — the registration, the payload in the REAL content-addressed
+ * store (which is what `request` does on the nonmanual path, where it appends
+ * no record), and then the `execution.started` the harness runs behind. The
+ * bound `file` is ABSOLUTE, because that is the only shape the hook has ever
+ * written: it resolves the declared target against the session's cwd.
+ */
+function authorizeSpecEdit(fixture: Fixture, key: string, startedMinutesAgo: number): void {
+  const material = {
+    tool: "Edit",
+    rule: "protected path",
+    file: join(fixture.dir, "SPEC.md"),
+    before: "old",
+    after: "new",
+  };
+  const hash = payloadHash(material);
+  const task = `hook:${key}`;
+  const actionKey = `${task}:policy.edit`;
+
+  const registered = register(
+    fixture.unit.logPath,
+    {
+      task,
+      envelope: {
+        origin: { app: "claude-code", created_by: AGENT },
+        state: "proposed",
+        actions: [
+          {
+            class: "policy.edit",
+            summary: "Edit SPEC.md",
+            reversible: true,
+            est_cost_usd: "0",
+            idempotency_key: actionKey,
+            payload_hash: hash,
+          },
+        ],
+      },
+    },
+    AGENT,
+    { ...fixture.unit.options, clock: fixedClock(minutesAgo(startedMinutesAgo + 1)) },
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const resolved = request(
+    fixture.unit.logPath,
+    {
+      task,
+      actionKey,
+      cls: "policy.edit",
+      est_cost_usd: "0",
+      summary: "Edit SPEC.md",
+      payload_hash: hash,
+      payload: { value: material },
+      execution: "harness",
+    },
+    AGENT,
+    { ...fixture.unit.options, clock: fixedClock(minutesAgo(startedMinutesAgo)) },
+  );
+  assert.equal(resolved.ok, true, JSON.stringify(resolved));
+  assert.equal(resolved.ok ? resolved.record : "appended", null, "autonomous requests append nothing");
+
+  const started = startHarnessExecution(
+    fixture.unit.logPath,
+    {
+      task,
+      actionKey,
+      cls: "policy.edit",
+      payload_hash: hash,
+      est_cost_usd: "0",
+    },
+    AGENT,
+    { ...fixture.unit.options, clock: fixedClock(minutesAgo(startedMinutesAgo)) },
+  );
+  assert.equal(started.ok, true, JSON.stringify(started));
+  assert.equal(verify(fixture.unit.logPath).status, "clean");
+}
+
+/**
  * Do `work` on a fresh branch cut from the current commit, commit it, and come
  * back. The working log is restored by the checkout, so what each branch holds
  * is exactly the log as it stood when that branch committed.
@@ -299,6 +386,39 @@ test("head alone: the grant in the log the pull request carries still passes", (
   // Discovery is harmless where the refs do not exist: this fixture has no
   // remote at all, and the absent candidate neither fails the run nor is read.
   assert.equal(candidate(run, "origin/main").status, "missing");
+});
+
+test("PR #393: an edit folded in by git commit --amend is credited (APRV-339)", () => {
+  // The real shape: `git commit --amend` keeps the first author date and moves
+  // the committer date, and the unattended start that wrote the change sits
+  // between the two. Commit c03cbb8 was authored 23:06:44 and committed
+  // 23:08:22; the start at seq 31684 is at 23:07:58.
+  const folded = newFixture("amended-anchor", UNATTENDED_POLICY);
+  authorizeSpecEdit(folded, "amended-anchor", 4);
+  writeFileSync(join(folded.dir, "SPEC.md"), "new\n", "utf8");
+  commit(folded.dir, "edit SPEC.md", {
+    GIT_AUTHOR_DATE: minutesAgo(6),
+    GIT_COMMITTER_DATE: minutesAgo(2),
+  });
+
+  const run = runGuard(folded, ["--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(run.report.findings[0]?.path, "SPEC.md");
+  assert.equal(run.report.findings[0]?.evidence, "policy-authorized-file");
+  // Both dates are named, so a reader can see which question got which.
+  assert.match(run.report.findings[0]?.detail ?? "", /authored .*, committed /u);
+
+  // The control: the same log and the same edit on a commit git dated once.
+  // The start follows that single date, so it is post-hoc and covers nothing.
+  const plain = newFixture("unamended-anchor", UNATTENDED_POLICY);
+  authorizeSpecEdit(plain, "unamended-anchor", 4);
+  writeFileSync(join(plain.dir, "SPEC.md"), "new\n", "utf8");
+  commit(plain.dir, "edit SPEC.md", {
+    GIT_AUTHOR_DATE: minutesAgo(6),
+    GIT_COMMITTER_DATE: minutesAgo(6),
+  });
+  const control = runGuard(plain, ["--head", "HEAD"]);
+  assert.equal(control.code, 1, `${control.stdout}${control.stderr}`);
 });
 
 test("a routed protected-path object is enforced by the script", () => {
