@@ -677,6 +677,121 @@ test("policy-authorized evidence must precede and closely match the changed comm
   }
 });
 
+test("an amended commit's two dates are asked different questions (APRV-339)", () => {
+  const { root, cleanup } = scratchRoot("guard-amended-anchor");
+  try {
+    // `git commit --amend` keeps the first author date and moves the committer
+    // date, so an edit folded into the amend sits BETWEEN them. PR #393's
+    // shape: commit c03cbb8 authored 23:06:44, committed 23:08:22, and the
+    // unattended start that wrote the change at 23:07:58.
+    const folded = world(join(root, "folded"), UNATTENDED_POLICY);
+    authorizeEdit(folded, "folded", fileMaterial("SPEC.md"), 1);
+    const credited = evaluateProtectedPaths(
+      inputFor(folded, ["SPEC.md"], {
+        changeTsFor: () => ({ author: at(1), committer: at(4) }),
+      }),
+    );
+    assert.equal(credited.ok, true, JSON.stringify(credited.findings));
+    assert.equal(credited.findings[0]?.evidence, "policy-authorized-file");
+    assert.match(
+      credited.findings[0]?.detail ?? "",
+      /authored .*, committed /u,
+      "the finding names both dates when they differ",
+    );
+    // The same log against the author date alone: the start at at(2) reads as
+    // after the change, which is the refusal APRV-339 removes.
+    assert.equal(
+      evaluateProtectedPaths(inputFor(folded, ["SPEC.md"], { changeTsFor: () => at(1) })).ok,
+      false,
+    );
+
+    // After the committer date is still post-hoc. Those bytes were committed
+    // before this record existed, so it did not write them.
+    const after = world(join(root, "after"), UNATTENDED_POLICY);
+    authorizeEdit(after, "after", fileMaterial("SPEC.md"), 5);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(after, ["SPEC.md"], {
+          changeTsFor: () => ({ author: at(1), committer: at(4) }),
+        }),
+      ).ok,
+      false,
+    );
+
+    // Staleness is still measured from the author date, which a rebase does not
+    // move: a start eight days before it is about some earlier edit.
+    const stale = world(join(root, "stale"), UNATTENDED_POLICY);
+    authorizeEdit(stale, "stale", fileMaterial("SPEC.md"), 1);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(stale, ["SPEC.md"], {
+          changeTsFor: () => ({ author: at(8 * 24 * 60), committer: at(8 * 24 * 60 + 3) }),
+        }),
+      ).ok,
+      false,
+    );
+
+    // The granted tier reaches the same question through the replay, whose
+    // spend has to have run before the bytes were committed.
+    const granted = world(join(root, "granted"), POLICY);
+    const fragment = { tool: "Edit", file: "SPEC.md", before: "quick", after: "swift" };
+    grantEdit(granted, "granted", fragment, 1);
+    spendGrant(granted, "granted", fragment, 3);
+    const blobs = { base: "the quick brown fox\n", head: "the swift brown fox\n" };
+    const replayed = evaluateProtectedPaths(
+      inputFor(granted, ["SPEC.md"], {
+        blobsFor: () => blobs,
+        changeTsFor: () => ({ author: at(2), committer: at(5) }),
+      }),
+    );
+    assert.equal(replayed.ok, true, JSON.stringify(replayed.findings));
+    assert.match(replayed.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(granted, ["SPEC.md"], {
+          blobsFor: () => blobs,
+          changeTsFor: () => at(2),
+        }),
+      ).ok,
+      false,
+      "the author date alone still refuses the spend that followed it",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a pair with one unusable date falls back to the other for both questions", () => {
+  const { root, cleanup } = scratchRoot("guard-anchor-fallback");
+  try {
+    const unit = world(join(root, "one-sided"), UNATTENDED_POLICY);
+    authorizeEdit(unit, "one-sided", fileMaterial("SPEC.md"), 1);
+    // Only a committer date: it answers both, exactly as a bare string does.
+    const committerOnly = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { changeTsFor: () => ({ author: null, committer: at(3) }) }),
+    );
+    assert.equal(committerOnly.ok, true, JSON.stringify(committerOnly.findings));
+    assert.match(committerOnly.findings[0]?.detail ?? "", /of the commit that changed it \(2/u);
+    // Only an author date, and the start follows it: the pre-APRV-339 refusal,
+    // because there is no committer date to be more generous with.
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(unit, ["SPEC.md"], { changeTsFor: () => ({ author: at(1), committer: null }) }),
+      ).ok,
+      false,
+    );
+    // Neither: no bound at all, and this tier fails closed on that, exactly as
+    // it does for a bare `null`.
+    const undated = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { changeTsFor: () => ({ author: null, committer: null }) }),
+    );
+    assert.equal(undated.ok, false);
+    assert.equal(undated.findings[0]?.code, "no-evidence");
+  } finally {
+    cleanup();
+  }
+});
+
 test("policy-authorized exact material cannot cover a different hunk", () => {
   const { root, cleanup } = scratchRoot("guard-policy-hunk");
   try {

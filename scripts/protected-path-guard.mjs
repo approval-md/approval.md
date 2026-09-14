@@ -14,6 +14,17 @@
  * `git show <ref>:<path>`. A guard that read the checkout could be told a
  * different story than the one the pull request carries.
  *
+ * ## The two dates each protected path is anchored to (APRV-339)
+ *
+ * For every protected path this script asks git for both dates of the newest
+ * commit in the range that touched it, and the core measures a different
+ * question against each: ordering ("did this authorization record come before
+ * the bytes were committed") against the COMMITTER date, staleness ("is this
+ * evidence about this change at all") against the AUTHOR date. They differ only
+ * on an amended or rebased commit, and that is exactly where one date alone
+ * fails: `git commit --amend` keeps the first author date, so a genuine edit
+ * folded into the amend looks like it happened after the change (PR #393).
+ *
  * ## Where the log comes from (APRV-260)
  *
  * The log at head is main's log at branch time, and it trails the primary
@@ -450,20 +461,29 @@ async function main() {
       return value;
     };
 
-    // When each protected path last changed in this range: the anchor the
-    // recency bound is measured from. Author date, so a rebase does not move it.
+    // When each protected path last changed in this range: BOTH of git's dates
+    // for that commit (APRV-339). The author date (`%aI`) is what the staleness
+    // bound is measured from, because a rebase does not move it. The committer
+    // date (`%cI`) is what the ordering checks are measured against, because it
+    // is the moment those bytes were committed and an amend only moves it
+    // later. They are the same instant on an ordinary commit.
     const changeTsCache = new Map();
     const changeTsFor = (path) => {
       if (changeTsCache.has(path)) return changeTsCache.get(path);
       const out = git(repo, [
         "log",
         "-1",
-        "--format=%aI",
+        "--format=%aI%n%cI",
         `${base}..${head}`,
         "--",
         path,
       ]);
-      const value = out === null || out.trim().length === 0 ? null : out.trim();
+      const lines =
+        out === null ? [] : out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+      // One date and not the other is the pair the core reads as "this is all
+      // git could say", and it then answers both questions.
+      const value =
+        lines.length === 0 ? null : { author: lines[0], committer: lines[1] ?? lines[0] };
       changeTsCache.set(path, value);
       return value;
     };

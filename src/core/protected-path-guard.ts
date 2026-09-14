@@ -149,6 +149,22 @@
  * against the head commit would have been theatre. The finding says which of
  * the two it got, every time.
  *
+ * ## Two anchors, because git keeps two dates (APRV-339)
+ *
+ * A commit carries an author date and a committer date, and they answer
+ * different questions. ORDERING — could this record have written these bytes,
+ * or does it come after them — is measured against the COMMITTER date, the
+ * moment those bytes were committed: an amend or a rebase only ever moves it
+ * later, so it cannot turn a genuine earlier start into a post-hoc one.
+ * STALENESS — is this evidence about this change or about some edit months ago
+ * — is measured against the AUTHOR date, which a rebase does not move, so
+ * replaying history does not expire evidence. Measuring both against the author
+ * date is what refused PR #393: `git commit --amend` kept the first author date
+ * while the bytes were committed 98 seconds later, and the unattended start
+ * that wrote them sat between the two and was read as having happened after the
+ * change. A caller that has only one date supplies it alone, and it answers
+ * both questions, which is where every caller stood before this.
+ *
  * ## How a hunk is decided to be covered
  *
  * The unit is a line of text. `added` is the multiset of lines the head blob
@@ -378,6 +394,20 @@ export interface ChangeBlobs {
   head: string | null;
 }
 
+/**
+ * The two dates git carries for the commit that changed a path (APRV-339).
+ *
+ * They are the same instant on an ordinary commit and they part company on an
+ * amended or rebased one, which is why the guard asks its two time questions
+ * against different ones. See {@link GuardInput.changeTsFor}.
+ */
+export interface ChangeTimestamps {
+  /** git's author date (`%aI`): when the change was written. */
+  author: string | null;
+  /** git's committer date (`%cI`): when those bytes were committed. */
+  committer: string | null;
+}
+
 /** The window of log the guard could see, for the failure messages. */
 export interface LogWindow {
   /** Lowest and highest `seq` in the log at head, or `null` for an empty log. */
@@ -437,10 +467,27 @@ export interface GuardInput {
    */
   payloadFor: (hash: string) => unknown | null;
   /**
-   * The author timestamp of the newest commit in `base..head` that touched this
-   * path, as an ISO-8601 instant, or `null` when git could not say.
+   * When the newest commit in `base..head` that touched this path landed, as
+   * ISO-8601 instants, or `null` when git could not say.
    *
-   * With no anchor — `null`, or a value that does not parse — NO recency bound
+   * Two dates, because git keeps two and they answer different questions
+   * (APRV-339). A {@link ChangeTimestamps} pair carries git's author date
+   * (`%aI`) and its committer date (`%cI`); a bare string, or a pair with one
+   * side missing or unparseable, means the one date the caller has answers
+   * both, which is exactly what every caller written before APRV-339 supplies.
+   *
+   * - The ORDERING question — could this start have written these bytes, or
+   *   does it come after them — is measured against the COMMITTER date, the
+   *   moment those bytes were committed. An amend or a rebase only moves it
+   *   later, so it never turns a genuine earlier start into a post-hoc one,
+   *   while the author date does exactly that: `git commit --amend` keeps the
+   *   first author date, so an edit folded into the amend sits AFTER it and was
+   *   refused as post-hoc (PR #393, commit c03cbb8).
+   * - The STALENESS question — is this evidence about this change or about some
+   *   edit months ago — is measured against the AUTHOR date, which a rebase
+   *   does not move, so replaying history does not expire evidence.
+   *
+   * With no anchor — `null`, or values that do not parse — NO recency bound
    * is applied to this path, and the finding says so in its own text rather
    * than reporting a bound it did not enforce.
    *
@@ -457,7 +504,7 @@ export interface GuardInput {
    * attacker-reachable one; refusing on it would fire only on that breakage.
    * The path-level evidence requirement is unaffected and still holds.
    */
-  changeTsFor: (path: string) => string | null;
+  changeTsFor: (path: string) => string | ChangeTimestamps | null;
   /**
    * The path's bytes at base and at head, or `null` when they could not be
    * read (git could not show them, or the blob is binary).
@@ -903,6 +950,46 @@ function hasAmbiguousRoute(
 }
 
 /**
+ * One path's change, as the two instants the guard measures time against.
+ *
+ * `authorMs` and `committerMs` are null TOGETHER or not at all: a pair with one
+ * unusable side falls back to the other, so every check downstream asks one
+ * question ("is there an anchor at all?") and cannot enforce half a bound.
+ */
+interface ChangeAnchor {
+  /** What git said, for the finding's text. */
+  authorTs: string | null;
+  committerTs: string | null;
+  /** The author date: staleness, and the command-attribution distance. */
+  authorMs: number | null;
+  /** The committer date: ordering, which an amend may only move later. */
+  committerMs: number | null;
+}
+
+/** Normalize whatever the caller supplied into one {@link ChangeAnchor}. */
+function changeAnchorOf(supplied: string | ChangeTimestamps | null): ChangeAnchor {
+  const pair: ChangeTimestamps =
+    supplied === null || typeof supplied === "string"
+      ? { author: supplied, committer: supplied }
+      : supplied;
+  const authorTs = pair.author ?? pair.committer;
+  const committerTs = pair.committer ?? pair.author;
+  const parse = (ts: string | null): number | null => {
+    if (ts === null) return null;
+    const ms = Date.parse(ts);
+    return Number.isNaN(ms) ? null : ms;
+  };
+  const authorMs = parse(authorTs);
+  const committerMs = parse(committerTs);
+  return {
+    authorTs,
+    committerTs,
+    authorMs: authorMs ?? committerMs,
+    committerMs: committerMs ?? authorMs,
+  };
+}
+
+/**
  * Exact-file evidence from an unattended execution authorized by policy.
  *
  * The start must reproduce the one declaration that preceded it, and the
@@ -915,7 +1002,7 @@ function policyAuthorizedEvidence(
   path: string,
   policyProtectedPaths: readonly ProtectedPathEntry[],
   payloadFor: (hash: string) => unknown | null,
-  anchorMs: number | null,
+  anchor: ChangeAnchor,
   lookbackMs: number,
 ): NamingMatch | null {
   if (start.event !== "execution.started") return null;
@@ -960,11 +1047,14 @@ function policyAuthorizedEvidence(
     )
   ) return null;
 
-  // A start cannot authorize a change that already happened. This tier also
-  // requires a usable commit timestamp; missing temporal evidence fails closed.
-  if (anchorMs === null) return null;
+  // A start cannot authorize a change that already happened, and a start from
+  // months ago is about some earlier edit. Ordering is asked of the COMMITTER
+  // date and staleness of the AUTHOR date (APRV-339). This tier also requires a
+  // usable commit timestamp; missing temporal evidence fails closed.
+  const { authorMs, committerMs } = anchor;
+  if (authorMs === null || committerMs === null) return null;
   const at = Date.parse(start.ts);
-  if (Number.isNaN(at) || at > anchorMs || anchorMs - at > lookbackMs) return null;
+  if (Number.isNaN(at) || at > committerMs || authorMs - at > lookbackMs) return null;
 
   const material = payloadFor(hash);
   if (material === null) return null;
@@ -1001,12 +1091,13 @@ function exactReplayEdit(material: unknown, path: string): { before: string; aft
 function startForReplayGrant(
   candidate: EvidenceCandidate,
   records: readonly EventRecord[],
-  anchorMs: number | null,
+  anchor: ChangeAnchor,
   lookbackMs: number,
   path: string,
   policyProtectedPaths: readonly ProtectedPathEntry[],
 ): EventRecord | null {
-  if (anchorMs === null) return null;
+  const { authorMs, committerMs } = anchor;
+  if (authorMs === null || committerMs === null) return null;
   const grant = candidate.record;
   const task = grant.task;
   const actionKey = grant.action_key;
@@ -1046,8 +1137,10 @@ function startForReplayGrant(
       hasTokenLink &&
       (typeof grantToken !== "string" || started["token_sha256"] !== grantToken)
     ) return false;
+    // Ordering against the committer date, staleness against the author date
+    // (APRV-339), exactly as the policy-authorized tier asks them.
     const at = Date.parse(record.ts);
-    return !Number.isNaN(at) && at <= anchorMs && anchorMs - at <= lookbackMs;
+    return !Number.isNaN(at) && at <= committerMs && authorMs - at <= lookbackMs;
   });
   if (starts.length !== 1) return null;
   const start = starts[0] as EventRecord;
@@ -1096,7 +1189,7 @@ function exactEditReplay(
   records: readonly EventRecord[],
   base: string | null,
   head: string | null,
-  anchorMs: number | null,
+  anchor: ChangeAnchor,
   lookbackMs: number,
   path: string,
   policyProtectedPaths: readonly ProtectedPathEntry[],
@@ -1121,7 +1214,7 @@ function exactEditReplay(
       : startForReplayGrant(
           candidate,
           records,
-          anchorMs,
+          anchor,
           lookbackMs,
           path,
           policyProtectedPaths,
@@ -1316,8 +1409,8 @@ function windowText(window: LogWindow): string {
 
 /**
  * How far past the change commit a run may still start and be its cause: five
- * minutes, for clock disagreement between the log and git's author date. It is
- * a skew allowance, not an ordering allowance.
+ * minutes, for clock disagreement between the log and git's committer date. It
+ * is a skew allowance, not an ordering allowance.
  */
 const SKEW_GRACE_MS = 5 * 60 * 1000;
 
@@ -1344,9 +1437,14 @@ function spanText(ms: number): string {
 function attributeRun(
   grant: EventRecord,
   runs: Map<string, EventRecord[]>,
-  anchorMs: number | null,
+  anchor: ChangeAnchor,
   attributionMs: number,
 ): { ok: true; detail: string } | { ok: false; why: string } {
+  // The same split the other two tiers make (APRV-339): "did this run start
+  // after the bytes were committed" is asked of the COMMITTER date, which an
+  // amend may only move later, and "how far from the change is it" of the
+  // AUTHOR date, which a rebase does not move.
+  const { authorMs, committerMs } = anchor;
   const key = grant.action_key;
   if (key === undefined) {
     return {
@@ -1366,7 +1464,7 @@ function attributeRun(
   const endOf = (record: EventRecord): EventRecord | undefined =>
     completed.find((done) => done.seq > record.seq);
 
-  if (anchorMs === null) {
+  if (authorMs === null || committerMs === null) {
     const first = started[0] as EventRecord;
     return {
       ok: true,
@@ -1380,14 +1478,14 @@ function attributeRun(
   // the record is appended before the process is spawned. The real log shows
   // what the symmetric window costs — a SPEC.md batch run four hours AFTER
   // PR #187's commit would otherwise have carried that commit's changes.
-  // `SKEW_GRACE_MS` is for the two clocks (the log's and git's author date)
+  // `SKEW_GRACE_MS` is for the two clocks (the log's and git's committer date)
   // disagreeing, not for ordering.
   let best: { record: EventRecord; end: EventRecord | undefined; distance: number } | null = null;
   let laterOnly: EventRecord | null = null;
   for (const record of started) {
     const from = Date.parse(record.ts);
     if (Number.isNaN(from)) continue;
-    if (from > anchorMs + SKEW_GRACE_MS) {
+    if (from > committerMs + SKEW_GRACE_MS) {
       if (laterOnly === null) laterOnly = record;
       continue;
     }
@@ -1395,9 +1493,9 @@ function attributeRun(
     const to = end === undefined ? from : Date.parse(end.ts);
     const upper = Number.isNaN(to) ? from : to;
     const distance =
-      anchorMs >= Math.min(from, upper) && anchorMs <= Math.max(from, upper)
+      authorMs >= Math.min(from, upper) && authorMs <= Math.max(from, upper)
         ? 0
-        : Math.min(Math.abs(from - anchorMs), Math.abs(upper - anchorMs));
+        : Math.min(Math.abs(from - authorMs), Math.abs(upper - authorMs));
     if (best === null || distance < best.distance) best = { record, end, distance };
   }
   if (best === null && laterOnly !== null) {
@@ -1586,18 +1684,25 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     const lookbackMs = input.lookbackMs ?? DEFAULT_LOOKBACK_MS;
     // ONE derivation of the anchor, so the bound that is enforced and the bound
     // that is reported cannot disagree. An unparseable timestamp is no anchor,
-    // exactly as a missing one is not: both land in `anchorMs === null`.
-    const parsed = changeTs === null ? Number.NaN : Date.parse(changeTs);
-    const anchorMs = Number.isNaN(parsed) ? null : parsed;
+    // exactly as a missing one is not: both land in `anchorMs === null`. Two
+    // instants since APRV-339, and the one asked here is the AUTHOR date: this
+    // is the staleness pre-filter, and ordering belongs to the tiers that can
+    // say which record wrote which bytes.
+    const anchor = changeAnchorOf(changeTs);
+    const anchorMs = anchor.authorMs;
     const inWindow = (ts: string): boolean => {
       if (anchorMs === null) return true;
       const at = Date.parse(ts);
       return !Number.isNaN(at) && Math.abs(at - anchorMs) <= lookbackMs;
     };
+    const datedText =
+      anchor.committerTs === null || anchor.committerTs === anchor.authorTs
+        ? `${anchor.authorTs}`
+        : `authored ${anchor.authorTs}, committed ${anchor.committerTs}`;
     const boundText =
       anchorMs === null
-        ? `no usable commit timestamp for this path (${changeTs === null ? "git named none" : `git named ${JSON.stringify(changeTs)}, which does not parse`}), so NO recency bound was applied and this evidence rests on the path match alone`
-        : `within ${Math.round(lookbackMs / 86_400_000)}d of the commit that changed it (${changeTs})`;
+        ? `no usable commit timestamp for this path (${anchor.authorTs === null ? "git named none" : `git named ${JSON.stringify(datedText)}, which does not parse`}), so NO recency bound was applied and this evidence rests on the path match alone`
+        : `within ${Math.round(lookbackMs / 86_400_000)}d of the commit that changed it (${datedText})`;
 
     // EVERY qualifying grant is collected and the best one is reported, rather
     // than the first one found. The first-match version passed commit 41d2c9f
@@ -1632,7 +1737,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         path,
         input.policyProtectedPaths,
         input.payloadFor,
-        anchorMs,
+        anchor,
         lookbackMs,
       );
       const hash = payloadOf(start)["payload_hash"];
@@ -1709,7 +1814,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
           );
           continue;
         }
-        const run = attributeRun(record, runs, anchorMs, attributionMs);
+        const run = attributeRun(record, runs, anchor, attributionMs);
         if (!run.ok) {
           rejected.push(run.why);
           continue;
@@ -1788,7 +1893,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
           records,
           blobs.base,
           blobs.head,
-          anchorMs,
+          anchor,
           lookbackMs,
           path,
           input.policyProtectedPaths,
