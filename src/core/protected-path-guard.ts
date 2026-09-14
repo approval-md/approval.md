@@ -60,6 +60,21 @@
  *    change and the recorded class must be the class this path is routed to.
  *    This records authorization to execute, not successful completion; the
  *    exact hunk checks below establish whether those bytes landed.
+ *
+ *    The payload's `file` is the path the hook bound, and the hook binds an
+ *    ABSOLUTE one: `fileToolGate` resolves the declared target against the
+ *    session's `cwd`, so an Edit of SPEC.md in a worktree is recorded as
+ *    `/Users/carter/dev/approval-md/.claude/worktrees/<name>/SPEC.md`. This
+ *    tier accepts that shape and the bare repository-relative path, matching
+ *    an absolute one by its trailing segments (see
+ *    {@link namesProtectedFile}). Until APRV-337 it accepted only the relative
+ *    shape, which no hook has ever written, so every unsampled
+ *    supervised-live edit to SPEC.md failed CI (PR #393). Tail matching is
+ *    sound HERE because the bytes carry the proof: `before` has to occur in
+ *    the blob at base, `after` in the blob at head, and the replay has to
+ *    reach HEAD byte-identical, so a scratch copy holding other bytes covers
+ *    nothing whatever its path says. Verdict 4 below keeps the stricter
+ *    cwd-join rule, because a command payload describes no bytes.
  * 3. `granted-file` — a file-tool edit. The hook binds the CHANGE rather than
  *    the touch (APRV-124), so the bound material carries `file` plus the exact
  *    edit: `{before, after}` for an Edit, `{content}` for a Write. That is
@@ -484,6 +499,35 @@ function endsWithSegments(candidate: string, want: string): boolean {
 }
 
 /**
+ * Does a bound payload's `file` name this checkout's copy of `path`?
+ *
+ * The hook writes the ABSOLUTE path: `fileToolGate` resolves the declared
+ * target against the session's `cwd`, so a real Edit of SPEC.md in a worktree
+ * binds `/Users/carter/dev/approval-md/.claude/worktrees/<name>/SPEC.md`. Two
+ * shapes pass: the repository-relative path itself, and an absolute path whose
+ * TRAILING segments are that path. A relative path carrying extra leading
+ * directories (`dry/SPEC.md`) is refused, as is any `..` segment or backslash,
+ * either of which would make the tail test claim something it cannot know.
+ *
+ * Matching an absolute path by its tail is safe for Edit and Write material,
+ * and only for that material, because there the bytes are the proof: `before`
+ * has to occur in the blob at base, `after` in the blob at head, and the
+ * replay has to reach HEAD byte-identical. A payload naming another checkout's
+ * copy of SPEC.md carries that copy's bytes, which are not these, so it covers
+ * nothing. Command material describes no bytes at all, which is why
+ * {@link commandTargetsPath} keeps the stricter cwd-join rule for it.
+ */
+function namesProtectedFile(file: string, path: string): boolean {
+  if (file.includes("\\")) return false;
+  const named = segmentsOf(file);
+  if (named.includes("..")) return false;
+  const wanted = segmentsOf(path);
+  if (wanted.length === 0) return false;
+  if (file.startsWith("/")) return endsWithSegments(file, path);
+  return named.length === wanted.length && named.every((part, index) => part === wanted[index]);
+}
+
+/**
  * Does this command line WRITE `path`, as the runtime's own classifier reads it?
  *
  * Substring matching was the first thing tried here and it is wrong: run
@@ -798,13 +842,7 @@ function policyFileEvidence(
   const map = material as Record<string, unknown>;
   const tool = map["tool"];
   const file = map["file"];
-  if (
-    typeof file !== "string" ||
-    file.startsWith("/") ||
-    file.includes("\\")
-  ) return null;
-  const named = segmentsOf(file);
-  if (named.includes("..") || named.join("/") !== segmentsOf(path).join("/")) return null;
+  if (typeof file !== "string" || !namesProtectedFile(file, path)) return null;
 
   const keys = Object.keys(map);
   const hasOnly = (allowed: readonly string[]): boolean => keys.every((key) => allowed.includes(key));
@@ -938,7 +976,7 @@ function policyAuthorizedEvidence(
   return policyFileEvidence(material, path, policyProtectedPaths);
 }
 
-/** The closed, repository-relative Edit shape eligible for byte replay. */
+/** The closed Edit shape, naming this path, eligible for byte replay. */
 function exactReplayEdit(material: unknown, path: string): { before: string; after: string } | null {
   if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
   const map = material as Record<string, unknown>;
@@ -948,21 +986,13 @@ function exactReplayEdit(material: unknown, path: string): { before: string; aft
   if (
     map["tool"] !== "Edit" ||
     typeof map["file"] !== "string" ||
-    map["file"].startsWith("/") ||
-    map["file"].includes("\\") ||
+    !namesProtectedFile(map["file"], path) ||
     (map["rule"] !== undefined && typeof map["rule"] !== "string") ||
     typeof map["before"] !== "string" ||
     map["before"].length === 0 ||
     typeof map["after"] !== "string" ||
     map["before"] === map["after"] ||
     (map["replace_all"] !== undefined && map["replace_all"] !== false)
-  ) return null;
-  const named = segmentsOf(map["file"]);
-  const changed = segmentsOf(path);
-  if (
-    named.includes("..") ||
-    named.length !== changed.length ||
-    !named.every((segment, index) => segment === changed[index])
   ) return null;
   return { before: map["before"], after: map["after"] };
 }
