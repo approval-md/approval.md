@@ -55,7 +55,7 @@ The block below is guidance, never policy. Nothing in it grants anything, and
 no part of the runtime reads it to decide.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 
 love:
   - seeing the real change, not a description of it
@@ -64,16 +64,14 @@ love:
 like:
   - success reported first, caveats after
   - small reviewable commits
+  - honest opinions on the work, including when you think a task is wrong
+  - a journal entry of about five points per milestone
 
 dislike:
   - prose where a command would do
   - being asked to approve something I cannot see
 
-wants:
-  - honest opinions on the work, including when you think a task is wrong
-  - a journal entry of about five points per milestone
-
-responds: "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
+communication: "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
 ```
 
 Prose again after the block, ignored by both readers.

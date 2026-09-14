@@ -64,11 +64,12 @@
  * headings ("what I value", "what good looks like", "how I like to work",
  * "what I want from you") and their bullets are drafted into a
  * ` ```yaml approval-values ` block (SPEC.md §5.3). Every bullet lands in
- * `wants:`, and nothing is ever placed in `love:`, `like:` or `dislike:`.
- * Grading is the human's act. This importer can see that a line was written
- * down; it cannot see how much its author meant it, and a guessed grade would
- * put words in their mouth inside the one block of `APPROVAL.md` that exists to
- * carry their own.
+ * `like:`, and nothing is ever placed in `love:` or `dislike:`. Since APRV-336
+ * folded `wants:` away, `like:` is the list that carries both what an operator
+ * prefers and what they ask of an agent, and it is the middle of the three
+ * grades: the importer can see that a line was written down and cannot see how
+ * much its author meant it, so it declines to reach for the strongest grade or
+ * the negative one. Promoting an entry to `love:` is the human's act.
  *
  * ## Namespaces
  *
@@ -455,8 +456,8 @@ const VALUES_MAX_LENGTH = 200;
 export interface ValuesDraft {
   /** The recognised headings, normalised, in source order. */
   headings: string[];
-  /** Bullets destined for `wants:`: truncated, deduped, capped. */
-  wants: string[];
+  /** Bullets destined for `like:`: truncated, deduped, capped. */
+  like: string[];
   /** Bullets past {@link VALUES_MAX_ITEMS}, kept so none is dropped silently. */
   overflow: string[];
   /** Human-facing notes; never a reason to relax anything. */
@@ -493,18 +494,19 @@ function capLength(text: string): { text: string; truncated: boolean } {
  * Collect the bullets under the optional values headings of an AGENTS.md-style
  * document (SPEC.md §5.3).
  *
- * ## Everything goes to `wants`, and nothing is graded
+ * ## Everything goes to `like`, and nothing is promoted
  *
- * The values block has three standing grades (`love`, `like`, `dislike`) and
- * one behavioural list (`wants`). This function fills `wants` and leaves the
- * three grades empty, always. A grade is a statement of taste, and it is the
- * human's to make: the source shows that a line was written under a heading, it
- * does not show how strongly it was meant, and an importer that inferred
- * "love" from an exclamation mark or a heading's wording would be putting words
- * in its reader's mouth in the one block of `APPROVAL.md` that exists to carry
- * theirs. `wants` is the honest destination for a bullet whose grade is
- * unknown: it says the operator asked for something, which is exactly what a
- * bullet under "what I want from you" demonstrates.
+ * The values block has three standing grades (`love`, `like`, `dislike`) and,
+ * since APRV-336, nothing else: `like` carries what the operator prefers and
+ * what they ask of an agent alike. This function fills `like` and leaves `love`
+ * and `dislike` empty, always. The strength of a grade is a statement of taste
+ * and it is the human's to make: the source shows that a line was written under
+ * a heading, it does not show how strongly it was meant, and an importer that
+ * inferred "love" from an exclamation mark or a heading's wording would be
+ * putting words in its reader's mouth in the one block of `APPROVAL.md` that
+ * exists to carry theirs. The middle grade is the honest destination for a
+ * bullet whose strength is unknown: it says the operator asked for something,
+ * which is exactly what a bullet under "what I want from you" demonstrates.
  *
  * ## The scan
  *
@@ -606,15 +608,15 @@ export function parseValuesHeadings(markdown: string): ValuesDraft {
     );
   }
 
-  const wants = unique.slice(0, VALUES_MAX_ITEMS);
+  const like = unique.slice(0, VALUES_MAX_ITEMS);
   const overflow = unique.slice(VALUES_MAX_ITEMS);
   if (overflow.length > 0) {
     warnings.push(
-      `${String(overflow.length)} values ${overflow.length === 1 ? "bullet is" : "bullets are"} past the cap of ${String(VALUES_MAX_ITEMS)}; they are preserved as comments in the draft instead of in wants:, and a human promotes the ones they want`,
+      `${String(overflow.length)} values ${overflow.length === 1 ? "bullet is" : "bullets are"} past the cap of ${String(VALUES_MAX_ITEMS)}; they are preserved as comments in the draft instead of in like:, and a human promotes the ones they want`,
     );
   }
 
-  return { headings, wants, overflow, warnings };
+  return { headings, like, overflow, warnings };
 }
 
 /** One proposed class rule, with the bullets that produced it. */
@@ -789,37 +791,37 @@ export function renderFencedValuesDraft(draft: ValuesDraft, source: string): str
     "# The values block lives INSIDE APPROVAL.md, so pasting it changes the file's",
     "# bytes and invalidates the standing attestation; renew it immediately after.",
     "#",
-    "# EVERY bullet is in `wants:`, and nothing is graded. `love:`, `like:` and",
-    "# `dislike:` are yours to fill in. A grade is a statement of taste and it is",
-    "# yours to make: this importer can see that you wrote a line down, and cannot",
+    "# EVERY bullet is in `like:`, the middle grade, and nothing is promoted.",
+    "# `love:` and `dislike:` are yours to fill in. How strongly a line is meant",
+    "# is yours to say: this importer can see that you wrote it down, and cannot",
     "# see how much you meant it. Guessing would put words in your mouth.",
     "#",
     "# This block is guidance and never policy. Nothing here is enforced, counted",
     "# or checked, and no routing, class match, sampling draw, budget or token",
     "# reads it (SPEC.md §11.1 invariant 10).",
     "",
-    "version: 1",
+    'version: "0.2"',
   ];
 
-  if (draft.wants.length === 0) {
+  if (draft.like.length === 0) {
     lines.push(
       "# The headings were there and carried no bullets. An empty list is a real",
       "# answer: it says the question was considered and left blank.",
-      "wants: []",
+      "like: []",
     );
   } else {
-    lines.push("wants:");
-    for (const want of draft.wants) lines.push(`  - ${JSON.stringify(want)}`);
+    lines.push("like:");
+    for (const entry of draft.like) lines.push(`  - ${JSON.stringify(entry)}`);
   }
 
   if (draft.overflow.length > 0) {
     lines.push(
       "",
       `# OVER THE CAP: values.schema.json admits ${String(VALUES_MAX_ITEMS)} entries and the source`,
-      "# offered more. These are preserved verbatim and are NOT in `wants:`. Promote",
+      "# offered more. These are preserved verbatim and are NOT in `like:`. Promote",
       "# the ones you want by hand, in place of ones above:",
     );
-    for (const want of draft.overflow) lines.push(`#   ${want}`);
+    for (const entry of draft.overflow) lines.push(`#   ${entry}`);
   }
 
   return `\`\`\`${VALUES_INFO_STRING}\n${lines.join("\n")}\n\`\`\`\n`;

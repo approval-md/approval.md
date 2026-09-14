@@ -354,12 +354,20 @@ test("the diff's key vocabulary is the policy schema's own top-level keys", () =
  * block Carter pastes into APPROVAL.md by hand (agents may not write that
  * file). The property under test is SPEC.md §5.3's: a values block changes
  * nothing about the parsed policy. It is proved against scratch strings and
- * never by writing the real file, and it holds in both states the live file
- * can be in. Before the paste, the block is appended to the live bytes and the
- * policy must parse identically. After the paste (the live file already
- * carries a block), appending a second one would be the `multiple-blocks`
- * refusal rather than a paste, so the check runs the other way: the live block
- * must load, and the policy must parse identically with the block cut out.
+ * never by writing the real file, and it holds in every state the live file
+ * can be in.
+ *
+ * There are three such states since APRV-336, which cut the format to
+ * `version: "0.2"` and folded `wants` into `like`. The live file carries a
+ * block of the FIRST revision until Carter pastes the new one, so the reader
+ * refuses it with `version-unsupported`: that is a state this suite has to
+ * tolerate rather than fail on, since the paste is a human act this code
+ * cannot perform and must not wait for. The states are therefore: no block at
+ * all (the proposal goes onto the live bytes), a block the reader refuses as
+ * the old format (the refusal itself is asserted, and the inertness check runs
+ * against the copy with that block cut out), and a block that loads (the live
+ * block comes off the live bytes). In all three the policy must parse
+ * identically with and without the block.
  */
 
 /**
@@ -405,37 +413,77 @@ function assertValuesInert(withBlock: string, withoutBlock: string): void {
   assert.deepEqual(loadPolicyText(scratchPath, withBlock), loadPolicyText(scratchPath, withoutBlock));
 }
 
+/** The given markdown with its first values fence cut out, by TEXT. */
+function withoutValuesFence(markdown: string): string {
+  const fence = rawValuesFenceOf(markdown);
+  if (fence === null) return markdown;
+  return `${markdown.slice(0, fence.start)}${markdown.slice(fence.end)}`;
+}
+
 test("the proposed values block leaves the live policy byte-for-byte the same (APRV-240)", () => {
   const live = readFileSync(APPROVAL_MD, "utf8");
   const fence = valuesFenceOf(live);
-  if (fence === null) {
-    // Before the paste: the proposal goes onto the live bytes.
+  if (fence !== null) {
+    // After the paste: the live block comes off the live bytes.
+    assertValuesInert(live, `${live.slice(0, fence.start)}${live.slice(fence.end)}`);
+    return;
+  }
+  const raw = rawValuesFenceOf(live);
+  if (raw === null) {
+    // No block at all: the proposal goes onto the live bytes.
     assertValuesInert(`${live.trimEnd()}\n\n${proposedValuesBlock()}\n`, live);
     return;
   }
-  // After the paste: the live block comes off the live bytes.
-  assertValuesInert(live, `${live.slice(0, fence.start)}${live.slice(fence.end)}`);
+  // APRV-336: the live file carries a block the reader will not take. Until
+  // Carter pastes the "0.2" block, that block is the first revision, and this
+  // suite asserts the refusal rather than failing on it: the paste is a human
+  // act and a test that demanded it would be demanding it of the wrong party.
+  const refusal = loadValuesText(APPROVAL_MD, live);
+  assert.equal(refusal.ok, false, "the live values block loaded but valuesFenceOf found none");
+  if (refusal.ok) throw new Error("unreachable");
+  assert.equal(refusal.code, "version-unsupported", refusal.message);
+  assert.match(refusal.message, /fold `wants:` into `like:`/u);
+  assert.match(refusal.message, /version: "0\.2"/u);
+  // And the refused block moves the policy no more than a valid one would.
+  const stripped = withoutValuesFence(live);
+  assert.deepEqual(loadPolicyText(APPROVAL_MD, live), loadPolicyText(APPROVAL_MD, stripped));
+  assertValuesInert(`${stripped.trimEnd()}\n\n${proposedValuesBlock()}\n`, stripped);
 });
 
-test("the values check holds in the state the live file is not in (APRV-240)", () => {
-  // Whichever state APPROVAL.md is in, exercise the other one against a scratch
-  // string, so a paste (or its reversal) cannot leave one branch of the check
-  // untested.
-  const live = readFileSync(APPROVAL_MD, "utf8");
-  const fence = valuesFenceOf(live);
-  if (fence === null) {
-    // The block goes on the end, so the block that comes off is the LAST fence
-    // by text: a file whose earlier fence is hidden inside a wrapper still has
-    // exactly one the loader can see, and it is the one just appended.
-    const block = proposedValuesBlock();
-    const pasted = `${live.trimEnd()}\n\n${block}\n`;
-    const cutStart = pasted.lastIndexOf(block);
-    assert.ok(cutStart > 0);
-    assertValuesInert(pasted, `${pasted.slice(0, cutStart)}${pasted.slice(cutStart + block.length)}`);
-    return;
-  }
-  const stripped = `${live.slice(0, fence.start)}${live.slice(fence.end)}`;
-  assertValuesInert(`${stripped.trimEnd()}\n\n${proposedValuesBlock()}\n`, stripped);
+test("the values check holds in the states the live file is not in (APRV-240)", () => {
+  // Whichever state APPROVAL.md is in, exercise the others against scratch
+  // strings, so a paste (or its reversal) cannot leave a branch untested.
+  const scratchPath = join(REPO_ROOT, "APPROVAL.md");
+  const base = withoutValuesFence(readFileSync(APPROVAL_MD, "utf8"));
+
+  // The pasted state. The block goes on the end, so the block that comes off is
+  // the LAST fence by text: a file whose earlier fence is hidden inside a
+  // wrapper still has exactly one the loader can see, the one just appended.
+  const block = proposedValuesBlock();
+  const pasted = `${base.trimEnd()}\n\n${block}\n`;
+  const cutStart = pasted.lastIndexOf(block);
+  assert.ok(cutStart > 0);
+  assertValuesInert(pasted, `${pasted.slice(0, cutStart)}${pasted.slice(cutStart + block.length)}`);
+
+  // The pre-paste state (APRV-336): a first-revision block on the same copy is
+  // refused by the values reader, with the migration in the message, and the
+  // policy parses exactly as it does with no block at all.
+  const old = [
+    "```yaml approval-values",
+    "version: 1",
+    "like:",
+    "  - success reported first, caveats after",
+    "",
+    "wants:",
+    "  - say when you are stuck rather than guessing a fourth time",
+    "```",
+  ].join("\n");
+  const withOld = `${base.trimEnd()}\n\n${old}\n`;
+  const refused = loadValuesText(scratchPath, withOld);
+  assert.equal(refused.ok, false, "a version-1 values block loaded");
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "version-unsupported", refused.message);
+  assert.deepEqual(loadPolicyText(scratchPath, withOld), loadPolicyText(scratchPath, base));
 });
 
 test("APPROVAL.md is unchanged mid-suite", () => {

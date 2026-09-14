@@ -55,7 +55,7 @@ The block below is not YAML: the second entry is indented into a mapping that
 was never opened.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 like:
   - success reported first
     key: value

@@ -4,7 +4,7 @@
  * Everything else in this directory is control: what an agent may do, who
  * decides, what is sampled. This module reads the other half of the file — the
  * optional ` ```yaml approval-values ` block in which the operator says what
- * they value in the work, what they want from the agent, and how they read and
+ * they value in the work, what they ask of the agent, and how they read and
  * answer. It is the mirror of the journal (SPEC.md §10.1): the journal is the
  * agent's outlet the gate does not stand in front of, and the values block is
  * the human's, with the same rule running in both directions, that nothing said
@@ -66,18 +66,16 @@ export const VALUES_INFO_STRING = "yaml approval-values";
  * shape for TypeScript and adds nothing.
  */
 export interface Values {
-  /** Format version. The only required key; the integer `1` and nothing else. */
-  version: 1;
+  /** Format version. The only required key; the string `"0.2"` and nothing else. */
+  version: "0.2";
   /** What the operator loves, in their own words. */
   love?: string[];
-  /** What the operator likes. */
+  /** What the operator likes, including what they ask of an agent as behaviour. */
   like?: string[];
   /** What the operator dislikes. NOT a prohibition: a prohibition is policy. */
   dislike?: string[];
-  /** What the operator wants FROM the agent, as behaviour rather than taste. */
-  wants?: string[];
   /** How the operator reads and answers. One sentence or two. */
-  responds?: string;
+  communication?: string;
 }
 
 /**
@@ -87,12 +85,23 @@ export interface Values {
  * two are different questions with different consequences, and a shared union
  * would invite a caller to handle one with the other's rules. There is no
  * `no-block` here, because a file with no values block is not a failure at all.
+ *
+ * `version-unsupported` is separate from `schema-invalid` although the schema
+ * would refuse both blocks it covers. A block written to the first revision of
+ * this format is a correct document of the wrong vintage, and its reader is a
+ * human who wrote it before APRV-336 rather than one who made a typo: the
+ * message they need names the migration (fold `wants:` into `like:`, set
+ * `version: "0.2"`), and a generic "does not match values.schema.json" with a
+ * const violation under it does not carry that. The unquoted `version: 0.2` is
+ * the same case one step later: YAML read the dotted identifier as a float, and
+ * the fix is a pair of quotes rather than anything about the block's content.
  */
 export type ValuesLoadFailureCode =
   | "file-missing"
   | "multiple-blocks"
   | "unterminated-fence"
   | "yaml-error"
+  | "version-unsupported"
   | "schema-invalid";
 
 /** Where the values block was read from. */
@@ -191,6 +200,37 @@ function resolveFile(
   );
 }
 
+/** The version this runtime reads, spelled as the block must spell it. */
+export const VALUES_VERSION = "0.2";
+
+/** The migration a pre-APRV-336 block needs, in one clause. */
+const MIGRATION = `fold \`wants:\` into \`like:\` and set \`version: "${VALUES_VERSION}"\`, with the quotes`;
+
+/**
+ * The version refusal a parsed block earns before the schema is consulted, or
+ * null when the version is not a number and the schema is the right judge.
+ *
+ * Only NUMBERS are answered for here. A number in this position is YAML having
+ * read the version rather than the author having mistyped it: `version: 1` is
+ * the first revision of this format, and `version: 0.2` is the current one
+ * written without quotes, which YAML resolves to a float. Both are refused with
+ * the edit that fixes them. Every other wrong version (a list, a map, the
+ * string "1", the string "0.3") goes to the schema, whose const violation says
+ * what it is, because this function has nothing truer to add about it.
+ */
+function versionRefusal(parsed: unknown): string | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const version = (parsed as Record<string, unknown>)["version"];
+  if (typeof version !== "number") return null;
+  if (version === 1) {
+    return `the values block is version 1, the format this runtime replaced in APRV-336; it reads version "${VALUES_VERSION}" only. To migrate: ${MIGRATION}. Nothing about the policy block changes, and a version-1 block fails this reader alone.`;
+  }
+  if (version === 0.2) {
+    return `the values block writes \`version: ${VALUES_VERSION}\` unquoted, which YAML reads as the number 0.2 rather than as a format identifier. Quote it: \`version: "${VALUES_VERSION}"\`. If the block is also older than APRV-336, ${MIGRATION}.`;
+  }
+  return `the values block carries the number ${String(version)} as its version; this runtime reads the quoted string "${VALUES_VERSION}" and nothing else. To migrate a pre-APRV-336 block: ${MIGRATION}.`;
+}
+
 /**
  * Extract, parse, and validate the values block of an already-read file.
  *
@@ -236,6 +276,11 @@ export function loadValuesText(
     tagContext: "a values block",
   });
   if (!parsed.ok) return failure("yaml-error", `${path}: ${parsed.message}`, source);
+
+  // Before the schema, because the schema's answer to an old block is a const
+  // violation and the author's question is "what do I edit" (APRV-336).
+  const refusal = versionRefusal(parsed.value);
+  if (refusal !== null) return failure("version-unsupported", `${path}: ${refusal}`, source);
 
   // `exactOptionalPropertyTypes` is on, so the key is omitted rather than
   // passed as `undefined`: the validator's own default is not the same thing as

@@ -86,24 +86,24 @@ function policyPlus(tail: string): string {
 
 test("a file with a values block loads it (SPEC.md §5.3)", () => {
   const result = expectPresent(loadFixture("valid", "with-values.md"));
-  assert.equal(result.values.version, 1);
+  assert.equal(result.values.version, "0.2");
   assert.deepEqual(result.values.love, [
     "seeing the real change, not a description of it",
     "a runbook I can paste into a terminal",
   ]);
+  // APRV-336: `like` carries what the operator prefers AND what they ask for,
+  // which the first revision split off into a `wants` list of its own.
   assert.deepEqual(result.values.like, [
     "success reported first, caveats after",
     "small reviewable commits",
+    "honest opinions on the work, including when you think a task is wrong",
+    "a journal entry of about five points per milestone",
   ]);
   assert.deepEqual(result.values.dislike, [
     "prose where a command would do",
     "being asked to approve something I cannot see",
   ]);
-  assert.deepEqual(result.values.wants, [
-    "honest opinions on the work, including when you think a task is wrong",
-    "a journal entry of about five points per milestone",
-  ]);
-  assert.match(result.values.responds ?? "", /within the hour on the phone/u);
+  assert.match(result.values.communication ?? "", /within the hour on the phone/u);
   assert.equal(result.source.filename, "with-values.md");
 });
 
@@ -127,7 +127,7 @@ test("discovery follows the policy filename precedence", () => {
   const dir = mkdtempSync(join(scratch, "discovery-"));
   writeFileSync(
     join(dir, "APPROVALS.md"),
-    policyPlus("```yaml approval-values\nversion: 1\nlike: [from-approvals-md]\n```\n"),
+    policyPlus('```yaml approval-values\nversion: "0.2"\nlike: [from-approvals-md]\n```\n'),
     "utf8",
   );
   const fallback = expectPresent(loadValues({ dir }));
@@ -136,7 +136,7 @@ test("discovery follows the policy filename precedence", () => {
 
   writeFileSync(
     join(dir, "APPROVAL.md"),
-    policyPlus("```yaml approval-values\nversion: 1\nlike: [from-approval-md]\n```\n"),
+    policyPlus('```yaml approval-values\nversion: "0.2"\nlike: [from-approval-md]\n```\n'),
     "utf8",
   );
   const preferred = expectPresent(loadValues({ dir }));
@@ -174,8 +174,59 @@ test("a values block the schema refuses fails schema-invalid, with errors", () =
   assert.ok((result.errors ?? []).length > 0, "a schema failure must carry its errors");
 });
 
+// ---------------------------------------------------------------------------
+// The version cut (APRV-336)
+// ---------------------------------------------------------------------------
+
+test("a version-1 block is refused with the migration, not a const violation", () => {
+  const result = expectFail(loadFixture("invalid", "version-1.md"), "version-unsupported");
+  // The message has to say what to edit. A reader of this block wrote a correct
+  // document of the wrong vintage; "does not match values.schema.json" would
+  // leave them to work the two edits out from a const violation.
+  assert.match(result.message, /version 1/u);
+  assert.match(result.message, /fold `wants:` into `like:`/u);
+  assert.match(result.message, /version: "0\.2"/u);
+  assert.match(result.message, /quotes/u);
+  // …and it says what this refusal does NOT do, because the policy is the
+  // question a reader of a refusal in APPROVAL.md asks next.
+  assert.match(result.message, /fails this reader alone/u);
+  assert.equal(result.source?.filename, "version-1.md");
+
+  // The policy half of the same file is untouched by it (SPEC.md §11.1
+  // invariant 10): a values refusal is never a policy refusal.
+  assert.equal(loadPolicy({ file: fixturePath("invalid", "version-1.md") }).ok, true);
+});
+
+test("an unquoted 0.2 is refused as the YAML float it is", () => {
+  const result = expectFail(loadFixture("invalid", "version-unquoted.md"), "version-unsupported");
+  assert.match(result.message, /unquoted/u);
+  assert.match(result.message, /number 0\.2/u);
+  assert.match(result.message, /version: "0\.2"/u);
+  assert.equal(loadPolicy({ file: fixturePath("invalid", "version-unquoted.md") }).ok, true);
+});
+
+test("a version that is neither is left to the schema", () => {
+  // The string "1" is a wrong version and not a recognisable vintage, so the
+  // const violation is the truest thing anyone can say about it.
+  expectFail(loadFixture("invalid", "schema-invalid.md"), "schema-invalid");
+  // A number this runtime has never used still gets the migration pointer,
+  // because a number in this position is always YAML having read the version.
+  const future = expectFail(
+    loadValuesText("future.md", "```yaml approval-values\nversion: 3\n```\n"),
+    "version-unsupported",
+  );
+  assert.match(future.message, /the number 3/u);
+});
+
 test("loadValues never throws for any fixture", () => {
-  for (const name of ["two-blocks.md", "unterminated.md", "yaml-error.md", "schema-invalid.md"]) {
+  for (const name of [
+    "two-blocks.md",
+    "unterminated.md",
+    "yaml-error.md",
+    "schema-invalid.md",
+    "version-1.md",
+    "version-unquoted.md",
+  ]) {
     assert.doesNotThrow(() => loadFixture("invalid", name), `${name} threw`);
   }
   for (const name of ["with-values.md", "absent.md"]) {
@@ -198,7 +249,7 @@ test("the values block is parsed under the same hardened YAML rules as the polic
   expectFail(
     loadValuesText(
       "duplicate.md",
-      "```yaml approval-values\nversion: 1\nlike: [a]\nlike: [b]\n```\n",
+      '```yaml approval-values\nversion: "0.2"\nlike: [a]\nlike: [b]\n```\n',
     ),
     "yaml-error",
   );
@@ -207,21 +258,24 @@ test("the values block is parsed under the same hardened YAML rules as the polic
   // never the boolean `false`. Which dialect a reader happens to ship must not
   // decide what a human's sentence says.
   const yaml11 = expectPresent(
-    loadValuesText("yaml11.md", "```yaml approval-values\nversion: 1\nresponds: no\n```\n"),
+    loadValuesText(
+      "yaml11.md",
+      '```yaml approval-values\nversion: "0.2"\ncommunication: no\n```\n',
+    ),
   );
-  assert.equal(yaml11.values.responds, "no");
+  assert.equal(yaml11.values.communication, "no");
 
   // And a real boolean stays a boolean, which the closed schema refuses rather
   // than coercing into a list entry.
   expectFail(
-    loadValuesText("bool.md", "```yaml approval-values\nversion: 1\nlove: [true]\n```\n"),
+    loadValuesText("bool.md", '```yaml approval-values\nversion: "0.2"\nlove: [true]\n```\n'),
     "schema-invalid",
   );
 
   // An alias bomb is bounded rather than expanded.
   const bomb = [
     "```yaml approval-values",
-    "version: 1",
+    'version: "0.2"',
     "a: &a [x, x, x, x, x, x, x, x, x]",
     "b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a]",
     "c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b]",
@@ -251,9 +305,9 @@ test("the block is found by its info string, not by looking like yaml", () => {
 
   // Whitespace in the info string is normalised, so this IS the block.
   const spaced = expectPresent(
-    loadValuesText("spaced.md", "```  yaml   approval-values  \nversion: 1\n```\n"),
+    loadValuesText("spaced.md", '```  yaml   approval-values  \nversion: "0.2"\n```\n'),
   );
-  assert.equal(spaced.values.version, 1);
+  assert.equal(spaced.values.version, "0.2");
 
   // …and the constant is the string the fixtures and the guard test use.
   assert.equal(VALUES_INFO_STRING, "yaml approval-values");
@@ -317,7 +371,7 @@ test("a values failure is not a policy failure, and the reverse", () => {
   // that reads perfectly. The values reader answers on its own terms.
   const brokenPolicy = tempFile(
     "broken-policy.md",
-    "```yaml approval-policy\nversion: [not, a, string]\n```\n\n```yaml approval-values\nversion: 1\nlike: [still readable]\n```\n",
+    '```yaml approval-policy\nversion: [not, a, string]\n```\n\n```yaml approval-values\nversion: "0.2"\nlike: [still readable]\n```\n',
   );
   assert.equal(loadPolicy({ file: brokenPolicy }).ok, false);
   const values = expectPresent(loadValues({ file: brokenPolicy }));

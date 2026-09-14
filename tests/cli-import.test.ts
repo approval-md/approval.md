@@ -276,7 +276,7 @@ test("stdout prints the values fence after the policy draft, byte for byte", () 
   const policyAt = run.stdout.indexOf("```yaml approval-policy");
   const valuesAt = run.stdout.indexOf("```yaml approval-values");
   assert.ok(policyAt >= 0 && valuesAt > policyAt, run.stdout.slice(0, 80));
-  assert.match(run.stderr, /nothing is graded/u);
+  assert.match(run.stderr, /nothing is promoted/u);
   assert.match(run.stderr, /invalidates the standing attestation/u);
 });
 
@@ -284,7 +284,7 @@ test("a source with no values heading prints no values fence at all", () => {
   const run = importFixture("claude-md-permissions.md");
   assert.equal(run.code, 0);
   assert.ok(!run.stdout.includes("approval-values"), run.stdout);
-  assert.ok(!run.stderr.includes("nothing is graded"), run.stderr);
+  assert.ok(!run.stderr.includes("nothing is promoted"), run.stderr);
 });
 
 test("--json carries the values draft, and it is the fence and nothing else", () => {
@@ -297,9 +297,10 @@ test("--json carries the values draft, and it is the fence and nothing else", ()
   assert.ok(text.startsWith("```yaml approval-values\n"), text.slice(0, 40));
   assert.ok(text.endsWith("```\n"));
   assert.ok(!text.includes("approval-policy"));
-  assert.ok(text.includes("wants:"));
-  // The negative property, on the wire: no grade was invented.
-  assert.ok(!/^\s*(love|like|dislike):/mu.test(text), text);
+  assert.ok(text.includes("like:"));
+  // The negative property, on the wire: no grade was promoted, and the key the
+  // first revision drafted into is gone (APRV-336).
+  assert.ok(!/^\s*(love|dislike|wants):/mu.test(text), text);
   const warnings = value["warnings"] as string[];
   assert.ok(warnings.some((warning) => warning.includes("repeated values")));
   assert.ok(warnings.some((warning) => warning.includes("215 characters")));
@@ -329,9 +330,8 @@ test("--out writes both blocks, and the file loads as a policy and as values", (
   const values = loadValuesText(path, written, { schemaDir: SCHEMA_DIR });
   assert.ok(values.ok, values.ok ? "" : values.message);
   assert.ok(values.present);
-  assert.equal(values.values.version, 1);
+  assert.equal(values.values.version, "0.2");
   assert.equal(values.values.love, undefined);
-  assert.equal(values.values.like, undefined);
   assert.equal(values.values.dislike, undefined);
-  assert.ok((values.values.wants ?? []).includes("The failing case lands first, then the fix"));
+  assert.ok((values.values.like ?? []).includes("The failing case lands first, then the fix"));
 });

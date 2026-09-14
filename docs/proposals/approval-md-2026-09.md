@@ -168,6 +168,93 @@ Replace with:
   vcs.remote.meta:           { autonomy: supervised-retro }   # gh graphql query, pr update-branch, run rerun (APRV-268)
 ```
 
-## 3. Values block, version 2 (APRV-336)
+## 3. Values block, version "0.2" (APRV-336)
 
-Pending: APRV-336 appends this section.
+The values block separated `wants` (what you ask of an agent as behaviour) from
+`like` (what the work is graded by). The line between the two has to be
+re-decided on every edit, and both lists are read by the same person in the same
+way: a request about behaviour and a preference about the output are one kind of
+thing. APRV-336 folds `wants` into `like`, renames `responds` to
+`communication` (which no longer reads as a sibling of the `approval feedback`
+verb), and moves the format version from the integer `1` to the quoted string
+`"0.2"`, so both blocks in this file spell their version the same way. The
+quotes carry weight: YAML reads a bare `0.2` as a float, and the reader refuses
+that by name. Until you paste, `approval values` and the `values-block` row of
+`approval doctor` report the live block as unreadable with the code
+`version-unsupported`. Nothing else moves: the policy block, every class and
+every gate are untouched, because no enforcement path reads a values block (SPEC
+§11.1 invariant 10).
+
+`>-` on the current `responds:` line is YAML's folded-scalar marker, which joins
+the indented lines below it into one string. It is optional, and the replacement
+writes the same sentence as an ordinary quoted string on one line.
+
+The prose line above the block ("Below the policy is a second block the runtime
+never enforces...") stays as it is. What is replaced is the fenced block itself,
+from its ` ```yaml approval-values ` line through its closing fence. The
+four-backtick wrapper below belongs to this page and is not part of the block.
+
+Current:
+
+````yaml
+```yaml approval-values
+version: 1
+
+love:
+  - honest thoughts on what we are building, including when you think I am wrong
+  - a journal entry of about five points at the end of each milestone
+  - "a tight ship loop: task, plan, diff, tests, PR, merge armed, all in one session"
+  - suggestions for changes to APPROVAL.md, tightening or loosening, with the cost you saw that prompted them
+
+like:
+  - success reported first, caveats after, in a message that stands on its own
+  - a runbook I can paste into a terminal rather than prose about one
+  - the real change shown, not a description of it
+  - small diffs with one reviewable idea in them
+
+dislike:
+  - work that lands without a Backlog task
+  - a PR left waiting for a hand click when the merge could have been armed
+  - confident documentation that is stale
+
+wants:
+  - say when you are stuck rather than guessing a fourth time; the journal is for that
+  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
+  - name the window and the full command when you hand me something to run
+
+responds: >-
+  I read the journal after a session and react on the samples that reach me.
+  Silence is not disapproval. A loved or disliked reaction always carries a
+  note saying why; a bare ok means I looked and it was fine.
+```
+````
+
+Replace with:
+
+````yaml
+```yaml approval-values
+version: "0.2"
+
+love:
+  - honest thoughts on what we are building, including when you think I am wrong
+  - a journal entry of about five points at the end of each milestone
+  - "a tight ship loop: task, plan, diff, tests, PR, merge armed, all in one session"
+  - suggestions for changes to APPROVAL.md, tightening or loosening, with the cost you saw that prompted them
+
+like:
+  - success reported first, caveats after, in a message that stands on its own
+  - a runbook I can paste into a terminal rather than prose about one
+  - the real change shown, not a description of it
+  - small diffs with one reviewable idea in them
+  - say when you are stuck rather than guessing a fourth time; the journal is for that
+  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
+  - name the window and the full command when you hand me something to run
+
+dislike:
+  - work that lands without a Backlog task
+  - a PR left waiting for a hand click when the merge could have been armed
+  - confident documentation that is stale
+
+communication: "I read the journal after a session and react on the samples that reach me. Silence is not disapproval. A loved or disliked reaction always carries a note saying why; a bare ok means I looked and it was fine."
+```
+````

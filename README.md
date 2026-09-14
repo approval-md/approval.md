@@ -393,9 +393,10 @@ backlog at the terminal.
 ## The other half of the word
 
 Everything above is control. The file carries your voice too. Below the policy
-block, `APPROVAL.md` may hold one optional `yaml approval-values` block: what
-you love, like and dislike in the work, what you want from an agent as
-behaviour, and how you read and answer.
+block, `APPROVAL.md` may hold one optional `yaml approval-values` block: four
+keys under `version: "0.2"`, which are what you `love`, `like` and `dislike` in
+the work (what you ask of an agent as behaviour goes in `like` beside what you
+prefer) and `communication`, one sentence on how you read and answer.
 
 ```sh
 approval values      # the operator's block, or "the operator has declared no values here."
@@ -620,10 +621,12 @@ paths public. See the [adapter API guide](docs/adapter-api.md).
 
 ## The APPROVAL.md dictionary
 
-Every key that can appear in the policy block. The schema is closed at every
-level: an unrecognised key fails validation, which fails the policy closed to
-all-manual, because a key the runtime did not understand is a rule its author
-believed was in force. Full semantics: SPEC.md section 5.
+Every key that can appear in the policy block, and after it the four of the
+optional values block. The schema is closed at every level: an unrecognised key
+fails validation, which fails the policy closed to all-manual, because a key the
+runtime did not understand is a rule its author believed was in force. A values
+key the schema refuses fails the values reader alone and never the policy. Full
+semantics: SPEC.md section 5.
 
 | key | what it says |
 | --- | --- |
@@ -665,6 +668,17 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `channels.<name>.prompt.always` | Rows this channel renders only when abnormal, or not at all, render on every prompt instead. The anomaly mark stays a statement about the value, so a forced-on row shouts only when the value is in fact the reason to look. Absent means the channel's own visibility rules (§5.2, §10.3, APRV-218). |
 | `channels.<name>.prompt.hide` | Rows this channel never renders. Refused for the rows required for a decision (`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`) with `prompt-row-required`, and refused for a row `always` also names. Absent means nothing is hidden, and the canonical payload block is out of reach either way (§5.2, §10.3, APRV-218). |
 | `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). A `prompt` block written under such a name is still validated: a layout is checked wherever it appears. |
+
+And the values block (SPEC.md §5.3), which is guidance and reaches no
+enforcement path:
+
+| key | what it says |
+| --- | --- |
+| `version` | Values format version, quoted (`"0.2"`), spelled as the policy block's `"0.1"` is. The only required key here too. The quotes are load-bearing: a bare `0.2` is a float to YAML, and the reader refuses it by name (§5.3, APRV-336). |
+| `love` | What you love in the work. The strongest of the three standing grades. Absent means you named none (§5.3). |
+| `like` | What you like, which since APRV-336 is also where what you ask of an agent as behaviour lives: the former `wants` list folded in here (§5.3). |
+| `dislike` | What you dislike. NOT a prohibition, which belongs in the policy block where it is enforced (§5.3). |
+| `communication` | One string, at most 500 characters, on how you read and answer, so an agent can read silence or terseness correctly. Called `responds` before APRV-336 (§5.3). |
 
 Every key ending in `_env` carries a variable's *name* and never its value:
 agents may read `APPROVAL.md`, so a secret it carried would be a secret they

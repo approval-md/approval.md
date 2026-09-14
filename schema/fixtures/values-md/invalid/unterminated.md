@@ -56,6 +56,6 @@ file; this reader will not, because the truncated tail of a block is
 indistinguishable from a complete one.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 like:
   - success reported first, caveats after

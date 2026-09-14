@@ -25,6 +25,11 @@ approval doctor
 `values-block: pass` and no `policy-not-attested` row means the paste landed.
 `approval values` prints what agents will see.
 
+Until the paste, that row reads `fail` with the code `version-unsupported`: the
+live block is the first revision of the format and APRV-336 cut the reader to
+`version: "0.2"`. The policy is untouched by that, and so is every gate; only
+the values reader refuses.
+
 ## Where it goes
 
 Below the ` ```yaml approval-policy ` block, after its closing fence. Prose
@@ -42,7 +47,7 @@ Below the policy is a second block the runtime never enforces. It is what I
 value, for agents that want to know; `approval values` prints it.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 
 love:
   - honest thoughts on what we are building, including when you think I am wrong
@@ -54,31 +59,33 @@ like:
   - a runbook I can paste into a terminal rather than prose about one
   - the real change shown, not a description of it
   - small diffs with one reviewable idea in them
+  - say when you are stuck rather than guessing a fourth time; the journal is for that
+  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
+  - name the window and the full command when you hand me something to run
 
 dislike:
   - work that lands without a Backlog task
   - a PR left waiting for a hand click when the merge could have been armed
   - confident documentation that is stale
 
-wants:
-  - say when you are stuck rather than guessing a fourth time; the journal is for that
-  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
-  - name the window and the full command when you hand me something to run
-
-responds: >-
-  I read the journal after a session and react on the samples that reach me.
-  Silence is not disapproval. A loved or disliked reaction always carries a
-  note saying why; a bare ok means I looked and it was fine.
+communication: "I read the journal after a session and react on the samples that reach me. Silence is not disapproval. A loved or disliked reaction always carries a note saying why; a bare ok means I looked and it was fine."
 ```
 
 ## Why these words
 
 - `love` holds the three things named as the reason for this feature: honest
   opinions, per-milestone journals, and the ship loop CLAUDE.md already asks for.
-- `like` restates the attention bar the repo's session practices already assume.
+- `like` restates the attention bar the repo's session practices already assume,
+  and it now carries the three requests that used to sit in `wants` as well:
+  APRV-336 folded that list in, since a request about behaviour and a preference
+  about the output are graded by the same person in the same way, and one list is
+  easier to keep true. Nothing in it is enforced; SPEC §11.1 invariant 10 keeps it
+  that way.
 - `dislike` names the three failure modes CLAUDE.md's workflow section exists to
   prevent, so the block and the workflow prose agree.
-- `wants` is behaviour the human asks for, phrased as requests. Nothing in it is
-  enforced; SPEC §11.1 invariant 10 keeps it that way.
-- `responds` tells an agent how to read silence, which is the one thing a block
-  of preferences cannot otherwise convey.
+- `communication` tells an agent how to read silence, which is the one thing a
+  block of preferences cannot otherwise convey. It was called `responds` before
+  APRV-336, a word that read as a sibling of the `approval feedback` verb.
+- `version` is the quoted string `"0.2"`, spelled as the policy block's `"0.1"`
+  is. The quotes are load-bearing: YAML reads a bare `0.2` as a float, and the
+  reader refuses that by name.

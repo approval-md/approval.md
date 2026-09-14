@@ -859,13 +859,21 @@ function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: strin
         ),
       };
     }
+    // A block of the format APRV-336 replaced is a fixable block rather than a
+    // broken one, so its fix names the two edits instead of the load code.
+    const fix =
+      result.code === "version-unsupported"
+        ? `edit the block in ${result.source?.filename ?? "the policy file"}: fold \`wants:\` into \`like:\`, rename \`responds:\` to \`communication:\`, and set \`version: "0.2"\` with the quotes; then re-attest, since the attestation digests the whole file`
+        : `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`;
     return {
       check: "values-block",
       status: "fail",
       detail: oneLine(
-        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
+        // The loader's own message may end in a full stop (the version refusals
+        // are whole sentences), and two of them in a row reads as a typo.
+        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message.replace(/\.$/u, "")}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
       ),
-      fix: `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`,
+      fix,
     };
   }
   if (!result.present) {
@@ -875,16 +883,16 @@ function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: strin
       detail: `${result.source.filename}: no approval-values block; the operator has declared no values here. That is a declaration rather than a gap, and \`approval values\` says so in those words.`,
     };
   }
-  const declared = (["love", "like", "dislike", "wants"] as const).filter(
+  const declared = (["love", "like", "dislike"] as const).filter(
     (key) => result.values[key] !== undefined,
   );
-  const responds = result.values.responds === undefined ? "" : ", responds";
+  const communication = result.values.communication === undefined ? "" : ", communication";
   return {
     check: "values-block",
     status: "pass",
-    detail: `${result.source.filename}: the values block parses and validates (version ${String(
+    detail: `${result.source.filename}: the values block parses and validates (version ${JSON.stringify(
       result.values.version,
-    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${responds}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
+    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${communication}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
   };
 }
 

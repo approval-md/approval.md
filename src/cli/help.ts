@@ -1519,7 +1519,7 @@ Reads one markdown file, finds its permissions section, and prints a DRAFT
 \`\`\`yaml approval-policy block from a fixed, ordered keyword table.
 THE DRAFT AUTHORIZES NOTHING: this verb never writes APPROVAL.md, never logs and
 never attests. Fail closed: a bullet the table cannot place is kept verbatim.
-"What I value"-style headings become a DRAFT values fence, all under \`wants\`.
+"What I value"-style headings become a DRAFT values fence, all under \`like\`.
 
 JSON shape (stdout, one object):
   {"ok":true,"source":"<path>","out":"<path>"|null,
@@ -1682,8 +1682,8 @@ Flags:
   --json / -h, --help   machine-readable output / this text
 
 Prints the optional \`\`\`yaml approval-values block of APPROVAL.md: what the
-operator loves, likes and dislikes, what they want from you as behaviour, and
-how they read and answer. EVERY FORM CARRIES THE LABEL: this is GUIDANCE and
+operator loves, likes (including what they ask of you as behaviour) and
+dislikes, and how they read and answer. EVERY FORM CARRIES THE LABEL: this is GUIDANCE and
 never policy. It grants nothing, forbids nothing and changes no verdict; what
 you MAY do is the policy block, answered by \`approval policy check\`.
 

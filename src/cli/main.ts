@@ -1256,8 +1256,8 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       return commandJournal(rest, streams, cwd);
     }
     // The human's half of the same pair (APRV-238). `values` prints the
-    // optional values block of APPROVAL.md — what the operator values, wants
-    // and how they answer — and it is guidance rather than policy: it grants
+    // optional values block of APPROVAL.md — what the operator values, what
+    // they ask for, and how they answer — and it is guidance rather than policy: it grants
     // nothing, and no path that computes a verdict, a class, a sample, a budget
     // or a token reads it (SPEC.md §11.1 invariant 10). It resolves no policy
     // rule, reads no log and appends nothing.
