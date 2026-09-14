@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","api","--method","POST","repos/approval-md/approval.md/environments/npm/deployment-branch-policies","--input","/private/tmp/aprv307-npm-main-only-body.json"],"body_sha256":"8299c77e1e86d9e14ed19c6a7e7bc8df964a19eabf04f1f70c8840c21690c138","configuration":{"name":"main","type":"branch"},"cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"body":{"bypass_actors":[],"conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*"]}},"enforcement":"active","name":"Immutable npm release tags","rules":[{"parameters":{"update_allows_fetch_and_merge":false},"type":"update"},{"type":"deletion"}],"target":"tag"},"endpoint":"repos/approval-md/approval.md/rulesets","method":"POST","repository":"approval-md/approval.md"}
