@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && approval log advance --help 2>&1 | head -40; echo \"=== daemon\"; approval status 2>&1 | head -15","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
