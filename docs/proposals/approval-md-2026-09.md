@@ -89,7 +89,84 @@ Replace with:
 
 ## 2. Retire the bare `supervised` spelling (APRV-335)
 
-Pending: APRV-335 appends this section.
+Four class rules in this policy still write the bare `supervised`. Since the
+autonomy split (APRV-127) that spelling is an alias of `supervised-retro`, and
+as of APRV-335 it is a deprecated one: it still parses, the loader still notes
+it, `approval doctor`'s `autonomy-alias` row now names every rule that uses it,
+and a future version of the policy schema removes it. Nothing about how these
+four rules behave changes here. Each of them proceeds at once and is sampled
+for retrospective review today, and does exactly that after the paste; what
+changes is that the file states which of the two supervised bargains it means,
+so a reader of this policy meets two levels rather than three. No `retro_rate`
+is added: these rules sample at `audit.supervised_sample_rate`, and a rate
+written here would be a new decision hiding inside a spelling fix.
+
+### `vcs.push.main`
+
+Section 1 above rewrites this line's comment, and the replacement here
+supersedes it: paste the "Replace with" line from this section rather than that
+one, so the line lands with the corrected comment and the current spelling
+together.
+
+Section 1's line, which this supersedes:
+
+```yaml
+  vcs.push.main:             { autonomy: supervised }   # proceeds, sampled for retrospective review; includes gh pr merge
+```
+
+Current:
+
+```yaml
+  vcs.push.main:             { autonomy: supervised }   # gated by per-task human review; includes gh pr merge
+```
+
+Replace with:
+
+```yaml
+  vcs.push.main:             { autonomy: supervised-retro }   # proceeds, sampled for retrospective review; includes gh pr merge
+```
+
+### `vcs.pr.*`
+
+Current:
+
+```yaml
+  vcs.pr.*:                  { autonomy: supervised }   # gh pr create / edit / comment on a feature branch
+```
+
+Replace with:
+
+```yaml
+  vcs.pr.*:                  { autonomy: supervised-retro }   # gh pr create / edit / comment on a feature branch
+```
+
+### `policy.edit.design`
+
+Current:
+
+```yaml
+  policy.edit.design:        { autonomy: supervised }   # design docs: read in the PR, sampled after
+```
+
+Replace with:
+
+```yaml
+  policy.edit.design:        { autonomy: supervised-retro }   # design docs: read in the PR, sampled after
+```
+
+### `vcs.remote.meta`
+
+Current:
+
+```yaml
+  vcs.remote.meta:           { autonomy: supervised }   # gh graphql query, pr update-branch, run rerun (APRV-268)
+```
+
+Replace with:
+
+```yaml
+  vcs.remote.meta:           { autonomy: supervised-retro }   # gh graphql query, pr update-branch, run rerun (APRV-268)
+```
 
 ## 3. Values block, version 2 (APRV-336)
 

@@ -179,7 +179,12 @@ function policyWith(port: number): string {
     "  on_expiry: reject",
     "classes:",
     "  files.write.*:",
-    "    autonomy: supervised",
+    // `supervised-retro` rather than the bare `supervised` (APRV-335): the
+    // alias is deprecated, the `autonomy-alias` row names every rule still
+    // writing it, and a shared fixture that wrote it would hand a `fix` to a
+    // passing row in every sweep below. The two shapes of that row have their
+    // own cases at the end of this file.
+    "    autonomy: supervised-retro",
     "channels:",
     "  web:",
     `    port: ${port}`,
@@ -429,6 +434,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // codex-hook-wiring skips: no project Codex hook file is present, and
       // file absence cannot say anything about trust or observed execution.
       "skip",
+      // autonomy-alias passes: the fixture policy writes `supervised-retro`,
+      // so no rule uses the deprecated bare spelling. The question was asked
+      // and the answer is "none", which is a pass rather than a skip, exactly
+      // as values-block treats a file that declares no values (APRV-335).
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -467,7 +477,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 28);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 29);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -926,14 +936,15 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 28: APRV-313 appended `codex-hook-wiring`.
+  // 29: APRV-335 appended `autonomy-alias` (which rules still write the
+  // deprecated bare `supervised`), and APRV-313 appended `codex-hook-wiring`.
   // APRV-227 appended `harness-version-unverified` (whether the binary
   // hosting the hook changed under it), APRV-208 appended `live-draw`
   // (whether a daemon is answering supervised-live draws for this log),
   // APRV-272 appended `gate-organs` (which harness files carry no attestation
   // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
   // sealed-delivery private key is tracked or unignored).
-  assert.equal(parsed.checks.length, 28);
+  assert.equal(parsed.checks.length, 29);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1306,7 +1317,7 @@ async function socketHomeLive(port: number): Promise<string> {
   writeFileSync(
     join(dir, "APPROVAL.md"),
     policyWith(port).replace(
-      "    autonomy: supervised",
+      "    autonomy: supervised-retro",
       ["    autonomy: supervised-live", "    live_rate: 0.1"].join("\n"),
     ),
   );
@@ -2249,4 +2260,100 @@ test("doctor: a key consumed and unlinked is still reported while it is in the i
 
   assert.equal(keys.status, "fail");
   assert.match(keys.detail, /TRACKED by git/u);
+});
+
+// ---------------------------------------------------------------------------
+// autonomy-alias: which rules still write the deprecated bare `supervised`
+// (APRV-335)
+// ---------------------------------------------------------------------------
+
+/**
+ * A home whose policy writes whatever level these cases need.
+ *
+ * `policyWith` is the shared healthy fixture and says `supervised-retro`, which
+ * is the answer half of this row. The other half needs a policy that still
+ * spells the level the old way, and it needs more than one rule spelling it so
+ * the detail's list can be read back in order.
+ */
+async function homeWithLevels(lines: readonly string[]): Promise<string> {
+  const port = await freePort();
+  const home = await makeHome({ attest: false, port });
+  writeFileSync(
+    join(home, "APPROVAL.md"),
+    policyWith(port).replace("    autonomy: supervised-retro", lines.join("\n")),
+  );
+  const attested = await runCli(["policy", "attest"], home, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return home;
+}
+
+test("doctor: autonomy-alias names every rule still writing the bare supervised", async () => {
+  const home = await homeWithLevels([
+    "    autonomy: supervised",
+    "  vcs.push.main:",
+    "    autonomy: supervised",
+    "  read.*:",
+    "    autonomy: autonomous",
+  ]);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const alias = checkNamed(run, "autonomy-alias");
+
+  // A deprecated spelling is not a fault: it parses as `supervised-retro` and
+  // every gate enforces it as one, so the row states the fact and leaves the
+  // exit code where it found it.
+  assert.equal(alias.status, "pass");
+  assert.match(alias.detail, /deprecated bare `supervised` on 2 rule\(s\)/u);
+  assert.match(alias.detail, /files\.write\.\*/u);
+  assert.match(alias.detail, /vcs\.push\.main/u);
+  // The rule that named a level this row is not about stays out of the list.
+  assert.equal(alias.detail.includes("read.*"), false);
+  assert.match(alias.fix ?? "", /supervised-retro/u);
+  assert.match(alias.fix ?? "", /docs\/proposals\/approval-md-2026-09\.md/u);
+  assert.ok(
+    FIX_COMMAND_PREFIXES.some((prefix) => (alias.fix ?? "").startsWith(prefix)),
+    `the autonomy-alias fix does not begin with an allowed command: ${String(alias.fix)}`,
+  );
+  assert.equal(
+    parseDoctor(run).checks.some(
+      (entry) => entry.check === "autonomy-alias" && entry.status === "fail",
+    ),
+    false,
+  );
+});
+
+test("doctor: autonomy-alias says so plainly when no rule uses the bare spelling", async () => {
+  const home = await homeWithLevels([
+    "    autonomy: supervised-retro",
+    "  vcs.push.main:",
+    "    autonomy: supervised-live",
+    "    live_rate: 0.1",
+  ]);
+
+  const alias = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "autonomy-alias",
+  );
+
+  assert.equal(alias.status, "pass");
+  assert.match(alias.detail, /no rule uses the deprecated bare `supervised`/u);
+  // Nothing to do, so nothing to type: the fix belongs to the shape that has a
+  // rewrite waiting.
+  assert.equal(alias.fix, undefined);
+});
+
+test("doctor: autonomy-alias skips a policy that did not load, and never passes on one", async () => {
+  const home = await makeHome({ attest: false, port: await freePort() });
+  writeFileSync(join(home, "APPROVAL.md"), "# Policy\n\nno block here at all\n");
+
+  const alias = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "autonomy-alias",
+  );
+
+  // A check that could not look must never report a pass: an unreadable policy
+  // names no level at all, and its own failure is `policy check`'s to report.
+  assert.equal(alias.status, "skip");
+  assert.match(alias.detail, /did not load/u);
+  assert.equal(alias.fix, undefined);
 });

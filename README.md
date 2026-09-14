@@ -429,7 +429,8 @@ an agent with `class-human-only`), `manual` (a human decides before execution),
 `supervised-live` (a policy-declared fraction blocks on the gate exactly as
 `manual` does, and the rest proceed, so the rule carries a `live_rate`),
 `supervised-retro` (executes immediately, a sampled fraction escalated for
-retrospective review), `supervised` (an alias of `supervised-retro`), and
+retrospective review), `supervised` (the deprecated alias of
+`supervised-retro`, still parsed and removed in a future schema version), and
 `autonomous` (executes freely). A truthful `reversible: false` declaration
 normally engages section 7's manual floor. An operator who deliberately accepts
 irreversible execution for one nonmanual class can add
@@ -637,7 +638,7 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `protected_paths[].path` | The path half of the object form: the same grammar as the bare string, an exact file (`SPEC.md`) or a directory prefix (`design/`) (§5.2, APRV-266). |
 | `protected_paths[].class` | The class half: one lowercase segment under `policy.edit`. Four reserved names, `policy.edit.spec`, `policy.edit.harness`, `policy.edit.ci` and `policy.edit.design`, plus any word an author mints beside them. Nothing outside `policy.edit` may be named, and a route below the `policy.edit` line is refused `protected-route-floor`. No default: an entry that wants a sub-class states it (§5.2, APRV-266). |
 | `approvers.<name>.channels` | The channels one approver can decide on. At least one: an approver reachable nowhere can never grant. No default (§5.1). |
-| `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and an alias of `supervised-retro` (§5.2, APRV-127, APRV-185). |
+| `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and the DEPRECATED alias of `supervised-retro`: it still parses, `approval doctor`'s `autonomy-alias` row names every rule that writes it, and a future schema version removes it (§5.2, APRV-127, APRV-185, APRV-335). |
 | `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
 | `classes.<pattern>.retro_rate` | This class's retrospective sampling rate, in (0, 1], overriding `audit.supervised_sample_rate` for it alone. Optional on `supervised`, `supervised-retro` and `supervised-live`, refused on the rest. Absent means the global rate (§5.2, APRV-183). |
 | `classes.<pattern>.allow_irreversible` | Explicit operator permission for a truthful `reversible: false` action to retain this rule's `autonomous` or supervised behavior. Optional boolean; absent or `false` preserves the manual floor. `true` is refused on `manual` and `human-only`, cannot appear in `defaults`, and takes effect only when every equally most-specific matching rule says `true` (§5.2, §7, APRV-317). |
@@ -794,7 +795,7 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **28 rows** and a tally, in the order their failures
+`approval doctor` prints **29 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope
 integrity, the vault, the environment source map, then the rows that ask git
@@ -803,17 +804,17 @@ and the harness what happened (`log-drift`, `reconciliation`,
 `log-advance-cadence`, `dark-sessions`, `verified-snapshot`, `read-proof`,
 `main-behind-origin`, `harness-version-unverified`, `live-draw`,
 `values-block`, `checkpoint`, `gate-organs`, `sealed-keys`,
-`codex-hook-wiring`). Each failure
+`codex-hook-wiring`, `autonomy-alias`). Each failure
 carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
 and repairs nothing, and no credential value appears in its output. Three
-of the 28 lines from a fresh directory, plus the tally:
+of the 29 lines from a fresh directory, plus the tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-9 ok · 18 not applicable · 1 failed
+10 ok · 18 not applicable · 1 failed
 ```
 
 That one failure is expected on the scaffolded policy: it samples supervised
@@ -822,7 +823,7 @@ names, and a control that looks on while the party under oversight could steer
 it is worse than one that is visibly off. Name the secret when you want
 sampling, or delete the `audit` block if one person's gate has no use for it.
 
-**18 of the 28 report `not applicable` in a fresh directory**, and each names
+**18 of the 29 report `not applicable` in a fresh directory**, and each names
 the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 (no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
 `read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),

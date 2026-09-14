@@ -2622,6 +2622,17 @@ The checks, at length:
   doctor does not interpret or merge the TOML hook tables. Malformed JSON
   FAILS; a different valid Codex hook profile SKIPS as undetermined rather than
   being called broken.
+- **autonomy-alias** — which rules of this policy still write the deprecated
+  bare `supervised` (APRV-335). The spelling parses as `supervised-retro` and
+  every gate enforces it as one, so the row is never a FAIL and never moves the
+  exit code: a red line over a spelling would be doctor going red over prose.
+  The two PASS shapes are the whole row. Where some rule uses it, the detail
+  names each one, in the order the loader's own notes name them, and the `fix`
+  is `approval policy amend`, which owns the edit and the re-attestation that
+  edit costs. Where none does, the detail says so plainly, which is the answer
+  an operator wants before a future schema version drops the alias. A policy
+  that did not load is a SKIP: it names no level at all, and its own failure is
+  reported by the attestation row and by `approval policy check`.
 
 **`--json`** (one object on stdout):
 
@@ -2650,8 +2661,9 @@ reaches this backlog. A `supervised-live` class puts a declared `live_rate`
 fraction of its actions through the human gate BEFORE they run; those are
 ordinary manual requests with ordinary grants and tokens, a person has already
 answered them, and they are not drawn a second time for retrospective review. A
-`supervised-retro` class — and the bare `supervised`, which is now an alias for
-it — is what this page is about. `approval policy check` names the mode in its
+`supervised-retro` class — and the bare `supervised`, which is now a deprecated
+alias for it, still parsed and removed in a future schema version (APRV-335) —
+is what this page is about. `approval policy check` names the mode in its
 final line and in `outcome.supervision`.
 
 Supervised actions execute immediately and are audited afterwards. The daemon
