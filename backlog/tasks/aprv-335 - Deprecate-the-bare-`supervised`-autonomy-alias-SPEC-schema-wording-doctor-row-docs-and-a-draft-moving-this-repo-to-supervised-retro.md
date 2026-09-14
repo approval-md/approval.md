@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-opus'
 created_date: '2026-09-14 04:04'
-updated_date: '2026-09-14 06:02'
+updated_date: '2026-09-14 06:27'
 labels: []
 dependencies:
   - APRV-334
@@ -79,6 +79,8 @@ INVARIANTS: no SPEC §11 global invariant was touched. The change is wording plu
 VALIDATION: npm test exit 0, 4120 tests, 4119 pass, 0 fail, 1 skipped. npm run lint (oxlint src tests) exit 0. `node cli.js doctor` on this repo prints the new row naming policy.edit.design, vcs.pr.*, vcs.push.main and vcs.remote.meta, the same four lines section 2 of the proposal rewrites.
 
 SPEC edits landed 2026-09-13 after the daemon was started in the primary (the earlier hook-timeouts were the live draw failing closed with no draw socket, plus Telegram unset in that shell; not a rejection). Glossary row, deprecation paragraph and the calendar.write.own example line applied verbatim as recorded above; each passed its own 1% draw.
+
+Follow-on after the combined-branch test run: SPEC §5.1 canonical example line calendar.write.own moved to supervised-retro, and tests/cli-init.test.ts guards that the init scaffold, the canonical fixture and §5.1 are one document, so src/cli/scaffold.ts, schema/fixtures/policy-md/valid/canonical.md, the ten fixtures that copy it and schema/fixtures/policy/valid/canonical.json moved with it, and the conformance vectors were regenerated. The init scaffold no longer emits the deprecation note it introduces. tests/policy-match.test.ts expectation stays "supervised": the resolver reports the tier with supervision retro|live alongside, so the resolved autonomy is unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

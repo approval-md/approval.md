@@ -46,7 +46,7 @@ approvers:
 classes:
   read.*:                       { autonomy: autonomous }
   files.write.workspace:        { autonomy: autonomous }
-  calendar.write.own:           { autonomy: supervised }
+  calendar.write.own:           { autonomy: supervised-retro }
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual

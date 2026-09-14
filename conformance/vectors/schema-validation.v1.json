@@ -3815,7 +3815,7 @@
               "autonomy": "autonomous"
             },
             "calendar.write.own": {
-              "autonomy": "supervised"
+              "autonomy": "supervised-retro"
             },
             "communicate.email.draft": {
               "autonomy": "autonomous"
