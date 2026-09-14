@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb; git add SPEC.md \"backlog/tasks/aprv-335\"* && git commit -q --amend --no-edit -- SPEC.md \"backlog/tasks/aprv-335\"* && git log --oneline -1 && git show --stat HEAD | tail -15","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

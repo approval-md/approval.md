@@ -1065,10 +1065,13 @@ test("policy-authorized file evidence rejects ambiguous paths and tool shapes", 
   const { root, cleanup } = scratchRoot("guard-policy-shape");
   try {
     const materials = [
-      fileMaterial("/repo/SPEC.md"),
       fileMaterial("dry/SPEC.md"),
       fileMaterial("dir/../SPEC.md"),
       fileMaterial("dir\\SPEC.md"),
+      // Absolute, but not resolvable by tail: a `..` segment makes the tail
+      // say something it does not know, and `notSPEC.md` is another file.
+      fileMaterial("/other/../SPEC.md"),
+      fileMaterial("/Users/carter/dev/approval-md/notSPEC.md"),
       { ...fileMaterial("SPEC.md"), content: "new\n" },
       { ...writeMaterial("SPEC.md", "new\n"), before: "old", after: "new" },
     ];
@@ -1078,6 +1081,108 @@ test("policy-authorized file evidence rejects ambiguous paths and tool shapes", 
       const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
       assert.equal(report.ok, false, `${String(index)}: ${JSON.stringify(report.findings)}`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+/**
+ * The path shape the hook actually writes. `fileToolGate` resolves the
+ * declared target against the session's `cwd`, so every real Claude Code edit
+ * of a protected path binds the worktree's ABSOLUTE path (APRV-337).
+ */
+const HOOK_ABSOLUTE = `${CHECKOUT}/.claude/worktrees/aprv-337-guard/SPEC.md`;
+
+test("the ABSOLUTE path the hook binds is policy-authorized file evidence", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-absolute");
+  try {
+    for (const [key, material] of [
+      ["edit", fileMaterial(HOOK_ABSOLUTE)],
+      ["write", writeMaterial(HOOK_ABSOLUTE, "new\n")],
+    ] as const) {
+      const unit = world(join(root, key), UNATTENDED_POLICY);
+      const start = authorizeEdit(unit, key, material, 1);
+      const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+      assert.equal(report.ok, true, `${key}: ${JSON.stringify(report.findings)}`);
+      assert.equal(report.findings[0]?.evidence, "policy-authorized-file", key);
+      assert.equal(report.findings[0]?.seq, start.seq, key);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("an absolute path whose bytes are in neither blob still covers nothing", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-absolute-dry");
+  try {
+    // A dry run into a scratch copy: the path tail matches, and the bytes are
+    // the proof, so the hunk this pull request carries stays uncovered.
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(unit, "dry", fileMaterial("/elsewhere/dry/SPEC.md", "scratch old", "scratch new"), 1);
+    const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay composes absolute-path policy and manual edits", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-absolute");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const first = { tool: "Edit", file: HOOK_ABSOLUTE, before: "old-one", after: "new-one" };
+    const second = { tool: "Edit", file: HOOK_ABSOLUTE, before: "old-two", after: "new-two" };
+    authorizeEdit(unit, "replay-policy", first, 1);
+    attestPolicy(unit, POLICY, 3);
+    grantEdit(unit, "replay-grant", second, 4);
+    spendGrant(unit, "replay-grant", second, 6);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "prefix old-one middle old-two suffix\n",
+          head: "prefix new-one middle new-two suffix\n",
+        }),
+        changeTsFor: () => at(8),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.match(report.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.equal(report.findings[0]?.coveredBy?.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("PR #393: a granted hunk and an unattended hunk, both bound absolutely", () => {
+  const { root, cleanup } = scratchRoot("guard-pr-393");
+  try {
+    // The shape of PR #393 run 34813602123: one session, several SPEC.md
+    // edits, some sampled onto the gate and some proceeding on the draw. The
+    // granted hunk passed and the unattended one reported `uncovered-hunk`
+    // with no evidence, because the tier rejected the absolute path the hook
+    // binds and the hook binds no other. Before APRV-337 this test failed on
+    // the second hunk.
+    const unit = world(root, UNATTENDED_POLICY);
+    const unattended = fileMaterial(HOOK_ABSOLUTE, "old B", "new B");
+    const start = authorizeEdit(unit, "unattended", unattended, 1);
+    attestPolicy(unit, POLICY, 3);
+    const granted = grantEdit(unit, "granted", fileMaterial(HOOK_ABSOLUTE, "old A", "new A"), 4);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        changeTsFor: () => at(8),
+        blobsFor: () => ({
+          base: "head\nold A\nmiddle\nold B\ntail\n",
+          head: "head\nnew A\nmiddle\nnew B\ntail\n",
+        }),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    const coveredBy = report.findings[0]?.coveredBy ?? [];
+    assert.ok(coveredBy.includes(granted.seq), JSON.stringify(report.findings));
+    assert.ok(coveredBy.includes(start.seq), JSON.stringify(report.findings));
   } finally {
     cleanup();
   }

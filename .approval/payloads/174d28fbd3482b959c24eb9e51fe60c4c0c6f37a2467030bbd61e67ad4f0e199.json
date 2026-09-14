@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb; gh pr merge 393 --merge --auto 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
