@@ -101,12 +101,15 @@ function outputValidator(): (value: unknown) => boolean {
   return ajv.compile(spec.output as JsonSchema) as (value: unknown) => boolean;
 }
 
-/** The four broken fixtures, with the code each must report. */
+/** The broken fixtures, with the code each must report. */
 const BROKEN: readonly { readonly file: string; readonly code: string }[] = [
   { file: "two-blocks.md", code: "multiple-blocks" },
   { file: "unterminated.md", code: "unterminated-fence" },
   { file: "yaml-error.md", code: "yaml-error" },
   { file: "schema-invalid.md", code: "schema-invalid" },
+  // APRV-336: a block of the format this runtime replaced.
+  { file: "version-1.md", code: "version-unsupported" },
+  { file: "version-unquoted.md", code: "version-unsupported" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -168,13 +171,16 @@ test("values: a present block renders every declared key for a person", () => {
     "loves:",
     "likes:",
     "dislikes:",
-    "wants from you:",
-    "responds:",
+    "communication:",
     "  - a runbook I can paste into a terminal",
+    // Folded into `like` by APRV-336, and still printed for the reader.
     "  - honest opinions on the work, including when you think a task is wrong",
   ]) {
     assert.ok(run.stdout.includes(line), `the rendered block omits "${line}":\n${run.stdout}`);
   }
+  // The two names the format retired do not appear on the screen at all.
+  assert.ok(!run.stdout.includes("wants from you:"), run.stdout);
+  assert.ok(!/^responds:/mu.test(run.stdout), run.stdout);
   assert.ok(!run.stdout.includes(NO_VALUES_SENTENCE), "a present block claimed absence");
 });
 
@@ -258,7 +264,7 @@ test("values: --dir discovers APPROVAL.md, then APPROVALS.md", () => {
   const canonical = readFileSync(fixture("valid", "absent.md"), "utf8");
   writeFileSync(
     join(dir, "APPROVALS.md"),
-    `${canonical}\n\`\`\`${VALUES_INFO_STRING}\nversion: 1\nlike: [from-approvals-md]\n\`\`\`\n`,
+    `${canonical}\n\`\`\`${VALUES_INFO_STRING}\nversion: "0.2"\nlike: [from-approvals-md]\n\`\`\`\n`,
     "utf8",
   );
   const fallback = runCli(["values", "--dir", dir, "--json"], caseDir());
@@ -269,7 +275,7 @@ test("values: --dir discovers APPROVAL.md, then APPROVALS.md", () => {
 
   writeFileSync(
     join(dir, "APPROVAL.md"),
-    `${canonical}\n\`\`\`${VALUES_INFO_STRING}\nversion: 1\nlike: [from-approval-md]\n\`\`\`\n`,
+    `${canonical}\n\`\`\`${VALUES_INFO_STRING}\nversion: "0.2"\nlike: [from-approval-md]\n\`\`\`\n`,
     "utf8",
   );
   const preferred = JSON.parse(runCli(["values", "--dir", dir, "--json"], caseDir()).stdout) as {

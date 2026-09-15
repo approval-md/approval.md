@@ -19,7 +19,7 @@ approvers:
 classes:
   read.*:                       { autonomy: autonomous }
   files.write.workspace:        { autonomy: autonomous }
-  calendar.write.own:           { autonomy: supervised }
+  calendar.write.own:           { autonomy: supervised-retro }
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual
@@ -55,7 +55,7 @@ Two values blocks: two answers to one question. The reader refuses rather than
 picking one on document order.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 like:
   - success reported first, caveats after
 ```
@@ -63,7 +63,7 @@ like:
 And, further down the file, a second one somebody pasted in later.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 like:
   - the opposite of the above
 ```

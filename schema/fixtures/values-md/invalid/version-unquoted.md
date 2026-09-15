@@ -51,27 +51,14 @@ Everything after the block is prose again and is ignored by the parser.
 
 ## What I value
 
-The block below is guidance, never policy. Nothing in it grants anything, and
-no part of the runtime reads it to decide.
+The block below is the current revision written without quotes. YAML reads the
+dotted identifier as the float 0.2, which is why the version is quoted at all,
+so the reader refuses it with `version-unsupported` and the quotes as the fix.
 
 ```yaml approval-values
-version: "0.2"
-
-love:
-  - seeing the real change, not a description of it
-  - a runbook I can paste into a terminal
-
+version: 0.2
 like:
   - success reported first, caveats after
-  - small reviewable commits
-  - honest opinions on the work, including when you think a task is wrong
-  - a journal entry of about five points per milestone
-
-dislike:
-  - prose where a command would do
-  - being asked to approve something I cannot see
-
-communication: "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
 ```
 
 Prose again after the block, ignored by both readers.

@@ -41,17 +41,17 @@ classes:
 # The values block lives INSIDE APPROVAL.md, so pasting it changes the file's
 # bytes and invalidates the standing attestation; renew it immediately after.
 #
-# EVERY bullet is in `wants:`, and nothing is graded. `love:`, `like:` and
-# `dislike:` are yours to fill in. A grade is a statement of taste and it is
-# yours to make: this importer can see that you wrote a line down, and cannot
+# EVERY bullet is in `like:`, the middle grade, and nothing is promoted.
+# `love:` and `dislike:` are yours to fill in. How strongly a line is meant
+# is yours to say: this importer can see that you wrote it down, and cannot
 # see how much you meant it. Guessing would put words in your mouth.
 #
 # This block is guidance and never policy. Nothing here is enforced, counted
 # or checked, and no routing, class match, sampling draw, budget or token
 # reads it (SPEC.md §11.1 invariant 10).
 
-version: 1
-wants:
+version: "0.2"
+like:
   - "Work I can check without rerunning it myself"
   - "A diff that says what it changed and why it changed it"
   - "The failing case lands first, then the fix"

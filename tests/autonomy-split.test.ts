@@ -280,6 +280,10 @@ test("bare supervised parses as supervised-retro, with a load-time note", async 
   assert.equal(load.notes[0]?.code, "supervised-alias");
   assert.equal(load.notes[0]?.where, "classes.files.write.*");
   assert.match(load.notes[0]?.message ?? "", /supervised-retro/u);
+  // APRV-335: the alias is on a path out, and the note leads with the word, so
+  // a reader who takes in only its first clause still learns the one part of it
+  // that has a deadline attached.
+  assert.match(load.notes[0]?.message ?? "", /deprecated/u);
 });
 
 test("a policy with no bare supervised carries no notes", async () => {

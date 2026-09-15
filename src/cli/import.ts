@@ -180,7 +180,7 @@ function commandImportAgentsMd(argv: string[], streams: Streams, cwd: string): n
   for (const warning of result.warnings) streams.err(`approval: ${warning}\n`);
   if (valuesDraft !== null) {
     streams.err(
-      "approval: a DRAFT values block is included. Every bullet is in `wants:` and nothing is graded: love/like/dislike are yours to fill in, and this verb will not guess a grade for you. The values block lives inside APPROVAL.md, so pasting it invalidates the standing attestation until you renew it\n",
+      "approval: a DRAFT values block is included. Every bullet is in `like:`, the middle grade, and nothing is promoted: love/dislike are yours to fill in, and this verb will not guess how strongly you meant a line. The values block lives inside APPROVAL.md, so pasting it invalidates the standing attestation until you renew it\n",
     );
   }
   streams.err(

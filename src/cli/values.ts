@@ -115,17 +115,16 @@ function renderList(label: string, entries: string[] | undefined): string[] {
   return [`${label}:`, ...entries.map((entry) => `  - ${entry}`)];
 }
 
-/** The block, for a person: four bulleted lists and one paragraph. */
+/** The block, for a person: three bulleted lists and one paragraph. */
 function renderValues(values: Values): string {
   const lines = [
     ...renderList("loves", values.love),
     ...renderList("likes", values.like),
     ...renderList("dislikes", values.dislike),
-    ...renderList("wants from you", values.wants),
   ];
-  if (values.responds !== undefined) {
+  if (values.communication !== undefined) {
     if (lines.length > 0) lines.push("");
-    lines.push("responds:", `  ${values.responds}`);
+    lines.push("communication:", `  ${values.communication}`);
   }
   if (lines.length === 0) {
     // A block carrying nothing but `version`. It is present and it says

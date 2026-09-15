@@ -941,8 +941,8 @@ function describeLevel(declared: DeclaredAutonomy, liveRate: number | null): str
 }
 
 /**
- * Amended SPEC.md §5.2 (APRV-127): one note per place a policy still writes the
- * bare `supervised`.
+ * Amended SPEC.md §5.2 (APRV-127, APRV-335): one note per place a policy still
+ * writes the bare `supervised`.
  *
  * The alias keeps every pre-split policy meaning exactly what its author meant:
  * `supervised` was retrospective sampling, and `supervised-retro` is that same
@@ -950,6 +950,11 @@ function describeLevel(declared: DeclaredAutonomy, liveRate: number | null): str
  * author reading the split for the first time can reasonably believe `supervised`
  * now means "supervised somehow, possibly live"; the note says, in the one place
  * a reader is already looking, that it does not.
+ *
+ * Since APRV-335 the note leads with the word `deprecated:`, because the alias
+ * is now on a path out: it is still parsed, still admitted by the schema, and a
+ * future schema version drops it. A reader who sees only the first clause of a
+ * long note should still learn the one thing that has a deadline attached.
  *
  * Pure, total, and ordered: `defaults` first, then class patterns in sorted
  * order, so the notes of one policy are byte-stable across runs.
@@ -959,7 +964,7 @@ function aliasNotes(policy: Policy): PolicyNote[] {
   const say = (where: string): PolicyNote => ({
     code: "supervised-alias",
     where,
-    message: `${where} declares the bare \`supervised\`, which parses as \`supervised-retro\`: the action executes immediately and is sampled for review AFTERWARDS. Nothing about it changed with the autonomy split — this is the same behaviour under its honest name. Write \`supervised-retro\` to say so explicitly, or \`supervised-live: <rate>\` to have a fraction of the class stop for a human FIRST.`,
+    message: `deprecated: ${where} declares the bare \`supervised\`, which parses as \`supervised-retro\`: the action executes immediately and is sampled for review AFTERWARDS. Nothing about it changed with the autonomy split — this is the same behaviour under its honest name. Write \`supervised-retro\` to say so explicitly, or \`supervised-live: <rate>\` to have a fraction of the class stop for a human FIRST. The bare spelling still parses and a future version of the policy schema removes it (APRV-335).`,
   });
 
   if (policy.defaults?.autonomy === "supervised") notes.push(say("defaults.autonomy"));

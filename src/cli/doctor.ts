@@ -859,13 +859,21 @@ function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: strin
         ),
       };
     }
+    // A block of the format APRV-336 replaced is a fixable block rather than a
+    // broken one, so its fix names the two edits instead of the load code.
+    const fix =
+      result.code === "version-unsupported"
+        ? `edit the block in ${result.source?.filename ?? "the policy file"}: fold \`wants:\` into \`like:\`, rename \`responds:\` to \`communication:\`, and set \`version: "0.2"\` with the quotes; then re-attest, since the attestation digests the whole file`
+        : `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`;
     return {
       check: "values-block",
       status: "fail",
       detail: oneLine(
-        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
+        // The loader's own message may end in a full stop (the version refusals
+        // are whole sentences), and two of them in a row reads as a typo.
+        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message.replace(/\.$/u, "")}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
       ),
-      fix: `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`,
+      fix,
     };
   }
   if (!result.present) {
@@ -875,16 +883,77 @@ function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: strin
       detail: `${result.source.filename}: no approval-values block; the operator has declared no values here. That is a declaration rather than a gap, and \`approval values\` says so in those words.`,
     };
   }
-  const declared = (["love", "like", "dislike", "wants"] as const).filter(
+  const declared = (["love", "like", "dislike"] as const).filter(
     (key) => result.values[key] !== undefined,
   );
-  const responds = result.values.responds === undefined ? "" : ", responds";
+  const communication = result.values.communication === undefined ? "" : ", communication";
   return {
     check: "values-block",
     status: "pass",
-    detail: `${result.source.filename}: the values block parses and validates (version ${String(
+    detail: `${result.source.filename}: the values block parses and validates (version ${JSON.stringify(
       result.values.version,
-    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${responds}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
+    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${communication}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7e. the deprecated bare `supervised` (APRV-335)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which rules of this policy still write the deprecated bare `supervised`.
+ *
+ * SPEC.md §5.2 keeps the spelling parsing as `supervised-retro` so that no
+ * published policy breaks, and the loader records a note wherever it appears.
+ * A note is read by whoever happens to run a verb that prints notes; the
+ * deprecation needs a place an operator looks at the state of their repository
+ * on purpose, which is this report. SPEC.md §5.2 asks implementations for
+ * exactly that.
+ *
+ * It is never a `fail` and never a `warn`. The policy says what its author
+ * meant, every gate resolves it identically, and nothing on this machine is
+ * broken by a spelling: a red row here would be doctor going red over prose. A
+ * `skip` is the unreadable policy, whose own failure the attestation and
+ * `policy check` rows report; everything else is a `pass` that either names the
+ * rules to rewrite or says plainly that there are none.
+ */
+function checkAutonomyAlias(policyLoad: PolicyLoadResult): DoctorCheck {
+  if (!policyLoad.ok) {
+    return {
+      check: "autonomy-alias",
+      status: "skip",
+      detail: `the policy did not load (${policyLoad.code}), so no rule could be read for the deprecated bare \`supervised\`. A failed load resolves every class to \`manual\` and names no level at all; the failure itself is reported by \`approval policy check\`.`,
+    };
+  }
+
+  // The same walk `aliasNotes` makes in the loader, and deliberately the same
+  // order: `defaults` first, then class patterns sorted, so the row and the
+  // load-time notes name the same places in the same sequence.
+  const where: string[] = [];
+  if (policyLoad.policy.defaults?.autonomy === "supervised") where.push("defaults.autonomy");
+  for (const pattern of Object.keys(policyLoad.policy.classes ?? {}).sort()) {
+    if (policyLoad.policy.classes?.[pattern]?.autonomy === "supervised") where.push(pattern);
+  }
+
+  if (where.length === 0) {
+    return {
+      check: "autonomy-alias",
+      status: "pass",
+      detail: `${policyLoad.source.filename}: no rule uses the deprecated bare \`supervised\`. Every supervised class says which bargain it means, \`supervised-retro\` or \`supervised-live\`, so nothing here changes when a future schema version drops the alias.`,
+    };
+  }
+
+  return {
+    check: "autonomy-alias",
+    status: "pass",
+    detail: oneLine(
+      `deprecated bare \`supervised\` on ${String(where.length)} rule(s): ${where.join(", ")}. Each parses as \`supervised-retro\` and is enforced as one, so the policy means today what its author meant; the spelling is deprecated and a future version of the policy schema removes it (SPEC.md §5.2, APRV-335).`,
+    ),
+    // FIX_COMMAND_PREFIXES: the repair is a hand edit of the policy file plus
+    // the re-attestation that edit costs, and `policy amend` is the one verb
+    // that owns both. The prose after it is the edit itself: write
+    // supervised-retro.
+    fix: "approval policy amend — write supervised-retro in place of the bare supervised on the rules above, and re-attest in the same step; the paste-ready draft for this repo is docs/proposals/approval-md-2026-09.md",
   };
 }
 
@@ -3069,6 +3138,11 @@ export function commandDoctor(
       // APRV-313: appended, nineteenth time, same reason. Configuration on
       // disk is distinct from Codex trust, loading and observed execution.
       checkCodexHookWiring(dir),
+      // APRV-335: appended, twentieth time, same reason. The health-report half
+      // of the alias deprecation SPEC.md §5.2 now states: the loader's note is
+      // seen by whoever runs a verb that prints notes, and this is the surface
+      // an operator opens to read the state of their own repository.
+      checkAutonomyAlias(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

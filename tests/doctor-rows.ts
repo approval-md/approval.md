@@ -120,6 +120,13 @@ export const DOCTOR_ROW_ORDER = [
   // APRV-313: project-local Codex hook wiring, append-only like every doctor
   // row. File presence never stands in for Codex trust or observed execution.
   "codex-hook-wiring",
+  // APRV-335: which rules still write the deprecated bare `supervised`,
+  // appended for the same reason. Never a fail: the spelling parses as
+  // `supervised-retro` and every gate enforces it as one, so nothing on this
+  // machine is broken by it. The row exists because SPEC.md §5.2 asks the
+  // health report to surface a deprecation the loader's note only reaches
+  // whoever happened to run a verb that prints notes.
+  "autonomy-alias",
 ] as const;
 
 /**

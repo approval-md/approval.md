@@ -2573,7 +2573,14 @@ The checks, at length:
   words SPEC.md §5.3 fixes: a file with no block is an operator who has declared
   no values, which is a state and not a fault. The only FAIL is a block that is
   present and unreadable, and its fix names the code rather than proposing a
-  repair, because what the block should say is the human's to write.
+  repair, because what the block should say is the human's to write. The one
+  exception is the block APRV-336 replaced (`version: 1` with a `wants` list):
+  that is a correct document of the wrong vintage rather than a broken one, so
+  the row's detail carries the loader's migration message and its fix names the
+  three edits (fold `wants:` into `like:`, rename `responds:` to
+  `communication:`, quote `version: "0.2"`) plus the re-attestation that the
+  whole-file digest requires. The pass detail lists what the block declares,
+  which are `love`, `like`, `dislike` and `communication` and nothing else.
 - **checkpoint** — how this log stands against its own human-signed checkpoints
   (APRV-257), running the same check as `approval log verify --checkpoints`, so
   two implementations of "does this log's own signature contradict it" cannot
@@ -2622,6 +2629,17 @@ The checks, at length:
   doctor does not interpret or merge the TOML hook tables. Malformed JSON
   FAILS; a different valid Codex hook profile SKIPS as undetermined rather than
   being called broken.
+- **autonomy-alias** — which rules of this policy still write the deprecated
+  bare `supervised` (APRV-335). The spelling parses as `supervised-retro` and
+  every gate enforces it as one, so the row is never a FAIL and never moves the
+  exit code: a red line over a spelling would be doctor going red over prose.
+  The two PASS shapes are the whole row. Where some rule uses it, the detail
+  names each one, in the order the loader's own notes name them, and the `fix`
+  is `approval policy amend`, which owns the edit and the re-attestation that
+  edit costs. Where none does, the detail says so plainly, which is the answer
+  an operator wants before a future schema version drops the alias. A policy
+  that did not load is a SKIP: it names no level at all, and its own failure is
+  reported by the attestation row and by `approval policy check`.
 
 **`--json`** (one object on stdout):
 
@@ -2650,8 +2668,9 @@ reaches this backlog. A `supervised-live` class puts a declared `live_rate`
 fraction of its actions through the human gate BEFORE they run; those are
 ordinary manual requests with ordinary grants and tokens, a person has already
 answered them, and they are not drawn a second time for retrospective review. A
-`supervised-retro` class — and the bare `supervised`, which is now an alias for
-it — is what this page is about. `approval policy check` names the mode in its
+`supervised-retro` class — and the bare `supervised`, which is now a deprecated
+alias for it, still parsed and removed in a future schema version (APRV-335) —
+is what this page is about. `approval policy check` names the mode in its
 final line and in `outcome.supervision`.
 
 Supervised actions execute immediately and are audited afterwards. The daemon
@@ -3778,8 +3797,10 @@ importer collects the bullets under those headings into a second draft fence,
 ` ```yaml approval-values ` (SPEC.md §5.3), printed after the policy draft on
 stdout and written after it with `--out`; `--json` carries it as
 `values_draft`, or `null` when no such heading exists. Every bullet lands in
-`wants` and none in `love`, `like` or `dislike`: grading is the human's act,
-and an importer that guessed a grade would be putting words in their mouth. A
+`like`, the middle grade, and none in `love` or `dislike`: how strongly a line
+is meant is the human's to say, and an importer that reached for the strongest
+grade would be putting words in their mouth. (`like` is where what an operator
+asks for lives since APRV-336 folded `wants` into it.) A
 bullet over the schema's 200 characters is truncated with a warning rather than
 dropped, and bullets past the twentieth are kept as comments inside the fence,
 which is the same stance the permissions half takes on unmapped bullets. The
@@ -3910,6 +3931,19 @@ in one direction only: the policy block says what an agent may do, and nothing
 in the file said what the operator wanted the work to be like. The optional
 ` ```yaml approval-values ` block (SPEC.md §5.3) is that, and this verb prints
 it.
+
+**The keys.** `version`, the quoted string `"0.2"` and the only required one;
+the standing grades `love`, `like` and `dislike`, printed as `loves:`, `likes:`
+and `dislikes:`; and `communication`, one sentence or two on how the operator
+reads and answers, printed under `communication:`. APRV-336 settled that shape:
+a `wants` list for what the operator asks of an agent folded into `like`, since
+a request about behaviour and a preference about the output are graded by the
+same person in the same way and one list is easier to keep true, and `responds`
+became `communication`, which no longer reads as a sibling of `approval
+feedback`. A block written to the earlier format (`version: 1`, a `wants` list)
+is refused with the code `version-unsupported` and a message naming both edits,
+rather than with a schema violation a reader has to decode. The same code
+answers `version: 0.2` written without quotes, which YAML reads as a float.
 
 **It is guidance, and it is never policy.** Every output form opens with the
 banner saying so, `--json` carries the same sentence in `note`, and the reason

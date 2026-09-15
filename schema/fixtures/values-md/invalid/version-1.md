@@ -51,27 +51,19 @@ Everything after the block is prose again and is ignored by the parser.
 
 ## What I value
 
-The block below is guidance, never policy. Nothing in it grants anything, and
-no part of the runtime reads it to decide.
+The block below is the FIRST revision of the values format: `version` is the
+integer 1 and it carries a `wants:` list. APRV-336 folded `wants` into `like`
+and moved the version to the quoted string "0.2", so this block is refused with
+`version-unsupported` and a message naming the two edits.
 
 ```yaml approval-values
-version: "0.2"
-
-love:
-  - seeing the real change, not a description of it
-  - a runbook I can paste into a terminal
-
+version: 1
 like:
   - success reported first, caveats after
-  - small reviewable commits
-  - honest opinions on the work, including when you think a task is wrong
-  - a journal entry of about five points per milestone
 
-dislike:
-  - prose where a command would do
-  - being asked to approve something I cannot see
-
-communication: "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
+wants:
+  - say when you are stuck rather than guessing a fourth time
 ```
 
-Prose again after the block, ignored by both readers.
+Prose again after the block. The policy above loads exactly as it does in every
+other fixture here: a values failure is never a policy failure.

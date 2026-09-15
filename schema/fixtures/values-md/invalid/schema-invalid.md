@@ -19,7 +19,7 @@ approvers:
 classes:
   read.*:                       { autonomy: autonomous }
   files.write.workspace:        { autonomy: autonomous }
-  calendar.write.own:           { autonomy: supervised }
+  calendar.write.own:           { autonomy: supervised-retro }
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual
@@ -52,8 +52,10 @@ Everything after the block is prose again and is ignored by the parser.
 ## What I value
 
 The block below parses as YAML and is refused by values.schema.json: `version`
-is the string "1" rather than the integer 1, and `classes` is a policy-shaped
-key the closed schema does not admit.
+is the string "1" rather than the string "0.2", and `classes` is a policy-shaped
+key the closed schema does not admit. The version here is a STRING on purpose,
+so this fixture reaches the schema: a numeric version is refused earlier, by
+name, as `version-unsupported` (APRV-336).
 
 ```yaml approval-values
 version: "1"
