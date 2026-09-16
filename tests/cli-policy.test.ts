@@ -488,16 +488,17 @@ test("this repo's APPROVAL.md gates its own classes as written", () => {
   assert.equal(push["manualBecause"], null);
   assert.deepEqual(push["matched"], {
     pattern: "vcs.push.main",
-    rule: { autonomy: "supervised" },
+    rule: { autonomy: "supervised-retro" },
   });
-  // APRV-127 pins the migration promise on the repo's OWN policy: this file
-  // still writes the bare `supervised`, and the split must not have changed
-  // what it means. Retro, no live rate, nothing gated before execution. The
-  // rates the human wants land later, through the ordinary amendment ceremony;
-  // shipping the mechanism must not move the policy by itself.
+  // APRV-127 pinned the migration promise on the repo's OWN policy: the bare
+  // `supervised` kept meaning retro, no live rate, nothing gated before
+  // execution, and shipping the split did not move the policy by itself. That
+  // promise was kept until APRV-335 deprecated the bare spelling and the human
+  // pasted `supervised-retro` through the amendment ceremony (attested seq
+  // 32573). The declared spelling moved; what it resolves to did not.
   assert.deepEqual(push["outcome"], {
     autonomy: "supervised",
-    declaredAutonomy: "supervised",
+    declaredAutonomy: "supervised-retro",
     supervision: "retro",
     liveRate: null,
     approvers: null,
