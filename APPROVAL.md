@@ -43,23 +43,20 @@ classes:
   files.write.workspace:     { autonomy: autonomous }   # src, tests, fixtures, backlog/
   vcs.commit.branch:         { autonomy: autonomous }
   vcs.push.branch:           { autonomy: autonomous }
-  vcs.push.main:             { autonomy: supervised }   # gated by per-task human review; includes gh pr merge
-  vcs.pr.*:                  { autonomy: supervised }   # gh pr create / edit / comment on a feature branch
+  vcs.push.main:             { autonomy: supervised-retro }   # proceeds, sampled for retrospective review; includes gh pr merge
+  vcs.pr.*:                  { autonomy: supervised-retro }   # gh pr create / edit / comment on a feature branch
   vcs.history.rewrite:       { autonomy: human-only }   # a person rewrites shared history, never an agent (APRV-185)
   files.delete.out_of_scope: { autonomy: manual }
   deps.add:                  { autonomy: manual }       # every new package, runtime or dev
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
   release.publish:           { autonomy: manual }       # npm, tags, versions
-  policy.edit:               { autonomy: supervised-live, live_rate: 0.01 }       # this file, CLAUDE.md, CI config
-  policy.edit.design:        { autonomy: supervised }   # design docs: read in the PR, sampled after
-  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.01 }
-    # today it is undeclared, so it falls to the default manual: every SPEC amendment
-    # in every task is a tap. The guard, the sign-off convention and retrospective
-    # review already cover SPEC prose; one in five live is plenty.
+  policy.edit:               { autonomy: supervised-live, live_rate: 0.01 }       # CLAUDE.md, AGENTS.md, .npmrc; this file is policy.core, CI is policy.edit.ci
+  policy.edit.design:        { autonomy: supervised-retro }   # design docs: read in the PR, sampled after
+  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.01 }       # SPEC amendments: one in a hundred stops for a tap; the guard and retro review cover the rest
   policy.edit.ci:            { autonomy: manual }       # CI and release config: always a tap
   files.delete.scratch:      { autonomy: autonomous }   # rm confined to the system temp root (APRV-267)
-  vcs.remote.meta:           { autonomy: supervised }   # gh graphql query, pr update-branch, run rerun (APRV-268)
+  vcs.remote.meta:           { autonomy: supervised-retro }   # gh graphql query, pr update-branch, run rerun (APRV-268)
   policy.core:               { autonomy: human-only }   # APPROVAL.md and .approval/* except the log (APRV-198)
   log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
   account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
@@ -83,7 +80,7 @@ Below the policy is a second block the runtime never enforces. It is what I
 value, for agents that want to know; `approval values` prints it.
 
 ```yaml approval-values
-version: 1
+version: "0.2"
 
 love:
   - honest thoughts on what we are building, including when you think I am wrong
@@ -96,19 +93,14 @@ like:
   - a runbook I can paste into a terminal rather than prose about one
   - the real change shown, not a description of it
   - small diffs with one reviewable idea in them
+  - say when you are stuck rather than guessing a fourth time; the journal is for that
+  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
+  - name the window and the full command when you hand me something to run
 
 dislike:
   - work that lands without a Backlog task
   - a PR left waiting for a hand click when the merge could have been armed
   - confident documentation that is stale
 
-wants:
-  - say when you are stuck rather than guessing a fourth time; the journal is for that
-  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
-  - name the window and the full command when you hand me something to run
-
-responds: >-
-  I read the journal after a session and react on the samples that reach me.
-  Silence is not disapproval. A loved or disliked reaction always carries a
-  note saying why; a bare ok means I looked and it was fine.
+communication: "I read the journal after a session and react on the samples that reach me. Silence is not disapproval. A loved or disliked reaction always carries a note saying why; a bare ok means I looked and it was fine."
 ```
