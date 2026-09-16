@@ -1,0 +1,1 @@
+{"command":"sed -i '' -e '139s/(Amended APRV-335, pending sign-off\\.)/(Amended APRV-335.)/' SPEC.md && echo edited-139","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
