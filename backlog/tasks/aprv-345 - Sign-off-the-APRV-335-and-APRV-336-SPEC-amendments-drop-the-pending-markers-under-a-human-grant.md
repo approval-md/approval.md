@@ -3,11 +3,11 @@ id: APRV-345
 title: >-
   Sign off the APRV-335 and APRV-336 SPEC amendments: drop the pending markers
   under a human grant
-status: In Progress
+status: Done
 assignee:
   - '@claude-fable'
 created_date: '2026-09-16 18:33'
-updated_date: '2026-09-16 21:56'
+updated_date: '2026-09-16 22:17'
 labels:
   - spec
 dependencies: []
@@ -24,7 +24,7 @@ SPEC.md line 139 (bare supervised deprecated, APRV-335) and line 160 (values blo
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 SPEC.md lines 139 and 160 end in '(Amended APRV-335.)' and '(Amended APRV-336.)' respectively; no other line changes
-- [ ] #2 Both edits are human grants in the log (approval.granted by human:carter) and the pull request's protected-path check passes on them
+- [x] #2 Both edits are human grants in the log (approval.granted by human:carter) and the pull request's protected-path check passes on them
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -40,3 +40,9 @@ Both edits granted by human:carter from the CLI (daemon down, so each hook quest
 
 Redone on branch aprv-345-spec-signoff-2 after the primary's working log forked: the amend runbook's trailing 'git checkout main' rewound APPROVAL.md and events.jsonl to main's older copies, so the first two grants (fork seqs ~31990 and 31999) sat on a chain main never had. The fork was snapshotted to ~/approval-log-fork-2026-09-16.jsonl and discarded, the working log restored byte-identical to main through seq 32577, and PR #400 closed. New grants on the true chain: line 139 at seq 32591 (question toolu_01CVgGgTEhz6mPG2g8b2XWMQ), line 160 at seq 32598 (toolu_01MjT4k1waGfs3xBUM2DRLQH), both human:carter from the CLI with the daemon down. Lesson recorded on APRV-341: the amend's git half must build its commit in a scratch index and never switch the working tree.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+SPEC.md lines 139 and 160 now end in (Amended APRV-335.) and (Amended APRV-336.). Both edits were granted by human:carter (seq 32591, 32598) on the true chain, published on records PR #402, and PR #401's protected-path check passed on them before the merge at 2026-09-16T22:16Z. A first attempt (PR #400) was discarded with the forked working log.
+<!-- SECTION:FINAL_SUMMARY:END -->
