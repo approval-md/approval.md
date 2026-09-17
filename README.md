@@ -175,7 +175,9 @@ same log as the CLI.
 
 Codex support is opt-in while native compatibility and everyday activation are
 still being verified. See the bounded [Codex hook operator
-runbook](docs/codex-hook.md) before installing or trusting it.
+runbook](docs/codex-hook.md) before installing or trusting it, and
+[activation and rollback](docs/codex-activation.md) for what a trust tap does
+and does not buy on the Codex version installed today.
 
 **1. See how a command classifies.** This touches nothing.
 

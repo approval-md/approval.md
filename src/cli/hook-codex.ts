@@ -149,6 +149,17 @@ export type CodexOutcomeReading =
  * arbitrary JSON with no stable status key. Its raw value is intentionally
  * accepted and ignored. Until a native probe records a discriminating
  * contract, appending either outcome would fabricate it.
+ *
+ * The negative half of that contract matters as much and is recorded here
+ * rather than in a note somebody has to find (APRV-310 v5/v6, APRV-311): Codex
+ * has NO counterpart to Claude Code's `PostToolUseFailure`. An exit 0 and an
+ * exit 7 shell call both raised the same `PostToolUse` event, and the top-level
+ * fields of that event carried no status, no exit code, and nothing else that
+ * separates them. So there is no reading to take from the event NAME either,
+ * which is the reading Claude Code's adapter relies on. This function is
+ * therefore total: it refuses every event, and the caller's unreadable arm
+ * (which appends nothing and names the open execution) is the only arm Codex
+ * reaches today.
  */
 export function readCodexReportedOutcome(_input: CodexHookInput): CodexOutcomeReading {
   return {

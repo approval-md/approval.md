@@ -350,6 +350,14 @@ const unionVectors = [
     "checkpoint_refusal_codes",
     "every way the human-signed checkpoint check can refuse a range whose signed heads the log contradicts",
   ],
+  [
+    "hook_deny_codes",
+    "every way `approval hook <harness>` can deny a tool call before it runs; `hook-gate-refused` is a family whose emitted form is `hook-gate-refused:<gate refusal code>`",
+  ],
+  [
+    "post_tool_codes",
+    "every line the post-execution half of `approval hook <harness>` can print instead of closing a delegated execution; `post-tool-gate-refused` carries the gate's own code after a colon",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -1167,7 +1175,17 @@ const SUITES = [
     // suite pins which unions exist, and an implementation that verifies a
     // chain and an anchor but cannot say what a bad checkpoint signature is
     // called has not implemented invariant 6 for checkpoints at all.
-    vectors_version: "8.0.0",
+    // 9.0.0 (APRV-311): an EIGHTH and a NINTH union, `hook_deny_codes` and
+    // `post_tool_codes`, the two vocabularies the harness hooks speak. They
+    // were closed sets in the source and nowhere else, which is how one code
+    // came to carry two unrelated meanings on the Codex adapter: `hook-io` said
+    // both "this event was malformed, send a well-formed one" and "every event
+    // of this shape is refused on this harness version". Splitting the second
+    // out as `hook-unsupported-execution-context` is a distinction a caller can
+    // only rely on if it is pinned, and the whole enforcement surface a second
+    // implementation has to reproduce is a hook. Major for the reason 7.0.0 and
+    // 8.0.0 were: this suite pins WHICH unions exist.
+    vectors_version: "9.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
