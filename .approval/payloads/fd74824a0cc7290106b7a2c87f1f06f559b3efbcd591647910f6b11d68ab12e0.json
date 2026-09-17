@@ -1,0 +1,1 @@
+{"after":"`gate.opened`, `gate.closed`, `gate.bypassed`, `gate.organ.attested`, `gate.path.signed_off`, `log.checkpoint`.","before":"`gate.opened`, `gate.closed`, `gate.bypassed`, `gate.organ.attested`, `log.checkpoint`.","file":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213/SPEC.md","replace_all":false,"rule":"protected-path-proposal","tool":"Edit"}
