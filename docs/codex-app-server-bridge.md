@@ -166,16 +166,20 @@ oneshot (`outgoing_message.rs:357`, awaited at
 `bespoke_event_handling.rs:1958-1971`) has no deadline either.
 
 This is the architecturally interesting line in the whole note, so it is worth
-stating plainly against what we have today. `approval hook claude-code` waits 55
-seconds and then denies (`src/core/harness-wait.ts:23,26`), and it waits 55
-seconds for a reason that has nothing to do with approval: Claude Code's own
-hook timeout is 60, so the adapter has to answer before the harness kills it.
-Everything downstream of that ceiling exists because of it, including the
-five-minute retry grace and the adopt-on-retry dance
-(`harness-wait.ts:50`, `src/cli/hook.ts:2845`). A transport with no deadline
-removes the ceiling. A question could wait as long as the policy's TTL allows,
-and a human who answers in eleven minutes would be answering rather than
-arriving too late.
+stating plainly against what we have today. Every hook adapter answers inside a
+ceiling the harness sets, and the ceiling has nothing to do with approval.
+`approval hook claude-code` defaults to a 55-second wait
+(`src/core/harness-wait.ts:23,26`) because Claude Code's own hook timeout is 60,
+so the adapter has to answer before the harness kills it. The Codex hook entry
+buys more room and is still bounded: a nine-minute gate wait inside a
+ten-minute outer timeout (`docs/codex-hook.md`). Everything downstream of a
+ceiling exists because of it, including the five-minute retry grace and the
+adopt-on-retry dance (`harness-wait.ts:50`, `src/cli/hook.ts:2845`), which exist
+so a denial-by-deadline is recoverable.
+
+A transport with no deadline removes the ceiling rather than widening it. A
+question could wait as long as the policy's TTL allows, and a human who answers
+in eleven minutes would be answering rather than arriving too late.
 
 **observed (pending):** trial `no-reply`. The probe holds the question for its
 configured hold and then reads the workspace back.
@@ -295,8 +299,8 @@ JSON-RPC round trip replacing the hook's stdin and stdout.
 4. **Wait.** The hook's wait loop (`src/cli/hook.ts:2680`) polls the verified
    view until every key is granted or the deadline passes. The bridge's deadline
    is the interesting change: with no protocol timeout (question 2), it can be
-   the policy's TTL rather than 55 seconds, and the retry grace and
-   adopt-on-retry machinery that exist to survive a 60-second harness ceiling
+   the policy's TTL rather than a harness ceiling, and the retry grace and
+   adopt-on-retry machinery that exist to make a denial-by-deadline recoverable
    stop being necessary.
 5. **Answer.** `{id, result: {decision: "accept"}}` or `"decline"`, on the same
    connection.
@@ -306,8 +310,8 @@ Against a human decision measured in seconds to minutes, that is noise. Under
 `autonomous` and `supervised` classes no human is involved and the added cost is
 the appends alone, which is the same cost the hook pays today. The number the
 operator actually feels is unchanged, with one improvement: today a manual class
-under Claude Code denies at 55 seconds and asks the agent to retry, and here it
-would simply keep waiting.
+denies when the harness ceiling runs out and asks the agent to retry, and here
+it would simply keep waiting.
 
 **observed (pending):** the per-call round-trip latency on real hardware. The
 probe does not measure it yet, since a first run has a model call on the same
