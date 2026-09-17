@@ -1744,6 +1744,22 @@ function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
     if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };
     return null;
   }
+  // APRV-343. `policy apply` WRITES `APPROVAL.md`, which is the one file in this
+  // repository nothing but a human's own hand may change: an agent that could
+  // run it could widen the policy that governs it and then attest the result
+  // through the amendment the verb goes on to run. Classified where the file
+  // already is (`policy.core`, human-only in the reference policy), so the hook
+  // denies it with `hook-class-human-only`, behind the verb's own
+  // `apply-agent-actor` refusal. It mints no new class (SPEC.md §11.1 invariant
+  // 9): `policy.core` already exists and already covers the policy's machinery.
+  //
+  // The other `policy` subcommands stay pass-through. `check` and `test` read,
+  // `attest` and `amend` refuse a non-human actor in code and collect a human's
+  // tap through a channel when an agent runs them, which is the widening
+  // APRV-109 deliberately made — and neither of them writes the policy file.
+  if (verb === "policy" && sub === "apply") {
+    return { class: "policy.core", rule: "approval-policy-apply" };
+  }
   // APRV-257. `setup checkpoint` MINTS the key `log checkpoint` signs with, so
   // an agent that could run it could mint a key, store it, and vouch for a
   // chain it had just written — the mechanism defeated at its source rather

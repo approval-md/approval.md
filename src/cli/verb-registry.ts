@@ -744,6 +744,44 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "policy",
+    subcommand: "apply",
+    purpose:
+      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
+    human_only: true,
+    input: input({
+      positionals: positionals(
+        [{ name: "proposal", description: "the proposal document to apply" }],
+        1,
+      ),
+      flags: {
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...AS_FLAG,
+        "--dry-run": "boolean",
+        "--no-amend": "boolean",
+        "--pr": "boolean",
+        "--yes": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        policy: STRING,
+        proposal: STRING,
+        pairs: INTEGER,
+        noop: BOOLEAN,
+        dryRun: BOOLEAN,
+      },
+      ["ok", "policy", "proposal", "pairs", "noop", "dryRun"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "register",
     purpose:
       "Validate a task file's `approval:` envelope against envelope.schema.json and append one task.registered event carrying the declared actions. FAIL CLOSED: an invalid envelope appends nothing. The file is read only. Registration is a proposal rather than a decision, so an agent may perform it, and it is the step that makes every later question about an action ('what class is this key?') answerable from the log.",

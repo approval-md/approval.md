@@ -390,6 +390,13 @@ did left conflict markers inside the log mid-ceremony.
 So the ritual became deterministic code, on the `policy amend` precedent: when a
 hand-ritual proves dangerous, it becomes a verb the gate can read.
 
+**You rarely type it any more (APRV-346).** `approval up`'s preflight calls this
+function itself whenever the working log is a byte-for-byte extension of the
+committed one, which is the state every records advance leaves behind. What is
+left for a hand-run `approval log sync` is the fork: two chains that share a
+prefix and then carry different records at the same `seq`. See
+[up](#up) for what the preflight checks before it delegates.
+
 Everything runs inside ONE hold of the append lockfile. The lock is normally
 taken per append; here it spans the whole operation, because an append landing
 between the snapshot and the restore is exactly the interleaving that forks a
@@ -912,14 +919,53 @@ base carries it, and a pins edit somebody else landed is not reverted by this
 ceremony. The pin deltas print in the semantic diff beside the class deltas, ride
 in the commit subject, and appear in `--json` as `pins`.
 
-It refuses outside a git repository, and refuses when the index holds staged
-changes to anything beyond those three: a commit that swept in an unrelated
-staged edit would make "this commit is the amendment" false. On the branch flow
+It refuses outside a git repository (`commit-preconditions`), and refuses
+`staged-unrelated` when the index holds staged changes to anything beyond those
+three: a commit that swept in an unrelated staged edit would make "this commit is
+the amendment" false. It refuses `dirty-tree` when one of those three is staged
+in one state and modified again in the working tree, because the commit is
+assembled from the WORKING TREE and would otherwise carry bytes the operator's
+`git diff --cached` never showed. An unrelated *unstaged* path is deliberately
+not a refusal: the scratch index lays exactly the ceremony's paths over the
+remote's tree, so nothing else can reach the commit, and refusing over one would
+stop the ceremony in the checkout it is written for, where the daemon's envelope
+write-backs leave task files modified as a matter of course. On the branch flow
 it also refuses when there is no `origin` remote, and when a `--branch` name
 already exists. Every one of those refusals happens BEFORE the attestation, so a
 refused `--commit` never leaves an attested policy without its commit. The same
 holds for the fetch, the two base checks, the policy suite and the dogfood suite
 above.
+
+**`--pr`: the ceremony finishes its own job (APRV-341).** `--pr` is `--commit`
+plus "and publish it": it forces the BRANCH flow whatever the protection probe
+answered, so the amendment is committed on `origin/<default branch>` in a scratch
+index, pushed to `policy-amend-<seq>`, carried by a pull request, and armed with
+`gh pr merge <branch> --merge --auto`. The merge queue picks the strategy from
+there. `--pr --direct` and `--pr --no-publish` are usage errors: each pair asks
+for opposite ceremonies.
+
+The pull request is OPENED or UPDATED. `gh pr list --head <branch> --state open`
+is asked first, and when one is already standing its title and body are edited
+rather than a second being opened, so a re-run of a ceremony that stopped
+half-way finishes rather than failing at `gh pr create`. A `gh` that cannot
+answer the question falls through to `create`, which is the path that was there
+before.
+
+**The verb never switches branches.** On 2026-09-16 an agent-written runbook for
+the primary checkout ended with `git checkout main` after the amend commit, which
+rewound `APPROVAL.md` and `events.jsonl` under a live appender; the hook then
+appended 204 records on the stale chain and the log forked. `--pr` exists so that
+runbook does not: the commit is assembled with `git read-tree` into a scratch
+index and pushed by sha, the checkout ends the verb on the branch it started on,
+with the same HEAD, the same index and the same working tree, and the only file
+that moved is the log, which gained the attestation. A test compares all four
+before and after.
+
+Without `--pr` (and on a box with no `gh`) the printed runbook is exactly what it
+was: `git fetch origin`, `git checkout -b policy-amend-<seq> origin/main`, `git
+add`, `git commit`, `git push -u origin`, `gh pr create`. A fixture test pins the
+six commands, because a flag that quietly rewrote the fallback would leave the
+operator who does not pass it with a procedure nobody checks.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the
@@ -1117,7 +1163,7 @@ attestation may still proceed.
  "publishing":null|{"attempted":true,"complete":true,
              "via":"direct"|"branch"|"recovery"|"none",
              "branch":null|"policy-amend-2","pushed":true,
-             "prUrl":null|"https://...",
+             "prUrl":null|"https://...","prUpdated":false,
              "autoMerge":"armed"|"refused"|"not-attempted",
              "steps":[{"command":"git push origin main","ok":false}],
              "stoppedAt":null|"git push -u origin policy-amend-2",
@@ -1149,10 +1195,19 @@ the message.
 - `io` — the policy file or the log could not be read or written.
 - `load-failed` — `--require-load` and the policy does not load. Nothing was
   appended.
-- `commit-preconditions` — `--commit` outside a git repository, with staged
-  changes beyond the policy, the log and the pins, or (branch flow) with no
-  origin remote or a `--branch` name already taken. Checked before the
-  attestation; nothing was appended.
+- `commit-preconditions` — `--commit` outside a git repository, with the policy
+  and the log in different repositories, or (branch flow) with no origin remote
+  or a `--branch` name already taken. Checked before the attestation; nothing
+  was appended.
+- `staged-unrelated` — the index carries staged changes beyond the policy, the
+  log and the pins (APRV-341). Its own code because its repair is its own: one
+  `git restore --staged <path>`. Checked before the attestation; nothing was
+  appended.
+- `dirty-tree` — one of those three is staged in one state and modified again in
+  the working tree (APRV-341). The commit is assembled from the working tree, so
+  it would carry bytes `git diff --cached` does not show. An unrelated *unstaged*
+  path is not this refusal and never was. Checked before the attestation;
+  nothing was appended.
 - `fetch-failed` / `base-policy-diverged` / `base-log-diverged` — the remote the
   amendment would be based on could not be fetched, carries a policy this edit
   was not written against, or carries a log this working log does not contain.
@@ -1180,6 +1235,103 @@ the message.
 - `append-failed` — the attestation append itself failed.
 - `log-unreadable` / `log-torn-tail` / `log-corrupt` — nothing is amended from a
   log that does not verify.
+
+## policy apply
+
+**The hand-paste this replaces (APRV-343).** Agents may not write `APPROVAL.md`:
+it is `policy.core`, and this project's policy holds that class human-only. So a
+policy change an agent proposes travels as a document under `docs/proposals/`
+that quotes each current line byte for byte beside its replacement, and the
+human pastes. Two things go wrong with a paste, and both have:
+
+- **a whole-file copy reverts what it did not know about.** The prepared file was
+  written against the policy as it stood when the proposal was drafted, so
+  anything landed in between is silently undone. That is the failure
+  `base-policy-diverged` catches for the commit, one step too late to help;
+- **a paste carries its wrapper.** One paste of a proposal page took the page's
+  own fence with it, which hid a block from the loader (APRV-273).
+
+`approval policy apply <proposal.md>` answers both by construction. It writes no
+byte that is not anchored to a byte it proved present in the live file, and it
+reads fences by their backtick run, so a four-backtick wrapper around a
+three-backtick block is the wrapper it is rather than part of the content.
+
+### The proposal format
+
+A proposal is ordinary markdown. Anywhere in it, a fenced block **with a
+declared language** whose immediately preceding non-blank line is a label is a
+member of a pair:
+
+| label | means |
+|---|---|
+| `Current:` | the bytes as they stand in the live policy |
+| `Replace with:` | what they become |
+| `Supersedes:` | optional: an earlier section's RESULT, to match instead |
+
+A fence with no info string is skipped, which is APRV-273's hazard turned into a
+rule. A block whose label names no role is skipped too, so a proposal page can
+carry a `bash` block of commands to run afterwards without the applier mistaking
+it for policy text. Pairs apply in document order.
+
+**Supersession is declared, never inferred from position.** A later section that
+rewrites a line an earlier section already rewrote quotes the earlier section's
+*result* under a `Supersedes:` label; the applier looks for that text when the
+section's own `Current` block is no longer in the file, which is exactly the
+state the earlier section left behind. Position could not carry this: two
+sections that touch one line are not in general in the order the file needs, and
+a rule inferred from order is a rule nobody can read off the page. A pair whose
+`Current` **and** `Supersedes` blocks both occur in the file is
+`proposal-ambiguous`: two spellings of one line is a question about which the
+file means, and no verb here will pick.
+
+**Whole-file replacement is not accepted**, and that is the decision rather than
+an omission. The verb's whole value is that every byte it writes is anchored to
+a byte it proved present, which is what makes a stale proposal a refusal instead
+of a silent revert. A whole-file blob has no anchor. `approval policy amend`
+over a hand-edited file is already the supported way to replace the file
+deliberately.
+
+**The values block is treated exactly as the policy block is**, by knowing
+nothing about either. The applier is a byte-level replacement over the whole
+file: it does not parse the policy, does not locate blocks, and does not care
+which fence a pair lands in. The values block is inert (SPEC §11.1 invariant
+10), so applying one changes no verdict, and the attestation the amendment
+appends covers the whole file's bytes either way (SPEC §5.2, §5.3).
+
+`docs/proposals/README.md` is the contract as a page for proposal authors, and
+`docs/proposals/approval-md-2026-09.md` is a worked example of every part of it.
+
+### What it does, in order
+
+1. Refuses an agent identity (`apply-agent-actor`) before reading anything.
+2. Parses the proposal into ordered pairs.
+3. Resolves every pair against an **in-memory** copy of the policy. A proposal
+   whose third pair is stale writes nothing at all, so "a stale proposal cannot
+   half-apply" is a property of the code rather than of the order somebody wrote
+   the sections in.
+4. Prints the replacements, each as its matched block and its replacement.
+5. Asks for confirmation (`--yes` skips it, `--dry-run` stops here).
+6. Writes the policy, then runs `approval policy amend` in this process — which
+   asks its OWN question about the semantic diff, because "are these the bytes"
+   and "is this the policy" are different questions. `--pr` passes through to it.
+
+`--no-amend` writes and stops, and says loudly that the policy is now edited and
+unattested. A run where every pair resolves and no byte moves is a success and a
+no-op: the proposal has already been applied.
+
+**Refusal codes** (`error.code` with `--json`; frozen public API): `usage`,
+`io`, `apply-agent-actor`, `proposal-empty`, `proposal-malformed` (a `Current`
+with no `Replace with`, or the reverse), `proposal-stale` (a quoted current text
+is not in the file), `proposal-ambiguous` (it occurs more than once, or both it
+and its superseded text occur). Every one of them writes nothing.
+
+Two outcomes are deliberately not in that union. Answering no at the
+confirmation is exit 0 with `aborted:` on stdout, exactly as `policy amend`
+answers it: nothing failed, and an error object at exit 0 would be a
+contradiction the caller has to resolve. An amendment that refuses has already
+printed its own code from its own frozen union, so this verb adds a sentence
+naming the state that leaves behind — the replacements written, the policy
+unattested — and returns the amendment's exit code unchanged.
 
 ## register
 
@@ -2530,6 +2682,23 @@ The checks, at length:
   log sync` for a diverged log, `approval up` otherwise — never a `git` command:
   a repair line telling an operator to reset a branch would be doctor making the
   decision this project keeps human.
+- **attested-policy-on-main** — whether the policy the log vouches for is the
+  policy `origin/<branch>` carries (APRV-342). `attestation` above asks whether
+  the LOCAL file is attested; between a `policy amend` and its pull request
+  merging that answer is yes while a fresh checkout of main carries the old
+  policy with no attestation covering it, so every gate operation there refuses
+  `policy-not-attested`. Nothing said so until this row: on 2026-09-16 `approval
+  up` ran in exactly that state and reported "already at the remote tip". PASS
+  when the attested hash equals the SHA-256 of `APPROVAL.md` at the remote tip.
+  FAIL with `attested at seq N, not yet on main`, naming
+  `policy-amend-<seq>` when this checkout has already seen that branch on the
+  remote, and fixing with `approval policy amend --pr` — which opens the pull
+  request or updates the open one, so the same command is right either way.
+  SKIP with no attestation, outside a git checkout, and where there is no
+  remote-tracking ref. **It fetches nothing**, for the reason
+  `main-behind-origin` fetches nothing, and it looks for the amend branch among
+  the remote-tracking refs rather than asking GitHub. `approval up`'s preflight
+  prints the same sentence on stderr and never refuses on it.
 - **harness-version-unverified** — whether the harness binary hosting the
   PreToolUse hook changed since the log last saw a record from it (APRV-227).
   The only row that asks anything about a program outside this repository, and
@@ -4539,13 +4708,15 @@ because `git status` does not say what the upstream range changed. So the verb
 does all four, and `approval daemon run` runs the identical preflight from the
 identical module, printing the identical two lines.
 
-It is allowed exactly three writes: a `--ff-only` merge, `npm run build`, and
+It is allowed exactly four writes: a `--ff-only` merge, `npm run build`,
 clearing an untracked `backlog/tasks/` file the incoming commit already contains
-out of the merge's way (APRV-300, described below). It
+out of the merge's way (APRV-300, described below), and the reconcile `approval
+log sync` performs on its behalf (APRV-346, described below). It
 never resets, never stashes, never checks anything out, and never touches the
-working log. That list is not caution for its own sake: a working `events.jsonl`
-rewound through git underneath a live appender is fork 2 of 2026-08-20, the
-incident `approval log sync` exists to prevent.
+working log itself. That list is not caution for its own sake: a working
+`events.jsonl` rewound through git underneath a live appender is fork 2 of
+2026-08-20, the incident `approval log sync` exists to prevent, which is why the
+one write that does move that file is made by that verb and by nothing here.
 
 **Safe** means both of: this checkout is not AHEAD of the remote, and no path the
 upstream range changes is locally modified. When it is safe, the preflight
@@ -4555,10 +4726,44 @@ running. When it is not, it refuses, and changes nothing:
 | code | fires when | next |
 |---|---|---|
 | `up-preflight-behind-ahead` | `origin/<branch>..HEAD` is non-empty: this checkout carries commits the remote has never seen. A fast-forward is not the operation for that state, and choosing a side is a decision. | look at them (`git log --oneline origin/main..HEAD`), then push them or `git reset --keep` |
-| `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
+| `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, this working copy has uncommitted changes to one of them, and the two chains are **not** in a prefix relationship (or cannot be compared at all). The judgment a human could not make by eye. A working log that merely extends the committed one is reconciled instead, see below. | `approval log sync` |
 | `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
 | `up-preflight-task-file-conflict` | an untracked file under `backlog/tasks/` stopped the fast-forward and it holds lines the incoming copy does not. Which version is wanted is a question, and no verb here will pick. | read the two copies, move yours aside, run `approval up` again |
 | `up-preflight-failed` | a write the preflight attempted did not complete: the fast-forward, or the rebuild. Not a judgment, so it is not in the union above; the message names the step, and for a build it names the exit code `npm run build` came back with. | `npm run build` to see the whole error, or `approval up --no-build` if you mean to run the stale one |
+
+**A working log that merely extends the committed one is reconciled, not
+refused (APRV-346).** Every records advance moves `origin/main`'s
+`.approval/log/events.jsonl` while the hook keeps appending locally, so
+"upstream changed the log and so did this working copy" is the normal state of
+the primary checkout after a merge. Refusing it sent the operator to `approval
+log sync` and then back to `approval up`, every time. So the collision is a
+question now: `core/log-reconcile.ts` — the same comparison `log sync` and
+doctor's `log-drift` row use — is asked how the working chain stands to the
+committed chain at the fetched tip, and:
+
+- **`ahead`, `behind` or `equal`** — one chain contains the other whole, so
+  adopting the longer one extends and rewinds nothing. The preflight calls
+  `approval log sync` itself, which holds the append lock for its whole ceremony
+  (snapshot, baseline, fast-forward, reconcile, rebuild the projections,
+  post-verify), and prints one line: `synced: fast-forwarded to origin/main
+  <sha>, kept K local records`. The `--json` stream carries it as a
+  `preflight_sync` event and the `preflight` line's `log_synced` reads true.
+  Nothing here reimplements any of that ceremony; it supplies a caller for it;
+- **`diverged`** — two appenders built different records on one predecessor.
+  Hash chains do not merge, so this is the `up-preflight-log-diverged` refusal
+  above, unchanged, and it is now the **only** case that needs a hand-run
+  `approval log sync` (which will tell you the same thing, at more length).
+
+Four conditions have to hold before the reconcile is even offered, and each of
+them answers "refuse" rather than "probably fine": the log is the repository's
+own `.approval/log/events.jsonl` (not some other file named with `--log`), no
+*other* path the upstream range touches is locally modified, both chains verify
+clean, and the relation is a prefix one. A `log sync` that refuses anyway — an
+appender that took the lock first (`log-sync-locked`), a fork that landed
+between the read and the ceremony, a git failure — comes back as the same
+`up-preflight-log-diverged` refusal with the sync's own code and sentence in
+YOUR STATE. Nothing starts, and the working log is exactly as `log sync` found
+it.
 
 **An untracked task file no longer stops it (APRV-300).** A lane files
 `backlog/tasks/aprv-299` on its branch and its pull request merges, while the

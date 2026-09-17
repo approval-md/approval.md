@@ -99,6 +99,17 @@ interface GhBehaviour {
   /** What `gh pr create` prints; absent means it fails. */
   prUrl?: string;
   /**
+   * The URL `gh pr list --head <b> --state open --json url` reports, or absent
+   * for the empty list (APRV-341).
+   *
+   * Set it to put a pull request already IN FRONT of the ceremony, which is the
+   * state a re-run walks into: the verb must update that one rather than ask
+   * `gh pr create` to open a second and fail.
+   */
+  openPrUrl?: string;
+  /** Whether `gh pr edit` fails (APRV-341). */
+  prEditFails?: boolean;
+  /**
    * Whether `gh pr merge --auto` refuses (APRV-130). A merge queue, and a
    * repository with auto-merge disabled, both refuse it; neither is a failure
    * of the ceremony, because the pull request is open either way.
@@ -138,6 +149,16 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
     behaviour.autoMergeRefused === true
       ? 'echo "gh: auto-merge is not enabled on this repository" >&2; exit 1'
       : "exit 0";
+  // APRV-341: `pr list` is a third answer, and the default is the empty list,
+  // so every case written before this existed keeps taking the `create` path.
+  const list =
+    behaviour.openPrUrl === undefined
+      ? "echo '[]'; exit 0"
+      : `echo '[{"url":"${behaviour.openPrUrl}"}]'; exit 0`;
+  const edit =
+    behaviour.prEditFails === true
+      ? 'echo "gh: pr edit failed" >&2; exit 1'
+      : `echo ${behaviour.openPrUrl ?? "https://github.test/o/r/pull/0"}; exit 0`;
 
   const script = [
     "#!/bin/sh",
@@ -156,6 +177,8 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
     // splits on the subcommand and not on the noun.
     '  pr) case "$2" in',
     `    merge) ${merge} ;;`,
+    `    list) ${list} ;;`,
+    `    edit) ${edit} ;;`,
     `    *) ${pr} ;;`,
     "  esac ;;",
     "esac",
@@ -1213,7 +1236,9 @@ test("--commit refuses a staged change beyond the two files, and attests nothing
   );
 
   assert.equal(run.code, 2);
-  assert.equal(errorOf(run).code, "commit-preconditions");
+  // APRV-341: its own code. The repair is one `git restore --staged`, which is
+  // not the repair for any of `commit-preconditions`' other conditions.
+  assert.equal(errorOf(run).code, "staged-unrelated");
   assert.match(errorOf(run).message, /unrelated\.txt/u);
   assert.equal(rawLog(dir), before);
   assert.equal(git(["rev-list", "--count", "HEAD"], dir).stdout.trim(), "2");
@@ -2953,7 +2978,7 @@ test("APRV-274: a staged pins edit is not a stray, and a staged anything-else st
     pathWith(stub.dir),
   );
   assert.notEqual(refused.code, 0);
-  assert.equal(errorOf(refused).code, "commit-preconditions");
+  assert.equal(errorOf(refused).code, "staged-unrelated");
   assert.match(errorOf(refused).message, /UNRELATED\.md/u);
   assert.match(
     errorOf(refused).message,
@@ -3091,4 +3116,302 @@ test("APRV-296: a class the policy declares and no pin names runs the ceremony c
   // The other direction is unchanged and tested above ("the dogfood pins are
   // checked against the amended file"): loosening a class the pins DO name is
   // still `policy-suite-failed`, before the attestation.
+});
+
+// ---------------------------------------------------------------------------
+// APRV-341: `--pr`, the whole ceremony in one word
+// ---------------------------------------------------------------------------
+
+/**
+ * The 2026-09-16 shape: the amendment is typed, and the six commands that
+ * publish it are typed too. One of those runbooks ended with `git checkout
+ * main`, which rewound `APPROVAL.md` and `events.jsonl` under a live appender
+ * and forked the primary's log for 204 records.
+ *
+ * So the ceremony finishes its own job, and the property under test in every
+ * case below is the one the incident is about: the checkout ends the verb
+ * exactly where it started. `--pr` never switches a branch, because
+ * `commitOnBase` assembles the commit in a scratch index and the push names a
+ * sha rather than a ref.
+ */
+
+/**
+ * The branch, index and working tree of a checkout, as one comparable object.
+ *
+ * The working log is left out, and only the working log: the attestation IS an
+ * append to it, so a ceremony that left `events.jsonl` byte-identical would be a
+ * ceremony that attested nothing. Everything else — the branch, HEAD, the index,
+ * every other path's status, the policy bytes — must come through untouched,
+ * and that is the claim the 2026-09-16 fork made false.
+ */
+function checkoutState(dir: string): Record<string, string> {
+  return {
+    branch: git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(),
+    head: git(["rev-parse", "HEAD"], dir).stdout.trim(),
+    status: git(["status", "--porcelain"], dir)
+      .stdout.split("\n")
+      .filter((line) => !line.includes(".approval/log/events.jsonl"))
+      .join("\n"),
+    policy: readFileSync(join(dir, "APPROVAL.md"), "utf8"),
+  };
+}
+
+test("APRV-341: --pr commits exactly the two paths, pushes, opens the PR and arms the merge", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/341" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+  // The dirty working tree APRV-203's scratch index exists for: in the primary
+  // checkout the daemon's envelope write-backs leave task files modified all
+  // day, and none of them may ride along.
+  mkdirSync(join(dir, "backlog", "tasks"), { recursive: true });
+  writeFileSync(join(dir, "backlog", "tasks", "aprv-199.md"), "# envelope write-back\n", "utf8");
+  const before = checkoutState(dir);
+  const originBefore = remoteHead(remote, "main");
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["flow"], "branch");
+  assert.equal(gitPlan["pushed"], true);
+  // EXACTLY two paths. Not the untracked task file, not the README.
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  const publishing = report(run)["publishing"] as Record<string, unknown>;
+  assert.equal(publishing["via"], "branch");
+  assert.equal(publishing["prUrl"], "https://github.test/o/r/pull/341");
+  assert.equal(publishing["prUpdated"], false);
+  assert.equal(publishing["autoMerge"], "armed");
+  const calls = ghCalls(stub.log).join("\n");
+  assert.match(calls, /--auto/u, "the merge was not armed");
+
+  // main is where it was: the amendment reaches it through the pull request.
+  assert.equal(remoteHead(remote, "main"), originBefore);
+  // And the checkout: same branch, same HEAD, same index, same working tree.
+  assert.deepEqual(checkoutState(dir), before);
+});
+
+test("APRV-341: a second run updates the open pull request instead of failing to open one", () => {
+  const { dir, remote } = repoWithRemote();
+  // `pr create` FAILS in this stub, so a run that reached it would be pr-failed.
+  const stub = ghStub({ protection: "protected", openPrUrl: "https://github.test/o/r/pull/342" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+  const before = checkoutState(dir);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const publishing = report(run)["publishing"] as Record<string, unknown>;
+  assert.equal(publishing["prUpdated"], true);
+  assert.equal(publishing["prUrl"], "https://github.test/o/r/pull/342");
+  assert.equal(publishing["autoMerge"], "armed");
+  const calls = ghCalls(stub.log);
+  assert.ok(calls.includes("edit"), `gh pr edit was not run:\n${calls.join("\n")}`);
+  assert.ok(!calls.includes("create"), `gh pr create ran anyway:\n${calls.join("\n")}`);
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  assert.deepEqual(checkoutState(dir), before);
+});
+
+test("APRV-341: a re-run with nothing left to amend is a no-op that attests nothing twice", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/343" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const first = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(first.code, 0, first.stderr);
+  const afterFirst = logRecords(dir).length;
+  const before = checkoutState(dir);
+
+  const second = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(report(second)["noop"], true);
+  assert.equal(logRecords(dir).length, afterFirst, "the second run attested again");
+  assert.deepEqual(checkoutState(dir), before);
+});
+
+test("APRV-341: a staged unrelated path and a split ceremony file each have their own code", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/344" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+
+  // 1. Staged, and not one of the ceremony's own files.
+  writePolicy(dir, AFTER);
+  writeFileSync(join(dir, "NOTES.md"), "# not part of the amendment\n", "utf8");
+  git(["add", "NOTES.md"], dir);
+  const recordsBefore = logRecords(dir).length;
+  const stray = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(stray.code, 0);
+  assert.equal(errorOf(stray).code, "staged-unrelated");
+  assert.match(errorOf(stray).message, /NOTES\.md/u);
+  assert.equal(logRecords(dir).length, recordsBefore, "a refused precondition attested something");
+  assert.equal(git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(), "");
+
+  // 2. The policy staged in one state and edited again: the commit would carry
+  //    the working tree's bytes, which `git diff --cached` does not show.
+  git(["rm", "--cached", "-q", "NOTES.md"], dir);
+  rmSync(join(dir, "NOTES.md"), { force: true });
+  git(["add", "APPROVAL.md"], dir);
+  writePolicy(dir, WIDE);
+  const split = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(split.code, 0);
+  assert.equal(errorOf(split).code, "dirty-tree");
+  assert.match(errorOf(split).message, /APPROVAL\.md/u);
+  assert.equal(logRecords(dir).length, recordsBefore, "a refused precondition attested something");
+  assert.equal(git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(), "");
+});
+
+test("APRV-341: an origin carrying a later policy edit refuses before anything is pushed", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/345" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+
+  // Somebody else amends the policy on origin while this edit is being written.
+  const peer = join(scratch, `peer-341-${String(counter += 1)}`);
+  git(["clone", "-q", remote, peer], scratch);
+  git(["config", "user.email", "test@example.invalid"], peer);
+  git(["config", "user.name", "Test"], peer);
+  writeFileSync(join(peer, "APPROVAL.md"), WIDE, "utf8");
+  git(["add", "-A"], peer);
+  git(["commit", "-qm", "somebody else's amendment"], peer);
+  assert.equal(git(["push", "-q", "origin", "main"], peer).code, 0);
+
+  writePolicy(dir, AFTER);
+  const recordsBefore = logRecords(dir).length;
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.notEqual(run.code, 0);
+  assert.equal(errorOf(run).code, "base-policy-diverged");
+  assert.equal(logRecords(dir).length, recordsBefore, "a refused base attested something");
+  assert.equal(git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(), "");
+});
+
+test("APRV-341: --pr and --direct, and --pr and --no-publish, are usage errors", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const direct = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--direct", "--json"],
+    dir,
+  );
+  assert.equal(direct.code, 2);
+  assert.equal(errorOf(direct).code, "usage");
+  assert.match(errorOf(direct).message, /--pr and --direct/u);
+
+  const quiet = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--pr", "--no-publish", "--json"],
+    dir,
+  );
+  assert.equal(quiet.code, 2);
+  assert.equal(errorOf(quiet).code, "usage");
+  assert.match(errorOf(quiet).message, /--pr and --no-publish/u);
+  assert.deepEqual(logRecords(dir).length, 1, "a usage error attested something");
+});
+
+/**
+ * The runbook, byte for byte.
+ *
+ * `--pr` is an addition, so the printed procedure has to be exactly what it was
+ * for the operator who does not pass it (and for the box with no `gh`). The
+ * fixture is the command list rather than the whole screen: the surrounding
+ * prose carries a hash and a seq, and pinning those would make this a test of
+ * the fixture's freshness rather than of the runbook's stability.
+ */
+const BRANCH_RUNBOOK = [
+  "git fetch origin",
+  "git checkout -b policy-amend-2 origin/main",
+  "git add APPROVAL.md .approval/log/events.jsonl",
+  'git commit -m "Policy: ',
+  "git push -u origin policy-amend-2",
+  "gh pr create --title ",
+] as const;
+
+test("APRV-341: without --pr the printed runbook is exactly the six commands it was", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/346" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  const printed = run.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("git ") || line.startsWith("gh "));
+  assert.equal(printed.length, BRANCH_RUNBOOK.length, `printed:\n${printed.join("\n")}`);
+  for (const [index, expected] of BRANCH_RUNBOOK.entries()) {
+    assert.ok(
+      (printed[index] ?? "").startsWith(expected),
+      `runbook line ${String(index + 1)} is ${JSON.stringify(printed[index])}, not ${JSON.stringify(expected)}…`,
+    );
+  }
+  // Nothing ran: the runbook is a runbook.
+  assert.equal(git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(), "");
 });

@@ -136,6 +136,9 @@ const FLAGS: Record<string, FlagKind> = {
   "--require-load": "boolean",
   "--dry-run": "boolean",
   "--commit": "boolean",
+  // APRV-341: the whole ceremony in one word. Implies `--commit` and forces the
+  // branch flow, so the amendment reaches a protected trunk the only way it can.
+  "--pr": "boolean",
   "--no-publish": "boolean",
   "--branch": "string",
   "--direct": "boolean",
@@ -181,6 +184,29 @@ type AmendErrorCode =
   | "io"
   | "load-failed"
   | "commit-preconditions"
+  /**
+   * The index carries a change beyond the ceremony's own files (APRV-341).
+   *
+   * Split out of `commit-preconditions` so the one condition an operator can
+   * fix with a single `git restore --staged` has a code of its own. The
+   * amendment commit carries EXACTLY the policy, the log and (when it moved)
+   * the pins, so that "this commit is the amendment" stays a true sentence, and
+   * unstaging somebody else's work is not this verb's decision to make.
+   */
+  | "staged-unrelated"
+  /**
+   * A ceremony file whose index and working tree disagree (APRV-341).
+   *
+   * The commit is assembled from the WORKING TREE (`commitOnBase` lays those
+   * bytes over the remote's tree), so a policy staged in one state and left in
+   * another would be signed for in the state the operator's `git diff --cached`
+   * does not show. Unrelated dirty paths are deliberately NOT this refusal:
+   * they cannot reach the commit at all, which is the whole point of the
+   * scratch index, and refusing over them would stop the ceremony in the one
+   * checkout it is written for, where the daemon's envelope write-backs leave
+   * task files modified as a matter of course.
+   */
+  | "dirty-tree"
   // APRV-203: the ceremony owns its own git preconditions. Each of these three
   // ends with NOTHING attested, committed or pushed.
   /** The remote could not be fetched, so there is no base to build on. */
@@ -1262,7 +1288,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 
   const dryRun = boolFlag(parsed.flags, "--dry-run");
   const requireLoad = boolFlag(parsed.flags, "--require-load");
-  const wantCommit = boolFlag(parsed.flags, "--commit");
+  // APRV-341. `--pr` is `--commit` plus "and finish the job": the branch flow,
+  // whatever the protection probe thinks, because the operator has said which
+  // ceremony they want. `--commit` alone keeps letting the probe decide.
+  const wantPr = boolFlag(parsed.flags, "--pr");
+  const wantCommit = boolFlag(parsed.flags, "--commit") || wantPr;
   // APRV-130: the ceremony publishes by default (push, and on a protected main
   // branch + push + PR). `--no-publish` is the operator who wants it to stop at
   // the commit, which is what `--commit` did before the publishing half existed.
@@ -1279,6 +1309,20 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
   if (branchFlag !== null && branchFlag.trim().length === 0) {
     return usageError(streams, json, "--branch expects a branch name");
+  }
+  if (wantPr && forceDirect) {
+    return usageError(
+      streams,
+      json,
+      "--pr and --direct ask for opposite ceremonies: --pr publishes through a branch and a pull request, --direct commits on the branch you are standing on. Pass one of them",
+    );
+  }
+  if (wantPr && noPublish) {
+    return usageError(
+      streams,
+      json,
+      "--pr and --no-publish ask for opposite ceremonies: --pr opens the pull request, --no-publish stops at the commit. Pass one of them",
+    );
   }
 
   // Identity first, before a byte is read. Asking a human to read a diff and
@@ -1464,7 +1508,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     probe.protection === "protected" &&
     probe.currentBranch !== null &&
     probe.currentBranch === probe.defaultBranch;
-  const useBranch = branchFlag !== null || (!forceDirect && onProtectedDefault);
+  // APRV-341: `--pr` is a third way into the branch flow, and it is the
+  // operator's own instruction rather than an inference from a probe. A probe
+  // that cannot reach GitHub answers `unknown`, which used to mean "commit in
+  // place"; an operator who typed `--pr` has said what they want either way.
+  const useBranch = branchFlag !== null || wantPr || (!forceDirect && onProtectedDefault);
   const branchName = (seq: string): string => branchFlag ?? `policy-amend-${seq}`;
   // The direct flow's push is about to hit a protected branch. Say so before
   // the human types it, rather than after GitHub says it.
@@ -1493,7 +1541,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   if (wantCommit && !dryRun) {
     const plan = planCommit(policyPath, logPath, useBranch ? { branch: branchFlag } : null);
     if (!plan.ok) {
-      return refuse(streams, json, "commit-preconditions", plan.message, EXIT_USAGE);
+      return refuse(streams, json, plan.code, plan.message, EXIT_USAGE);
     }
     commitPlan = plan.plan;
 
@@ -1933,6 +1981,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     branch: null,
     pushed: false,
     prUrl: null,
+    prUpdated: false,
     autoMerge: "not-attempted",
     steps: [],
     stoppedAt: null,
@@ -2148,6 +2197,42 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     /** `gh pr create …` as the operator would type it, for both flows. */
     const prCreateCommand = (head: string): string =>
       `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${head}${probe.defaultBranch === null ? "" : ` --base ${probe.defaultBranch}`}`;
+    /**
+     * The open pull request for `head`, or `null` when there is none (APRV-341).
+     *
+     * Asked before `gh pr create`, because a second run of the ceremony onto a
+     * branch that already carries one is the ordinary shape of "the ceremony
+     * stopped half-way and I ran it again": `gh pr create` answers that with a
+     * failure, and a failure there used to end the verb holding an attestation
+     * it had already appended. A `gh` that cannot answer is `null`, which falls
+     * through to `create` — the path that was there before this existed.
+     */
+    const openPrFor = (head: string): string | null => {
+      const listed = gh(["pr", "list", "--head", head, "--state", "open", "--json", "url"], commitPlan.root);
+      if (!listed.ok) return null;
+      const text = listed.stdout.trim();
+      if (text.length === 0) return null;
+      let rows: unknown;
+      try {
+        rows = JSON.parse(text);
+      } catch {
+        return null;
+      }
+      if (!Array.isArray(rows)) return null;
+      const first = rows[0];
+      if (typeof first !== "object" || first === null) return null;
+      const url = (first as { url?: unknown }).url;
+      return typeof url === "string" && url.length > 0 ? url : null;
+    };
+    const prEditArgs = (head: string): string[] => [
+      "pr",
+      "edit",
+      head,
+      "--title",
+      prTitle(summary, String(seq)),
+      "--body",
+      prBody(String(seq)),
+    ];
     const prCreateArgs = (head: string): string[] => [
       "pr",
       "create",
@@ -2203,13 +2288,25 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
 
       if (ghAvailable(commitPlan.root)) {
-        const pr = gh(prCreateArgs(branch), commitPlan.root);
-        publishing.steps.push({ command: prCreateCommand(branch), ok: pr.ok });
+        // APRV-341: open, or update the one that is already open for this
+        // branch. A ceremony re-run onto a branch a pull request already stands
+        // on is not an error to report, it is the state to bring up to date.
+        const standing = openPrFor(branch);
+        const pr =
+          standing === null
+            ? gh(prCreateArgs(branch), commitPlan.root)
+            : gh(prEditArgs(branch), commitPlan.root);
+        publishing.steps.push({
+          command: standing === null ? prCreateCommand(branch) : `gh pr edit ${branch} --title … --body …`,
+          ok: pr.ok,
+        });
         if (!pr.ok) {
           const ghFailure = pr.stderr.trim() || pr.stdout.trim() || "gh did not run";
           return stalled(
             "pr-failed",
-            "`gh pr create` failed; the branch is already on origin",
+            standing === null
+              ? "`gh pr create` failed; the branch is already on origin"
+              : "`gh pr edit` failed; the branch and its pull request are already on origin",
             pr,
             `the attestation was appended at seq ${seq}, committed on ${branch} and pushed, but \`gh pr create\` failed: ${ghFailure}; open the pull request by hand and merge it with a merge commit`,
             [
@@ -2225,8 +2322,12 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
             [MERGE_COMMIT_LINE],
           );
         }
-        prUrl = lastUrl(pr.stdout);
+        // `gh pr edit` prints the pull request's URL too, but the one this
+        // ceremony already knows is the one it asked for; `create` has nothing
+        // but its own output. Either way `null` is an honest answer.
+        prUrl = standing ?? lastUrl(pr.stdout);
         publishing.prUrl = prUrl;
+        publishing.prUpdated = standing !== null;
         publishing.complete = true;
         // APRV-130: the ceremony offers to finish the last step too.
         armAutoMerge(commitPlan.root, branch);
@@ -2516,11 +2617,12 @@ function planCommit(
    * the append happens.
    */
   branchFlow: { branch: string | null } | null,
-): { ok: true; plan: CommitPlan } | { ok: false; message: string } {
+): { ok: true; plan: CommitPlan } | { ok: false; code: AmendErrorCode; message: string } {
   const root = repoRoot(dirname(policyPath));
   if (root === null) {
     return {
       ok: false,
+      code: "commit-preconditions",
       message: `--commit needs a git repository and ${policyPath} is not inside one; nothing was attested`,
     };
   }
@@ -2536,30 +2638,54 @@ function planCommit(
   if (policyArg.startsWith("../") || logArg.startsWith("../")) {
     return {
       ok: false,
+      code: "commit-preconditions",
       message: `--commit needs the policy (${policyPath}) and the log (${logPath}) inside the same repository (${root}); nothing was attested`,
     };
   }
 
   const status = git(["status", "--porcelain"], root);
   if (!status.ok) {
-    return { ok: false, message: `--commit could not read git status: ${status.stderr.trim()}` };
+    return {
+      ok: false,
+      code: "commit-preconditions",
+      message: `--commit could not read git status: ${status.stderr.trim()}`,
+    };
   }
+  const ceremonyFiles = [policyArg, logArg, ...(pinsArg === null ? [] : [pinsArg])];
+  const carried = pinsArg === null ? "the policy and the log" : `the policy, the log and ${pinsArg}`;
   const strays: string[] = [];
+  /** Ceremony files staged in one state and left in another (APRV-341). */
+  const split: string[] = [];
   for (const line of status.stdout.split("\n")) {
     if (line.trim().length === 0) continue;
     const index = line[0] ?? " ";
-    // Only the INDEX column matters: an unstaged or untracked file elsewhere is
-    // not going into this commit, and refusing over it would make the verb
-    // unusable in any working repository.
-    if (index === " " || index === "?") continue;
+    const worktree = line[1] ?? " ";
     const path = line.slice(3).trim();
-    if (path === policyArg || path === logArg || path === pinsArg) continue;
+    const ceremony = ceremonyFiles.includes(path);
+    // A ceremony file the operator staged and then edited again. The commit is
+    // assembled from the working tree, so the bytes it would carry are not the
+    // bytes `git diff --cached` shows, and an amendment is the one commit that
+    // may not be a surprise to the person who signed it.
+    if (ceremony && index !== " " && index !== "?" && worktree === "M") split.push(path);
+    // Only the INDEX column matters for everything else: an unstaged or
+    // untracked file elsewhere is not going into this commit (the scratch index
+    // lays exactly the ceremony paths over the remote's tree), and refusing
+    // over one would make the verb unusable in any working repository.
+    if (index === " " || index === "?") continue;
+    if (ceremony) continue;
     strays.push(path);
   }
-  if (strays.length > 0) {
-    const carried = pinsArg === null ? "the policy and the log" : `the policy, the log and ${pinsArg}`;
+  if (split.length > 0) {
     return {
       ok: false,
+      code: "dirty-tree",
+      message: `--commit refuses: ${split.join(", ")} ${split.length === 1 ? "is" : "are"} staged in one state and modified again in the working tree. The amendment commit is assembled from the WORKING TREE, so it would carry bytes your \`git diff --cached\` does not show, and the one commit that may not surprise the person who signed it is this one. Stage the file as it stands (\`git add ${split.join(" ")}\`) or unstage it, then run this again. Nothing was attested`,
+    };
+  }
+  if (strays.length > 0) {
+    return {
+      ok: false,
+      code: "staged-unrelated",
       message: `--commit refuses: the index carries ${strays.length} staged change(s) beyond ${carried} (${strays.join(", ")}). The amendment commit carries EXACTLY those files, so that "this commit is the amendment" stays true. Unstage them, or drop --commit and run the printed commands yourself. Nothing was attested`,
     };
   }
@@ -2569,6 +2695,7 @@ function planCommit(
     if (!remote.ok) {
       return {
         ok: false,
+        code: "commit-preconditions",
         message: `--commit on a branch needs an "origin" remote to push to, and ${root} has none (${remote.stderr.trim()}); pass --direct to commit in place, or add the remote. Nothing was attested`,
       };
     }
@@ -2577,6 +2704,7 @@ function planCommit(
       if (exists.ok) {
         return {
           ok: false,
+          code: "commit-preconditions",
           message: `--branch ${branchFlow.branch} already exists in ${root}; the amendment branch is created fresh so it carries exactly one commit. Pick another name. Nothing was attested`,
         };
       }
@@ -2758,6 +2886,12 @@ interface PublishingReport {
   /** Did a push reach origin? */
   pushed: boolean;
   prUrl: string | null;
+  /**
+   * True when a pull request was already open for this branch and the ceremony
+   * UPDATED it rather than opening one (APRV-341). Additive; false on every
+   * path that opened a pull request, and on every path that opened none.
+   */
+  prUpdated: boolean;
   autoMerge: "armed" | "refused" | "not-attempted";
   /** Every publishing command the verb RAN, in order, with its outcome. */
   steps: { command: string; ok: boolean }[];

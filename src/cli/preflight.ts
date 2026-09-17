@@ -15,19 +15,45 @@
  *
  * ## What it is allowed to do
  *
- * Read git, and at most three writes: a `--ff-only` merge, `npm run build`,
- * and, when the merge refused over an untracked file under `backlog/tasks/`
+ * Read git, and at most four writes: a `--ff-only` merge, `npm run build`,
+ * when the merge refused over an untracked file under `backlog/tasks/`
  * that main already contains, clearing that file out of the way (APRV-300, and
- * the rules it obeys are in {@link reconcileUntrackedTaskFiles}).
+ * the rules it obeys are in {@link reconcileUntrackedTaskFiles}), and the one
+ * `approval log sync` performs on its behalf (APRV-346, below).
  *
  * It never resets, never stashes, never checks anything out, and never touches
- * the working log. That list is not conservatism for its own sake — it is fork 2
- * of 2026-08-20 (APRV-104's notes, and the reason `approval log sync` exists at
- * all): a working `events.jsonl` rewound through git underneath a live appender
- * is two chains where there was one. `--ff-only` cannot rewind a file that
- * upstream did not change, and when upstream DID change it while the working
- * copy is dirty, this module refuses and names `approval log sync`, which is the
- * verb that knows how to do it safely.
+ * the working log ITSELF. That list is not conservatism for its own sake — it is
+ * fork 2 of 2026-08-20 (APRV-104's notes, and the reason `approval log sync`
+ * exists at all): a working `events.jsonl` rewound through git underneath a live
+ * appender is two chains where there was one. `--ff-only` cannot rewind a file
+ * that upstream did not change, and when upstream DID change it while the
+ * working copy is dirty, the file is moved by `cli/log-sync.ts` and by nothing
+ * here.
+ *
+ * ## The routine collision, and the one that is not (APRV-346)
+ *
+ * Every records advance moves `origin/main`'s `.approval/log/events.jsonl`
+ * while the hook keeps appending locally, so "upstream changed the log and so
+ * did this working copy" is the NORMAL state of the primary checkout after a
+ * merge rather than an edge case. Refusing it sent the operator to `approval log
+ * sync` and then back to `approval up` every single time, which is a two-step
+ * ritual for a state the preflight can already tell apart from a fork.
+ *
+ * So the collision is now a question rather than a verdict: is the working log a
+ * byte-for-byte EXTENSION of the committed one (main's records 1..N unchanged,
+ * local N+1.. following) or are they two chains that share a prefix and then
+ * differ? {@link planLogSync} asks `core/log-reconcile.ts` — the same comparison
+ * `log sync` and doctor's `log-drift` ask — and answers a plan or `null`:
+ *
+ * - a plan, and {@link runPreflight} calls `logSync` itself. Not a
+ *   reimplementation of it: the APRV-215 ceremony (one hold of the append lock,
+ *   snapshot, baseline, fast-forward, reconcile, rebuild the projections,
+ *   post-verify) stays the single implementation, and this module supplies a
+ *   caller rather than a copy;
+ * - `null`, and the old `up-preflight-log-diverged` refusal stands unchanged.
+ *   A fork, a log that does not verify, a log at some path other than the
+ *   repository's own, or any OTHER upstream-touched path locally modified all
+ *   answer `null`. Every one of those is a judgment, and this module makes none.
  *
  * ## Refusals, not repairs
  *
@@ -38,9 +64,11 @@
  *   commits exist that the remote does not have. A fast-forward is not the
  *   operation for that state, and guessing which side to keep is a decision.
  * - `up-preflight-log-diverged` — the upstream range changes the working log or
- *   the queue projection, and the working copy has uncommitted changes to them.
- *   This is the case the human could not judge by eye, and it is `approval log
- *   sync`'s whole subject.
+ *   the queue projection, the working copy has uncommitted changes to them, AND
+ *   the two chains are not in a prefix relationship (or cannot be compared at
+ *   all). This is the case the human could not judge by eye, and it is `approval
+ *   log sync`'s whole subject. The routine case — a working log that merely
+ *   extends the committed one — is reconciled rather than refused (APRV-346).
  * - `up-preflight-dirty-protected` — some OTHER path the upstream range changes
  *   is locally modified, so `git merge --ff-only` would refuse to overwrite it.
  *   Named separately because the repair is different: look at the edit and
@@ -94,6 +122,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkAttestation, policyBytesHash } from "../core/attest.js";
+import type { EventRecord } from "../core/log.js";
+import { compareChains, type LogRelation } from "../core/log-reconcile.js";
+import { POLICY_FILENAMES } from "../core/policy-load.js";
+import { verifyWithRecords } from "../core/verify.js";
 import type { DoctorCheck } from "./doctor.js";
 import { EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import {
@@ -105,6 +138,8 @@ import {
   repoRoot,
   showBlob,
 } from "./git-scope.js";
+import { logSync } from "./log-sync.js";
+import { DEFAULT_LOG_PATH } from "./paths.js";
 import { runbook, style, type RunbookStep } from "./style.js";
 
 // ---------------------------------------------------------------------------
@@ -366,6 +401,31 @@ export interface PreflightFacts {
    * answer and never this one.
    */
   reexec: boolean;
+  /**
+   * True when `approval log sync`'s reconcile ran on this preflight's behalf
+   * (APRV-346), which is the one write here that touches the working log.
+   *
+   * Always false from {@link inspectPreflight}, for the same reason `reexec` is:
+   * inspection performs nothing, so it can never be the thing that did this.
+   * What inspection answers instead is {@link PreflightReport}'s `sync`, which
+   * is the plan rather than the deed.
+   */
+  log_synced: boolean;
+}
+
+/**
+ * The reconcile the preflight would hand to `approval log sync`, or has.
+ *
+ * Present on a report only when the protected-path collision is the routine one
+ * (APRV-346): the working chain and the committed chain stand in a prefix
+ * relationship, so adopting the longer one extends and never rewinds. A fork,
+ * or a chain that cannot be verified, has no plan — it has a refusal.
+ */
+export interface PreflightSyncPlan {
+  /** How the working chain stands relative to the committed one at the target. */
+  relation: LogRelation;
+  /** Records the working chain holds beyond the committed one: what is kept. */
+  kept: number;
 }
 
 /** A refusal, in the APRV-129 runbook's own vocabulary. */
@@ -392,6 +452,11 @@ export type PreflightReport =
       target: string | null;
       /** Where the judgment was made. `null` when there was no repository. */
       root: string | null;
+      /**
+       * The reconcile this preflight would ask `approval log sync` for, or
+       * `null` when the working log needs nothing (APRV-346).
+       */
+      sync: PreflightSyncPlan | null;
     }
   | { ok: false; facts: PreflightFacts; refusal: PreflightRefusal; root: string };
 
@@ -428,6 +493,7 @@ const ZERO: Omit<PreflightFacts, "action"> = {
   log_touched: false,
   dist_stale: false,
   reexec: false,
+  log_synced: false,
 };
 
 /** `git status --porcelain -uno` as a set of repo-relative paths. */
@@ -472,7 +538,76 @@ function counts(root: string, base: string): { behind: number; ahead: number } |
 }
 
 function skipped(detail: string, root: string | null): PreflightReport {
-  return { ok: true, facts: { ...ZERO, action: "skipped" }, detail, warning: null, target: null, root };
+  return {
+    ok: true,
+    facts: { ...ZERO, action: "skipped" },
+    detail,
+    warning: null,
+    target: null,
+    root,
+    sync: null,
+  };
+}
+
+/**
+ * Is this protected-path collision the routine one, and what would clearing it
+ * keep? `null` means "not a question this module answers", and the caller
+ * refuses (APRV-346).
+ *
+ * Four conditions, and every one of them is a reason to refuse rather than a
+ * degree of confidence:
+ *
+ * 1. **The log is the repository's own.** `approval log sync` reconciles the log
+ *    at `.approval/log/events.jsonl` in the checkout it runs in, so a preflight
+ *    pointed at some other file with `--log` must not hand it a reconcile of a
+ *    file it was never asked about. That is a mismatch a test fixture can have
+ *    and the primary checkout cannot, which is exactly when a guard is cheap.
+ * 2. **Nothing else is in the merge's way.** `logSync` ends in `git merge
+ *    --ff-only`, which refuses over any dirty tracked path. A dirty unrelated
+ *    file is the `up-preflight-dirty-protected` conversation and is not made
+ *    better by starting a ceremony that will stop half-way.
+ * 3. **Both chains can be read.** `compareChains` verifies each side before it
+ *    compares a single seq, and a side that does not verify is a refusal rather
+ *    than an answer (SPEC §11.1: enforcement paths read only verified records).
+ * 4. **They are in a prefix relationship.** `ahead`, `behind` and `equal` all
+ *    mean the longer chain contains the other whole, so adopting it extends and
+ *    rewinds nothing. `diverged` means two appenders built different records on
+ *    one predecessor, hash chains do not merge, and no verb here will pick.
+ *
+ * Read-only throughout, so doctor can ask the same question without doctor ever
+ * having done anything.
+ */
+function planLogSync(
+  root: string,
+  logPath: string,
+  target: string,
+  upstream: ReadonlySet<string>,
+  dirty: ReadonlySet<string>,
+  protectedPaths: ReadonlySet<string>,
+): PreflightSyncPlan | null {
+  const logRelative = repoPath(root, logPath);
+  if (logRelative !== DEFAULT_LOG_PATH) return null;
+
+  const others = [...upstream].filter((path) => dirty.has(path) && !protectedPaths.has(path));
+  if (others.length > 0) return null;
+
+  let working: string;
+  try {
+    const bytes = readIfPresent(logPath);
+    working = bytes === null ? "" : bytes.toString("utf8");
+  } catch {
+    return null;
+  }
+  const committed = showBlob(root, target, logRelative);
+  if (committed === null) return null;
+
+  const compared = compareChains(
+    { label: `the working log ${logPath}`, text: working },
+    { label: `the committed log at ${target.slice(0, 12)}`, text: committed.toString("utf8") },
+  );
+  if (!compared.ok) return null;
+  if (compared.drift.relation === "diverged") return null;
+  return { relation: compared.drift.relation, kept: compared.drift.ahead };
 }
 
 /**
@@ -515,6 +650,7 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
         warning: fetched.message,
         target: null,
         root,
+        sync: null,
       };
     }
     base = fetched.sha;
@@ -552,6 +688,7 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
     dist_stale: stale,
     action,
     reexec: false,
+    log_synced: false,
   });
 
   // 1. Ahead. Nothing else is worth judging: whatever the upstream range holds,
@@ -599,6 +736,7 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
       root,
       target: base,
       warning,
+      sync: null,
       facts: facts(stale ? "rebuild" : "none"),
       detail: stale
         ? `up to date with ${remote}/${branch}, and the build is older than the sources`
@@ -616,39 +754,31 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
   const collidingProtected = [...protectedPaths].filter(
     (path) => upstream.has(path) && dirty.has(path),
   );
-  if (collidingProtected.length > 0) {
+  // ...unless the collision is the routine one, which is the state the primary
+  // checkout is in after every records advance (APRV-346). `planLogSync` asks
+  // the chains themselves; a plan is a reconcile `runPreflight` will delegate to
+  // `approval log sync`, and `null` is the refusal below, unchanged.
+  const plan =
+    collidingProtected.length === 0
+      ? null
+      : planLogSync(root, input.logPath, base, upstream, dirty, protectedPaths);
+  if (collidingProtected.length > 0 && plan === null) {
     return {
       ok: false,
       root,
       facts: facts("refused"),
-      refusal: {
-        code: "up-preflight-log-diverged",
-        headline: `${remote}/${branch} changed ${collidingProtected.join(" and ")} and so did this working copy`,
-        state: [
-          `${plural(counted.behind, "commit")} behind ${remote}/${branch}`,
-          `changed on both sides: ${collidingProtected.join(", ")}`,
-          "the working log was not read, moved, or rewound",
-        ],
-        steps: [
-          {
-            command: "approval log sync",
-            note: "snapshots the working log, fast-forwards, reconciles the chain",
-          },
-          { command: "approval up", note: "again, once sync reports clean" },
-        ],
-        footer: [
-          "a fast-forward over a log another process is appending to is how one chain becomes two",
-          "the ritual and what it refuses: docs/cli-reference.md#log-sync",
-        ],
-        next: "approval log sync",
-      },
+      refusal: divergedRefusal(remote, branch, counted.behind, collidingProtected),
     };
   }
 
   // 3. Any other local modification in the fast-forward's way. `--ff-only` would
   //    refuse rather than clobber it, so the refusal is reported here, where it
-  //    can say which file and what the two ways out are.
-  const colliding = [...upstream].filter((path) => dirty.has(path)).sort();
+  //    can say which file and what the two ways out are. The protected pair is
+  //    exempt when there is a plan: `log sync` is the writer that moves those
+  //    two, and it has already been asked whether it can.
+  const colliding = [...upstream]
+    .filter((path) => dirty.has(path) && !(plan !== null && protectedPaths.has(path)))
+    .sort();
   if (colliding.length > 0) {
     return {
       ok: false,
@@ -683,8 +813,55 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
     root,
     target: base,
     warning,
+    sync: plan,
     facts: facts(stale ? "fast-forward+rebuild" : "fast-forward"),
-    detail: `${plural(counted.behind, "commit")} behind ${remote}/${branch}, and the upstream range is safe to fast-forward${stale ? "; the build is older than the sources" : ""}`,
+    detail: `${plural(counted.behind, "commit")} behind ${remote}/${branch}, and the upstream range is safe to fast-forward${
+      plan === null ? "" : `, once \`approval log sync\`'s reconcile has kept the ${plural(plan.kept, "local record")}`
+    }${stale ? "; the build is older than the sources" : ""}`,
+  };
+}
+
+/**
+ * The `up-preflight-log-diverged` refusal, in one place.
+ *
+ * Two callers now: the judgment that decides the chains cannot be reconciled
+ * without a human, and the one case where `logSync` — asked to reconcile a pair
+ * this module had already found reconcilable — refuses anyway. The second is a
+ * race (an appender that beat the lock, a fork that landed between the read and
+ * the ceremony) or a machine problem, and it says so in `extra` rather than in a
+ * code of its own: the repair is the same repair, and a code whose repair is
+ * another code's is not a distinct refusal, it is a synonym.
+ */
+function divergedRefusal(
+  remote: string,
+  branch: string,
+  behind: number,
+  collidingProtected: readonly string[],
+  extra: readonly string[] = [],
+): PreflightRefusal {
+  return {
+    code: "up-preflight-log-diverged",
+    headline: `${remote}/${branch} changed ${collidingProtected.join(" and ")} and so did this working copy`,
+    state: [
+      `${plural(behind, "commit")} behind ${remote}/${branch}`,
+      `changed on both sides: ${collidingProtected.join(", ")}`,
+      ...extra,
+      extra.length === 0
+        ? "the working log was not read, moved, or rewound"
+        : "the reconcile restored the working log exactly as it found it, and nothing was started",
+    ],
+    steps: [
+      {
+        command: "approval log sync",
+        note: "snapshots the working log, fast-forwards, reconciles the chain",
+      },
+      { command: "approval up", note: "again, once sync reports clean" },
+    ],
+    footer: [
+      "a fast-forward over a log another process is appending to is how one chain becomes two",
+      "the ritual and what it refuses: docs/cli-reference.md#log-sync",
+    ],
+    next: "approval log sync",
   };
 }
 
@@ -696,6 +873,17 @@ function plural(count: number, noun: string): string {
 // Acting on it
 // ---------------------------------------------------------------------------
 
+/** What the reconcile actually did, once `approval log sync` had run it. */
+export interface PreflightSynced {
+  /** The commit the checkout ended on. */
+  commit: string;
+  /** Local records the reconcile put back on top of it. */
+  kept: number;
+  relation: LogRelation;
+  remote: string;
+  branch: string;
+}
+
 /** What {@link runPreflight} did, with the facts as they ended up. */
 export type PreflightOutcome =
   | {
@@ -705,6 +893,8 @@ export type PreflightOutcome =
       warning: string | null;
       /** Present when a rebuild happened: the caller must become this child. */
       reexec?: ReexecPlan;
+      /** Present when the reconcile ran: what it fast-forwarded and kept. */
+      synced?: PreflightSynced;
     }
   | { ok: false; facts: PreflightFacts; refusal: PreflightRefusal }
   /** A write the preflight attempted and could not complete. Also a refusal. */
@@ -735,6 +925,45 @@ export function runPreflight(
   // nothing to do. It rides out on the warning line so the aside directory is
   // printed where the operator is already looking.
   let cleared: string | null = null;
+
+  // The routine protected-path collision, reconciled rather than refused
+  // (APRV-346). This runs BEFORE the fast-forward below and does that
+  // fast-forward itself: `logSync` holds the append lock for its whole ceremony
+  // — snapshot, baseline, `git merge --ff-only`, reconcile, rebuild the
+  // projections, post-verify — and this module supplies a caller for it rather
+  // than a second copy of any of that. The merge below then finds the checkout
+  // already at the target and says so.
+  let synced: PreflightSynced | null = null;
+  if (report.sync !== null && report.root !== null) {
+    const remote = input.remote ?? "origin";
+    const branch = input.branch ?? currentBranch(report.root) ?? "main";
+    const result = logSync({ cwd: report.root, remote, branch });
+    if (!result.ok) {
+      // Asked for a reconcile this module had already found reconcilable, and
+      // refused: an appender that took the lock first, a fork that landed in
+      // between, or git itself. Either way nothing starts, and the sync's own
+      // code and sentence go into the refusal so the operator is not sent to
+      // read a second one.
+      return {
+        ok: false,
+        facts: { ...facts, action: "refused" },
+        refusal: divergedRefusal(
+          remote,
+          branch,
+          facts.behind_by,
+          [repoPath(report.root, input.logPath)],
+          [`approval log sync refused at its ${result.step} step (${result.code}): ${result.message}`],
+        ),
+      };
+    }
+    synced = {
+      commit: result.report.commitAfter,
+      kept: report.sync.kept,
+      relation: report.sync.relation,
+      remote,
+      branch,
+    };
+  }
 
   if (facts.behind_by > 0 && report.root !== null && report.target !== null) {
     const root = report.root;
@@ -829,10 +1058,11 @@ export function runPreflight(
   const plan = stale && build ? reexecPlan(input.root) : null;
   return {
     ok: true,
-    facts: { ...settled, reexec: plan !== null },
+    facts: { ...settled, reexec: plan !== null, log_synced: synced !== null },
     detail: report.detail,
     warning: [warning, cleared].filter((part) => part !== null).join("; ") || null,
     ...(plan === null ? {} : { reexec: plan }),
+    ...(synced === null ? {} : { synced }),
   };
 }
 
@@ -1195,12 +1425,41 @@ export function reexecFreshBuild(plan: ReexecPlan, cwd: string): Promise<number>
  */
 export type PreflightEvent =
   | ({ event: "preflight"; commit: string | null; detail: string } & PreflightFacts)
-  | { event: "preflight_warning"; message: string };
+  | { event: "preflight_warning"; message: string }
+  /**
+   * The reconcile, when there was one (APRV-346). A third additive shape rather
+   * than a field on `preflight`: a consumer that already parses that line must
+   * not have to learn a key to keep working, and this is a different fact —
+   * what `approval log sync` did, not what the preflight found.
+   */
+  | ({ event: "preflight_sync" } & PreflightSynced)
+  /**
+   * The attested policy is not on the remote yet (APRV-342). Emitted only when
+   * that is TRUE: `up` reports the interregnum and never refuses on it, because
+   * a policy amendment waiting on a pull request is a normal state of a
+   * repository and not a reason to refuse to run the gate.
+   */
+  | { event: "preflight_policy"; detail: string; fix: string | null };
 
 /** One preflight line as a human sentence, and where it belongs. */
 export function describePreflightEvent(event: PreflightEvent): { text: string; stderr: boolean } {
   if (event.event === "preflight_warning") {
     return { text: `approval: preflight — ${event.message}`, stderr: true };
+  }
+  if (event.event === "preflight_policy") {
+    return {
+      text: `up: preflight — ${event.detail}${event.fix === null ? "" : `; ${event.fix}`}`,
+      stderr: true,
+    };
+  }
+  if (event.event === "preflight_sync") {
+    return {
+      text: `up: preflight — synced: fast-forwarded to ${event.remote}/${event.branch} ${event.commit.slice(
+        0,
+        12,
+      )}, kept ${String(event.kept)} local records`,
+      stderr: false,
+    };
   }
   const commits = `${String(event.behind_by)} commit${event.behind_by === 1 ? "" : "s"}`;
   const did: Record<PreflightAction, string> = {
@@ -1225,9 +1484,39 @@ export function describePreflightEvent(event: PreflightEvent): { text: string; s
 /** How a caller emits one line. `up` and `daemon run` route theirs identically. */
 export type PreflightEmit = (event: PreflightEvent) => void;
 
+/**
+ * The policy file `--policy` names, or the one `--dir` (else `cwd`) holds.
+ *
+ * Discovery, not a load: this answers WHICH FILE, so the preflight can compare
+ * its attested hash against the remote's copy (APRV-342) before either caller
+ * has loaded a policy. The order is `core/policy-load.ts`'s own, so the file
+ * named here is the file the runtime will go on to enforce. `null` when there is
+ * no such file, which is not a finding — `approval doctor`'s `policy` rows are
+ * where an absent policy is somebody's problem.
+ */
+export function preflightPolicyPath(
+  policyFlag: string | null,
+  dirFlag: string | null,
+  cwd: string,
+): string | null {
+  if (policyFlag !== null) return resolvePathSegments(cwd, policyFlag);
+  const dir = dirFlag === null ? cwd : resolvePathSegments(cwd, dirFlag);
+  for (const filename of POLICY_FILENAMES) {
+    const candidate = join(dir, filename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 export interface StartupPreflightInput {
   logPath: string;
   queuePath: string;
+  /**
+   * The policy file, for the `attested-policy-on-main` line (APRV-342). `null`
+   * where the caller could not name one, and the line is then not emitted:
+   * there is nothing to compare, which is not a finding.
+   */
+  policyPath?: string | null;
   /** The installation whose `dist/` is dated. `null` means "ask this build". */
   root: string | null;
   remote: string | null;
@@ -1274,6 +1563,11 @@ export function startupPreflight(
   if (outcome.warning !== null) {
     input.emit({ event: "preflight_warning", message: outcome.warning });
   }
+  // Before the `preflight` line, because it happened before what that line
+  // reports: the reconcile is what made the fast-forward possible.
+  if (outcome.synced !== undefined) {
+    input.emit({ event: "preflight_sync", ...outcome.synced });
+  }
   // Emitted BEFORE the re-exec, and by the parent, because this is the only
   // place the whole story is known: the child runs with `--no-preflight` and
   // has nothing to say about a fast-forward it did not perform. The commit is
@@ -1284,7 +1578,71 @@ export function startupPreflight(
     detail: outcome.detail,
     ...outcome.facts,
   });
+  // APRV-342, and AFTER the fast-forward: a merge that just landed the
+  // amendment is exactly the case where the answer changes, and reporting the
+  // pre-merge one would name an interregnum this process had already left.
+  const interregnum = attestedPolicyLine(input);
+  if (interregnum !== null) input.emit(interregnum);
   return { ok: true, reexec: outcome.reexec ?? null };
+}
+
+/**
+ * The `attested-policy-on-main` line, or `null` when there is nothing to say.
+ *
+ * `null` for a pass, a skip, and for every state the check cannot read: the
+ * preflight's lines report what happened and what an operator has to act on,
+ * and "your policy is where it should be" is neither. It NEVER refuses — see
+ * {@link checkAttestedPolicyOnMain} for why a pending amendment is a normal
+ * state of a repository rather than a fault.
+ *
+ * The log is re-verified here rather than passed in, because the preflight runs
+ * before either caller has opened it. That is one whole-log read at startup, in
+ * a process that is about to read the log on every tick.
+ */
+function attestedPolicyLine(input: StartupPreflightInput): PreflightEvent | null {
+  const policyPath = input.policyPath ?? null;
+  if (policyPath === null) return null;
+  const root = repoRoot(dirname(input.logPath));
+  if (root === null) return null;
+
+  // The cheap half first, and it answers the common case without opening the
+  // log at all: when the remote's copy of the policy is byte-identical to the
+  // one on disk, "is the attested policy on the remote" has the same answer as
+  // "is the policy on disk attested" — which is doctor's `attestation` row, and
+  // which `up` has no business duplicating on its startup line. The expensive
+  // half below is a whole-log verify, so skipping it whenever the answer is
+  // already settled is the difference between a read per start and a read per
+  // start on a repository mid-amendment.
+  const relative = repoPath(root, policyPath);
+  if (relative.startsWith("..")) return null;
+  const remote = input.remote ?? "origin";
+  const branch = input.branch ?? currentBranch(root) ?? "main";
+  const resolved = git(
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${branch}^{commit}`],
+    root,
+  );
+  const tip = resolved.stdout.trim();
+  if (!resolved.ok || tip.length === 0) return null;
+  const blob = showBlob(root, tip, relative);
+  let onDisk: Buffer | null;
+  try {
+    onDisk = readIfPresent(policyPath);
+  } catch {
+    return null;
+  }
+  if (blob !== null && onDisk !== null && blob.equals(onDisk)) return null;
+
+  const verified = verifyWithRecords(input.logPath);
+  if (verified.result.status !== "clean") return null;
+  const row = checkAttestedPolicyOnMain({
+    policyPath,
+    records: verified.records,
+    root,
+    ...(input.remote === null ? {} : { remote: input.remote }),
+    ...(input.branch === null ? {} : { branch: input.branch }),
+  });
+  if (row.status !== "fail") return null;
+  return { event: "preflight_policy", detail: row.detail, fix: row.fix ?? null };
 }
 
 /** The short sha this checkout is on, or `null` when git will not say. */
@@ -1406,6 +1764,110 @@ function npmBuild(root: string): { ok: boolean; message: string } {
  * never `git`. That constraint predates this row and is the right one — a repair
  * line telling an operator to reset a branch would be doctor making a decision.
  */
+/**
+ * `attested-policy-on-main`, doctor's row for the interregnum (APRV-342).
+ *
+ * Between a policy amendment and its pull request merging there is a window
+ * where the attestation is in the log and the amended `APPROVAL.md` is in the
+ * working tree, and `origin/main` carries neither. A fresh checkout of main in
+ * that window has the OLD policy with no attestation covering it, and every
+ * gate operation there refuses `policy-not-attested`.
+ *
+ * Nothing said so. On 2026-09-16 `approval up` ran its preflight in exactly that
+ * state and reported "already at the remote tip"; doctor's `attestation` row
+ * passed, because the LOCAL file is attested and that row asks a different
+ * question. This row asks the missing one: is the policy the log vouches for the
+ * policy `origin/<branch>` carries?
+ *
+ * Read-only, and networkless. The remote tip is read from the last fetch, like
+ * every other answer doctor gives about a remote, and the `policy-amend-<seq>`
+ * branch is looked for among the remote-tracking refs rather than asked of
+ * GitHub: a report that reached the network to be more accurate would be doing
+ * something on its own account.
+ */
+export function checkAttestedPolicyOnMain(input: {
+  policyPath: string;
+  /** The log, verified, in append order. Doctor's own records; `up` re-reads. */
+  records: readonly EventRecord[];
+  /** The repository the policy lives in, or `null` when it is not in one. */
+  root: string | null;
+  remote?: string;
+  branch?: string;
+}): DoctorCheck {
+  const check = "attested-policy-on-main";
+  const root = input.root;
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${input.policyPath} is not inside a git repository, so there is no remote copy of it to compare the attestation against`,
+    };
+  }
+  const status = checkAttestation([...input.records], input.policyPath);
+  // Not applicable rather than a pass: with no attestation there is no hash to
+  // compare, and `attestation` is the row that has something to say about that.
+  const attested =
+    status.status === "attested"
+      ? { sha256: status.sha256, seq: status.seq }
+      : status.status === "hash-mismatch"
+        ? { sha256: status.attestedSha256, seq: status.seq }
+        : null;
+  if (attested === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${input.policyPath} carries no attestation, so there is no attested hash to look for on the remote`,
+    };
+  }
+
+  const remote = input.remote ?? "origin";
+  const branch = input.branch ?? currentBranch(root) ?? "main";
+  const ref = `refs/remotes/${remote}/${branch}`;
+  const resolved = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], root);
+  const tip = resolved.stdout.trim();
+  if (!resolved.ok || tip.length === 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `this checkout has no ${remote}/${branch} remote-tracking ref, so there is no remote copy of ${input.policyPath} to compare the attestation against`,
+    };
+  }
+
+  const relative = repoPath(root, input.policyPath);
+  const blob = relative.startsWith("..") ? null : showBlob(root, tip, relative);
+  const remoteSha256 = blob === null ? null : policyBytesHash(blob);
+  if (remoteSha256 === attested.sha256) {
+    return {
+      check,
+      status: "pass",
+      detail: `${remote}/${branch} carries the policy attested at seq ${String(attested.seq)} (sha256 ${attested.sha256.slice(0, 12)}…)`,
+    };
+  }
+
+  // The branch the amendment would ride, when this checkout has already seen it
+  // on the remote. Named in the detail rather than in the fix: `approval policy
+  // amend --pr` is the command either way, because it updates an open pull
+  // request rather than opening a second one (APRV-341).
+  const amendBranch = `policy-amend-${String(attested.seq)}`;
+  const pushed = git(
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${amendBranch}^{commit}`],
+    root,
+  );
+  const carried = pushed.ok && pushed.stdout.trim().length > 0;
+  return {
+    check,
+    status: "fail",
+    detail: `attested at seq ${String(attested.seq)}, not yet on main: ${remote}/${branch} carries ${
+      remoteSha256 === null ? `no ${relative} at all` : `${relative} hashing ${remoteSha256.slice(0, 12)}…`
+    } while the attestation covers ${attested.sha256.slice(0, 12)}…${
+      carried
+        ? `; ${remote} already carries ${amendBranch}, so its pull request is what lands it`
+        : ""
+    }. A fresh checkout of ${branch} refuses every gate operation with policy-not-attested until it merges`,
+    fix: `approval policy amend --pr — commits the policy and its attestation on ${amendBranch}, opens or updates its pull request, and arms the merge`,
+  };
+}
+
 export function checkMainBehindOrigin(logPath: string, queuePath: string, root: string): DoctorCheck {
   const report = inspectPreflight({ logPath, queuePath, root, fetch: false });
   if (!report.ok) {
@@ -1426,10 +1888,21 @@ export function checkMainBehindOrigin(logPath: string, queuePath: string, root: 
   if (report.facts.behind_by === 0 && !report.facts.dist_stale) {
     return { check: "main-behind-origin", status: "pass", detail: `${report.detail}${suffix}` };
   }
+  // A plan is worth naming even though it is a pass: the row is where an
+  // operator looks to find out whether starting will be one command or two, and
+  // "your working log extends the committed one" is the answer that used to
+  // arrive as a refusal (APRV-346).
+  const plan =
+    report.sync === null
+      ? ""
+      : `; the working log is a clean extension (${report.sync.relation}, ${plural(
+          report.sync.kept,
+          "local record",
+        )}), so up reconciles it rather than refusing`;
   return {
     check: "main-behind-origin",
     status: "pass",
-    detail: `${report.detail}; upstream ${report.facts.log_touched ? "DOES" : "does not"} touch the working log or queue${suffix}`,
+    detail: `${report.detail}; upstream ${report.facts.log_touched ? "DOES" : "does not"} touch the working log or queue${plan}${suffix}`,
     fix: "approval up — fast-forwards and rebuilds when it is safe, and refuses with the next command when it is not",
   };
 }
