@@ -23,6 +23,10 @@ use is experimental direct-patch evaluation: the required full
 `Bash|apply_patch` matcher refuses every matched Bash call, including gate-self
 shell commands. Everyday activation remains blocked.
 
+The operator's half, including the trust tap, the bounded Telegram ceremony that
+replaces the loopback smoke test below, and the tested rollback, is
+[docs/codex-activation.md](codex-activation.md).
+
 The direct-patch path uses the same policy, verified log, budget, and approval core as
 the other harness hooks. Codex's own sandbox and approval mode remain an
 independent control. Installing this hook does not widen that sandbox or grant
