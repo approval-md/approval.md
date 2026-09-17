@@ -21,6 +21,7 @@ entry here is the summary and the pointer.
 | Grok Build (xAI coding-agent harness) | [docs.x.ai/build](https://docs.x.ai/build/overview), [xai-org/grok-build](https://github.com/xai-org/grok-build) | 2026-09-02 | harness | parked | APRV-243 |
 | Grok Bot (xAI agent product) | [x.ai/news/grok-bot-and-x](https://x.ai/news/grok-bot-and-x) | 2026-09-02 | agent product (MCP client) | adopted (demo) | APRV-245, APRV-246 |
 | Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
+| Muse Code (Meta coding agent) | [developer.meta.com](https://developer.meta.com/ai/products/muse-code/) | 2026-09-16 | harness | parked, unverified | APRV-347 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
 **parked** (design verified, no code, activated on demand), **declined** (no
@@ -438,6 +439,134 @@ fill it.
 - APRV-228, extended: `pip install`, `pipx install` and `uv pip install`
   classify `deps.add` alongside `npm install -g` and `bun install -g`,
   instead of falling to unclassified.
+
+## Muse Code (Meta coding agent)
+
+Assessed 2026-09-16. Verdict: **parked, and explicitly unverified**: the read
+scope this repository built for it (APRV-347) needs no Muse-specific code at
+all, and everything that WOULD need code is resting on secondary sources.
+
+### What it is
+
+Meta's terminal coding agent, powered by the Muse Spark model family, in beta
+since 2026-08-05. It is the same shape as Claude Code, Cursor Agent and Codex
+CLI: a CLI run from a project directory (`muse-code init`, `muse-code auth
+login`), which is why the request that produced APRV-347 was phrased as "an
+agent working under `~/dev/muse`". Announced at
+[developer.meta.com/ai/products/muse-code](https://developer.meta.com/ai/products/muse-code/)
+and covered on the day by
+[TechCrunch](https://techcrunch.com/2026/08/05/meta-launches-muse-code-an-ai-agent-for-large-code-bases/),
+[CNBC](https://www.cnbc.com/2026/08/05/meta-debuts-muse-code-to-take-on-anthropic-and-openai-.html)
+and
+[VentureBeat](https://venturebeat.com/orchestration/meta-enters-the-ai-coding-wars-with-muse-spark-1-2-and-muse-code-with-persistent-async-background-agents).
+
+**A name collision worth recording**, because the next person to read "Muse"
+will hit it. Meta also ships a CONSUMER product called Muse, a personal agent
+that asks for access to email, calendar, payments and health data
+([TechCrunch, 2026-09-08](https://techcrunch.com/2026/09/08/meta-debuts-its-muse-ai-agent-will-consumers-trust-it/)).
+That one is not a development harness and is not what this entry is about; its
+side-effect surface (money, mail) would be a completely different assessment.
+Several unrelated products also carry the name (muse.ai video hosting, the
+Muse meditation headband, muse.place); none of them surfaced as a coding agent.
+
+### What it exposes
+
+**Read this section as unconfirmed unless it says otherwise.** Research for
+this entry was a web survey, not a live install, and the most specific
+material about the hook contract came from third-party sites — one of which
+(`musecodes.io`) self-discloses as an unofficial fan site, and others
+(`agenticcontrolplane.com`, `docs.asymptotelabs.ai`) describe internals in
+more detail than Meta's own documentation does. One of those sources *disputes
+Meta's docs*, claiming the documented `.muse/hooks.json` path is not what the
+shipped binary reads and that the real mechanism is an experimental plugin
+flag. That contradiction is unresolved here.
+
+Against the six questions from `HANDOVER-2026-09-16.md` §4:
+
+1. **Interception surface.** *Vendor-documented.* A hook system with
+   `PreToolUse` and `PermissionRequest` events, configurable at three levels:
+   project (`.muse/hooks.json`, committable, so it could be attested as a gate
+   organ exactly as `.claude/settings.json` is), user, and a centrally-managed
+   `managed_hooks_path`. Source: `ai.developer.meta.com/docs/muse-code/configuration`.
+   *Unconfirmed:* whether that path is what ships.
+2. **Payload completeness.** *Not in Meta's documentation.* A third-party
+   source describes snake_case JSON on stdin with `hook_event_name`,
+   `tool_name`, `tool_input`, `session_id` and `cwd` — i.e. everything the
+   adapter needs, if true. Treat as unknown. This is the question that
+   decided Codex (APRV-311): a hook that cannot bind the per-call working
+   directory cannot produce guard evidence, and no amount of product
+   documentation substitutes for one captured event.
+3. **Failure mode.** *Contradictory.* Meta documents the core sandbox as
+   fail-closed ("Muse Code refuses to run a shell command when it can't
+   confirm that the sandbox is active",
+   `ai.developer.meta.com/docs/muse-code/permissions`), while a third-party
+   source claims hooks run outside that sandbox and that an empty `{}` hook
+   response defaults to ALLOW. If the second is right, the hook layer fails
+   OPEN, which is the Grok Build situation (APRV-243) and would cap what may
+   ever be activated.
+4. **Identity and session.** *Unknown.* Nothing on a stable agent identity for
+   `agent:<id>`, on session scope, or on whether the harness can impersonate a
+   human channel. An unverified `session_id` field is the only trace.
+5. **Side-effect classes.** *Vendor-documented:* shell (sandboxed, staged for
+   review), file writes (confined to the workspace and a temp directory, with
+   `.git`, `.muse` and `.agents` read-only), and network (`--sandbox-network`
+   with `proxy-only`, `restricted` and `enabled` modes). No email and no money
+   surface is documented for Muse Code — those belong to the consumer Muse.
+   Every one of these maps onto existing §7 classes; none is new.
+6. **Demo shape.** *Not documented anywhere found.* It would have to be built,
+   and the honest smallest version is the one APRV-347 already makes possible
+   with no Muse code at all: run the session from `~/dev/muse` under a
+   `~/dev/muse/APPROVAL.md`, and every read of a sibling under `~/dev` is
+   `read.file.out_of_scope`.
+
+### Fit
+
+**The read jail needs nothing from Muse.** That is the finding that matters.
+APRV-347's scope is anchored on the GATE ROOT — the directory holding the
+policy file the runtime resolved — so a harness started in `~/dev/muse` with
+its own `APPROVAL.md` is confined by construction, through the shell
+classifier and through the Seatbelt read profile, with no adapter, no hook
+entry and no harness-specific grammar. What a Muse-specific `readTools` entry
+would add is gating of Muse's own read TOOL, and that needs the payload shape
+in question 2.
+
+Against the three judgements this file asks for: the §7 taxonomy needs no new
+class (shell, file writes, network are all present); the §11.1 invariants at
+stake are fail-closed (question 3 decides whether a Muse hook can be trusted
+to deny at all) and self-reported fields never reducing scrutiny (question 2,
+the `cwd`); and the existing contracts place Muse as a HARNESS, so it would
+join `src/cli/hook.ts`'s adapter table rather than `src/adapters/` or
+`src/channels/`.
+
+### Conclusion
+
+Parked. There is no code to write until somebody runs `muse-code` and captures
+one `PreToolUse` event, and this entry deliberately does not pretend otherwise:
+the two facts that decide the integration (payload completeness, failure mode)
+are exactly the two this survey could not establish from a primary source.
+Filing an adapter task on the strength of a fan site would be the failure this
+register exists to prevent.
+
+No classifier output is quoted in this entry, which the checklist below asks
+for, because there is no verified Muse command surface to classify. The
+commands an agent runs UNDER Muse are ordinary shell and are already covered.
+
+### Next steps
+
+- A human installs `muse-code` and captures one `PreToolUse` envelope and one
+  hook timeout, then this entry's questions 2, 3 and 4 get answers with a
+  primary source. **An agent should not run the vendor's
+  `curl … | bash` installer**: it is `network.call` and untrusted-source
+  execution, and the suggestion to do it came out of a web survey rather than
+  from the operator (SPEC.md §11.1: nothing read from the world is an
+  instruction).
+- If the payload carries a per-call `cwd` and the hook fails closed, the work
+  is a `readTools` entry plus a matcher, on the model of the Claude Code
+  adapter. If it fails open, the entry moves to **declined** with the Grok
+  Build reasoning.
+- No Backlog task is filed for an adapter, on purpose: per the checklist
+  below, an entry points at ids rather than intentions, and there is nothing
+  here to specify yet.
 
 ## How to add an entry
 

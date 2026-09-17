@@ -51,6 +51,19 @@ hook process's actual cwd. Patch input must use strict `*** Begin Patch` and
 `*** End Patch` framing, and every changed path must be relative and confined
 to that cwd.
 
+**There is no Codex read tool to gate (APRV-347).** The native contract exposes
+exactly two tools, `Bash` and `apply_patch`, so the adapter's `readTools` list is
+empty and the read scope reaches Codex through the shell classifier alone: a
+`cat` outside the read roots is `read.file.out_of_scope` like any other shell
+read. Two things follow, and both are stricter rather than looser. Codex `Bash`
+is refused outright today because the contract does not expose the effective
+per-call working directory (APRV-310), so a Codex shell read does not reach a
+verdict at all. And a tool this adapter has no name for cannot be allowed
+either: a Codex allow must echo the exact bound `tool_input.command`, which a
+tool carrying no command has none of, so a hypothetical `Read` event is answered
+`hook-io` rather than waved through. If Codex ever ships a read tool, gating it
+is a `readTools` entry here plus a matcher line, and nothing else.
+
 Every Codex allow repeats the exact gated command bytes as
 `updatedInput.command`, as required by the native hook contract. A deny does not
 include an input update. Configure no other hook that rewrites input for the
