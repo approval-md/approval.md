@@ -146,7 +146,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { HOOK_HELP } from "./help.js";
+import { HOOK_GROK_HELP, HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
@@ -384,6 +384,17 @@ interface HarnessAdapter {
   fileTools: readonly string[];
   /** Include the native tool name in the bytes a grant binds. */
   bindToolName?: boolean;
+  /**
+   * Read `toolName`/`toolInput`/`sessionId` as well as the snake_case
+   * spellings (APRV-243).
+   *
+   * Grok Build's PreToolUse envelope is Claude Code's with camelCase keys.
+   * Opt-in per adapter rather than tolerated everywhere: a Claude Code event
+   * that arrived with the wrong spelling is a malformed event, and the strict
+   * answer to a malformed event is the deny that `parseHookInput` already
+   * produces.
+   */
+  camelCaseEnvelope?: boolean;
 }
 
 const CLAUDE_ADAPTER: HarnessAdapter = {
@@ -412,11 +423,38 @@ const CODEX_ADAPTER: HarnessAdapter = {
 };
 
 /**
+ * Grok Build (APRV-243).
+ *
+ * Its PreToolUse hook is modelled on Claude Code's, with three differences
+ * that matter here: the envelope keys are camelCase, the verdict is
+ * `{decision, reason}` rather than the nested `hookSpecificOutput`, and a deny
+ * is EXIT 2 rather than exit 0 with a JSON body. The tool names are Claude
+ * Code's, which is what its documentation says and what the compatibility read
+ * of `.claude/settings.json` implies; `docs/grok-hook.md` records that this
+ * half is unverified until the live probe runs.
+ *
+ * The reason this adapter exists at all is a hazard rather than a feature.
+ * Grok Build states that it reads `.claude/settings.json` for compatibility.
+ * If that read fires this repository's committed claude-code entry under a
+ * Grok session, the claude-code adapter answers a deny by printing the nested
+ * Claude envelope and exiting 0, and Grok reads exit 0 as ALLOW. Every command
+ * would look gated and none would be.
+ */
+const GROK_ADAPTER: HarnessAdapter = {
+  kind: "grok",
+  originApp: "grok-hook",
+  defaultActor: "agent:grok",
+  shellTool: "Bash",
+  fileTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"],
+  camelCaseEnvelope: true,
+};
+
+/**
  * The decision object the harness reads from stdout.
  *
  * Claude Code wants the nested PreToolUse envelope. Cursor native hooks want
- * `{permission, user_message, agent_message}`. One construction site per
- * harness, still never `ask`.
+ * `{permission, user_message, agent_message}`. Grok Build wants
+ * `{decision, reason}`. One construction site per harness, still never `ask`.
  */
 function decision(
   permission: Permission,
@@ -430,6 +468,9 @@ function decision(
       user_message: reason,
       agent_message: reason,
     })}\n`;
+  }
+  if (harness === "grok") {
+    return `${JSON.stringify({ decision: permission, reason })}\n`;
   }
   const hookSpecificOutput: Record<string, unknown> = {
     hookEventName: "PreToolUse",
@@ -460,9 +501,20 @@ function allow(
   return EXIT_OK;
 }
 
+/**
+ * The exit code a DENY carries.
+ *
+ * Claude Code, Cursor and Codex read the verdict out of stdout and treat a
+ * non-zero exit as a broken hook, so a deny there exits 0 with a JSON body.
+ * Grok Build reads exit 2 as the deny (APRV-243), and reads exit 0 as ALLOW
+ * whatever stdout said. Printing the body AND exiting 2 satisfies both halves
+ * of its documented contract and leaves the reason where a person can read it.
+ */
+const GROK_DENY_EXIT = 2;
+
 function deny(streams: Streams, code: string, detail: string, harness: HarnessKind): number {
   streams.out(decision("deny", `${code}: ${detail}`, harness));
-  return EXIT_OK;
+  return harness === "grok" ? GROK_DENY_EXIT : EXIT_OK;
 }
 
 // ===========================================================================
@@ -530,6 +582,35 @@ function readString(source: Record<string, unknown>, key: string): string | null
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/**
+ * The snake_case key, or the camelCase one when the adapter speaks that
+ * dialect (APRV-243).
+ *
+ * snake_case is read FIRST in both dialects, so an envelope carrying both
+ * spellings resolves the same way for every harness and cannot be used to show
+ * one command to the classifier and another to the harness.
+ */
+function readDialect(
+  source: Record<string, unknown>,
+  snake: string,
+  camel: string,
+  camelCase: boolean,
+): unknown {
+  const value = source[snake];
+  if (value !== undefined) return value;
+  return camelCase ? source[camel] : undefined;
+}
+
+function readDialectString(
+  source: Record<string, unknown>,
+  snake: string,
+  camel: string,
+  camelCase: boolean,
+): string | null {
+  const value = readDialect(source, snake, camel, camelCase);
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 type ParsedInput = { ok: true; input: HookInput } | { ok: false; detail: string };
 
 /**
@@ -541,7 +622,7 @@ type ParsedInput = { ok: true; input: HookInput } | { ok: false; detail: string 
  * and a gate that read the subject's own account of its intent would be letting
  * a self-reported field reduce scrutiny (SPEC.md §11.1).
  */
-function parseHookInput(raw: string): ParsedInput {
+function parseHookInput(raw: string, camelCase = false): ParsedInput {
   if (raw.trim().length === 0) return { ok: false, detail: "hook stdin was empty" };
   let parsed: unknown;
   try {
@@ -556,15 +637,20 @@ function parseHookInput(raw: string): ParsedInput {
     return { ok: false, detail: "hook stdin is not a JSON object" };
   }
   const fields = parsed as Record<string, unknown>;
-  const toolName = readString(fields, "tool_name");
-  if (toolName === null) return { ok: false, detail: "hook input has no tool_name" };
-  const toolInputValue = fields["tool_input"];
+  const toolName = readDialectString(fields, "tool_name", "toolName", camelCase);
+  if (toolName === null) {
+    return {
+      ok: false,
+      detail: camelCase ? "hook input has no tool_name or toolName" : "hook input has no tool_name",
+    };
+  }
+  const toolInputValue = readDialect(fields, "tool_input", "toolInput", camelCase);
   const toolInput =
     typeof toolInputValue === "object" && toolInputValue !== null && !Array.isArray(toolInputValue)
       ? (toolInputValue as Record<string, unknown>)
       : {};
-  const responseValue = fields["tool_response"];
-  const sessionId = readString(fields, "session_id");
+  const responseValue = readDialect(fields, "tool_response", "toolResponse", camelCase);
+  const sessionId = readDialectString(fields, "session_id", "sessionId", camelCase);
   return {
     ok: true,
     input: {
@@ -573,13 +659,17 @@ function parseHookInput(raw: string): ParsedInput {
       // slower, which is the fail-closed direction.
       sessionId: sessionId ?? UNKNOWN_SESSION,
       sessionIdPresent: sessionId !== null,
+      // Grok Build sends `workspaceRoot` beside `cwd`. Only `cwd` is read:
+      // the classifier resolves paths against the directory the command will
+      // actually run in, and a workspace root is a different fact.
       cwd: readString(fields, "cwd") ?? "",
       toolName,
       toolInput,
-      toolUseId: readString(fields, "tool_use_id"),
-      hookEventName: readString(fields, "hook_event_name"),
+      toolUseId: readDialectString(fields, "tool_use_id", "toolUseId", camelCase),
+      hookEventName: readDialectString(fields, "hook_event_name", "hookEventName", camelCase),
       harnessVersion: readString(fields, "version"),
-      interrupted: fields["is_interrupt"] === true,
+      interrupted:
+        fields["is_interrupt"] === true || (camelCase && fields["isInterrupt"] === true),
       toolResponse:
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
@@ -3204,7 +3294,10 @@ function runHarnessHook(
   });
   if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
-    streams.out(`${HOOK_HELP}\n`);
+    // APRV-243. Grok's help carries the `.grok/hooks/*.json` the human commits,
+    // because that file's `timeout` is load-bearing: it must exceed `--timeout`
+    // or Grok abandons the hook mid-wait and, failing open, runs the command.
+    streams.out(`${adapter.kind === "grok" ? HOOK_GROK_HELP : HOOK_HELP}\n`);
     return EXIT_OK;
   }
   const extra = parsed.positionals[0];
@@ -3245,7 +3338,7 @@ function runHarnessHook(
     );
   }
 
-  const parsedInput = parseHookInput(readStdin());
+  const parsedInput = parseHookInput(readStdin(), adapter.camelCaseEnvelope === true);
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
 
@@ -3277,13 +3370,23 @@ function runHarnessHook(
     // already finished, and the reason the counterpart did not land would be
     // dressed as a permission decision. A throw on this path is `post-tool-io`,
     // on stderr, at the exit code that makes the line visible.
+    //
+    // APRV-243. Grok Build reads exit 2 as DENY, full stop, so the visibility
+    // exit this path uses everywhere else would be a permission decision about
+    // a tool call that has already run. On this one harness the post-execution
+    // path therefore always exits 0. The machine-readable line still goes to
+    // stderr; whether Grok shows it is Grok's business, and losing a debug line
+    // is a smaller harm than emitting a verdict the protocol will act on.
+    const settle = (code: number): number => (adapter.kind === "grok" ? EXIT_OK : code);
     try {
-      return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+      return settle(runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter));
     } catch (cause) {
-      return report(
-        streams,
-        "post-tool-io",
-        `the counterpart failed: ${cause instanceof Error ? cause.message : String(cause)}; nothing was appended, so the start this event would have closed is still open`,
+      return settle(
+        report(
+          streams,
+          "post-tool-io",
+          `the counterpart failed: ${cause instanceof Error ? cause.message : String(cause)}; nothing was appended, so the start this event would have closed is still open`,
+        ),
       );
     }
   }
@@ -3644,6 +3747,8 @@ export function commandHook(
       return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
     case "codex":
       return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
+    case "grok":
+      return commandHarnessHook(rest, streams, cwd, readStdin, GROK_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

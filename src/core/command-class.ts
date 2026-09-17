@@ -361,6 +361,16 @@ export function protectedPathClass(
       const next = segments[index + 1];
       if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
     }
+    // Grok Build's equivalent: `.grok/hooks/*.json` is where its PreToolUse
+    // entries are installed, and the scripts beside them are what those
+    // entries run. Same property as `.cursor/hooks.json` above and for the
+    // same reason (APRV-243): an agent that could write those could write
+    // itself out of the gate. Grok also READS `.claude/settings.json` and
+    // `.cursor/hooks.json` for compatibility, and both are already here.
+    if (segment === ".grok") {
+      const next = segments[index + 1];
+      if (next === "hooks.json" || next === "hooks") return "policy.core";
+    }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
       const next = segments[index + 1];
