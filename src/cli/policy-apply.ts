@@ -114,6 +114,17 @@ const AGENT_ACTOR = /^agent:.+/u;
  * file moved and the proposal has to be rewritten against it; `proposal-
  * ambiguous` means the quoted text is not specific enough and the proposal has
  * to quote more; `proposal-malformed` means the page is not a proposal yet.
+ *
+ * Two outcomes are deliberately NOT in this union, because neither is this
+ * verb's refusal to make:
+ *
+ * - an operator who answers no at the confirmation gets exit 0 and `aborted:`
+ *   on stdout, exactly as `policy amend` does. Nothing failed, and an error
+ *   object at exit 0 would be a contradiction a caller has to resolve;
+ * - an amendment that refuses has already printed its OWN code, from its own
+ *   frozen union. Wrapping it in a second one would put two error objects on
+ *   one stream and make a caller guess which is the answer. What this verb adds
+ *   is the sentence naming the state that refusal leaves behind.
  */
 export const POLICY_APPLY_REFUSAL_CODES = [
   "usage",
@@ -123,8 +134,6 @@ export const POLICY_APPLY_REFUSAL_CODES = [
   "proposal-malformed",
   "proposal-stale",
   "proposal-ambiguous",
-  "apply-aborted",
-  "amend-failed",
 ] as const;
 
 export type PolicyApplyRefusalCode = (typeof POLICY_APPLY_REFUSAL_CODES)[number];

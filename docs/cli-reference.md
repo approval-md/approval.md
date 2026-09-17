@@ -1323,8 +1323,15 @@ no-op: the proposal has already been applied.
 `io`, `apply-agent-actor`, `proposal-empty`, `proposal-malformed` (a `Current`
 with no `Replace with`, or the reverse), `proposal-stale` (a quoted current text
 is not in the file), `proposal-ambiguous` (it occurs more than once, or both it
-and its superseded text occur), `apply-aborted`, `amend-failed`. Every one of
-them writes nothing.
+and its superseded text occur). Every one of them writes nothing.
+
+Two outcomes are deliberately not in that union. Answering no at the
+confirmation is exit 0 with `aborted:` on stdout, exactly as `policy amend`
+answers it: nothing failed, and an error object at exit 0 would be a
+contradiction the caller has to resolve. An amendment that refuses has already
+printed its own code from its own frozen union, so this verb adds a sentence
+naming the state that leaves behind — the replacements written, the policy
+unattested — and returns the amendment's exit code unchanged.
 
 ## register
 

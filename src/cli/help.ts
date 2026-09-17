@@ -663,8 +663,9 @@ fenced blocks WITH a declared language (APRV-273), labelled \`Current:\` and
 \`Replace with:\` above; \`Supersedes:\` names an earlier section's result to match
 instead. Whole-file replacement is NOT accepted: every byte written is anchored
 to a byte proved present. The values block is treated as the policy block is.
-Refusals: proposal-empty, proposal-malformed, proposal-stale, proposal-ambiguous,
-apply-agent-actor, apply-aborted, amend-failed. Then it runs \`policy amend\`.
+Refusals: usage, io, apply-agent-actor, proposal-empty, proposal-malformed,
+proposal-stale, proposal-ambiguous. Then it runs \`policy amend\`, whose refusals
+are its own; answering no is exit 0 and \`aborted:\`, as it is there.
 
 ${EXIT_CODES_POINTER}
 ${why("policy-apply")}`;

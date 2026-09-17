@@ -26,7 +26,12 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fencesOf, parseProposal, planApply } from "../src/cli/policy-apply.js";
+import {
+  POLICY_APPLY_REFUSAL_CODES,
+  fencesOf,
+  parseProposal,
+  planApply,
+} from "../src/cli/policy-apply.js";
 
 /** dist/tests/cli-policy-apply.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -301,6 +306,27 @@ test("apply: it hands over to the amendment, which refuses without an identity",
   assert.match(policyOf(dir), /autonomy: manual/u, "the replacements were not written");
   assert.match(run.stderr, /edited and unattested/u);
   assert.match(run.stderr, /approval policy amend --pr/u);
+});
+
+/**
+ * SPEC §11.1 invariant 6 in its own small way: the union is frozen public API,
+ * so an eighth code cannot appear without a line changing here. The two
+ * outcomes that are NOT in it are the point of the assertion — an abort is exit
+ * 0, and a refused amendment carries the amendment's own code.
+ */
+test("apply: the refusal-code union is frozen, and excludes the two non-refusals", () => {
+  assert.deepEqual(
+    [...POLICY_APPLY_REFUSAL_CODES],
+    [
+      "usage",
+      "io",
+      "apply-agent-actor",
+      "proposal-empty",
+      "proposal-malformed",
+      "proposal-stale",
+      "proposal-ambiguous",
+    ],
+  );
 });
 
 test("apply: the help names the human-only rule and the refusal codes", () => {
