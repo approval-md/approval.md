@@ -290,6 +290,27 @@ export const HOOK_DENY_CODES = [
    * merges do not reconcile hash chains (APRV-101).
    */
   "hook-log-unreachable",
+  /**
+   * The harness does not tell this hook where the call will run, so no verdict
+   * over the visible bytes can bind the action (APRV-311, native evidence in
+   * APRV-310 v6/v7).
+   *
+   * Native Codex 0.152.1 honours a per-call Bash working directory that appears
+   * in no field of the event: `tool_input` carries `command` alone, and the
+   * event cwd and the hook process cwd both stay at the session root. A
+   * decision over `{command, session root}` would therefore authorize different
+   * bytes from the `{command, effective directory}` the harness executes, and a
+   * relative path in an approved command can name a protected organ in a
+   * directory the classifier never saw.
+   *
+   * Distinct from `hook-io`, which this used to borrow, and the distinction is
+   * the repair. `hook-io` says THIS event was malformed and a well-formed one
+   * would be answered; this says every event of this shape is refused on this
+   * harness version, and the fix is a harness contract that exposes the
+   * effective execution directory, not a retry, a policy edit, or an open
+   * window. Nothing appends on this path and no gate lifecycle opens.
+   */
+  "hook-unsupported-execution-context",
   /** Malformed hook input, or a log/filesystem fact that stopped the check. */
   "hook-io",
 ] as const;
@@ -2975,9 +2996,26 @@ function runPostToolUse(
     );
   }
 
+  // APRV-311. The id the pre-execution half minted for this same call, derived
+  // here from the same two native fields it derived it from. It rides the
+  // unreadable arm so that the line naming a start nobody closed also names
+  // WHICH start: on Codex that arm is the only arm, and a diagnostic that
+  // cannot be joined to an `execution.started` leaves an operator grepping a
+  // log for a record they cannot identify. It is the correlation and nothing
+  // more — no outcome is read, inferred, or appended on this path.
+  const task =
+    adapter.kind === "codex"
+      ? codexBinding(input, cwd).task
+      : `hook:${input.sessionId}:${input.toolUseId}`;
+
   const reading = readReportedOutcome(input, adapter);
   if (!reading.ok) {
-    return report(streams, "post-tool-unreadable-outcome", `${reading.detail}; nothing was appended`);
+    return report(
+      streams,
+      "post-tool-unreadable-outcome",
+      `${reading.detail}; nothing was appended`,
+      { task },
+    );
   }
 
   const { logPath, root } = hookScope(flags, cwd);
@@ -3008,6 +3046,7 @@ function runPostToolUse(
       streams,
       `post-tool-gate-refused:${finished.code}`,
       finished.message,
+      { task },
     );
   }
   return report(
@@ -3575,7 +3614,29 @@ function runHarnessHook(
 
   if (adapter.kind === "codex") {
     const checked = checkCodexHookInput(input, cwd);
-    if (!checked.ok) return deny(streams, "hook-io", checked.detail, adapter.kind);
+    if (!checked.ok) {
+      // APRV-311. WHICH PHASE the malformed event belongs to decides which
+      // vocabulary refuses it, and until now both took the pre-execution one.
+      // A `PostToolUse` event naming an unsupported tool, or carrying an id
+      // this adapter will not accept, printed
+      // `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}`
+      // at exit 0: a permission decision about a call that has already run, in
+      // the same words the pre-execution refusal uses, so nothing downstream
+      // could tell the two apart. Nothing was ever going to be authorized here.
+      //
+      // The strict answer on this side is the one the rest of the post path
+      // already gives: say so on stderr at the exit code that makes the line
+      // visible, append nothing, and print no verdict. The event name is read
+      // off the raw input rather than off the check, because the check is what
+      // just failed.
+      return input.hookEventName === CODEX_POST_TOOL_EVENT
+        ? report(
+            streams,
+            "post-tool-io",
+            `${checked.detail}; nothing was appended, so the start this event would have closed is still open`,
+          )
+        : deny(streams, "hook-io", checked.detail, adapter.kind);
+    }
   }
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
@@ -3621,7 +3682,7 @@ function runHarnessHook(
   if (adapter.kind === "codex" && input.toolName === "Bash") {
     return deny(
       streams,
-      "hook-io",
+      "hook-unsupported-execution-context",
       "Codex Bash is disabled because the native hook contract does not expose the effective per-call working directory; no policy or open window can authorize bytes the hook cannot bind",
       adapter.kind,
     );

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -118,6 +118,42 @@ test("Codex doctor reports TOML presence as unsupported rather than configured",
   assert.equal(ambiguous.status, "skip");
   assert.match(ambiguous.detail, /Codex merges hook sources/u);
   assert.match(ambiguous.detail, /Trust and observed execution remain unknown/u);
+});
+
+/**
+ * The rollback `docs/codex-activation.md` prescribes, rehearsed (APRV-315).
+ *
+ * It is a reversible rename and nothing else, so the property worth pinning is
+ * that doctor's answer goes all the way back: not to a softer warning, but to
+ * the same NOT CONFIGURED line a project that never installed the hook gets,
+ * with the harness no longer registered. An agent cannot rehearse this by hand
+ * — any path naming `.codex` classifies `policy.core`, human-only, wherever it
+ * lives — so the rehearsal lives here, where the fixture is built inside the
+ * test process and no Codex configuration on the machine is touched.
+ */
+test("the documented rollback returns Codex doctor to NOT CONFIGURED, and is reversible", () => {
+  const dir = home();
+  hooks(dir, configured());
+  assert.equal(checkCodexHookWiring(dir).status, "pass");
+  assert.deepEqual(registeredHarnesses(dir), ["codex"]);
+
+  const installed = join(dir, ".codex", "hooks.json");
+  const disabled = `${installed}.disabled`;
+  renameSync(installed, disabled);
+
+  const rolledBack = checkCodexHookWiring(dir);
+  assert.equal(rolledBack.status, "skip");
+  assert.match(rolledBack.detail, /NOT CONFIGURED on disk/u);
+  assert.match(rolledBack.detail, /trust and observed execution are separate and remain unknown/u);
+  assert.deepEqual(
+    registeredHarnesses(dir),
+    [],
+    "a disabled file registers no harness: doctor reads the name Codex reads",
+  );
+
+  // The disabled copy is still on disk, and putting it back is the whole undo.
+  renameSync(disabled, installed);
+  assert.equal(checkCodexHookWiring(dir).status, "pass");
 });
 
 test("Codex doctor fails visibly for malformed project hook JSON", () => {

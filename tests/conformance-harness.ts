@@ -61,7 +61,7 @@ import {
   withdraw,
   type Decision,
 } from "../src/core/gate.js";
-import { commandHook } from "../src/cli/hook.js";
+import { HOOK_DENY_CODES, POST_TOOL_CODES, commandHook } from "../src/cli/hook.js";
 import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { CHECKPOINT_REFUSAL_CODES } from "../src/core/checkpoint.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -318,6 +318,13 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   append_error_codes: APPEND_ERROR_CODES,
   anchor_refusal_codes: ANCHOR_REFUSAL_CODES,
   checkpoint_refusal_codes: CHECKPOINT_REFUSAL_CODES,
+  // APRV-311. The two harness-hook vocabularies were closed sets in the source
+  // and in nothing else, which is how `hook-io` came to mean both "this event
+  // was malformed" and "this harness version is refused outright". A caller
+  // branches on these strings exactly as it branches on the gate's, so they
+  // belong where a change to them is a visible diff.
+  hook_deny_codes: HOOK_DENY_CODES,
+  post_tool_codes: POST_TOOL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {
