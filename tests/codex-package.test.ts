@@ -196,6 +196,11 @@ test("packed npm artifact installs without scripts and runs outside the checkout
   for (const path of [
     "cli.js", "schema/codex-instance.schema.json", "docs/codex-enforced-session.md",
     "templates/codex/README.md", "dist/src/codex/manifest.js", "dist/src/cli/codex.js",
+    // APRV-325.2: the broker, its durable transaction and its strict server all
+    // have to be IN the tarball, because a packaged `codex serve` that could not
+    // load one of them would refuse at the worst possible moment.
+    "dist/src/codex/broker.js", "dist/src/codex/workspace-commit.js", "dist/src/codex/serve.js",
+    "docs/codex-workspace-broker.md",
   ]) {
     assert.equal(existsSync(join(packageRoot, path)), true, `${path} missing from installed tarball`);
   }
@@ -203,5 +208,6 @@ test("packed npm artifact installs without scripts and runs outside the checkout
     cwd: outside, encoding: "utf8", env: cleanEnv(), timeout: 10_000,
   });
   assert.equal(invoked.status, 0, invoked.stderr);
-  assert.match(invoked.stdout, /prepare and inspect a constrained Codex host bundle/u);
+  assert.match(invoked.stdout, /prepare a constrained Codex host and broker its workspace writes/u);
+  assert.match(invoked.stdout, /approval codex apply --manifest/u);
 });
