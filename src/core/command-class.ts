@@ -1179,7 +1179,7 @@ interface RuleContext {
  * command it refuses sends the agent looking for a flag it did not pass. A
  * refinement that has its own reason states it.
  */
-type Refinement = { class: string; rule: string } | { opaque: string };
+type Refinement = { class: string; rule: string; path?: string } | { opaque: string };
 
 /**
  * One row of the classification table.
@@ -1249,7 +1249,44 @@ function isTagRefspec(refspec: string): boolean {
   return isTagRef(refspec.slice(0, colon)) || isTagRef(refspec.slice(colon + 1));
 }
 
-/** `git push` — force, release, trunk and branch classes turn on flags and refspecs. */
+/**
+ * Deleting a remote ref: its own class, never the trunk-push one (APRV-352).
+ *
+ * A `git push` that deletes refs was `vcs.push.main` until now, which reads as
+ * "this reaches the trunk" and in a repository that samples trunk pushes
+ * retrospectively means an irreversible removal proceeds unasked and is looked
+ * at afterwards. It is not the same act. A push adds commits somebody can still
+ * see; a deletion removes the only name an unmerged branch had, and the
+ * reflog that could find it again lives on a server nobody in the session can
+ * reach. The two belong on separate policy lines, and a policy that wants them
+ * on one can still write `vcs.*`.
+ *
+ * Distinct from `vcs.history.rewrite` as well, which guards SHARED history: a
+ * force push moves a ref other people have already built on. That class stays
+ * exactly where it was, above this one, so a force push that also deletes is
+ * still a rewrite.
+ */
+const REF_DELETE_CLASS = "vcs.ref.delete";
+
+/**
+ * The ref a deleting refspec names, or `null` when the refspec deletes nothing.
+ *
+ * `:dst` (empty source) is the deletion git documents; `src:` (empty
+ * destination) is the spelling the classifier has always treated as one too,
+ * and it keeps doing so rather than being narrowed here. The non-empty side is
+ * the name worth showing an approver either way.
+ */
+function deletedRef(refspec: string): string | null {
+  const colon = refspec.indexOf(":");
+  if (colon === -1) return null;
+  const source = refspec.slice(0, colon);
+  const destination = refspec.slice(colon + 1);
+  if (destination.length === 0) return source.length === 0 ? refspec : source;
+  if (source.length === 0) return destination;
+  return null;
+}
+
+/** `git push` — force, release, deletion, trunk and branch turn on flags and refspecs. */
 function refineGitPush(ctx: RuleContext): Refinement {
   const args = ctx.args.slice(1);
   if (hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"])) {
@@ -1260,6 +1297,13 @@ function refineGitPush(ctx: RuleContext): Refinement {
   if (refspecs.some((refspec) => refspec.startsWith("+"))) {
     return { class: "vcs.history.rewrite", rule: "git-push-force" };
   }
+  // The tag check stays ABOVE the deletion check, deliberately. A tag is the
+  // name a release was published under, and this repository's policy prices
+  // `release.publish` accordingly; deleting one is a release act whichever
+  // spelling removes it. Moving the deletion check up would re-label
+  // `git push origin :refs/tags/v1.2.3` and a bulk form that mixes a tag in,
+  // and APRV-352 asks for a class for branch deletions, not a loosening of the
+  // tag surface.
   if (
     hasFlag(args, ["--tags", "--follow-tags"]) ||
     refspecs.some(isTagRefspec) ||
@@ -1267,24 +1311,33 @@ function refineGitPush(ctx: RuleContext): Refinement {
   ) {
     return { class: "release.publish", rule: "git-push-tag" };
   }
-  // A non-tag deletion, or a push with no refspec at all: the destination is
-  // either the trunk or unknown, and unknown resolves to the stricter class.
+  // `--delete` / `-d`: every refspec after the remote is a ref being removed.
+  // A `--delete` naming no ref at all is a git error, and it stays in this
+  // class with nothing bound rather than falling through to a push class: an
+  // invocation whose targets cannot be read is the one that least deserves the
+  // looser answer.
   if (hasFlag(args, ["--delete", "-d"])) {
-    return { class: "vcs.push.main", rule: "git-push-delete" };
+    return {
+      class: REF_DELETE_CLASS,
+      rule: "git-ref-delete",
+      ...(refspecs.length === 0 ? {} : { path: refspecs.join(" ") }),
+    };
   }
   if (refspecs.length === 0) {
     return { class: "vcs.push.main", rule: "git-push-implicit" };
+  }
+  // The colon-refspec spellings, which need no flag: `:refs/heads/x`, `:x`, and
+  // a bulk form mixing several. ONE deleting refspec makes the whole command a
+  // deletion, because the command's effect is the union of its refspecs and the
+  // destructive half is the half a person is being asked about.
+  const deleted = refspecs.map(deletedRef).filter((ref): ref is string => ref !== null);
+  if (deleted.length > 0) {
+    return { class: REF_DELETE_CLASS, rule: "git-ref-delete", path: deleted.join(" ") };
   }
   let sawMain = false;
   for (const refspec of refspecs) {
     const colon = refspec.indexOf(":");
     const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
-    // `:branch` (empty source) and `src:` (empty destination) both delete a
-    // remote ref. A deletion is destructive whatever it names, so it takes the
-    // stricter class rather than the branch one.
-    if (destination.length === 0 || (colon !== -1 && refspec.slice(0, colon).length === 0)) {
-      return { class: "vcs.push.main", rule: "git-push-delete" };
-    }
     if (isUnknownValue(destination)) {
       sawMain = true;
       continue;
@@ -1977,7 +2030,7 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["git"],
     subs: ["push"],
     class: "vcs.push.main",
-    emits: ["vcs.push.branch", "vcs.push.main", "vcs.history.rewrite"],
+    emits: ["vcs.push.branch", "vcs.push.main", "vcs.history.rewrite", "vcs.ref.delete"],
     refine: refineGitPush,
   },
   {
@@ -2751,6 +2804,11 @@ function classifySegment(
   }
   let cls = refined === null ? rule.class : refined.class;
   let ruleId = refined === null ? rule.id : refined.rule;
+  // The value a refinement bound, when one did (APRV-352). Same field and same
+  // meaning as the protected-path binding above: the words the classifier
+  // matched, verbatim, so an approver is told WHICH refs a deletion names
+  // rather than being handed a class and left to re-read the command.
+  const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
 
   // A protected path anywhere in an effectful segment takes that path's class:
   // the command is editing the gate, whatever else it is doing. Every
@@ -2791,7 +2849,13 @@ function classifySegment(
     }
   }
 
-  return { ok: true, class: cls, rule: ruleId, ...(sandbox === null ? {} : { sandbox }) };
+  return {
+    ok: true,
+    class: cls,
+    rule: ruleId,
+    ...(boundPath === undefined ? {} : { path: boundPath }),
+    ...(sandbox === null ? {} : { sandbox }),
+  };
 }
 
 /**

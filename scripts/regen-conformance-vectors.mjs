@@ -970,6 +970,50 @@ const commandClassVectors = [
     description: "adjacent quoted and unquoted runs are one word, the way the shell joins them",
     input: { command: `backlog task edit T --append-notes 'a'"b"c` },
   },
+  // --- remote ref deletion is its own class (APRV-352) -----------------------
+  {
+    id: "ref-delete-flag",
+    description:
+      "git push --delete <ref> is vcs.ref.delete with the ref bound, not the trunk-push class",
+    input: { command: "git push origin --delete feature/x" },
+  },
+  {
+    id: "ref-delete-short-flag",
+    description: "the -d spelling is the same deletion",
+    input: { command: "git push origin -d feature/x" },
+  },
+  {
+    id: "ref-delete-colon-refspec",
+    description: "the colon refspec deletes without a flag, fully qualified or short",
+    input: { command: "git push origin :refs/heads/x" },
+  },
+  {
+    id: "ref-delete-bulk",
+    description: "a bulk deletion binds every ref it names, so the prompt can show them",
+    input: { command: "git push origin --delete a b c" },
+  },
+  {
+    id: "ref-delete-mixed-with-a-push",
+    description:
+      "one deleting refspec makes the whole command a deletion: the destructive half is what is being asked about",
+    input: { command: "git push origin feature :stale" },
+  },
+  {
+    id: "ref-delete-tag-stays-release",
+    description:
+      "a TAG deletion keeps release.publish: the name a release was published under is a release surface however it is removed",
+    input: { command: "git push origin :refs/tags/v1.2.3" },
+  },
+  {
+    id: "ref-delete-force-stays-rewrite",
+    description: "a force push that also deletes is still vcs.history.rewrite, the stricter fact",
+    input: { command: "git push --force origin --delete feature/x" },
+  },
+  {
+    id: "ordinary-push-unmoved",
+    description: "the control for the six above: an ordinary branch push did not move",
+    input: { command: "git push origin feature/x" },
+  },
 ];
 
 const gateVectors = [
@@ -1546,7 +1590,15 @@ const SUITES = [
   {
     file: "command-class.v1.json",
     suite: "command-class",
-    vectors_version: "1.0.0",
+    // 1.1.0 (APRV-352): a MINOR bump. The eight `ref-delete-*` /
+    // `ordinary-push-unmoved` vectors are new and no existing expectation in
+    // this file moved — the suite was born in 1.0.0 with the quoting vectors
+    // only, and none of them names a `git push`. The CLASS of a remote ref
+    // deletion did move, from `vcs.push.main` to `vcs.ref.delete`, but that
+    // expectation lived in no vector before this, so an implementation that
+    // passed 1.0.0 fails 1.1.0 only by not knowing a class the taxonomy has
+    // gained.
+    vectors_version: "1.1.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
