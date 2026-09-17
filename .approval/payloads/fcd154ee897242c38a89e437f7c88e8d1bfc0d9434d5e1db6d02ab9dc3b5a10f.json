@@ -1,0 +1,1 @@
+{"command":"gh pr edit 415 --body-file /tmp/lane4a-pr3.md 2>&1 | tail -1; gh pr checks 415 --watch --interval 60 2>&1 | tail -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

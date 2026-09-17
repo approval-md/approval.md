@@ -1,0 +1,1 @@
+{"command":"git checkout --theirs -- SPEC.md && grep -c \"gate.path.signed_off\\|Sign-off on a protected path\\|Ratifying a protected file\" SPEC.md; grep -n \"^<<<<<<<\\|^>>>>>>>\" SPEC.md | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213"}

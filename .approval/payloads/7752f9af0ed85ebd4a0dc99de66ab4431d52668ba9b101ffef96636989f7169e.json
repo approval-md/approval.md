@@ -1,0 +1,1 @@
+{"command":"backlog task edit APRV-351 --check-ac 1 --check-ac 4 2>&1 | tail -3 && git add design docs scripts tests backlog && git status --short","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a27452dfe58b83aa6"}
