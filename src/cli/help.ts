@@ -699,22 +699,22 @@ export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment 
 
 Usage:
   approval policy amend [--policy|--dir|--log <p>] [--as human:<id>|agent:<id>] [--require-load]
-      [--dry-run] [--commit] [--no-publish] [--yes] [--json] [--branch <n>|--direct] [--wait <d>]
+      [--dry-run] [--commit|--pr] [--no-publish] [--yes] [--json] [--branch <n>|--direct] [--wait <d>]
 
 Flags:
   --policy <p> / --dir <p> / --log <p>  policy, its discovery dir, and the log
   --as human:<id> / agent:<id>    attest HERE, or ask for a TAP (--wait/--interval/--note)
   --require-load                  refuse to attest a policy that does not load
   --dry-run / --commit / --no-publish   write nothing / the ceremony / stop at commit
-  --branch <name> / --direct      force the BRANCH or the DIRECT flow
+  --pr / --branch <name> / --direct     FINISH it (branch, push, PR, arm) / force either flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then
-commits EXACTLY the policy, the log and the pins when they moved. commit-preconditions, the pins
-and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected, pr-failed break after it.
-Attested TEXT is NOT recoverable from the log: HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
---branch <name>, --direct; a refused push PUBLISHES ITSELF, dropping to a RUNBOOK. MERGE COMMIT it.
---as agent: appends policy.proposed; the TAP attests. Fail closed: no-channel, declined, timeout.
+Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then commits
+EXACTLY the policy, the log and the pins when they moved. commit-preconditions, staged-unrelated,
+dirty-tree, the pins and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected and
+pr-failed break after it, into a RUNBOOK. Attested TEXT is NOT recoverable from the log:
+HASH-ONLY MODE. Flows, in PRECEDENCE, highest first: --branch <name>, --pr (opens or UPDATES the open
+pull request, arms --auto), --direct. MERGE COMMIT it. --as agent: appends policy.proposed, TAP attests.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

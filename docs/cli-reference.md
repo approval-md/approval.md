@@ -919,14 +919,53 @@ base carries it, and a pins edit somebody else landed is not reverted by this
 ceremony. The pin deltas print in the semantic diff beside the class deltas, ride
 in the commit subject, and appear in `--json` as `pins`.
 
-It refuses outside a git repository, and refuses when the index holds staged
-changes to anything beyond those three: a commit that swept in an unrelated
-staged edit would make "this commit is the amendment" false. On the branch flow
+It refuses outside a git repository (`commit-preconditions`), and refuses
+`staged-unrelated` when the index holds staged changes to anything beyond those
+three: a commit that swept in an unrelated staged edit would make "this commit is
+the amendment" false. It refuses `dirty-tree` when one of those three is staged
+in one state and modified again in the working tree, because the commit is
+assembled from the WORKING TREE and would otherwise carry bytes the operator's
+`git diff --cached` never showed. An unrelated *unstaged* path is deliberately
+not a refusal: the scratch index lays exactly the ceremony's paths over the
+remote's tree, so nothing else can reach the commit, and refusing over one would
+stop the ceremony in the checkout it is written for, where the daemon's envelope
+write-backs leave task files modified as a matter of course. On the branch flow
 it also refuses when there is no `origin` remote, and when a `--branch` name
 already exists. Every one of those refusals happens BEFORE the attestation, so a
 refused `--commit` never leaves an attested policy without its commit. The same
 holds for the fetch, the two base checks, the policy suite and the dogfood suite
 above.
+
+**`--pr`: the ceremony finishes its own job (APRV-341).** `--pr` is `--commit`
+plus "and publish it": it forces the BRANCH flow whatever the protection probe
+answered, so the amendment is committed on `origin/<default branch>` in a scratch
+index, pushed to `policy-amend-<seq>`, carried by a pull request, and armed with
+`gh pr merge <branch> --merge --auto`. The merge queue picks the strategy from
+there. `--pr --direct` and `--pr --no-publish` are usage errors: each pair asks
+for opposite ceremonies.
+
+The pull request is OPENED or UPDATED. `gh pr list --head <branch> --state open`
+is asked first, and when one is already standing its title and body are edited
+rather than a second being opened, so a re-run of a ceremony that stopped
+half-way finishes rather than failing at `gh pr create`. A `gh` that cannot
+answer the question falls through to `create`, which is the path that was there
+before.
+
+**The verb never switches branches.** On 2026-09-16 an agent-written runbook for
+the primary checkout ended with `git checkout main` after the amend commit, which
+rewound `APPROVAL.md` and `events.jsonl` under a live appender; the hook then
+appended 204 records on the stale chain and the log forked. `--pr` exists so that
+runbook does not: the commit is assembled with `git read-tree` into a scratch
+index and pushed by sha, the checkout ends the verb on the branch it started on,
+with the same HEAD, the same index and the same working tree, and the only file
+that moved is the log, which gained the attestation. A test compares all four
+before and after.
+
+Without `--pr` (and on a box with no `gh`) the printed runbook is exactly what it
+was: `git fetch origin`, `git checkout -b policy-amend-<seq> origin/main`, `git
+add`, `git commit`, `git push -u origin`, `gh pr create`. A fixture test pins the
+six commands, because a flag that quietly rewrote the fallback would leave the
+operator who does not pass it with a procedure nobody checks.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the
@@ -1124,7 +1163,7 @@ attestation may still proceed.
  "publishing":null|{"attempted":true,"complete":true,
              "via":"direct"|"branch"|"recovery"|"none",
              "branch":null|"policy-amend-2","pushed":true,
-             "prUrl":null|"https://...",
+             "prUrl":null|"https://...","prUpdated":false,
              "autoMerge":"armed"|"refused"|"not-attempted",
              "steps":[{"command":"git push origin main","ok":false}],
              "stoppedAt":null|"git push -u origin policy-amend-2",
@@ -1156,10 +1195,19 @@ the message.
 - `io` — the policy file or the log could not be read or written.
 - `load-failed` — `--require-load` and the policy does not load. Nothing was
   appended.
-- `commit-preconditions` — `--commit` outside a git repository, with staged
-  changes beyond the policy, the log and the pins, or (branch flow) with no
-  origin remote or a `--branch` name already taken. Checked before the
-  attestation; nothing was appended.
+- `commit-preconditions` — `--commit` outside a git repository, with the policy
+  and the log in different repositories, or (branch flow) with no origin remote
+  or a `--branch` name already taken. Checked before the attestation; nothing
+  was appended.
+- `staged-unrelated` — the index carries staged changes beyond the policy, the
+  log and the pins (APRV-341). Its own code because its repair is its own: one
+  `git restore --staged <path>`. Checked before the attestation; nothing was
+  appended.
+- `dirty-tree` — one of those three is staged in one state and modified again in
+  the working tree (APRV-341). The commit is assembled from the working tree, so
+  it would carry bytes `git diff --cached` does not show. An unrelated *unstaged*
+  path is not this refusal and never was. Checked before the attestation;
+  nothing was appended.
 - `fetch-failed` / `base-policy-diverged` / `base-log-diverged` — the remote the
   amendment would be based on could not be fetched, carries a policy this edit
   was not written against, or carries a log this working log does not contain.

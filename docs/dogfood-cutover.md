@@ -741,8 +741,18 @@ ceremony, for the human, is three steps: edit the line, run the verb, tap.**
 ```sh
 cd /Users/carter/dev/approval-md
 $EDITOR APPROVAL.md
-approval policy amend --commit
+approval policy amend --pr
 ```
+
+`--pr` is `--commit` and then the rest of the job (APRV-341): the amendment is
+committed on `origin/main` in a scratch index carrying exactly `APPROVAL.md` and
+`.approval/log/events.jsonl`, pushed to `policy-amend-<seq>`, carried by a pull
+request that is opened or updated, and armed with `gh pr merge --merge --auto`.
+**Nothing here checks anything out.** That matters in this checkout specifically:
+on 2026-09-16 a runbook for the primary ended with `git checkout main` after the
+amend commit, which rewound the policy and the log under a live appender and
+forked the working log for 204 records. A runbook for the primary never switches
+branches, and `--pr` is how that stops being a thing anyone has to remember.
 
 When the amendment needs the pins moved as well, it is still three steps: edit
 both files, run the verb, tap.
@@ -752,7 +762,7 @@ cd /Users/carter/dev/approval-md
 $EDITOR APPROVAL.md
 $EDITOR src/core/policy-expectations.ts   # only when a PINNED class moved
 npm run build                             # the ceremony runs the BUILT suite
-approval policy amend --commit
+approval policy amend --pr
 ```
 
 ### Which classes are pinned, and why (APRV-296)
@@ -813,11 +823,17 @@ policy and the log), then cherry-picked onto `policy-amend-<seq>` by an agent
 after the push. A pins file the base already carries stays as the base carries
 it, so a pins edit somebody else landed is never reverted by your ceremony.
 
-Your checkout is left exactly as the verb found it: still on `main`, working tree
-carrying the edits you made and nothing else, and the amendment commit held on
-`policy-amend-<seq>`. After the pull request merges, `approval log sync`
-brings main down safely. Five things stop the ceremony, all of them before the
-attestation, so nothing is ever half-done: `fetch-failed`,
+Your checkout is left exactly as the verb found it: still on `main`, same HEAD,
+same index, working tree carrying the edits you made and nothing else (and the
+log, which gained the attestation), and the amendment commit held on
+`policy-amend-<seq>`. After the pull request merges, the next `approval up`
+brings main down safely by itself (APRV-346); `approval log sync` by hand is for
+a forked chain. Seven things stop the ceremony, all of them before the
+attestation, so nothing is ever half-done: `staged-unrelated` (the index carries
+something beyond the ceremony's own files: one `git restore --staged` and run it
+again), `dirty-tree` (one of those files is staged in one state and edited again
+in the working tree, so the commit would carry bytes your `git diff --cached`
+does not show), `fetch-failed`,
 `base-policy-diverged` (somebody amended the policy on origin since this edit
 began; bring the checkout up to origin and re-apply the edit),
 `base-log-diverged` (run `approval log sync` first), `policy-suite-failed`
