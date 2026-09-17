@@ -279,6 +279,15 @@ const FIXTURES: readonly Fixture[] = [
   { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
   { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
   { command: "node dist/src/cli/main.js gate close", class: "policy.core", rule: "approval-gate-close", row: "node" },
+  // APRV-343: `policy apply` WRITES APPROVAL.md, which is the one file nothing
+  // but a human's own hand may change, so it classifies where that file already
+  // is. The other `policy` subcommands read, or refuse a non-human actor in
+  // code, and stay pass-through.
+  { command: "approval policy apply docs/proposals/x.md", class: "policy.core", rule: "approval-policy-apply", row: "approval" },
+  { command: "approval --json policy apply x.md --yes", class: "policy.core", rule: "approval-policy-apply", row: "approval" },
+  { command: "node ./cli.js policy apply x.md", class: "policy.core", rule: "approval-policy-apply", row: "node" },
+  { command: "approval policy amend --pr", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "approval policy check network.call", class: GATE_SELF_CLASS, rule: "approval" },
   // Reporting the window is the gate reading itself, and stays pass-through.
   { command: "approval gate status --json", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "approval gate", class: GATE_SELF_CLASS, rule: "approval" },

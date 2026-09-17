@@ -32,6 +32,7 @@ import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { explain, isActionClass, type Explanation } from "../core/policy-explain.js";
 import { loadPolicy, POLICY_FILENAMES, type LoadPolicyOptions } from "../core/policy-load.js";
 import { commandPolicyAmend } from "./amend.js";
+import { commandPolicyApply } from "./policy-apply.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { commandPolicyAttest } from "./attest.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -264,6 +265,11 @@ export function commandPolicy(argv: string[], streams: Streams, cwd: string): nu
     // It writes too, and for the same reason it lives in its own file.
     case "amend":
       return commandPolicyAmend(rest, streams, cwd);
+    // APRV-343. It writes the policy FILE, which nothing else in this CLI does,
+    // and then hands over to the amendment above so the edit and its
+    // attestation stay one act.
+    case "apply":
+      return commandPolicyApply(rest, streams, cwd);
     default:
       return usageError(
         streams,

@@ -1236,6 +1236,96 @@ the message.
 - `log-unreadable` / `log-torn-tail` / `log-corrupt` — nothing is amended from a
   log that does not verify.
 
+## policy apply
+
+**The hand-paste this replaces (APRV-343).** Agents may not write `APPROVAL.md`:
+it is `policy.core`, and this project's policy holds that class human-only. So a
+policy change an agent proposes travels as a document under `docs/proposals/`
+that quotes each current line byte for byte beside its replacement, and the
+human pastes. Two things go wrong with a paste, and both have:
+
+- **a whole-file copy reverts what it did not know about.** The prepared file was
+  written against the policy as it stood when the proposal was drafted, so
+  anything landed in between is silently undone. That is the failure
+  `base-policy-diverged` catches for the commit, one step too late to help;
+- **a paste carries its wrapper.** One paste of a proposal page took the page's
+  own fence with it, which hid a block from the loader (APRV-273).
+
+`approval policy apply <proposal.md>` answers both by construction. It writes no
+byte that is not anchored to a byte it proved present in the live file, and it
+reads fences by their backtick run, so a four-backtick wrapper around a
+three-backtick block is the wrapper it is rather than part of the content.
+
+### The proposal format
+
+A proposal is ordinary markdown. Anywhere in it, a fenced block **with a
+declared language** whose immediately preceding non-blank line is a label is a
+member of a pair:
+
+| label | means |
+|---|---|
+| `Current:` | the bytes as they stand in the live policy |
+| `Replace with:` | what they become |
+| `Supersedes:` | optional: an earlier section's RESULT, to match instead |
+
+A fence with no info string is skipped, which is APRV-273's hazard turned into a
+rule. A block whose label names no role is skipped too, so a proposal page can
+carry a `bash` block of commands to run afterwards without the applier mistaking
+it for policy text. Pairs apply in document order.
+
+**Supersession is declared, never inferred from position.** A later section that
+rewrites a line an earlier section already rewrote quotes the earlier section's
+*result* under a `Supersedes:` label; the applier looks for that text when the
+section's own `Current` block is no longer in the file, which is exactly the
+state the earlier section left behind. Position could not carry this: two
+sections that touch one line are not in general in the order the file needs, and
+a rule inferred from order is a rule nobody can read off the page. A pair whose
+`Current` **and** `Supersedes` blocks both occur in the file is
+`proposal-ambiguous`: two spellings of one line is a question about which the
+file means, and no verb here will pick.
+
+**Whole-file replacement is not accepted**, and that is the decision rather than
+an omission. The verb's whole value is that every byte it writes is anchored to
+a byte it proved present, which is what makes a stale proposal a refusal instead
+of a silent revert. A whole-file blob has no anchor. `approval policy amend`
+over a hand-edited file is already the supported way to replace the file
+deliberately.
+
+**The values block is treated exactly as the policy block is**, by knowing
+nothing about either. The applier is a byte-level replacement over the whole
+file: it does not parse the policy, does not locate blocks, and does not care
+which fence a pair lands in. The values block is inert (SPEC §11.1 invariant
+10), so applying one changes no verdict, and the attestation the amendment
+appends covers the whole file's bytes either way (SPEC §5.2, §5.3).
+
+`docs/proposals/README.md` is the contract as a page for proposal authors, and
+`docs/proposals/approval-md-2026-09.md` is a worked example of every part of it.
+
+### What it does, in order
+
+1. Refuses an agent identity (`apply-agent-actor`) before reading anything.
+2. Parses the proposal into ordered pairs.
+3. Resolves every pair against an **in-memory** copy of the policy. A proposal
+   whose third pair is stale writes nothing at all, so "a stale proposal cannot
+   half-apply" is a property of the code rather than of the order somebody wrote
+   the sections in.
+4. Prints the replacements, each as its matched block and its replacement.
+5. Asks for confirmation (`--yes` skips it, `--dry-run` stops here).
+6. Writes the policy, then runs `approval policy amend` in this process — which
+   asks its OWN question about the semantic diff, because "are these the bytes"
+   and "is this the policy" are different questions. `--pr` passes through to it.
+
+`--no-amend` writes and stops, and says loudly that the policy is now edited and
+unattested. A run where every pair resolves and no byte moves is a success and a
+no-op: the proposal has already been applied.
+
+**Refusal codes** (`error.code` with `--json`; frozen public API): `usage`,
+`io`, `apply-agent-actor`, `proposal-empty`, `proposal-malformed` (a `Current`
+with no `Replace with`, or the reverse), `proposal-stale` (a quoted current text
+is not in the file), `proposal-ambiguous` (it occurs more than once, or both it
+and its superseded text occur), `apply-aborted`, `amend-failed`. Every one of
+them writes nothing.
+
 ## register
 
 The task file is read only. Nothing is rewritten, so unknown frontmatter keys

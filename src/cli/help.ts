@@ -625,24 +625,49 @@ const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility
 export const POLICY_HELP = `approval policy — explain what policy does with an action class
 
 Usage:
-  approval policy check|test <class> [--reversible true|false] [--policy <p>]
-                             [--dir <p>] [--json]
-  approval policy attest [--policy <p>] [--dir <p>] [--as human:<id>] [--json]
-  approval policy amend  [--policy <p>] [--dir <p>] [--log <p>] [--as human:<id>]
-                         [--require-load] [--dry-run] [--commit] [--yes] [--json]
+  approval policy check|test <class> [--reversible true|false] [--policy|--dir <p>] [--json]
+  approval policy attest [--policy|--dir <p>] [--as human:<id>] [--json]
+  approval policy amend  [--policy|--dir|--log <p>] [--as human:<id>] [--require-load]
+                         [--dry-run] [--commit|--pr] [--yes] [--json]
+  approval policy apply  <proposal.md> [--dry-run] [--no-amend] [--pr] [--yes]
 
 Subcommands:
   check   explain the autonomy resolution for <class>
   test    exact alias of check (SPEC.md §10.1 names both)
   attest  record a human's sign-off on the policy file's bytes (human-only)
   amend   the whole amendment ceremony: diff, advisory, attestation, commit
+  apply   apply a proposal document's quoted replacements, then amend (human-only)
 
-Nothing is executed, requested, or logged: this reads APPROVAL.md and answers a
-hypothetical. Discovery is APPROVAL.md then APPROVALS.md in --dir.
-${POLICY_MANUAL_BECAUSE}
+check and test read APPROVAL.md and answer a hypothetical, executing and logging nothing.
+Discovery is APPROVAL.md then APPROVALS.md in --dir. ${POLICY_MANUAL_BECAUSE}
 
 ${POLICY_EXIT_CODES}
 ${why("policy")}`;
+
+export const POLICY_APPLY_HELP = `approval policy apply — apply a proposal document to APPROVAL.md, then amend
+
+Usage:
+  approval policy apply <proposal.md> [--policy <p>] [--dir <p>] [--log <p>]
+      [--as human:<id>] [--dry-run] [--no-amend] [--pr] [--yes] [--json]
+
+Flags:
+  <proposal.md>                   the document whose Current/Replace-with pairs to apply
+  --policy <p> / --dir <p>        the policy file, or the directory to discover it in
+  --dry-run / --no-amend          show the replacements only / write them and stop
+  --pr / --yes / --json / -h      pass --pr to the amend / skip both prompts / machine
+
+HUMAN-ONLY: an agent identity refuses apply-agent-actor, and the verb classifies
+policy.core, human-only in this project's policy. Every pair resolves against an
+in-memory copy FIRST, so a stale proposal writes nothing at all. A pair is two
+fenced blocks WITH a declared language (APRV-273), labelled \`Current:\` and
+\`Replace with:\` above; \`Supersedes:\` names an earlier section's result to match
+instead. Whole-file replacement is NOT accepted: every byte written is anchored
+to a byte proved present. The values block is treated as the policy block is.
+Refusals: proposal-empty, proposal-malformed, proposal-stale, proposal-ambiguous,
+apply-agent-actor, apply-aborted, amend-failed. Then it runs \`policy amend\`.
+
+${EXIT_CODES_POINTER}
+${why("policy-apply")}`;
 
 function policyVerbHelp(verb: "check" | "test", alias: "check" | "test"): string {
   return `approval policy ${verb} — explain what policy does with an action class
