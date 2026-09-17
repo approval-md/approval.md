@@ -1,0 +1,1 @@
+{"command":"gh pr close 430 --comment \"Superseded by #431: #428 merged first, so this branch's log commit no longer extends main. #431 carries seq 41810..42328 rebuilt on the new main; nothing in this range is lost.\" 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

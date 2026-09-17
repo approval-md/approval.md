@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"harness.launch.NAME: launching an agent harness is its own class (APRV-354)\" --body-file /tmp/laneA-classifier-352-353/pr-body-354.md 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac74dc414acffab39"}
