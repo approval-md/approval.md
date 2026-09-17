@@ -340,6 +340,19 @@ function hookConfiguration() {
  *      bulk ref deletion classified from the command line would proceed with
  *      nobody asked. Requiring the grant record means this driver acts only on
  *      a decision a person actually made,
+ *
+ *      APRV-352 narrows the first half of that sentence and changes nothing
+ *      about the check. The classifier now answers `vcs.ref.delete` for every
+ *      deletion spelling, with the ref names bound, and a class this policy has
+ *      no line for resolves to `defaults.autonomy` — `manual` here — so the
+ *      command-line route is already stricter than it was. The check STAYS
+ *      until `APPROVAL.md` carries the explicit line
+ *      (`docs/proposals/vcs-ref-delete-2026-09.md`), for two reasons: an
+ *      autonomy that holds by default is one a later `vcs.*` wildcard could
+ *      absorb without anyone editing this file, and removing a check on the
+ *      strength of a policy edit nobody has made yet is the shape of mistake
+ *      this driver exists to not repeat. Dropping it afterwards is APRV-318's
+ *      decision, recorded there, and `--plan` says so in its output,
  *   1. an `execution.started` record for that exact key,
  *   2. no terminal record (`completed`, `failed`, `indeterminate`,
  *      `reconciled`) after it, so the execution is still open, and
@@ -717,6 +730,9 @@ function main() {
   }
 
   if (options.mode === "plan") {
+    process.stdout.write(
+      `\ngrant record: still required. APRV-352 gave a remote ref deletion its own class, vcs.ref.delete, but this driver keeps the assertGranted check above until this repository's APPROVAL.md carries the line for it (docs/proposals/vcs-ref-delete-2026-09.md). Dropping the check is APRV-318's decision to make once the line is applied, not a consequence of the class existing.\n`,
+    );
     process.stdout.write(
       blockers.length === 0
         ? `\nplan only: nothing was pushed.\n`

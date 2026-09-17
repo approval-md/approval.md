@@ -623,8 +623,13 @@ test("a gate refusal surfaced from a decision exits 1", () => {
   assert.equal(run.code, 1, `${run.stdout}\n${run.stderr}`);
   assert.match(run.stdout, /refused: policy-not-attested/u);
   // APRV-235: the sentence the terminal prints is the sentence the Telegram
-  // message edit shows, from the one helper both read.
-  assert.match(run.stdout, /Refused by the runtime: policy-not-attested\./u);
+  // message edit shows, from the one helper both read. APRV-324 gave this code
+  // a sentence of its own there, because a phone can now receive it — a
+  // checkpoint signature and a review resolve their sender only against an
+  // attested policy — and a generic "refused by the runtime" is not something
+  // a person holding a phone can act on.
+  assert.match(run.stdout, /APPROVAL\.md has changed and nobody has attested it yet/u);
+  assert.match(run.stdout, /Re-attest it, or do this from a terminal\./u);
   // No DECISION was recorded, and one audit record says a person answered and
   // the gate would not take it. The pending request is untouched.
   assert.deepEqual(

@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"Classifier pair: quoted text is data (APRV-353), vcs.ref.delete (APRV-352)\" --body-file /tmp/laneA-classifier-352-353/pr-body.md 2>&1 | tail -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac74dc414acffab39"}

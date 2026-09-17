@@ -98,7 +98,7 @@ an addition).
 
 | rule | binaries | subcommands | classes |
 |---|---|---|---|
-| `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite |
+| `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite, vcs.ref.delete |
 | `git-rewrite` | git | rebase \| filter-branch \| filter-repo | vcs.history.rewrite † |
 | `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
 | `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
@@ -257,6 +257,17 @@ unchanged and unconditional: what happens at the far end is not written in the
 argv, so there is no read-shaped invocation to carve out. A GET-shaped fetch
 redirected into a file is still `files.write.workspace`, by the `redirect-write`
 override above.
+
+### Deleting a remote ref (APRV-352)
+
+A `git push` that removes a remote ref is `vcs.ref.delete`, rule
+`git-ref-delete`, with the ref names bound to the segment's `path`. Every
+spelling lands there: `--delete`, `-d`, a colon refspec (`:refs/heads/x`, `:x`),
+and bulk forms mixing several. A force push stays `vcs.history.rewrite` and a
+tag deletion stays `release.publish`. The full account, including why the class
+exists and what a policy that has no line for it resolves to, is in
+[docs/claude-code-hook.md](claude-code-hook.md#deleting-a-remote-ref-aprv-352);
+the classifier is the same file for both harnesses.
 
 ### Rewriting unpublished history
 

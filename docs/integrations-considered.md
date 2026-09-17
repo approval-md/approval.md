@@ -22,6 +22,7 @@ entry here is the summary and the pointer.
 | Grok Bot (xAI agent product) | [x.ai/news/grok-bot-and-x](https://x.ai/news/grok-bot-and-x) | 2026-09-02 | agent product (MCP client) | adopted (demo) | APRV-245, APRV-246 |
 | Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
 | Muse Code (Meta coding agent) | [developer.meta.com](https://developer.meta.com/ai/products/muse-code/) | 2026-09-16 | harness | parked, unverified | APRV-347 |
+| Codex CLI (OpenAI coding-agent harness) | [learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks), [openai/codex](https://github.com/openai/codex) | 2026-09-17 | harness | adopted, native shell gating blocked upstream | [docs/codex-hook.md](codex-hook.md), APRV-310, APRV-311, APRV-348, APRV-349 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
 **parked** (design verified, no code, activated on demand), **declined** (no
@@ -582,6 +583,82 @@ commands an agent runs UNDER Muse are ordinary shell and are already covered.
 - No Backlog task is filed for an adapter, on purpose: per the checklist
   below, an entry points at ids rather than intentions, and there is nothing
   here to specify yet.
+
+## Codex CLI (OpenAI coding-agent harness)
+
+Assessed 2026-09-17, after three probe rounds against the installed CLI.
+Verdict: **adopted, with native shell gating blocked upstream**. The adapter
+exists and is tested; what is refused today is refused because of a payload
+omission in the harness, and this entry records the condition under which that
+refusal lifts.
+
+### What it is
+
+OpenAI's terminal coding agent, `@openai/codex`, pinned at 0.152.1 everywhere
+this repository names a version. It exposes three surfaces we have looked at: a
+native hook contract (`PreToolUse` and `PostToolUse` command handlers), a
+built-in command sandbox (`codex sandbox -P :read-only`), and an app-server
+protocol over which a client answers the harness's own approval requests.
+
+### What it exposes
+
+Detailed elsewhere rather than restated here: the hook contract and the adapter
+in [docs/codex-hook.md](codex-hook.md), the captured native events in
+[docs/codex-hook-probe.md](codex-hook-probe.md), the sandbox boundary in
+[docs/codex-boundary-probe.md](codex-boundary-probe.md), the confined session
+and its one-tool broker in [docs/codex-workspace-broker.md](codex-workspace-broker.md)
+and [docs/codex-enforced-session.md](codex-enforced-session.md), and the
+app-server approval bridge in
+[docs/codex-app-server-bridge.md](codex-app-server-bridge.md).
+
+The two facts that decide everyday native activation, both observed on 0.152.1
+and both upstream rather than ours:
+
+1. A `Bash` `PreToolUse` event carries `tool_input` keys exactly `["command"]`.
+   The event `cwd` and the hook process cwd both stay at the session root even
+   when the call runs somewhere else, so the adapter cannot bind the action.
+2. A `PostToolUse` event carries no outcome. Exit 0 and exit 7 raise the same
+   event with the same empty `tool_response`, and there is no
+   `PostToolUseFailure`.
+
+### Fit
+
+Codex is a HARNESS, so it lives in `src/cli/hook.ts`'s adapter table beside
+Claude Code, Cursor and Grok, and needs no new §7 class: shell and patch are
+`files.write.*`, `vcs.*`, `network.call` and kin through the ordinary shell
+classifier. The §11.1 invariants at stake are fail closed (the harness proceeds
+on hook crash, timeout and malformed output, so the adapter can never be the
+only control) and self-reported fields never reduce scrutiny (the event's own
+`cwd` is the field that would have to be trusted, and it is the wrong one).
+
+Classifier output, per the checklist below: `codex update` is unclassified and
+therefore denied, and `bun install -g @openai/codex` is `deps.add`, both
+recorded in the UCA entry's table above. The commands an agent runs UNDER Codex
+are ordinary shell and are already covered.
+
+### Conclusion
+
+Adopted for direct `apply_patch` and for the confined broker session. Native
+shell gating is refused unconditionally with
+`hook-unsupported-execution-context`, and **the condition under which it
+becomes activatable is the upstream issue drafted in
+[docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md)** (APRV-348;
+issue URL pending, recorded in that task's notes once posted). Concretely:
+native Codex shell gating becomes activatable when a Codex release carries the
+effective per-call execution directory on the shell pre-event, which is ask 1 of
+that issue. Outcome records additionally need ask 2. Treating the hook as a
+boundary rather than as one control among several additionally needs ask 3.
+Until then the shell answer is the confined session, whose enforcement does not
+depend on the hook at all.
+
+### Next steps
+
+- The operator posts the issue from `docs/upstream/codex-hook-payload.md` and
+  records the URL in APRV-348. No agent session posts it.
+- If ask 1 ships, APRV-311's AC1 reopens and the adapter's unconditional `Bash`
+  refusal is replaced by ordinary classification against the bound directory.
+- APRV-349 asks whether the app-server approval protocol can bind what the hook
+  cannot, independently of anything upstream chooses to do.
 
 ## How to add an entry
 

@@ -1,0 +1,1 @@
+{"command":"git add conformance README.md tests && git add SPEC.md 2>&1 | tail -2; git status --short | grep -cE '^(UU|AA|DD|AU|UA|DU|UD)'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213"}

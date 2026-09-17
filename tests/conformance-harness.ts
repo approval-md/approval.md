@@ -61,6 +61,7 @@ import {
   withdraw,
   type Decision,
 } from "../src/core/gate.js";
+import { classifyCommand } from "../src/core/command-class.js";
 import { HOOK_DENY_CODES, POST_TOOL_CODES, commandHook } from "../src/cli/hook.js";
 import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { CHECKPOINT_REFUSAL_CODES } from "../src/core/checkpoint.js";
@@ -772,6 +773,40 @@ function readScopeInput(input: Record<string, unknown>, dir: string): Record<str
   return tool === "Read" ? { file_path: target } : { pattern: "**/*.ts", path: target };
 }
 
+// --- command-class (APRV-353, APRV-352) -------------------------------------
+
+/**
+ * The command classifier, as a language-neutral suite.
+ *
+ * Pure in exactly the way `classifyCommand` is: a string in, segments out, no
+ * gate root, no policy, no disk. A conforming implementation runs the same
+ * string through its own classifier and must produce the same segmentation and
+ * the same classes — which is the point, because the segmentation is the half a
+ * second implementation is most likely to get subtly wrong. Reading inside a
+ * quoted argument, or failing to read a `$(…)` the shell really does expand,
+ * both look like working code until the day they do not.
+ *
+ * The expectation pins the SEGMENT COUNT, each segment's class and rule, and
+ * the bound path where a rule bound one. On a refusal it pins the code and not
+ * the detail: the code is the machine's half and is frozen by §11.1, the detail
+ * is prose a runtime may improve.
+ */
+function runCommandClass(input: Record<string, unknown>): Expectation {
+  const result = classifyCommand(str(input, "command"));
+  if (!result.ok) {
+    return { valid: false, failure_class: result.code, segments: null };
+  }
+  return {
+    valid: true,
+    segments: result.segments.map((segment) => ({
+      class: segment.class,
+      rule: segment.rule,
+      ...(segment.path === undefined ? {} : { path: segment.path }),
+    })),
+    classes: result.classes,
+  };
+}
+
 const EXECUTORS: Readonly<Record<string, Executor>> = {
   "jcs-canonicalization": runJcs,
   "refusal-unions": runUnion,
@@ -780,6 +815,7 @@ const EXECUTORS: Readonly<Record<string, Executor>> = {
   "schema-validation": runSchemaValidation,
   "gate-verdicts": runGateVerdict,
   "hook-read-scope": runHookReadScope,
+  "command-class": runCommandClass,
 };
 
 /** The suite ids this runner knows how to execute, sorted. */
