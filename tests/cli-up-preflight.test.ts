@@ -1205,6 +1205,92 @@ test("preflight: a dirty unrelated path the upstream range touches still refuses
   assert.equal(readFileSync(join(repo.dir, "README.md"), "utf8"), "# mine\n");
 });
 
+// ---------------------------------------------------------------------------
+// The interregnum between an attestation and its pull request (APRV-342)
+// ---------------------------------------------------------------------------
+
+/**
+ * A repo whose policy is attested through the real append path, with the
+ * attestation and the policy both committed and pushed.
+ *
+ * `amended` rewrites the policy and re-attests without pushing, which is
+ * exactly the state a `policy amend` leaves behind while its pull request is
+ * open: the log vouches for bytes `origin/main` has never seen.
+ */
+function attestedRepo(amended: boolean): Repo {
+  const repo = newRepo();
+  writeFileSync(join(repo.dir, ".gitignore"), `${MARKER_RELATIVE}\n`, "utf8");
+  const attested = appendAttestation(repo.logPath, join(repo.dir, "APPROVAL.md"), "human:tester");
+  assert.equal(attested.ok, true, attested.ok ? "" : attested.error.message);
+  assert.equal(git(["add", "-A"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "attested policy"], repo.dir).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.dir).code, 0);
+  if (amended) {
+    writeFileSync(join(repo.dir, "APPROVAL.md"), `${POLICY}\n<!-- amended -->\n`, "utf8");
+    const again = appendAttestation(repo.logPath, join(repo.dir, "APPROVAL.md"), "human:tester");
+    assert.equal(again.ok, true, again.ok ? "" : again.error.message);
+  }
+  assert.equal(git(["fetch", "-q", "origin", "main:refs/remotes/origin/main"], repo.dir).code, 0);
+  return repo;
+}
+
+function attestedRow(repo: Repo, root: string): DoctorRow {
+  const run = cli(
+    ["doctor", "--json", "--log", repo.logPath, "--dir", repo.dir, "--root", root],
+    repo.dir,
+  );
+  const parsed = JSON.parse(run.stdout.trim().split("\n").at(-1) as string) as {
+    checks: DoctorRow[];
+  };
+  const row = parsed.checks.find((entry) => entry.check === "attested-policy-on-main");
+  assert.ok(row !== undefined, `no attested-policy-on-main row in:\n${run.stdout}`);
+  return row;
+}
+
+test("doctor: attested-policy-on-main passes when the remote carries the attested bytes", () => {
+  const row = attestedRow(attestedRepo(false), fixtureRoot(false));
+  assert.equal(row.status, "pass");
+  assert.match(row.detail, /origin\/main carries the policy attested at seq 1/u);
+});
+
+test("doctor: attested-policy-on-main names the seq and the command when main lags", () => {
+  const row = attestedRow(attestedRepo(true), fixtureRoot(false));
+  assert.equal(row.status, "fail");
+  assert.match(row.detail, /attested at seq 2, not yet on main/u);
+  assert.match(row.detail, /policy-not-attested/u);
+  assert.ok(row.fix !== undefined);
+  assert.match(row.fix, /approval policy amend --pr/u);
+  assert.match(row.fix, /policy-amend-2/u);
+});
+
+test("doctor: attested-policy-on-main is not applicable without an attestation", () => {
+  const repo = newRepo();
+  assert.equal(git(["fetch", "-q", "origin", "main:refs/remotes/origin/main"], repo.dir).code, 0);
+  const row = attestedRow(repo, fixtureRoot(false));
+  assert.equal(row.status, "skip");
+  assert.match(row.detail, /carries no attestation/u);
+});
+
+test("preflight: up prints the same line when the attested policy is not on main, and starts", () => {
+  const repo = attestedRepo(true);
+
+  const run = upOnce(repo, ["--root", fixtureRoot(false)]);
+  // It REPORTS. A policy amendment waiting on a pull request is a normal state
+  // of a repository, not a reason to refuse to run the gate.
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /attested at seq 2, not yet on main/u);
+  assert.match(run.stderr, /approval policy amend --pr/u);
+});
+
+test("preflight: up says nothing about the policy when the remote carries the attested bytes", () => {
+  const repo = attestedRepo(false);
+
+  const run = upOnce(repo, ["--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.doesNotMatch(run.stderr, /not yet on main/u);
+  assert.doesNotMatch(run.stdout, /not yet on main/u);
+});
+
 test("doctor: main-behind-origin names the reconcile when the working log merely extends", () => {
   const { repo } = afterRecordsAdvance();
   // Doctor never fetches, so the remote-tracking ref is an operator's last one.

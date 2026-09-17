@@ -2585,6 +2585,23 @@ The checks, at length:
   log sync` for a diverged log, `approval up` otherwise — never a `git` command:
   a repair line telling an operator to reset a branch would be doctor making the
   decision this project keeps human.
+- **attested-policy-on-main** — whether the policy the log vouches for is the
+  policy `origin/<branch>` carries (APRV-342). `attestation` above asks whether
+  the LOCAL file is attested; between a `policy amend` and its pull request
+  merging that answer is yes while a fresh checkout of main carries the old
+  policy with no attestation covering it, so every gate operation there refuses
+  `policy-not-attested`. Nothing said so until this row: on 2026-09-16 `approval
+  up` ran in exactly that state and reported "already at the remote tip". PASS
+  when the attested hash equals the SHA-256 of `APPROVAL.md` at the remote tip.
+  FAIL with `attested at seq N, not yet on main`, naming
+  `policy-amend-<seq>` when this checkout has already seen that branch on the
+  remote, and fixing with `approval policy amend --pr` — which opens the pull
+  request or updates the open one, so the same command is right either way.
+  SKIP with no attestation, outside a git checkout, and where there is no
+  remote-tracking ref. **It fetches nothing**, for the reason
+  `main-behind-origin` fetches nothing, and it looks for the amend branch among
+  the remote-tracking refs rather than asking GitHub. `approval up`'s preflight
+  prints the same sentence on stderr and never refuses on it.
 - **harness-version-unverified** — whether the harness binary hosting the
   PreToolUse hook changed since the log last saw a record from it (APRV-227).
   The only row that asks anything about a program outside this repository, and

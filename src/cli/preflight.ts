@@ -122,7 +122,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkAttestation, policyBytesHash } from "../core/attest.js";
+import type { EventRecord } from "../core/log.js";
 import { compareChains, type LogRelation } from "../core/log-reconcile.js";
+import { POLICY_FILENAMES } from "../core/policy-load.js";
+import { verifyWithRecords } from "../core/verify.js";
 import type { DoctorCheck } from "./doctor.js";
 import { EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import {
@@ -1428,12 +1432,25 @@ export type PreflightEvent =
    * not have to learn a key to keep working, and this is a different fact —
    * what `approval log sync` did, not what the preflight found.
    */
-  | ({ event: "preflight_sync" } & PreflightSynced);
+  | ({ event: "preflight_sync" } & PreflightSynced)
+  /**
+   * The attested policy is not on the remote yet (APRV-342). Emitted only when
+   * that is TRUE: `up` reports the interregnum and never refuses on it, because
+   * a policy amendment waiting on a pull request is a normal state of a
+   * repository and not a reason to refuse to run the gate.
+   */
+  | { event: "preflight_policy"; detail: string; fix: string | null };
 
 /** One preflight line as a human sentence, and where it belongs. */
 export function describePreflightEvent(event: PreflightEvent): { text: string; stderr: boolean } {
   if (event.event === "preflight_warning") {
     return { text: `approval: preflight — ${event.message}`, stderr: true };
+  }
+  if (event.event === "preflight_policy") {
+    return {
+      text: `up: preflight — ${event.detail}${event.fix === null ? "" : `; ${event.fix}`}`,
+      stderr: true,
+    };
   }
   if (event.event === "preflight_sync") {
     return {
@@ -1467,9 +1484,39 @@ export function describePreflightEvent(event: PreflightEvent): { text: string; s
 /** How a caller emits one line. `up` and `daemon run` route theirs identically. */
 export type PreflightEmit = (event: PreflightEvent) => void;
 
+/**
+ * The policy file `--policy` names, or the one `--dir` (else `cwd`) holds.
+ *
+ * Discovery, not a load: this answers WHICH FILE, so the preflight can compare
+ * its attested hash against the remote's copy (APRV-342) before either caller
+ * has loaded a policy. The order is `core/policy-load.ts`'s own, so the file
+ * named here is the file the runtime will go on to enforce. `null` when there is
+ * no such file, which is not a finding — `approval doctor`'s `policy` rows are
+ * where an absent policy is somebody's problem.
+ */
+export function preflightPolicyPath(
+  policyFlag: string | null,
+  dirFlag: string | null,
+  cwd: string,
+): string | null {
+  if (policyFlag !== null) return resolvePathSegments(cwd, policyFlag);
+  const dir = dirFlag === null ? cwd : resolvePathSegments(cwd, dirFlag);
+  for (const filename of POLICY_FILENAMES) {
+    const candidate = join(dir, filename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 export interface StartupPreflightInput {
   logPath: string;
   queuePath: string;
+  /**
+   * The policy file, for the `attested-policy-on-main` line (APRV-342). `null`
+   * where the caller could not name one, and the line is then not emitted:
+   * there is nothing to compare, which is not a finding.
+   */
+  policyPath?: string | null;
   /** The installation whose `dist/` is dated. `null` means "ask this build". */
   root: string | null;
   remote: string | null;
@@ -1531,7 +1578,43 @@ export function startupPreflight(
     detail: outcome.detail,
     ...outcome.facts,
   });
+  // APRV-342, and AFTER the fast-forward: a merge that just landed the
+  // amendment is exactly the case where the answer changes, and reporting the
+  // pre-merge one would name an interregnum this process had already left.
+  const interregnum = attestedPolicyLine(input);
+  if (interregnum !== null) input.emit(interregnum);
   return { ok: true, reexec: outcome.reexec ?? null };
+}
+
+/**
+ * The `attested-policy-on-main` line, or `null` when there is nothing to say.
+ *
+ * `null` for a pass, a skip, and for every state the check cannot read: the
+ * preflight's lines report what happened and what an operator has to act on,
+ * and "your policy is where it should be" is neither. It NEVER refuses — see
+ * {@link checkAttestedPolicyOnMain} for why a pending amendment is a normal
+ * state of a repository rather than a fault.
+ *
+ * The log is re-verified here rather than passed in, because the preflight runs
+ * before either caller has opened it. That is one whole-log read at startup, in
+ * a process that is about to read the log on every tick.
+ */
+function attestedPolicyLine(input: StartupPreflightInput): PreflightEvent | null {
+  const policyPath = input.policyPath ?? null;
+  if (policyPath === null) return null;
+  const root = repoRoot(dirname(input.logPath));
+  if (root === null) return null;
+  const verified = verifyWithRecords(input.logPath);
+  if (verified.result.status !== "clean") return null;
+  const row = checkAttestedPolicyOnMain({
+    policyPath,
+    records: verified.records,
+    root,
+    ...(input.remote === null ? {} : { remote: input.remote }),
+    ...(input.branch === null ? {} : { branch: input.branch }),
+  });
+  if (row.status !== "fail") return null;
+  return { event: "preflight_policy", detail: row.detail, fix: row.fix ?? null };
 }
 
 /** The short sha this checkout is on, or `null` when git will not say. */
@@ -1653,6 +1736,110 @@ function npmBuild(root: string): { ok: boolean; message: string } {
  * never `git`. That constraint predates this row and is the right one — a repair
  * line telling an operator to reset a branch would be doctor making a decision.
  */
+/**
+ * `attested-policy-on-main`, doctor's row for the interregnum (APRV-342).
+ *
+ * Between a policy amendment and its pull request merging there is a window
+ * where the attestation is in the log and the amended `APPROVAL.md` is in the
+ * working tree, and `origin/main` carries neither. A fresh checkout of main in
+ * that window has the OLD policy with no attestation covering it, and every
+ * gate operation there refuses `policy-not-attested`.
+ *
+ * Nothing said so. On 2026-09-16 `approval up` ran its preflight in exactly that
+ * state and reported "already at the remote tip"; doctor's `attestation` row
+ * passed, because the LOCAL file is attested and that row asks a different
+ * question. This row asks the missing one: is the policy the log vouches for the
+ * policy `origin/<branch>` carries?
+ *
+ * Read-only, and networkless. The remote tip is read from the last fetch, like
+ * every other answer doctor gives about a remote, and the `policy-amend-<seq>`
+ * branch is looked for among the remote-tracking refs rather than asked of
+ * GitHub: a report that reached the network to be more accurate would be doing
+ * something on its own account.
+ */
+export function checkAttestedPolicyOnMain(input: {
+  policyPath: string;
+  /** The log, verified, in append order. Doctor's own records; `up` re-reads. */
+  records: readonly EventRecord[];
+  /** The repository the policy lives in, or `null` when it is not in one. */
+  root: string | null;
+  remote?: string;
+  branch?: string;
+}): DoctorCheck {
+  const check = "attested-policy-on-main";
+  const root = input.root;
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${input.policyPath} is not inside a git repository, so there is no remote copy of it to compare the attestation against`,
+    };
+  }
+  const status = checkAttestation([...input.records], input.policyPath);
+  // Not applicable rather than a pass: with no attestation there is no hash to
+  // compare, and `attestation` is the row that has something to say about that.
+  const attested =
+    status.status === "attested"
+      ? { sha256: status.sha256, seq: status.seq }
+      : status.status === "hash-mismatch"
+        ? { sha256: status.attestedSha256, seq: status.seq }
+        : null;
+  if (attested === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${input.policyPath} carries no attestation, so there is no attested hash to look for on the remote`,
+    };
+  }
+
+  const remote = input.remote ?? "origin";
+  const branch = input.branch ?? currentBranch(root) ?? "main";
+  const ref = `refs/remotes/${remote}/${branch}`;
+  const resolved = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], root);
+  const tip = resolved.stdout.trim();
+  if (!resolved.ok || tip.length === 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `this checkout has no ${remote}/${branch} remote-tracking ref, so there is no remote copy of ${input.policyPath} to compare the attestation against`,
+    };
+  }
+
+  const relative = repoPath(root, input.policyPath);
+  const blob = relative.startsWith("..") ? null : showBlob(root, tip, relative);
+  const remoteSha256 = blob === null ? null : policyBytesHash(blob);
+  if (remoteSha256 === attested.sha256) {
+    return {
+      check,
+      status: "pass",
+      detail: `${remote}/${branch} carries the policy attested at seq ${String(attested.seq)} (sha256 ${attested.sha256.slice(0, 12)}…)`,
+    };
+  }
+
+  // The branch the amendment would ride, when this checkout has already seen it
+  // on the remote. Named in the detail rather than in the fix: `approval policy
+  // amend --pr` is the command either way, because it updates an open pull
+  // request rather than opening a second one (APRV-341).
+  const amendBranch = `policy-amend-${String(attested.seq)}`;
+  const pushed = git(
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${amendBranch}^{commit}`],
+    root,
+  );
+  const carried = pushed.ok && pushed.stdout.trim().length > 0;
+  return {
+    check,
+    status: "fail",
+    detail: `attested at seq ${String(attested.seq)}, not yet on main: ${remote}/${branch} carries ${
+      remoteSha256 === null ? `no ${relative} at all` : `${relative} hashing ${remoteSha256.slice(0, 12)}…`
+    } while the attestation covers ${attested.sha256.slice(0, 12)}…${
+      carried
+        ? `; ${remote} already carries ${amendBranch}, so its pull request is what lands it`
+        : ""
+    }. A fresh checkout of ${branch} refuses every gate operation with policy-not-attested until it merges`,
+    fix: `approval policy amend --pr — commits the policy and its attestation on ${amendBranch}, opens or updates its pull request, and arms the merge`,
+  };
+}
+
 export function checkMainBehindOrigin(logPath: string, queuePath: string, root: string): DoctorCheck {
   const report = inspectPreflight({ logPath, queuePath, root, fetch: false });
   if (!report.ok) {

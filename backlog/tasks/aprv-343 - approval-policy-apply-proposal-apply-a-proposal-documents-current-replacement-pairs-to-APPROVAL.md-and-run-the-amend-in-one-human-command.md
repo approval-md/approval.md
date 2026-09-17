@@ -4,10 +4,11 @@ title: >-
   approval policy apply <proposal>: apply a proposal document's
   current/replacement pairs to APPROVAL.md and run the amend in one human
   command
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opus-lane-ergonomics'
 created_date: '2026-09-16 17:59'
-updated_date: '2026-09-16 17:59'
+updated_date: '2026-09-17 01:12'
 labels:
   - cli
   - policy

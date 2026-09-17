@@ -401,6 +401,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // git checkout, so there is no origin to be behind — the same absence
       // log-drift, log-advance-cadence and dark-sessions skip on (APRV-215).
       "skip",
+      // attested-policy-on-main skips: for the same absence. There is no
+      // repository, so there is no remote copy of the policy to compare the
+      // attestation against, and a comparison that could not be made must not
+      // report that it was made (APRV-342).
+      "skip",
       // harness-version-unverified skips: the fixture registers no `approval
       // hook` command in .claude/settings.json or .cursor/hooks.json, so no
       // harness hosts the hook there — the same absence harness-hook-outcomes
@@ -477,7 +482,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 29);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 30);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -944,7 +949,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   // APRV-272 appended `gate-organs` (which harness files carry no attestation
   // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
   // sealed-delivery private key is tracked or unignored).
-  assert.equal(parsed.checks.length, 29);
+  assert.equal(parsed.checks.length, 30);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

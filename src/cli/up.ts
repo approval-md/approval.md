@@ -121,6 +121,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import {
   describePreflightEvent,
+  preflightPolicyPath,
   reexecFreshBuild,
   startupPreflight,
   type PreflightEvent,
@@ -209,6 +210,7 @@ export function describeUpEvent(
     case "preflight":
     case "preflight_warning":
     case "preflight_sync":
+    case "preflight_policy":
       return describePreflightEvent(event);
     case "up_started":
       return {
@@ -428,6 +430,14 @@ export function commandUp(
     const cleared = startupPreflight({
       logPath,
       queuePath,
+      // APRV-342: the file the `attested-policy-on-main` line is about. Resolved
+      // here rather than inside the preflight, because which file is the policy
+      // is this verb's flag table's answer and not git's.
+      policyPath: preflightPolicyPath(
+        stringFlag(flags, "--policy"),
+        stringFlag(flags, "--dir"),
+        cwd,
+      ),
       root: rootFlag === null ? null : absolute(rootFlag, cwd),
       remote: stringFlag(flags, "--preflight-remote"),
       branch: stringFlag(flags, "--preflight-base"),

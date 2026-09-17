@@ -67,6 +67,7 @@ import { useReadProof } from "../core/state.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import {
   describePreflightEvent,
+  preflightPolicyPath,
   reexecFreshBuild,
   startupPreflight,
 } from "./preflight.js";
@@ -531,6 +532,13 @@ export function commandDaemonRun(
     const cleared = startupPreflight({
       logPath,
       queuePath,
+      // APRV-342: the same line `approval up` prints, from the same module, for
+      // the same reason the whole preflight lives there.
+      policyPath: preflightPolicyPath(
+        stringFlag(flags, "--policy"),
+        stringFlag(flags, "--dir"),
+        cwd,
+      ),
       root: rootFlag === null ? null : absolute(rootFlag, cwd),
       remote: stringFlag(flags, "--preflight-remote"),
       branch: stringFlag(flags, "--preflight-base"),
