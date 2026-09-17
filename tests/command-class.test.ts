@@ -247,6 +247,17 @@ const FIXTURES: readonly Fixture[] = [
   // `--dry-run` claims to change nothing; the classifier cannot verify the
   // claim from text and takes the updater at its strictest.
   { command: "uca --dry-run", class: "deps.upgrade", rule: "harness-updater" },
+  // APRV-354. One positive fixture per generated launch row, so the coverage
+  // assertion at the bottom of this file sees them; the spelling matrix, the
+  // probe forms and the Muse model cases are their own suite
+  // (`tests/command-class-harness-launch.test.ts`).
+  { command: "codex exec x", class: "harness.launch.codex", rule: "harness-launch-codex" },
+  { command: "muse", class: "harness.launch.muse", rule: "harness-launch-muse" },
+  { command: "grok run", class: "harness.launch.grok", rule: "harness-launch-grok" },
+  { command: "claude -p 'summarize this'", class: "harness.launch.claude", rule: "harness-launch-claude" },
+  { command: "cursor-agent --resume", class: "harness.launch.cursor", rule: "harness-launch-cursor" },
+  // A probe starts no session, so it reads.
+  { command: "codex --help", class: "read.shell", rule: "harness-probe", row: "harness-launch-codex" },
   // The package-manager route to the same upgrade was `deps.add` before this
   // task and stays so: the rows above add spellings, they do not move rows.
   { command: "npm install -g @anthropic-ai/claude-code", class: "deps.add", rule: "npm-install-package", row: "npm-install" },
@@ -915,13 +926,14 @@ for (const unknown of [
   "docker compose up",
   "git frobnicate",
   "gh weird thing",
-  // APRV-228 names the harnesses' `update` verb and nothing else about them:
-  // a version probe, a one-shot prompt and a bare launch are not upgrades, and
-  // the row must not become the rule that runs a nested harness unattended.
-  "claude --version",
-  "claude -p 'summarize this'",
-  "claude",
-  "codex --help",
+  // APRV-228's row names the harnesses' `update` verb and nothing else about
+  // them, and until APRV-354 a version probe, a one-shot prompt and a bare
+  // launch were therefore `unclassified`. APRV-354 gave those their own rows:
+  // `claude --version` is now `read.shell` (rule `harness-probe`) and `claude`,
+  // `claude -p …` and `codex --help` are answered by the launch rows. The
+  // fixtures for all of that live in `tests/command-class-harness-launch.test.ts`.
+  // `gemini` stays here, which is the assertion that APRV-354 named five
+  // harnesses and added nothing by implication.
   "gemini",
   // The updater's state dumper is a different binary and is not named.
   "ucas --json",

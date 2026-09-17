@@ -257,6 +257,15 @@ evidence alone.
 
 ## Coverage and failure boundary
 
+Starting a Codex session from inside another gated session is itself a gated act
+since APRV-354: `codex …`, `/opt/homebrew/bin/codex …` and `npx @openai/codex …`
+classify `harness.launch.codex` with the argv bound, and `codex --version`
+classifies `read.shell`. A grant of the launch class covers the launch and
+nothing the launched session then does; this adapter, installed and attested, is
+what brings those inner actions back inside the gate. See
+[docs/claude-code-hook.md](claude-code-hook.md#launching-an-agent-harness-aprv-354).
+The confined `approval codex start` keeps its own class and is not a launch.
+
 The hook entry deliberately matches shell and patch calls only. Official Codex
 documentation says a later `write_stdin` call transports input to or polls an
 already-approved unified execution and does not receive another `PreToolUse`.

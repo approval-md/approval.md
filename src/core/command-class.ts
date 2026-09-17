@@ -33,13 +33,22 @@
  * harness's `description` field is authored by the very agent being gated
  * (SPEC.md §11.1: self-reported fields never reduce scrutiny).
  *
- * The one import (APRV-347) is `core/read-scope.ts`, which is pure in exactly
- * the same way this file is: no disk, no clock, no environment, no
- * dependencies. It holds the read-side path arithmetic so the hook and the
- * policy explainer can ask the same questions this file asks, of the same
- * table, rather than each growing a copy of it.
+ * Two imports, and both are pure in exactly the same way this file is: no disk,
+ * no clock, no environment, no dependencies.
+ *
+ * `core/read-scope.ts` (APRV-347) holds the read-side path arithmetic, so the
+ * hook and the policy explainer can ask the same questions this file asks, of
+ * the same table, rather than each growing a copy of it.
+ *
+ * `core/policy-match.ts` (APRV-354) is imported for ONE name, the
+ * `harness.launch.` prefix. The classifier emits the family and two enforcement
+ * paths refuse a member of it that no policy rule names, so the three have to
+ * agree on what the family is; a second spelling of the prefix would close one
+ * of those doors and leave the other open. The import is type-safe in the
+ * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
+import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
   isUnreadableTarget,
@@ -1365,6 +1374,217 @@ function refineGitPush(ctx: RuleContext): Refinement {
  */
 const SCRATCH_DELETE_CLASS = "files.delete.scratch";
 
+// ---------------------------------------------------------------------------
+// Agent harnesses (APRV-354)
+// ---------------------------------------------------------------------------
+
+/**
+ * Launching an agent harness is its own class family, `harness.launch.NAME`.
+ *
+ * Until this, a command whose first word was `codex`, `muse`, `grok`, `claude`
+ * or `cursor-agent` was `unclassified`: denied, which is fail closed and also
+ * blunt. It told an approver nothing, it gave a human no class to grant through
+ * the ordinary manual path, and it meant a lane could not so much as read a
+ * harness version without going around the gate. The family fixes the second
+ * half without touching the first: an unknown class still falls to
+ * `defaults.autonomy`, so a project that adopts nothing is exactly where it was.
+ *
+ * ## The laundering hazard, which is why this is a class and not a table row
+ *
+ * A launched harness runs its own tools OUTSIDE this gate unless that harness's
+ * own adapter is installed and attested. So a grant of `harness.launch.codex`
+ * authorizes the LAUNCH and nothing the launched session then does — every
+ * file it writes, every command it runs and every request it makes happens
+ * where this runtime cannot see it. A policy that made the family autonomous
+ * would have written itself out of the gate in one line, which is why SPEC.md
+ * §7 says the family is never inferred autonomous and why the reference
+ * proposal holds it at `manual`. The blessed Codex entry point is the confined
+ * `approval codex start` (APRV-325.3), which keeps its own class.
+ *
+ * ## Muse, which carries a second hazard
+ *
+ * A Muse Code model id ending `-contributor` trades price for permission to
+ * train on prompts and completions, so running one over real code shares that
+ * code. Carter has ruled that Muse must never run with a Contributor model
+ * selected. The classifier cannot enforce that — the model is a self-reported
+ * argument, and a session may select one in its own UI where no command line
+ * shows it — so it does the one thing a classifier honestly can: it BINDS the
+ * `--model` value where it appears and gives a contributor value its own rule
+ * id, so a prompt and a policy can both see it. This may only ever RAISE
+ * scrutiny. A `-standard` id, or no `--model` at all, returns the ordinary rule
+ * id and changes nothing, because a self-reported field that could lower
+ * scrutiny is a field an agent would learn to write (SPEC.md §11.1 invariant 4).
+ *
+ * ## Where the family's name lives
+ *
+ * {@link HARNESS_LAUNCH_PREFIX} is `core/policy-match.ts`'s, not this file's,
+ * and is imported rather than repeated. Two enforcement paths refuse a launch
+ * that no policy rule names (`harnessLaunchNeedsRule`), and a second spelling of
+ * the prefix is the shape of bug that closes one of those doors and leaves the
+ * other open.
+ */
+
+/** The rule id prefix, so a reader can tell a launch row from a probe. */
+const HARNESS_LAUNCH_RULE_PREFIX = "harness-launch-";
+
+/**
+ * Harness binaries, by BASENAME, to the name their class carries.
+ *
+ * Basenames, because that is what {@link classifySegment} derives before any
+ * rule sees a command, and it is what makes `/opt/homebrew/bin/codex`,
+ * `~/.local/bin/muse` and `$HOME/.local/bin/muse` all land here without this
+ * table knowing anything about where a binary lives. A spelling the basename
+ * derivation cannot see through — `$MUSE_BIN`, a wrapper script of another
+ * name — is `unclassified`, which is the answer it had before and the answer it
+ * should keep.
+ *
+ * `cursor-agent` carries the name `cursor` so the class reads
+ * `harness.launch.cursor` beside the `cursor` adapter and the `.cursor/`
+ * protected paths. `gemini` is deliberately absent: APRV-354 names five
+ * harnesses, `gemini update` keeps its `deps.upgrade` row above this one, and a
+ * bare `gemini` stays `unclassified` until somebody makes that its own decision.
+ */
+const HARNESS_BINS: Readonly<Record<string, string>> = {
+  codex: "codex",
+  muse: "muse",
+  grok: "grok",
+  claude: "claude",
+  "cursor-agent": "cursor",
+};
+
+/**
+ * Package specs a package runner may name, EXACTLY, to the same harness names.
+ *
+ * Exact, and the exactness is the rule: `npx codex-helper` is not a codex
+ * launch, and a substring match that said it was would let any package whose
+ * name happens to contain a harness's take a class it did not earn. A spec this
+ * table does not know keeps whatever class the runner already had.
+ */
+const HARNESS_PACKAGES: Readonly<Record<string, string>> = {
+  codex: "codex",
+  "@openai/codex": "codex",
+  claude: "claude",
+  "@anthropic-ai/claude-code": "claude",
+  "cursor-agent": "cursor",
+  muse: "muse",
+  grok: "grok",
+};
+
+/**
+ * Argv that starts nothing: a version or help probe.
+ *
+ * A probe prints a string and exits, so it is a read, and reading a harness's
+ * own version is exactly what a session needs to be able to do without a
+ * prompt. `help` counts only as the WHOLE argv: `codex help` prints usage,
+ * while `codex help me refactor this` is a session.
+ */
+const HARNESS_PROBE_FLAGS: readonly string[] = ["--version", "-V", "--help", "-h"];
+
+/** The probe's rule id and class. A probe starts no session, so it reads. */
+const HARNESS_PROBE_RULE = "harness-probe";
+const HARNESS_PROBE_CLASS = "read.shell";
+
+/** The rule id a Muse launch takes when its `--model` names a Contributor model. */
+const MUSE_CONTRIBUTOR_RULE = "harness-launch-muse-contributor";
+
+/** The suffix that marks a Muse model as training on what it is shown. */
+const CONTRIBUTOR_SUFFIX = "-contributor";
+
+/** The `--model` value in either spelling, or `null` when none is written. */
+function harnessModel(args: readonly string[]): string | null {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (arg === "--model") {
+      const value = args[index + 1];
+      return value === undefined || isFlag(value) ? null : value;
+    }
+    if (arg.startsWith("--model=")) return arg.slice("--model=".length);
+  }
+  return null;
+}
+
+/**
+ * The harness a package spec names, version suffix stripped, or `null`.
+ *
+ * `@openai/codex@0.152.1` is the scoped case the split has to get right: the
+ * `@` that opens a scope is not the `@` that opens a version.
+ */
+function harnessPackage(spec: string): string | null {
+  const at = spec.startsWith("@") ? spec.indexOf("@", 1) : spec.indexOf("@");
+  const bare = at === -1 ? spec : spec.slice(0, at);
+  return HARNESS_PACKAGES[bare] ?? null;
+}
+
+/**
+ * One harness invocation, given its name and the argv that follows its identity.
+ *
+ * Shared by the direct rows and the package-runner refinement, so a launch
+ * spelled `npx @openai/codex exec` answers exactly as `codex exec` does. The
+ * argv is bound to `path`: the segment's own `text` carries the command as
+ * written, and `path` carries the part the class is ABOUT, which is what lets a
+ * channel name it without re-parsing the line.
+ */
+function harnessRefinement(name: string, args: readonly string[]): Refinement {
+  if (
+    args.length === 1 &&
+    (HARNESS_PROBE_FLAGS.includes(args[0] as string) || args[0] === "help")
+  ) {
+    return { class: HARNESS_PROBE_CLASS, rule: HARNESS_PROBE_RULE };
+  }
+  // Anything else is a session. A probe flag beside other arguments is NOT a
+  // probe here: the classifier cannot know which of the two the binary will
+  // honour, and the stricter reading of an ambiguous harness invocation is the
+  // one that assumes a session started.
+  const model = name === "muse" ? harnessModel(args) : null;
+  const contributor = model !== null && model.toLowerCase().endsWith(CONTRIBUTOR_SUFFIX);
+  return {
+    class: `${HARNESS_LAUNCH_PREFIX}${name}`,
+    rule: contributor ? MUSE_CONTRIBUTOR_RULE : `${HARNESS_LAUNCH_RULE_PREFIX}${name}`,
+    ...(args.length === 0 ? {} : { path: args.join(" ") }),
+  };
+}
+
+/** `codex …`, `muse …`, `grok …`, `claude …`, `cursor-agent …`. */
+function refineHarness(ctx: RuleContext): Refinement {
+  const name = HARNESS_BINS[ctx.bin];
+  // Unreachable through the table, which matches on these basenames; a defensive
+  // arm rather than a silent wrong class if a row is ever edited apart from the
+  // table it is generated from.
+  if (name === undefined) {
+    return { opaque: `${ctx.bin} is an agent harness this table cannot name` };
+  }
+  return harnessRefinement(name, ctx.args);
+}
+
+/**
+ * `npx`, `tsx`, `tsc`, … — unchanged, except a package runner naming a harness.
+ *
+ * `npx @openai/codex` starts the same session `codex` starts, and before this
+ * it was `files.write.workspace`: the looser of the two answers, reachable by
+ * typing four extra characters. The refinement is deliberately narrow — only
+ * `npx`, only an EXACT package spec, and everything else returns the row's own
+ * answer byte for byte, which is what keeps this from being a widening of the
+ * workspace-tool row.
+ */
+function refineWorkspaceTool(ctx: RuleContext): Refinement {
+  const unchanged: Refinement = { class: "files.write.workspace", rule: "workspace-tool" };
+  if (ctx.bin !== "npx") return unchanged;
+  const index = ctx.args.findIndex((arg) => !isFlag(arg));
+  if (index === -1) return unchanged;
+  const name = harnessPackage(ctx.args[index] as string);
+  if (name === null) return unchanged;
+  return harnessRefinement(name, ctx.args.slice(index + 1));
+}
+
+/** The five generated harness rows, one per binary, sharing one refinement. */
+const HARNESS_RULES: readonly CommandRule[] = Object.entries(HARNESS_BINS).map(([bin, name]) => ({
+  id: `${HARNESS_LAUNCH_RULE_PREFIX}${name}`,
+  bins: [bin],
+  class: `${HARNESS_LAUNCH_PREFIX}${name}`,
+  emits: [HARNESS_PROBE_CLASS],
+  refine: refineHarness,
+}));
+
 /**
  * Is `candidate` a STRICT descendant of `root`? Both are compared by path
  * segment, so `/private/tmpfoo` is not under `/private/tmp` and a root is never
@@ -2158,8 +2378,21 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   // harness unattended. `uca` matches with ANY arguments, `--dry-run` included:
   // the classifier reads text, cannot know which flags the script honours, and
   // the strictest reading of an updater is that it updates.
+  //
+  // APRV-354 answers the other half of that sentence: the launch rows below now
+  // name what a bare `claude` or `codex …` is. This row stays ABOVE them on
+  // purpose, so `codex update` and `claude update` keep `deps.upgrade` — an
+  // upgrade swaps the binary that hosts the hook, which is the stricter of the
+  // two readings and the class they already had.
   { id: "harness-update", bins: ["claude", "codex", "gemini"], subs: ["update"], class: "deps.upgrade" },
   { id: "harness-updater", bins: ["uca"], class: "deps.upgrade" },
+
+  // -- agent harness launch (APRV-354) --------------------------------------
+  // Generated from {@link HARNESS_BINS}, one row per binary, all sharing
+  // {@link refineHarness}. Below `harness-update` so an upgrade keeps its
+  // class; above the workspace tools so a package-runner spelling is the only
+  // one that has to be refined rather than matched.
+  ...HARNESS_RULES,
 
   // -- workspace tools -----------------------------------------------------
   // APRV-193: three of the rules below hand control to code the runtime did not
@@ -2182,6 +2415,14 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     id: "workspace-tool",
     bins: ["npx", "tsx", "ts-node", "tsc", "oxlint", "eslint", "prettier", "vitest", "jest", "backlog", "make"],
     class: "files.write.workspace",
+    // APRV-354: only `npx` naming a harness package changes; see
+    // {@link refineWorkspaceTool}, which returns this row's own answer for
+    // every other binary and every other package.
+    emits: [
+      HARNESS_PROBE_CLASS,
+      ...Object.values(HARNESS_PACKAGES).map((name) => `${HARNESS_LAUNCH_PREFIX}${name}`),
+    ],
+    refine: refineWorkspaceTool,
   },
   {
     id: "workspace-write",
@@ -2489,6 +2730,20 @@ export const CODE_EXECUTING_RULES: readonly string[] = [
   "node-script",
   /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
   "workspace-tool",
+  /**
+   * Launching an agent harness, and probing one (APRV-354).
+   *
+   * Every spelling is here, the probe included. A launch hands control to a
+   * whole second agent, which is the most complete form of "code the runtime
+   * did not author"; a probe still executes the same binary. The list is
+   * matched against a segment's RULE, so the generated launch ids and the two
+   * ids a refinement can return on its own — the probe and the Muse
+   * contributor id — all have to be named, or `npx @openai/codex` would have
+   * quietly stopped requiring a sandbox by gaining a better class.
+   */
+  ...HARNESS_RULES.map((rule) => rule.id),
+  HARNESS_PROBE_RULE,
+  MUSE_CONTRIBUTOR_RULE,
 ];
 
 /**

@@ -173,6 +173,13 @@ corrected to match before the register entry moves from parked.
 
 Anything else passes through with `is not a gated tool`, at exit 0.
 
+Starting a Grok session from inside another gated session is itself a gated act
+since APRV-354: `grok …` classifies `harness.launch.grok` with the argv bound
+and `grok --version` classifies `read.shell`, and a grant of the launch class
+covers the launch and never what the launched session then does, which is what
+this adapter exists to bring back inside the gate. See
+[docs/claude-code-hook.md](claude-code-hook.md#launching-an-agent-harness-aprv-354).
+
 ## SPEC status
 
 SPEC.md has not been amended for this adapter, deliberately.

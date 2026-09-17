@@ -261,11 +261,16 @@ an addition).
 | `npm-network` | npm, pnpm, yarn, bun | audit \| outdated \| view \| search \| info \| login \| whoami | network.call |
 | `npm-list` | npm, pnpm, yarn, bun | ls \| list \| config \| help | read.shell |
 | `npm-script` | npm, pnpm, yarn, bun | run \| run-script \| test \| start \| build \| lint \| exec | files.write.workspace |
-| `harness-update` | claude, codex, gemini | update | deps.upgrade (APRV-228: the harness's own self-update verb; `claude --version`, `claude -p …` and a bare launch stay unclassified) |
+| `harness-update` | claude, codex, gemini | update | deps.upgrade (APRV-228: the harness's own self-update verb, matched above the launch rows so an upgrade keeps the stricter class) |
 | `harness-updater` | uca | (any) | deps.upgrade (APRV-228: the unattended harness updater, `--dry-run` included, taken at its strictest) |
+| `harness-launch-codex` | codex | (any) | harness.launch.codex, read.shell (APRV-354) |
+| `harness-launch-muse` | muse | (any) | harness.launch.muse, read.shell (APRV-354) |
+| `harness-launch-grok` | grok | (any) | harness.launch.grok, read.shell (APRV-354) |
+| `harness-launch-claude` | claude | (any) | harness.launch.claude, read.shell (APRV-354) |
+| `harness-launch-cursor` | cursor-agent | (any) | harness.launch.cursor, read.shell (APRV-354) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
-| `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
+| `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace (plus the `harness.launch.*` family, for `npx` naming a harness package exactly — APRV-354) |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
@@ -471,6 +476,85 @@ unchanged and unconditional: what happens at the far end is not written in the
 argv, so there is no read-shaped invocation to carve out. A GET-shaped fetch
 redirected into a file is still `files.write.workspace`, by the `redirect-write`
 override above.
+
+### Launching an agent harness (APRV-354)
+
+Starting a second agent is its own class family, `harness.launch.NAME`, with the
+argv bound to the segment's `path`:
+
+| harness | binary | class | rule |
+|---|---|---|---|
+| Codex | `codex` | `harness.launch.codex` | `harness-launch-codex` |
+| Muse Code | `muse` | `harness.launch.muse` | `harness-launch-muse` |
+| Grok | `grok` | `harness.launch.grok` | `harness-launch-grok` |
+| Claude Code | `claude` | `harness.launch.claude` | `harness-launch-claude` |
+| Cursor | `cursor-agent` | `harness.launch.cursor` | `harness-launch-cursor` |
+
+Five spellings reach the same class, because the classifier matches on the
+BASENAME of the first word: bare (`codex exec …`), absolute
+(`/opt/homebrew/bin/codex …`), home-relative in either form
+(`~/.local/bin/muse`, `$HOME/.local/bin/muse`), env-prefixed (`FOO=1 codex …`),
+and the package runner (`npx @openai/codex …`, `npx codex`, with a version
+suffix stripped). A spelling the basename cannot see through — `$MUSE_BIN`, a
+wrapper script of another name — stays `hook-unclassified`, which is where it
+was. `npx` matches the package spec EXACTLY: `npx codex-helper` is not a codex
+launch, and everything `npx` did before it does still.
+
+**A version or help probe is a read.** `--version`, `-V`, `--help`, `-h`, or a
+lone `help` as the whole argv is `read.shell`, rule `harness-probe`: it prints a
+string and starts nothing, and a session should be able to read a harness
+version without spending a person's attention. A probe word beside other
+arguments (`codex help me refactor this`) is a launch — the classifier cannot
+know which of the two the binary will honour, and a session is the stricter
+reading.
+
+**What a grant of the class covers.** The launch, and nothing the launched
+session then does. A harness runs its own tools OUTSIDE this gate unless that
+harness's own adapter is installed and attested, so every file the inner session
+writes, every command it runs and every request it makes happens where this
+runtime cannot see it. That is why SPEC.md §7 says the family is never inferred
+autonomous and why the reference proposal holds it at `manual`: a policy that
+made it autonomous would have written itself out of the gate in one line. The
+blessed Codex entry point is the confined [`approval codex
+start`](codex-activation.md), which keeps its own class and is not a launch here.
+
+**Muse carries a second hazard.** A Muse Code model id ending `-contributor`
+trades price for permission to train on prompts and completions, so running one
+over real code shares that code. The classifier cannot enforce a model choice —
+the value is self-reported, and a session may pick one in its own UI where no
+command line shows it — so it does the one thing it honestly can: it binds the
+`--model` value in both spellings (`--model x` and `--model=x`) and gives a
+contributor value its own rule id, `harness-launch-muse-contributor`, so a
+prompt and a policy can both see it. This may only RAISE scrutiny. A `-standard`
+id classifies exactly as no `--model` at all, because a self-reported field that
+could lower scrutiny is one an agent would learn to write (SPEC.md §11.1
+invariant 4).
+
+`codex update` and `claude update` are unchanged: the `harness-update` row sits
+above these and keeps `deps.upgrade`, since an upgrade swaps the binary that
+hosts this hook. Every launch and probe rule is in `CODE_EXECUTING_RULES`, so
+`APPROVAL_HOOK_REQUIRE_SANDBOX=1` still applies to them.
+
+**A policy with no line for the family refuses the launch.** This one class does
+not fall to `defaults.autonomy` the way every other unmatched class does: a
+launch resolves only under a rule somebody wrote, `harness.launch.*` or
+`harness.launch.NAME`, and a policy naming neither denies with
+`hook-harness-launch-unruled`. Nothing is registered, requested or appended, and
+the refusal names the line that would allow it.
+
+That is SPEC §7's "never inferred autonomous", read at its strongest, and the
+family needs the strong reading. Letting the new class fall to a `manual`
+default would have made every harness launch grantable by a single tap in every
+project whose defaults are manual, from the moment they upgraded, and what that
+tap covers is a whole second agent whose own actions this gate never sees. A
+capability that arrives by upgrade rather than by decision is not a capability
+anybody chose. The same refusal applies on the `approval register` / `approval
+request` path, as `harness-launch-unruled`, so a caller that declares the class
+rather than having it classified meets the same door.
+
+A probe is outside the family, so reading a harness version needs no opt-in.
+This repository's lines are proposed in
+`docs/proposals/harness-launch-2026-09.md`.
 
 ### Deleting a remote ref (APRV-352)
 
@@ -860,6 +944,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 |---|---|
 | `hook-unclassified` | no rule covers some segment of the command |
 | `hook-class-human-only` | some class of the command resolves to `human-only`: the policy reserves it to human hands, so the command is denied outright and no gate lifecycle is opened. Nothing is registered, requested or appended, and a person runs the command instead. The gate's own code for the same fact is `class-human-only`, which the detail names |
+| `hook-harness-launch-unruled` | some class of the command is in the `harness.launch.*` family and this policy names no rule for it (APRV-354). The family resolves only under an explicit rule and never under `defaults.autonomy`, so a launch arrives exactly as refused as it was before the family existed until an operator opts in. Nothing is registered, requested or appended. The gate's own code, for a class a caller DECLARES rather than one classified from a command line, is `harness-launch-unruled`. The repair is a line in `APPROVAL.md`, which is what makes it the opposite of `hook-class-human-only` |
 | `hook-opaque` | a construct whose effect cannot be read from the text |
 | `hook-unparseable` | the command line could not be tokenized |
 | `hook-rejected` | a human said no |

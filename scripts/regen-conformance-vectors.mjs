@@ -1014,6 +1014,85 @@ const commandClassVectors = [
     description: "the control for the six above: an ordinary branch push did not move",
     input: { command: "git push origin feature/x" },
   },
+  // --- launching an agent harness is its own class (APRV-354) ----------------
+  {
+    id: "harness-launch-bare",
+    description:
+      "a bare harness invocation is harness.launch.NAME with the argv bound, not exec.* and not unclassified",
+    input: { command: "codex exec 'refactor the parser'" },
+  },
+  {
+    id: "harness-launch-app-server",
+    description: "codex app-server is a launch: it is the spawn APRV-349's probe makes",
+    input: { command: "codex app-server" },
+  },
+  {
+    id: "harness-launch-absolute-path",
+    description: "an absolute path reaches the same class, because the table matches basenames",
+    input: { command: "/opt/homebrew/bin/codex exec x" },
+  },
+  {
+    id: "harness-launch-home-relative",
+    description: "a home-relative path reaches the same class without the classifier resolving ~",
+    input: { command: "~/.local/bin/muse" },
+  },
+  {
+    id: "harness-launch-env-prefixed",
+    description: "a VAR=value prefix is not the command, so the harness behind it is still found",
+    input: { command: "FOO=1 grok run" },
+  },
+  {
+    id: "harness-launch-package-runner",
+    description:
+      "a package runner naming an EXACT harness spec, version suffix stripped, is the same launch",
+    input: { command: "npx @openai/codex@0.152.1 exec x" },
+  },
+  {
+    id: "harness-launch-package-runner-unknown-unmoved",
+    description:
+      "the control for the vector above: a package this table does not know keeps the runner's own class, and a name that merely CONTAINS a harness name is not a launch",
+    input: { command: "npx codex-helper" },
+  },
+  {
+    id: "harness-probe-version",
+    description: "a version probe starts no session, so it is a read with its own rule id",
+    input: { command: "claude --version" },
+  },
+  {
+    id: "harness-probe-lone-help",
+    description: "a lone help argument is a probe; a help word beside others is not",
+    input: { command: "cursor-agent help" },
+  },
+  {
+    id: "harness-probe-word-with-arguments-is-a-launch",
+    description:
+      "fail closed: text cannot say which of a probe flag and a prompt the binary will honour, so a session is the answer",
+    input: { command: "codex help me refactor this" },
+  },
+  {
+    id: "harness-launch-muse-model-bound",
+    description: "a muse launch binds the --model value so a prompt can show it",
+    input: { command: "muse --model muse-1-standard" },
+  },
+  {
+    id: "harness-launch-muse-contributor",
+    description:
+      "a --model ending in -contributor takes a distinct rule id: a contributor model trains on what it is shown, and a self-reported value may raise scrutiny and never lower it",
+    input: { command: "muse --model=muse-1-contributor" },
+  },
+  {
+    id: "harness-update-unmoved",
+    description:
+      "a harness's own update verb stays deps.upgrade: an upgrade swaps the binary that hosts the hook, which is the stricter reading",
+    input: { command: "codex update" },
+  },
+  {
+    id: "harness-wrapper-stays-unclassified",
+    description:
+      "a wrapper that hides the binary is refused, as it was: the command name is the first word and never a substring of an argument",
+    input: { command: "mywrapper codex exec x" },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -1443,7 +1522,17 @@ const SUITES = [
     // only rely on if it is pinned, and the whole enforcement surface a second
     // implementation has to reproduce is a hook. Major for the reason 7.0.0 and
     // 8.0.0 were: this suite pins WHICH unions exist.
-    vectors_version: "9.0.0",
+    // 10.0.0 (APRV-354): `gate_refusal_codes` gains `harness-launch-unruled`
+    // and `hook_deny_codes` gains `hook-harness-launch-unruled`, the two
+    // spellings of one refusal: a `harness.launch.*` class that no rule of the
+    // policy names. Major for the reason every union growth here is major —
+    // the vector pins each whole array in definition order — and the pair is
+    // deliberately two codes rather than one, because the two paths refuse
+    // different inputs. The hook refuses a launch it CLASSIFIED from a command
+    // line; the gate refuses one a caller DECLARED. A second implementation
+    // that offers the family must answer both, or it has left one of the two
+    // doors open.
+    vectors_version: "10.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1598,7 +1687,13 @@ const SUITES = [
     // expectation lived in no vector before this, so an implementation that
     // passed 1.0.0 fails 1.1.0 only by not knowing a class the taxonomy has
     // gained.
-    vectors_version: "1.1.0",
+    // 1.2.0 (APRV-354): a MINOR bump, the same shape. Fourteen new
+    // `harness-*` vectors, and no existing expectation in this file moves.
+    // What DID move outside it is that a harness invocation used to be
+    // `unclassified` and is now a class — a refusal becoming an answer, which
+    // is the direction a taxonomy grows in. An implementation that passed
+    // 1.1.0 fails 1.2.0 only by not knowing the family.
+    vectors_version: "1.2.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

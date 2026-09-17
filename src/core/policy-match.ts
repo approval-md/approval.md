@@ -288,6 +288,64 @@ export function humanOnlyRefusal(actionClass: string, whatWasRefused: string): s
   );
 }
 
+/**
+ * The `harness.launch.*` family: starting an agent harness session (APRV-354).
+ *
+ * Defined here rather than beside the classifier rows that emit it, because two
+ * enforcement paths and the classifier all have to agree on what the family IS,
+ * and a second spelling of the prefix is the shape of bug that lets one door
+ * close while another stays open.
+ */
+export const HARNESS_LAUNCH_PREFIX = "harness.launch.";
+
+/** Is `actionClass` a member of the `harness.launch.*` family? */
+export function isHarnessLaunchClass(actionClass: string): boolean {
+  return actionClass.startsWith(HARNESS_LAUNCH_PREFIX);
+}
+
+/**
+ * Does this family member resolve with NO explicit rule behind it? (APRV-354.)
+ *
+ * SPEC.md §7 says the family is never inferred autonomous. This is the stronger
+ * reading, and the one the family needs: it is never inferred AT ALL. A launch
+ * resolves only under a rule an operator wrote — `harness.launch.*` or
+ * `harness.launch.NAME` — and a policy that names neither refuses the launch
+ * rather than falling to `defaults.autonomy`.
+ *
+ * The reason is the window the softer reading opens. Before this family existed
+ * a harness launch was `unclassified`: refused outright. Adding the class and
+ * letting it fall to `defaults.autonomy` would make every launch grantable by a
+ * single approval in every project that has ever written `defaults: { autonomy:
+ * manual }` — which is all of them — the moment they upgraded. For most classes
+ * that is exactly right, because a manual default is an operator saying "ask
+ * me". For this one it is not: what the operator would be approving is a whole
+ * second agent whose own actions this gate never sees, and a capability that
+ * arrives by upgrade rather than by decision is not a capability anybody chose.
+ * Muse is the sharp end of it (a Contributor model trains on what it is shown,
+ * and the model may come from that harness's own settings where no command line
+ * shows it), and the rule is written for the family because the argument is not
+ * really about Muse.
+ *
+ * Keyed on `matched === null`, which is exactly "no rule of the policy's own
+ * decided this". That covers both spellings of the fallback: `provenance:
+ * "default"` (the file loaded and named nothing for this class) and
+ * `provenance: "fail-closed"` (the file did not load, so it names nothing for
+ * any class). An explicit rule resolves as written, human-only included.
+ */
+export function harnessLaunchNeedsRule(actionClass: string, resolution: Resolution): boolean {
+  return isHarnessLaunchClass(actionClass) && resolution.matched === null;
+}
+
+/** The refusal text for a harness launch no policy rule names (APRV-354). */
+export function harnessLaunchUnruledRefusal(actionClass: string, whatWasRefused: string): string {
+  return (
+    `class ${actionClass} is a harness launch and this policy names no rule for it (SPEC.md §7, APRV-354), so ${whatWasRefused}. ` +
+    `Launching an agent harness resolves only under an explicit rule — \`${HARNESS_LAUNCH_PREFIX}*\` or \`${actionClass}\` — and never under \`defaults.autonomy\`, because a grant of this class covers the launch and nothing the launched session then does: that session runs its own tools outside this gate unless its own adapter is installed and attested. ` +
+    `This is not a rejection and nobody decided anything. ` +
+    `Nothing was appended. To allow it, add the line and re-attest (\`docs/proposals/harness-launch-2026-09.md\` carries this repository's pair, \`${HARNESS_LAUNCH_PREFIX}*\` at manual and \`${HARNESS_LAUNCH_PREFIX}muse\` at human-only).`
+  );
+}
+
 const WILDCARD = "*";
 
 /** Split a dotted class or pattern into segments. */

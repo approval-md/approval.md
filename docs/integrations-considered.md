@@ -462,6 +462,16 @@ Assessed 2026-09-16. Verdict: **parked, and explicitly unverified**: the read
 scope this repository built for it (APRV-347) needs no Muse-specific code at
 all, and everything that WOULD need code is resting on secondary sources.
 
+One thing about Muse is no longer parked: LAUNCHING it is a gated act.
+APRV-354 classifies `muse …` as `harness.launch.muse` with the argv bound,
+binds the `--model` value where it appears, and gives a value ending
+`-contributor` its own rule id, because a Contributor model trades price for
+permission to train on prompts and completions; this repository's proposal
+holds `harness.launch.muse` at `human-only`
+([docs/claude-code-hook.md](claude-code-hook.md#launching-an-agent-harness-aprv-354)).
+That governs the launch only, and says nothing about what a running Muse session
+does, which is what an adapter would have to cover.
+
 ### What it is
 
 Meta's terminal coding agent, powered by the Muse Spark model family, in beta
