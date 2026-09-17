@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 22:39'
-updated_date: '2026-09-09 23:42'
+updated_date: '2026-09-17 00:30'
 labels: []
 dependencies: []
 priority: high
@@ -21,9 +21,9 @@ Codex-authored feature commits include attribution, but log advance and its GitH
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An explicit validated co-author option is retained in generated records commit messages and the requested GitHub merge body.
-- [ ] #2 Default output remains unchanged and metadata cannot inject extra headers, arguments or authority fields.
-- [ ] #3 Tests verify real generated commit trailers and merge argv, invalid values refuse before mutation, and docs distinguish co-author credit from gate identity.
+- [x] #1 An explicit validated co-author option is retained in generated records commit messages and the requested GitHub merge body.
+- [x] #2 Default output remains unchanged and metadata cannot inject extra headers, arguments or authority fields.
+- [x] #3 Tests verify real generated commit trailers and merge argv, invalid values refuse before mutation, and docs distinguish co-author credit from gate identity.
 - [ ] #4 Reviewed change is delivered and subsequent GitHub attribution is verified; historical shared commits remain unchanged.
 <!-- AC:END -->
 
@@ -43,4 +43,16 @@ Review fix and full validation (2026-09-09): duplicate detection now accepts the
 Final review correction (2026-09-09): a final-looking Co-authored-by line is considered an existing trailer only when the body is exactly that trailer or it is separated from preceding text by a blank line, after CRLF normalization. The regression now covers both a fenced middle-body example and an unseparated final prose line; both original byte sequences survive and one proper blank-separated final trailer is appended, with no further append on retry. Build exited 0 and focused cli-log-verbs passed 43/43 exit 0 after this correction. The previously recorded local full-suite exit 0 preceded this final small correction and is not claimed as post-fix evidence; exact pull-request CI must provide the final broad check. No second completed broad run was performed.
 
 Parent integration check: explicit co-author credit is implemented on direct log advance only. Daemon cadence/up/shutdown/async-child paths reconstruct closed options and do not accept an advance-co-author setting; no identity is inferred. Codex-orchestrated records publication must invoke the reviewed direct CLI with the explicit flag. Global daemon configuration remains unchanged. GitHub PR_BODY setting attempt30365 remains indeterminate, with a live read showing PR_TITLE unchanged; human reconciliation and live queued-merge verification are pending.
+
+Closeout verification by the closeouts lane, 2026-09-16. The reviewed change is on main: PR #381 is MERGED at merge commit 6b8f2d32a19eccaa996245cc3998aa5f7615923b; the branch head was e57680e2be65f91f93b8d8aa6501f6e939e981a8. PR CI run 34418422745 passed ci, all three node-22 full-gate shards, protected paths and classify tier; the merge commit's own run 34421841142 concluded success. Re-verified at merged main in a clean worktree: node scripts/run-tests.mjs --only cli-log-verbs cli-help cli-long-help cli-instructions, wrapper exit 0, tests 91 / pass 91 / fail 0. Build, typecheck and lint each exit 0.
+
+AC1 checked. src/cli/log-advance.ts carries the option end to end: coAuthor on the options type at line 156, validated at the CLI edge and again inside logAdvance before any primary-checkout discovery, log snapshot, version-control object creation, push or gh call at line 287, the trailer appended to the generated records commit message through messageWithCoAuthor at lines 574 and 919-925, and appended once to the pull request body for both the create and the update arm of ghPullRequest at lines 699 and 973-1017.
+
+AC2 checked. The value can only ever be the trailer's text: validateCoAuthor bounds the byte length, refuses control and separator characters and surrounding whitespace, and requires exactly one Name and email shape at lines 898-913. The value travels in argv arrays and a body file rather than as an interpolated gh option, so it cannot become a flag or an extra header. With the flag omitted the commit message, PR body and merge argv are unchanged byte for byte. The refusal is machine-readable, code log-advance-co-author-invalid at line 126.
+
+AC3 checked. tests/cli-log-verbs.test.ts has the three cases the criterion names, green inside the 91-test result above: explicit co-author reaches the real commit and new PR body without entering gh argv at line 859, which asserts both the real generated trailer and the exact merge argv; an existing PR body is preserved and receives one co-author trailer at line 909, covering duplicate delivery against a real prior body; and invalid co-author values refuse before any mutation at line 943, proving the refuse-before-mutation ordering. docs/cli-reference.md lines 488-500 state the distinction the criterion asks for in as many words: the trailer is display credit only, and it does not set an event actor, name an approver, ident authority, or derive an identity from the log.
+
+AC4 NOT checked, and it is the only thing left. Its historical half holds: no shared history was rewritten by this task. Its live half needs the repository setting this package deliberately does not change. Read today, the repository merge_commit_message is still PR_TITLE, with merge_commit_title MERGE_MESSAGE which is already correct, so a queued merge commit still cannot carry the PR body's trailer and there is as yet nothing to verify. That flip is Carter's, section 3 of private/runbook-2026-09-16.md, one command: gh api -X PATCH repos/approval-md/approval.md -f merge_commit_message=PR_BODY. After it, the first records pull request the daemon merges is the proof, and AC4 closes on that merge commit's body carrying the trailer. The task stays In Progress until then.
+
+Typo correction to the AC3 note above: the cli-reference sentence reads that the trailer does not set an event actor, name an approver, grant authority, or derive an identity from the log. The word was mistyped as ident in the preceding paragraph.
 <!-- SECTION:NOTES:END -->
