@@ -50,10 +50,20 @@ get, and where each is enforced:
 |---|---|
 | canonical workspace writes | Seatbelt `(deny file-write*)` with an allow-list naming only the disposable workspace |
 | gate writes (log, policy, vault, keys) | the same deny; the gate home is not on the allow-list |
+| reads of anything but the two workspaces | Seatbelt `(deny file-read*)` with an allow-list of two roots (APRV-347's read jail) |
 | ambient credentials | an environment ALLOW-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `TERM` and a few more) applied after `core/child-env.ts`'s credential strip |
-| credential material on disk | Seatbelt `denyRead` over the vault, the environment map and the sealing keys |
+| credential material on disk | Seatbelt `denyRead` over the vault, the environment map and the sealing keys, emitted after the jail's allows so it is the last word |
 | external egress | Seatbelt `(deny network-outbound)`, loopback included |
-| mutable executor code | the broker, the CLI and the pinned Node live under the root-owned install root, which is not on the write allow-list |
+| mutable executor code | the broker, the CLI and the pinned Node live under the root-owned install root, which is on neither allow-list |
+
+The read jail has exactly two roots, the disposable workspace and the canonical
+workspace, and `core/sandbox.ts` adds the fixed runtime set and the running
+command's own install prefix itself. A session has to READ the tree it is
+reasoning about, which is why the canonical workspace is a root and why write
+confinement rather than read denial is what stops it changing one. Everything
+the operator's home holds beside it — other repositories, `~/.ssh`, the gate
+home — is outside the jail and unreadable, and that is the half `denyRead` alone
+could never cover: a deny-list has to have heard of a path to deny it.
 
 Two properties are worth stating rather than implying. **There is no opt-out.**
 `approval run` has `--no-sandbox`, because an operator holding a human's grant
@@ -118,3 +128,9 @@ refuses rather than running unconfined. Inbound sockets are not denied. The
 environment allow-list is a control over NAMES and therefore best-effort by
 construction; the load-bearing control beside it is that egress is denied, so a
 secret that does reach the child has nowhere to go.
+
+The read jail is a control over PATHS and has the same shape of limit: a secret
+someone checked into the canonical workspace is inside a root the session may
+read, and no sandbox rule will change that. What the jail buys is that
+everything outside those two roots is unreadable whether or not anyone thought
+to name it.

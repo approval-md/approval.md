@@ -2836,7 +2836,7 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "start",
     purpose:
-      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable, the gate's log, policy, vault and keys are neither, credential-bearing variables are withheld from the environment, and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
+      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable; reads are jailed to exactly those two roots, so the gate home and everything else the host holds are unreadable; the environment is an allow-list rather than a filtered copy of the operator's; and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
     input: input({
