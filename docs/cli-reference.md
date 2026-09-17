@@ -1950,7 +1950,7 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
 ## sandbox
 
 ```
-approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+approval sandbox [--allow-loopback] [--read-jail] [--log <path>] -- <cmd> [args…]
 ```
 
 Runs a command with outbound network denied by the operating system. It appends
@@ -1987,6 +1987,15 @@ is a sandbox somebody turns off.
 **`--allow-loopback`** carves loopback back in, for a suite that starts its own
 server. It is a real widening: a port is a port, and anything listening on one is
 reachable from inside.
+
+**`--read-jail`** (APRV-347) goes the other way and makes the room smaller: file
+reads become deny-default, with the gate root, the scratch roots and a fixed
+runtime set opened by `subpath`. It is already on, without the flag, whenever
+the policy declares a `read_scope` block, which is the spelling an operator
+commits and attests; the flag is for trying it on one command first. There is no
+flag that turns the jail OFF where a policy asked for it, because a flag an agent
+can pass must only ever narrow what it can do. See
+[docs/sandboxed-exec.md](./sandboxed-exec.md) for the profile and its limits.
 
 **Exit 127** means the command was NOT run: this machine has no working sandbox
 primitive, or the command is not on `PATH`. Unlike `approval run`, this verb

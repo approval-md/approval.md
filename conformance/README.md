@@ -107,6 +107,12 @@ writes — MUST:
 | `chain-verification` | SPEC.md §8: mutation, reorder, splice, duplication, truncation (anchored and not), a torn tail, and `alg` tampering, each with the reason a verifier must report. |
 | `schema-validation` | Write-boundary validation of every committed schema fixture, with the constraint each refusal violates named — and the APRV-121 read boundary, where a pre-change monetary amount must still validate. |
 | `gate-verdicts` | Scripted gate scenarios: a policy, a sequence of operations, and the verdict of the last one, covering the refusal codes intake and decision can produce. |
+| `hook-read-scope` | SPEC.md §5.2/§7 (amended, APRV-347): a harness `PreToolUse` envelope for a read inside the scope, outside it, carrying no path, resolving nowhere, and unparseable — per harness. Targets are SYMBOLIC (`inside`, `outside`, `absent`, …) rather than paths, because a vector naming one machine's directories is a fact about that machine; a runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. |
+
+`hook-read-scope` pins the permission, the deny CODE and whether the call was
+gated at all, and deliberately does NOT pin the reason text: that is English
+prose a runtime may improve, and a suite that froze it would be testing a
+sentence rather than a behaviour.
 
 One suite also states a **boundary** rather than a capability, because an
 implementation that claims more than the design gives is the failure mode a
