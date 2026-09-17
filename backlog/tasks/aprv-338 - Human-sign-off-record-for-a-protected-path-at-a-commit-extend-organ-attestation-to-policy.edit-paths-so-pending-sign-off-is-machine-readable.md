@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-signoff'
 created_date: '2026-09-14 22:25'
-updated_date: '2026-09-17 00:54'
+updated_date: '2026-09-17 00:57'
 labels:
   - design
   - guard
@@ -152,6 +152,30 @@ task exists to make resolvable.
 - Every log in the new tests is built through the real append path
   (`core/attest.ts` -> `core/log.ts`, `core/gate.ts` for the grants); nothing
   hand-writes a record line.
+
+## Follow-up after running the guard against this very branch
+
+`node scripts/protected-path-guard.mjs --base origin/main --head HEAD` fails
+SPEC.md with `uncovered-hunk` on this PR, which is the expected and intended
+outcome: the four SPEC hunks proceeded unsampled under supervised-live, so their
+`execution.started` records sit in the primary checkout's LIVE log and have not
+been advanced into a records branch. CI's 'protected paths (grant cross-check)'
+job fails the same way. That is the case this task exists to make resolvable,
+and the failure now ends by naming the route.
+
+Running it also exposed an ergonomic gap the first draft had. The repair
+sentence said to ratify 'in the PRIMARY checkout', which hashes the WRONG bytes:
+the digest the guard checks is the file's blob at the commit under review, and
+the primary checkout holds main's copy. `--dir` and `--log` are already separate
+flags for exactly this (`--dir` is the checkout whose bytes are hashed and which
+the recorded path is relative to, `--log` is where the record is appended), so
+the advice now names both, states the digest the command must produce, and
+docs/cli-reference.md carries the worked command. The verb never writes a log
+inside the worktree it hashed.
+
+That fix is a second commit rather than an amend: the harness hook denied
+`git commit --amend` with `hook-class-human-only` (`vcs.history.rewrite` is
+human-only), which is the policy working as written.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
