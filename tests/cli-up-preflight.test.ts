@@ -38,6 +38,8 @@ import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { appendAttestation } from "../src/core/attest.js";
+import { verify } from "../src/core/verify.js";
 import { PREFLIGHT_REFUSAL_CODES } from "../src/cli/preflight.js";
 
 /** dist/tests/cli-up-preflight.test.js -> dist/src/cli/main.js */
@@ -276,6 +278,7 @@ interface PreflightLine {
   dist_stale: boolean;
   action: string;
   reexec: boolean;
+  log_synced: boolean;
   commit: string | null;
   detail: string;
 }
@@ -889,6 +892,7 @@ test("preflight: the --json line carries exactly the frozen fact set", () => {
     "detail",
     "dist_stale",
     "event",
+    "log_synced",
     "log_touched",
     "reexec",
   ]);
@@ -1022,4 +1026,192 @@ test("doctor: main-behind-origin skips outside a repository, and never fetches",
   const row = parsed.checks.find((entry) => entry.check === "main-behind-origin");
   assert.ok(row !== undefined);
   assert.equal(row.status, "skip");
+});
+
+// ---------------------------------------------------------------------------
+// The routine protected-path collision, reconciled rather than refused
+// (APRV-346)
+// ---------------------------------------------------------------------------
+
+/**
+ * These cases build REAL chains. Every record below comes out of
+ * `core/attest.ts`'s `appendAttestation`, which is the append path the hook and
+ * the daemon use, because the whole question here is whether two chains are in
+ * a prefix relationship — and a hand-written line that does not verify is a
+ * third answer ("cannot tell"), which is the one these cases are not about.
+ *
+ * The `up-preflight-log-diverged` cases above keep their hand-written lines on
+ * purpose: those files do not verify, `compareChains` refuses to compare them,
+ * and the preflight therefore refuses. That is the fail-closed path, and it is
+ * still pinned by exactly the tests that pinned it before.
+ */
+
+/** Gitignored, for the reason `tests/cli-log-verbs.test.ts` gives. */
+const MARKER_RELATIVE = ".approval/attest-marker.md";
+
+/** One appended record, through the real append path. Returns its seq. */
+function appendRecord(dir: string, marker: string): number {
+  const path = join(dir, MARKER_RELATIVE);
+  if (!existsSync(path)) {
+    mkdirSync(join(dir, ".approval"), { recursive: true });
+    writeFileSync(path, "# attested fixture\n", "utf8");
+  }
+  writeFileSync(path, `${readFileSync(path, "utf8")}\n<!-- ${marker} -->\n`, "utf8");
+  const appended = appendAttestation(join(dir, LOG_RELATIVE), path, "human:tester");
+  assert.equal(appended.ok, true, appended.ok ? "" : appended.error.message);
+  if (!appended.ok) throw new Error("unreachable");
+  return appended.record.seq;
+}
+
+/** A repo whose committed log already carries two real records, peer included. */
+function newChainRepo(): Repo {
+  const repo = newRepo();
+  writeFileSync(join(repo.dir, ".gitignore"), `${MARKER_RELATIVE}\n`, "utf8");
+  appendRecord(repo.dir, "seed-1");
+  appendRecord(repo.dir, "seed-2");
+  assert.equal(git(["add", "-A"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "seed chain"], repo.dir).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.dir).code, 0);
+  assert.equal(git(["pull", "-q", "--ff-only"], repo.peer).code, 0);
+  return repo;
+}
+
+/**
+ * The shape the primary checkout is in after every records advance: main
+ * carries records 1..N, and the hook has appended N+1.. here since.
+ *
+ * Main's copy is produced the way `approval log advance` produces it — the
+ * working log's own bytes, committed — rather than by composing a file, so the
+ * prefix relationship under test is the one a real advance leaves behind.
+ */
+function afterRecordsAdvance(): { repo: Repo; target: string; keptSeq: number } {
+  const repo = newChainRepo();
+  appendRecord(repo.dir, "local-3");
+  appendRecord(repo.dir, "local-4");
+
+  const advanced = readFileSync(repo.logPath);
+  writeFileSync(join(repo.peer, LOG_RELATIVE), advanced);
+  assert.equal(git(["add", "-A"], repo.peer).code, 0);
+  assert.equal(git(["commit", "-qm", "records advance"], repo.peer).code, 0);
+  const pushed = git(["push", "-q", "origin", "main"], repo.peer);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  const target = git(["rev-parse", "HEAD"], repo.peer).stdout.trim();
+
+  // ...and the hook keeps appending while the advance is in flight.
+  const keptSeq = appendRecord(repo.dir, "local-5");
+  return { repo, target, keptSeq };
+}
+
+test("preflight: a working log that extends the committed one is synced, and up starts", () => {
+  const { repo, target, keptSeq } = afterRecordsAdvance();
+  const before = readFileSync(repo.logPath);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.equal(line.log_touched, true);
+  assert.equal(line.log_synced, true);
+  assert.equal(line.action, "fast-forward");
+
+  const sync = run.stdout
+    .split("\n")
+    .filter((text) => text.trim().startsWith("{"))
+    .map((text) => JSON.parse(text) as { event: string })
+    .find((event) => event.event === "preflight_sync") as
+    | { event: string; commit: string; kept: number; relation: string }
+    | undefined;
+  assert.ok(sync !== undefined, `no preflight_sync line in:\n${run.stdout}`);
+  assert.equal(sync.relation, "ahead");
+  assert.equal(sync.kept, 1);
+  assert.equal(sync.commit, target);
+
+  // The fast-forward landed, and the working chain came back byte for byte.
+  assert.equal(head(repo.dir), target);
+  assert.deepEqual(readFileSync(repo.logPath), before);
+  assert.equal(verify(repo.logPath).status, "clean");
+  const settled = verify(repo.logPath);
+  assert.equal(settled.status === "clean" ? settled.head?.seq : -1, keptSeq);
+});
+
+test("preflight: the sync line names the remote tip and how many local records it kept", () => {
+  const { repo } = afterRecordsAdvance();
+
+  const run = upOnce(repo, ["--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /synced: fast-forwarded to origin\/main [0-9a-f]{12}, kept 1 local records/u);
+});
+
+test("preflight: two chains that share a prefix and then differ are still refused", () => {
+  const repo = newChainRepo();
+  // The peer records a different decision on the same predecessor and advances.
+  appendRecord(repo.peer, "the other chain");
+  assert.equal(git(["add", "-A"], repo.peer).code, 0);
+  assert.equal(git(["commit", "-qm", "the other chain"], repo.peer).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.peer).code, 0);
+  // ...while this checkout records its own onto the very same predecessor.
+  appendRecord(repo.dir, "this chain");
+
+  const before = readFileSync(repo.logPath);
+  const at = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const refused = refusalOf(run);
+  assert.equal(refused.error.code, "up-preflight-log-diverged");
+  assert.equal(refused.error.next, "approval log sync");
+  assert.equal(refused.preflight.log_synced, false);
+
+  // A fork changes nothing: not the checkout, not the working log.
+  assert.equal(head(repo.dir), at);
+  assert.deepEqual(readFileSync(repo.logPath), before);
+});
+
+test("preflight: a held append lock refuses, starts nothing, and says which step stopped", () => {
+  const { repo } = afterRecordsAdvance();
+  const before = readFileSync(repo.logPath);
+  const at = head(repo.dir);
+  // The lockfile every appender takes, held by somebody else for the whole run.
+  writeFileSync(`${repo.logPath}.lock`, "", "utf8");
+
+  const run = upOnce(repo, ["--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /up-preflight-log-diverged/u);
+  assert.match(run.stderr, /log-sync-locked/u);
+  assert.doesNotMatch(run.stderr, /reset --hard/u);
+
+  assert.equal(head(repo.dir), at);
+  assert.deepEqual(readFileSync(repo.logPath), before);
+  rmSync(`${repo.logPath}.lock`, { force: true });
+});
+
+test("preflight: a dirty unrelated path the upstream range touches still refuses", () => {
+  const { repo } = afterRecordsAdvance();
+  // The advance also carried a README edit, and this checkout has its own.
+  writeFileSync(join(repo.peer, "README.md"), "# fixture, advanced\n", "utf8");
+  assert.equal(git(["add", "-A"], repo.peer).code, 0);
+  assert.equal(git(["commit", "-qm", "readme"], repo.peer).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.peer).code, 0);
+  writeFileSync(join(repo.dir, "README.md"), "# mine\n", "utf8");
+
+  const before = readFileSync(repo.logPath);
+  const at = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(refusalOf(run).error.code, "up-preflight-log-diverged");
+  assert.equal(head(repo.dir), at);
+  assert.deepEqual(readFileSync(repo.logPath), before);
+  assert.equal(readFileSync(join(repo.dir, "README.md"), "utf8"), "# mine\n");
+});
+
+test("doctor: main-behind-origin names the reconcile when the working log merely extends", () => {
+  const { repo } = afterRecordsAdvance();
+  // Doctor never fetches, so the remote-tracking ref is an operator's last one.
+  assert.equal(git(["fetch", "-q", "origin", "main:refs/remotes/origin/main"], repo.dir).code, 0);
+
+  const row = doctorRow(repo, fixtureRoot(false));
+  assert.equal(row.status, "pass");
+  assert.match(row.detail, /clean extension \(ahead, 1 local record\)/u);
+  assert.ok(row.fix !== undefined && row.fix.startsWith("approval up"));
 });

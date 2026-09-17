@@ -390,6 +390,13 @@ did left conflict markers inside the log mid-ceremony.
 So the ritual became deterministic code, on the `policy amend` precedent: when a
 hand-ritual proves dangerous, it becomes a verb the gate can read.
 
+**You rarely type it any more (APRV-346).** `approval up`'s preflight calls this
+function itself whenever the working log is a byte-for-byte extension of the
+committed one, which is the state every records advance leaves behind. What is
+left for a hand-run `approval log sync` is the fork: two chains that share a
+prefix and then carry different records at the same `seq`. See
+[up](#up) for what the preflight checks before it delegates.
+
 Everything runs inside ONE hold of the append lockfile. The lock is normally
 taken per append; here it spans the whole operation, because an append landing
 between the snapshot and the restore is exactly the interleaving that forks a
@@ -4539,13 +4546,15 @@ because `git status` does not say what the upstream range changed. So the verb
 does all four, and `approval daemon run` runs the identical preflight from the
 identical module, printing the identical two lines.
 
-It is allowed exactly three writes: a `--ff-only` merge, `npm run build`, and
+It is allowed exactly four writes: a `--ff-only` merge, `npm run build`,
 clearing an untracked `backlog/tasks/` file the incoming commit already contains
-out of the merge's way (APRV-300, described below). It
+out of the merge's way (APRV-300, described below), and the reconcile `approval
+log sync` performs on its behalf (APRV-346, described below). It
 never resets, never stashes, never checks anything out, and never touches the
-working log. That list is not caution for its own sake: a working `events.jsonl`
-rewound through git underneath a live appender is fork 2 of 2026-08-20, the
-incident `approval log sync` exists to prevent.
+working log itself. That list is not caution for its own sake: a working
+`events.jsonl` rewound through git underneath a live appender is fork 2 of
+2026-08-20, the incident `approval log sync` exists to prevent, which is why the
+one write that does move that file is made by that verb and by nothing here.
 
 **Safe** means both of: this checkout is not AHEAD of the remote, and no path the
 upstream range changes is locally modified. When it is safe, the preflight
@@ -4555,10 +4564,44 @@ running. When it is not, it refuses, and changes nothing:
 | code | fires when | next |
 |---|---|---|
 | `up-preflight-behind-ahead` | `origin/<branch>..HEAD` is non-empty: this checkout carries commits the remote has never seen. A fast-forward is not the operation for that state, and choosing a side is a decision. | look at them (`git log --oneline origin/main..HEAD`), then push them or `git reset --keep` |
-| `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
+| `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, this working copy has uncommitted changes to one of them, and the two chains are **not** in a prefix relationship (or cannot be compared at all). The judgment a human could not make by eye. A working log that merely extends the committed one is reconciled instead, see below. | `approval log sync` |
 | `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
 | `up-preflight-task-file-conflict` | an untracked file under `backlog/tasks/` stopped the fast-forward and it holds lines the incoming copy does not. Which version is wanted is a question, and no verb here will pick. | read the two copies, move yours aside, run `approval up` again |
 | `up-preflight-failed` | a write the preflight attempted did not complete: the fast-forward, or the rebuild. Not a judgment, so it is not in the union above; the message names the step, and for a build it names the exit code `npm run build` came back with. | `npm run build` to see the whole error, or `approval up --no-build` if you mean to run the stale one |
+
+**A working log that merely extends the committed one is reconciled, not
+refused (APRV-346).** Every records advance moves `origin/main`'s
+`.approval/log/events.jsonl` while the hook keeps appending locally, so
+"upstream changed the log and so did this working copy" is the normal state of
+the primary checkout after a merge. Refusing it sent the operator to `approval
+log sync` and then back to `approval up`, every time. So the collision is a
+question now: `core/log-reconcile.ts` — the same comparison `log sync` and
+doctor's `log-drift` row use — is asked how the working chain stands to the
+committed chain at the fetched tip, and:
+
+- **`ahead`, `behind` or `equal`** — one chain contains the other whole, so
+  adopting the longer one extends and rewinds nothing. The preflight calls
+  `approval log sync` itself, which holds the append lock for its whole ceremony
+  (snapshot, baseline, fast-forward, reconcile, rebuild the projections,
+  post-verify), and prints one line: `synced: fast-forwarded to origin/main
+  <sha>, kept K local records`. The `--json` stream carries it as a
+  `preflight_sync` event and the `preflight` line's `log_synced` reads true.
+  Nothing here reimplements any of that ceremony; it supplies a caller for it;
+- **`diverged`** — two appenders built different records on one predecessor.
+  Hash chains do not merge, so this is the `up-preflight-log-diverged` refusal
+  above, unchanged, and it is now the **only** case that needs a hand-run
+  `approval log sync` (which will tell you the same thing, at more length).
+
+Four conditions have to hold before the reconcile is even offered, and each of
+them answers "refuse" rather than "probably fine": the log is the repository's
+own `.approval/log/events.jsonl` (not some other file named with `--log`), no
+*other* path the upstream range touches is locally modified, both chains verify
+clean, and the relation is a prefix one. A `log sync` that refuses anyway — an
+appender that took the lock first (`log-sync-locked`), a fork that landed
+between the read and the ceremony, a git failure — comes back as the same
+`up-preflight-log-diverged` refusal with the sync's own code and sentence in
+YOUR STATE. Nothing starts, and the working log is exactly as `log sync` found
+it.
 
 **An untracked task file no longer stops it (APRV-300).** A lane files
 `backlog/tasks/aprv-299` on its branch and its pull request merges, while the

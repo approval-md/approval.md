@@ -86,6 +86,18 @@ against the same bot, or run two instances polling that bot: Telegram returns
 HTTP 409. Stop the polling runtime before rerunning `approval setup channel
 telegram`, then reload the environment and start `up` again.
 
+`up` runs a preflight before it starts anything: it fetches, fast-forwards when
+the upstream range is safe, and rebuilds when `dist/` is older than `src/`. When
+the log directory lives in that checkout, a pull that changes
+`.approval/log/events.jsonl` while this copy has appended to it is the routine
+state rather than an incident, so the preflight reconciles it through `approval
+log sync` itself and prints one line saying what it fast-forwarded to and how
+many local records it kept. The one case left for a hand-run `approval log
+sync` is a genuine fork: two chains that share a prefix and then carry different
+records at the same `seq`. Hash chains do not merge, so `up` refuses
+`up-preflight-log-diverged` there, changes nothing, and leaves the decision to
+you.
+
 By default the daemon scans `backlog/tasks/`. If your envelopes live elsewhere,
 use `approval up --tasks /path/to/existing/task-folder`. The scan reads `.md`
 files directly inside that folder, without descending into subdirectories.

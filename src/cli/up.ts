@@ -208,6 +208,7 @@ export function describeUpEvent(
     // in the words they use for the same fact.
     case "preflight":
     case "preflight_warning":
+    case "preflight_sync":
       return describePreflightEvent(event);
     case "up_started":
       return {
