@@ -269,5 +269,93 @@ scope.
 
 ## Broker session activation (Lane 4a)
 
-<!-- Reserved for the policy-bound workspace broker's activation steps
-     (APRV-325.2, 325.3). Left empty deliberately. -->
+This is a **different boundary** from the trust ceremony above, and the two
+prove different things. Everything before this section is about the native
+Codex hook and the Telegram transport: that a tap happened, that a rejection and
+an approval reached a person, that the log recorded both. None of that is
+evidence about enforcement. This section is the enforcement half: the workspace
+broker (APRV-325.2) and the confined session (APRV-325.3). A green trust
+ceremony with no broker enforces nothing, and a working broker with no Telegram
+proves nothing about whether a decision can reach a human. Keep the two claims
+apart when you write either one up.
+
+Reference: `docs/codex-workspace-broker.md` for the broker,
+`docs/codex-enforced-session.md` for the room and what it does not cover.
+
+Human-only steps are marked. Nothing an agent runs performs them.
+
+1. **(human)** Install the package and the reviewed bundle under a root-owned
+   install root, per `approval codex prepare` and `setup --check`. No install
+   script does this; a person or an MDM workflow does.
+2. **(human)** Create the three service principals the manifest names.
+3. Verify the host. It fails closed, and every finding is a reason not to
+   activate:
+
+   ```sh
+   approval codex doctor --strict --manifest /opt/approval/instance.json --json
+   ```
+
+   `trusted-path-acl-unproven` is reported unconditionally, because POSIX
+   ownership and mode say nothing about ACLs.
+
+4. Verify the room. With no `--` it reports and runs nothing, so an operator
+   checking a host does not have to start Codex to learn whether it can host a
+   confined session:
+
+   ```sh
+   approval codex start --manifest /opt/approval/instance.json --json
+   ```
+
+   Expect `"egress":"denied"`, a `write_allow` of exactly one path, and that
+   path not being the canonical workspace. An unsupported host refuses here with
+   `sandbox-unsupported` rather than running the shell and calling it confined.
+
+5. **(human)** Point the Codex host at the strict server, whose invocation the
+   manifest pins:
+
+   ```sh
+   approval codex serve --manifest /opt/approval/instance.json
+   ```
+
+   It publishes exactly one tool, `codex_workspace_apply`. **Do not add the
+   broad `approval mcp serve` beside it** — that server's catalog is the whole
+   verb registry and includes `run`, which is the surface the broker exists to
+   replace.
+
+6. Run the session's shell work through the room:
+
+   ```sh
+   approval codex start --manifest /opt/approval/instance.json -- <command>
+   ```
+
+### Roll back the broker session
+
+Subtraction, and it needs no new state.
+
+1. Stop `codex serve` and stop starting shells through `codex start`. Each
+   session's disposable workspace is removed when the session ends, so there is
+   nothing to clean up.
+2. **(human)** Remove the Codex host's MCP entry pointing at the strict server.
+3. If a brokered change was interrupted:
+
+   ```sh
+   approval codex recover --manifest /opt/approval/instance.json --json
+   ```
+
+   It reports `before`, `after` or `mixed` and **repairs nothing**. Exit 1 means
+   `mixed`: neither the approved before-state nor the approved after-state, and
+   a person's to resolve with `approval execution reconcile`. Rolling it forward
+   would guess which half was approved; rolling it back would delete the half
+   that committed.
+4. **(human)** Nothing under `.approval/` or `APPROVAL.md` is touched by any of
+   this, so there is no policy to restore. The log keeps every brokered change
+   that happened, which is the point.
+
+### What this activation does not buy
+
+Read scoping is not part of it: the room denies writes and egress, and a
+confined shell can still read what the host can read. The confinement covers
+processes this runtime spawns and their descendants, on macOS; a Codex desktop
+application a person starts **outside** `codex start` is not in the room, and
+`docs/codex-boundary-probe.md` holds what was measured about it. Linux refuses
+rather than running unconfined. Inbound sockets are not denied.
