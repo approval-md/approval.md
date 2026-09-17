@@ -1,0 +1,1 @@
+{"command":"gh pr checks 424 --watch --interval 30 2>&1 | tail -15; echo \"CHECKS_EXIT=$?\"; gh api graphql -f query='{ repository(owner:\"approval-md\",name:\"approval.md\"){ pullRequest(number:424){ isInMergeQueue mergeStateStatus state autoMergeRequest{enabledAt} } } }'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a0db4839fa9a9152f"}
