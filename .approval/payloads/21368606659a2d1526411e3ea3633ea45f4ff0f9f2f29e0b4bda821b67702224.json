@@ -1,0 +1,1 @@
+{"command":"gh pr update-branch 406 2>&1 | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

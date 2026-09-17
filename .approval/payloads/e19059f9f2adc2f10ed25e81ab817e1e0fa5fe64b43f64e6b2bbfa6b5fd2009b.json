@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"docs: broker session activation and the APRV-325 boundary report\" --body-file /tmp/lane4a-pr3.md --base main --head lane/codex-325-closeout 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

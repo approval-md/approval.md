@@ -1,0 +1,1 @@
+{"command":"git add src/cli/help.ts && git status --short && git commit -q -F \"/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-gated-messages-approval-60aa72/b8b9b5db-43e2-4a69-9da3-d3c266a2098e/scratchpad/msg-fix.txt\" && git push 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a636a95f43005acb7"}

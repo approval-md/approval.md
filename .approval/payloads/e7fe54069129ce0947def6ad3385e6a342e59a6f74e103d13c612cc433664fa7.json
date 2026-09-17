@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"Policy and gate ergonomics: up auto-syncs, amend --pr, attested-policy-on-main, policy apply (APRV-346, 341, 342, 343)\" --body-file /tmp/lane1-pr.md 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40e78016667c572b"}
