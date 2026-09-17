@@ -148,12 +148,28 @@ harness. `--as agent:<id>` overrides it.
 ## What is gated
 
 The same tools Claude Code's adapter gates, because Grok's tool names follow
-Claude Code's: `Bash` for shell, and `Edit` / `Write` / `MultiEdit` /
-`NotebookEdit` for file writes. **This half is unverified**: it follows from
-Grok Build's documentation and from the compatibility read, not from an
-observed session. The probe records the tool names an actual Grok session
-sends, and this list is corrected to match before the register entry moves from
-parked.
+Claude Code's:
+
+- `Bash` for shell;
+- `Edit` / `Write` / `MultiEdit` / `NotebookEdit` for file writes;
+- `Read` / `Glob` / `Grep` for reads, scoped by APRV-347's read jail.
+
+A read inside the read roots keeps the pass-through allow it has always had. A
+read outside them resolves `read.file.out_of_scope` through the policy like any
+other class, which on this harness means a `{"decision":"deny"}` at **exit 2**.
+A `Glob` or `Grep` carrying no path names no file and stays ungated.
+
+Both directions of the read-tool guess are safe in the way APRV-347 makes them
+safe. A name listed here that Grok never sends is inert: an unmatched tool
+takes the path it took before. A name Grok sends that is NOT listed would be an
+unscoped read, so the wider Claude Code set is the fail-closed guess. And a
+read that arrives as a shell command through `Bash` is scoped by the classifier
+regardless, which is the floor under all of it.
+
+**The tool lists are unverified**: they follow from Grok Build's documentation
+and from the compatibility read, not from an observed session. The probe
+records the tool names an actual Grok session sends, and both lists are
+corrected to match before the register entry moves from parked.
 
 Anything else passes through with `is not a gated tool`, at exit 0.
 
@@ -191,4 +207,8 @@ stale-confident documentation this project exists to avoid.
 - `docs/integrations-considered.md` — the register entry, parked until AC1.
 - `scripts/probes/grok-build-hook.mjs` — the read-only probe for AC1.
 - `tests/cli-hook-grok.test.ts` — allow, deny at exit 2, unparseable input,
-  post-event no-op, dialect precedence, and the `policy.core` path rule.
+  post-event no-op, dialect precedence, the read jail, and the `policy.core`
+  path rule.
+- `conformance/vectors/hook-read-scope.v1.json` — the six `grok-*` vectors,
+  which pin the exit code as well as the verdict, because a Grok deny printed
+  at exit 0 is read by that harness as an allow.

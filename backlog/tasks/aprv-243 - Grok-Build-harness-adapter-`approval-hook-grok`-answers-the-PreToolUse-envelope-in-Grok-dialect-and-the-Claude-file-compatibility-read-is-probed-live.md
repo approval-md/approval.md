@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-02 21:10'
-updated_date: '2026-09-17 01:58'
+updated_date: '2026-09-17 04:32'
 labels: []
 dependencies: []
 references:
@@ -70,4 +70,16 @@ Verification, all from a clean worktree, nothing run against the primary. Build,
 ACs 2, 3 and 5 checked. AC4 checked on the documentation clause, which it fully meets, with the SPEC row declined on the criterion's own condition and the proposed hunk left for the human. AC1 unchecked, runbook section 7. Task stays In Progress.
 
 Delivered in pull request #414 (lane/closeouts), auto-merge armed; all three full-gate shards green.
+
+Read-jail collision, resolved 2026-09-17. APRV-347 landed on main while this lane was open and made readTools a REQUIRED member of the harness adapter, with a read-tool gate parallel to the file-tool gate. The GROK_ADAPTER predated it and the merge-group build failed TS2741. Merged main into the lane and gave the adapter its list.
+
+The choice, stated because it is a guess and not an observation: Read, Glob and Grep, mirroring the claude-code adapter rather than the smaller Cursor set. The reason is the same one that decided the file-tool list, and it is the harness's own documentation plus the compatibility read: this harness's tool vocabulary follows Claude Code's, and it reads .claude/settings.json, so the names a session sends are the names that file matches on. Both directions of the guess are safe in the way APRV-347 makes them safe. A name listed that the harness never sends is inert, because an unmatched tool takes the path it took before. A name the harness sends that is NOT listed would be an unscoped read, so the wider set is the fail-closed guess. And a read arriving as a shell command is scoped by the classifier regardless, which is the floor. The list is unverified like the file-tool list beside it, docs/grok-hook.md says so, and the live probe corrects both before the register entry moves from parked.
+
+The deny path needed no new code: an out-of-scope read routes into the ordinary gated path, resolves read.file.out_of_scope through the policy, and is answered by the same deny helper, so it comes out in the dialect with exit 2 by construction. A test and six conformance vectors pin that rather than trusting it.
+
+Conformance: six grok vectors added to hook-read-scope, suite version 1.1.0, a MINOR bump since no existing expectation moved. grok-read-inside-allows, grok-read-outside-denies, grok-grep-outside-denies, grok-glob-no-path-allows, grok-shell-read-outside-denies, and grok-malformed-input-denies as a negative control. The executor in tests/conformance-harness.ts now sends the camelCase envelope for this harness, because a vector sent snake_case would pass through the adapter's snake_case-first fallback and prove nothing about the dialect, and it ASSERTS THE EXIT CODE against the verdict: deny is 2, allow is 0. A runner whose deny exits 0 has emitted something this harness reads as an allow, and it fails these vectors. The manifest was regenerated; hook-read-scope is now 20 vectors with 4 negative controls.
+
+Also added a read-jail case to tests/cli-hook-grok.test.ts and reserved read.file.out_of_scope to human hands in that file's fixture policy, for the same reason the conformance fixture does: human-only is the one autonomy whose refusal is immediate and total, so the case measures routing without standing up a channel and a timeout. The pass-through case moved off Read, which is now a gated tool, onto a name in none of the three lists.
+
+Verification after the merge: build, typecheck and lint each exit 0. node scripts/run-tests.mjs over conformance, conformance-regen, all six hook suites, hook-module-graph, harness-version, command-class, the three help suites, the three doctor suites, docs-guard, classify-tier, ci-guard and this lane's own suites: 1,023 tests, 1,023 pass, 0 fail, 0 skipped, exit 0.
 <!-- SECTION:NOTES:END -->

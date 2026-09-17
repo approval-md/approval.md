@@ -518,6 +518,26 @@ const GROK_ADAPTER: HarnessAdapter = {
   defaultActor: "agent:grok",
   shellTool: "Bash",
   fileTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"],
+  // Claude Code's three path-carrying readers, for the same reason the file
+  // tools are Claude Code's: Grok Build's tool vocabulary follows Claude
+  // Code's, and it READS `.claude/settings.json` for compatibility, so the
+  // names a Grok session sends are the names that file matches on. The
+  // asymmetry with Cursor is deliberate — Cursor documents its own smaller set,
+  // Grok documents Claude's.
+  //
+  // Both directions of the guess are safe in the way APRV-347 makes them safe.
+  // A read tool listed here that Grok never sends is INERT: an unmatched tool
+  // takes the path it took before. A read tool Grok sends that is NOT listed
+  // would be an unscoped read, which is the direction that matters, so the
+  // wider Claude set is the fail-closed guess. And a Grok read that arrives as
+  // a shell command through `Bash` is scoped by the classifier regardless,
+  // which is the floor under all of this.
+  //
+  // UNVERIFIED, like the file-tool list beside it, and `docs/grok-hook.md`
+  // says so: the live probe of APRV-243 AC1 records the tool names an actual
+  // session sends, and both lists are corrected to match before the register
+  // entry moves from parked.
+  readTools: ["Read", "Glob", "Grep"],
   camelCaseEnvelope: true,
 };
 

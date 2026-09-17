@@ -844,6 +844,42 @@ const readScopeVectors = [
     input: { harness: "codex", tool: "Bash", target: "inside", malformed: true },
     control: true,
   },
+  // --- Grok Build (APRV-243) -------------------------------------------------
+  // The camelCase envelope, and the one harness where the EXIT CODE is the
+  // verdict: the executor asserts deny at exit 2 and allow at exit 0, because a
+  // deny printed at exit 0 is read by Grok as an allow.
+  {
+    id: "grok-read-inside-allows",
+    description: "the camelCase envelope, inside the scope",
+    input: { harness: "grok", tool: "Read", target: "inside" },
+  },
+  {
+    id: "grok-read-outside-denies",
+    description:
+      "a Read outside every read root, in Grok dialect: the deny is {decision,reason} at exit 2",
+    input: { harness: "grok", tool: "Read", target: "outside" },
+  },
+  {
+    id: "grok-grep-outside-denies",
+    description: "Grok's tool vocabulary follows Claude Code's, so Grep is a read target too",
+    input: { harness: "grok", tool: "Grep", target: "outside" },
+  },
+  {
+    id: "grok-glob-no-path-allows",
+    description: "a Glob carrying no path names no file, so it stays not-a-gated-tool",
+    input: { harness: "grok", tool: "Glob", target: "absent" },
+  },
+  {
+    id: "grok-shell-read-outside-denies",
+    description: "the shell reader takes the same class as the read tool, in Grok dialect",
+    input: { harness: "grok", tool: "Bash", target: "outside" },
+  },
+  {
+    id: "grok-malformed-input-denies",
+    description: "unparseable input on the Grok envelope, denied at exit 2",
+    input: { harness: "grok", tool: "Read", target: "inside", malformed: true },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -1406,11 +1442,15 @@ const SUITES = [
   {
     file: "hook-read-scope.v1.json",
     suite: "hook-read-scope",
-    vectors_version: "1.0.0",
+    // 1.1.0 (APRV-243): a MINOR bump. The six `grok-*` vectors are new and no
+    // existing expectation moved; the Grok dialect did not exist when 1.0.0
+    // was written, so nothing that passed 1.0.0 fails 1.1.0 except an
+    // implementation that claims the harness and answers it wrongly.
+    vectors_version: "1.1.0",
     algorithm:
       "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
     description:
-      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen.",
+      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors.",
     vectors: readScopeVectors,
   },
 ];

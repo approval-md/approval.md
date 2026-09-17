@@ -78,6 +78,12 @@ const POLICY = [
   "classes:",
   "  read.*:",
   "    autonomy: autonomous",
+  // APRV-347's class, reserved here for the same reason the conformance
+  // fixture reserves it: human-only is the one autonomy whose refusal is
+  // immediate and total, so a case can measure the ROUTING without also
+  // standing up a channel, a daemon and a timeout.
+  "  read.file.out_of_scope:",
+  "    autonomy: human-only",
   "  files.write.workspace:",
   "    autonomy: autonomous",
   "  vcs.commit.branch:",
@@ -272,11 +278,53 @@ test("snake_case is still read, and it wins when both spellings are present", ()
 test("a tool this hook does not gate passes through at exit 0", () => {
   const dir = ready();
   const before = rawLog(dir);
-  const run = runCli(["hook", "grok"], dir, event({ toolName: "Read", toolInput: { path: "x" } }));
+  // A name in neither the shell, file nor read list. `Read` stopped being such
+  // a name at APRV-347, which is what the next case is about.
+  const run = runCli(
+    ["hook", "grok"],
+    dir,
+    event({ toolName: "WebFetch", toolInput: { url: "https://example.invalid" } }),
+  );
   const verdict = verdictOf(run);
   assert.equal(verdict.decision, "allow");
   assert.match(verdict.reason, /is not a gated tool/u);
   assert.equal(rawLog(dir), before);
+});
+
+test("the read jail applies in Grok dialect: inside allows, outside denies at exit 2", () => {
+  const dir = ready();
+
+  // APRV-347 gave every adapter a read-tool list, and Grok's mirrors Claude
+  // Code's because its tool vocabulary does. A read inside the gate root keeps
+  // the pass-through allow it always had.
+  const inside = runCli(
+    ["hook", "grok"],
+    dir,
+    event({ toolName: "Read", toolInput: { file_path: join(dir, "APPROVAL.md") } }),
+  );
+  const insideVerdict = verdictOf(inside);
+  assert.equal(insideVerdict.decision, "allow");
+  assert.match(insideVerdict.reason, /is not a gated tool/u);
+
+  // Outside every read root it resolves under read.file.out_of_scope, which
+  // this fixture leaves to the manual default, so the answer is a deny — and on
+  // this harness a deny must arrive at exit 2 or Grok reads it as an allow.
+  // `verdictOf` asserts that pairing for every case in this file.
+  const outside = runCli(
+    ["hook", "grok"],
+    dir,
+    event({ toolName: "Read", toolInput: { file_path: "/etc/hosts" } }),
+  );
+  assert.equal(verdictOf(outside).decision, "deny");
+  assert.equal(outside.code, 2);
+
+  // A Glob with no path names no file, so it is not a read target at all.
+  const glob = runCli(
+    ["hook", "grok"],
+    dir,
+    event({ toolName: "Glob", toolInput: { pattern: "**/*.ts" } }),
+  );
+  assert.equal(verdictOf(glob).decision, "allow");
 });
 
 test("the post-execution event is a no-op that exits 0, because exit 2 would be a verdict", () => {
