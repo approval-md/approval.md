@@ -1,0 +1,1 @@
+{"command":"git push 2>&1 | tail -2 && git log --oneline -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a0db4839fa9a9152f"}
