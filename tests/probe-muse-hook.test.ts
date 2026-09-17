@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 // The probe is plain Node ESM on purpose: an operator runs it straight from a
 // checkout, before any build. Its exports are exercised here without adding a
@@ -43,7 +44,31 @@ const {
   trialArtifact: (trial: string) => string;
 };
 
+/**
+ * The suite's OWN pointer file, and the reason this is not the real one.
+ *
+ * `--setup` writes a breadcrumb so `--report` can find the scratch directory
+ * from any working directory. The first version of this suite let it write the
+ * real breadcrumb under the system temp root, which is shared with whatever the
+ * operator is doing: a test run during Carter's live probe session on
+ * 2026-09-18 repointed his `--arm` at a test directory mid-run, so the trial he
+ * armed landed nowhere and that round of the probe proved nothing.
+ *
+ * So the suite redirects the pointer into its own temp directory and removes
+ * every directory it creates. A test that can disturb a live run is a test that
+ * will, eventually, on the worst possible day.
+ */
+const POINTER_DIR = mkdtempSync(join(tmpdir(), "approval-muse-probe-test-"));
+const TEST_POINTER = join(POINTER_DIR, "pointer.json");
+process.env["APPROVAL_MUSE_PROBE_POINTER"] = TEST_POINTER;
+
 const created: string[] = [];
+
+after(() => {
+  for (const root of created.splice(0)) rmSync(root, { recursive: true, force: true });
+  rmSync(POINTER_DIR, { recursive: true, force: true });
+  delete process.env["APPROVAL_MUSE_PROBE_POINTER"];
+});
 
 /** Run `--setup` capturing its output, and remember the scratch root for cleanup. */
 function runSetup(extra: string[] = []): { out: string; state: string; project: string; root: string } {
@@ -52,7 +77,7 @@ function runSetup(extra: string[] = []): { out: string; state: string; project: 
     out += text;
   });
   assert.equal(code, 0);
-  const pointer = JSON.parse(readFileSync(probe.POINTER as string, "utf8")) as {
+  const pointer = JSON.parse(readFileSync(TEST_POINTER, "utf8")) as {
     state: string;
     project: string;
     root: string;
@@ -310,6 +335,101 @@ test("each armed trial fires once, then disarms", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Post events and bookkeeping tools (observed 2026-09-18)
+// ---------------------------------------------------------------------------
+
+test("a PostToolUse event is recorded but answered with nothing at all", () => {
+  try {
+    const { state } = runSetup();
+    const result = runRecord(
+      state,
+      envelope({ hook_event_name: "PostToolUse", tool_response: "{\"exit_code\":0}" }),
+    );
+    // Muse rejects a permission verdict on a post event ("unsupported
+    // `permission_decision` in output"), and a rejected hook is a FAILED hook,
+    // which fails open. Printing nothing is the only safe answer.
+    assert.equal(result.out, "", "no verdict is printed on a post event");
+    assert.equal(result.code, 0);
+    const captured = readFileSync(join(state, "envelopes.jsonl"), "utf8");
+    assert.match(captured, /PostToolUse/u, "the event is still recorded");
+  } finally {
+    cleanup();
+  }
+});
+
+test("post events and bookkeeping tools never consume an armed trial", () => {
+  try {
+    const { state } = runSetup();
+    arm(["node", "muse-hook.mjs", "--arm", "deny-nested", "--state", state], () => {});
+
+    // Muse fires PreToolUse for `submit_reminder_decision` many times a turn
+    // (100 of the 139 captured events). If either of these consumed the arm,
+    // the trial would land on a call that was never the one under test.
+    // A bookkeeping PRE event still gets the ordinary guard verdict — Muse
+    // expects an answer — but it must not spend the armed trial.
+    const bookkeeping = runRecord(state, envelope({ tool_name: "submit_reminder_decision" }));
+    assert.ok(bookkeeping.out.length > 0, "a pre event is still answered");
+    assert.ok(
+      Object.keys(JSON.parse(bookkeeping.out) as Record<string, unknown>).length > 1,
+      "and it is the ordinary verdict, not the single-dialect trial payload",
+    );
+    runRecord(state, envelope({ hook_event_name: "PostToolUse" }));
+
+    // The arm is still loaded, so it lands on the next real pre event.
+    const real = runRecord(state, envelope({ tool_name: "write_file" }));
+    const parsed = JSON.parse(real.out) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(parsed), ["hookSpecificOutput"], "exactly one dialect");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Deny-dialect trials: exactly one form of no per trial
+// ---------------------------------------------------------------------------
+
+test("each deny-dialect trial emits exactly one dialect and nothing else", () => {
+  try {
+    const { state } = runSetup();
+
+    const shapes: Record<string, { keys: string[]; code: number }> = {
+      "deny-nested": { keys: ["hookSpecificOutput"], code: 0 },
+      "deny-snake": { keys: ["permission_decision", "permission_decision_reason"], code: 0 },
+      "deny-block": { keys: ["decision", "reason"], code: 0 },
+    };
+
+    for (const [trial, expected] of Object.entries(shapes)) {
+      arm(["node", "muse-hook.mjs", "--arm", trial, "--state", state], () => {});
+      const result = runRecord(state, envelope({ tool_name: "write_file" }));
+      const parsed = JSON.parse(result.out) as Record<string, unknown>;
+      assert.deepEqual(
+        Object.keys(parsed).sort(),
+        expected.keys.sort(),
+        `${trial} must print one dialect only: mixing them made Muse fail open`,
+      );
+      assert.equal(result.code, expected.code, `${trial} exit code`);
+    }
+
+    // exit 2 with NO stdout is its own dialect.
+    arm(["node", "muse-hook.mjs", "--arm", "deny-exit2", "--state", state], () => {});
+    const exit2 = runRecord(state, envelope({ tool_name: "write_file" }));
+    assert.equal(exit2.out, "", "deny-exit2 prints nothing on stdout");
+    assert.equal(exit2.code, 2);
+
+    // deny-exit0 is the full superset, kept as the control that failed open.
+    arm(["node", "muse-hook.mjs", "--arm", "deny-exit0", "--state", state], () => {});
+    const exit0 = runRecord(state, envelope({ tool_name: "write_file" }));
+    assert.equal(exit0.code, 0);
+    assert.ok(
+      Object.keys(JSON.parse(exit0.out) as Record<string, unknown>).length > 1,
+      "deny-exit0 is the mixed-dialect control",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // --report
 // ---------------------------------------------------------------------------
 
@@ -334,7 +454,10 @@ test("report leads with the model line and answers each question", () => {
 
     assert.match(out.split("\n")[0] ?? "", /^MODEL REPORTED: muse-spark-1\.3$/u, "line 1 is the model");
     assert.match(out, /FIRED {2}\.muse\/hooks\.json/u, "the config that fired is named");
-    assert.match(out, /silent {2}\.muse\/settings\.json/u, "the ones that did not are named too");
+    // The two candidates that never fired on 2026-09-18 were deleted rather
+    // than left standing: a disproved guess is noise in the next report.
+    assert.equal(out.includes(".muse/settings.json"), false);
+    assert.equal(out.includes(".muse/hooks/hooks.json"), false);
     assert.match(out, /PRESENT under: cwd/u, "the per-call working directory is reported");
     assert.match(out, /Bash/u);
     assert.match(out, /Write/u);

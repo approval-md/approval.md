@@ -2677,6 +2677,33 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "hook",
+    subcommand: "muse",
+    purpose:
+      "Read one Meta Muse Code PreToolUse or PostToolUse event on stdin (snake_case), classify its bash command or its write_file, read_file and search paths, resolve the class against APPROVAL.md, and answer allow or deny — waiting on a real decision when the class is manual. THE VERDICT IS NEVER 'ask'. It answers in ONE dialect and nothing else, the nested permissionDecision object at exit 0, because Muse treats output carrying any unsupported key as a failed hook and a failed hook FAILS OPEN. A Contributor-tier model is refused for every tool call regardless of policy (hook-muse-contributor-model): Meta trains on that tier's prompts and completions, so every read is a disclosure. Muse fails open on hook crash, timeout and malformed output, so this is enforcement only while the hook is healthy and answers inside the timeout the human commits.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: Muse invokes it around the agent's own tool calls. It proposes and waits; it never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        "--retry-grace": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the PreToolUse verdict (allow OR deny) is the JSON object on stdout, or a reported PostToolUse counterpart landed" },
+      { code: 2, meaning: "the hook is misconfigured or a PostToolUse outcome was not recorded; the diagnostic is on stderr" },
+    ],
+  },
+
+  {
+    name: "hook",
     subcommand: "classify",
     purpose:
       "Print what the classifier makes of a command line: the segments it split it into, the class it assigned each, and the rule that decided. Reads no log, resolves no policy, writes nothing. The classifier is best effort and is not scheming-robust; it reads the command text and never the agent's own description of it.",

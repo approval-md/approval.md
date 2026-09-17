@@ -695,6 +695,13 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
     // Self-reported and deliberately wrong: a conforming runtime resolves
     // the scope from its own directory (SPEC.md §11.1 invariant 4).
     cwd: "/somewhere/else",
+    // APRV-350. Muse refuses every tool call on a Contributor-tier model, so
+    // its ordinary vectors must name a Standard one or they would all measure
+    // the guard instead of the read scope. `contributor_model: true` is how a
+    // vector asks to measure the guard on purpose.
+    ...(harness === "muse"
+      ? { model: input["contributor_model"] === true ? "muse-spark-1.3-contributor" : "muse-spark-1.3" }
+      : {}),
     ...(camelCase
       ? {
           sessionId: "conformance-read-scope",
@@ -766,8 +773,26 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
 function readScopeInput(input: Record<string, unknown>, dir: string): Record<string, unknown> {
   const tool = str(input, "tool");
   const target = readScopeTarget(str(input, "target"), dir);
-  if (tool === "Bash" || tool === "Shell") {
-    return { command: target === null ? "ls" : `cat ${target}` };
+  if (tool === "Bash" || tool === "Shell" || tool === "bash") {
+    // APRV-350: Muse's shell tool carries the PER-CALL working directory
+    // beside the command, which is the directory the classifier must resolve
+    // relative paths against.
+    return {
+      command: target === null ? "ls" : `cat ${target}`,
+      ...(tool === "bash" ? { workdir: dir } : {}),
+    };
+  }
+  // APRV-350: Muse's own read tools. `read_file` names one path; `search`
+  // names an ARRAY under `paths`, which is the shape a live session was
+  // observed reaching outside the workspace with.
+  if (tool === "read_file") return target === null ? { limit: 5 } : { path: target, limit: 5 };
+  if (tool === "search") {
+    return target === null
+      ? { pattern: "needle", output_mode: "text" }
+      : { pattern: "needle", output_mode: "text", paths: [target] };
+  }
+  if (tool === "write_file") {
+    return { path: target ?? "probe.txt", content: "x\n" };
   }
   if (target === null) return { pattern: "**/*.ts" };
   return tool === "Read" ? { file_path: target } : { pattern: "**/*.ts", path: target };

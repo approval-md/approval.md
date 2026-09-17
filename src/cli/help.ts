@@ -1498,7 +1498,7 @@ ${why("quickstart")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor|codex|grok [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex|grok|muse [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
@@ -1506,9 +1506,9 @@ Commands:
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
   codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   grok         Grok Build camelCase Pre/PostToolUse JSON in; {decision,reason} out, DENY IS EXIT 2. \`approval hook grok --help\` prints the config
+  muse         Muse Code snake_case Pre/PostToolUse; ONE dialect out or it fails open. \`approval hook muse --help\` prints the config
   classify     print what the classifier makes of a command line and exit
-
-  --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex / agent:grok)
+  --as <id>        proposing identity (default agent:<harness>)
   --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
@@ -1516,7 +1516,7 @@ Commands:
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
@@ -1545,6 +1545,32 @@ mid-wait and, failing open, runs the command while a human is still deciding.
 .grok/hooks/ classifies policy.core, like .cursor/hooks.json.
 
 ${EXIT_CODES_POINTER} (0 allow, 2 deny; never "ask")
+${why("hook")}`;
+
+export const HOOK_MUSE_HELP = `approval hook muse — the gate in front of Meta Muse Code (APRV-350)
+
+Usage:
+  approval hook muse [--as agent:<id>] [--timeout <d>] [--interval <d>]
+                     [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+snake_case in (hook_event_name, tool_name, tool_input, cwd, model); ONE dialect
+out, nested {"hookSpecificOutput":{"permissionDecision":…}} at exit 0, never
+"ask". Tools: bash (per-call workdir), write_file, read_file, search.
+
+READ docs/muse-hook.md FIRST. Muse fails OPEN on hook crash, timeout and
+malformed output — and output MIXING dialects is itself malformed, so a payload
+satisfying every harness at once satisfies this one not at all.
+CONTRIBUTOR MODELS ARE REFUSED (hook-muse-contributor-model) on every tool call
+regardless of policy: Meta trains on that tier. The guard stops tool calls; it
+cannot recall a prompt already sent.
+The file the human commits, .muse/hooks.json (no "matcher"; policy.core):
+  {"hooks":{"PreToolUse":[{"hooks":[
+    {"type":"command","command":"approval hook muse --dir <repo>",
+     "timeout": 600}]}],"PostToolUse":[{"hooks":[
+    {"type":"command","command":"approval hook muse --dir <repo>",
+     "timeout": 600}]}]}}
+That "timeout" MUST EXCEED --timeout (9m), or Muse abandons the call mid-wait
+and, failing open, runs it while a human is still deciding.
+${EXIT_CODES_POINTER} (0 for every verdict; deny is the body, not the code)
 ${why("hook")}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy

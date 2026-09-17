@@ -107,10 +107,10 @@ test("readHarnessProvenance needs both halves and a kind this build knows", () =
 });
 
 test("the harness kind set and the binary map are the same list", () => {
-  // `grok` since APRV-243. The list is pinned literally on purpose: adding a
-  // harness is adding a protocol this runtime claims to speak, and it should
-  // cost a deliberate edit here.
-  assert.deepEqual([...HARNESS_KINDS], ["claude-code", "cursor", "codex", "grok"]);
+  // `grok` since APRV-243, `muse` since APRV-350. The list is pinned literally
+  // on purpose: adding a harness is adding a protocol this runtime claims to
+  // speak, and it should cost a deliberate edit here.
+  assert.deepEqual([...HARNESS_KINDS], ["claude-code", "cursor", "codex", "grok", "muse"]);
   assert.deepEqual(Object.keys(HARNESS_BINARY).sort(), [...HARNESS_KINDS].sort());
   for (const kind of HARNESS_KINDS) assert.ok(isHarnessKind(kind));
   assert.ok(!isHarnessKind("acme"));

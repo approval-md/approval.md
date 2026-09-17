@@ -524,6 +524,9 @@ const AGENT_FACING: readonly string[] = [
   "hook claude-code",
   "hook cursor",
   "hook codex",
+  // APRV-350. Agent-facing by construction, like every other harness hook:
+  // Muse invokes it around the agent's own tool calls.
+  "hook muse",
   "hook classify",
   // APRV-214. Reporting the window establishes no authority and changes
   // nothing; an agent that can see a bypass window is standing is better placed

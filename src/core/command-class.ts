@@ -393,6 +393,25 @@ export function protectedPathClass(
       const next = segments[index + 1];
       if (next === "hooks.json" || next === "hooks") return "policy.core";
     }
+    // Muse Code's equivalent, OBSERVED rather than guessed (APRV-350): the live
+    // probe on muse-bin-1.3.0-R3233.1 established that the installed build reads
+    // `.muse/hooks.json` in the project, and that it rejects a malformed one
+    // loudly at startup. `settings` is listed beside it because Meta documents
+    // user-level hooks inside a `settings.json` `hooks` block, so a
+    // project-level copy would be the same organ under a second name; it never
+    // fired in the probe, and an entry for a file Muse does not read is INERT,
+    // while a missing entry for one it does read would be the hole.
+    //
+    // `worktrees` is deliberately NOT here. Muse keeps its own worktree state
+    // under `.muse/worktrees/`, which is ordinary workspace content: making it
+    // `policy.core` would price routine session bookkeeping at a human's
+    // attention, which is the failure mode §11 asks to avoid.
+    if (segment === ".muse") {
+      const next = segments[index + 1];
+      if (next === "hooks.json" || next === "hooks" || next?.startsWith("settings")) {
+        return "policy.core";
+      }
+    }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
       const next = segments[index + 1];
@@ -1487,8 +1506,15 @@ const HARNESS_PROBE_CLASS = "read.shell";
 /** The rule id a Muse launch takes when its `--model` names a Contributor model. */
 const MUSE_CONTRIBUTOR_RULE = "harness-launch-muse-contributor";
 
-/** The suffix that marks a Muse model as training on what it is shown. */
-const CONTRIBUTOR_SUFFIX = "-contributor";
+/**
+ * The suffix that marks a Muse model as training on what it is shown.
+ *
+ * Exported since APRV-350 so the hook adapter's contributor guard and this
+ * classifier's `harness.launch.muse` refinement test the SAME mark. Two
+ * spellings of "which models are unsafe" would drift, and the direction they
+ * drift in is the one where a launch is refused and a tool call is not.
+ */
+export const CONTRIBUTOR_SUFFIX = "-contributor";
 
 /** The `--model` value in either spelling, or `null` when none is written. */
 function harnessModel(args: readonly string[]): string | null {

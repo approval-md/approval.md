@@ -19,7 +19,7 @@ const {
   authorityAllowed: (authority: unknown, allow: string[]) => boolean;
   detectSeatbelt: (platform?: string) => { available: boolean; reason: string };
   harnessProfile: (port: number) => string;
-  probe: (json?: boolean) => Promise<number>;
+  probe: (json?: boolean, write?: (text: string) => void) => Promise<number>;
   spawnedProfile: () => string;
   startPinningProxy: (options: {
     allow: string[];
@@ -120,19 +120,95 @@ test("the proxy refuses a non-listed authority with 403 and never opens a tunnel
 // The whole matrix
 // ---------------------------------------------------------------------------
 
-test("the constrained-egress matrix holds, or skips cleanly where there is no Seatbelt", async () => {
-  const seatbelt = detectSeatbelt();
-  const code = await probe(true);
+/**
+ * Run the matrix ONCE and report each assertion separately.
+ *
+ * The first cut of this suite was a single case asserting `code === 0`, which
+ * is a true statement and a useless failure: a broken proxy and a broken
+ * profile produced the same red line, naming neither. The matrix is expensive
+ * (it spawns sandboxed children), so it runs once and is memoized, and each
+ * assertion below reads its own row out of the result.
+ */
+interface MatrixResult {
+  skipped: boolean;
+  code: number;
+  results: { name: string; claim: string; pass: boolean; detail: string }[];
+}
 
-  if (!seatbelt.available) {
-    assert.equal(
-      code,
-      EXIT_SANDBOX_UNAVAILABLE,
-      "a machine without the primitive reports EX_UNAVAILABLE rather than a false pass",
-    );
-    return;
+let matrixRun: Promise<MatrixResult> | null = null;
+
+function matrix(): Promise<MatrixResult> {
+  matrixRun ??= (async () => {
+    const chunks: string[] = [];
+    const code = await probe(true, (text: string) => {
+      chunks.push(text);
+    });
+    const parsed = JSON.parse(chunks.join("")) as {
+      skipped: boolean;
+      results?: MatrixResult["results"];
+    };
+    return { skipped: parsed.skipped, code, results: parsed.results ?? [] };
+  })();
+  return matrixRun;
+}
+
+/** One named assertion from the matrix, or a clean skip where there is no Seatbelt. */
+function assertion(name: string, why: string): void {
+  test(why, async () => {
+    const run = await matrix();
+    if (run.skipped) {
+      assert.equal(
+        run.code,
+        EXIT_SANDBOX_UNAVAILABLE,
+        "a machine without the primitive reports EX_UNAVAILABLE rather than a false pass",
+      );
+      return;
+    }
+    const row = run.results.find((result) => result.name === name);
+    assert.notEqual(row, undefined, `the matrix produced no assertion named ${name}`);
+    assert.equal(row?.pass, true, `${name}: ${row?.claim ?? ""} — observed: ${row?.detail ?? ""}`);
+  });
+}
+
+assertion(
+  "seatbelt-rejects-hostname-rules-outright",
+  "Seatbelt refuses to COMPILE a hostname rule, which is why a proxy is needed at all",
+);
+assertion(
+  "seatbelt-filters-by-address-not-name",
+  "the remote-ip predicate matches an address and port, never a name",
+);
+assertion(
+  "direct-connection-denied",
+  "under the harness profile a direct connection bypassing the proxy is denied",
+);
+assertion(
+  "allowed-host-through-proxy-succeeds",
+  "a request through the proxy to an allow-listed host completes",
+);
+assertion(
+  "non-listed-host-through-proxy-denied",
+  "the proxy refuses a non-listed authority, so the admitted port is not a general door",
+);
+assertion(
+  "spawned-command-has-no-network",
+  "a command the harness spawns inherits no network at all",
+);
+assertion(
+  "proxy-refused-what-it-should",
+  "the proxy's own ledger shows it admitted only the allow-listed authority",
+);
+
+test("the matrix as a whole passes, or skips cleanly where there is no Seatbelt", async () => {
+  const run = await matrix();
+  assert.equal(
+    run.code,
+    run.skipped ? EXIT_SANDBOX_UNAVAILABLE : 0,
+    run.skipped ? "a skip is EX_UNAVAILABLE" : "every assertion in the matrix held",
+  );
+  if (!run.skipped) {
+    assert.equal(run.results.length, 7, "and the matrix ran every assertion it claims to have");
   }
-  assert.equal(code, 0, "every assertion in the matrix held");
 });
 
 test("detectSeatbelt reports unavailable off macOS instead of guessing", () => {
