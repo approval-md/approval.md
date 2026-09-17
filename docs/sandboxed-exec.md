@@ -247,9 +247,63 @@ profile it got before, byte for byte.
 COMMAND. They do not put the harness itself in the room: `claude` and
 `cursor-agent` talk to a model over the network, which is exactly what the
 profile denies, so `approval sandbox -- claude` is a session that cannot think.
-Whole-session containment needs an egress allowlist reaching one host, which
-Seatbelt cannot express by hostname and which the prior art solves with a local
-proxy. That is the open half of APRV-193 AC1 and is a separate design.
+Whole-session containment is APRV-351, below.
+
+## Constrained model egress (APRV-351)
+
+The design is `design/constrained-model-egress.md`. The outcome, stated here so
+this file answers the question on its own: **recommended, opt-in, and the
+`approval sandbox --harness <name>` mode lands only after the round trip below
+passes.** `APPROVAL_HOOK_REQUIRE_SANDBOX` stays default off, unchanged.
+
+Seatbelt cannot express a hostname allow-list. This is measured rather than
+assumed: `sandbox-exec` refuses to compile a profile naming a host, with `host
+must be * or localhost in network address`, and refuses a literal IP the same
+way. The only postures available are all egress, no egress, or a port on
+loopback. So the mechanism is a **pinning forwarding proxy on loopback**: it
+accepts `CONNECT`, matches the authority against an exact allow-list, and
+tunnels bytes without terminating TLS, while the profile admits only that one
+port and everything the harness spawns keeps the ordinary no-network profile.
+
+Everything the mechanism can enforce is proved offline against loopback stubs:
+
+```bash
+node scripts/probes/constrained-egress.mjs probe
+```
+
+Seven assertions, no internet, no credential, no model call. Exit 0 if all held,
+1 if any failed, 69 (`EX_UNAVAILABLE`) on a machine with no Seatbelt, where
+`tests/probe-constrained-egress.test.ts` skips rather than reporting a false
+pass.
+
+### Harness round trip
+
+The one leg a probe cannot prove is a real harness completing a real model call
+behind the proxy, because that needs a provider and a credential no agent
+session may hold. **This command is the operator's.** Run it in a terminal where
+your Claude Code credential already works, with the repository built:
+
+```bash
+node scripts/probes/constrained-egress.mjs proxy --allow api.anthropic.com:443 --port 8931 & \
+  sleep 1 && HTTPS_PROXY=http://127.0.0.1:8931 NO_PROXY= \
+  node dist/src/cli.js sandbox --allow-loopback -- claude -p "reply with the single word: confined"
+```
+
+Note `--allow-loopback`, not a per-port flag. The narrow single-port carve-out
+the design calls for arrives with `--harness`, which has not shipped; today's
+flag opens `localhost:*`, which is wider. That is deliberate and it is stated
+rather than hidden: this round trip is measuring whether **the harness** works
+through a pinned proxy at all, which is the open question. The profile's
+narrowness is already measured separately, offline, by the probe above.
+
+A pass is the word `confined` coming back, and the proxy's own line showing it
+admitted `api.anthropic.com:443` and nothing else. A fail is either a hang (the
+harness is not honouring `HTTPS_PROXY`) or the proxy logging a refusal naming a
+host you did not pin (the harness has a second egress path, which is the finding
+that matters most). Kill the backgrounded proxy afterwards.
+
+Report the result on APRV-351. It decides whether `--harness` ships as designed
+or ships narrower.
 
 ## What this does not claim
 
