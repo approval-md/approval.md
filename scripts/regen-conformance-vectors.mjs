@@ -758,6 +758,94 @@ const REQUEST_SECOND_EMAIL = {
   at: 2,
 };
 
+/**
+ * The read scope, per harness (APRV-347).
+ *
+ * Three harnesses, and the third is the interesting one: Codex has no read tool
+ * at all, so its read vectors are about the shell path and about what happens
+ * to a tool this runtime cannot bind. Every harness gets an allow, a deny and a
+ * malformed input, which is what AC2 asks for.
+ */
+const readScopeVectors = [
+  // --- Claude Code -----------------------------------------------------------
+  {
+    id: "claude-read-inside-allows",
+    description: "a Read of a file inside the gate root keeps the pass-through allow",
+    input: { harness: "claude-code", tool: "Read", target: "inside" },
+  },
+  {
+    id: "claude-read-inside-relative-allows",
+    description: "a relative Read is resolved against the hook's own directory, not the event cwd",
+    input: { harness: "claude-code", tool: "Read", target: "inside-relative" },
+  },
+  {
+    id: "claude-read-outside-denies",
+    description: "a Read outside every read root is answered by policy under read.file.out_of_scope",
+    input: { harness: "claude-code", tool: "Read", target: "outside" },
+  },
+  {
+    id: "claude-read-unresolvable-denies",
+    description: "a Read whose path resolves nowhere is out of scope: fail closed",
+    input: { harness: "claude-code", tool: "Read", target: "unresolvable" },
+  },
+  {
+    id: "claude-glob-no-path-allows",
+    description: "a Glob carrying no path names no file, so it stays not-a-gated-tool",
+    input: { harness: "claude-code", tool: "Glob", target: "absent" },
+  },
+  {
+    id: "claude-grep-outside-denies",
+    description: "Grep's search directory is a read target like any other",
+    input: { harness: "claude-code", tool: "Grep", target: "outside" },
+  },
+  {
+    id: "claude-shell-read-outside-denies",
+    description: "the shell reader takes the same class as the read tool",
+    input: { harness: "claude-code", tool: "Bash", target: "outside" },
+  },
+  {
+    id: "claude-malformed-input-denies",
+    description: "unparseable hook input is denied, and nothing is appended",
+    input: { harness: "claude-code", tool: "Read", target: "inside", malformed: true },
+    control: true,
+  },
+  // --- Cursor ----------------------------------------------------------------
+  {
+    id: "cursor-read-inside-allows",
+    description: "the Cursor envelope, inside the scope",
+    input: { harness: "cursor", tool: "Read", target: "inside" },
+  },
+  {
+    id: "cursor-read-outside-denies",
+    description: "the Cursor envelope, outside the scope",
+    input: { harness: "cursor", tool: "Read", target: "outside" },
+  },
+  {
+    id: "cursor-shell-read-outside-denies",
+    description: "Cursor's Shell tool takes the same classifier as Bash",
+    input: { harness: "cursor", tool: "Shell", target: "outside" },
+  },
+  {
+    id: "cursor-malformed-input-denies",
+    description: "unparseable input on the Cursor envelope",
+    input: { harness: "cursor", tool: "Read", target: "inside", malformed: true },
+    control: true,
+  },
+  // --- Codex -----------------------------------------------------------------
+  {
+    id: "codex-has-no-read-tool",
+    description:
+      "Codex exposes only Bash and apply_patch, and a tool whose exact command bytes cannot be bound is refused rather than waved through",
+    input: { harness: "codex", tool: "Read", target: "outside" },
+  },
+  {
+    id: "codex-malformed-input-denies",
+    description: "unparseable input on the Codex envelope",
+    input: { harness: "codex", tool: "Bash", target: "inside", malformed: true },
+    control: true,
+  },
+];
+
 const gateVectors = [
   {
     id: "manual-request-is-recorded",
@@ -1286,7 +1374,12 @@ const SUITES = [
     // adds one accepted and one refused fixture. Existing expectations do not
     // move; implementations conforming to 2.1.0 simply do not know this new
     // packaged manifest shape.
-    vectors_version: "2.2.0",
+    // 2.3.0 (APRV-338): a MINOR bump, the same shape 2.1.0 was.
+    // `gate.path.signed_off` is a new event type with four new fixtures (one
+    // accepted, three refused: an agent actor, an absolute `path`, and a
+    // missing one). No existing expectation moves, so an implementation that
+    // passed 2.2.0 fails this only by not knowing a type the enum has gained.
+    vectors_version: "2.3.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
@@ -1309,6 +1402,16 @@ const SUITES = [
     description:
       "Scripted scenarios over a scratch log: each is a policy, a sequence of gate operations, and the verdict of the last one. A step before the last that refuses is a broken vector and is reported as such rather than counted as a result.",
     vectors: gateVectors,
+  },
+  {
+    file: "hook-read-scope.v1.json",
+    suite: "hook-read-scope",
+    vectors_version: "1.0.0",
+    algorithm:
+      "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
+    description:
+      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen.",
+    vectors: readScopeVectors,
   },
 ];
 

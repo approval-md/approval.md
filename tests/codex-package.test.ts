@@ -112,11 +112,23 @@ test("generated launcher shell-quotes hostile pinned paths and forwards argument
 });
 
 test("Codex family is omitted from broad MCP and unfinished entry points refuse", () => {
+  // The WHOLE family, including APRV-325.2's `apply`, `recover` and `serve`.
+  // The broker is reached through the strict server, which publishes exactly
+  // one tool; a second door on the broad catalogue would defeat the first.
   assert.equal(publishedVerbs().some((verb) => verb.name === "codex"), false);
-  for (const subcommand of ["start", "serve"]) {
-    const result = spawnSync(process.execPath, [CLI, "codex", subcommand, "--manifest", "/tmp/example.json", "--json"], { encoding: "utf8" });
-    assert.equal(result.status, 1);
-    assert.equal(JSON.parse(result.stderr).error.code, "codex-not-ready");
+  // Every implemented verb of the family refuses a manifest it cannot validate
+  // rather than inventing an installation. `start` (APRV-325.3) is in the list
+  // now: it validates the manifest BEFORE it asks the host about a sandbox, so
+  // a bad manifest is a manifest error and never a confinement verdict.
+  for (const argv of [
+    ["serve", "--manifest", "/tmp/example.json", "--json"],
+    ["recover", "--manifest", "/tmp/example.json", "--json"],
+    ["start", "--manifest", "/tmp/example.json", "--json"],
+    ["apply", "--manifest", "/tmp/example.json", "--proposal", "/tmp/example-proposal.json", "--json"],
+  ]) {
+    const result = spawnSync(process.execPath, [CLI, "codex", ...argv], { encoding: "utf8" });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(JSON.parse(result.stderr).error.code, "manifest-invalid");
   }
 });
 
@@ -183,6 +195,13 @@ test("packed npm artifact installs without scripts and runs outside the checkout
   for (const path of [
     "cli.js", "schema/codex-instance.schema.json", "docs/codex-enforced-session.md",
     "templates/codex/README.md", "dist/src/codex/manifest.js", "dist/src/cli/codex.js",
+    // APRV-325.2: the broker, its durable transaction and its strict server all
+    // have to be IN the tarball, because a packaged `codex serve` that could not
+    // load one of them would refuse at the worst possible moment.
+    "dist/src/codex/broker.js", "dist/src/codex/workspace-commit.js", "dist/src/codex/serve.js",
+    "docs/codex-workspace-broker.md",
+    // APRV-325.3: the confined runner, and the doc an operator activates from.
+    "dist/src/codex/runner.js", "dist/src/core/sandbox.js",
   ]) {
     assert.equal(existsSync(join(packageRoot, path)), true, `${path} missing from installed tarball`);
   }
@@ -190,5 +209,91 @@ test("packed npm artifact installs without scripts and runs outside the checkout
     cwd: outside, encoding: "utf8", env: cleanEnv(), timeout: 10_000,
   });
   assert.equal(invoked.status, 0, invoked.stderr);
-  assert.match(invoked.stdout, /prepare and inspect a constrained Codex host bundle/u);
+  assert.match(invoked.stdout, /prepare a constrained Codex host and broker its workspace writes/u);
+  assert.match(invoked.stdout, /approval codex apply --manifest/u);
+
+  // APRV-325.3: setup, doctor and start from the INSTALLED path, against a
+  // scratch instance built here. This is the activation runbook's first three
+  // commands, run as an operator runs them, from outside any checkout.
+  const scratchInstance = join(root, "instance");
+  const manifestPath = scratchCodexInstance(scratchInstance);
+
+  const setup = spawnSync(process.execPath, [join(packageRoot, "cli.js"), "codex", "setup", "--check", scratchInstance, "--json"], {
+    cwd: outside, encoding: "utf8", env: cleanEnv(), timeout: 20_000,
+  });
+  // The scratch tree is not a prepared bundle, so setup must REFUSE rather than
+  // report an inert bundle it never verified.
+  assert.equal(setup.status, 1, setup.stdout);
+  assert.equal(typeof (JSON.parse(setup.stderr) as { error: { code: string } }).error.code, "string");
+
+  const doctor = spawnSync(process.execPath, [join(packageRoot, "cli.js"), "codex", "doctor", "--strict", "--manifest", manifestPath, "--json"], {
+    cwd: outside, encoding: "utf8", env: cleanEnv(), timeout: 20_000,
+  });
+  // Fail-closed by construction: the scratch install is not root-owned, so
+  // doctor reports findings and refuses. A doctor that passed here would be the
+  // bug, not the evidence.
+  assert.equal(doctor.status, 1, doctor.stdout);
+  const findings = (JSON.parse(doctor.stderr) as { ready: boolean; findings: { code: string }[] });
+  assert.equal(findings.ready, false);
+  assert.ok(findings.findings.some((finding) => finding.code === "owner-not-root"));
+
+  const start = spawnSync(process.execPath, [join(packageRoot, "cli.js"), "codex", "start", "--manifest", manifestPath, "--json"], {
+    cwd: outside, encoding: "utf8", env: cleanEnv(), timeout: 30_000,
+  });
+  if (process.platform === "darwin") {
+    assert.equal(start.status, 0, start.stderr);
+    const room = JSON.parse(start.stdout.trim()) as {
+      ok: boolean; egress: string; write_allow: string[]; canonical: string;
+    };
+    assert.equal(room.ok, true);
+    assert.equal(room.egress, "denied");
+    assert.equal(room.write_allow.length, 1);
+    assert.equal(room.write_allow.includes(room.canonical), false);
+  } else {
+    // An unsupported host REFUSES rather than silently weakening enforcement.
+    assert.equal(start.status, 1, start.stdout);
+    assert.equal(
+      (JSON.parse(start.stderr) as { error: { code: string } }).error.code,
+      "sandbox-unsupported",
+    );
+  }
 });
+
+/** A minimal valid instance manifest under `dir`. Returns the manifest path. */
+function scratchCodexInstance(dir: string): string {
+  const install = join(dir, "install");
+  const primary = join(dir, "primary");
+  const workspace = join(dir, "workspace");
+  mkdirSync(join(install, "bin"), { recursive: true });
+  mkdirSync(join(primary, ".approval", "log"), { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(primary, "APPROVAL.md"), "# scratch\n", "utf8");
+  const manifestPath = join(install, "instance.json");
+  const mcp = join(install, "bin", "approval");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    schema_version: "approval.codex.instance.v1",
+    instance_id: "packed",
+    platform: "darwin",
+    codex_version: "0.152.1",
+    node_version: "22.0.0",
+    package_version: "0.2.0",
+    paths: {
+      install_root: install,
+      package_root: join(install, "pkg"),
+      workspace,
+      primary,
+      policy: join(primary, "APPROVAL.md"),
+      log: join(primary, ".approval", "log", "events.jsonl"),
+      manifest: manifestPath,
+      codex_executable: join(install, "bin", "codex"),
+      node_executable: join(install, "bin", "node"),
+      mcp_executable: mcp,
+      broker_executable: join(install, "bin", "broker"),
+      runner_executable: join(install, "bin", "runner"),
+    },
+    principals: { codex: "_approval_codex", broker: "_approval_broker", runner: "_approval_runner" },
+    invocation: { command: mcp, args: ["codex", "serve", "--manifest", manifestPath] },
+    components: { broker: "required-not-shipped", runner: "required-not-shipped" },
+  }, null, 2)}\n`, "utf8");
+  return manifestPath;
+}

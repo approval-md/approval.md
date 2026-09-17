@@ -76,11 +76,18 @@ import {
   HUMAN_ACTOR_ENV,
   checkAttestation,
   findOrganAttestation,
+  findPathSignOff,
   latestOrganAttestation,
+  latestPathSignOff,
   policyBytesHash,
   resolveHumanActor,
 } from "../core/attest.js";
-import { isGateOrganPath } from "../core/command-class.js";
+import {
+  isGateOrganPath,
+  POLICY_EDIT_SUBCLASS,
+  protectedPathClass,
+  type ProtectedPathEntry,
+} from "../core/command-class.js";
 import { VALUES_INFO_STRING, loadValues } from "../core/values.js";
 import {
   KEYSTORE_DEFERRED,
@@ -145,6 +152,7 @@ import {
 import { git, repoPath, repoRoot } from "./git-scope.js";
 import {
   ScanError,
+  checkAttestedPolicyOnMain,
   checkBuildFreshness,
   checkMainBehindOrigin,
   installationRoot,
@@ -2785,6 +2793,171 @@ function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCh
 }
 
 // ---------------------------------------------------------------------------
+// 31. pending-sign-off (APRV-338)
+// ---------------------------------------------------------------------------
+
+/**
+ * The marker SPEC.md's amendment-provenance rule puts on unratified text.
+ *
+ * Matched case-insensitively on the words alone rather than on the whole
+ * `(Amended APRV-n, pending sign-off.)` form, because the form is prose a human
+ * writes and a row that missed a hand-typed variant would report a clean file
+ * that is not one. Over-reporting here costs a line of output; under-reporting
+ * costs the thing the marker exists for.
+ */
+const PENDING_SIGN_OFF_MARKER = /pending sign-off/giu;
+
+/**
+ * Where to look for protected files carrying the marker.
+ *
+ * One level deep and enumerated, exactly as {@link ORGAN_SEARCH} is, and for
+ * the same reason: `core/command-class.ts` decides what IS a protected path
+ * (every candidate found here is put to it), so this list only says where to
+ * look. A repository-wide walk would be a health check that reads the whole
+ * working tree on every run, and the marker lives in governing documents, which
+ * sit at the root or in a directory a policy named.
+ */
+const SIGN_OFF_SEARCH_DIRS: readonly string[] = [".", join(".github", "workflows"), "docs", "design"];
+
+/** How many bytes of a candidate are read before it is skipped as not-prose. */
+const SIGN_OFF_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The protected files this checkout carries that doctor will read,
+ * repository-relative and sorted.
+ *
+ * The enumerated directories above, plus every exact path the policy's
+ * `protected_paths` names (a directory entry is enumerated one level deep like
+ * the rest). A candidate is kept only when the classifier calls it `policy.edit`
+ * or a `policy.edit.*` sub-class, which is the same set `approval policy attest
+ * --path` will sign off: a row that listed a file the verb refuses would be
+ * advice nobody can take.
+ */
+function listSignableFiles(root: string, extra: readonly ProtectedPathEntry[]): string[] {
+  const dirs = new Set<string>(SIGN_OFF_SEARCH_DIRS);
+  const exact = new Set<string>();
+  for (const raw of extra) {
+    const entry = typeof raw === "string" ? raw : raw.path;
+    if (typeof entry !== "string" || entry.length === 0) continue;
+    if (entry.includes("..") || isAbsolute(entry)) continue;
+    if (/[/\\]$/u.test(entry)) dirs.add(entry.replace(/[/\\]+$/u, ""));
+    else exact.add(entry.split(/[/\\]+/u).join("/"));
+  }
+
+  const found = new Set<string>();
+  const keep = (relative: string): void => {
+    let isFile: boolean;
+    try {
+      const stats = statSync(join(root, relative));
+      isFile = stats.isFile() && stats.size <= SIGN_OFF_MAX_BYTES;
+    } catch {
+      return;
+    }
+    if (!isFile) return;
+    const routed = protectedPathClass(relative, extra);
+    if (routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed))) {
+      found.add(relative);
+    }
+  };
+  for (const dir of dirs) {
+    let names: string[];
+    try {
+      names = readdirSync(join(root, dir));
+    } catch {
+      continue;
+    }
+    const prefix = dir === "." ? "" : `${dir.split(/[/\\]+/u).join("/")}/`;
+    for (const name of names.sort()) keep(`${prefix}${name}`);
+  }
+  for (const path of exact) keep(path);
+  return [...found].sort();
+}
+
+/**
+ * Which protected files carry a pending-sign-off marker that no record
+ * resolves (APRV-338)?
+ *
+ * SPEC.md's amendment-provenance rule says text that reached a protected file
+ * without a grant carries `(Amended APRV-n, pending sign-off.)` and holds no
+ * more authority than a proposal until a human ratifies it. Since APRV-338 the
+ * ratification is a record, `gate.path.signed_off`, so the state is finally
+ * answerable: a file whose CURRENT bytes carry a sign-off is ratified as it
+ * stands, and one that carries the marker with no such record is a debt
+ * somebody owes.
+ *
+ * **This row never moves the exit code**, for the reasons `gate-organs` does
+ * not. Nothing on this machine is broken by unratified prose; what the row buys
+ * is that the debt is visible at the terminal rather than discovered when a
+ * pull request fails. And a marker is a human's own sentence about their own
+ * text: a health check that failed on one would be the runtime grading prose.
+ */
+function checkPendingSignOff(
+  dir: string,
+  records: readonly EventRecord[],
+  policyLoad: PolicyLoadResult,
+): DoctorCheck {
+  const check = "pending-sign-off";
+  const root = repoRoot(dir) ?? dir;
+  // A policy that did not load contributes no entries, which narrows the set
+  // doctor reads rather than widening it — the same direction every other
+  // reader of `protected_paths` takes when it cannot have the list.
+  const extra = policyLoad.ok ? (policyLoad.policy.protected_paths ?? []) : [];
+  const files = listSignableFiles(root, extra);
+
+  const pending: string[] = [];
+  const ratified: string[] = [];
+  const unreadable: string[] = [];
+  for (const file of files) {
+    let text: string;
+    let sha256: string;
+    try {
+      const bytes = readFileSync(join(root, file));
+      text = bytes.toString("utf8");
+      sha256 = policyBytesHash(bytes);
+    } catch (cause) {
+      unreadable.push(`${file} (${detailOf(cause)})`);
+      continue;
+    }
+    const markers = text.match(PENDING_SIGN_OFF_MARKER)?.length ?? 0;
+    if (markers === 0) continue;
+    const plural = markers === 1 ? "" : "s";
+    if (findPathSignOff(records, file, sha256) !== null) {
+      ratified.push(`${file} (${String(markers)} marker${plural}, signed off at these bytes)`);
+      continue;
+    }
+    const previous = latestPathSignOff(records, file);
+    pending.push(
+      previous === null
+        ? `${file} (${String(markers)} marker${plural}, never signed off, live ${sha256.slice(0, 12)}…)`
+        : `${file} (${String(markers)} marker${plural}, edited since seq ${previous.record.seq}: signed ${previous.sha256.slice(0, 12)}…, live ${sha256.slice(0, 12)}…)`,
+    );
+  }
+
+  if (pending.length === 0 && unreadable.length === 0) {
+    return {
+      check,
+      status: "pass",
+      detail:
+        ratified.length === 0
+          ? `no protected file in ${root} carries a pending-sign-off marker (${String(files.length)} file(s) read)`
+          : `every pending-sign-off marker in ${root} sits in a file a human has signed off at its current bytes: ${ratified.join("; ")}`,
+    };
+  }
+
+  const parts: string[] = [];
+  if (pending.length > 0) parts.push(`AWAITING SIGN-OFF: ${pending.join("; ")}`);
+  if (unreadable.length > 0) parts.push(`unreadable: ${unreadable.join("; ")}`);
+  const first = (pending[0] ?? "<path>").split(" ")[0] ?? "<path>";
+  return {
+    check,
+    // Never a fail: see the note above.
+    status: "skip",
+    detail: `${parts.join(". ")}. Text carrying that marker holds no more authority than a proposal until a human ratifies it (SPEC.md §5.2), and the ratification is a gate.path.signed_off record over the file's exact bytes. A marker whose text was later granted through the gate should lose the suffix instead; signing off is for text that reached the file without a grant`,
+    fix: `approval policy attest --path ${first} --as human:<id> — after READING the file as it now stands`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 28. sealed-keys (APRV-285)
 // ---------------------------------------------------------------------------
 
@@ -3103,6 +3276,15 @@ export function commandDoctor(
       // network to be more accurate would be acting on its own account, so the
       // answer is as fresh as the operator's last fetch and says so.
       checkMainBehindOrigin(logPath, queuePath, root),
+      // APRV-342: the interregnum between an attestation and its pull request
+      // merging. `attestation` above asks whether the LOCAL policy is attested;
+      // this asks whether the attested policy is on the remote, which is the
+      // question a fresh checkout of main answers with `policy-not-attested`.
+      checkAttestedPolicyOnMain({
+        policyPath,
+        records: verified.records,
+        root: repoRoot(dirname(logPath)),
+      }),
       // APRV-227: appended, fourteenth time, same reason. The only row that
       // asks a question about a binary OUTSIDE this repository, and it asks it
       // the one way a log can: what the last record said the harness was,
@@ -3143,6 +3325,13 @@ export function commandDoctor(
       // seen by whoever runs a verb that prints notes, and this is the surface
       // an operator opens to read the state of their own repository.
       checkAutonomyAlias(policyLoad),
+      // APRV-338: appended, twenty-first time, same reason. The terminal half
+      // of the sign-off record: which protected files still carry SPEC.md's
+      // pending-sign-off marker with no record ratifying their current bytes.
+      // Informational and never a fail, exactly as gate-organs is — nothing on
+      // this machine is broken by unratified prose, and a health check that
+      // graded prose would be the runtime marking a human's homework.
+      checkPendingSignOff(dir, verified.records, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

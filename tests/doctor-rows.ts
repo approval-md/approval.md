@@ -86,6 +86,13 @@ export const DOCTOR_ROW_ORDER = [
   // remote-tracking refs, and it fetches nothing: the answer is as fresh as
   // the operator's last fetch, and outside a repository it is a skip.
   "main-behind-origin",
+  // APRV-342: whether the policy the log vouches for is the policy the remote
+  // carries, appended for the same reason. `attestation` above asks whether the
+  // LOCAL file is attested; between an amendment and its pull request merging
+  // that answer is yes while a fresh checkout of main refuses every gate
+  // operation, and this is the row that says so. Read-only and networkless: the
+  // remote tip is the last fetch's.
+  "attested-policy-on-main",
   // APRV-227: whether the harness binary hosting the hook changed since the
   // log last saw a record from it, appended for the same reason. The only
   // row that asks anything about a program outside this repository.
@@ -127,6 +134,13 @@ export const DOCTOR_ROW_ORDER = [
   // health report to surface a deprecation the loader's note only reaches
   // whoever happened to run a verb that prints notes.
   "autonomy-alias",
+  // APRV-338: which protected files still carry SPEC.md's pending-sign-off
+  // marker with no `gate.path.signed_off` record over their current bytes,
+  // appended for the same reason. Never a fail: unratified prose breaks
+  // nothing on this machine, and the enforcement is the CI-side guard. It
+  // passes in a fresh directory rather than skipping, because "no protected
+  // file carries a marker" is a clean state and not a missing configuration.
+  "pending-sign-off",
 ] as const;
 
 /**
@@ -154,6 +168,7 @@ export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "verified-snapshot",
   "read-proof",
   "main-behind-origin",
+  "attested-policy-on-main",
   "harness-version-unverified",
   "live-draw",
   "checkpoint",

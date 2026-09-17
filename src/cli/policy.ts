@@ -32,9 +32,11 @@ import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { explain, isActionClass, type Explanation } from "../core/policy-explain.js";
 import { loadPolicy, POLICY_FILENAMES, type LoadPolicyOptions } from "../core/policy-load.js";
 import { commandPolicyAmend } from "./amend.js";
+import { commandPolicyApply } from "./policy-apply.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { commandPolicyAttest } from "./attest.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { resolveScratchRoots } from "./hook.js";
 import { POLICY_CHECK_HELP, POLICY_HELP, POLICY_TEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { relPath, style, type Role, type Style } from "./style.js";
@@ -219,11 +221,13 @@ function runVerb(argv: string[], streams: Streams, cwd: string, helpText: string
     if (!check.ok) return ioError(streams, json, check.message);
   }
 
-  const explanation = explain(
-    loadPolicy(options),
-    actionClass,
-    reversibleFlag === null ? {} : { reversible: reversibleFlag === "true" },
-  );
+  const explanation = explain(loadPolicy(options), actionClass, {
+    ...(reversibleFlag === null ? {} : { reversible: reversibleFlag === "true" }),
+    // APRV-347. Resolved HERE, where the process may touch a disk, so the read
+    // scope a reader is shown is the one this machine would actually enforce
+    // rather than a description of the key.
+    systemReadRoots: resolveScratchRoots(cwd),
+  });
 
   if (json) {
     streams.out(`${JSON.stringify(explanation)}\n`);
@@ -264,6 +268,11 @@ export function commandPolicy(argv: string[], streams: Streams, cwd: string): nu
     // It writes too, and for the same reason it lives in its own file.
     case "amend":
       return commandPolicyAmend(rest, streams, cwd);
+    // APRV-343. It writes the policy FILE, which nothing else in this CLI does,
+    // and then hands over to the amendment above so the edit and its
+    // attestation stay one act.
+    case "apply":
+      return commandPolicyApply(rest, streams, cwd);
     default:
       return usageError(
         streams,

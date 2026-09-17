@@ -661,12 +661,13 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272).",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime.",
     human_only: true,
     input: input({
       flags: {
         ...POLICY_FLAGS,
         "--organ": "string",
+        "--path": "string",
         ...AS_FLAG,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -683,6 +684,10 @@ const VERBS: VerbSpec[] = [
         // repository-relative spelling the record carries, which is the
         // identity the guard matches on and is not derivable from `path`.
         organ_path: STRING,
+        // The same fact for the --path route, under its own name so that a
+        // reader of one object can never take a sign-off for an organ
+        // attestation: the two records are different claims (APRV-338).
+        signed_path: STRING,
       },
       ["ok", "seq", "sha256", "path"],
     ),
@@ -738,6 +743,44 @@ const VERBS: VerbSpec[] = [
         "attestation",
         "git",
       ],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "policy",
+    subcommand: "apply",
+    purpose:
+      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
+    human_only: true,
+    input: input({
+      positionals: positionals(
+        [{ name: "proposal", description: "the proposal document to apply" }],
+        1,
+      ),
+      flags: {
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...AS_FLAG,
+        "--dry-run": "boolean",
+        "--no-amend": "boolean",
+        "--pr": "boolean",
+        "--yes": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        policy: STRING,
+        proposal: STRING,
+        pairs: INTEGER,
+        noop: BOOLEAN,
+        dryRun: BOOLEAN,
+      },
+      ["ok", "policy", "proposal", "pairs", "noop", "dryRun"],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
@@ -1073,11 +1116,12 @@ const VERBS: VerbSpec[] = [
   {
     name: "sandbox",
     purpose:
-      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied.",
+      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied. Since APRV-347 it also confines what the child may READ: a policy declaring a `read_scope` block turns the profile deny-default for file reads and opens the gate root and whatever that block adds, and `--read-jail` applies the same confinement to one command whether the policy declares a block or not. There is no flag that turns the jail off where a policy asked for it.",
     human_only: false,
     input: input({
       flags: {
         "--allow-loopback": "boolean",
+        "--read-jail": "boolean",
         ...LOG_FLAG,
         ...HELP_FLAGS,
       },
@@ -2743,12 +2787,67 @@ const VERBS: VerbSpec[] = [
   },
   {
     name: "codex",
+    subcommand: "apply",
+    purpose:
+      "Apply one bounded typed workspace proposal through the gate (APRV-325.2). The manifest supplies the actor, workspace root, policy and log, and the proposal file supplies only operations and the policy digest it was built against; an unknown key is refused rather than ignored. One action is registered per distinct path class and never collapsed, every leg is authorized and started before any byte moves, and the change is staged, journaled and applied under a workspace lock. The outcome reported is what reading the workspace back proved: applied, not applied, or honestly unknown.",
+    human_only: true,
+    human_only_note:
+      "The broker is reached by a constrained Codex session through `codex serve`, which publishes exactly one tool. Publishing this verb on the broad agent MCP catalog would put a second door beside that one, and the whole point of the strict server is that there is only the one.",
+    input: input({
+      flags: {
+        "--manifest": "string",
+        "--proposal": "string",
+        "--token": "string",
+        "--require-exclusive-custody": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        version: { const: "approval.codex.broker.v1" },
+        task: STRING,
+        payload_hash: SHA256,
+        policy_sha256: SHA256,
+        legs: arrayOf(object(
+          { class: STRING, actionKey: STRING, mode: { enum: ["policy", "token"] } },
+          ["class", "actionKey", "mode"],
+        )),
+        custody: object(
+          { kind: { enum: ["os-exclusive", "advisory"] }, findings: arrayOf(STRING) },
+          ["kind", "findings"],
+        ),
+        state: { const: "after" },
+      },
+      ["ok", "version", "task", "payload_hash", "policy_sha256", "legs", "custody", "state"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
+    subcommand: "recover",
+    purpose:
+      "Read a workspace's retained transaction journal and report whether the workspace is in the approved before-state, the approved after-state, or neither. It changes nothing: a mixed workspace is a person's to reconcile, and a recovery that rolled one either way would be guessing which half was approved. Exits 1 on mixed.",
+    human_only: true,
+    human_only_note: "Reading a half-applied workspace is an operator's diagnosis and belongs beside the reconcile verb, which is human-only for the same reason.",
+    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
     subcommand: "start",
     purpose:
-      "Reserved constrained-session launcher. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable; reads are jailed to exactly those two roots, so the gate home and everything else the host holds are unreadable; the environment is an allow-list rather than a filtered copy of the operator's; and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
-    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    input: input({
+      flags: { "--manifest": "string", "--timeout": "string", ...JSON_FLAG, ...HELP_FLAGS },
+      trailing: TRAILING,
+    }),
     output: null,
     error: ERROR_SCHEMA,
     exit_codes: [OK, INTEGRITY, USAGE],
@@ -2757,13 +2856,13 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "serve",
     purpose:
-      "Reserved strict MCP shim. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Serve the workspace broker over stdio as EXACTLY ONE MCP tool, `codex_workspace_apply`, with a positive server-side allowlist checked at call time as well as at list time. Distinct from `mcp serve`, whose catalog is this whole registry: a constrained session must reach one door and the same door next month. The published input schema carries no identity, path, class, token or sandbox argument, because none exists to remove.",
     human_only: true,
-    human_only_note: "The strict server is separate from and never published by the broad MCP server.",
-    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    human_only_note: "The strict server is separate from and never published by the broad MCP server; starting one is an operator's act, as `mcp serve` is.",
+    input: input({ flags: { "--manifest": "string", "--require-exclusive-custody": "boolean", ...JSON_FLAG, ...HELP_FLAGS } }),
     output: null,
     error: ERROR_SCHEMA,
-    exit_codes: [OK, INTEGRITY, USAGE],
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
   },
 
   {

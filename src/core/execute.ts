@@ -1774,8 +1774,21 @@ export const CUSTODY_STATES = [
 
 export type CustodyState = (typeof CUSTODY_STATES)[number];
 
-/** Where an indeterminate outcome's unknowing began. Closed (schema §8). */
-export const INDETERMINATE_REASONS = ["act-threw"] as const;
+/**
+ * Where an indeterminate outcome's unknowing began. Closed (schema §8).
+ *
+ * `act-threw` is the adapter contract's: `act` was entered and raised, so the
+ * provider call may or may not have committed. `workspace-commit-unknown` is
+ * the Codex broker's (APRV-325.2): a multi-file workspace transaction was
+ * applied and the workspace read back as neither the approved before-state nor
+ * the approved after-state, because POSIX has no atomic multi-file rename and a
+ * crash, an EPERM or a failed rollback can land between two of them. It is a
+ * SEPARATE member rather than a reuse of the first for the reason the two
+ * events are separate at all: a reader deciding what to do next needs to know
+ * whether the unknown thing was a remote call or a local half-written tree, and
+ * the recoveries have nothing in common.
+ */
+export const INDETERMINATE_REASONS = ["act-threw", "workspace-commit-unknown"] as const;
 export type IndeterminateReason = (typeof INDETERMINATE_REASONS)[number];
 
 /** What a reconciliation established. Closed, and the two are distinct. */

@@ -171,10 +171,125 @@ export interface EgressAllowance {
    * reach the profile. Directories deny their whole subtree.
    */
   readonly denyRead: readonly string[];
+  /**
+   * WRITE CONFINEMENT (APRV-325.3): the only absolute subtrees the child may
+   * write, or `undefined` for the ordinary egress-only profile.
+   *
+   * This flips the posture for one rule family and one only. The header explains
+   * why the rest of this module is a deny-LIST: a `(deny default)` profile
+   * spends itself re-allowing dyld, the process's own binary and every temporary
+   * directory, and a control that breaks ordinary development is a control that
+   * gets switched off. That reasoning holds for reads and for everything else,
+   * and it does NOT hold for writes in a confined session, where the whole
+   * property being enforced is "this shell cannot change the canonical
+   * workspace". A write deny-list would have to enumerate every path worth
+   * protecting; this names the handful worth writing, so a path nobody thought
+   * of is denied rather than forgotten.
+   *
+   * `/dev` is allowed alongside them, unconditionally. Writes there are process
+   * I/O rather than filesystem state — `/dev/null`, `/dev/stdout`, `/dev/tty`,
+   * the pty a shell needs — and denying them kills the child before it can
+   * demonstrate anything, which is the failure mode point 1 of the header
+   * records for `network-outbound` and unix sockets.
+   *
+   * An EMPTY array is meaningful and is not the same as `undefined`: it denies
+   * every write outside `/dev`. `undefined` emits no write rules at all.
+   */
+  readonly writeAllow?: readonly string[];
+  /**
+   * The READ JAIL (APRV-347): absolute directories the child may read, with
+   * everything else denied.
+   *
+   * Absent or empty leaves the profile exactly as it was — allow-default with a
+   * deny-list — and the bytes are identical to the pre-APRV-347 profile, which
+   * a fixture test pins. That default is deliberate: a deny-default read
+   * profile is a much larger change to what ordinary development can do, and a
+   * control that breaks `npm run build` is a control someone switches off.
+   *
+   * When it IS set, the profile flips to `(deny file-read*)` plus a `subpath`
+   * allow for each of these roots and for the fixed runtime set a process needs
+   * to exist at all (see {@link RUNTIME_READ_PATHS}). `denyRead` still applies
+   * and is emitted AFTER the allows, so a credential file inside an allowed
+   * root stays unreadable: last match wins in SBPL, and the credential denial
+   * must be the last word.
+   */
+  readonly allowRead?: readonly string[];
 }
 
 /** The default: nothing allowed, nothing denied beyond the network. */
 export const DENY_ALL_EGRESS: EgressAllowance = { loopback: false, denyRead: [] };
+
+/**
+ * What a process must be able to read to exist, regardless of the jail.
+ *
+ * Deliberately a fixed compiled-in list rather than anything a caller supplies:
+ * a jail whose runtime set could be widened by the party under oversight is not
+ * a jail (SPEC.md §11.1, self-reported fields never reduce scrutiny).
+ *
+ * - `/usr/lib`, `/usr/share`, `/System`, `/Library` — dyld, the shared cache,
+ *   ICU data and the frameworks every Mach-O binary links. A profile without
+ *   them kills the process before `main`, which reads as the command failing
+ *   rather than as the sandbox working.
+ * - `/private/var/db/dyld` and `/var/db/dyld` — the dyld shared cache, which
+ *   moved out of `/usr/lib` and is opened by name.
+ * - `/dev` — `/dev/null`, `/dev/urandom`, `/dev/dtracehelper`, the tty.
+ * - `/bin`, `/usr/bin`, `/sbin`, `/usr/sbin`, `/opt/homebrew`, `/usr/local` —
+ *   the interpreters and tools a build shells out to. The node binary's own
+ *   realpath is added separately by {@link runtimeReadRoots}, because a Node
+ *   installed by a version manager lives under the user's home and none of
+ *   these covers it.
+ * - `/etc`, `/private/etc` — `resolv.conf`, `passwd`, the locale tables.
+ *
+ * `node_modules` is NOT here, and that is a stated limit rather than an
+ * oversight: a repository's dependencies live inside the repository, so they
+ * are covered by the gate root being a read root. A project whose dependencies
+ * sit OUTSIDE the root (a pnpm store elsewhere, a linked package) must name
+ * that directory in `read_scope.roots`, which is exactly the widening that key
+ * exists for. docs/sandboxed-exec.md says so beside the survey.
+ *
+ * **The temp roots are not here either**, and that one is load-bearing. They
+ * reach the profile through the CALLER — `resolveReadRoots` puts the session
+ * scratchpad and the system temp root in the effective read scope, so
+ * `approval run` and `approval sandbox` open them and build tooling keeps
+ * working — and a caller that passes narrower roots gets a narrower jail. A
+ * temp root compiled in here would have been a widening no operator could turn
+ * off and no test could demonstrate a denial against, which is how it was
+ * found.
+ */
+export const RUNTIME_READ_PATHS: readonly string[] = [
+  "/usr/lib",
+  "/usr/share",
+  "/System",
+  "/Library",
+  "/private/var/db/dyld",
+  "/var/db/dyld",
+  "/dev",
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/usr/local",
+  "/opt/homebrew",
+  "/etc",
+  "/private/etc",
+];
+
+/**
+ * The runtime set plus this process's own interpreter.
+ *
+ * `process.execPath` is resolved because a version manager's `node` is usually
+ * a symlink, and a `subpath` rule matches what the KERNEL resolves rather than
+ * what the profile was handed (the lesson APRV-193's design lane paid for).
+ */
+function runtimeReadRoots(): string[] {
+  const roots = [...RUNTIME_READ_PATHS];
+  try {
+    roots.push(dirname(realpathSync(process.execPath)));
+  } catch {
+    // A process that cannot resolve its own binary is one the jail cannot help.
+  }
+  return roots;
+}
 
 // ---------------------------------------------------------------------------
 // The credential material
@@ -364,6 +479,41 @@ export function seatbeltProfile(allowance: EgressAllowance): string {
       '(allow network-outbound (remote ip "localhost:*"))',
     );
   }
+  // APRV-347, the read jail. Emitted between the egress rules and the
+  // credential denials, and the ORDER is the policy: SBPL takes the last
+  // matching rule, so the roots open the filesystem and `denyRead` closes the
+  // credential material inside them afterwards. An empty (or absent)
+  // `allowRead` emits nothing at all, which is why a profile built without it
+  // is byte-identical to the profile this function produced before this task.
+  const allowRead = allowance.allowRead ?? [];
+  if (allowRead.length > 0) {
+    lines.push(
+      ";; APRV-347: the read jail. Deny-default, then the roots and the fixed",
+      ";; runtime set a process needs to start at all.",
+      "(deny file-read*)",
+    );
+    const seen = new Set<string>();
+    for (const path of [...allowRead, ...runtimeReadRoots()]) {
+      const resolved = resolveForProfile(path);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      lines.push(`(allow file-read* (subpath ${sbplString(resolved)}))`);
+    }
+    // The ROOT DIRECTORY needs `file-read*`, not metadata, and this was
+    // measured rather than reasoned: with every other directory a process needs
+    // opened by subpath and `/` allowed for metadata only, `/usr/bin/true`
+    // dies with SIGABRT before `main`. `/` alone, as a literal: it opens the
+    // top-level directory listing and no file in it.
+    lines.push('(allow file-read* (literal "/"))');
+    // `file-read-metadata` on every other ancestor of every allowed root:
+    // resolving a path means stat-ing each directory on the way down, and a
+    // jail that denied that would refuse `/Users/x/dev/muse` for lack of
+    // `/Users`. Metadata leaks a directory's existence, never its contents.
+    for (const ancestor of ancestorsOf([...seen])) {
+      if (ancestor === "/") continue;
+      lines.push(`(allow file-read-metadata (literal ${sbplString(ancestor)}))`);
+    }
+  }
   for (const path of allowance.denyRead) {
     const resolved = resolveForProfile(path);
     // `literal` for a file, `subpath` for a directory. Both are emitted for a
@@ -380,7 +530,95 @@ export function seatbeltProfile(allowance: EgressAllowance): string {
     if (!directory) lines.push(`(deny file-read* (literal ${sbplString(resolved)}))`);
     if (!file) lines.push(`(deny file-read* (subpath ${sbplString(resolved)}))`);
   }
+  if (allowance.writeAllow !== undefined) {
+    lines.push(
+      ";; APRV-325.3: write confinement. Deny-DEFAULT for this rule family only,",
+      ";; so a path nobody thought of is denied rather than forgotten.",
+      "(deny file-write*)",
+      ";; /dev is process I/O, not filesystem state. Denying it kills a shell",
+      ";; before it can do anything, for the reason a bare network-outbound deny does.",
+      '(allow file-write* (subpath "/dev"))',
+    );
+    for (const path of allowance.writeAllow) {
+      lines.push(`(allow file-write* (subpath ${sbplString(resolveForProfile(path))}))`);
+    }
+  }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The read jail, plus the directories the command being run lives in (APRV-347).
+ *
+ * You cannot run a program you may not read. `sandbox-exec` execs the RESOLVED
+ * path, so a `node` or `npm` installed outside the compiled-in runtime set — a
+ * version manager under `~`, a `.local/bin` shim — fails `execvp` with
+ * `Operation not permitted` and exits 71, which reads as the command failing
+ * rather than as the jail working.
+ *
+ * Two directories are opened: the resolved executable's own, and its PARENT.
+ * The parent is what makes a toolchain work rather than merely start: an
+ * interpreter's entry point lives at `<prefix>/bin/<name>` and the library it
+ * immediately requires lives at `<prefix>/lib` or beside it, so opening only
+ * `bin` gets a process that launches and cannot find itself. `npm` resolves to
+ * `…/lib/node_modules/npm/bin/npm-cli.js`, whose parent is the npm package, and
+ * that is the shape this rule is for.
+ *
+ * It is NOT a widening a caller chooses: it is derived from the argv this
+ * function was already given, and it does nothing at all when no jail was
+ * asked for. Anything a command needs BEYOND its own install prefix — a
+ * dependency store elsewhere, a linked package — is the operator's
+ * `read_scope.roots` to declare.
+ */
+function withExecutableRoots(allowance: EgressAllowance, command: string): EgressAllowance {
+  const jail = allowance.allowRead ?? [];
+  if (jail.length === 0) return allowance;
+  let real = command;
+  try {
+    real = realpathSync(command);
+  } catch {
+    // Not resolvable: the caller already handles a command that is not there.
+  }
+  const own = dirname(real);
+  // `dirname(command)` as well as `dirname(real)`: a PATH entry is usually a
+  // directory of symlinks (`~/.local/bin/npm` -> a version manager's tree), and
+  // traversing the link needs the link's own directory open, not just the
+  // target's. Leaving it out fails `execvp` before the program starts.
+  const roots = [own, dirname(command)];
+  // The prefix, behind a DEPTH FLOOR. `dirname("/bin")` is `/`, and a root of
+  // `/` would open the entire filesystem — a jail that opened everything and
+  // reported nothing, which is the worst failure this file can have. Two
+  // segments, the same floor the hook applies to a scratch root and for the
+  // same reason: a value derived from somewhere else must not be able to name
+  // the root of the disk.
+  const prefix = dirname(own);
+  if (prefix.split("/").filter((segment) => segment.length > 0).length >= 2) {
+    roots.push(prefix);
+  }
+  return { ...allowance, allowRead: [...jail, ...roots] };
+}
+
+/**
+ * Every proper ancestor directory of these paths, sorted and de-duplicated.
+ *
+ * `subpath` opens a subtree; it says nothing about the directories ABOVE it,
+ * and opening `/Users/carter/dev/muse` is useless if the process may not stat
+ * `/Users`, `/Users/carter` and `/Users/carter/dev` on the way down. Metadata
+ * only: the names of the intermediate directories leak, their contents do not.
+ */
+function ancestorsOf(paths: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const path of paths) {
+    let at = dirname(path);
+    for (let depth = 0; depth < 64; depth += 1) {
+      if (at === "/" || at === "." || at === "") break;
+      out.add(at);
+      const up = dirname(at);
+      if (up === at) break;
+      at = up;
+    }
+  }
+  out.add("/");
+  return [...out].sort();
 }
 
 /**
@@ -467,7 +705,9 @@ export function wrapForSandbox(
   }
   const dir = mkdtempSync(join(realTmpdir(), "approval-sandbox-"));
   const profile = join(dir, "egress-denied.sb");
-  writeFileSync(profile, seatbeltProfile(allowance), { mode: 0o600 });
+  writeFileSync(profile, seatbeltProfile(withExecutableRoots(allowance, command)), {
+    mode: 0o600,
+  });
   return {
     command: SANDBOX_EXEC,
     args: [...profileFlags(profile), command, ...args],

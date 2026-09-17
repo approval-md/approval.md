@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && approval log advance --pr 2>&1 | grep -E '✓|pull request|seq|refus|error' | head -6","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

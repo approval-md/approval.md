@@ -135,6 +135,13 @@ import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import {
+  READ_OUT_OF_SCOPE_CLASS,
+  effectiveReadRoots,
+  isInReadScope,
+  readTargetsOf,
+  renderReadRoots,
+} from "../core/read-scope.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import {
   payloadOf,
@@ -383,6 +390,21 @@ function hookScope(flags: Record<string, string | boolean>, cwd: string): HookSc
   return { logPath, root, options };
 }
 
+/**
+ * The GATE ROOT: the directory holding the policy file that was actually read
+ * (APRV-347).
+ *
+ * This is the anchor of the read scope, and it is deliberately the loaded
+ * policy's own directory rather than the hook's cwd or the harness's `cwd`
+ * field. A muse session started in `~/dev/muse` with its own `APPROVAL.md` gets
+ * `~/dev/muse`, and every sibling under `~/dev` is outside the scope with no
+ * extra grammar anywhere. A policy that did not load falls back to the scope
+ * root, which is the same directory the loader was pointed at.
+ */
+function policyRootOf(load: ReturnType<typeof loadPolicy>, fallback: string): string {
+  return load.ok ? dirname(load.source.path) : fallback;
+}
+
 // ===========================================================================
 // Hook output
 // ===========================================================================
@@ -403,6 +425,16 @@ interface HarnessAdapter {
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /**
+   * Tools that READ a named path (APRV-347).
+   *
+   * Parallel to `fileTools` and answered by a parallel gate. The two lists
+   * differ in what an empty entry means: a file tool with no path is a tool
+   * call this runtime does not understand, while a read tool with no path is
+   * the ordinary spelling of "read the workspace" and keeps the
+   * not-a-gated-tool `allow` it has always had.
+   */
+  readTools: readonly string[];
   /** Include the native tool name in the bytes a grant binds. */
   bindToolName?: boolean;
   /**
@@ -424,6 +456,10 @@ const CLAUDE_ADAPTER: HarnessAdapter = {
   defaultActor: "agent:claude-code",
   shellTool: "Bash",
   fileTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"],
+  // Claude Code's three path-carrying readers. `Read` names the file in
+  // `file_path` (or `notebook_path`), `Glob` and `Grep` name the directory they
+  // search in `path` and default to the workspace when it is absent.
+  readTools: ["Read", "Glob", "Grep"],
 };
 
 const CURSOR_ADAPTER: HarnessAdapter = {
@@ -432,6 +468,14 @@ const CURSOR_ADAPTER: HarnessAdapter = {
   defaultActor: "agent:cursor",
   shellTool: "Shell",
   fileTools: ["Write", "Delete"],
+  // Cursor's own hook documentation names `Shell`, `Write` and `Delete` as the
+  // matchable tools, and no read tool among them; `Read` is the name its agent
+  // surface uses. It is listed here because an entry that Cursor never sends is
+  // INERT — an unmatched tool takes the path it took before this task — while
+  // an entry missing for a tool Cursor does send would be an unscoped read. If
+  // Cursor names it otherwise, `cat` through `Shell` is still scoped by the
+  // classifier, which is the floor. See docs/cursor-hook.md.
+  readTools: ["Read"],
 };
 
 const CODEX_ADAPTER: HarnessAdapter = {
@@ -440,6 +484,13 @@ const CODEX_ADAPTER: HarnessAdapter = {
   defaultActor: "agent:codex",
   shellTool: "Bash",
   fileTools: ["apply_patch"],
+  // Empty, and not an oversight. The Codex native hook contract exposes exactly
+  // two tools, `Bash` and `apply_patch` (docs/codex-hook.md); it has no
+  // separate read tool to gate. Codex `Bash` is refused outright today because
+  // the contract does not expose the per-call working directory (APRV-310), so
+  // a Codex read arrives as a shell command and is scoped by the classifier or
+  // it does not arrive at all.
+  readTools: [],
   bindToolName: true,
 };
 
@@ -1171,26 +1222,184 @@ export function refineScratchDelete(
   return { result: { ok: true, segments, classes }, notes };
 }
 
+// ===========================================================================
+// Read scope, the disk half (APRV-347)
+// ===========================================================================
+
 /**
- * The classifier, its scratch context, and both impure refinements, in the one
+ * ## Why reads need a second pass too
+ *
+ * The pure classifier can settle an ABSOLUTE read target against the roots and
+ * nothing else. `cat ../other/secrets`, `grep -r needle ./link-to-elsewhere`
+ * and a bare `ls` all mean something only once a working directory and the
+ * filesystem's own links are in hand, and those are exactly the spellings an
+ * agent reaches for. So the read rule has the same two-part shape the delete
+ * rule has: the text decides what text can decide, and this pass — which
+ * resolves against the hook's OWN directory, follows links, and answers `null`
+ * for anything it cannot resolve — tightens `read.shell` back to
+ * `read.file.out_of_scope`.
+ *
+ * It only ever moves a segment toward the stricter class. A caller that skipped
+ * it would be no more permissive than one that runs it, which is what lets
+ * `hook classify` and `hook <harness>` share it without either becoming the
+ * authority.
+ */
+
+/** The rule a read tightened by this pass reports. */
+const READ_SCOPE_REJECTED_RULE = "read-out-of-scope-resolved";
+
+/**
+ * The read roots this process may vouch for, resolved.
+ *
+ * The gate root is the directory the hook resolved its POLICY from, never the
+ * harness-supplied `cwd`: a scope the subject of the gate could choose is not a
+ * scope (SPEC.md §11.1, self-reported fields never reduce scrutiny). The
+ * scratchpad and temp roots are the ones `resolveScratchRoots` already computes
+ * and already guards, so the two rules cannot disagree about where the agent's
+ * own scratch is. `declared` is `read_scope.roots` out of the loaded policy,
+ * which may only widen this set.
+ */
+export function resolveReadRoots(
+  cwd: string,
+  gateRoot: string,
+  declared?: readonly string[],
+): string[] {
+  const roots = effectiveReadRoots({
+    gateRoot: resolvedPath(gateRoot) ?? gateRoot,
+    systemRoots: resolveScratchRoots(cwd),
+    ...(declared === undefined ? {} : { declared }),
+  });
+  const out: string[] = [];
+  for (const root of roots) {
+    const resolved = resolvedPath(root) ?? root;
+    if (!out.includes(resolved)) out.push(resolved);
+  }
+  return out;
+}
+
+/**
+ * Where this target really is, or `null` when nothing can say.
+ *
+ * The same walk `targetStaysInScratch` does, and for the same reason: the file
+ * may not exist yet (or at all), so the nearest EXISTING ancestor is resolved
+ * and the unresolved tail re-appended. A symlink anywhere in that chain
+ * therefore cannot smuggle a read out of the root, which is the escape the pure
+ * half cannot see.
+ */
+function resolvedReadTarget(target: string, cwd: string): string | null {
+  let existing = isAbsolute(target) ? target : resolvePathSegments(cwd, target);
+  const tail: string[] = [];
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (existsSync(existing)) break;
+    const up = dirname(existing);
+    if (up === existing) return null;
+    tail.unshift(basename(existing));
+    existing = up;
+  }
+  const resolved = resolvedPath(existing);
+  if (resolved === null) return null;
+  return tail.length === 0 ? resolved : join(resolved, ...tail);
+}
+
+/**
+ * Tighten a `read.shell` segment to `read.file.out_of_scope` wherever the disk
+ * disagrees with the text.
+ *
+ * IMPURE by design and by contract. `roots` empty means the caller asked for no
+ * read scoping at all, and every segment is returned untouched — the same
+ * "absent yields today's answer" the classifier context promises.
+ */
+export function refineReadScope(
+  result: CommandClassification,
+  roots: readonly string[],
+  cwd: string,
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  if (roots.length === 0) return { result, notes: [] };
+  if (!result.segments.some((segment) => segment.class === "read.shell")) {
+    return { result, notes: [] };
+  }
+
+  const notes: string[] = [];
+  const segments = result.segments.map((segment) => {
+    if (segment.class !== "read.shell") return segment;
+    const words = commandSegmentWords(segment.text);
+    const parsed = words === null ? undefined : words[0];
+    if (parsed === undefined) return segment;
+    const positionals = parsed.args.filter((arg) => !arg.startsWith("-") || arg === "-");
+    const declaredTargets = readTargetsOf(parsed.bin, positionals, parsed.args);
+    if (declaredTargets === null) return segment;
+    // No operand is not "no read": `ls`, `find` and a piped `grep needle` all
+    // read the working directory, so the working directory is what is checked.
+    const targets = declaredTargets.length === 0 ? ["."] : declaredTargets;
+
+    const reject = (path: string, detail: string): ClassifiedSegment => {
+      notes.push(`${READ_SCOPE_REJECTED_RULE}: ${detail}`);
+      return {
+        ...segment,
+        class: READ_OUT_OF_SCOPE_CLASS,
+        rule: READ_SCOPE_REJECTED_RULE,
+        path,
+      };
+    };
+
+    for (const target of targets) {
+      const resolved = resolvedReadTarget(target, cwd);
+      if (resolved === null) {
+        return reject(
+          target,
+          `${target} does not resolve to any path this hook can see, so \`${segment.text}\` is ${READ_OUT_OF_SCOPE_CLASS}`,
+        );
+      }
+      if (!isInReadScope(resolved, roots)) {
+        return reject(
+          resolved,
+          `${target} resolves to ${resolved}, which is outside the read scope (${renderReadRoots(roots)}), so \`${segment.text}\` is ${READ_OUT_OF_SCOPE_CLASS}`,
+        );
+      }
+    }
+    return segment;
+  });
+  if (notes.length === 0) return { result, notes };
+
+  const classes: string[] = [];
+  for (const segment of segments) {
+    if (!classes.includes(segment.class)) classes.push(segment.class);
+  }
+  return { result: { ok: true, segments, classes }, notes };
+}
+
+/**
+ * The classifier, its context, and all three impure refinements, in the one
  * order every caller must use.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are two refinements in the chain.
+ * that stays true now there are three refinements in the chain.
+ *
+ * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
+ * the strict one (APRV-347), so it is passed explicitly at every call site: an
+ * empty list means "do not scope reads", which is what every caller outside a
+ * resolved gate scope wants and what this classifier did before the field
+ * existed.
  */
 export function classifyForHook(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
+  readRoots: readonly string[] = [],
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
-  const classified = classifyCommand(command, protectedPaths, { scratchRoots: roots });
+  const classified = classifyCommand(command, protectedPaths, {
+    scratchRoots: roots,
+    ...(readRoots.length === 0 ? {} : { readRoots }),
+  });
   const rewritten = refineRewrite(classified, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
+  const scoped = refineReadScope(scratched.result, readRoots, cwd);
   return {
-    result: scratched.result,
-    notes: [...rewritten.notes, ...scratched.notes],
+    result: scoped.result,
+    notes: [...rewritten.notes, ...scratched.notes, ...scoped.notes],
   };
 }
 
@@ -1261,7 +1470,7 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
     return usageError(streams, "missing <command> argument for `approval hook classify`");
   }
 
-  const { options } = hookScope(parsed.flags, cwd);
+  const { root, options } = hookScope(parsed.flags, cwd);
   const load = loadPolicy(
     options.policy?.file === undefined
       ? { dir: options.policy?.dir ?? cwd }
@@ -1275,12 +1484,19 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
   const protectedPaths = load.ok ? (load.policy.protected_paths ?? []) : [];
 
   // The same impure refinements `hook claude-code` applies (APRV-108,
-  // APRV-267), run against the same directory: an explainer that printed the
-  // pure class where the hook decides a refined one would be explaining a
-  // different program.
+  // APRV-267, APRV-347), run against the same directory and the same roots: an
+  // explainer that printed the pure class where the hook decides a refined one
+  // would be explaining a different program. A policy that did not load
+  // contributes no `read_scope`, so the scope is the built-in roots alone,
+  // which is the narrower answer and is what the hook itself would refuse on.
+  const readRoots = resolveReadRoots(
+    cwd,
+    policyRootOf(load, root),
+    load.ok ? load.policy.read_scope?.roots : undefined,
+  );
   streams.out(
     renderClassification(
-      classifyForHook(command, protectedPaths, cwd).result,
+      classifyForHook(command, protectedPaths, cwd, readRoots).result,
       boolFlag(parsed.flags, "--json"),
     ),
   );
@@ -1565,6 +1781,73 @@ function fileToolGate(
     // be ellipsized away (a long path is not — the payload carries it whole).
     summary: summaryFor(tier, toolName, file),
   };
+}
+
+/**
+ * What a read tool asks for, or `null` when it is not a question at all
+ * (APRV-347).
+ *
+ * `null` twice over, and the two cases are different:
+ *
+ * - the tool names NO path. `Glob` and `Grep` default to the workspace, which
+ *   is inside the gate root by construction, so the call keeps the
+ *   not-a-gated-tool `allow` it has always been answered with. A path the
+ *   harness did not send is not a path this runtime may invent;
+ * - the tool names a path INSIDE the scope. An ordinary read of the workspace
+ *   is the most common tool call a session makes, and routing it anywhere near
+ *   the log would make the transparency log a database (SPEC.md §2).
+ *
+ * Everything else is one gated question with the RESOLVED path bound, because
+ * the resolved path is the fact: a harness-supplied `~/dev/muse/../other/x`, or
+ * a symlink inside the root pointing out of it, must not be able to describe
+ * itself as in scope (SPEC.md §11.1, self-reported fields never reduce
+ * scrutiny).
+ */
+interface ReadGate {
+  /** The target, absolute and resolved from the hook's own directory. */
+  file: string;
+  /** The target exactly as the harness spelled it, for the reason text. */
+  declared: string;
+  payload: Record<string, unknown>;
+  summary: string;
+}
+
+function readToolGate(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  roots: readonly string[],
+  cwd: string,
+): ReadGate | null {
+  if (roots.length === 0) return null;
+  const declared =
+    readString(toolInput, "file_path") ??
+    readString(toolInput, "notebook_path") ??
+    readString(toolInput, "path");
+  if (declared === null) return null;
+
+  // FAIL CLOSED on an unresolvable path (the task's AC1, and SPEC.md §11.1):
+  // a target nothing on this disk can place is a target nothing can say is
+  // inside the scope, so it is out of it.
+  const resolved = resolvedReadTarget(declared, cwd);
+  if (resolved !== null && isInReadScope(resolved, roots)) return null;
+  const file = resolved ?? absolute(declared, cwd);
+
+  const input: Record<string, unknown> = { ...toolInput };
+  delete input["description"];
+  return {
+    file,
+    declared,
+    // The binding bytes name the RESOLVED path as well as the tool's own input,
+    // so an approver reads where the data actually comes from and a grant over
+    // one spelling cannot be spent on another.
+    payload: { tool: toolName, rule: "read-scope", file, input },
+    summary: `${toolName} ${file} (outside the read scope)`,
+  };
+}
+
+/** The verdict note for a gated read: what was asked for, and against what. */
+function readScopeNote(gated: ReadGate, roots: readonly string[]): string {
+  return `read-scope: ${gated.declared} resolves to ${gated.file}, which is outside the read scope (${renderReadRoots(roots)})`;
 }
 
 /** The headline for a tier: the qualifier first, the touch after it. */
@@ -2777,7 +3060,14 @@ function runPostToolUse(
   actor: string,
   adapter: HarnessAdapter,
 ): number {
-  if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
+  if (
+    input.toolName !== adapter.shellTool &&
+    !adapter.fileTools.includes(input.toolName) &&
+    // APRV-347: a read tool MAY have had a start written for it (one outside
+    // the scope), so it belongs in this set. A read inside the scope wrote
+    // nothing, and the close below finds no start and says so in its own words.
+    !adapter.readTools.includes(input.toolName)
+  ) {
     return report(
       streams,
       "post-tool-not-gated",
@@ -2895,6 +3185,7 @@ function describeToolCall(
   adapter: HarnessAdapter,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
+  readRoots: readonly string[] = [],
 ): ToolDescription {
   if (adapter.kind === "codex" && input.toolName === "apply_patch") {
     const raw = readString(input.toolInput, "command");
@@ -2934,7 +3225,7 @@ function describeToolCall(
     // commit. APRV-267: a delete confined to the agent's own scratch is not a
     // decision. Both run in the hook's own cwd, after classification and never
     // inside it, and neither claims anything it cannot establish from the disk.
-    const refined = classifyForHook(raw, protectedPaths, cwd);
+    const refined = classifyForHook(raw, protectedPaths, cwd, readRoots);
     const classified = refined.result;
     if (!classified.ok) {
       return {
@@ -3025,6 +3316,26 @@ function describeToolCall(
       headline: raw,
       notes: refined.notes,
       segments: classified.segments,
+    };
+  }
+
+  // APRV-347, above the file-tool branch because the two lists are disjoint and
+  // a read is the cheaper question to answer: a read inside the scope, or one
+  // naming no path at all, returns `null` here and takes the allow below.
+  if (adapter.readTools.includes(input.toolName)) {
+    const read = readToolGate(input.toolName, input.toolInput, readRoots, cwd);
+    if (read === null) {
+      return {
+        kind: "allow",
+        reason: `${input.toolName} is not a gated tool`,
+      };
+    }
+    return {
+      kind: "gated",
+      classes: [READ_OUT_OF_SCOPE_CLASS],
+      payload: read.payload,
+      headline: read.summary,
+      notes: [readScopeNote(read, readRoots)],
     };
   }
 
@@ -3212,7 +3523,20 @@ function runBypass(
     ? null
     : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
 
-  const described = describeToolCall(input, adapter, protectedPaths, cwd);
+  const described = describeToolCall(
+    input,
+    adapter,
+    protectedPaths,
+    cwd,
+    // APRV-347. The window suspends the POLICY, not the classification: a read
+    // outside the scope is described as one here too, so the bypass RECORD says
+    // what was actually authorized rather than calling it an ordinary read.
+    resolveReadRoots(
+      cwd,
+      policyRootOf(load, scope.root),
+      load.ok ? load.policy.read_scope?.roots : undefined,
+    ),
+  );
   if (described.kind === "deny") {
     return deny(
       streams,
@@ -3468,7 +3792,29 @@ function runHarnessHook(
   }
 
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
-    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+    if (!adapter.readTools.includes(input.toolName)) {
+      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+    }
+    // APRV-347, and the placement is the whole of its cost. A read tool call is
+    // the most frequent event a session produces, and before this task it was
+    // answered here with no policy load, no verified read of the log and no
+    // window lookup. Everything below this line is expensive, so the reads that
+    // do not need it must not pay for it.
+    //
+    // The short-circuit is sound because `read_scope` is ADDITIVE: it can only
+    // widen the roots, so a target already inside the BUILT-IN roots is inside
+    // the effective ones whatever the policy says, and the policy need not be
+    // read to know it. A target outside them falls through, the policy is
+    // loaded below, and `describeToolCall` asks again with the widened set —
+    // which is where a policy-declared root actually takes effect.
+    //
+    // The cost of the fast path is a handful of `realpath` calls and no process
+    // spawn, provided the hook is configured with `--dir` as the docs show
+    // (otherwise `hookScope` runs `git rev-parse` to find the primary).
+    const early = hookScope(parsed.flags, cwd);
+    if (readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null) {
+      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+    }
   }
 
   // APRV-188. From here on this process may resume a verified read behind the
@@ -3540,12 +3886,16 @@ function runHarnessHook(
     );
   }
   const protectedPaths = load.policy.protected_paths ?? [];
+  // APRV-347. Resolved from the LOADED policy's own directory, so the scope is
+  // anchored to the gate a decision will be recorded in, and widened by
+  // `read_scope.roots` if that policy declares any.
+  const readRoots = resolveReadRoots(cwd, policyRootOf(load, root), load.policy.read_scope?.roots);
 
   // What is being asked for, as one or more classes. One description site for
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const described = describeToolCall(input, adapter, protectedPaths, cwd);
+  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots);
   if (described.kind === "deny") {
     return deny(streams, described.code, described.detail, adapter.kind);
   }

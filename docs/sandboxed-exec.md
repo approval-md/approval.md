@@ -56,6 +56,66 @@ ships a profile that silently protects nothing:
    which would be recorded as the child's own exit code. The command is resolved
    to an absolute path first, and one that does not resolve is never wrapped.
 
+### The read jail (APRV-347)
+
+The profile above is a deny-LIST: allow by default, deny the network and the
+credential files. That stays the default, byte for byte, and
+`tests/sandbox-read-jail.test.ts` pins it — a profile built without a read jail
+is identical to the profile this runtime produced before the jail existed, so no
+deployment that did not ask for one pays anything for it.
+
+A policy that declares a `read_scope` block (SPEC.md §5.2) flips file reads to
+deny-default for `approval run` and `approval sandbox`:
+
+```
+(deny file-read*)
+(allow file-read* (subpath "/Users/…/dev/muse"))       ;; the gate root
+(allow file-read* (subpath "/usr/lib"))                ;; the runtime set, fixed
+(allow file-read* (subpath "/System"))
+…
+(allow file-read-metadata (literal "/Users"))          ;; stat the way down
+(deny file-read* (literal "/…/.approval/vault.enc"))   ;; last word wins
+```
+
+Three things about it are load-bearing:
+
+- **Order is the policy.** SBPL takes the LAST matching rule, so the roots open
+  the filesystem and the credential denials close it again afterwards. A vault
+  inside an allowed root stays unreadable because its denial is written after
+  the allow that contains it, and the test asserts the ordering rather than the
+  presence.
+- **The runtime set is compiled in** (`RUNTIME_READ_PATHS` in
+  `src/core/sandbox.ts`): dyld and the shared cache, `/usr/lib`, `/System`,
+  `/Library`, `/dev`, the standard binary directories, `/etc`, the temp roots,
+  and this process's own resolved `node`. A caller cannot widen it. A jail whose
+  runtime set could be extended by the party under oversight is not a jail.
+- **The temp roots come from the CALLER, not from the profile builder.**
+  `approval run` and `approval sandbox` build their roots with
+  `resolveReadRoots`, which includes the session scratchpad and the system temp
+  root, so both are open in an ordinary jailed run and build tooling keeps
+  working. Two consequences, and the second is why this is a bullet rather than
+  a footnote. Material an agent parks in the system temp directory is readable
+  from inside such a jail, whoever put it there, so do not treat temp as
+  private. And a caller that passes narrower roots gets a narrower jail: the
+  temp allowance is a default, not a floor, which is exactly what
+  `tests/sandbox-read-jail.test.ts` relies on to demonstrate a real denial with
+  its fixtures sitting under temp.
+- **The root directory is readable, as a listing.** `(allow file-read*
+  (literal "/"))` is in every jailed profile because without it a process dies
+  with SIGABRT before `main`; measured, not reasoned. Every directory between
+  `/` and an allowed root gets `file-read-metadata` and nothing more, so a path
+  can be resolved without its contents being readable.
+- **`node_modules` is not special.** Dependencies inside the gate root are
+  covered by the root. Dependencies OUTSIDE it — a linked package, a shared
+  store, or a git worktree whose `node_modules` lives up in the primary
+  checkout — are refused, and that is the one way the jail breaks an ordinary
+  project. The fix is a `read_scope.roots` entry naming that directory, which is
+  what the key is for. The refusal and the fix are both pinned as tests.
+
+`approval sandbox --read-jail` turns it on for one command whether the policy
+declares a block or not. There is no flag that turns it OFF where the policy
+asked for it: a flag an agent can pass must only ever make the room smaller.
+
 **Linux is not implemented in this build.** `bwrap --unshare-net` and
 `unshare --net` are the mechanisms (both need unprivileged user namespaces,
 which hardened kernels disable, so availability has to be probed rather than
@@ -166,6 +226,30 @@ nothing readable from an environment loosens anything.
    Everything else (`git`, `gh`, `mkdir`, `cat`, an edit) is untouched.
 4. Leave the daemon and the channels outside. They are the gate's transport and
    the human launches them.
+5. **To confine what those commands may READ** (APRV-347, wired here by
+   APRV-193), declare a `read_scope` block in the gate's `APPROVAL.md`. Both
+   `approval run` and `approval sandbox` then build the deny-default read
+   profile above from the gate root plus whatever the block adds, so a command
+   that goes looking outside the project gets EPERM rather than a file. Try it
+   on one command first: `approval sandbox --read-jail -- npm test` applies the
+   same jail without touching the policy, which is the cheap way to find the
+   directory your build reads and nobody remembered (usually a `node_modules`
+   outside the root, or a global cache).
+
+**Why the policy and not a flag.** The jail is turned on by a key in the file a
+human writes and attests, and there is no flag that turns it OFF where that key
+asked for it. A flag an agent can pass must only ever make the room smaller
+(SPEC.md §11.1 invariant 4), so `--read-jail` can add the confinement and
+nothing can remove it. A gate whose policy declares no `read_scope` gets the
+profile it got before, byte for byte.
+
+**What this wires, and what it still does not.** Steps 2 and 5 protect a
+COMMAND. They do not put the harness itself in the room: `claude` and
+`cursor-agent` talk to a model over the network, which is exactly what the
+profile denies, so `approval sandbox -- claude` is a session that cannot think.
+Whole-session containment needs an egress allowlist reaching one host, which
+Seatbelt cannot express by hostname and which the prior art solves with a local
+proxy. That is the open half of APRV-193 AC1 and is a separate design.
 
 ## What this does not claim
 

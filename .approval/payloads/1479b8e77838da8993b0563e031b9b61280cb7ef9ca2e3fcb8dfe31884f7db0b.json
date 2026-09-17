@@ -1,0 +1,1 @@
+{"command":"gh pr update-branch 406 2>&1 | tail -2; gh pr view 406 --json mergeStateStatus,autoMergeRequest --jq '{state:.mergeStateStatus,armed:(.autoMergeRequest!=null)}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

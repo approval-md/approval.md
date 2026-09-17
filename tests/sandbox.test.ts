@@ -45,7 +45,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -665,6 +665,59 @@ test("`approval sandbox --allow-loopback` is a real widening, and only that", { 
   } finally {
     await stubs.close();
   }
+});
+
+test("the read jail reaches the CLI, by flag and by POLICY (APRV-193 AC1)", { skip: SKIP }, async () => {
+  // The wiring, end to end, through the real verb rather than through the
+  // profile builder: a jailed `approval sandbox` cannot read a sibling of the
+  // gate root, and the two ways to turn the jail on must agree.
+  const space = workspace();
+  const sibling = join(space.dir, "..", `sibling-${basename(space.dir)}`);
+  mkdirSync(sibling, { recursive: true });
+  const secret = join(sibling, "secrets.txt");
+  writeFileSync(secret, "sk-live-not-yours\n", "utf8");
+
+  // Baseline: no jail, no flag, no policy key. The sibling is readable, which
+  // is what makes the two denials below evidence rather than coincidence.
+  const open = await cli(["sandbox", "--", "/bin/cat", secret], space.dir);
+  assert.equal(open.code, 0, open.stderr);
+  assert.match(open.stdout, /sk-live-not-yours/u);
+
+  // By flag, for one command.
+  const flagged = await cli(["sandbox", "--read-jail", "--", "/bin/cat", secret], space.dir);
+  assert.notEqual(flagged.code, 0, "the flag did not confine the read");
+  assert.equal(flagged.stdout.includes("sk-live-not-yours"), false);
+
+  // By POLICY, with no flag at all: a `read_scope` block is a human's attested
+  // statement, and it is what turns the jail on for every command this verb
+  // wraps. Written with no roots, so it adds nothing and only switches the
+  // posture — the narrowest form of the key there is.
+  writeFileSync(
+    join(space.dir, "APPROVAL.md"),
+    [
+      "# Policy",
+      "",
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: manual",
+      "read_scope:",
+      "  roots: []",
+      "classes:",
+      "  read.*:",
+      "    autonomy: autonomous",
+      "```",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const byPolicy = await cli(["sandbox", "--", "/bin/cat", secret], space.dir);
+  assert.notEqual(byPolicy.code, 0, "the policy did not confine the read");
+  assert.equal(byPolicy.stdout.includes("sk-live-not-yours"), false);
+
+  // And the gate root itself stays readable, or the jail would be unusable.
+  const mine = await cli(["sandbox", "--", "/bin/cat", join(space.dir, "launder.mjs")], space.dir);
+  assert.equal(mine.code, 0, mine.stderr);
 });
 
 test("`approval sandbox` is transparent about exit codes and refuses without a command", { skip: SKIP }, async () => {
