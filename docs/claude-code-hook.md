@@ -217,6 +217,16 @@ parentheses, and `$(…)` command substitution. Every segment of a command line 
 classified, and the command's classes are the union: `git status && curl -d … `
 is gated as `network.call`.
 
+Quoted argument text is never read as syntax (APRV-353): a quoted argument is
+one word to the shell, so nothing inside it is an operator, a redirection, a
+separator or a command name here either, and a note that says the word `bash`,
+carries an angle-bracketed placeholder, a pipe or a semicolon classifies as the
+workspace write it is. The two exceptions are the shell's own: inside DOUBLE
+quotes, `$(…)` and backticks are expanded before the command runs, so they keep
+whatever class they have anywhere else. Single quotes make the same text
+literal, which is the spelling to reach for when a note has to quote a command.
+Quoting that does not balance is `hook-unparseable`, never a guess.
+
 ### The rule table
 
 One row per binary group. The first row whose binary and subcommand match
@@ -226,7 +236,7 @@ an addition).
 
 | rule | binaries | subcommands | classes |
 |---|---|---|---|
-| `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite |
+| `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite, vcs.ref.delete |
 | `git-rewrite` | git | rebase \| filter-branch \| filter-repo | vcs.history.rewrite † |
 | `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
 | `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
@@ -461,6 +471,45 @@ unchanged and unconditional: what happens at the far end is not written in the
 argv, so there is no read-shaped invocation to carve out. A GET-shaped fetch
 redirected into a file is still `files.write.workspace`, by the `redirect-write`
 override above.
+
+### Deleting a remote ref (APRV-352)
+
+A `git push` that removes a remote ref is `vcs.ref.delete`, rule
+`git-ref-delete`, with the ref names bound to the segment's `path` so an
+approver is told what is about to disappear rather than being handed a class and
+left to re-read the command. Every spelling lands there:
+
+| command | class | bound |
+|---|---|---|
+| `git push origin --delete feature/x` | `vcs.ref.delete` | `feature/x` |
+| `git push origin -d feature/x` | `vcs.ref.delete` | `feature/x` |
+| `git push origin :refs/heads/x` | `vcs.ref.delete` | `refs/heads/x` |
+| `git push origin :x` | `vcs.ref.delete` | `x` |
+| `git push origin --delete a b c` | `vcs.ref.delete` | `a b c` |
+| `git push origin feature :stale` | `vcs.ref.delete` | `stale` |
+
+It used to be `vcs.push.main`, which reads as "this reaches the trunk". In a
+project that samples trunk pushes retrospectively that meant an irreversible
+removal proceeded unasked and was looked at afterwards, and APRV-318 found 233
+of them queued behind one command. The two acts are not the same: a push adds
+commits somebody can still see, while a deletion removes the only name an
+unmerged branch had, and the reflog that could find it again is on a server
+nobody in the session can reach.
+
+Three boundaries hold around it. A **force** push is still
+`vcs.history.rewrite`, including one that also deletes, because moving shared
+history is the stricter fact about the command. A **tag** deletion is still
+`release.publish` — the name a release was published under is a release surface
+however it is removed — and so is a bulk deletion that mixes a tag in. A
+`--delete` naming **no ref at all** stays in the class with nothing bound: an
+invocation whose targets cannot be read is the one that least deserves the
+looser answer.
+
+A policy that has no `vcs.ref.delete` line resolves the class by
+`defaults.autonomy`, like any other class no rule matches, so adopting it is an
+explicit act and shipping the class ahead of the line is safe in the strict
+direction. This repository's line is proposed in
+`docs/proposals/vcs-ref-delete-2026-09.md`.
 
 ### Rewriting unpublished history
 

@@ -882,6 +882,140 @@ const readScopeVectors = [
   },
 ];
 
+/**
+ * The note text from the APRV-353 incident, in one constant.
+ *
+ * It names a shell, carries an angle-bracketed placeholder, a pipe and a
+ * semicolon: every construct a tokenizer that reads inside a quoted argument
+ * would misread, in the position a real backlog note puts them.
+ */
+const QUOTED_NOTE =
+  "Ran it through the Bash tool; wrote <abs>/lane.log | the exit code is what counts";
+
+/**
+ * The command classifier's segmentation and classes (APRV-353).
+ *
+ * The suite is about the shell's own command boundary, which is the part of a
+ * classifier a second implementation is most likely to get subtly wrong in both
+ * directions at once: reading operators inside a quoted argument refuses
+ * ordinary work, and failing to read a `$(…)` the shell really does expand lets
+ * an unclassified effect run before the outer command starts.
+ *
+ * Every vector is one command string. Nothing here touches a gate root, a
+ * policy or the disk, so these vectors are portable in a way the harness
+ * suites cannot be.
+ */
+const commandClassVectors = [
+  // --- quoted argument text is data (APRV-353) -------------------------------
+  {
+    id: "quoted-note-single-quotes",
+    description:
+      "a single-quoted backlog note naming a shell, a placeholder, a pipe and a semicolon is ONE segment: a workspace write",
+    input: { command: `backlog task edit APRV-353 --append-notes '${QUOTED_NOTE}'` },
+  },
+  {
+    id: "quoted-note-double-quotes",
+    description: "the same note in double quotes is the same one segment",
+    input: { command: `backlog task edit APRV-353 --append-notes "${QUOTED_NOTE}"` },
+  },
+  {
+    id: "quoted-redirect-is-not-a-redirect",
+    description:
+      "a redirection written inside a quoted argument creates no file, so it is not a write target",
+    input: {
+      command: `backlog task edit APRV-353 --append-notes 'node run.mjs > <dir>/lane.log 2>&1'`,
+    },
+  },
+  {
+    id: "quoted-separator-does-not-split",
+    description: "a separator inside quotes is one word, where the same separator unquoted splits",
+    input: { command: "echo 'one ; git push origin main'" },
+  },
+  {
+    id: "unquoted-separator-splits",
+    description: "the control for the pair above: unquoted, it is two segments and the push shows",
+    input: { command: "echo one ; git push origin main" },
+  },
+  {
+    id: "unquoted-redirect-still-writes",
+    description: "an unquoted redirection is a write, exactly as it was",
+    input: { command: "echo hello > lane.log" },
+  },
+  {
+    id: "double-quoted-substitution-still-refuses",
+    description:
+      "the shell expands `$(…)` inside double quotes, so an effectful substitution taints the segment",
+    input: { command: `backlog task edit APRV-353 --append-notes "$(git push origin main)"` },
+    control: true,
+  },
+  {
+    id: "double-quoted-backtick-still-refuses",
+    description: "a backtick inside double quotes is a command substitution the shell runs: opaque",
+    input: { command: 'backlog task edit APRV-353 --append-notes "verified with `npm test`"' },
+    control: true,
+  },
+  {
+    id: "single-quoted-backtick-is-literal",
+    description: "the same backticks inside single quotes are text, because the shell does not expand them",
+    input: { command: "backlog task edit APRV-353 --append-notes 'verified with `npm test`'" },
+  },
+  {
+    id: "unbalanced-quote-fails-closed",
+    description: "quoting that never closes is unparseable, never a guess at what was meant",
+    input: { command: `backlog task edit APRV-353 --append-notes 'never closed` },
+    control: true,
+  },
+  {
+    id: "adjacent-quotes-concatenate",
+    description: "adjacent quoted and unquoted runs are one word, the way the shell joins them",
+    input: { command: `backlog task edit T --append-notes 'a'"b"c` },
+  },
+  // --- remote ref deletion is its own class (APRV-352) -----------------------
+  {
+    id: "ref-delete-flag",
+    description:
+      "git push --delete <ref> is vcs.ref.delete with the ref bound, not the trunk-push class",
+    input: { command: "git push origin --delete feature/x" },
+  },
+  {
+    id: "ref-delete-short-flag",
+    description: "the -d spelling is the same deletion",
+    input: { command: "git push origin -d feature/x" },
+  },
+  {
+    id: "ref-delete-colon-refspec",
+    description: "the colon refspec deletes without a flag, fully qualified or short",
+    input: { command: "git push origin :refs/heads/x" },
+  },
+  {
+    id: "ref-delete-bulk",
+    description: "a bulk deletion binds every ref it names, so the prompt can show them",
+    input: { command: "git push origin --delete a b c" },
+  },
+  {
+    id: "ref-delete-mixed-with-a-push",
+    description:
+      "one deleting refspec makes the whole command a deletion: the destructive half is what is being asked about",
+    input: { command: "git push origin feature :stale" },
+  },
+  {
+    id: "ref-delete-tag-stays-release",
+    description:
+      "a TAG deletion keeps release.publish: the name a release was published under is a release surface however it is removed",
+    input: { command: "git push origin :refs/tags/v1.2.3" },
+  },
+  {
+    id: "ref-delete-force-stays-rewrite",
+    description: "a force push that also deletes is still vcs.history.rewrite, the stricter fact",
+    input: { command: "git push --force origin --delete feature/x" },
+  },
+  {
+    id: "ordinary-push-unmoved",
+    description: "the control for the six above: an ordinary branch push did not move",
+    input: { command: "git push origin feature/x" },
+  },
+];
+
 const gateVectors = [
   {
     id: "manual-request-is-recorded",
@@ -1452,6 +1586,24 @@ const SUITES = [
     description:
       "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors.",
     vectors: readScopeVectors,
+  },
+  {
+    file: "command-class.v1.json",
+    suite: "command-class",
+    // 1.1.0 (APRV-352): a MINOR bump. The eight `ref-delete-*` /
+    // `ordinary-push-unmoved` vectors are new and no existing expectation in
+    // this file moved — the suite was born in 1.0.0 with the quoting vectors
+    // only, and none of them names a `git push`. The CLASS of a remote ref
+    // deletion did move, from `vcs.push.main` to `vcs.ref.delete`, but that
+    // expectation lived in no vector before this, so an implementation that
+    // passed 1.0.0 fails 1.1.0 only by not knowing a class the taxonomy has
+    // gained.
+    vectors_version: "1.1.0",
+    algorithm:
+      "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
+    description:
+      "One command string per vector, classified by the pure classifier: no gate root, no policy, no disk. The suite pins the SEGMENTATION as much as the classes, because that is where a second implementation goes wrong in both directions at once. Quoted argument text is data — a note naming a shell, a placeholder, a pipe or a semicolon is one word — while the two expansions the shell performs inside double quotes (`$(…)` and backticks) keep classifying as they do anywhere else, and quoting that does not balance is a refusal rather than a guess. On a refusal the CODE is pinned and the detail is not: the code is the machine's half (§11.1 invariant 6), the detail is prose a runtime may improve.",
+    vectors: commandClassVectors,
   },
 ];
 

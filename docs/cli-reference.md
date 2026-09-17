@@ -3990,8 +3990,11 @@ gate.self          the "approval" CLI itself is pass-through
 Bash (Claude Code) and Shell (Cursor) commands are classified into SPEC.md §7
 action classes. A `git push` that names `refs/tags/*`, a bare `v`-prefixed
 semantic-version-shaped tag, `tag <name>`, `--tags`, or `--follow-tags` is
-`release.publish`; force and mirror pushes remain `vcs.history.rewrite`, and
-ordinary branch pushes retain their branch or trunk class. Claude file tools
+`release.publish`; force and mirror pushes remain `vcs.history.rewrite`; a push
+that DELETES a remote ref — `--delete`, `-d`, or a colon refspec such as
+`:refs/heads/x` — is `vcs.ref.delete` with the ref names bound (APRV-352), and a
+tag deletion keeps `release.publish`; ordinary branch pushes retain their branch
+or trunk class. Claude file tools
 (Edit, Write, MultiEdit, NotebookEdit) and
 Cursor Write/Delete are gated only when the file is policy-protected
 (`APPROVAL.md`, `.approval/`, `CLAUDE.md`, `AGENTS.md`, `.claude/settings*`,

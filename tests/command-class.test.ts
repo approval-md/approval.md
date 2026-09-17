@@ -70,8 +70,11 @@ const FIXTURES: readonly Fixture[] = [
   { command: "git push", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
   { command: "git push origin", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
   { command: "git push origin $BRANCH", class: "vcs.push.main", rule: "git-push-main", row: "git-push" },
-  { command: "git push --delete origin feature", class: "vcs.push.main", rule: "git-push-delete", row: "git-push" },
-  { command: "git push origin :feature", class: "vcs.push.main", rule: "git-push-delete", row: "git-push" },
+  // APRV-352 moved these two off `vcs.push.main`: a deletion is not a push at
+  // the trunk, and a policy that sampled trunk pushes was sampling irreversible
+  // removals. `tests/command-class-ref-delete.test.ts` holds the rest.
+  { command: "git push --delete origin feature", class: "vcs.ref.delete", rule: "git-ref-delete", row: "git-push" },
+  { command: "git push origin :feature", class: "vcs.ref.delete", rule: "git-ref-delete", row: "git-push" },
   { command: "git push origin claude/aprv-82", class: "vcs.push.branch", rule: "git-push-branch", row: "git-push" },
   { command: "git push -u origin feature/x", class: "vcs.push.branch", rule: "git-push-branch", row: "git-push" },
   { command: "git push --force origin feature", class: "vcs.history.rewrite", rule: "git-push-force", row: "git-push" },
