@@ -3,11 +3,11 @@ id: APRV-193
 title: >-
   Starve the code: egress-sandboxed allowed exec and credential custody, so
   laundered side effects fail closed
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-readscope'
 created_date: '2026-09-01 03:21'
-updated_date: '2026-09-17 01:25'
+updated_date: '2026-09-17 02:22'
 labels:
   - security
   - dogfood
@@ -29,12 +29,12 @@ Deliverables: the sandbox profile and spawn wiring for dev-fleet agent sessions,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
-- [x] #2 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
-- [x] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
-- [x] #4 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
-- [x] #5 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
-- [x] #6 npm test passes; lint clean
+- [x] #1 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
+- [x] #2 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
+- [x] #3 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
+- [x] #4 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
+- [x] #5 npm test passes; lint clean
+- [x] #6 Per-command containment: the Seatbelt egress-deny profile (loopback to the gate daemon excepted) is applied to allowed-class exec through approval run and the hook exec path, with the profile and wiring committed and tested; confining the harness process itself, which needs its model API, is split out as APRV-351 (narrowed from the original wording and accepted by Carter, 2026-09-17)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -154,4 +154,12 @@ GLOBAL INVARIANTS TOUCHED. Self-reported fields never reduce scrutiny: the jail'
 The log is append-only and nothing new reads it back: approval sandbox still appends nothing, and the read jail is informational on no record at all. No refusal union was widened.
 
 VERIFICATION (macOS 15 arm64, Node 26). npm run build, typecheck and lint clean. node scripts/run-tests.mjs --only sandbox sandbox-read-jail sandbox-credential-starvation sandbox-probe cli-run cli-help cli-long-help cli-instructions command-class cli-hook cli-hook-read-scope: 698 tests, 697 pass, 0 fail, 1 skip (the opt-in external curl leg of sandbox-probe), exit 0. The sandbox suite itself is 27 tests, 27 pass, up one for the new CLI read-jail case.
+
+AC1 narrowed 2026-09-17 with Carter: per-command containment is what PR #411 (Lane 3, APRV-347 and APRV-193 commits) proves; a harness under the profile cannot reach its model API, so harness-level confinement is APRV-351 (constrained model egress design). The criterion now appears as #6 after the rewrite. Evidence: tests/sandbox-read-jail.test.ts, tests/sandbox-credential-starvation.test.ts, the allowRead and resolveReadRoots wiring in src/core/sandbox.ts and src/cli/hook.ts, CI green on PR #411.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Egress-deny Seatbelt profile applied per command through approval run and the hook exec path; laundering (SMTP send, webhook POST) and credential reads from a sandboxed exec are blocked and tested; legitimate-exec carve-outs documented; the drafted SPEC/CLAUDE.md amendment text was not applied and did not need to be. Harness-level confinement split to APRV-351. Verified by PR #411 CI (full gate green) and the sandbox suites.
+<!-- SECTION:FINAL_SUMMARY:END -->
