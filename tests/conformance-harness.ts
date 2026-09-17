@@ -61,6 +61,7 @@ import {
   withdraw,
   type Decision,
 } from "../src/core/gate.js";
+import { HOOK_DENY_CODES, POST_TOOL_CODES, commandHook } from "../src/cli/hook.js";
 import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { CHECKPOINT_REFUSAL_CODES } from "../src/core/checkpoint.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -317,6 +318,13 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   append_error_codes: APPEND_ERROR_CODES,
   anchor_refusal_codes: ANCHOR_REFUSAL_CODES,
   checkpoint_refusal_codes: CHECKPOINT_REFUSAL_CODES,
+  // APRV-311. The two harness-hook vocabularies were closed sets in the source
+  // and in nothing else, which is how `hook-io` came to mean both "this event
+  // was malformed" and "this harness version is refused outright". A caller
+  // branches on these strings exactly as it branches on the gate's, so they
+  // belong where a change to them is a visible diff.
+  hook_deny_codes: HOOK_DENY_CODES,
+  post_tool_codes: POST_TOOL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {
@@ -599,6 +607,134 @@ function runGateStep(
   }
 }
 
+// --- hook-read-scope (APRV-347) ---------------------------------------------
+
+/**
+ * The read scope, per harness, as a language-neutral suite.
+ *
+ * The inputs name targets SYMBOLICALLY (`inside`, `outside`, `absent`,
+ * `unresolvable`) rather than by path, because a vector carrying
+ * `/Users/carter/...` would be a fact about one machine. A conforming runner
+ * builds a gate root, puts a file in it, and picks something outside every read
+ * root for `outside`; this runner uses `/etc/hosts`, which is outside a scratch
+ * gate root and outside the temp roots on every platform the suite runs on.
+ *
+ * `read.file.out_of_scope` is `human-only` in the fixture policy. That is not
+ * advice about what a project should write — it is the one autonomy whose
+ * refusal is immediate, total and appends nothing, so a vector measures the
+ * ROUTING (did this envelope reach policy resolution under that class?) without
+ * also standing up a channel, a daemon and a timeout.
+ */
+const READ_SCOPE_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  read.file.out_of_scope:",
+  "    autonomy: human-only",
+  "  files.write.workspace:",
+  "    autonomy: autonomous",
+  "```",
+  "",
+].join("\n");
+
+/** A path outside a scratch gate root and outside every temp root. */
+const READ_SCOPE_OUTSIDE = "/etc/hosts";
+
+function readScopeTarget(kind: string, dir: string): string | null {
+  switch (kind) {
+    case "inside":
+      return join(dir, "src", "a.ts");
+    case "inside-relative":
+      return "src/a.ts";
+    case "outside":
+      return READ_SCOPE_OUTSIDE;
+    case "unresolvable":
+      return "/nonexistent-root-aprv347/deep/x";
+    case "absent":
+      return null;
+    default:
+      throw new ConformanceError(`unknown read-scope target ${JSON.stringify(kind)}`);
+  }
+}
+
+function runHookReadScope(input: Record<string, unknown>): Expectation {
+  const harness = str(input, "harness");
+  const dir = gateHome();
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), READ_SCOPE_POLICY, "utf8");
+  writeFileSync(join(dir, "src", "a.ts"), "export const a = 1;\n", "utf8");
+  const attested = appendAttestation(
+    join(dir, ".approval", "log", "events.jsonl"),
+    join(dir, "APPROVAL.md"),
+    "human:conformance",
+  );
+  if (!attested.ok) {
+    throw new ConformanceError(`the fixture policy could not be attested: ${attested.error.code}`);
+  }
+
+  const stdin =
+    input["malformed"] === true
+      ? "{not json at all"
+      : JSON.stringify({
+          session_id: "conformance-read-scope",
+          // Self-reported and deliberately wrong: a conforming runtime resolves
+          // the scope from its own directory (SPEC.md §11.1 invariant 4).
+          cwd: "/somewhere/else",
+          hook_event_name: harness === "cursor" ? "preToolUse" : "PreToolUse",
+          tool_name: str(input, "tool"),
+          tool_input: readScopeInput(input, dir),
+          tool_use_id: "conformance-tu-1",
+        });
+
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = commandHook(
+    [harness],
+    { out: (text) => out.push(text), err: (text) => err.push(text) },
+    dir,
+    () => stdin,
+  );
+  if (code !== 0) {
+    throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
+  }
+  const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
+  const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;
+  const permission = String(
+    harness === "cursor" ? parsed["permission"] : nested?.["permissionDecision"],
+  );
+  const reason = String(
+    harness === "cursor" ? parsed["agent_message"] : nested?.["permissionDecisionReason"],
+  );
+  const colon = reason.indexOf(":");
+  return {
+    valid: permission === "allow",
+    permission,
+    // The code, present only for a deny. The REASON TEXT is deliberately not
+    // pinned: it is prose a runtime may improve, and a conformance suite that
+    // froze it would be freezing an English sentence.
+    ...(permission === "deny" && colon > 0 ? { failure_class: reason.slice(0, colon) } : {}),
+    gated: permission === "deny" || !reason.includes("is not a gated tool"),
+  };
+}
+
+function readScopeInput(input: Record<string, unknown>, dir: string): Record<string, unknown> {
+  const tool = str(input, "tool");
+  const target = readScopeTarget(str(input, "target"), dir);
+  if (tool === "Bash" || tool === "Shell") {
+    return { command: target === null ? "ls" : `cat ${target}` };
+  }
+  if (target === null) return { pattern: "**/*.ts" };
+  return tool === "Read" ? { file_path: target } : { pattern: "**/*.ts", path: target };
+}
+
 const EXECUTORS: Readonly<Record<string, Executor>> = {
   "jcs-canonicalization": runJcs,
   "refusal-unions": runUnion,
@@ -606,6 +742,7 @@ const EXECUTORS: Readonly<Record<string, Executor>> = {
   "chain-verification": runChainVerification,
   "schema-validation": runSchemaValidation,
   "gate-verdicts": runGateVerdict,
+  "hook-read-scope": runHookReadScope,
 };
 
 /** The suite ids this runner knows how to execute, sorted. */

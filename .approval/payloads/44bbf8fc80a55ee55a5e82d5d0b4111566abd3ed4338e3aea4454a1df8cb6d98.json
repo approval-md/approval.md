@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"feat: policy-bound typed Codex workspace change broker (APRV-325.2)\" --body-file /tmp/lane4a-pr.md --base main --head lane/codex-broker-325 2>&1 | tail -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

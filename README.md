@@ -86,6 +86,18 @@ against the same bot, or run two instances polling that bot: Telegram returns
 HTTP 409. Stop the polling runtime before rerunning `approval setup channel
 telegram`, then reload the environment and start `up` again.
 
+`up` runs a preflight before it starts anything: it fetches, fast-forwards when
+the upstream range is safe, and rebuilds when `dist/` is older than `src/`. When
+the log directory lives in that checkout, a pull that changes
+`.approval/log/events.jsonl` while this copy has appended to it is the routine
+state rather than an incident, so the preflight reconciles it through `approval
+log sync` itself and prints one line saying what it fast-forwarded to and how
+many local records it kept. The one case left for a hand-run `approval log
+sync` is a genuine fork: two chains that share a prefix and then carry different
+records at the same `seq`. Hash chains do not merge, so `up` refuses
+`up-preflight-log-diverged` there, changes nothing, and leaves the decision to
+you.
+
 By default the daemon scans `backlog/tasks/`. If your envelopes live elsewhere,
 use `approval up --tasks /path/to/existing/task-folder`. The scan reads `.md`
 files directly inside that folder, without descending into subdirectories.
@@ -175,7 +187,9 @@ same log as the CLI.
 
 Codex support is opt-in while native compatibility and everyday activation are
 still being verified. See the bounded [Codex hook operator
-runbook](docs/codex-hook.md) before installing or trusting it.
+runbook](docs/codex-hook.md) before installing or trusting it, and
+[activation and rollback](docs/codex-activation.md) for what a trust tap does
+and does not buy on the Codex version installed today.
 
 **1. See how a command classifies.** This touches nothing.
 
@@ -640,6 +654,8 @@ semantics: SPEC.md section 5.
 | `protected_paths` | Repo-relative files and directory prefixes whose edit is classified `policy.edit`. A bare string is the whole entry. Additive only, no globs, and absent means the built-in protected set alone (§5.2, APRV-107). |
 | `protected_paths[].path` | The path half of the object form: the same grammar as the bare string, an exact file (`SPEC.md`) or a directory prefix (`design/`) (§5.2, APRV-266). |
 | `protected_paths[].class` | The class half: one lowercase segment under `policy.edit`. Four reserved names, `policy.edit.spec`, `policy.edit.harness`, `policy.edit.ci` and `policy.edit.design`, plus any word an author mints beside them. Nothing outside `policy.edit` may be named, and a route below the `policy.edit` line is refused `protected-route-floor`. No default: an entry that wants a sub-class states it (§5.2, APRV-266). |
+| `read_scope` | Directories an agent's reads may stay inside. A read resolving outside every root is `read.file.out_of_scope`. Additive only: the gate root (this policy's own directory), the session scratchpad and the system temp root are in scope whatever this says, and absent means those alone (§5.2, APRV-347). |
+| `read_scope.roots` | The extra directories. Absolute, or relative to the gate root. No globs and no negation; each is resolved on disk before it is compared, so a symlink cannot smuggle a read out of one. Absent means no widening (§5.2, APRV-347). |
 | `approvers.<name>.channels` | The channels one approver can decide on. At least one: an approver reachable nowhere can never grant. No default (§5.1). |
 | `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and the DEPRECATED alias of `supervised-retro`: it still parses, `approval doctor`'s `autonomy-alias` row names every rule that writes it, and a future schema version removes it (§5.2, APRV-127, APRV-185, APRV-335). |
 | `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
@@ -809,26 +825,27 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **29 rows** and a tally, in the order their failures
+`approval doctor` prints **30 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope
 integrity, the vault, the environment source map, then the rows that ask git
 and the harness what happened (`log-drift`, `reconciliation`,
 `harness-hook-outcomes`, `harness-hook-wiring`, `keychain-scope`,
 `log-advance-cadence`, `dark-sessions`, `verified-snapshot`, `read-proof`,
-`main-behind-origin`, `harness-version-unverified`, `live-draw`,
+`main-behind-origin`, `attested-policy-on-main`,
+`harness-version-unverified`, `live-draw`,
 `values-block`, `checkpoint`, `gate-organs`, `sealed-keys`,
 `codex-hook-wiring`, `autonomy-alias`). Each failure
 carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
 and repairs nothing, and no credential value appears in its output. Three
-of the 29 lines from a fresh directory, plus the tally:
+of the 30 lines from a fresh directory, plus the tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-10 ok · 18 not applicable · 1 failed
+10 ok · 19 not applicable · 1 failed
 ```
 
 That one failure is expected on the scaffolded policy: it samples supervised
@@ -837,7 +854,7 @@ names, and a control that looks on while the party under oversight could steer
 it is worse than one that is visibly off. Name the secret when you want
 sampling, or delete the `audit` block if one person's gate has no use for it.
 
-**18 of the 29 report `not applicable` in a fresh directory**, and each names
+**19 of the 30 report `not applicable` in a fresh directory**, and each names
 the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 (no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
 `read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),
@@ -845,7 +862,8 @@ the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 `harness-hook-wiring`, `codex-hook-wiring`, `harness-version-unverified` and
 `gate-organs` (no harness settings file), `verified-snapshot` (no daemon has
 run), and
-`log-drift`, `log-advance-cadence`, `dark-sessions`, `main-behind-origin` and
+`log-drift`, `log-advance-cadence`, `dark-sessions`, `main-behind-origin`,
+`attested-policy-on-main` and
 `sealed-keys` (not a git checkout). `sealed-keys` asks git what it tracks:
 `.approval/payloads/` is tracked on purpose, and a sealed-delivery private key
 swept in by a `git add` of that directory would open that action's token for

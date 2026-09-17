@@ -85,6 +85,21 @@
         ]
       ]
     },
+    "read_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2 (amended, APRV-347): the directories an agent's reads may stay inside. Reads outside every root classify `read.file.out_of_scope`, both for shell readers (`cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, `ls`, `find`, and kin) and for a harness read tool that names a path (Claude Code's `Read`, `Glob` and `Grep`). ADDITIVE ONLY, exactly as `protected_paths` is: the built-in roots — the GATE ROOT (the directory holding this policy file), the session scratchpad, and the system temp root — are in scope whatever this block says or omits, because a runtime that could be denied its own policy, log and workspace could not run at all, and a policy able to shrink its own read scope would be a policy an agent could narrow until nothing was gated. Omitting the block entirely means the built-in roots alone, which is the common case and the whole of the muse jail: a session whose `APPROVAL.md` sits in `~/dev/muse` has `~/dev/muse` as its gate root and every sibling under `~/dev` is out of scope with no grammar here at all. An unparseable value is refused at load like every other key in this closed schema, and a refused policy means every class is `manual` (SPEC.md §5.2, fail closed).",
+      "properties": {
+        "roots": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Extra directories whose reads stay ordinary `read.shell`. An absolute path is taken as written; a relative path is resolved against the gate root, so a policy stays portable between a checkout and a clone of it. Each entry is compared by PATH SEGMENT after the runtime resolves it, so a symlink cannot smuggle a read out of a root and `/dev/muse-other` does not match a root of `/dev/muse`. No globs and no negation: a pattern language half-implemented here would be a scope the author believed was in force and the runtime did not apply.",
+          "items": { "$ref": "#/$defs/readRoot" },
+          "examples": [["/Users/carter/dev/shared-fixtures"], ["../vendor"]]
+        }
+      },
+      "examples": [{ "roots": ["/opt/reference-corpus"] }]
+    },
     "approvers": {
       "type": "object",
       "additionalProperties": false,
@@ -496,6 +511,12 @@
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^*?\\[\\]{}\\\\\\s]+$",
       "description": "A repo-relative path: exact file (`SPEC.md`) or directory prefix with a trailing `/` (`design/`). Leading `/`, `.`/`..` segments, whitespace and the glob characters `* ? [ ] { }` are rejected — each would be a path the matcher cannot honour literally, and silently ignoring one would leave the author believing a file is gated when it is not. Named as a `$def` since APRV-266 so the bare-string entry and the `path` of a routed entry are held to one grammar and cannot drift apart."
+    },
+    "readRoot": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^*?\\[\\]{}\\\\\\s$~]+$",
+      "description": "A directory whose reads stay in scope (APRV-347). Absolute, or relative to the gate root. The glob characters `* ? [ ] { }`, whitespace, `$` and a leading `~` are rejected for the same reason `protectedPath` rejects them: this runtime compares path segments and expands nothing, so a value it would have to expand is one an author believes is in force and the runtime does not apply. Unlike `protectedPath`, an absolute path and `..` segments are both ALLOWED, because a read root may legitimately sit beside the gate root (`../vendor`) or anywhere on the machine — a root widens the scope and is resolved on disk before it is compared, where `..` has a meaning."
     }
   }
 }

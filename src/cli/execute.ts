@@ -118,6 +118,7 @@ import {
   EXIT_USAGE,
 } from "./exit-codes.js";
 import { repoRoot } from "./git-scope.js";
+import { resolveReadRoots } from "./hook.js";
 import { publishedState } from "./log-advance.js";
 import { confirmUntil, createPrompter, type Prompter } from "./prompt.js";
 import {
@@ -317,13 +318,38 @@ function wrapExecutable(
   args: readonly string[],
   env: Record<string, string>,
   logPath: string,
+  readJail: readonly string[],
 ): WrappedSpawn | null {
   const resolved = resolveExecutable(command, env);
   if (resolved === null) return null;
   return wrapForSandbox(mechanism, resolved, args, {
     loopback: false,
     denyRead: credentialPathsFor(logPath),
+    ...(readJail.length === 0 ? {} : { allowRead: readJail }),
   });
+}
+
+/**
+ * The read jail for this execution, or an empty list for "no jail" (APRV-347).
+ *
+ * Driven by the POLICY and by nothing else. A policy that declares a
+ * `read_scope` block — even an empty one — is a human's attested statement that
+ * this gate's executions read inside its roots and nowhere else, so the profile
+ * denies file reads by default and opens those roots. A policy that declares
+ * none gets exactly the profile it got before APRV-347, byte for byte, which is
+ * every deployment that has not asked for this.
+ *
+ * It is not a flag, and deliberately: an agent can pass flags. It is not an
+ * environment variable either, for the same reason. The one loosening — no
+ * jail — is the absence of a key in a file an agent may not edit.
+ */
+function readJailFor(flags: Record<string, string | boolean>, cwd: string): string[] {
+  const location = policyLocation(flags, cwd);
+  const load = loadPolicy(
+    location.file === undefined ? { dir: location.dir ?? cwd } : { file: location.file },
+  );
+  if (!load.ok || load.policy.read_scope === undefined) return [];
+  return resolveReadRoots(cwd, dirname(load.source.path), load.policy.read_scope.roots);
 }
 
 /** `defaults.approval_ttl` in force, or `null` when the policy declares none. */
@@ -596,7 +622,14 @@ export function commandRun(
   // and fails as the ENOENT it is.
   const wrapped =
     posture.kind === "apply"
-      ? wrapExecutable(posture.mechanism, command, childArgv.slice(1), childEnv.env, logPath)
+      ? wrapExecutable(
+          posture.mechanism,
+          command,
+          childArgv.slice(1),
+          childEnv.env,
+          logPath,
+          readJailFor(flags, cwd),
+        )
       : null;
   const child = spawnSync(
     wrapped?.command ?? command,

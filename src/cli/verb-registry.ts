@@ -744,6 +744,44 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "policy",
+    subcommand: "apply",
+    purpose:
+      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
+    human_only: true,
+    input: input({
+      positionals: positionals(
+        [{ name: "proposal", description: "the proposal document to apply" }],
+        1,
+      ),
+      flags: {
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...AS_FLAG,
+        "--dry-run": "boolean",
+        "--no-amend": "boolean",
+        "--pr": "boolean",
+        "--yes": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        policy: STRING,
+        proposal: STRING,
+        pairs: INTEGER,
+        noop: BOOLEAN,
+        dryRun: BOOLEAN,
+      },
+      ["ok", "policy", "proposal", "pairs", "noop", "dryRun"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "register",
     purpose:
       "Validate a task file's `approval:` envelope against envelope.schema.json and append one task.registered event carrying the declared actions. FAIL CLOSED: an invalid envelope appends nothing. The file is read only. Registration is a proposal rather than a decision, so an agent may perform it, and it is the step that makes every later question about an action ('what class is this key?') answerable from the log.",
@@ -1073,11 +1111,12 @@ const VERBS: VerbSpec[] = [
   {
     name: "sandbox",
     purpose:
-      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied.",
+      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied. Since APRV-347 it also confines what the child may READ: a policy declaring a `read_scope` block turns the profile deny-default for file reads and opens the gate root and whatever that block adds, and `--read-jail` applies the same confinement to one command whether the policy declares a block or not. There is no flag that turns the jail off where a policy asked for it.",
     human_only: false,
     input: input({
       flags: {
         "--allow-loopback": "boolean",
+        "--read-jail": "boolean",
         ...LOG_FLAG,
         ...HELP_FLAGS,
       },

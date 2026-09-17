@@ -60,7 +60,7 @@ Usage:
                       [--as <id>] [--json]                            (internal)
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
                       [--as <id>] [--no-sandbox] [--json] -- <cmd…>
-  approval sandbox    [--allow-loopback] [--log <path>] -- <cmd…>
+  approval sandbox    [--allow-loopback] [--read-jail] [--log <path>] -- <cmd…>
   approval adapter email <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval adapter agentmail <action-key> [--token <t>] --payload <file|->
@@ -625,24 +625,50 @@ const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility
 export const POLICY_HELP = `approval policy — explain what policy does with an action class
 
 Usage:
-  approval policy check|test <class> [--reversible true|false] [--policy <p>]
-                             [--dir <p>] [--json]
-  approval policy attest [--policy <p>] [--dir <p>] [--as human:<id>] [--json]
-  approval policy amend  [--policy <p>] [--dir <p>] [--log <p>] [--as human:<id>]
-                         [--require-load] [--dry-run] [--commit] [--yes] [--json]
+  approval policy check|test <class> [--reversible true|false] [--policy|--dir <p>] [--json]
+  approval policy attest [--policy|--dir <p>] [--as human:<id>] [--json]
+  approval policy amend  [--policy|--dir|--log <p>] [--as human:<id>] [--require-load]
+                         [--dry-run] [--commit|--pr] [--yes] [--json]
+  approval policy apply  <proposal.md> [--dry-run] [--no-amend] [--pr] [--yes]
 
 Subcommands:
   check   explain the autonomy resolution for <class>
   test    exact alias of check (SPEC.md §10.1 names both)
   attest  record a human's sign-off on the policy file's bytes (human-only)
   amend   the whole amendment ceremony: diff, advisory, attestation, commit
+  apply   apply a proposal document's quoted replacements, then amend (human-only)
 
-Nothing is executed, requested, or logged: this reads APPROVAL.md and answers a
-hypothetical. Discovery is APPROVAL.md then APPROVALS.md in --dir.
-${POLICY_MANUAL_BECAUSE}
+check and test read APPROVAL.md and answer a hypothetical, executing and logging nothing.
+Discovery is APPROVAL.md then APPROVALS.md in --dir. ${POLICY_MANUAL_BECAUSE}
 
 ${POLICY_EXIT_CODES}
 ${why("policy")}`;
+
+export const POLICY_APPLY_HELP = `approval policy apply — apply a proposal document to APPROVAL.md, then amend
+
+Usage:
+  approval policy apply <proposal.md> [--policy <p>] [--dir <p>] [--log <p>]
+      [--as human:<id>] [--dry-run] [--no-amend] [--pr] [--yes] [--json]
+
+Flags:
+  <proposal.md>                   the document whose Current/Replace-with pairs to apply
+  --policy <p> / --dir <p>        the policy file, or the directory to discover it in
+  --dry-run / --no-amend          show the replacements only / write them and stop
+  --pr / --yes / --json / -h      pass --pr to the amend / skip both prompts / machine
+
+HUMAN-ONLY: an agent identity refuses apply-agent-actor, and the verb classifies
+policy.core, human-only in this project's policy. Every pair resolves against an
+in-memory copy FIRST, so a stale proposal writes nothing at all. A pair is two
+fenced blocks WITH a declared language (APRV-273), labelled \`Current:\` and
+\`Replace with:\` above; \`Supersedes:\` names an earlier section's result to match
+instead. Whole-file replacement is NOT accepted: every byte written is anchored
+to a byte proved present. The values block is treated as the policy block is.
+Refusals: usage, io, apply-agent-actor, proposal-empty, proposal-malformed,
+proposal-stale, proposal-ambiguous. Then it runs \`policy amend\`, whose refusals
+are its own; answering no is exit 0 and \`aborted:\`, as it is there.
+
+${EXIT_CODES_POINTER}
+${why("policy-apply")}`;
 
 function policyVerbHelp(verb: "check" | "test", alias: "check" | "test"): string {
   return `approval policy ${verb} — explain what policy does with an action class
@@ -699,22 +725,22 @@ export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment 
 
 Usage:
   approval policy amend [--policy|--dir|--log <p>] [--as human:<id>|agent:<id>] [--require-load]
-      [--dry-run] [--commit] [--no-publish] [--yes] [--json] [--branch <n>|--direct] [--wait <d>]
+      [--dry-run] [--commit|--pr] [--no-publish] [--yes] [--json] [--branch <n>|--direct] [--wait <d>]
 
 Flags:
   --policy <p> / --dir <p> / --log <p>  policy, its discovery dir, and the log
   --as human:<id> / agent:<id>    attest HERE, or ask for a TAP (--wait/--interval/--note)
   --require-load                  refuse to attest a policy that does not load
   --dry-run / --commit / --no-publish   write nothing / the ceremony / stop at commit
-  --branch <name> / --direct      force the BRANCH or the DIRECT flow
+  --pr / --branch <name> / --direct     FINISH it (branch, push, PR, arm) / force either flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then
-commits EXACTLY the policy, the log and the pins when they moved. commit-preconditions, the pins
-and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected, pr-failed break after it.
-Attested TEXT is NOT recoverable from the log: HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
---branch <name>, --direct; a refused push PUBLISHES ITSELF, dropping to a RUNBOOK. MERGE COMMIT it.
---as agent: appends policy.proposed; the TAP attests. Fail closed: no-channel, declined, timeout.
+Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then commits
+EXACTLY the policy, the log and the pins when they moved. commit-preconditions, staged-unrelated,
+dirty-tree, the pins and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected and
+pr-failed break after it, into a RUNBOOK. Attested TEXT is NOT recoverable from the log:
+HASH-ONLY MODE. Flows, in PRECEDENCE, highest first: --branch <name>, --pr (opens or UPDATES the open
+pull request, arms --auto), --direct. MERGE COMMIT it. --as agent: appends policy.proposed, TAP attests.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1001,19 +1027,21 @@ ${why("run")}`;
 export const SANDBOX_HELP = `approval sandbox — run a command with no way out (APRV-193)
 
 Usage:
-  approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+  approval sandbox [--allow-loopback] [--read-jail] [--log <path>] -- <cmd…>
 
 Flags:
   --allow-loopback  also allow connections to localhost. For a suite that
                     starts its own server. A real widening: a port is a port
+  --read-jail       also deny file reads outside the gate root and the scratch
+                    roots. Already on when the policy declares read_scope, and
+                    nothing turns it off where it did (APRV-347)
   --log <path>      the log, so the credential material beside it can be made
                     unreadable to the child (vault, env map, sealing keys)
   -h, --help        this text ("--help --long" adds the reference section)
 
-Denies the child outbound network (macOS sandbox-exec), scrubs the
-credential-bearing variables out of its environment, and exits with the child's
-own exit code. It appends NOTHING: it removes a capability rather than
-authorizing anything, and the gate stays reachable because its IPC is a file.
+Denies outbound network (macOS sandbox-exec), scrubs the credential variables
+from the child's environment, exits with its code, and appends NOTHING: it
+removes a capability rather than authorizing anything.
 
 The point is laundered exec: "npm test" runs whatever was written a minute ago,
 so the command's NAME stopped describing its effect. An agent HARNESS cannot run
@@ -1487,7 +1515,8 @@ Commands:
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable,
+hook-unsupported-execution-context, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;

@@ -378,6 +378,11 @@ const HUMAN_ONLY: readonly string[] = [
   "init",
   "policy attest",
   "policy amend",
+  // APRV-343. The one verb in this CLI that WRITES `APPROVAL.md`. An agent that
+  // could run it could widen the policy governing it and attest the result
+  // through the amendment it goes on to run, so it is human-only in the
+  // registry, refuses an agent identity in code, and classifies `policy.core`.
+  "policy apply",
   "grant",
   "reject",
   "revoke",

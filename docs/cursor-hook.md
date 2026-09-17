@@ -183,6 +183,28 @@ Five overrides sit on top of the table:
   to it is `files.write.workspace` like any other workspace write, which is what
   makes the channel ungated. Traversal back out of it is protected again, and a
   copy from credential material into it is still `account.credential`.
+- **`read-out-of-scope` / `read-unreadable-path` / `read-out-of-scope-resolved`
+  → `read.file.out_of_scope`.** The read jail (APRV-347). A shell reader whose
+  target resolves outside every read root — the gate root (the directory holding
+  the policy file), the session scratchpad, the system temp root, plus whatever
+  `read_scope.roots` adds — takes this class instead of `read.shell`, with the
+  resolved path bound. The text half decides absolute targets and unreadable
+  ones; the hook's disk half resolves relative targets and symlinks against its
+  own directory and only ever tightens. A command naming no target is checked
+  against the working directory.
+
+  **Cursor's read tool.** The adapter lists `Read` alongside `Shell`, `Write`
+  and `Delete`, and gates it by the path in `path` or `file_path`. Cursor's own
+  hook documentation names `Shell`, `Write` and `Delete` as the matchable tools
+  and no read tool among them, so this entry is written against the name
+  Cursor's agent surface uses and has NOT been confirmed against a live hook
+  event. It is inert if wrong — a tool name Cursor never sends takes the
+  pass-through it took before — and the floor either way is the shell path: a
+  `cat` through `Shell` is scoped by the classifier whatever the read tool is
+  called. Add `Read` to the `matcher` only when you want the scope; every
+  matched read costs a process start. If you find Cursor naming it otherwise,
+  that is a one-line fix to `readTools` in `src/cli/hook.ts` and a correction
+  worth filing.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so. A redirection onto a DISCARD device
   is exempt since APRV-283, because it creates nothing: `/dev/null`,
@@ -427,6 +449,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. Re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
+| `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Cursor's events carry the directory. It is the refusal native Codex Bash takes on every event (`docs/codex-hook.md`) |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `bash -c …`, `eval`, `source`,

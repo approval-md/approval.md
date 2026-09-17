@@ -23,6 +23,10 @@ use is experimental direct-patch evaluation: the required full
 `Bash|apply_patch` matcher refuses every matched Bash call, including gate-self
 shell commands. Everyday activation remains blocked.
 
+The operator's half, including the trust tap, the bounded Telegram ceremony that
+replaces the loopback smoke test below, and the tested rollback, is
+[docs/codex-activation.md](codex-activation.md).
+
 The direct-patch path uses the same policy, verified log, budget, and approval core as
 the other harness hooks. Codex's own sandbox and approval mode remain an
 independent control. Installing this hook does not widen that sandbox or grant
@@ -51,6 +55,19 @@ hook process's actual cwd. Patch input must use strict `*** Begin Patch` and
 `*** End Patch` framing, and every changed path must be relative and confined
 to that cwd.
 
+**There is no Codex read tool to gate (APRV-347).** The native contract exposes
+exactly two tools, `Bash` and `apply_patch`, so the adapter's `readTools` list is
+empty and the read scope reaches Codex through the shell classifier alone: a
+`cat` outside the read roots is `read.file.out_of_scope` like any other shell
+read. Two things follow, and both are stricter rather than looser. Codex `Bash`
+is refused outright today because the contract does not expose the effective
+per-call working directory (APRV-310), so a Codex shell read does not reach a
+verdict at all. And a tool this adapter has no name for cannot be allowed
+either: a Codex allow must echo the exact bound `tool_input.command`, which a
+tool carrying no command has none of, so a hypothetical `Read` event is answered
+`hook-io` rather than waved through. If Codex ever ships a read tool, gating it
+is a `readTools` entry here plus a matcher line, and nothing else.
+
 Every Codex allow repeats the exact gated command bytes as
 `updatedInput.command`, as required by the native hook contract. A deny does not
 include an input update. Configure no other hook that rewrites input for the
@@ -70,6 +87,35 @@ open-window, gate-self, carryover, or execution-start handling. A native focus
 run sent an `apply_patch` heredoc through `exec_command`; Codex reported that
 route as Bash, so it receives the same denial. Direct `apply_patch` remains a
 separate bounded surface and does not make shell execution available.
+
+That denial carries its own code, `hook-unsupported-execution-context`
+(APRV-311). It used to borrow `hook-io`, which also means "this event was
+malformed", and the two repairs are opposite: a malformed event is worth
+sending again, while every Bash event of every shape is refused on this harness
+version until a native contract exposes the effective execution directory. The
+code is a member of the hook denial union that `approval hook --help` prints and
+the conformance suite pins, so a caller may branch on it.
+
+## The post-execution phase
+
+`PostToolUse` never appends an outcome on Codex, and it prints no permission
+verdict. It writes one machine-readable line on stderr, at exit 2 so the line
+is visible, and exits without touching the log:
+
+| code | when |
+|---|---|
+| `post-tool-io` | the event was rejected by the input check: an unsupported tool, an identifier this adapter will not accept, an event `cwd` that is not the hook process's directory, or an unknown execution-affecting field |
+| `post-tool-unreadable-outcome` | the event was accepted and carries no reading of the execution's outcome, which is every accepted Codex `PostToolUse` event on 0.152.1 |
+
+Both lines carry the stable `task` the pre-execution half minted for the same
+call, derived from the same native `session_id` and `tool_use_id`, so the
+`execution.started` nobody closed can be found by its own identifier rather than
+by guesswork. Nothing else about the event is read: `tool_response` is arbitrary
+JSON, and its value is accepted and ignored rather than parsed.
+
+Before APRV-311 a rejected `PostToolUse` event printed a `PreToolUse` deny
+verdict at exit 0, which is a permission decision about a call that has already
+run and is indistinguishable from the pre-execution refusal of the same shape.
 
 ## Future installation by human review
 

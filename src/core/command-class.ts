@@ -32,7 +32,20 @@
  * Self-reported text is never read. The hook passes the command only; the
  * harness's `description` field is authored by the very agent being gated
  * (SPEC.md §11.1: self-reported fields never reduce scrutiny).
+ *
+ * The one import (APRV-347) is `core/read-scope.ts`, which is pure in exactly
+ * the same way this file is: no disk, no clock, no environment, no
+ * dependencies. It holds the read-side path arithmetic so the hook and the
+ * policy explainer can ask the same questions this file asks, of the same
+ * table, rather than each growing a copy of it.
  */
+
+import {
+  READ_OUT_OF_SCOPE_CLASS,
+  isUnreadableTarget,
+  readTargetVerdict,
+  readTargetsOf,
+} from "./read-scope.js";
 
 // ===========================================================================
 // Result shape
@@ -1064,6 +1077,25 @@ export interface ClassifierContext {
    * own: a path under a root still has to survive that second pass.
    */
   scratchRoots?: readonly string[];
+  /**
+   * Roots a read may stay inside: the gate root, the session scratchpad and the
+   * system temp root, plus whatever `read_scope.roots` added (APRV-347).
+   *
+   * The polarity is the OPPOSITE of `scratchRoots`, and the difference is worth
+   * stating. A scratch root LOOSENS a delete, so forgetting the field is safe
+   * by construction. A read root NARROWS a read, so forgetting the field would
+   * be safe in a different way — it leaves every read `read.shell`, exactly as
+   * this classifier answered before the field existed. An EMPTY array means the
+   * same thing as absent, and deliberately: read against no roots at all would
+   * make every read in the session a decision, which is a fail-closed answer
+   * nobody asked for and the one spelling a caller reaches by accident. A
+   * caller that means to scope reads passes roots.
+   *
+   * As with `scratchRoots`, this file only compares segments. The relative
+   * paths, the symlinks and the working directory are the hook's second pass,
+   * which can only ever tighten the answer reached here.
+   */
+  readRoots?: readonly string[];
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -1267,6 +1299,51 @@ function allTargetsAreScratch(
     if (!roots.some((root) => isUnderRoot(target, root))) return false;
   }
   return true;
+}
+
+// ===========================================================================
+// Read scope (read.file.out_of_scope, APRV-347)
+// ===========================================================================
+
+/** The rule id for a read whose ABSOLUTE target sits outside every root. */
+export const READ_OUT_OF_SCOPE_RULE = "read-out-of-scope";
+
+/** The rule id for a read target whose expansion the text cannot show. */
+export const READ_UNREADABLE_TARGET_RULE = "read-unreadable-path";
+
+/**
+ * The first target of this read command that the TEXT places outside every
+ * root, or `null` when nothing here settles it.
+ *
+ * `null` covers three different situations on purpose, and all three are
+ * handed on rather than decided: the binary is not a scoped reader, every
+ * target is provably inside a root, or a target is relative (or carries `..`)
+ * and therefore means nothing without a working directory. The last of those
+ * is the common case, and it is why the hook's second pass exists.
+ */
+function escapedReadTarget(
+  bin: string,
+  positionals: readonly string[],
+  args: readonly string[],
+  roots: readonly string[],
+): { path: string; rule: string } | null {
+  const targets = readTargetsOf(bin, positionals, args);
+  if (targets === null) return null;
+  for (const target of targets) {
+    switch (readTargetVerdict(target, roots)) {
+      case "out-of-scope":
+        return {
+          path: target,
+          rule: isUnreadableTarget(target)
+            ? READ_UNREADABLE_TARGET_RULE
+            : READ_OUT_OF_SCOPE_RULE,
+        };
+      case "in-scope":
+      case "needs-disk":
+        break;
+    }
+  }
+  return null;
 }
 
 /** `rm` — everything outside the workspace, and every unreadable path, is manual. */
@@ -1743,6 +1820,22 @@ function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
     if (sub === "open") return { class: "policy.core", rule: "approval-gate-open" };
     if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };
     return null;
+  }
+  // APRV-343. `policy apply` WRITES `APPROVAL.md`, which is the one file in this
+  // repository nothing but a human's own hand may change: an agent that could
+  // run it could widen the policy that governs it and then attest the result
+  // through the amendment the verb goes on to run. Classified where the file
+  // already is (`policy.core`, human-only in the reference policy), so the hook
+  // denies it with `hook-class-human-only`, behind the verb's own
+  // `apply-agent-actor` refusal. It mints no new class (SPEC.md §11.1 invariant
+  // 9): `policy.core` already exists and already covers the policy's machinery.
+  //
+  // The other `policy` subcommands stay pass-through. `check` and `test` read,
+  // `attest` and `amend` refuse a non-human actor in code and collect a human's
+  // tap through a channel when an agent runs them, which is the widening
+  // APRV-109 deliberately made — and neither of them writes the policy file.
+  if (verb === "policy" && sub === "apply") {
+    return { class: "policy.core", rule: "approval-policy-apply" };
   }
   // APRV-257. `setup checkpoint` MINTS the key `log checkpoint` signs with, so
   // an agent that could run it could mint a key, store it, and vouch for a
@@ -2295,6 +2388,10 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
   seen.add(CREDENTIAL_CLASS);
   seen.add("files.write.workspace");
   seen.add("read.shell");
+  // APRV-347: emitted from `classifySegment`'s tail rather than from a row of
+  // the table, because it is a refinement of `read.shell` against roots the
+  // CALLER resolved and no binary implies it on its own.
+  seen.add(READ_OUT_OF_SCOPE_CLASS);
   return [...seen].sort();
 })();
 
@@ -2600,6 +2697,25 @@ function classifySegment(
   if (cls.startsWith("read.") && writeTargets.length > 0) {
     cls = "files.write.workspace";
     ruleId = "redirect-write";
+  }
+
+  // APRV-347, last because it is the narrowest: a read whose target the TEXT
+  // places outside every root the caller named. Only `read.shell` is scoped —
+  // `read.web` reaches no file, and a segment that has already taken a
+  // protected, credential or write class is not a read at all. The relative
+  // and symlinked cases are deliberately NOT decided here; they are left at
+  // `read.shell` for the hook's disk pass, which tightens and never loosens.
+  if (cls === "read.shell" && (context.readRoots ?? []).length > 0) {
+    const escaped = escapedReadTarget(basename, positionals, args, context.readRoots ?? []);
+    if (escaped !== null) {
+      return {
+        ok: true,
+        class: READ_OUT_OF_SCOPE_CLASS,
+        rule: escaped.rule,
+        path: escaped.path,
+        ...(sandbox === null ? {} : { sandbox }),
+      };
+    }
   }
 
   return { ok: true, class: cls, rule: ruleId, ...(sandbox === null ? {} : { sandbox }) };
