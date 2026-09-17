@@ -2836,10 +2836,13 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "start",
     purpose:
-      "Reserved constrained-session launcher. It refuses codex-not-ready until the confined runner of APRV-325.3 ships; the broker alone confines no shell.",
+      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable; reads are jailed to exactly those two roots, so the gate home and everything else the host holds are unreadable; the environment is an allow-list rather than a filtered copy of the operator's; and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
-    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    input: input({
+      flags: { "--manifest": "string", "--timeout": "string", ...JSON_FLAG, ...HELP_FLAGS },
+      trailing: TRAILING,
+    }),
     output: null,
     error: ERROR_SCHEMA,
     exit_codes: [OK, INTEGRITY, USAGE],

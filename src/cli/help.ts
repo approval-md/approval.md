@@ -2434,17 +2434,17 @@ Usage:
   approval codex doctor --strict --manifest <abs> [--json]
   approval codex apply --manifest <abs> --proposal <file> [--json]
       [--token <class>=<token>]... [--require-exclusive-custody]
-  approval codex serve|recover|start --manifest <abs> [--json]
+  approval codex serve|recover --manifest <abs> [--json]
+  approval codex start --manifest <abs> [--timeout <dur>] [--json] [-- <cmd>...]
 
-prepare writes a fresh review bundle; setup --check verifies its file set, hashes,
-manifest and templates; doctor executes no manifest binary. apply is the BROKER: a
-bounded create/replace/delete/move proposal, ONE REGISTERED ACTION PER PATH CLASS,
+prepare, setup --check and doctor are the inert half: a review bundle, its exact
+file set and hashes, and host custody, executing no manifest binary. apply is the
+BROKER: a bounded create/replace/delete/move proposal, ONE ACTION PER PATH CLASS,
 gate-authorized, every leg started before any byte moves, then staged, journaled
-and applied under a workspace lock. The MANIFEST supplies actor, root, policy and
-log; the file supplies only operations and the policy digest it was built against.
-recover READS a retained journal and reports before/after/mixed, repairing nothing.
-serve publishes the broker as EXACTLY ONE MCP tool, separate from \`approval mcp
-serve\`. start refuses until APRV-325.3's runner. Nothing here confines a shell.
+and applied under a workspace lock; the MANIFEST supplies actor, root, policy and
+log. recover READS a retained journal, repairing nothing. serve is EXACTLY ONE MCP
+tool, separate from \`approval mcp serve\`. start CONFINES a shell: one disposable
+writable path, read-only gate and workspace, no credentials, no egress, NO OPT-OUT.
 
 ${EXIT_CODES_POINTER} (1: the boundary is absent, invalid, or the workspace mixed)
 ${JSON_ERRORS}

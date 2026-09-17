@@ -6021,5 +6021,36 @@ approval codex serve publishes that broker over stdio as exactly one MCP tool,
 codex_workspace_apply, checked at call time as well as at list time. It is a
 different server from approval mcp serve, whose catalog is the whole verb
 registry and therefore grows: a constrained session has to reach one door, and
-the same door next month. approval codex start still refuses codex-not-ready.
-The broker governs workspace writes and confines no shell; that is APRV-325.3.
+the same door next month.
+
+### The confined session (APRV-325.3)
+
+approval codex start prepares the room a session's shell runs in. With no
+-- <command> it reports the room and runs nothing, which is what an operator
+checking a host should not have to start Codex to learn. With one, it runs that
+command inside the room and exits with the child's own code.
+
+The shell gets a disposable workspace under the system temporary directory, and
+that workspace is the only path it may write. The canonical workspace is
+readable and never writable. Reads are jailed to exactly those two roots
+(APRV-347), so the gate home, other repositories and everything else the
+operator's home holds are unreadable whether or not anyone thought to name them,
+and the credential denials are emitted after the jail's allows so they remain
+the last word on the vault, the environment map and the sealing keys. The
+environment is an allow-list rather than a filtered copy of the operator's, so a
+provider key nobody taught this runtime about is absent rather than forgotten.
+Outbound network is denied, loopback included. Descendants inherit all of it,
+which is the property that matters: a session does not write files by calling
+into this runtime, it spawns shells that do.
+
+There is no opt-out flag and no unwrapped fallback. approval run has
+--no-sandbox because a human's grant over exact bytes is authority to reach the
+world; a confined session has no such authority to present, so a host with no
+sandbox mechanism refuses (sandbox-unsupported) where approval run would record
+unsupported and proceed. A command that cannot be resolved on the session PATH is
+refused rather than spawned outside the room.
+
+The disposable workspace is removed when the session ends, so a replay of the
+same shell work starts from an empty room. Only a brokered change survives it,
+which is the whole arrangement: the shell cannot reach the canonical workspace,
+and approval codex apply is how a change that a policy admitted does.

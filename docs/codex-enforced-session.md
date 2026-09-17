@@ -37,10 +37,100 @@ every leg started before any byte moves, then staged, journaled and applied
 under a workspace lock, with the outcome taken from reading the workspace back.
 `docs/codex-workspace-broker.md` is its reference.
 
-That is a gate on workspace writes and nothing more. `approval codex start` still
-refuses `codex-not-ready`, `codex doctor --strict` still reports
-`runner-not-ready`, and the session is still not enforced: a shell that can write
-the workspace by another route is not bounded by the broker, credentials and
-egress are untouched, and no probe has yet shown that the alternate mutable
-surfaces are constrained. APRV-325.3 owns that evidence, and until it lands
-nobody should describe an installation as a mandatory boundary.
+That is a gate on workspace writes and nothing more. On its own a door beside an
+open window is decoration, which is what APRV-325.3 below closes.
+
+## The confined session (APRV-325.3)
+
+`approval codex start --manifest <abs>` prepares the room a session's shell runs
+in, and `-- <command>` runs something inside it. Five things the shell does not
+get, and where each is enforced:
+
+| withheld | enforced by |
+|---|---|
+| canonical workspace writes | Seatbelt `(deny file-write*)` with an allow-list naming only the disposable workspace |
+| gate writes (log, policy, vault, keys) | the same deny; the gate home is not on the allow-list |
+| reads of anything but the two workspaces | Seatbelt `(deny file-read*)` with an allow-list of two roots (APRV-347's read jail) |
+| ambient credentials | an environment ALLOW-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `TERM` and a few more) applied after `core/child-env.ts`'s credential strip |
+| credential material on disk | Seatbelt `denyRead` over the vault, the environment map and the sealing keys, emitted after the jail's allows so it is the last word |
+| external egress | Seatbelt `(deny network-outbound)`, loopback included |
+| mutable executor code | the broker, the CLI and the pinned Node live under the root-owned install root, which is on neither allow-list |
+
+The read jail has exactly two roots, the disposable workspace and the canonical
+workspace, and `core/sandbox.ts` adds the fixed runtime set and the running
+command's own install prefix itself. A session has to READ the tree it is
+reasoning about, which is why the canonical workspace is a root and why write
+confinement rather than read denial is what stops it changing one. Everything
+the operator's home holds beside it — other repositories, `~/.ssh`, the gate
+home — is outside the jail and unreadable, and that is the half `denyRead` alone
+could never cover: a deny-list has to have heard of a path to deny it.
+
+Two properties are worth stating rather than implying. **There is no opt-out.**
+`approval run` has `--no-sandbox`, because an operator holding a human's grant
+may deliberately reach the world; a confined session has no such flag and no
+unwrapped fallback, and a host with no sandbox mechanism REFUSES
+(`sandbox-unsupported`) where `approval run` would record `unsupported` and
+proceed. A session advertised as confined and not confined is worse than no
+session. And **descendants are confined too**: Codex does not write files by
+calling into this runtime, it spawns shells that do, so the proof that matters
+is the one where the confined child's own `/bin/sh` grandchild is denied.
+
+### Activation
+
+`docs/codex-activation.md` is the intended home for the operator runbook and did
+not exist on `origin/main` when this section was written (Lane 4b owns it), so
+the activation and rollback steps live here for now and should move when that
+file lands.
+
+Human-only steps are marked. Nothing an agent runs performs them.
+
+1. **(human)** Install the package and the reviewed bundle under a root-owned
+   install root, as `approval codex prepare` and `setup --check` describe above.
+   No install script does this; a person or an MDM workflow does.
+2. **(human)** Create the three service principals the manifest names.
+3. Verify the host: `approval codex doctor --strict --manifest <abs> --json`. It
+   fails closed. Every finding is a reason not to activate, and
+   `trusted-path-acl-unproven` is reported unconditionally because POSIX
+   ownership and mode say nothing about ACLs.
+4. Verify the room: `approval codex start --manifest <abs> --json`. With no
+   `-- <command>` it reports the disposable workspace, the canonical workspace,
+   the mechanism, the write allow-list, the read denials and the count of
+   withheld variables, and it runs nothing. An unsupported host refuses here.
+5. **(human)** Point the Codex host at the strict server, whose invocation the
+   manifest pins: `approval codex serve --manifest <abs>`. It publishes exactly
+   one tool. Do not add the broad `approval mcp serve` beside it.
+6. Run the session's shell work through `approval codex start -- <command>`.
+
+### Rollback
+
+Rollback is subtraction and needs no new state.
+
+1. Stop the strict server (`codex serve`) and stop starting shells through
+   `codex start`. Every confined session's disposable workspace is removed when
+   the session ends, so there is nothing to clean up.
+2. **(human)** Remove the Codex host's MCP entry pointing at the strict server.
+3. If a brokered change was interrupted, `approval codex recover --manifest
+   <abs>` reports whether the workspace is in the approved before-state, the
+   approved after-state, or neither. It repairs nothing. A `mixed` result exits 1
+   and is a person's to resolve with `approval execution reconcile`.
+4. **(human)** Nothing under `.approval/` or `APPROVAL.md` is touched by any of
+   this, so there is no policy to restore. The log keeps every brokered change
+   that happened, which is the point.
+
+### What is still not proven
+
+The confinement evidence covers processes this runtime spawns and their
+descendants, on macOS. It is not a claim about a Codex desktop application a
+person starts outside `codex start`: that process is not in the room, and what
+was measured about it is in `docs/codex-boundary-probe.md`. Linux has no
+mechanism in this build (`core/sandbox.ts`'s stated gap), so a Linux host
+refuses rather than running unconfined. Inbound sockets are not denied. The
+environment allow-list is a control over NAMES and therefore best-effort by
+construction; the load-bearing control beside it is that egress is denied, so a
+secret that does reach the child has nowhere to go.
+
+The read jail is a control over PATHS and has the same shape of limit: a secret
+someone checked into the canonical workspace is inside a root the session may
+read, and no sandbox rule will change that. What the jail buys is that
+everything outside those two roots is unreadable whether or not anyone thought
+to name it.
