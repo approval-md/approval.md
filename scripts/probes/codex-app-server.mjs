@@ -1104,6 +1104,15 @@ function buildReport(results, path) {
     }
   }
 
+  // Every method name that crossed the wire, approval or not. A server-to-client
+  // request this probe has no name for is exactly the kind of thing a reader
+  // needs to see, so the report shows the whole vocabulary rather than only the
+  // part it understood.
+  const methodsSeen = [...new Set(trials.flatMap((trial) => trial.notification_methods ?? []))].sort();
+  lines.push("");
+  lines.push(`methods observed on the wire (${String(methodsSeen.length)}):`);
+  for (const method of methodsSeen) lines.push(`  ${method}`);
+
   const autoReviews = trials.flatMap((trial) => trial.auto_review_notifications ?? []);
   lines.push("");
   lines.push(`auto-review notifications: ${String(autoReviews.length)}`);

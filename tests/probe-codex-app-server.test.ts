@@ -375,6 +375,11 @@ test("the probe records both approval requests and blocks on every refusal", () 
   assert.match(report.stdout, /cwd present:\s+yes/u);
   assert.match(report.stdout, /patch content:\s+no/u);
   assert.match(report.stdout, /decisions offered:\s+accept, acceptForSession, cancel, decline/u);
+  // The whole wire vocabulary, not only the part the probe understood: a
+  // server-to-client request nobody expected has to be visible in the report.
+  assert.match(report.stdout, /methods observed on the wire/u);
+  assert.match(report.stdout, /\n {2}item\/started\n/u);
+  assert.match(report.stdout, /\n {2}turn\/completed\n/u);
   assert.match(report.stdout, /No effect landed on deny, crash, no-reply or malformed/u);
   assert.doesNotMatch(report.stdout, /FAILURE TO BLOCK/u);
 });
