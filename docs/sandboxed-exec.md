@@ -226,6 +226,31 @@ nothing readable from an environment loosens anything.
    Everything else (`git`, `gh`, `mkdir`, `cat`, an edit) is untouched.
 4. Leave the daemon and the channels outside. They are the gate's transport and
    the human launches them.
+5. **To confine what those commands may READ** (APRV-347, wired here by
+   APRV-193), declare a `read_scope` block in the gate's `APPROVAL.md`. Both
+   `approval run` and `approval sandbox` then build the deny-default read
+   profile above from the gate root plus whatever the block adds, so a command
+   that goes looking outside the project gets EPERM rather than a file. Try it
+   on one command first: `approval sandbox --read-jail -- npm test` applies the
+   same jail without touching the policy, which is the cheap way to find the
+   directory your build reads and nobody remembered (usually a `node_modules`
+   outside the root, or a global cache).
+
+**Why the policy and not a flag.** The jail is turned on by a key in the file a
+human writes and attests, and there is no flag that turns it OFF where that key
+asked for it. A flag an agent can pass must only ever make the room smaller
+(SPEC.md §11.1 invariant 4), so `--read-jail` can add the confinement and
+nothing can remove it. A gate whose policy declares no `read_scope` gets the
+profile it got before, byte for byte.
+
+**What this wires, and what it still does not.** Steps 2 and 5 protect a
+COMMAND. They do not put the harness itself in the room: `claude` and
+`cursor-agent` talk to a model over the network, which is exactly what the
+profile denies, so `approval sandbox -- claude` is a session that cannot think.
+Whole-session containment needs an egress allowlist reaching one host, which
+Seatbelt cannot express by hostname and which the prior art solves with a local
+proxy. That is the open half of APRV-193 AC1 and is a separate design.
+
 ## What this does not claim
 
 - **A sandboxed child can still write files**, including a file some later

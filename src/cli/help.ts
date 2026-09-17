@@ -60,7 +60,7 @@ Usage:
                       [--as <id>] [--json]                            (internal)
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
                       [--as <id>] [--no-sandbox] [--json] -- <cmd…>
-  approval sandbox    [--allow-loopback] [--log <path>] -- <cmd…>
+  approval sandbox    [--allow-loopback] [--read-jail] [--log <path>] -- <cmd…>
   approval adapter email <action-key> [--token <t>] --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval adapter agentmail <action-key> [--token <t>] --payload <file|->
@@ -1001,19 +1001,21 @@ ${why("run")}`;
 export const SANDBOX_HELP = `approval sandbox — run a command with no way out (APRV-193)
 
 Usage:
-  approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+  approval sandbox [--allow-loopback] [--read-jail] [--log <path>] -- <cmd…>
 
 Flags:
   --allow-loopback  also allow connections to localhost. For a suite that
                     starts its own server. A real widening: a port is a port
+  --read-jail       also deny file reads outside the gate root and the scratch
+                    roots. Already on when the policy declares read_scope, and
+                    nothing turns it off where it did (APRV-347)
   --log <path>      the log, so the credential material beside it can be made
                     unreadable to the child (vault, env map, sealing keys)
   -h, --help        this text ("--help --long" adds the reference section)
 
-Denies the child outbound network (macOS sandbox-exec), scrubs the
-credential-bearing variables out of its environment, and exits with the child's
-own exit code. It appends NOTHING: it removes a capability rather than
-authorizing anything, and the gate stays reachable because its IPC is a file.
+Denies outbound network (macOS sandbox-exec), scrubs the credential variables
+from the child's environment, exits with its code, and appends NOTHING: it
+removes a capability rather than authorizing anything.
 
 The point is laundered exec: "npm test" runs whatever was written a minute ago,
 so the command's NAME stopped describing its effect. An agent HARNESS cannot run
