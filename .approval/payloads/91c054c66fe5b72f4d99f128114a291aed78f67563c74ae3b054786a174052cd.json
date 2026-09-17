@@ -1,0 +1,1 @@
+{"command":"git push 2>&1 | tail -2 && gh pr view 427 --json mergeStateStatus,headRefOid --jq '{merge:.mergeStateStatus,head:.headRefOid}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a65af0b624be44e63"}
