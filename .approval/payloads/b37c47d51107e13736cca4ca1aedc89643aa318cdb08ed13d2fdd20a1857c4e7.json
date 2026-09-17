@@ -1,0 +1,1 @@
+{"command":"gh run rerun 35203451214 --failed 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a65af0b624be44e63"}
