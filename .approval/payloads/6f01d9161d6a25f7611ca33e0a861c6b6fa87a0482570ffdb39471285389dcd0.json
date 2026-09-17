@@ -1,0 +1,1 @@
+{"command":"git add -A && git commit --no-edit 2>&1 | tail -3 && git push 2>&1 | tail -2 && git rev-parse HEAD","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a65af0b624be44e63"}
