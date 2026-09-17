@@ -217,6 +217,16 @@ parentheses, and `$(…)` command substitution. Every segment of a command line 
 classified, and the command's classes are the union: `git status && curl -d … `
 is gated as `network.call`.
 
+Quoted argument text is never read as syntax (APRV-353): a quoted argument is
+one word to the shell, so nothing inside it is an operator, a redirection, a
+separator or a command name here either, and a note that says the word `bash`,
+carries an angle-bracketed placeholder, a pipe or a semicolon classifies as the
+workspace write it is. The two exceptions are the shell's own: inside DOUBLE
+quotes, `$(…)` and backticks are expanded before the command runs, so they keep
+whatever class they have anywhere else. Single quotes make the same text
+literal, which is the spelling to reach for when a note has to quote a command.
+Quoting that does not balance is `hook-unparseable`, never a guess.
+
 ### The rule table
 
 One row per binary group. The first row whose binary and subcommand match

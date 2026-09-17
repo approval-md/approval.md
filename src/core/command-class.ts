@@ -754,6 +754,33 @@ interface PendingHeredoc {
  * Not understood, on purpose: parameter expansion values. `$VAR` and `${VAR}`
  * are kept verbatim in the word text, and every rule that reads a path or a
  * refspec treats a word containing `$` as unknown, which resolves stricter.
+ *
+ * ## Quoted text is DATA, and that is a contract (APRV-353)
+ *
+ * The command boundary this tokenizer honours is the shell's own. A quoted
+ * argument is ONE word to the shell, so nothing inside it is an operator, a
+ * redirection, a segment separator or a command name here either:
+ *
+ * - single-quoted text is wholly inert, every byte of it, `$` and backtick
+ *   included;
+ * - double-quoted text is inert too, with the two exceptions the shell itself
+ *   makes — `$(…)` and backticks, which it expands before the command runs and
+ *   which therefore keep the class they have anywhere else (a substitution is
+ *   classified recursively, a backtick is `opaque`);
+ * - adjacent quoted and unquoted runs concatenate into one word (`'a'"b"c`),
+ *   and a backslash escape is applied where the shell applies it;
+ * - UNQUOTED operators split exactly as they always did, and quoting that does
+ *   not balance is {@link LexResult} `ok: false` — `unparseable`, a refusal —
+ *   rather than a guess at what the writer meant.
+ *
+ * This is stated rather than merely true because the failure it prevents is
+ * silent and one-directional. A backlog note that says the word `bash`, carries
+ * an angle-bracketed placeholder, a pipe or a semicolon is prose about work; a
+ * tokenizer that read it as syntax would refuse an ordinary workspace write and
+ * push its author toward rewording the record of what they did, which is the
+ * audit cost SPEC.md §11 exists to protect. Every printable ASCII character is
+ * covered in both quote styles by `tests/command-class-quoting.test.ts`, so an
+ * edit that loses the property fails there rather than in someone's notes.
  */
 function lex(command: string): LexResult {
   const segments: LexSegment[] = [];
@@ -946,6 +973,21 @@ function lex(command: string): LexResult {
   return { ok: true, segments };
 }
 
+/**
+ * The refusal detail for a backtick the shell would expand inside a
+ * double-quoted argument (APRV-353).
+ *
+ * Same code (`opaque`), same verdict (deny), more use: double quotes are what
+ * an author reaches for when the text carries an apostrophe, and a note that
+ * quotes a command in backticks is then legal shell that really does run
+ * something. The refusal names the spelling that is inert, because a refusal a
+ * reader cannot act on costs the same attention as one they can (SPEC.md §11.1:
+ * refusals are machine-readable and distinct — the code stays the machine's
+ * half, this is the human's).
+ */
+const QUOTED_BACKTICK_OPAQUE =
+  "backtick command substitution inside a double-quoted argument, which the shell expands; single quotes make the same text literal";
+
 /** Scan a double-quoted string starting at the opening quote. */
 function readDoubleQuoted(
   command: string,
@@ -969,7 +1011,7 @@ function readDoubleQuoted(
     if (ch === "`") {
       const close = command.indexOf("`", index + 1);
       if (close === -1) return null;
-      opaque = "backtick command substitution";
+      opaque = QUOTED_BACKTICK_OPAQUE;
       index = close;
       continue;
     }
