@@ -75,47 +75,14 @@ session. And **descendants are confined too**: Codex does not write files by
 calling into this runtime, it spawns shells that do, so the proof that matters
 is the one where the confined child's own `/bin/sh` grandchild is denied.
 
-### Activation
+### Activation and rollback
 
-`docs/codex-activation.md` is the intended home for the operator runbook and did
-not exist on `origin/main` when this section was written (Lane 4b owns it), so
-the activation and rollback steps live here for now and should move when that
-file lands.
-
-Human-only steps are marked. Nothing an agent runs performs them.
-
-1. **(human)** Install the package and the reviewed bundle under a root-owned
-   install root, as `approval codex prepare` and `setup --check` describe above.
-   No install script does this; a person or an MDM workflow does.
-2. **(human)** Create the three service principals the manifest names.
-3. Verify the host: `approval codex doctor --strict --manifest <abs> --json`. It
-   fails closed. Every finding is a reason not to activate, and
-   `trusted-path-acl-unproven` is reported unconditionally because POSIX
-   ownership and mode say nothing about ACLs.
-4. Verify the room: `approval codex start --manifest <abs> --json`. With no
-   `-- <command>` it reports the disposable workspace, the canonical workspace,
-   the mechanism, the write allow-list, the read denials and the count of
-   withheld variables, and it runs nothing. An unsupported host refuses here.
-5. **(human)** Point the Codex host at the strict server, whose invocation the
-   manifest pins: `approval codex serve --manifest <abs>`. It publishes exactly
-   one tool. Do not add the broad `approval mcp serve` beside it.
-6. Run the session's shell work through `approval codex start -- <command>`.
-
-### Rollback
-
-Rollback is subtraction and needs no new state.
-
-1. Stop the strict server (`codex serve`) and stop starting shells through
-   `codex start`. Every confined session's disposable workspace is removed when
-   the session ends, so there is nothing to clean up.
-2. **(human)** Remove the Codex host's MCP entry pointing at the strict server.
-3. If a brokered change was interrupted, `approval codex recover --manifest
-   <abs>` reports whether the workspace is in the approved before-state, the
-   approved after-state, or neither. It repairs nothing. A `mixed` result exits 1
-   and is a person's to resolve with `approval execution reconcile`.
-4. **(human)** Nothing under `.approval/` or `APPROVAL.md` is touched by any of
-   this, so there is no policy to restore. The log keeps every brokered change
-   that happened, which is the point.
+The operator runbook lives in `docs/codex-activation.md`, under **Broker session
+activation (Lane 4a)**: the ordered commands, which steps are human-only, and
+how to roll back. That file also holds the native hook's trust ceremony, and the
+two are deliberately separate claims — a green trust ceremony with no broker
+enforces nothing, and a working broker with no Telegram proves nothing about
+whether a decision can reach a human.
 
 ### What is still not proven
 
