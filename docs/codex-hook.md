@@ -96,6 +96,33 @@ version until a native contract exposes the effective execution directory. The
 code is a member of the hook denial union that `approval hook --help` prints and
 the conformance suite pins, so a caller may branch on it.
 
+### What would lift the refusal
+
+The omission is upstream, so the repair is upstream. APRV-348 drafts an issue
+for `openai/codex`, checked in at
+[docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md), with
+three separate asks: the effective per-call execution directory on the shell
+pre-event, an outcome field plus a documented stable call id on the post-event,
+and an option for a hook to fail closed on crash, timeout and malformed output.
+The issue URL is recorded in APRV-348's notes once the operator posts it; no
+agent session posts it.
+
+**Native Codex Bash gating becomes activatable when a Codex release carries the
+effective per-call execution directory on the shell pre-event** (ask 1). That
+alone reopens APRV-311's AC1 and lets the adapter classify a shell call against
+the directory it will actually run in. Ask 2 is what APRV-311's outcome clause
+waits on: until a post-event carries a success or failure reading, this adapter
+appends nothing rather than fabricating one. Ask 3 is the difference between
+this hook being one control among several and this hook being a boundary; a
+release without it keeps the sentence below true, that a crash, timeout or
+malformed stdout proceeds.
+
+Until ask 1 ships, the answer for Codex shell work is the confined session and
+its one-tool broker ([docs/codex-workspace-broker.md](codex-workspace-broker.md)),
+whose enforcement does not depend on this hook. APRV-349 asks separately whether
+the app-server approval protocol can bind what the hook cannot; see
+[docs/codex-app-server-bridge.md](codex-app-server-bridge.md).
+
 ## The post-execution phase
 
 `PostToolUse` never appends an outcome on Codex, and it prints no permission
