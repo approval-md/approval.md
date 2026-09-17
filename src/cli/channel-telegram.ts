@@ -14,12 +14,18 @@
  *    are read here and passed to the channel as values (SPEC.md §5.1: policy
  *    carries the env-var *names*, never the secrets). Nothing in `channels/`
  *    touches `process.env`.
- * 2. **It declares who is approving.** The decision is recorded against the
- *    human actor from `--as` / `APPROVAL_HUMAN`, never against anything the
- *    callback carried. SPEC.md §11: identity in v0.1 is config-declared, the
- *    trust boundary is the local machine, and everyone who can reach the
- *    configured chat can approve as that actor. This is stated in `--help`
- *    because an operator has to be able to see it without reading the source.
+ * 2. **It declares the identity the process itself acts under.** `--as` /
+ *    `APPROVAL_HUMAN` is what this listener is, and it is what a decision is
+ *    recorded as whenever the policy maps no sender for this channel: SPEC.md
+ *    §11's config-declared identity, where the trust boundary is the local
+ *    machine and everyone who can reach the configured chat can approve as that
+ *    actor. Since APRV-324 a policy MAY map Telegram account ids to approvers,
+ *    and then the decision is recorded against the person the operator attested
+ *    the tapping account to, and an unmapped account is refused rather than
+ *    recorded as this listener. Either way the choosing happens in
+ *    `channels/contract.ts` against the attested policy, never here and never
+ *    in the channel. Both settings are stated in `--help` because an operator
+ *    has to be able to see which one they are in without reading the source.
  * 3. **It holds the token.** A grant mints a single-use execution token;
  *    `recordChannelDecision` returns it to *this* handler, which prints it on
  *    **stdout** and never hands it back to the channel. It is never sent to
@@ -110,6 +116,7 @@ import type { DecideOptions } from "../core/gate.js";
 import { assembleBatch } from "../channels/batch.js";
 import {
   recordChannelDecision,
+  refusedDecisionLine,
   type ChannelDecision,
   type ChannelRequest,
   type DecisionOutcome,
@@ -158,6 +165,12 @@ import {
 } from "../core/harness-wait.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
+import {
+  actorForSender,
+  type ChannelSender,
+  type SenderSource,
+} from "../core/sender-identity.js";
+import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import { promptLayoutFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
@@ -2184,8 +2197,11 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
         })}\n`,
       );
     } else if (result.outcome.ok) {
+      // APRV-324: the actor off the RECORD, not the one this process was
+      // launched with. Under a sender mapping they differ, and the line a human
+      // reads on the operator's terminal has to say who the log says decided.
       streams.out(
-        `${decision.decision === "grant" ? "granted" : "rejected"} ${decision.action_key} (seq ${result.outcome.record.seq}) by ${setup.actor} via telegram\n`,
+        `${decision.decision === "grant" ? "granted" : "rejected"} ${decision.action_key} (seq ${result.outcome.record.seq}) by ${result.outcome.record.actor} via telegram\n`,
       );
     } else {
       streams.err(
@@ -2229,11 +2245,114 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
  * request here to reject, and a checkpoint that is owed is a warning at every
  * layer and a refusal at none.
  */
+/**
+ * Where this listener's policy lives, as `loadPolicy` wants it (APRV-324
+ * follow-up).
+ *
+ * The same location every gate operation this process performs resolves,
+ * because the handlers below ask the policy who a sender is and the gate asks
+ * it what a class resolves to, and two different files answering those two
+ * questions would be a listener enforcing one policy and attributing under
+ * another.
+ */
+function policyLoadOptions(setup: ListenSetup): { file?: string; dir?: string } {
+  const policy = setup.gateOptions.policy;
+  if (policy?.file !== undefined) return { file: policy.file };
+  if (policy?.dir !== undefined) return { dir: policy.dir };
+  return {};
+}
+
+/**
+ * The identity a phone gesture is recorded under — or the refusal that replaces
+ * it (APRV-324 follow-up).
+ *
+ * ## Why this is not just `actorForSender`
+ *
+ * A decision is protected twice. The mapping chooses the actor, and then
+ * `decide` refuses `policy-not-attested` or `policy-drift` if the bytes on disk
+ * are not the bytes in force, so a mapping edited and not attested can never
+ * reach a grant. Checkpoint signing and review recording have no such backstop:
+ * they read the policy, act, and append. Without this check an edited
+ * `APPROVAL.md` that dropped or repointed the `senders` block would change who
+ * may sign a checkpoint or file a review from a phone **before any human had
+ * attested it**, which is precisely the property SPEC.md §5.2 and this
+ * module's own header claim it does not have — an edited policy is inoperative
+ * until a human re-attests it.
+ *
+ * So when a gesture carries a sender, the policy it is resolved against must be
+ * the attested one. The check is `core/attest.ts`'s own
+ * {@link checkAttestation}, the same function the gate's attestation refusal is
+ * built on, rather than a second comparison written here that could come to a
+ * different conclusion about the same file.
+ *
+ * With no sender, nothing changes: the gesture is attributed by configuration
+ * exactly as it was before the mapping existed, and a terminal — which
+ * authenticates no sender — can still sign and still review whatever state the
+ * policy file is in. That is what keeps the repair path open.
+ */
+type GestureIdentity =
+  | { ok: true; actor: string; sender?: ChannelSender; source?: SenderSource }
+  | { ok: false; code: string; message: string; sender: ChannelSender };
+
+function senderIdentityFor(
+  setup: ListenSetup,
+  sender: ChannelSender | undefined,
+): GestureIdentity {
+  const load = loadPolicy(policyLoadOptions(setup));
+  if (sender === undefined) return { ok: true, actor: setup.actor };
+
+  if (load.ok) {
+    const read = readVerifiedRecords(setup.logPath);
+    if (!read.ok) {
+      return {
+        ok: false,
+        code: "policy-not-attested",
+        sender,
+        message: `the log could not be read to check whether ${load.source.filename} is attested (${read.code}): ${read.message}. Nothing was recorded; a decision made at a terminal carries no sender and is unaffected.`,
+      };
+    }
+    // `core/attest.ts`'s own check and its own wording, rather than a second
+    // comparison written here that could come to a different conclusion about
+    // the same file than the one the gate's refusal is built on.
+    const refusal = attestationRefusal(checkAttestation(read.records, load.source.path));
+    if (refusal !== null) {
+      return {
+        ok: false,
+        code: refusal.code,
+        sender,
+        message: `${refusal.message}. The sender mapping it declares is therefore not in force, so the account this gesture came from cannot be resolved against it and nothing was recorded. Re-attest the policy, or do this from a terminal, which authenticates no sender and is unaffected by the mapping.`,
+      };
+    }
+  }
+
+  return actorForSender(load, setup.actor, sender);
+}
+
 export function checkpointHandlerFor(
   setup: ListenSetup,
   streams: Streams,
-): (tap: { sign: boolean; head: { seq: number; hash: string } }) => CheckpointTapResponse {
+): (tap: {
+  sign: boolean;
+  head: { seq: number; hash: string };
+  sender?: ChannelSender;
+}) => CheckpointTapResponse {
   return (tap) => {
+    // APRV-324 follow-up, and FIRST, before the decline branch is even
+    // considered: a signature says this log's head is what this person saw, so
+    // an account the ATTESTED policy does not name may not produce one. Under
+    // no mapping this resolves to the configured identity and the whole branch
+    // is today's behaviour.
+    const resolved = senderIdentityFor(setup, tap.sender);
+    if (!resolved.ok) {
+      streams.err(`approval: telegram checkpoint refused (${resolved.code}): ${resolved.message}\n`);
+      return {
+        ok: false,
+        headline: TELEGRAM_NOT_RECORDED,
+        detail: [refusedDecisionLine(resolved.code)],
+        toast: "Not signed.",
+      };
+    }
+
     if (!tap.sign) {
       return {
         ok: true,
@@ -2249,7 +2368,7 @@ export function checkpointHandlerFor(
     const result = signCheckpointOffer(
       setup.checkpoint,
       tap.head,
-      setup.actor,
+      resolved.actor,
       "telegram",
       process.cwd(),
     );
@@ -2268,7 +2387,7 @@ export function checkpointHandlerFor(
       );
     } else if (result.ok) {
       streams.out(
-        `checkpoint ${String(result.seq)}: signed head seq ${String(result.signed.seq)} ${result.signed.hash} by ${setup.actor} via telegram\n`,
+        `checkpoint ${String(result.seq)}: signed head seq ${String(result.signed.seq)} ${result.signed.hash} by ${resolved.actor} via telegram\n`,
       );
     } else {
       streams.err(`approval: telegram checkpoint refused (${result.code}): ${result.message}\n`);
@@ -2312,17 +2431,41 @@ export function reviewHandlerFor(
   verdict: "ok" | "denied";
   reaction?: "disliked" | "indifferent" | "liked" | "loved";
   note?: string;
+  sender?: ChannelSender;
 }) => ReviewTapResponse {
   return (tap) => {
+    // APRV-324 follow-up. A review confers no authority and is still a HUMAN's
+    // observation: `approval feedback` hands it to agents as human-authored
+    // guidance, so a review attributed to the wrong person is guidance in
+    // somebody else's name. Resolved against the ATTESTED policy exactly as a
+    // signature is, and under no mapping this is the configured identity and
+    // today's behaviour.
+    const resolved = senderIdentityFor(setup, tap.sender);
+    if (!resolved.ok) {
+      streams.err(`approval: telegram review refused (${resolved.code}): ${resolved.message}\n`);
+      return {
+        ok: false,
+        headline: TELEGRAM_NOT_RECORDED,
+        detail: [refusedDecisionLine(resolved.code)],
+        toast: "Not recorded.",
+      };
+    }
+
     const result = reviewSample(
       setup.logPath,
       { kind: "seq", seq: tap.sampleSeq },
-      setup.actor,
+      resolved.actor,
       tap.note ?? null,
       {
         ...(setup.gateOptions.policy === undefined ? {} : { policy: setup.gateOptions.policy }),
         verdict: tap.verdict,
         ...(tap.reaction === undefined ? {} : { reaction: tap.reaction }),
+        ...(resolved.sender === undefined
+          ? {}
+          : {
+              sender: resolved.sender,
+              ...(resolved.source === undefined ? {} : { senderSource: resolved.source }),
+            }),
       },
     );
 

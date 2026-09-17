@@ -141,6 +141,13 @@ export const DOCTOR_ROW_ORDER = [
   // passes in a fresh directory rather than skipping, because "no protected
   // file carries a marker" is a clean state and not a missing configuration.
   "pending-sign-off",
+  // APRV-324: which approvers a mapped channel can still recognize, appended
+  // for the same reason. It skips where no `senders` block exists, which is
+  // every installation before the key and most of them after; it fails only
+  // for an approver the policy lists on a channel whose senders it maps and
+  // whose own id it does not, because that is a person the file says may
+  // decide and the gate will refuse.
+  "sender-mapping",
 ] as const;
 
 /**
@@ -175,4 +182,5 @@ export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "gate-organs",
   "sealed-keys",
   "codex-hook-wiring",
+  "sender-mapping",
 ];

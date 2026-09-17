@@ -331,9 +331,11 @@ the next attestation, with no code change and no log repair; the recorded
 `payload.sender` fields on old records stay valid and readable. That property
 is why the mapping lives in policy rather than in a separate store.
 
-**A deployment that never adds `senders`** is in mode 1 forever, and its
-behaviour is byte-identical to today's. That is the compatibility promise, and
-§7's test 1 is what keeps it true.
+**A deployment that never adds `senders`** is in mode 1 forever: the same
+actor, the same decision, and neither of §4's payload keys on the record. That
+is the compatibility promise, and §7's test 1 is what keeps it true. The one
+field a record gains either way is `channel` (§4 item 1), which is additive and
+which §7's test 18 requires of every decision.
 
 ---
 
@@ -350,8 +352,14 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 
 **Compatibility (the one that must pass first)**
 
-1. A policy with no `senders` produces a log byte-identical to today's for a
-   full request-decide-execute cycle, on all three channels.
+1. A policy with no `senders` decides exactly as today for a full
+   request-decide-execute cycle, on all three channels: the same actor, the
+   same payload keys, and neither `payload.sender` nor `payload.sender_source`
+   present. *(Corrected during implementation: this item first said
+   "byte-identical", which contradicts item 18 and §4 item 1 — both of which
+   require the record to carry `channel`. The one additive difference from a
+   pre-APRV-324 log is that field, and the test asserts it explicitly rather
+   than leaving the contradiction for a reader to resolve.)*
 
 **Two distinct senders (AC2)**
 
@@ -393,9 +401,15 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 
 12. A sender mapped to an approver the class does not name: case 4 above, and
     additionally that nothing is appended to the log beyond the refusal record.
-13. Under a human-only class: refused `class-human-only` before any sender
-    resolution, with no refusal record naming a sender, because human-only
-    classes are inert to this path entirely.
+13. Under a human-only class: refused `class-human-only`, and no record the
+    runtime writes about it carries a sender or a resolution. *(Corrected
+    during implementation: this item first said "before any sender
+    resolution", which is not what the code does. The channel boundary owns
+    the resolution and the gate owns the class check, and ordering them the
+    other way would mean duplicating the gate's read of the log. What is true,
+    and what the test pins, is that a human-only refusal records no sender and
+    no resolution, so no authority and no attribution flows from the
+    computation — which is the property §11.1 invariant 9 is about.)*
 
 **Concurrent decisions (AC2)**
 
@@ -419,6 +433,91 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 19. No record anywhere carries `from.username`.
 
 ---
+
+## 7a. The other three callback families (added during implementation, APRV-324)
+
+§3.2 is written about `recordChannelDecision`, and the first implementation
+resolved senders there and nowhere else. Review of that implementation found
+the gap: a Telegram callback is routed to one of four handlers, and three of
+them never reached the resolution. A stranger in the configured chat therefore
+kept the exact power this design removes, on the gestures that matter most.
+
+The rule binds all four. `senderOf` is read once, directly after the chat-id
+check, so every branch below it sees the same observation and no future branch
+can be written that quietly does not.
+
+**Decisions** — §3.2, unchanged.
+
+**Checkpoint signatures** (`log.checkpoint`). A signature says this log's head
+is what this person saw, which is a human-only act with no request behind it.
+Resolved exactly as a decision: mapped signs as the mapped human, unmapped or
+ambiguous is refused, no mapping for the channel is the configured identity.
+The signature's `payload` is deliberately NOT given a `sender` field: it is a
+signed structure, and an unsigned field beside a signature invites a reader to
+treat it as covered by one. What the mapping changes here is the ACTOR, which
+is what the signature is over.
+
+**Both of these resolve only against an ATTESTED policy.** A decision is
+protected twice — the mapping chooses the actor, and then `decide` refuses
+`policy-not-attested` or `policy-drift` if the bytes on disk are not the bytes
+in force — while signing and reviewing read the policy, act, and append with no
+such check behind them. Without one, an edited `APPROVAL.md` that dropped or
+repointed the `senders` block would change who may sign a checkpoint or file a
+review from a phone *before any human had attested it*, which is exactly the
+property §3.1 claims the mapping has. So a gesture carrying a sender is refused
+`policy-not-attested` — the gate's own code, from `core/attest.ts`'s own check —
+whenever the file on disk is not the file in force, and records nothing. A
+terminal authenticates no sender, is unaffected, and is the repair.
+
+**Retrospective reviews** (`audit.reviewed`), including the note-reply path. A
+review confers no authority, and `approval feedback` hands it to agents as
+human-authored guidance, so a review attributed to the wrong person is guidance
+in somebody else's name. Resolved as a decision is; the record carries
+`payload.sender` on the same terms. The ForceReply note prompt additionally
+remembers which account armed it, and a reply from a different account records
+nothing and leaves the prompt open: the prompt is addressed to the person who
+tapped, and its words are recorded as theirs.
+
+**Attestation answers** (`policy.updated` / `policy.declined`) — the one that is
+stricter rather than the same, because the amendment being attested may itself
+add, remove or repoint the mapping. Resolving a tap against the file it is
+attesting would let whoever wrote that file name the account that approves
+their own edit: a gate authorizing its own widening. So the oracle is the
+policy **in force**, and the ladder is:
+
+1. No sender (terminal, web): unchanged. This is what keeps a repository
+   recoverable — a `policy.core` edit happens at a terminal anyway, so no
+   mapping, however broken, can strand the repair.
+2. In-force bytes recovered and the amendment CHANGES the mapping: only an
+   account the in-force policy maps may answer. Where it maps nobody on this
+   channel, nobody qualifies and the answer is `attest-requires-terminal`. An
+   amendment that introduces the identity system cannot be signed for by the
+   identity system it introduces.
+3. In-force bytes recovered and the mapping is unchanged: the ordinary rule,
+   run against the policy in force.
+4. In-force bytes NOT recovered: refuse `attest-requires-terminal` whenever the
+   proposed policy maps senders for this channel; otherwise behave as before.
+
+**Recovering the in-force bytes, and why it often fails.** An attestation
+records only a SHA-256 (`summarizeDiff` says so in as many words), so the log
+alone cannot produce them. The payload store can: every `policy.proposed` binds
+the whole policy text as its payload, so a proposal that was attested left the
+attested text addressable by its own `payload_hash`. The recovery finds the hash
+in force, finds a proposal that named exactly those bytes, reads the stored text
+and **re-hashes it against the attested digest** — nothing trusts the store.
+
+It fails in the ordinary case and the implementation says so rather than
+pretending otherwise: `approval policy attest`, and `policy amend` on its human
+path, append a `policy.updated` and store nothing. A chain that has never been
+amended from a phone has no recoverable bytes at all, which is this
+repository's own state. Step 4 is therefore the common path, and it is
+fail-closed.
+
+**The residual, stated.** In step 4 an amendment that REMOVES a mapping is
+indistinguishable from a policy that never had one, so it falls back to the
+pre-mapping behaviour. Closing it needs the in-force bytes, which is step 2.
+Reaching it requires an attacker who can already write `APPROVAL.md`, whom
+SPEC §11 already places inside the trust boundary.
 
 ## 8. What this document does not do
 

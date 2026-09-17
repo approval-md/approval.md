@@ -77,6 +77,11 @@ import { scanFences, type FenceScan } from "./md-fence.js";
 import { resolve, STRICTNESS } from "./policy-match.js";
 import { promptBlockErrors } from "./prompt-layout.js";
 import type { ReadScope } from "./read-scope.js";
+// APRV-324. Same shape as the matcher import above: this module imports a
+// FUNCTION from `sender-identity.ts`, which imports only this module's TYPES,
+// so the cycle is erased at build and the rule the loader enforces and the rule
+// the decision path applies are one implementation.
+import { checkSenderMappings } from "./sender-identity.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -286,7 +291,18 @@ export interface Policy {
    * symlink cannot smuggle a read out of one.
    */
   read_scope?: ReadScope;
-  approvers?: Record<string, { channels: string[] }>;
+  /**
+   * The approver roster (SPEC.md §5.1), and since APRV-324 the operator's
+   * attested statement of which transport account each of them decides from.
+   *
+   * `senders` is additive and optional, keyed by a channel whose transport
+   * authenticates a sender (`schema/policy.schema.json`'s `senderChannel`, which
+   * is `telegram` and nothing else today). It is READ by
+   * `channels/contract.ts` through `core/sender-identity.ts`, and by nothing on
+   * a routing, budget or token path: it decides WHO a decision is recorded as,
+   * never what a decision may authorize.
+   */
+  approvers?: Record<string, { channels: string[]; senders?: Record<string, string> }>;
   classes?: Record<string, PolicyClassRule>;
   /**
    * Named budget scopes (SPEC.md §5.1/§5.2). `max_pending` has been in
@@ -430,7 +446,17 @@ export type PolicyLoadErrorCode =
    * line — which no JSON Schema can state. See
    * {@link checkProtectedRouteFloor}.
    */
-  | "protected-route-floor";
+  | "protected-route-floor"
+  /**
+   * Amended SPEC.md §5.2 (APRV-324): two approvers declare one sender id. Like
+   * `protected-route-floor` it is a relationship between two parts of a file
+   * that is valid against the schema, which no JSON Schema can state. The
+   * consequence is the same and for the same reason: the policy does not load,
+   * so every class resolves `manual`, because a file that says one account is
+   * two people has no reading under which a decision from that account names
+   * anybody. See {@link checkSenderMappings}.
+   */
+  | "sender-ambiguous";
 
 /**
  * Result of {@link loadPolicy}.
@@ -863,6 +889,15 @@ export function loadPolicyText(
     daemon: daemonRead,
     notes: aliasNotes(policy),
   };
+
+  // APRV-324: one sender id, at most one person. Checked here rather than in
+  // the schema because it is a relationship between two approvers' blocks, and
+  // checked BEFORE the routing floor below because it needs only the parsed
+  // roster, not a resolution.
+  const senders = checkSenderMappings(policy.approvers);
+  if (senders !== null) {
+    return failure("sender-ambiguous", `${resolved.path}: ${senders}`, undefined, parsed.value);
+  }
 
   // APRV-266: the routing floor is the LAST gate on a load, because it is the
   // only check here that needs the resolved policy rather than the parsed one.

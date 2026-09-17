@@ -587,6 +587,12 @@ export function messageUpdate(options: {
   firstName?: string;
   title?: string;
   /**
+   * The account the Bot API attributes this message to (APRV-324). A note
+   * reply is a gesture like any other, and which account sent it is what
+   * decides whose words the runtime records.
+   */
+  fromId?: string | number;
+  /**
    * The `message_id` this message is a reply to (APRV-299).
    *
    * Telegram puts the whole replied-to message in `reply_to_message`; the only
@@ -604,7 +610,11 @@ export function messageUpdate(options: {
   if (options.firstName !== undefined) chat["first_name"] = options.firstName;
   const message: Record<string, unknown> = {
     message_id: 1,
-    from: { id: 42, is_bot: false, username: options.username ?? "approver" },
+    from: {
+      id: options.fromId ?? 42,
+      is_bot: false,
+      username: options.username ?? "approver",
+    },
     chat,
     date: 1_700_000_000,
     text: options.text ?? "hello",
@@ -619,18 +629,39 @@ export function messageUpdate(options: {
   return { message };
 }
 
-/** A `callback_query` update, as Telegram would deliver one. */
+/**
+ * A `callback_query` update, as Telegram would deliver one.
+ *
+ * `fromId` is the account the Bot API attributes the tap to (APRV-324), and it
+ * is the one field on this update that identifies a person. The three
+ * `spoof*` options exist so a test can put a DIFFERENT identity claim in every
+ * other place an implementation might be tempted to read one — the author of
+ * the message the button sits on, the text of that message, and the username
+ * beside the id — and assert that none of them changes anything. They are what
+ * the sender says about themselves; `fromId` is what Telegram says.
+ */
 export function callbackUpdate(options: {
   data: string;
   chatId: string | number;
   id?: string;
   from?: string;
+  fromId?: string | number;
+  spoofMessageFromId?: string | number;
+  spoofMessageText?: string;
 }): Record<string, unknown> {
+  const message: Record<string, unknown> = {
+    message_id: 1,
+    chat: { id: options.chatId },
+  };
+  if (options.spoofMessageFromId !== undefined) {
+    message["from"] = { id: options.spoofMessageFromId, username: "impostor" };
+  }
+  if (options.spoofMessageText !== undefined) message["text"] = options.spoofMessageText;
   return {
     callback_query: {
       id: options.id ?? `cb-${Math.random().toString(36).slice(2, 10)}`,
-      from: { id: 42, username: options.from ?? "approver" },
-      message: { message_id: 1, chat: { id: options.chatId } },
+      from: { id: options.fromId ?? 42, username: options.from ?? "approver" },
+      message,
       data: options.data,
     },
   };

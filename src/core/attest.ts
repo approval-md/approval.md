@@ -303,7 +303,7 @@ export function appendAttestation(
  * payload-less event could *satisfy* the guard, which is exactly backwards.
  * Ignoring them means an old log reads as `not-attested` — fail closed.
  */
-function attestationSha256(record: EventRecord): string | null {
+export function attestationSha256(record: EventRecord): string | null {
   if (record.event !== "policy.updated") return null;
   const payload = record.payload;
   if (payload === undefined) return null;

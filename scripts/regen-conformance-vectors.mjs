@@ -358,6 +358,10 @@ const unionVectors = [
     "post_tool_codes",
     "every line the post-execution half of `approval hook <harness>` can print instead of closing a delegated execution; `post-tool-gate-refused` carries the gate's own code after a colon",
   ],
+  [
+    "channel_decision_refusal_codes",
+    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the gesture is an attestation whose in-force policy cannot say who is tapping",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -1532,7 +1536,30 @@ const SUITES = [
     // line; the gate refuses one a caller DECLARED. A second implementation
     // that offers the family must answer both, or it has left one of the two
     // doors open.
-    vectors_version: "10.0.0",
+    // 11.0.0 (APRV-324): a TENTH union, `channel_decision_refusal_codes`, for
+    // the two refusals a decision SURFACE makes before the gate is called —
+    // `sender-unmapped` and `sender-ambiguous`. It is not part of
+    // `gate_refusal_codes` and must not be: that union is documented as every
+    // way `approval register|request|decide|withdraw|expire` can refuse, and
+    // `decide` emits neither, because the sender is resolved against the
+    // attested policy before it runs. A second implementation whose gate
+    // emitted one would be describing a different boundary from this one.
+    // Major for the reason 7.0.0, 8.0.0 and 9.0.0 were: this suite pins WHICH
+    // unions exist. (Numbered 11.0.0 rather than 10.0.0 after landing beside
+    // APRV-354's growth of `gate_refusal_codes` and `hook_deny_codes`: two
+    // majors were open at once on separate branches, and the merge orders them
+    // rather than letting one version name two different vector sets — the
+    // collision rule conformance/README.md states.)
+    // 12.0.0 (APRV-324, follow-up): `attest-requires-terminal` joined
+    // `channel_decision_refusal_codes`. The first cut resolved senders on the
+    // decision path and left three callback families — attestation taps,
+    // checkpoint signatures and review cards — deciding under the listener's
+    // configured identity, so a stranger in the configured chat kept exactly
+    // the power the mapping removes, on the most privileged gestures. The new
+    // code is what an attestation tap gets when the policy IN FORCE cannot say
+    // who is tapping: resolving it against the policy being ATTESTED would let
+    // whoever edited that file name the account that approves their own edit.
+    vectors_version: "12.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

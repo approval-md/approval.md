@@ -830,6 +830,117 @@
       }
     },
     {
+      "$comment": "SPEC.md §6.3/§10.3 (amended, APRV-324): who decided, as evidence rather than as configuration. `sender` is the account the channel's own transport attributed the gesture to — for Telegram the numeric `callback_query.from.id` — and the record's `actor` is the human the attested `approvers[id].senders` mapping binds that account to. Both optional and both additive: a decision made on a surface that authenticates no sender, or under a policy that maps none, carries neither key and is byte-identical to a decision written before they existed. That ABSENCE is meaningful and is why the fields are not defaulted: it says the attribution came from the identity the deciding process was launched with, which is the whole of what every build before APRV-324 could say. What may never appear here is anything the sender says about themselves: the mapping key is the transport's attribution, never a name, handle or id a message body claims (§11.1 invariant 4), and `from.username` is deliberately absent from the vocabulary because it is mutable and reusable and a log carrying it would grow a field that reads like identity and decays into a lie. `sender_source` names the kind of evidence, as a closed vocabulary, so a later source is distinguishable in a log rather than silently mixed in with policy-attested ones.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.granted",
+              "approval.rejected",
+              "approval.revoked"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "sender": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "channel",
+                  "id"
+                ],
+                "description": "The authenticated sender the `actor` was resolved from. Present only where a transport authenticated one and the attested policy mapped it.",
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The surface that observed the sender: `telegram`. Named separately from the record's own `channel` because a sender id is only meaningful inside the namespace that issued it."
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The transport's own stable account id, as a string. Not a credential — a Telegram user id is visible to everyone in a chat — and recorded so an operator investigating a decision has the number rather than a name they cannot check."
+                  }
+                },
+                "examples": [{ "channel": "telegram", "id": "12345678" }]
+              },
+              "sender_source": {
+                "type": "string",
+                "enum": [
+                  "policy"
+                ],
+                "description": "How the sender became the actor. `policy` is the attested `approvers[id].senders` mapping of SPEC.md §5.2, and it is the only member today. A closed vocabulary on purpose: a future source of the same shape must be distinguishable from an operator's attestation rather than read back as one."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.3 (amended, APRV-324): the same two fields on the other human acts a channel collects. An attestation decides which rules are in force and a retrospective review is handed to agents as human-authored guidance, so both are recorded as a person's and both are worth attributing to an account rather than to whichever process was listening. Optional and additive on exactly the terms the decision events carry them: absent means the attribution came from the deciding process's configuration. `log.checkpoint` is deliberately NOT in this list — its payload is a signed structure, and an unsigned field sitting beside a signature invites a reader to treat it as covered by one; a checkpoint tap resolves its ACTOR from the sender exactly as these do, and the account it came from is not written next to the signature.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "policy.updated",
+              "policy.declined",
+              "audit.reviewed"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "sender": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "channel",
+                  "id"
+                ],
+                "description": "The authenticated sender the `actor` was resolved from, on the same terms as a decision's.",
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "sender_source": {
+                "type": "string",
+                "enum": [
+                  "policy"
+                ],
+                "description": "How the sender became the actor. `policy` is the attested `approvers[id].senders` mapping of SPEC.md §5.2 — and for an attestation specifically, the mapping of the policy IN FORCE, never the one being attested."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §5.2/§8 (amended, APRV-118): a request and the grant that answers it each pin the SHA-256 of the attested policy the runtime evaluated them under, so a reader can see whether the approver decided by the rules the requester was routed by. The runtime assigns the value at the write boundary from its own attestation check, exactly as it assigns `ts` to a gate-typed event; a grant whose hash differs from its request's is refused `policy-drift` and never reaches this schema. Optional, and deliberately: the field is additive, so records written before it existed still validate and still verify, and only its SHAPE is constrained here — a 64-character lowercase hex digest, never an empty string or a truncated one that audit would have to guess at. Whether the hash names an attestation the log actually carries is not expressible in a schema that sees one record, and is the gate's check.",
       "if": {
         "type": "object",
@@ -1466,7 +1577,6 @@
           "payload": {
             "type": "object",
             "required": [
-              "actor",
               "decision",
               "code"
             ],
@@ -1474,7 +1584,37 @@
               "actor": {
                 "type": "string",
                 "pattern": "^human:",
-                "description": "The person whose decision was refused, `human:<id>`. Distinct from the record's own `actor`, which is the runtime: this field is the SUBJECT of the observation, and the record's actor is its author. `^human:` because this event exists only for a human decision; a refusal handed to an agent is not recorded at all."
+                "description": "The person whose decision was refused, `human:<id>`. Distinct from the record's own `actor`, which is the runtime: this field is the SUBJECT of the observation, and the record's actor is its author. `^human:` because this event exists only for a human decision; a refusal handed to an agent is not recorded at all. Required unless the refusal is precisely that the runtime could not say who the person was — see the `sender` field and the rule below it.",
+                "$comment": "APRV-324 moved this out of the payload's `required` list and into the conditional rule below, which requires it on every record that does not carry a `sender`."
+              },
+              "sender": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "channel",
+                  "id"
+                ],
+                "description": "SPEC.md §10.3 (amended, APRV-324): the authenticated sender whose decision was refused. Carried on a `sender-unmapped` or `sender-ambiguous` refusal, where it is the only thing the runtime knows about who tapped and the reason the record exists — an operator investigating who tried needs the number — and on any other refusal of a decision whose actor WAS resolved from a sender, where it says which account spent the attention.",
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The surface that observed the sender: `telegram`."
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The transport's own stable account id, as a string. A Telegram user id is not a credential: it is visible to everyone in the chat the tap arrived from."
+                  }
+                },
+                "examples": [{ "channel": "telegram", "id": "12345678" }]
+              },
+              "sender_source": {
+                "type": "string",
+                "enum": [
+                  "policy"
+                ],
+                "description": "How the sender became the actor, on a refusal whose actor was resolved. Absent where nothing resolved, which is what a `sender-unmapped` refusal is."
               },
               "decision": {
                 "type": "string",
@@ -1505,6 +1645,49 @@
                 "description": "The gate's own refusal message, as the approver was shown it. A convenience for a reader; `code` is what anything machine-readable branches on."
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.3/§11.1 (amended, APRV-324): a refused decision names the person it was refused for, UNLESS naming one is exactly what the runtime could not do. Before the sender mapping, every decision surface held one configured human identity and the answer was always available; `sender-unmapped` is the case where a transport authenticated an account the attested policy binds to nobody, and the honest record of it carries the account and no person. Writing the listener's own identity there would have been the false statement the refusal exists to prevent — that the operator's decision was refused, when the operator did not decide. So the requirement is conditional rather than dropped: a record with no `sender` MUST still name the human, which is every refusal the runtime wrote before this rule existed and every refusal on a surface that authenticates no sender.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "audit.decision_refused"
+          },
+          "payload": {
+            "type": "object",
+            "not": {
+              "properties": {
+                "sender": {}
+              },
+              "required": [
+                "sender"
+              ]
+            }
+          }
+        },
+        "required": [
+          "event",
+          "payload"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "actor": {
+                "type": "string",
+                "pattern": "^human:"
+              }
+            },
+            "required": [
+              "actor"
+            ]
           }
         }
       }

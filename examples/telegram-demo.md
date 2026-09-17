@@ -63,6 +63,57 @@ your approval chat can approve as you. Attestation proves that someone with loca
 control signed off, not who. Cryptographic identity is future work, not a v0.1
 claim.
 
+### Recording who tapped (APRV-324)
+
+The paragraph above describes a policy with no sender mapping, which is the
+default and what this walkthrough uses. If two people can reach your approval
+chat, the policy can say which is which:
+
+```yaml
+approvers:
+  carter:
+    channels: [telegram, cli]
+    senders:
+      telegram: "12345678"
+  dana:
+    channels: [telegram]
+    senders:
+      telegram: "87654321"
+```
+
+The value is the numeric Telegram account id the Bot API reports as
+`callback_query.from.id`, written as a string. It is not a `@handle`: usernames
+are mutable and reusable, so a mapping keyed on one hands an identity over with
+the name. To find an id, tap a button once with no mapping in place and read the
+`payload.sender` the refusal or the grant records, or ask any of the several
+bots that echo it back.
+
+Four things follow from adding that block, and they are worth reading before
+you do:
+
+1. **Each decision names the person.** `approval.granted` carries
+   `actor: human:dana` and `payload.sender: {channel: telegram, id: "87654321"}`
+   when Dana taps, whatever identity the listener process was started with.
+2. **An unmapped account is refused, not attributed.** A tap from an account the
+   policy does not name records no decision. It records one
+   `audit.decision_refused` with the code `sender-unmapped` and the observed id,
+   and the chat is told that the account is not one the policy names — without
+   reciting the id or naming who is mapped, because a chat is read by everyone
+   in it.
+3. **Enforcement turns on per channel, at the first entry.** Adding a mapping
+   for one approver turns it on for everyone on that channel, so an approver you
+   forget is an approver the gate will refuse. `approval doctor`'s
+   `sender-mapping` row names them before their first tap does.
+4. **It is an assertion, not a proof.** You are stating that an account belongs
+   to a person. What makes that accountable is where it lives: `APPROVAL.md` is
+   attested, so no agent can add itself as an approver's sender any more than it
+   can add itself as an approver. It is still not proof of personhood, and the
+   trust boundary of section 11 is unchanged.
+
+Removing the block returns to the behaviour above at the next attestation, with
+no code change and nothing to repair in the log: the `payload.sender` fields on
+old records stay valid and readable.
+
 ## The walkthrough
 
 Set up a scratch directory. `APPROVAL_MD` points at your checkout.

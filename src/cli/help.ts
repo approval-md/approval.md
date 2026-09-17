@@ -1817,7 +1817,9 @@ NAMES, and there is no flag that would put a bot token into a shell history.
 
 Anyone in the configured chat can approve as the actor this process was started
 with, so the chat's membership is part of your trust boundary. Use a private
-chat with the bot.
+chat with the bot — or map senders: approvers.<id>.senders.telegram: "<id>"
+records each decision against the person that Telegram account is attested to
+and refuses a tap from an account the policy does not name.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

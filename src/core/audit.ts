@@ -591,6 +591,20 @@ export interface ReviewOptions extends AuditOptions {
    * substitute `indifferent` for a person who said nothing.
    */
   reaction?: Reaction;
+  /**
+   * The authenticated account this review arrived from (APRV-324 follow-up),
+   * recorded as `payload.sender`, and the kind of evidence it is.
+   *
+   * A review confers no authority, and it is still a HUMAN's observation that
+   * `approval feedback` hands to agents as human-authored guidance — so a
+   * review attributed to the wrong person is guidance in somebody else's name.
+   * Absent means the attribution came from the reviewing process's own
+   * configuration, which is what every review before this field says. The
+   * resolution that decides whether an account may review at all is the
+   * surface's, against the attested policy; nothing here re-derives it.
+   */
+  sender?: { channel: string; id: string };
+  senderSource?: "policy";
 }
 
 /**
@@ -703,6 +717,13 @@ export function reviewSample(
   // the difference between "the human said nothing" and "the human said
   // indifferent" — a distinction the read surfaces depend on.
   if (reaction !== undefined) payload["reaction"] = reaction;
+  // APRV-324 follow-up, on the same terms as `reaction`: written only where a
+  // transport authenticated an account, so its absence says the attribution
+  // came from configuration.
+  if (options.sender !== undefined) {
+    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
+  }
 
   const result = appendEvent(
     logPath,
