@@ -2397,26 +2397,28 @@ ${why("setup-service")}`;
 // The MCP wrapper (APRV-87)
 // ---------------------------------------------------------------------------
 
-export const CODEX_HELP = `approval codex — prepare and inspect a constrained Codex host bundle (INERT)
+export const CODEX_HELP = `approval codex — prepare a constrained Codex host and broker its workspace writes
 
 Usage:
   approval codex prepare --instance <id> --workspace <abs> --primary <abs>
       --install-root <abs> --output <new-dir> --codex <abs> --node <abs> [--json]
   approval codex setup --check <bundle-dir> [--json]
   approval codex doctor --strict --manifest <abs> [--json]
-  approval codex start|serve --manifest <abs> [--json]
+  approval codex apply --manifest <abs> --proposal <file> [--json]
+      [--token <class>=<token>]... [--require-exclusive-custody]
+  approval codex serve|recover|start --manifest <abs> [--json]
 
-prepare writes a fresh review bundle only. setup --check verifies its closed file
-set, hashes, manifest and generated templates. Neither installs a package, edits
-Codex configuration, creates principals, loads services, reads credentials, or
-changes policy. doctor fails closed on unknown custody, executes no manifest
-binary in this slice, and reports runtime versions as unchecked.
+prepare writes a fresh review bundle; setup --check verifies its file set, hashes,
+manifest and templates; doctor executes no manifest binary. apply is the BROKER: a
+bounded create/replace/delete/move proposal, ONE REGISTERED ACTION PER PATH CLASS,
+gate-authorized, every leg started before any byte moves, then staged, journaled
+and applied under a workspace lock. The MANIFEST supplies actor, root, policy and
+log; the file supplies only operations and the policy digest it was built against.
+recover READS a retained journal and reports before/after/mixed, repairing nothing.
+serve publishes the broker as EXACTLY ONE MCP tool, separate from \`approval mcp
+serve\`. start refuses until APRV-325.3's runner. Nothing here confines a shell.
 
-start and serve currently refuse with codex-not-ready. The policy-bound broker
-and confined runner arrive in APRV-325.2 and APRV-325.3. An npm or project
-installation alone is never reported as enforcement.
-
-${EXIT_CODES_POINTER} (1 means the strict boundary is absent or invalid)
+${EXIT_CODES_POINTER} (1: the boundary is absent, invalid, or the workspace mixed)
 ${JSON_ERRORS}
 why: docs/cli-reference.md#constrained-codex-preparation`;
 

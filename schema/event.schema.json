@@ -1245,9 +1245,10 @@
               "reason": {
                 "type": "string",
                 "enum": [
-                  "act-threw"
+                  "act-threw",
+                  "workspace-commit-unknown"
                 ],
-                "description": "Where the unknowing began. `act-threw`: the adapter's `act` was entered and raised, so the provider call may or may not have committed. Closed, and extended only by a task that adds the case."
+                "description": "Where the unknowing began. `act-threw`: the adapter's `act` was entered and raised, so the provider call may or may not have committed. `workspace-commit-unknown` (APRV-325.2): a multi-file workspace transaction was applied and the workspace then read back as neither the approved before-state nor the approved after-state, because POSIX offers no atomic multi-file rename and a crash, a permission error or a failed rollback can land between two of them; the transaction journal naming both states is retained for a person. Closed, and extended only by a task that adds the case."
               },
               "exit_code": {
                 "type": "null",

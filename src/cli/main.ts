@@ -1348,8 +1348,10 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // exists. The verb itself is human-only, because starting one is an
     // operator's act.
     case "codex": {
+      // Asynchronous since APRV-325.2: `codex serve` runs the strict broker
+      // server in the foreground until it is interrupted.
       const { commandCodex } = await import("./codex.js");
-      return commandCodex(rest, streams, cwd);
+      return settle(commandCodex(rest, streams, cwd), streams, "Codex command failed");
     }
     case "mcp": {
       const { commandMcp } = await import("./mcp.js");

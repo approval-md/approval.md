@@ -26,5 +26,21 @@ both installed runtime versions unchecked.
 The package does not run a postinstall script, call sudo, edit Codex
 configuration, create accounts, load services, access credentials, start a
 model, or alter APPROVAL.md. A human or MDM system must eventually install and
-own the reviewed artifacts. APRV-325.2 and APRV-325.3 must provide the broker,
-runner and end-to-end denial evidence before the session can be called enforced.
+own the reviewed artifacts.
+
+## The broker has landed; the runner has not (APRV-325.2)
+
+`approval codex apply` and the one-tool server `approval codex serve` now exist:
+a bounded create/replace/delete/move proposal against the manifest's workspace,
+one registered action per distinct path class, authorized through the real gate,
+every leg started before any byte moves, then staged, journaled and applied
+under a workspace lock, with the outcome taken from reading the workspace back.
+`docs/codex-workspace-broker.md` is its reference.
+
+That is a gate on workspace writes and nothing more. `approval codex start` still
+refuses `codex-not-ready`, `codex doctor --strict` still reports
+`runner-not-ready`, and the session is still not enforced: a shell that can write
+the workspace by another route is not bounded by the broker, credentials and
+egress are untouched, and no probe has yet shown that the alternate mutable
+surfaces are constrained. APRV-325.3 owns that evidence, and until it lands
+nobody should describe an installation as a mandatory boundary.
