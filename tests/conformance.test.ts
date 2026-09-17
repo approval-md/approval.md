@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { HOOK_DENY_CODES, POST_TOOL_CODES } from "../src/cli/hook.js";
 import { APPEND_ERROR_CODES } from "../src/core/log.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
@@ -258,6 +259,11 @@ test("the §11.1 invariant 6 refusal unions are covered in full", () => {
   assert.deepEqual(pinned.get("token_refusal_codes"), [...TOKEN_REFUSAL_CODES]);
   assert.deepEqual(pinned.get("execute_refusal_codes"), [...EXECUTE_REFUSAL_CODES]);
   assert.deepEqual(pinned.get("append_error_codes"), [...APPEND_ERROR_CODES]);
+  // APRV-311: the harness-hook vocabularies. A second implementation of the
+  // enforcement surface implements a hook, so the strings its verdicts and its
+  // post-execution lines carry are as much of invariant 6 as the gate's are.
+  assert.deepEqual(pinned.get("hook_deny_codes"), [...HOOK_DENY_CODES]);
+  assert.deepEqual(pinned.get("post_tool_codes"), [...POST_TOOL_CODES]);
 });
 
 test("every gate refusal code a scripted scenario can reach is pinned by a vector", () => {
