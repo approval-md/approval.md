@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-codex'
 created_date: '2026-09-17 01:25'
-updated_date: '2026-09-17 07:40'
+updated_date: '2026-09-17 08:07'
 labels:
   - codex
   - upstream
@@ -44,3 +44,9 @@ Criterion three checked with this evidence: docs/codex-hook.md gained a section 
 
 Criteria one, two and four are deliberately unchecked and none of them is work this lane can do. Criterion one needs the issue POSTED and its URL recorded; that is step 3 of the operator runbook at private/runbook-2026-09-17.md, and no agent session in this repository posts publicly. Criterion two needs a maintainer response, which cannot exist before the post. Criterion four records the gate seqs for the external actions, which likewise cannot exist before them. The task therefore stays In Progress rather than Done. What is ready is the paste: docs/upstream/codex-hook-payload.md carries the title, the summary, three separate asks, a reproduction against 0.152.1 quoting the captured envelope key lists from the reviewed native fixtures, why each omission matters, a minimal payload diff for each ask, and an offer to send a pull request. Two deliberate choices worth review before it goes out. The call-id half of ask two is phrased as a request to DOCUMENT an existing property rather than to add a field, because the reviewed native v6 evidence shows the pre and post identifiers of one call are already identical and distinct calls already differ; asking for something that already ships would have read as not having looked. And the one sentence about this project sits at the very end, framed as context for where the report came from, so the issue reads as a payload report rather than as a pitch.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The issue is written and nothing else is left but posting it. docs/upstream/codex-hook-payload.md carries paste-ready text for openai/codex: three separate asks (the effective per-call execution directory on the shell pre-event, an outcome field on the post-event plus documentation of the call id that already correlates one call's two events, and an opt-in setting that makes a hook failure deny rather than proceed), a reproduction against 0.152.1 quoting the envelope key lists from the reviewed native fixtures, a minimal payload diff per ask, and an offer to send a pull request. docs/codex-hook.md and a new Codex entry in docs/integrations-considered.md both name that draft as the condition under which native shell gating becomes activatable, ask by ask, and APRV-311 references it. Criterion three is checked on that evidence, verified by grep of both docs and by reading the task's references back, with the docs-guard suite at 16 tests, 16 pass, 0 fail, exit 0. Criteria one, two and four stay unchecked: they need the posted URL, a maintainer response and the gate seqs for external actions, and no agent session in this repository posts publicly. Delivered in PR 424.
+<!-- SECTION:FINAL_SUMMARY:END -->

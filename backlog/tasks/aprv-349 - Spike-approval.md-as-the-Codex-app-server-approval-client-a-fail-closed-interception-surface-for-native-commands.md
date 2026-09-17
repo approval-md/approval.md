@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-codex'
 created_date: '2026-09-17 01:25'
-updated_date: '2026-09-17 08:02'
+updated_date: '2026-09-17 08:07'
 labels:
   - codex
   - spike
@@ -60,3 +60,9 @@ Criterion four cannot be evaluated before the run, and reading it carefully turn
 
 Verification for this lane: build, typecheck and lint all exit 0; the sweep of docs-guard, probe-codex-app-server, codex-hook-probe and cli-hook-codex gave 51 tests, 51 pass, 0 fail, exit 0. Full npm test is CI's.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The source half of the spike is finished and the observation half is one operator command away. Read at openai/codex b0659c53865dd48b0cd69c454368cea3980017cc with a file and line for every claim, cross-checked against the installed 0.152.1 string table: the exec approval request carries the command and its directory on the same frame, which is the pair the native hook cannot get; the item-based file-change request carries no patch content at all, only an item identifier, so a client on that API approves a reference; there is no timeout anywhere on the approval await, so silence blocks; a malformed reply or an unknown decision deserializes to a denial and the decision type's own default is denied; a disconnected client leaves the question pending and a reconnect replays it to whatever connects next; and a server-side auto-reviewer runs before the client path and can resolve an approval with a model call. That last one is what caps the answer. docs/codex-app-server-bridge.md recommends adopting the bridge as the everyday gate for sessions this runtime starts and declining it as a replacement for the broker or for confinement, conditional on three things the probe must show, with eight follow-up tasks named rather than filed. scripts/probes/codex-app-server.mjs is the observation half, exercised end to end in tests/probe-codex-app-server.test.ts against a stub server, including a fail-open stub whose result the report must call a failure to block in those words. Verified: build, typecheck and lint exit 0; docs-guard, probe-codex-app-server, codex-hook-probe and cli-hook-codex gave 51 tests, 51 pass, 0 fail, exit 0. No criterion is checked and the notes say why for each. Delivered in PR 424.
+<!-- SECTION:FINAL_SUMMARY:END -->
