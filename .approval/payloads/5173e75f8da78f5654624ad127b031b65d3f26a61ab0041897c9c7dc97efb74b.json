@@ -1,0 +1,1 @@
+{"command":"gh run rerun 35172656651 --failed 2>&1 | tail -1; gh pr view 414 --json autoMergeRequest --jq '(.autoMergeRequest!=null)'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}
