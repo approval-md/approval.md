@@ -1604,6 +1604,34 @@ function attestedPolicyLine(input: StartupPreflightInput): PreflightEvent | null
   if (policyPath === null) return null;
   const root = repoRoot(dirname(input.logPath));
   if (root === null) return null;
+
+  // The cheap half first, and it answers the common case without opening the
+  // log at all: when the remote's copy of the policy is byte-identical to the
+  // one on disk, "is the attested policy on the remote" has the same answer as
+  // "is the policy on disk attested" — which is doctor's `attestation` row, and
+  // which `up` has no business duplicating on its startup line. The expensive
+  // half below is a whole-log verify, so skipping it whenever the answer is
+  // already settled is the difference between a read per start and a read per
+  // start on a repository mid-amendment.
+  const relative = repoPath(root, policyPath);
+  if (relative.startsWith("..")) return null;
+  const remote = input.remote ?? "origin";
+  const branch = input.branch ?? currentBranch(root) ?? "main";
+  const resolved = git(
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${branch}^{commit}`],
+    root,
+  );
+  const tip = resolved.stdout.trim();
+  if (!resolved.ok || tip.length === 0) return null;
+  const blob = showBlob(root, tip, relative);
+  let onDisk: Buffer | null;
+  try {
+    onDisk = readIfPresent(policyPath);
+  } catch {
+    return null;
+  }
+  if (blob !== null && onDisk !== null && blob.equals(onDisk)) return null;
+
   const verified = verifyWithRecords(input.logPath);
   if (verified.result.status !== "clean") return null;
   const row = checkAttestedPolicyOnMain({

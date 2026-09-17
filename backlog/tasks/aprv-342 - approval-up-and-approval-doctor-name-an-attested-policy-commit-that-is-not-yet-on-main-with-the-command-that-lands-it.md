@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-ergonomics'
 created_date: '2026-09-16 17:59'
-updated_date: '2026-09-17 01:11'
+updated_date: '2026-09-17 01:32'
 labels:
   - cli
   - doctor
@@ -54,6 +54,8 @@ up and daemon pass a policy path into startupPreflight through a new shared pref
 SPEC 11.1: the comparison reads only verified records. The up line is built from verifyWithRecords and is skipped outright when the chain does not verify clean, so an unverifiable log produces no claim rather than a wrong one.
 
 Verification: node scripts-run-tests --only cli-up-preflight is 43 tests, 43 pass, 0 fail, exit 0, with five new cases built through appendAttestation, the real append path: doctor passes when the remote carries the attested bytes, fails naming 'attested at seq 2, not yet on main' with the amend command and the policy-amend-2 branch, and skips with no attestation; up prints the same sentence and still exits 0; up says nothing when the hashes agree. A run over docs-guard, cli-doctor, cli-up-preflight, cli-help and cli-long-help is 166 tests, 166 pass, 0 fail, exit 0. Build, typecheck and lint exit 0.
+
+Follow-up: the up line now answers the common case without opening the log. When the remote's copy of the policy is byte-identical to the one on disk, 'is the attested policy on the remote' has the same answer as 'is the policy on disk attested', which is doctor's attestation row and not this line's business, so the whole-log verify is skipped entirely. Doctor's row keeps the full check because it already holds the records.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
