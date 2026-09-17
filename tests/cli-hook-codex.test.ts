@@ -17,13 +17,15 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { codexBinding, type CodexHookInput } from "../src/cli/hook-codex.js";
-import { decide, register, request } from "../src/core/gate.js";
+import { decide, finishHarnessExecution, register, request } from "../src/core/gate.js";
 import { openWindow } from "../src/core/gate-window.js";
 import { harnessSessionOf } from "../src/core/loop.js";
 import { payloadHash } from "../src/core/payload.js";
 
 /** dist/tests/cli-hook-codex.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+/** dist/tests/ -> the repository root, for the reviewed native evidence. */
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-cli-hook-codex-")));
 let counter = 0;
 
@@ -356,7 +358,7 @@ test("Codex applies supervised and human-only policy to Bash and apply_patch", (
     ));
     if (tool === "Bash") {
       assert.equal(result.permission, "deny");
-      assert.match(result.reason, /^hook-io: Codex Bash is disabled/u);
+      assert.match(result.reason, /^hook-unsupported-execution-context: Codex Bash is disabled/u);
     } else {
       assertIdentityAllow(result, command);
       assert.match(result.reason, /files\.write\.workspace needs no approval/u, tool);
@@ -383,7 +385,7 @@ test("Codex applies supervised and human-only policy to Bash and apply_patch", (
     assert.equal(result.permission, "deny", tool);
     assert.match(
       result.reason,
-      tool === "Bash" ? /^hook-io: Codex Bash is disabled/u : /^hook-class-human-only: /u,
+      tool === "Bash" ? /^hook-unsupported-execution-context: Codex Bash is disabled/u : /^hook-class-human-only: /u,
       tool,
     );
     assert.equal(rawLog(dir), before, `${tool} human-only refusal appends nothing`);
@@ -416,7 +418,7 @@ test("Codex Bash refuses before every policy and window path without appending",
       event(dir, { tool_input: { command }, tool_use_id: `bash-policy-${index}` }),
     ));
     assert.equal(verdict.permission, "deny");
-    assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+    assert.match(verdict.reason, /^hook-unsupported-execution-context: Codex Bash is disabled/u);
     assert.equal(rawLog(dir), before);
   }
 
@@ -438,7 +440,7 @@ test("Codex Bash refuses before every policy and window path without appending",
       event(dir, { tool_input: { command }, tool_use_id: toolUse }),
     ));
     assert.equal(verdict.permission, "deny");
-    assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+    assert.match(verdict.reason, /^hook-unsupported-execution-context: Codex Bash is disabled/u);
     assert.equal(rawLog(dir), before, `${toolUse} must not append`);
   }
 });
@@ -509,7 +511,7 @@ test("Codex Bash refusal cannot consume an existing exact grant", () => {
     event(dir, { tool_input: { command }, tool_use_id: nativeInput.toolUseId }),
   ));
   assert.equal(verdict.permission, "deny");
-  assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+  assert.match(verdict.reason, /^hook-unsupported-execution-context: Codex Bash is disabled/u);
   assert.equal(rawLog(dir), before);
   assert.equal(before.match(/"event":"approval\.granted"/gu)?.length, 1);
   assert.doesNotMatch(before, /"event":"execution\.started"/u);
@@ -632,4 +634,255 @@ test("Codex preserves arbitrary PostToolUse responses but invents no outcome", (
     assert.doesNotMatch(run.stderr, /secret/u);
     assert.equal(rawLog(dir), before, "an unreadable outcome appends nothing");
   }
+});
+
+// ===========================================================================
+// APRV-311: the post-execution phase, and the ids that join it to the pre one
+// ===========================================================================
+
+interface PostReport {
+  code: string;
+  detail: string;
+  task?: string;
+}
+
+/** The one machine-readable line the post-execution half prints on stderr. */
+function reportOf(run: Run): PostReport {
+  const line = run.stderr.trimEnd().split("\n").at(-1) ?? "";
+  const body = JSON.parse(line) as Record<string, unknown>;
+  const approval = body["approval"] as Record<string, unknown>;
+  assert.equal(approval["hook"], "post-tool-use", "a post-execution line names its phase");
+  return {
+    code: String(approval["code"]),
+    detail: String(approval["detail"]),
+    ...(approval["task"] === undefined ? {} : { task: String(approval["task"]) }),
+  };
+}
+
+/** The binding the adapter mints for a native call, rebuilt from its fields. */
+function bindingFor(
+  dir: string,
+  toolName: "Bash" | "apply_patch",
+  command: string,
+  toolUseId: string,
+  sessionId = "codex-session-1",
+): ReturnType<typeof codexBinding> {
+  const input: CodexHookInput = {
+    sessionId,
+    sessionIdPresent: true,
+    cwd: dir,
+    toolName,
+    toolInput: { command },
+    toolUseId,
+    hookEventName: "PreToolUse",
+    toolResponseRaw: undefined,
+  };
+  return codexBinding(input, dir);
+}
+
+/**
+ * A malformed PostToolUse event used to print a PreToolUse permission verdict.
+ *
+ * The call it describes has already run, so there is no permission left to
+ * decide, and the verdict it printed was indistinguishable from the refusal the
+ * pre-execution phase prints for the same malformed shape. The strict answer is
+ * the one the rest of the post path gives: a machine-readable line on stderr at
+ * the exit code that shows it, no verdict on stdout, and nothing appended.
+ */
+test("Codex post-phase input rejection reports and never prints a permission verdict", () => {
+  const dir = ready();
+  const elsewhere = join(scratch, "not-this-process");
+  mkdirSync(elsewhere, { recursive: true });
+  const before = rawLog(dir);
+  const malformed: [string, Record<string, unknown>][] = [
+    ["an unsupported tool", { tool_name: "WebFetch" }],
+    ["an unstable tool_use_id", { tool_use_id: "not a stable id" }],
+    ["an unstable session_id", { session_id: "not a stable id" }],
+    ["a cwd that is not the hook process", { cwd: elsewhere }],
+    ["an execution-affecting field the adapter does not know", {
+      tool_input: { command: "ls -la", timeout_ms: 1000 },
+    }],
+  ];
+  for (const [name, fields] of malformed) {
+    const post = runCli(
+      ["hook", "codex"],
+      dir,
+      event(dir, { hook_event_name: "PostToolUse", tool_response: "", ...fields }),
+    );
+    assert.equal(post.code, 2, `${name}: the line must be visible`);
+    assert.equal(post.stdout, "", `${name}: a finished call gets no verdict`);
+    assert.equal(reportOf(post).code, "post-tool-io", name);
+    assert.match(reportOf(post).detail, /nothing was appended/u, name);
+    assert.equal(rawLog(dir), before, `${name}: a rejected post event appends nothing`);
+
+    // The same malformed shape before execution is still a deny, in the
+    // pre-execution vocabulary, with the verdict object Codex reads.
+    const pre = verdictOf(runCli(["hook", "codex"], dir, event(dir, fields)));
+    assert.equal(pre.permission, "deny", name);
+    assert.match(pre.reason, /^hook-io: /u, name);
+    assert.equal(rawLog(dir), before, `${name}: the pre refusal appends nothing either`);
+  }
+});
+
+/**
+ * The correlation, read off the REVIEWED NATIVE EVIDENCE rather than off a
+ * hand-written pair (APRV-310 native v6, Codex CLI 0.152.1).
+ *
+ * It also pins the fact that keeps native Bash refused: every Bash event in
+ * that run carried `command` and nothing else, and neither the event cwd nor
+ * the hook process cwd moved with the directory the command actually ran in.
+ */
+test("Codex derives one stable id for the Pre and Post of the same native call", () => {
+  const rows = readFileSync(
+    join(REPO_ROOT, "tests", "fixtures", "codex-hook", "native-v6.sanitized.jsonl"),
+    "utf8",
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(rows.length, 18, "the reviewed native v6 run recorded 18 events");
+
+  const dir = ready();
+  const bindingOf = (row: Record<string, unknown>): ReturnType<typeof codexBinding> => {
+    const toolInput = row["tool_input"] as Record<string, unknown>;
+    return bindingFor(
+      dir,
+      row["tool_name"] as "Bash" | "apply_patch",
+      String(toolInput["command"]),
+      String(row["tool_use_id"]),
+      String(row["session_id"]),
+    );
+  };
+
+  for (const scenario of ["allow", "patch-allow"]) {
+    const pair = rows.filter((row) => row["scenario"] === scenario);
+    assert.equal(pair.length, 2, `${scenario} recorded exactly one Pre and one Post`);
+    const pre = pair.find((row) => row["hook_event_name"] === "PreToolUse");
+    const post = pair.find((row) => row["hook_event_name"] === "PostToolUse");
+    assert.ok(pre !== undefined && post !== undefined, `${scenario} has both phases`);
+    assert.equal(
+      bindingOf(post).task,
+      bindingOf(pre).task,
+      `${scenario}: the post half reconstructs the task the pre half minted`,
+    );
+  }
+
+  // Distinct native calls stay distinct, so one report cannot close another
+  // call's start.
+  const distinct = new Set(
+    rows.filter((row) => row["hook_event_name"] === "PreToolUse").map((row) => bindingOf(row).task),
+  );
+  const preCount = rows.filter((row) => row["hook_event_name"] === "PreToolUse").length;
+  assert.equal(distinct.size, preCount, "every observed Pre event has its own task id");
+
+  for (const row of rows.filter((row) => row["tool_name"] === "Bash")) {
+    assert.deepEqual(
+      row["tool_input_keys"],
+      ["command"],
+      "native Bash tool_input carried only the command",
+    );
+    assert.equal(row["tool_input_cwd_type"], "missing");
+    assert.equal(row["tool_input_workdir_type"], "missing");
+  }
+  const nested = rows.find((row) => row["scenario"] === "nested");
+  assert.ok(nested !== undefined, "the directory control is in the reviewed run");
+  assert.equal(nested["cwd_matches_nested"], false);
+  assert.equal(nested["hook_process_cwd_matches_nested"], false);
+});
+
+/**
+ * The outcome stays open, and the line that says so says WHICH start it left
+ * open.
+ *
+ * Codex 0.152.1 returns the same empty-string `tool_response` for an exit 0 and
+ * an exit 7 Bash call, emits no separate failure event, and exposes no status
+ * field, so there is no reading to take. Appending either outcome would
+ * manufacture it. What this adapter can honestly do is name the delegated
+ * execution nobody closed.
+ */
+test("Codex leaves the outcome open and names the execution.started it did not close", () => {
+  const dir = ready();
+  const command = "*** Begin Patch\n*** Add File: outcome.txt\n+x\n*** End Patch";
+  const fields = { tool_name: "apply_patch", tool_input: { command }, tool_use_id: "outcome-1" };
+  assert.equal(verdictOf(runCli(["hook", "codex"], dir, event(dir, fields))).permission, "allow");
+  const started = rawLog(dir);
+  assert.equal(started.match(/"event":"execution\.started"/gu)?.length, 1);
+
+  const binding = bindingFor(dir, "apply_patch", command, "outcome-1");
+  for (const delivery of ["first", "second"]) {
+    const post = runCli(
+      ["hook", "codex"],
+      dir,
+      event(dir, { ...fields, hook_event_name: "PostToolUse", tool_response: "" }),
+    );
+    assert.equal(post.code, 2, delivery);
+    assert.equal(post.stdout, "", delivery);
+    const reported = reportOf(post);
+    assert.equal(reported.code, "post-tool-unreadable-outcome", delivery);
+    assert.equal(reported.task, binding.task, `${delivery}: the report names the open start`);
+    assert.equal(rawLog(dir), started, `${delivery}: an unreadable outcome appends nothing`);
+  }
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+/**
+ * Correlation and duplicate refusal for Codex ids, on the real append path.
+ *
+ * WHAT THIS PROVES: the ids the Codex adapter mints address exactly the
+ * delegated execution its own pre half started, one report closes it, and a
+ * second is refused by the gate rather than appended twice.
+ *
+ * WHAT IT DOES NOT PROVE: that a native Codex PostToolUse event can reach this
+ * path. On CLI 0.152.1 it cannot, because no reading of that event
+ * distinguishes success from failure (see the test above). The outcome is
+ * supplied here by the test, exactly as `approval report` supplies one, and the
+ * adapter still refuses to infer it from an event.
+ */
+test("Codex stable ids close their own delegated execution once, and a duplicate refuses", () => {
+  const dir = ready();
+  const command = "*** Begin Patch\n*** Add File: finish.txt\n+x\n*** End Patch";
+  const fields = { tool_name: "apply_patch", tool_input: { command }, tool_use_id: "finish-1" };
+  assert.equal(verdictOf(runCli(["hook", "codex"], dir, event(dir, fields))).permission, "allow");
+
+  const binding = bindingFor(dir, "apply_patch", command, "finish-1");
+  const logPath = join(dir, LOG);
+  const finish = (outcome: "completed" | "failed"): ReturnType<typeof finishHarnessExecution> =>
+    finishHarnessExecution(
+      logPath,
+      {
+        sessionId: binding.finishSessionId,
+        toolUseId: binding.finishToolUseId,
+        outcome,
+        reportedBy: "post-tool-use",
+      },
+      "agent:codex",
+      { policy: { dir } },
+    );
+
+  const first = finish("completed");
+  assert.equal(first.ok, true, first.ok ? "" : `${first.code}: ${first.message}`);
+  assert.equal(first.ok && first.task, binding.task);
+  assert.equal(first.ok && first.records.length, 1);
+
+  const duplicate = finish("failed");
+  assert.equal(duplicate.ok, false, "a second report of the same call is refused");
+  assert.equal(duplicate.ok ? "" : duplicate.code, "already-finished");
+  assert.equal(rawLog(dir).match(/"event":"execution\.completed"/gu)?.length, 1);
+
+  // A different call's ids close nothing: there is no start under that task.
+  const other = bindingFor(dir, "apply_patch", command, "finish-2");
+  const stranger = finishHarnessExecution(
+    logPath,
+    {
+      sessionId: other.finishSessionId,
+      toolUseId: other.finishToolUseId,
+      outcome: "completed",
+      reportedBy: "post-tool-use",
+    },
+    "agent:codex",
+    { policy: { dir } },
+  );
+  assert.equal(stranger.ok, false, "an unrelated task id closes nothing");
+  assert.equal(rawLog(dir).match(/"event":"execution\.completed"/gu)?.length, 1);
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
 });

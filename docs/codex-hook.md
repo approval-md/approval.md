@@ -71,6 +71,35 @@ run sent an `apply_patch` heredoc through `exec_command`; Codex reported that
 route as Bash, so it receives the same denial. Direct `apply_patch` remains a
 separate bounded surface and does not make shell execution available.
 
+That denial carries its own code, `hook-unsupported-execution-context`
+(APRV-311). It used to borrow `hook-io`, which also means "this event was
+malformed", and the two repairs are opposite: a malformed event is worth
+sending again, while every Bash event of every shape is refused on this harness
+version until a native contract exposes the effective execution directory. The
+code is a member of the hook denial union that `approval hook --help` prints and
+the conformance suite pins, so a caller may branch on it.
+
+## The post-execution phase
+
+`PostToolUse` never appends an outcome on Codex, and it prints no permission
+verdict. It writes one machine-readable line on stderr, at exit 2 so the line
+is visible, and exits without touching the log:
+
+| code | when |
+|---|---|
+| `post-tool-io` | the event was rejected by the input check: an unsupported tool, an identifier this adapter will not accept, an event `cwd` that is not the hook process's directory, or an unknown execution-affecting field |
+| `post-tool-unreadable-outcome` | the event was accepted and carries no reading of the execution's outcome, which is every accepted Codex `PostToolUse` event on 0.152.1 |
+
+Both lines carry the stable `task` the pre-execution half minted for the same
+call, derived from the same native `session_id` and `tool_use_id`, so the
+`execution.started` nobody closed can be found by its own identifier rather than
+by guesswork. Nothing else about the event is read: `tool_response` is arbitrary
+JSON, and its value is accepted and ignored rather than parsed.
+
+Before APRV-311 a rejected `PostToolUse` event printed a `PreToolUse` deny
+verdict at exit 0, which is a permission decision about a call that has already
+run and is indistinguishable from the pre-execution refusal of the same shape.
+
 ## Future installation by human review
 
 Do not run this installation procedure with Codex 0.152.1. It is retained for
