@@ -234,6 +234,144 @@ function asRefusal(value: { ok: boolean }): GateRefusal {
   return value as GateRefusal;
 }
 
+// ---------------------------------------------------------------------------
+// harness.launch.* resolves only under an explicit rule (APRV-354)
+// ---------------------------------------------------------------------------
+
+/** An envelope declaring one harness launch, so a caller can ASK for the class. */
+const HARNESS_ENVELOPE = {
+  origin: { app: "example-capture", created_by: "human:carter" },
+  state: "proposed",
+  actions: [
+    {
+      class: "harness.launch.codex",
+      summary: "Start a Codex app-server session",
+      reversible: false,
+      est_cost_usd: "0",
+      idempotency_key: "task-354:launch",
+      payload_hash: PAYLOAD_HASH,
+    },
+  ],
+};
+
+/** Ask for `task-354:launch` under whatever policy `unit` carries. */
+function requestLaunch(unit: Case): { ok: boolean } {
+  return request(
+    unit.logPath,
+    {
+      task: "task-354",
+      actionKey: "task-354:launch",
+      payload_hash: PAYLOAD_HASH,
+      cls: "harness.launch.codex",
+      est_cost_usd: "0",
+      reversible: false,
+      summary: "Start a Codex app-server session",
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+}
+
+test("a DECLARED harness launch is refused when no policy rule names it (APRV-354)", () => {
+  // The gate's half of the hook's `hook-harness-launch-unruled`, and the reason
+  // it exists: the hook refuses a launch it classified from a command line, and
+  // this refuses one a caller declares through `register` and `request`. Two
+  // paths, one door. The fixture POLICY has `defaults.autonomy: manual` and
+  // names nothing under `harness.launch`, which is the shape of every real
+  // policy that has not opted in.
+  const unit = newCase();
+  attest(unit);
+  const registered = register(
+    unit.logPath,
+    { task: "task-354", envelope: HARNESS_ENVELOPE },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const before = records(unit).length;
+  const refusal = asRefusal(requestLaunch(unit));
+  assert.equal(refusal.code, "harness-launch-unruled");
+  assert.match(refusal.message, /harness\.launch\.codex/u);
+  assert.match(refusal.message, /explicit rule/u);
+  // A human-only class must never acquire an `approval.requested`, and neither
+  // must this one: the record would be a question in a queue that no rule
+  // governs.
+  assert.equal(records(unit).length, before);
+  assert.ok(!records(unit).some((record) => record.event === "approval.requested"));
+});
+
+test("the same declared launch is requestable once a rule names it (APRV-354)", () => {
+  // The other half: opting in works, and opting in is all it takes. The
+  // refusal is about the ABSENCE of a rule, never about the class itself.
+  const unit = newCase(
+    POLICY.replace("classes:", ["classes:", "  harness.launch.*:", "    autonomy: manual"].join("\n")),
+  );
+  attest(unit);
+  const registered = register(
+    unit.logPath,
+    { task: "task-354", envelope: HARNESS_ENVELOPE },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const result = requestLaunch(unit);
+  assert.equal(result.ok, true, result.ok ? "" : (result as GateRefusal).message);
+  assert.ok(records(unit).some((record) => record.event === "approval.requested"));
+});
+
+test("an explicit human-only rule is refused for the class, not for the missing rule", () => {
+  // The two refusals are distinct and must not shadow each other. A policy that
+  // names `harness.launch.muse` at `human-only` HAS spoken, so the answer is
+  // `class-human-only` and the repair is a person, not a line.
+  const unit = newCase(
+    POLICY.replace(
+      "classes:",
+      [
+        "classes:",
+        "  harness.launch.*:",
+        "    autonomy: manual",
+        "  harness.launch.muse:",
+        "    autonomy: human-only",
+      ].join("\n"),
+    ),
+  );
+  attest(unit);
+  const envelope = {
+    ...HARNESS_ENVELOPE,
+    actions: [{ ...HARNESS_ENVELOPE.actions[0], class: "harness.launch.muse" }],
+  };
+  const registered = register(
+    unit.logPath,
+    { task: "task-354", envelope },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      {
+        task: "task-354",
+        actionKey: "task-354:launch",
+        payload_hash: PAYLOAD_HASH,
+        cls: "harness.launch.muse",
+        est_cost_usd: "0",
+        reversible: false,
+        summary: "Start a Muse session",
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ),
+  );
+  assert.equal(refusal.code, "class-human-only");
+  assert.ok(!records(unit).some((record) => record.event === "approval.requested"));
+});
+
 /** Append an execution.started through the real write path (APRV-18's event). */
 function executionStarted(unit: Case, actionKey: string, ts: string): void {
   const result = appendEvent(unit.logPath, {
@@ -2151,6 +2289,13 @@ test("the refusal-code union is frozen public API", () => {
     // hands. An addition to the union, not a rename, and distinct from every
     // rejection — nobody decided anything, so there is nothing to ask again.
     "class-human-only",
+    // APRV-354: the gate's half of the hook's `hook-harness-launch-unruled`,
+    // so a caller that DECLARES a `harness.launch.*` class meets the same door
+    // as one whose command line was classified into it. An addition to the
+    // union, not a rename, and distinct from `class-human-only`: that one says
+    // the policy reserved the class, this one says the policy has not spoken
+    // about it and the repair is a line rather than a person.
+    "harness-launch-unruled",
     // APRV-18 added this one: SPEC.md §10.2 loop safety, refused at intake for
     // the non-manual paths only. An addition to the union, not a rename.
     "loop-escalated",

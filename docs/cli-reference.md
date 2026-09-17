@@ -4027,6 +4027,15 @@ its own flags are not parsed as this verb's.
   no human is asked. This union's spelling of the gate's `class-human-only`,
   which the detail names in full. The opposite repair to `hook-unclassified`:
   that one says declare a class, this one says a person runs the command.
+- `hook-harness-launch-unruled` — some class of the command is in the
+  `harness.launch.*` family and this policy names no rule for it (APRV-354).
+  The family resolves only under an explicit rule, `harness.launch.*` or
+  `harness.launch.NAME`, and never under `defaults.autonomy`, because a grant
+  of the class covers the launch and nothing the launched session then does.
+  Distinct from `hook-unclassified` (the classifier had nothing to say; here it
+  was clear and the policy is silent) and from `hook-class-human-only` (the
+  policy has spoken and reserved the class; the repair there is for a person to
+  run the command, and here it is to write a line).
 - `hook-opaque` — a construct whose effect cannot be read from the text
   (`bash -c`, `eval`, backticks, a non-read substitution).
 - `hook-unparseable` — the command line could not be tokenized.

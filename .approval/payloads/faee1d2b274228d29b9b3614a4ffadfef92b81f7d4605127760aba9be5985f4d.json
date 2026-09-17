@@ -1,0 +1,1 @@
+{"command":"gh pr view 431 --json state,mergeStateStatus --jq '{state,mergeStateStatus}'; gh api graphql -f query='{ repository(owner:\"approval-md\",name:\"approval.md\"){ pullRequest(number:431){ isInMergeQueue } } }' --jq '.data.repository.pullRequest.isInMergeQueue'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

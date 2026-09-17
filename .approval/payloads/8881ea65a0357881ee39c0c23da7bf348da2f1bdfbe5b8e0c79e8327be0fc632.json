@@ -1,0 +1,1 @@
+{"command":"git show origin/lane/sender-identity-324:SPEC.md > /tmp/SPEC.md\ngrep -n \"callback verified\\|§10.3\\|10.3\" /tmp/SPEC.md | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

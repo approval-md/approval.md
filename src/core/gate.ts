@@ -163,7 +163,13 @@ import {
   type Autonomy,
   type PolicyLoadResult,
 } from "./policy-load.js";
-import { humanOnlyRefusal, resolve, type Resolution } from "./policy-match.js";
+import {
+  harnessLaunchNeedsRule,
+  harnessLaunchUnruledRefusal,
+  humanOnlyRefusal,
+  resolve,
+  type Resolution,
+} from "./policy-match.js";
 import {
   DRAW_PROTOCOL_VERSION,
   askDaemonDraw,
@@ -431,6 +437,27 @@ export const GATE_REFUSAL_CODES = [
    * decide it, under which policy hash, or against which budget.
    */
   "class-human-only",
+  /**
+   * A `harness.launch.*` class that no rule of this policy names (APRV-354).
+   *
+   * The gate's half of the hook's `hook-harness-launch-unruled`, and it exists
+   * so there is no second door. The hook refuses a harness launch it classified
+   * from a command line; this refuses one a caller DECLARES, through
+   * `approval register` and `approval request`, which is the other way an
+   * action class reaches the gate.
+   *
+   * SPEC.md §7: the family resolves only under an explicit rule, never under
+   * `defaults.autonomy`. What a grant of it covers is the launch and nothing
+   * the launched session then does, so a class arriving by upgrade rather than
+   * by an operator's decision would be a capability nobody chose.
+   *
+   * Evaluated in the same position as `class-human-only` and immediately above
+   * it: both are the policy answering before any question about registration,
+   * budget or approver, and this one is the narrower statement of the two — not
+   * "reserved to human hands" but "not spoken about at all". Nothing is
+   * appended, so no `approval.requested` exists for a class no rule governs.
+   */
+  "harness-launch-unruled",
   /**
    * Loop safety escalated the task to manual (SPEC.md §10.2, APRV-18): three
    * consecutive `execution.failed` events. Only the non-manual paths are
@@ -1923,6 +1950,22 @@ function attemptRequest(
   // in a human-only class is refused for the class rather than for the missing
   // registration: registering it would not help, and `not-registered` would
   // send the caller to fix the one thing that cannot make this request valid.
+  // APRV-354, immediately above the human-only check and for the same reason it
+  // sits there in the hook: this is the narrower statement of the two. A
+  // `harness.launch.*` class resolves only under a rule an operator wrote, so a
+  // caller that DECLARES one through `register` and asks for it here is refused
+  // when the policy names neither the family nor the member. Without this the
+  // gate would be the second door the hook's refusal left open.
+  if (harnessLaunchNeedsRule(input.cls, resolution)) {
+    return refuse(
+      "harness-launch-unruled",
+      harnessLaunchUnruledRefusal(
+        input.cls,
+        `action ${input.actionKey} cannot be requested and no approval.requested was written`,
+      ),
+    );
+  }
+
   if (resolution.autonomy === "human-only") {
     return refuse(
       "class-human-only",
