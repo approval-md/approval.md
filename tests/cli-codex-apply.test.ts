@@ -19,6 +19,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -217,13 +218,55 @@ test("recover reports no journal on a settled workspace and exits 0", () => {
   assert.equal(payload.state, "none");
 });
 
-test("start still refuses codex-not-ready: the broker is not a confined runner", () => {
+test("start reports the confined room and runs nothing without a command", () => {
   const unit = instance();
   const result = run(["codex", "start", "--manifest", unit.manifestPath, "--json"]);
+  if (process.platform !== "darwin") {
+    // An unsupported host refuses rather than silently weakening enforcement.
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(
+      (JSON.parse(result.stderr.trim()) as { error: { code: string } }).error.code,
+      "sandbox-unsupported",
+    );
+    return;
+  }
+  assert.equal(result.status, 0, result.stderr);
+  const room = JSON.parse(result.stdout.trim()) as {
+    ok: boolean; egress: string; canonical: string; write_allow: string[]; deny_read: string[];
+  };
+  assert.equal(room.ok, true);
+  assert.equal(room.egress, "denied");
+  assert.equal(room.canonical, unit.root);
+  assert.equal(room.write_allow.length, 1);
+  assert.equal(room.write_allow.includes(unit.root), false);
+  assert.ok(room.deny_read.length >= 3);
+  // It reported the room and did NOT create anything in the canonical workspace.
+  assert.deepEqual(readdirSync(unit.root), []);
+});
+
+test("start runs a command inside the room and hands back the child's exit code", { skip: process.platform === "darwin" ? false : "no sandbox mechanism here" }, () => {
+  const unit = instance();
+  const denied = run([
+    "codex", "start", "--manifest", unit.manifestPath,
+    "--", process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(join(unit.root, "smuggled.txt"))}, 'x')`,
+  ]);
+  assert.notEqual(denied.status, 0, "the confined write should have failed");
+  assert.equal(existsSync(join(unit.root, "smuggled.txt")), false);
+
+  const ok = run(["codex", "start", "--manifest", unit.manifestPath, "--", "/usr/bin/true"]);
+  assert.equal(ok.status, 0, ok.stderr);
+});
+
+test("start refuses a command that does not resolve, rather than spawning it unwrapped", { skip: process.platform === "darwin" ? false : "no sandbox mechanism here" }, () => {
+  const unit = instance();
+  const result = run([
+    "codex", "start", "--manifest", unit.manifestPath, "--json", "--", "definitely-not-a-real-binary-aprv3253",
+  ]);
   assert.equal(result.status, 1);
-  const error = (JSON.parse(result.stderr.trim()) as { error: { code: string; message: string } }).error;
-  assert.equal(error.code, "codex-not-ready");
-  assert.match(error.message, /APRV-325\.3/u);
+  assert.equal(
+    (JSON.parse(result.stderr.trim()) as { error: { code: string } }).error.code,
+    "command-unresolvable",
+  );
 });
 
 test("the strict server publishes exactly one tool, with no authority in its schema", () => {

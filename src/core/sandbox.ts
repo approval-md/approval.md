@@ -171,6 +171,31 @@ export interface EgressAllowance {
    * reach the profile. Directories deny their whole subtree.
    */
   readonly denyRead: readonly string[];
+  /**
+   * WRITE CONFINEMENT (APRV-325.3): the only absolute subtrees the child may
+   * write, or `undefined` for the ordinary egress-only profile.
+   *
+   * This flips the posture for one rule family and one only. The header explains
+   * why the rest of this module is a deny-LIST: a `(deny default)` profile
+   * spends itself re-allowing dyld, the process's own binary and every temporary
+   * directory, and a control that breaks ordinary development is a control that
+   * gets switched off. That reasoning holds for reads and for everything else,
+   * and it does NOT hold for writes in a confined session, where the whole
+   * property being enforced is "this shell cannot change the canonical
+   * workspace". A write deny-list would have to enumerate every path worth
+   * protecting; this names the handful worth writing, so a path nobody thought
+   * of is denied rather than forgotten.
+   *
+   * `/dev` is allowed alongside them, unconditionally. Writes there are process
+   * I/O rather than filesystem state — `/dev/null`, `/dev/stdout`, `/dev/tty`,
+   * the pty a shell needs — and denying them kills the child before it can
+   * demonstrate anything, which is the failure mode point 1 of the header
+   * records for `network-outbound` and unix sockets.
+   *
+   * An EMPTY array is meaningful and is not the same as `undefined`: it denies
+   * every write outside `/dev`. `undefined` emits no write rules at all.
+   */
+  readonly writeAllow?: readonly string[];
 }
 
 /** The default: nothing allowed, nothing denied beyond the network. */
@@ -379,6 +404,19 @@ export function seatbeltProfile(allowance: EgressAllowance): string {
     }
     if (!directory) lines.push(`(deny file-read* (literal ${sbplString(resolved)}))`);
     if (!file) lines.push(`(deny file-read* (subpath ${sbplString(resolved)}))`);
+  }
+  if (allowance.writeAllow !== undefined) {
+    lines.push(
+      ";; APRV-325.3: write confinement. Deny-DEFAULT for this rule family only,",
+      ";; so a path nobody thought of is denied rather than forgotten.",
+      "(deny file-write*)",
+      ";; /dev is process I/O, not filesystem state. Denying it kills a shell",
+      ";; before it can do anything, for the reason a bare network-outbound deny does.",
+      '(allow file-write* (subpath "/dev"))',
+    );
+    for (const path of allowance.writeAllow) {
+      lines.push(`(allow file-write* (subpath ${sbplString(resolveForProfile(path))}))`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }

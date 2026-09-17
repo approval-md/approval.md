@@ -14,9 +14,11 @@ import {
 } from "../codex/broker.js";
 import { strictDoctor } from "../codex/doctor.js";
 import { readCodexInstance } from "../codex/manifest.js";
+import { planConfinedSession, runConfined } from "../codex/runner.js";
 import { serveCodexBroker } from "../codex/serve.js";
 import { checkBundle, prepareBundle } from "../codex/templates.js";
 import { recoverWorkspaceCommit } from "../codex/workspace-commit.js";
+import { parseDuration } from "../core/policy-load.js";
 
 function emitError(streams: Streams, json: boolean, code: string, message: string): void {
   if (json) streams.err(`${JSON.stringify({ error: { code, message } })}\n`);
@@ -350,8 +352,14 @@ export async function commandCodex(argv: string[], streams: Streams, cwd: string
   }
 
   if (subcommand === "start") {
-    const parsed = parseFlags(rest, {
+    // `--` separates the flags from the argv the confined shell runs. Split
+    // before `parseFlags`, so a `--json` the CHILD takes is the child's.
+    const separator = rest.indexOf("--");
+    const flagArgv = separator === -1 ? rest : rest.slice(0, separator);
+    const childArgv = separator === -1 ? [] : rest.slice(separator + 1);
+    const parsed = parseFlags(flagArgv, {
       "--manifest": "string",
+      "--timeout": "string",
       "--json": "boolean",
       "--help": "boolean",
       "-h": "boolean",
@@ -361,10 +369,76 @@ export async function commandCodex(argv: string[], streams: Streams, cwd: string
       streams.out(`${CODEX_HELP}\n`);
       return EXIT_OK;
     }
-    if (parsed.positionals.length > 0) return usage(streams, json, "start takes flags only");
-    if (required(parsed.flags, "--manifest") === null) return usage(streams, json, "start requires --manifest <path>");
-    emitError(streams, json, "codex-not-ready", "codex start is not implemented until APRV-325.3 provides the confined runner; the broker (APRV-325.2) is reachable through `codex serve` and `codex apply`, and neither of those confines a shell");
-    return EXIT_INTEGRITY;
+    if (parsed.positionals.length > 0) {
+      return usage(streams, json, "start takes flags, then `--` and the command to run confined");
+    }
+    const manifestPath = required(parsed.flags, "--manifest");
+    if (manifestPath === null) return usage(streams, json, "start requires --manifest <path>");
+    const installation = installationOf(resolve(cwd, manifestPath), streams, json);
+    if (installation === null) return EXIT_INTEGRITY;
+
+    const planned = planConfinedSession(installation);
+    if (!planned.ok) {
+      emitError(streams, json, planned.code, planned.message);
+      return EXIT_INTEGRITY;
+    }
+    const session = planned.session;
+    try {
+      // No argv: report the room rather than launching anything. An operator
+      // checking that a host can host a confined session should not have to
+      // start Codex to find out.
+      if (childArgv.length === 0) {
+        const report = {
+          ok: true as const,
+          version: session.version,
+          workspace: session.workspace,
+          canonical: session.canonical,
+          mechanism: session.mechanism,
+          write_allow: session.writeAllow,
+          deny_read: session.denyRead,
+          env_stripped: session.envStripped,
+          egress: "denied" as const,
+        };
+        if (json) streams.out(`${JSON.stringify(report)}\n`);
+        else {
+          streams.out(`Confined session prepared with ${session.mechanism}.\n`);
+          streams.out(`  disposable workspace (the only writable path): ${session.workspace}\n`);
+          streams.out(`  canonical workspace (readable, never writable): ${session.canonical}\n`);
+          streams.out(`  credential-bearing variables withheld: ${String(session.envStripped)}\n`);
+          streams.out("  outbound network: denied, loopback included\n");
+          streams.out("Pass `-- <command>` to run something inside it.\n");
+        }
+        return EXIT_OK;
+      }
+
+      const timeoutFlag = stringFlag(parsed.flags, "--timeout");
+      const timeoutMs = timeoutFlag === null ? null : parseDuration(timeoutFlag);
+      if (timeoutFlag !== null && timeoutMs === null) {
+        return usage(streams, json, `--timeout expects a duration like 30s, got ${JSON.stringify(timeoutFlag)}`);
+      }
+      const command = childArgv[0] as string;
+      const ran = runConfined(
+        session,
+        command,
+        childArgv.slice(1),
+        timeoutMs === null ? {} : { timeoutMs },
+      );
+      if (!ran.ok) {
+        emitError(streams, json, ran.code, ran.message);
+        return EXIT_INTEGRITY;
+      }
+      if (ran.stdout.length > 0) streams.out(ran.stdout);
+      if (ran.stderr.length > 0) streams.err(ran.stderr);
+      if (json) {
+        streams.out(`${JSON.stringify({
+          ok: true, version: session.version, workspace: session.workspace,
+          exit_code: ran.exitCode, timed_out: ran.timedOut, env_stripped: session.envStripped,
+        })}\n`);
+      }
+      return ran.exitCode;
+    } finally {
+      session.dispose();
+    }
   }
 
   return usage(streams, json, `unknown codex subcommand ${JSON.stringify(subcommand)}`);
