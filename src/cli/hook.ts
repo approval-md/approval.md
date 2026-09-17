@@ -142,7 +142,13 @@ import {
   readTargetsOf,
   renderReadRoots,
 } from "../core/read-scope.js";
-import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
+import {
+  harnessLaunchNeedsRule,
+  harnessLaunchUnruledRefusal,
+  humanOnlyRefusal,
+  resolve as resolvePolicy,
+  type Resolution,
+} from "../core/policy-match.js";
 import {
   payloadOf,
   readVerifiedRecords,
@@ -222,6 +228,29 @@ export const HOOK_DENY_CODES = [
    * rejection: nobody decided anything, so there is nothing to ask again.
    */
   "hook-class-human-only",
+  /**
+   * A `harness.launch.*` class that no rule of this policy names (APRV-354).
+   *
+   * SPEC.md §7 says the family is never inferred autonomous; this is the
+   * stronger reading the family needs, which is that it is never inferred at
+   * all. A launch resolves only under a rule an operator wrote, and a policy
+   * that names neither `harness.launch.*` nor the specific member refuses.
+   *
+   * It exists because of the window the softer reading opens. Before the family
+   * existed, `codex …` and `muse …` were `hook-unclassified`: refused outright.
+   * Letting the new class fall to `defaults.autonomy` would have made every
+   * harness launch grantable by one approval in every project whose defaults
+   * are manual, the moment they upgraded — a capability arriving by upgrade
+   * rather than by decision. What that approval would cover is a whole second
+   * agent whose own actions this gate never sees.
+   *
+   * Distinct from `hook-unclassified`, which says the CLASSIFIER has nothing to
+   * say about the command; here the classifier was clear and the POLICY is
+   * silent. Distinct from `hook-class-human-only`, which is a policy that has
+   * spoken and reserved the class: the repair there is for a person to run the
+   * command, and the repair here is to write a line.
+   */
+  "hook-harness-launch-unruled",
   /** A construct whose effect cannot be read off the text (`bash -c`, `eval`). */
   "hook-opaque",
   /** The command line could not be tokenized at all. */
@@ -3593,6 +3622,20 @@ function runBypass(
   }
 
   if (load.ok) {
+    // APRV-354, above the human-only check here for the same reason it sits
+    // above it on the ordinary path. A window suspends what the policy DECIDES;
+    // it cannot supply a decision the policy never made. A launch the policy
+    // names no rule for is not a class the window is holding open — it is a
+    // class nobody has opted into — so the window does not reach it either.
+    const unruled = classes.find((cls) => harnessLaunchNeedsRule(cls, resolvePolicy(load, cls)));
+    if (unruled !== undefined) {
+      return deny(
+        streams,
+        "hook-harness-launch-unruled",
+        `${harnessLaunchUnruledRefusal(unruled, "this command may not run under an agent")} An open window does not reach it: a window suspends what the policy decides, and this is a class the policy has not spoken about at all.`,
+        adapter.kind,
+      );
+    }
     const reserved = classes.find(
       (cls) => resolvePolicy(load, cls).autonomy === "human-only",
     );
@@ -3977,7 +4020,30 @@ function runHarnessHook(
     channels: Object.keys(load.policy.channels ?? {}).sort(),
   };
 
-  const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
+  const resolutions = classes.map((cls) => resolvePolicy(load, cls));
+  const autonomies = resolutions.map((resolution) => resolution.autonomy);
+
+  // APRV-354, and ABOVE the human-only deny because it is the narrower
+  // statement: this class is not merely reserved, it is one the policy has not
+  // spoken about at all, and the repair is a line rather than a person.
+  //
+  // A `harness.launch.*` class resolves only under a rule an operator wrote. A
+  // policy naming neither the family nor the member refuses the launch instead
+  // of falling to `defaults.autonomy`, which keeps arrival exactly as strict as
+  // it was before the family existed (`hook-unclassified`, refused) until
+  // somebody opts in. See `harnessLaunchNeedsRule` for why the family gets this
+  // and no other class does.
+  const unruled = classes.find((cls, index) =>
+    harnessLaunchNeedsRule(cls, resolutions[index] as Resolution),
+  );
+  if (unruled !== undefined) {
+    return deny(
+      streams,
+      "hook-harness-launch-unruled",
+      harnessLaunchUnruledRefusal(unruled, "this command may not run under an agent"),
+      adapter.kind,
+    );
+  }
 
   // APRV-185, amended SPEC.md §5.2, and the first verdict this function reaches
   // once the classes have autonomies. A command touching a class the policy

@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-classifier'
 created_date: '2026-09-17 08:49'
-updated_date: '2026-09-17 09:14'
+updated_date: '2026-09-17 09:32'
 labels:
   - classifier
   - harness
@@ -87,6 +87,28 @@ AC4: docs/proposals/harness-launch-2026-09.md follows the docs/proposals/README.
 AC5: APRV-349 notes now record that codex app-server classifies harness.launch.codex, with the two things that does not do; no criterion of that task was checked and no field but its notes was touched. conformance/vectors/command-class.v1.json gains fourteen vectors at version 1.2.0, including the unknown-package control and a negative control for the wrapper. Build, typecheck, lint and the classifier suites pass as above.
 
 Two things a human should know. First, a hook test proves the human-only half end to end: a human-only harness launch is inert to an agent, denied, nothing appended, which asserts hook-class-human-only naming harness.launch.muse and that the log is byte for byte unchanged. Its pair, a harness launch the wildcard governs reaches the gate rather than being refused outright, shows the manual member opening an ordinary lifecycle, which is what separates a class a human can grant from one reserved to human hands. Second, shipping before the paste moves a harness launch from hook-unclassified (refused outright) to manual by defaults.autonomy, which is one step looser and is the step the task asks for; the paste is what adds Muse at human-only, which is stricter than the default.
+
+Follow-up commit, after the orchestrator read the direction note and asked for the window closed structurally rather than by merge timing. The finding that prompted it: shipping the family with a plain defaults fallback would move a harness launch from refused outright to grantable by one tap, in every project whose defaults.autonomy is manual, from the moment they upgraded. For most classes a manual default is an operator saying ask me; for this one what is being approved is a whole second agent whose own actions this gate never sees, and for Muse the model may come from the harness own settings where no command line shows it and no prompt could display it. A capability that arrives by upgrade rather than by decision is not a capability anybody chose.
+
+The rule now implemented: a harness.launch.* class resolves ONLY under an explicit rule an operator wrote, harness.launch.* or harness.launch.NAME. A policy naming neither refuses. The predicate is harnessLaunchNeedsRule in src/core/policy-match.ts, keyed on resolution.matched === null, which is exactly no rule of the policy own decided this and covers both spellings of the fallback: provenance default (the file loaded and named nothing) and provenance fail-closed (the file did not load, so it names nothing for any class).
+
+Two doors, closed together. The hook refuses a launch it CLASSIFIED from a command line with hook-harness-launch-unruled, on the ordinary path and on the open-window path (a window suspends what the policy decides and cannot supply a decision the policy never made). The gate refuses one a caller DECLARES through register and request with harness-launch-unruled, placed immediately above the class-human-only check for the same reason it sits there in the hook: it is the narrower statement of the two, not reserved to human hands but not spoken about at all. Both refusals append nothing, so no approval.requested exists for a class no rule governs.
+
+One definition of the family, not two. HARNESS_LAUNCH_PREFIX moved to policy-match.ts and command-class.ts imports it, because the classifier and both enforcement paths have to agree on what the family is and a second spelling of the prefix is the shape of bug that closes one door and leaves the other open. policy-match.ts imports only types, so this adds no runtime dependency to the classifier and no cycle.
+
+The refusals are distinct in the SPEC 11.1 sense and their repairs are opposites, which is written into both code comments and both doc tables: hook-unclassified says the classifier had nothing to say, hook-harness-launch-unruled says the classifier was clear and the policy is silent and the repair is a line, hook-class-human-only says the policy has spoken and reserved the class and the repair is a person.
+
+A PROBE is outside the family. codex --version classifies read.shell, so reading a harness version still needs no opt-in, and there is a test asserting it is allowed under a policy that has opted into nothing.
+
+Direction, restated honestly now that the guard is in: shipping this changes nothing an operator can act on. A harness launch was refused before the family existed, it is refused after this merges, and it is refused for a better reason, because the refusal now names the class, says what a grant would and would not cover, and points at the proposal. The paste is what makes a launch grantable at all. The proposal prose and the hook docs were rewritten to say exactly that; the earlier wording, which said the class falls to defaults.autonomy, is gone.
+
+SPEC section 7 gained the MUST: resolve the family only under an explicit rule, refuse a member no rule names rather than resolving it by defaults.autonomy, with a machine-readable refusal distinct from the unclassifiable one and from the human-only one, and apply the same refusal wherever a caller declares the class so the two paths are one door.
+
+Tests added. Six per-harness cases proving a launch no policy rule names is refused, not granted by default, each asserting the code, that the log is byte for byte unchanged, and that the message names the proposal file. A harness PROBE is unaffected by the unruled rule. An unparseable policy refuses a harness launch too. An explicit wildcard rule resolves as written, and the specific Muse line wins in either order, which runs the whole check twice over two policies that differ only in declaration order. On the gate path: a DECLARED harness launch is refused when no policy rule names it (asserting no approval.requested is appended), the same declared launch is requestable once a rule names it, and an explicit human-only rule is refused for the class, not for the missing rule, which is the test that keeps the two refusals from shadowing each other.
+
+Conformance: both unions gained their code and refusal-unions.v1.json is bumped to 10.0.0, a MAJOR bump because the vector pins each whole array in definition order. The pair is deliberately two codes rather than one: the two paths refuse different inputs, and a second implementation offering the family must answer both or it has left one door open.
+
+Re-verified after the follow-up: twenty-five affected suites at 1164 tests, 1164 pass, 0 fail, exit 0; conformance exit 0; build, typecheck and lint exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

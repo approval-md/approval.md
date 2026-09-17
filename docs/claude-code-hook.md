@@ -535,9 +535,26 @@ above these and keeps `deps.upgrade`, since an upgrade swaps the binary that
 hosts this hook. Every launch and probe rule is in `CODE_EXECUTING_RULES`, so
 `APPROVAL_HOOK_REQUIRE_SANDBOX=1` still applies to them.
 
-A policy with no line for the family resolves it by `defaults.autonomy` like any
-other class, so adopting it is an explicit act. This repository's lines are
-proposed in `docs/proposals/harness-launch-2026-09.md`.
+**A policy with no line for the family refuses the launch.** This one class does
+not fall to `defaults.autonomy` the way every other unmatched class does: a
+launch resolves only under a rule somebody wrote, `harness.launch.*` or
+`harness.launch.NAME`, and a policy naming neither denies with
+`hook-harness-launch-unruled`. Nothing is registered, requested or appended, and
+the refusal names the line that would allow it.
+
+That is SPEC §7's "never inferred autonomous", read at its strongest, and the
+family needs the strong reading. Letting the new class fall to a `manual`
+default would have made every harness launch grantable by a single tap in every
+project whose defaults are manual, from the moment they upgraded, and what that
+tap covers is a whole second agent whose own actions this gate never sees. A
+capability that arrives by upgrade rather than by decision is not a capability
+anybody chose. The same refusal applies on the `approval register` / `approval
+request` path, as `harness-launch-unruled`, so a caller that declares the class
+rather than having it classified meets the same door.
+
+A probe is outside the family, so reading a harness version needs no opt-in.
+This repository's lines are proposed in
+`docs/proposals/harness-launch-2026-09.md`.
 
 ### Deleting a remote ref (APRV-352)
 
@@ -927,6 +944,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 |---|---|
 | `hook-unclassified` | no rule covers some segment of the command |
 | `hook-class-human-only` | some class of the command resolves to `human-only`: the policy reserves it to human hands, so the command is denied outright and no gate lifecycle is opened. Nothing is registered, requested or appended, and a person runs the command instead. The gate's own code for the same fact is `class-human-only`, which the detail names |
+| `hook-harness-launch-unruled` | some class of the command is in the `harness.launch.*` family and this policy names no rule for it (APRV-354). The family resolves only under an explicit rule and never under `defaults.autonomy`, so a launch arrives exactly as refused as it was before the family existed until an operator opts in. Nothing is registered, requested or appended. The gate's own code, for a class a caller DECLARES rather than one classified from a command line, is `harness-launch-unruled`. The repair is a line in `APPROVAL.md`, which is what makes it the opposite of `hook-class-human-only` |
 | `hook-opaque` | a construct whose effect cannot be read from the text |
 | `hook-unparseable` | the command line could not be tokenized |
 | `hook-rejected` | a human said no |

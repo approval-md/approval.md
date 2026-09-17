@@ -33,13 +33,22 @@
  * harness's `description` field is authored by the very agent being gated
  * (SPEC.md §11.1: self-reported fields never reduce scrutiny).
  *
- * The one import (APRV-347) is `core/read-scope.ts`, which is pure in exactly
- * the same way this file is: no disk, no clock, no environment, no
- * dependencies. It holds the read-side path arithmetic so the hook and the
- * policy explainer can ask the same questions this file asks, of the same
- * table, rather than each growing a copy of it.
+ * Two imports, and both are pure in exactly the same way this file is: no disk,
+ * no clock, no environment, no dependencies.
+ *
+ * `core/read-scope.ts` (APRV-347) holds the read-side path arithmetic, so the
+ * hook and the policy explainer can ask the same questions this file asks, of
+ * the same table, rather than each growing a copy of it.
+ *
+ * `core/policy-match.ts` (APRV-354) is imported for ONE name, the
+ * `harness.launch.` prefix. The classifier emits the family and two enforcement
+ * paths refuse a member of it that no policy rule names, so the three have to
+ * agree on what the family is; a second spelling of the prefix would close one
+ * of those doors and leave the other open. The import is type-safe in the
+ * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
+import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
   isUnreadableTarget,
@@ -1405,8 +1414,15 @@ const SCRATCH_DELETE_CLASS = "files.delete.scratch";
  * scrutiny. A `-standard` id, or no `--model` at all, returns the ordinary rule
  * id and changes nothing, because a self-reported field that could lower
  * scrutiny is a field an agent would learn to write (SPEC.md §11.1 invariant 4).
+ *
+ * ## Where the family's name lives
+ *
+ * {@link HARNESS_LAUNCH_PREFIX} is `core/policy-match.ts`'s, not this file's,
+ * and is imported rather than repeated. Two enforcement paths refuse a launch
+ * that no policy rule names (`harnessLaunchNeedsRule`), and a second spelling of
+ * the prefix is the shape of bug that closes one of those doors and leaves the
+ * other open.
  */
-const HARNESS_LAUNCH_PREFIX = "harness.launch.";
 
 /** The rule id prefix, so a reader can tell a launch row from a probe. */
 const HARNESS_LAUNCH_RULE_PREFIX = "harness-launch-";

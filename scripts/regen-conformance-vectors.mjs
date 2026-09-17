@@ -1522,7 +1522,17 @@ const SUITES = [
     // only rely on if it is pinned, and the whole enforcement surface a second
     // implementation has to reproduce is a hook. Major for the reason 7.0.0 and
     // 8.0.0 were: this suite pins WHICH unions exist.
-    vectors_version: "9.0.0",
+    // 10.0.0 (APRV-354): `gate_refusal_codes` gains `harness-launch-unruled`
+    // and `hook_deny_codes` gains `hook-harness-launch-unruled`, the two
+    // spellings of one refusal: a `harness.launch.*` class that no rule of the
+    // policy names. Major for the reason every union growth here is major —
+    // the vector pins each whole array in definition order — and the pair is
+    // deliberately two codes rather than one, because the two paths refuse
+    // different inputs. The hook refuses a launch it CLASSIFIED from a command
+    // line; the gate refuses one a caller DECLARED. A second implementation
+    // that offers the family must answer both, or it has left one of the two
+    // doors open.
+    vectors_version: "10.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

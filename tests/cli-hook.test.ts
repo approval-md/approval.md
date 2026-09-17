@@ -2815,6 +2815,130 @@ function readyWithHarnessLaunchPolicy(): string {
   return dir;
 }
 
+/** The same pair with the SPECIFIC line written first, to show order is inert. */
+function readyWithHarnessLaunchPolicyReversed(): string {
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace(
+      "classes:",
+      [
+        "classes:",
+        "  harness.launch.muse:",
+        "    autonomy: human-only",
+        "  harness.launch.*:",
+        "    autonomy: manual",
+      ].join("\n"),
+    ),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+for (const command of [
+  "codex exec x",
+  "muse",
+  "grok run",
+  "claude -p 'summarize this'",
+  "cursor-agent --resume",
+  "npx @openai/codex exec x",
+]) {
+  test(`a harness launch no policy rule names is REFUSED, not granted by default: ${command}`, () => {
+    // APRV-354's structural guard, and the reason the family gets a rule no
+    // other class gets. Before the family existed these commands were
+    // `hook-unclassified`: refused outright. If the new class fell to
+    // `defaults.autonomy` — `manual` in this fixture policy, as in every real
+    // one — then adding the class would have made every harness launch
+    // grantable by a single tap, in every project, the moment they upgraded.
+    // A capability that arrives by upgrade rather than by decision is not a
+    // capability anybody chose, and what this one would cover is a whole second
+    // agent whose own actions this gate never sees.
+    const dir = ready();
+    const before = rawLog(dir);
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent(command),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-harness-launch-unruled: /u);
+    assert.match(verdict.reason, /harness\.launch\./u);
+    // The repair is actionable and is a LINE, not a person: this is what makes
+    // the code distinct from `hook-class-human-only`.
+    assert.match(verdict.reason, /harness-launch-2026-09\.md/u);
+    assert.equal(rawLog(dir), before);
+    assertClean(dir);
+  });
+}
+
+test("a harness PROBE is unaffected by the unruled rule: it is a read, not a launch", () => {
+  // The family is `harness.launch.*`. A probe classifies `read.shell`, which is
+  // outside it, so the guard does not touch it and a session can still read a
+  // harness version under a policy that has opted into nothing.
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("codex --version"),
+  );
+  assert.equal(verdictOf(run).permission, "allow");
+  assertClean(dir);
+});
+
+test("an unparseable policy refuses a harness launch too (APRV-354)", () => {
+  // Fail-closed resolution gives every class `manual` with provenance
+  // `fail-closed` and NO matched rule, so the guard fires there as well. A
+  // broken file names no rule for any class, which is exactly the condition
+  // this refusal is about.
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    ["# Policy", "", "```yaml approval-policy", 'version: "0.1"', "classes:", "   autonomy: [unclosed", "```", ""].join("\n"),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("codex exec x"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-(harness-launch-unruled|policy-unavailable): /u);
+});
+
+test("an explicit wildcard rule resolves as written, and the specific Muse line wins in either order", () => {
+  // The other half of the guard: opting in works, and opting in is all it takes.
+  for (const dir of [readyWithHarnessLaunchPolicy(), readyWithHarnessLaunchPolicyReversed()]) {
+    const codex = runCli(["policy", "check", "harness.launch.codex"], dir);
+    assert.equal(codex.code, 0, codex.stderr);
+    assert.match(codex.stdout, /manual/u);
+
+    const muse = runCli(["policy", "check", "harness.launch.muse"], dir);
+    assert.equal(muse.code, 0, muse.stderr);
+    assert.match(muse.stdout, /human-only/u);
+
+    // And through the hook, which is where it bites.
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("muse --model muse-1-contributor"),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-class-human-only: /u);
+    assertClean(dir);
+  }
+});
+
 test("a human-only harness launch is inert to an agent: denied, nothing appended (APRV-354)", () => {
   // APRV-185's property, on the class APRV-354 adds. Carter has ruled that Muse
   // Code must never run with a Contributor model selected and must not run over

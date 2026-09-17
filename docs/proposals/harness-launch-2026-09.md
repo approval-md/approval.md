@@ -98,16 +98,36 @@ and stops a fraction on the gate. It is **not** `supervised-retro`: a launch
 that already happened cannot be un-launched, and the inner actions are exactly
 the ones this gate never saw.
 
-## It is already safe without these lines
+## Before the paste, nothing is grantable at all
 
-The classifier ships ahead of the paste, and that is safe in the strict
-direction. A class no rule matches resolves to `defaults.autonomy`, which is
-`manual` in this file, so between the merge and the paste a harness launch is
-`manual` rather than the `hook-unclassified` refusal it was. That is a
-loosening of one step, from "refused outright" to "a person decides", and it is
-the step the task asks for. What the paste adds is Muse at `human-only`, which
-is stricter than the default, plus a line a reader can find and a name a future
-`*` wildcard cannot silently absorb.
+This is worth reading carefully, because it is the opposite of how most classes
+behave.
+
+`harness.launch.*` does **not** fall to `defaults.autonomy`. A member of the
+family resolves only under a rule somebody wrote, and a policy that names
+neither the family nor the member refuses the launch outright:
+`hook-harness-launch-unruled` from the hook, `harness-launch-unruled` from the
+gate when a caller declares the class instead. Nothing is registered, nothing is
+requested, nothing is appended.
+
+So **shipping the classifier ahead of this paste changes nothing an operator can
+act on**. A harness launch is refused today, it is refused after the merge, and
+it is refused for a better reason: the refusal now names the class, says what a
+grant of it would and would not cover, and points here. The paste is what makes
+a launch grantable at all.
+
+The rule exists because the softer alternative is worse than it looks. Letting
+the new class fall to a `manual` default would make every harness launch
+grantable by a single tap, in every project that has ever written `defaults: {
+autonomy: manual }`, from the moment they upgraded. For most classes a manual
+default is an operator saying "ask me". For this one what is being asked about
+is a whole second agent whose own actions this gate never sees, and Muse is the
+sharp end of it: the model may come from that harness's own settings, where no
+command line shows it and no prompt could display it. A capability that arrives
+by upgrade rather than by decision is not a capability anybody chose.
+
+A version or help probe is outside the family (`read.shell`), so none of this
+touches reading a harness version.
 
 ## Before you paste
 
@@ -156,8 +176,10 @@ with `app-server` bound, and `approval policy check harness.launch.codex` prints
 prints `read.shell`, which stays autonomous.
 
 Before the paste, the two `policy check` commands print `manual` from
-`defaults.autonomy` with no matched rule, which is the difference this page
-exists to close.
+`defaults.autonomy` with **no matched rule**, and that "no matched rule" is what
+the hook refuses on: `approval hook classify` still prints the class, and an
+actual launch is denied `hook-harness-launch-unruled`. That is the difference
+this page exists to close.
 
 Not changed by this paste, and worth saying so: `approval codex start` keeps
 `gate.self`. It is the confined Codex entry point (APRV-325.3), the spelling

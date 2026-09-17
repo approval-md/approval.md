@@ -465,6 +465,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 |---|---|
 | `hook-unclassified` | no rule covers some segment of the command |
 | `hook-class-human-only` | some class of the command resolves to `human-only`: the policy reserves it to human hands, so the command is denied outright and no gate lifecycle is opened. Nothing is registered, requested or appended, and a person runs the command instead. The gate's own code for the same fact is `class-human-only`, which the detail names |
+| `hook-harness-launch-unruled` | some class of the command is in the `harness.launch.*` family and this policy names no rule for it (APRV-354). The family resolves only under an explicit rule and never under `defaults.autonomy`, so a launch is refused until an operator opts in. Nothing is registered, requested or appended, and the repair is a line in `APPROVAL.md`. The gate's own code, for a class a caller declares rather than one classified from a command line, is `harness-launch-unruled` |
 | `hook-opaque` | a construct whose effect cannot be read from the text |
 | `hook-unparseable` | the command line could not be tokenized |
 | `hook-rejected` | a human said no |
