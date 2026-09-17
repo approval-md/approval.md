@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-signoff'
 created_date: '2026-09-14 22:25'
-updated_date: '2026-09-17 00:57'
+updated_date: '2026-09-17 01:16'
 labels:
   - design
   - guard
@@ -176,6 +176,37 @@ inside the worktree it hashed.
 That fix is a second commit rather than an amend: the harness hook denied
 `git commit --amend` with `hook-class-human-only` (`vcs.history.rewrite` is
 human-only), which is the policy working as written.
+
+## CI state at hand-off (PR #407)
+
+Run 35169334378, commit 78155e5:
+
+- `classify tier`: pass
+- `full gate (node 22, shard 1/3)`: pass
+- `full gate (node 22, shard 2/3)`: pass
+- `full gate (node 22, shard 3/3)`: pass
+- `protected paths (grant cross-check)`: **fail**, on SPEC.md, expected
+- `ci` (aggregate): fail, because of the line above
+- `docs guard`, `node 20 floor`, `records guards`: skipping
+
+Auto-merge is armed (`MERGE`); `mergeStateStatus` is BLOCKED by the cross-check.
+
+The first CI round also failed `full gate shard 1/3` on
+tests/conformance-regen.test.ts: the four new event fixtures are conformance
+INPUTS, so the frozen `schema-validation` vectors had fallen behind them.
+Regenerated through scripts/regen-conformance-vectors.mjs (which computes every
+expectation by running this repository's own harness) and bumped
+`schema-validation` 2.2.0 -> 2.3.0, a minor, the same shape 2.1.0 was for
+`gate.organ.attested`. conformance/README.md's rule is that a version is claimed
+at MERGE rather than at branch, so if another lane in this push also bumps that
+suite the two resolve to one minor above the higher of them.
+
+Local `node scripts/run-tests.mjs` (whole suite, Node 26): 4187 tests, 4159
+pass, 27 fail, exit 1. All 27 are one environment family — Node 26 refuses
+`options.servername` set to an IP address, so every test that speaks TLS to
+127.0.0.1 fails (adapter-email 14, smtp-probe 4, package-adapters 4, cli-setup
+4, codex-package 1). None of them touches anything in this change, and CI's
+Node 22 shards pass all three.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
