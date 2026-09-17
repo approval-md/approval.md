@@ -331,9 +331,11 @@ the next attestation, with no code change and no log repair; the recorded
 `payload.sender` fields on old records stay valid and readable. That property
 is why the mapping lives in policy rather than in a separate store.
 
-**A deployment that never adds `senders`** is in mode 1 forever, and its
-behaviour is byte-identical to today's. That is the compatibility promise, and
-§7's test 1 is what keeps it true.
+**A deployment that never adds `senders`** is in mode 1 forever: the same
+actor, the same decision, and neither of §4's payload keys on the record. That
+is the compatibility promise, and §7's test 1 is what keeps it true. The one
+field a record gains either way is `channel` (§4 item 1), which is additive and
+which §7's test 18 requires of every decision.
 
 ---
 
@@ -350,8 +352,14 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 
 **Compatibility (the one that must pass first)**
 
-1. A policy with no `senders` produces a log byte-identical to today's for a
-   full request-decide-execute cycle, on all three channels.
+1. A policy with no `senders` decides exactly as today for a full
+   request-decide-execute cycle, on all three channels: the same actor, the
+   same payload keys, and neither `payload.sender` nor `payload.sender_source`
+   present. *(Corrected during implementation: this item first said
+   "byte-identical", which contradicts item 18 and §4 item 1 — both of which
+   require the record to carry `channel`. The one additive difference from a
+   pre-APRV-324 log is that field, and the test asserts it explicitly rather
+   than leaving the contradiction for a reader to resolve.)*
 
 **Two distinct senders (AC2)**
 
@@ -393,9 +401,15 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 
 12. A sender mapped to an approver the class does not name: case 4 above, and
     additionally that nothing is appended to the log beyond the refusal record.
-13. Under a human-only class: refused `class-human-only` before any sender
-    resolution, with no refusal record naming a sender, because human-only
-    classes are inert to this path entirely.
+13. Under a human-only class: refused `class-human-only`, and no record the
+    runtime writes about it carries a sender or a resolution. *(Corrected
+    during implementation: this item first said "before any sender
+    resolution", which is not what the code does. The channel boundary owns
+    the resolution and the gate owns the class check, and ordering them the
+    other way would mean duplicating the gate's read of the log. What is true,
+    and what the test pins, is that a human-only refusal records no sender and
+    no resolution, so no authority and no attribution flows from the
+    computation — which is the property §11.1 invariant 9 is about.)*
 
 **Concurrent decisions (AC2)**
 
@@ -442,6 +456,18 @@ The signature's `payload` is deliberately NOT given a `sender` field: it is a
 signed structure, and an unsigned field beside a signature invites a reader to
 treat it as covered by one. What the mapping changes here is the ACTOR, which
 is what the signature is over.
+
+**Both of these resolve only against an ATTESTED policy.** A decision is
+protected twice — the mapping chooses the actor, and then `decide` refuses
+`policy-not-attested` or `policy-drift` if the bytes on disk are not the bytes
+in force — while signing and reviewing read the policy, act, and append with no
+such check behind them. Without one, an edited `APPROVAL.md` that dropped or
+repointed the `senders` block would change who may sign a checkpoint or file a
+review from a phone *before any human had attested it*, which is exactly the
+property §3.1 claims the mapping has. So a gesture carrying a sender is refused
+`policy-not-attested` — the gate's own code, from `core/attest.ts`'s own check —
+whenever the file on disk is not the file in force, and records nothing. A
+terminal authenticates no sender, is unaffected, and is the repair.
 
 **Retrospective reviews** (`audit.reviewed`), including the note-reply path. A
 review confers no authority, and `approval feedback` hands it to agents as

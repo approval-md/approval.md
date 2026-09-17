@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-lane-identity'
 created_date: '2026-09-08 22:53'
-updated_date: '2026-09-17 08:46'
+updated_date: '2026-09-17 08:55'
 labels: []
 dependencies:
   - APRV-249
@@ -102,4 +102,16 @@ One instruction not followed literally, with the reason. The review asked that a
 Invariants: unchanged from the first commit and extended to the three families. Self-reported fields never reduce scrutiny is the whole argument of the attestation rule, in its strongest form yet: the file under review may not be the oracle for who may approve it. Human-only classes stay inert. Validate at the write boundary: policy.updated, policy.declined and audit.reviewed gain the same additive, schema-constrained pair the decision events carry. Refusals machine-readable and distinct: attest-requires-terminal joins the surface union, distinct from sender-unmapped, which says the policy answered and did not name this account; conformance vectors are 11.0.0.
 
 Verification for this commit: build, typecheck and lint clean; node conformance/run.mjs exits 0; sender-identity 29 tests 29 pass, checkpoint-tap 35 tests 35 pass, channels-telegram 144 tests 144 pass; the whole suite 4402 tests with the same 27 known local email, TLS and packed-install failures as before.
+
+Second follow-up, 2026-09-17, after the orchestrator's re-review and an independent verification pass.
+
+The fix that was asked for. Checkpoint and review taps resolved through the policy file ON DISK whether or not it was attested. A decision is protected afterwards because decide refuses policy-not-attested or policy-drift, but signing and reviewing read the policy, act and append with nothing behind them, so an edited APPROVAL.md that dropped or repointed the senders block would have changed who may sign a checkpoint or file a review from a phone before any human attested it. That is exactly the property the module header and SPEC 5.2 claim the mapping does not have. Now: when a gesture carries a sender, the on-disk policy is checked with core/attest.ts's own checkAttestation and its own attestationRefusal wording, not a second comparison, and anything but attested refuses with the gate's existing policy-not-attested code, records nothing, and says in the terminal line and the chat line that a terminal can still do it. With no sender the behaviour is unchanged.
+
+Worth knowing, because it is broader than it sounds: the Bot API always sends a from object, so on Telegram a sender is effectively always present and this check therefore applies to every phone signature and review, mapped or not. That is the stricter reading and I kept it. It costs an operator whose policy is unattested the ability to sign or review from the phone, which is a state in which nothing could be approved either, and the terminal is unaffected.
+
+A fixture correction fell out of it. tests/checkpoint-tap.test.ts grew its log by attesting a throwaway marker file, which left APPROVAL.md permanently unattested, a shape no deployment has. It now attests its own policy, so the fixture exercises the real path.
+
+Three wording and coverage items from the verification pass, folded in. Design section 7 item 1 said a policy with no senders produces a log byte-identical to today's, which contradicts item 18 and section 4 item 1, both of which require the record to carry channel; it now says what the test pins, same actor, same payload keys, neither new key, with channel as the one additive field, and the correction is marked as made during implementation. Design section 7 item 13 said a human-only class is refused before any sender resolution, which is not what the code does: the channel boundary owns the resolution and the gate owns the class check, and ordering them the other way would duplicate the gate's read. It now says what is true and what the test pins, that no record the runtime writes about a human-only class carries a sender or a resolution, so no authority and no attribution flows from the computation. And a thirtieth test covers an ordinary policy load failure, the kind a typo produces rather than the ambiguous mapping this feature authors: a sender-bearing tap through the Telegram channel refuses sender-unmapped and writes no decision, while the terminal path still decides.
+
+Possible follow-up, left undone deliberately and recorded here on the orchestrator's instruction: a gesture-refused audit event. An unmapped checkpoint tap records nothing, because audit.decision_refused requires an action_key and a payload.decision of grant, reject or revoke and a signature has neither. An event type for a refused gesture that is not a decision would let the log account for that spent attention; it is a schema change and therefore its own task.
 <!-- SECTION:NOTES:END -->

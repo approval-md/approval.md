@@ -1113,6 +1113,48 @@ test("27. unrecoverable in-force bytes and no mapping in the amendment is today'
   assertClean(w.unit);
 });
 
+test("29. a policy that does not load refuses a sender-bearing tap, and the terminal still decides", async () => {
+  // Not the ambiguous-mapping case, which is a load failure this feature
+  // authors: an ordinary broken policy, the kind a typo produces. A failed load
+  // is not "a policy with no mapping" — it is a policy the runtime could not
+  // read — so a sender it cannot resolve is refused rather than attributed to
+  // whoever the listener happens to be running as.
+  const w = world(2);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(w.unit));
+  await deliver(w, 0, channel);
+
+  writePolicy(w.unit, POLICY_MAPPED.replace("classes:", "classes:\n  nope: [this is not a rule]"));
+  const broken = loadPolicyText(w.unit.policyPath, readPolicy(w.unit));
+  assert.equal(broken.ok, false, "the fixture policy still loads");
+  assert.notEqual(broken.ok === false ? broken.code : "", "sender-ambiguous");
+
+  const outcome = await press(channel, w.keys[0] as string, "grant", { fromId: CARTER_ID });
+  assert.ok(outcome !== undefined && outcome.ok === false, JSON.stringify(outcome));
+  assert.equal(outcome.code, "sender-unmapped");
+  assert.match(outcome.message, /could not be loaded/u);
+  assert.equal(decisionRecords(w.unit).length, 0);
+  assert.deepEqual(payloadOf(refusals(w.unit)[0] as EventRecord)["sender"], {
+    channel: "telegram",
+    id: CARTER_ID,
+  });
+
+  // And the repair path is open: a terminal supplies no sender, so it is never
+  // subject to a mapping the runtime cannot read. It is refused for the reason
+  // a broken policy refuses everything — `policy-not-attested`, because the
+  // edit is unattested — and NOT for the identity, which is the distinction
+  // that keeps a repository fixable through its own gate.
+  const terminal = recordChannelDecision(
+    w.unit.logPath,
+    { action_key: w.keys[1] as string, decision: "reject", deliveryId: "cli-1", note: "no" },
+    { actor: LISTENER, channel: "cli" },
+    { ...w.unit.options, clock: fixedClock(at(2)) },
+  ).outcome;
+  assert.ok(terminal.ok, JSON.stringify(terminal));
+  assert.equal(terminal.record.actor, LISTENER);
+  assertClean(w.unit);
+});
+
 test("28. the in-force bytes are recovered only when they hash to the attestation", () => {
   const w = attested(POLICY_MAPPED, policyText({ senders: MAPPED, ttl: "48h" }));
   const store = payloadStoreDirFor(w.unit.logPath);

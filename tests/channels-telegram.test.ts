@@ -6221,6 +6221,46 @@ test("APRV-324: with no mapping, a review is attributed exactly as it was before
   assertClean(world.unit);
 });
 
+test("APRV-324: a mapping edited and not attested records no review", async () => {
+  const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
+  const { channel, err } = reviewChannelFor(world);
+  const cards = cardsFor(world);
+  await channel.offerReview(cards[0] as ReviewCard);
+
+  // The attack: repoint the mapping at another account and file a review from
+  // it before any human has attested the edit. A decision is protected here by
+  // `decide`'s own attestation refusal; a review had no such backstop.
+  const attested = readFileSync(world.unit.policyPath, "utf8");
+  writeFileSync(
+    world.unit.policyPath,
+    attested.replace(`telegram: "${DANA_TG}"`, `telegram: "${STRANGER_TG}"`),
+    "utf8",
+  );
+
+  await tapReview(channel, "ok", CHAT, STRANGER_TG);
+  assert.equal(reviewsIn(world).length, 0, "an unattested mapping recorded a review");
+  // And the account the ATTESTED policy names is refused too: the file on disk
+  // is not the file in force, whoever is tapping.
+  await tapReview(channel, "ok", CHAT, DANA_TG);
+  assert.equal(reviewsIn(world).length, 0);
+  assert.ok(
+    err.some((line) => line.includes("policy-not-attested")),
+    `the operator was not told: ${err.join(" | ")}`,
+  );
+  assert.match(
+    mock.edits().map((edit) => edit.text).join("\n"),
+    /nobody has attested it yet/u,
+  );
+
+  // Put the attested bytes back and the same tap records.
+  writeFileSync(world.unit.policyPath, attested, "utf8");
+  await tapReview(channel, "ok", CHAT, DANA_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:dana");
+  assertClean(world.unit);
+});
+
 test("APRV-324: a note prompt answers only to the account that armed it", async () => {
   const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
   const { channel } = reviewChannelFor(world);

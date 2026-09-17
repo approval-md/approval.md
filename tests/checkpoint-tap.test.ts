@@ -209,18 +209,21 @@ function newHome(
   return home;
 }
 
-/** One record through the real append path. */
+/**
+ * One record through the real append path.
+ *
+ * It attests THIS HOME'S POLICY rather than a marker file (APRV-324). The
+ * marker grew the log and left `APPROVAL.md` permanently unattested, which no
+ * deployment looks like and which the sender rule now notices: a phone gesture
+ * carrying an account resolves only against an attested policy, so a fixture
+ * whose policy is in force is the one that exercises the real path. Every
+ * attestation here names the same bytes, so the log grows and the policy stays
+ * in force until a test edits the file — which is exactly what the
+ * unattested-mapping case does on purpose.
+ */
 function appendRecord(home: Home, marker: string): EventRecord {
-  const path = join(home.dir, ".approval", "attest-marker.md");
-  const before = (() => {
-    try {
-      return readFileSync(path, "utf8");
-    } catch {
-      return "# attested fixture\n";
-    }
-  })();
-  writeFileSync(path, `${before}\n<!-- ${marker} -->\n`, "utf8");
-  const appended = appendAttestation(home.logPath, path, HUMAN);
+  assert.ok(marker.length > 0);
+  const appended = appendAttestation(home.logPath, home.policyPath, HUMAN);
   assert.equal(appended.ok, true, appended.ok ? "" : appended.error.message);
   if (!appended.ok) throw new Error("unreachable");
   return appended.record;
@@ -1034,6 +1037,57 @@ test("an unmapped sender signs nothing, and the message says why", async (t) => 
   const edits = world.mock.edits();
   const last = edits[edits.length - 1];
   assert.match(String(last?.text ?? ""), /not one the attested policy names as an approver/u);
+});
+
+test("a mapping edited and not attested signs nothing: an edited policy is inoperative", async (t) => {
+  const world = await tapWorld({ every: "1ms", senders: { tester: SIGNER_ID } });
+  t.after(world.close);
+
+  const state = newDispatchState();
+  const offered = await cycle(world.setup, state);
+  assert.ok(offered.checkpoint !== undefined);
+
+  // The attack this closes: edit the file so somebody else's account is the
+  // signer, and tap before any human has attested the edit. A decision is
+  // protected here by `decide`'s own attestation refusal; a signature had no
+  // such backstop until this check.
+  const attested = readFileSync(world.home.policyPath, "utf8");
+  writeFileSync(
+    world.home.policyPath,
+    attested.replace(`telegram: "${SIGNER_ID}"`, `telegram: "${STRANGER_ID}"`),
+    "utf8",
+  );
+  const before = records(world.home.logPath).length;
+
+  // A nonce is spent by the tap that uses it, so each attempt below gets its
+  // own prompt from its own dispatch state — the same thing a restarted
+  // listener's re-offer does.
+  const tap = async (fromId: string): Promise<void> => {
+    await cycle(world.setup, newDispatchState());
+    const buttons = checkpointButtons(world.mock.requests);
+    world.mock.queueUpdate(callbackUpdate({ data: buttons.sign, chatId: CHAT, fromId }));
+    await world.setup.channel.pollOnce();
+  };
+
+  await tap(STRANGER_ID);
+  assert.equal(records(world.home.logPath).length, before, "an unattested mapping signed");
+  const edits = world.mock.edits();
+  assert.match(String(edits[edits.length - 1]?.text ?? ""), /nobody has attested it yet/u);
+
+  // The account the ATTESTED policy names is refused too, for the same reason:
+  // the file on disk is not the file in force, whoever is tapping.
+  await tap(SIGNER_ID);
+  assert.equal(records(world.home.logPath).length, before);
+
+  // Put the attested bytes back and the same tap signs.
+  writeFileSync(world.home.policyPath, attested, "utf8");
+  await tap(SIGNER_ID);
+  const checkpoints = records(world.home.logPath).filter(
+    (record) => record.event === "log.checkpoint",
+  );
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0]?.actor, HUMAN);
+  assert.equal(check(world.home).status, "pass");
 });
 
 test("with no mapping, a checkpoint tap is attributed exactly as it was before", async (t) => {

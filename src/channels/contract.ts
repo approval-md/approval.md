@@ -198,6 +198,14 @@ export function refusedDecisionLine(code: string): string {
     return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
   }
   if (code === "expired") return "Expired — the approval window has closed.";
+  // APRV-324 follow-up. The gate has always been able to return this; what
+  // changed is that a checkpoint signature and a review can too, because the
+  // sender mapping they resolve against is only in force once a human has
+  // attested the file it is written in. One sentence, every surface, and it
+  // names the repair rather than the check.
+  if (code === "policy-not-attested") {
+    return "Not recorded — APPROVAL.md has changed and nobody has attested it yet, so its rules are not in force. Re-attest it, or do this from a terminal.";
+  }
   // APRV-235, and the reason this helper exists. The distinction the line has to
   // carry is that nothing is wrong with the ACTION: the policy was re-attested
   // after the question was asked, so the rules on the approver's screen are not
