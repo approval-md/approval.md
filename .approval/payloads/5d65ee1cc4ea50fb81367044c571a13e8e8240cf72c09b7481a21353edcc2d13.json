@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"feat: confine Codex shell work to a disposable workspace (APRV-325.3)\" --body-file /tmp/lane4a-pr2.md --base main --head lane/codex-confine-325-3 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

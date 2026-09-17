@@ -1,0 +1,1 @@
+{"command":"gh pr merge 406 --auto 2>&1; gh pr view 406 --json mergeStateStatus,autoMergeRequest,headRefOid --jq '{state:.mergeStateStatus,armed:(.autoMergeRequest!=null),head:.headRefOid}'; gh pr checks 406 2>&1 | grep -E 'protected|^ci' ","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

@@ -1,0 +1,1 @@
+{"command":"git push 2>&1 | tail -3 && gh pr view 411 --json mergeable,mergeStateStatus,autoMergeRequest 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac08008ff153ca007"}

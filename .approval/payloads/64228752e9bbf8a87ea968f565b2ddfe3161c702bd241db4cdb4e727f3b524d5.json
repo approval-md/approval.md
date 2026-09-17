@@ -1,0 +1,1 @@
+{"command":"gh pr edit 412 --body-file /tmp/lane1-pr.md 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40e78016667c572b"}

@@ -1,0 +1,1 @@
+{"command":"backlog task edit APRV-325 --append-notes \"Limits of the desktop session. A Codex desktop application a person starts outside the confined room is not in it, and nothing here constrains its native write, patch, browser or plugin surfaces.\" 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}
