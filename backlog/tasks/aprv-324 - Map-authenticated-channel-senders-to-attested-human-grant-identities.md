@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-08 22:53'
-updated_date: '2026-09-17 01:58'
+updated_date: '2026-09-17 04:53'
 labels: []
 dependencies:
   - APRV-249
@@ -27,6 +27,7 @@ GitHub issue #137 requests grant attribution to the actual Telegram callback sen
 - [x] #1 A reviewed design defines sender mapping, unknown-sender refusal, per-class approvers, audit fields and safe migration from listener identity.
 - [ ] #2 Implementation tests cover two distinct senders, missing or stale mapping, spoofed request fields, unauthorized sender and concurrent decisions before changing production attribution.
 - [x] #3 Issue #137 remains open until implemented and verified; documentation states exactly what the channel can authenticate.
+- [ ] #4 SPEC 10.3 is corrected as part of this implementation: it says the Telegram callback is verified against approver identity, while src/channels/telegram.ts verifies only the configured chat id and never reads the sender (SPEC 5.2 and 11 are already accurate); the sentence states exactly what the channel authenticates before this task and after it, and the amendment is called out to the human
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -59,4 +60,6 @@ AC2 closes when the implementation task runs them green. AC3 checked: the task r
 Task stays In Progress on AC2.
 
 Delivered in pull request #414 (lane/closeouts).
+
+Folded in 2026-09-17 on Carter's word: Lane 5 found that SPEC 10.3 overclaims (callback verified against approver identity; the code checks the chat id only, src/channels/telegram.ts around 3327). The correction rides this task's implementation rather than a separate edit, because this task is what makes the sentence true.
 <!-- SECTION:NOTES:END -->
