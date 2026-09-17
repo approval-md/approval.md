@@ -2743,9 +2743,61 @@ const VERBS: VerbSpec[] = [
   },
   {
     name: "codex",
+    subcommand: "apply",
+    purpose:
+      "Apply one bounded typed workspace proposal through the gate (APRV-325.2). The manifest supplies the actor, workspace root, policy and log, and the proposal file supplies only operations and the policy digest it was built against; an unknown key is refused rather than ignored. One action is registered per distinct path class and never collapsed, every leg is authorized and started before any byte moves, and the change is staged, journaled and applied under a workspace lock. The outcome reported is what reading the workspace back proved: applied, not applied, or honestly unknown.",
+    human_only: true,
+    human_only_note:
+      "The broker is reached by a constrained Codex session through `codex serve`, which publishes exactly one tool. Publishing this verb on the broad agent MCP catalog would put a second door beside that one, and the whole point of the strict server is that there is only the one.",
+    input: input({
+      flags: {
+        "--manifest": "string",
+        "--proposal": "string",
+        "--token": "string",
+        "--require-exclusive-custody": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        version: { const: "approval.codex.broker.v1" },
+        task: STRING,
+        payload_hash: SHA256,
+        policy_sha256: SHA256,
+        legs: arrayOf(object(
+          { class: STRING, actionKey: STRING, mode: { enum: ["policy", "token"] } },
+          ["class", "actionKey", "mode"],
+        )),
+        custody: object(
+          { kind: { enum: ["os-exclusive", "advisory"] }, findings: arrayOf(STRING) },
+          ["kind", "findings"],
+        ),
+        state: { const: "after" },
+      },
+      ["ok", "version", "task", "payload_hash", "policy_sha256", "legs", "custody", "state"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
+    subcommand: "recover",
+    purpose:
+      "Read a workspace's retained transaction journal and report whether the workspace is in the approved before-state, the approved after-state, or neither. It changes nothing: a mixed workspace is a person's to reconcile, and a recovery that rolled one either way would be guessing which half was approved. Exits 1 on mixed.",
+    human_only: true,
+    human_only_note: "Reading a half-applied workspace is an operator's diagnosis and belongs beside the reconcile verb, which is human-only for the same reason.",
+    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
     subcommand: "start",
     purpose:
-      "Reserved constrained-session launcher. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Reserved constrained-session launcher. It refuses codex-not-ready until the confined runner of APRV-325.3 ships; the broker alone confines no shell.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
     input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
@@ -2757,13 +2809,13 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "serve",
     purpose:
-      "Reserved strict MCP shim. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Serve the workspace broker over stdio as EXACTLY ONE MCP tool, `codex_workspace_apply`, with a positive server-side allowlist checked at call time as well as at list time. Distinct from `mcp serve`, whose catalog is this whole registry: a constrained session must reach one door and the same door next month. The published input schema carries no identity, path, class, token or sandbox argument, because none exists to remove.",
     human_only: true,
-    human_only_note: "The strict server is separate from and never published by the broad MCP server.",
-    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    human_only_note: "The strict server is separate from and never published by the broad MCP server; starting one is an operator's act, as `mcp serve` is.",
+    input: input({ flags: { "--manifest": "string", "--require-exclusive-custody": "boolean", ...JSON_FLAG, ...HELP_FLAGS } }),
     output: null,
     error: ERROR_SCHEMA,
-    exit_codes: [OK, INTEGRITY, USAGE],
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
   },
 
   {

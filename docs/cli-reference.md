@@ -5744,7 +5744,68 @@ the broker and runner present? POSIX ownership does not establish ACL custody,
 so this slice executes no manifest-selected binary and reports runtime versions
 unchecked. Unknown evidence is a refusal.
 
-The first slice deliberately makes start and serve return codex-not-ready. An
+The first slice deliberately made start and serve return codex-not-ready. An
 npm install, generated config, or passing bundle check does not create a
 mandatory boundary. The whole approval codex family is operator-only and absent
 from the ordinary broad MCP catalog.
+
+### The workspace broker (APRV-325.2)
+
+approval codex apply is the executable half. It takes an instance manifest and a
+proposal file, and the split between them is the design: the manifest supplies
+the acting identity (agent:codex-<instance_id>), the workspace root, the policy
+file and the log, and the proposal supplies operations and the SHA-256 of the
+policy it was built against. A proposal naming anything else, an actor, a root,
+a class, a token, a sandbox posture, is refused input-invalid rather than having
+the extra key ignored, because a caller that wrote one meant something by it.
+
+The order of one apply, and why each step is where it is:
+
+1. Read the log under chain verification, read the policy once, hash those exact
+   bytes, and check them against the latest attestation. An unattested or
+   drifted policy refuses here, before a plan exists.
+2. Compare the caller's expected digest. A mismatch is attestation-drift: the
+   proposal was built against a policy nobody is enforcing.
+3. Plan through src/codex/workspace-plan.ts, which does the path work: traversal,
+   symlinks, hardlinks, case aliases, missing sources, existing destinations,
+   preimage digests, and human-only classes refused before any preimage is read.
+4. Register one action per distinct path class under a task id derived from the
+   payload hash. Classes are never collapsed: the class is what the operator's
+   roster, budget and autonomy are keyed to.
+5. Authorize every leg. A leg the policy sends to a human refuses
+   approval-required and names the action keys to grant; nothing is written, and
+   the same proposal applies once a person has decided.
+6. Start every leg before any byte moves. A later leg refusing to start closes
+   the earlier ones execution.failed and leaves the workspace untouched by
+   construction rather than by cleanup.
+7. Take the workspace lock, then revalidate the plan under it. A revalidation
+   that precedes the lock proves only what was true before another writer could
+   act.
+8. Stage the new bytes and the preimages on the same filesystem, fsync them,
+   write a journal naming the before-state and the after-state, fsync that, and
+   only then apply.
+9. Read the workspace back. All-after completes every leg, all-before fails every
+   leg, and anything else, a partial apply, a failed rollback, an endpoint that
+   cannot be read, records execution.indeterminate with the reason
+   workspace-commit-unknown on every leg and retains the journal and the lock.
+
+approval codex recover reads that retained journal and reports before, after or
+mixed. It repairs nothing, and the restraint is the point: rolling a mixed
+workspace forward would guess which half the human approved, and rolling it back
+would delete the half that committed. Exit 1 means mixed. The resolution is a
+person's, through approval execution reconcile.
+
+Custody is claimed only as far as the platform proves it. The broker takes an
+O_CREAT|O_EXCL lock, which excludes other cooperating brokers and nothing else,
+and then asks POSIX ownership and mode whether any other principal can write the
+directories it is about to touch. It reports os-exclusive only when both hold and
+advisory otherwise, and it always reports acl-unproven, because ownership and
+mode say nothing about ACLs. --require-exclusive-custody turns the weak answer
+into a refusal rather than a footnote.
+
+approval codex serve publishes that broker over stdio as exactly one MCP tool,
+codex_workspace_apply, checked at call time as well as at list time. It is a
+different server from approval mcp serve, whose catalog is the whole verb
+registry and therefore grows: a constrained session has to reach one door, and
+the same door next month. approval codex start still refuses codex-not-ready.
+The broker governs workspace writes and confines no shell; that is APRV-325.3.

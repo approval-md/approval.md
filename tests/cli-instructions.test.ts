@@ -427,13 +427,19 @@ const HUMAN_ONLY: readonly string[] = [
   "gate open",
   "gate close",
   // APRV-325.1. These prepare or inspect operator-owned host configuration.
-  // start and serve are reserved for the later strict broker and runner and
-  // currently refuse, but must never enter the broad agent MCP catalogue.
+  // `start` is reserved for the later confined runner and currently refuses.
   "codex prepare",
   "codex setup",
   "codex doctor",
   "codex start",
+  // APRV-325.2. The broker and its strict server. A constrained session reaches
+  // the broker through `codex serve`, which publishes exactly one tool; putting
+  // either of these on the broad agent catalogue would be a second door beside
+  // the one door the strict server exists to be. `recover` reads a half-applied
+  // workspace, which is an operator's diagnosis beside `execution reconcile`.
   "codex serve",
+  "codex apply",
+  "codex recover",
 ];
 
 const AGENT_FACING: readonly string[] = [

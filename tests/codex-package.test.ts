@@ -112,11 +112,24 @@ test("generated launcher shell-quotes hostile pinned paths and forwards argument
 });
 
 test("Codex family is omitted from broad MCP and unfinished entry points refuse", () => {
+  // The WHOLE family, including APRV-325.2's `apply`, `recover` and `serve`.
+  // The broker is reached through the strict server, which publishes exactly
+  // one tool; a second door on the broad catalogue would defeat the first.
   assert.equal(publishedVerbs().some((verb) => verb.name === "codex"), false);
-  for (const subcommand of ["start", "serve"]) {
-    const result = spawnSync(process.execPath, [CLI, "codex", subcommand, "--manifest", "/tmp/example.json", "--json"], { encoding: "utf8" });
-    assert.equal(result.status, 1);
-    assert.equal(JSON.parse(result.stderr).error.code, "codex-not-ready");
+  // `start` still refuses codex-not-ready: the confined runner is APRV-325.3.
+  const start = spawnSync(process.execPath, [CLI, "codex", "start", "--manifest", "/tmp/example.json", "--json"], { encoding: "utf8" });
+  assert.equal(start.status, 1);
+  assert.equal(JSON.parse(start.stderr).error.code, "codex-not-ready");
+  // `serve`, `apply` and `recover` are implemented, and each still refuses a
+  // manifest it cannot validate rather than inventing an installation.
+  for (const argv of [
+    ["serve", "--manifest", "/tmp/example.json", "--json"],
+    ["recover", "--manifest", "/tmp/example.json", "--json"],
+    ["apply", "--manifest", "/tmp/example.json", "--proposal", "/tmp/example-proposal.json", "--json"],
+  ]) {
+    const result = spawnSync(process.execPath, [CLI, "codex", ...argv], { encoding: "utf8" });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(JSON.parse(result.stderr).error.code, "manifest-invalid");
   }
 });
 
