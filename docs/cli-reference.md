@@ -824,6 +824,29 @@ does cover still passes on the grant and still names it. Signing off is for the
 case the pending-sign-off suffix was invented for: text a human has read at that
 commit and agrees with, for which no grant was ever taken.
 
+**Signing off bytes that are on a branch.** The digest the guard checks is the
+file's blob at the commit under review, and that is usually a pull request's
+head rather than anything on disk in the primary checkout. `--dir` and `--log`
+are separate flags for exactly this: `--dir` is the checkout whose bytes are
+hashed and which the recorded path is relative to, `--log` is the log the record
+is appended to. So a human ratifying an open pull request reads the change,
+puts a checkout at that commit somewhere (a `git worktree`, or the branch
+checked out in a scratch clone), and runs:
+
+```
+approval policy attest --path SPEC.md \
+  --dir /path/to/checkout-at-that-commit \
+  --log /path/to/primary/.approval/log/events.jsonl \
+  --as human:<id>
+```
+
+The record lands in the primary checkout's log, where a log advance carries it
+to a records branch, and the guard then finds it for that path at that digest.
+The verb never writes a log inside the worktree it hashed. If the digest it
+prints is not the one the guard's failure named, the checkout is at the wrong
+commit or the file has been edited since: the two must agree exactly, and a
+mismatch is a sign-off on bytes nobody reviewed.
+
 The verb classifies `policy.core` when `--path` is present (without it the verb
 attests the gate's own configuration and stays pass-through), so under this
 repository's policy the harness hook denies it to an agent with

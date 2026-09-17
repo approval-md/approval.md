@@ -1875,7 +1875,12 @@ test("an unevidenced protected path names the sign-off route, last and hedged", 
     assert.equal(report.ok, false);
     assert.equal(report.findings[0]?.code, "no-evidence");
     const detail = report.findings[0]?.detail ?? "";
-    assert.match(detail, /approval policy attest --path SPEC\.md --as human:<id>/u);
+    assert.match(detail, /approval policy attest --path SPEC\.md --dir /u);
+    // Both flags, because the bytes under review are on the branch and the log
+    // is the primary checkout's: a repair naming only one of them is a repair
+    // that hashes the wrong file.
+    assert.match(detail, /--log <the primary checkout's log>/u);
+    assert.match(detail, /must hash to [a-f0-9]{64}/u);
     // And it says plainly that the gate is the better route, so the sentence
     // cannot be read as an invitation to route around it.
     assert.match(detail, /prefer the gate/u);
@@ -1960,7 +1965,7 @@ test("an uncovered change with no sign-off names the route in its failure too", 
     assert.equal(report.findings[0]?.code, "uncovered-hunk");
     assert.match(
       report.findings[0]?.detail ?? "",
-      /approval policy attest --path SPEC\.md --as human:<id>/u,
+      /approval policy attest --path SPEC\.md --dir /u,
     );
   } finally {
     cleanup();

@@ -1637,7 +1637,12 @@ function signOffEligible(path: string, extra: readonly ProtectedPathEntry[]): bo
  */
 function signOffRepair(path: string, digest: string | null): string {
   if (digest === null) return "";
-  return ` If a human has READ this change at this commit and stands behind the file as it now is, they may ratify it in the PRIMARY checkout with \`approval policy attest --path ${path} --as human:<id>\` (digest ${digest}), then a log advance carrying that record; that is whole-file evidence and weaker than a grant, so prefer the gate wherever the edit can still go through it.`;
+  // The two flags are named because the digest is the thing that has to match,
+  // and the bytes under review are on the BRANCH while the log lives in the
+  // primary checkout. `--dir` says which bytes to hash and `--log` says where
+  // the record goes, so one command can span both without the log ever being
+  // written from a worktree.
+  return ` If a human has READ this change at this commit and stands behind the file as it now is, they may ratify it with \`approval policy attest --path ${path} --dir <a checkout at this commit> --log <the primary checkout's log> --as human:<id>\`, which must hash to ${digest}, followed by a log advance carrying that record; that is whole-file evidence and weaker than a grant, so prefer the gate wherever the edit can still go through it.`;
 }
 
 /** The ordering rule, stated identically on every failure that could be lag. */
