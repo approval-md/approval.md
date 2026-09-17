@@ -1,0 +1,1 @@
+{"command":"git status --short | head -5; git push 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

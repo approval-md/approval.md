@@ -1,0 +1,1 @@
+{"command":"gh pr merge 414 --auto 2>&1; gh api graphql -f query='{ repository(owner:\"approval-md\",name:\"approval.md\"){ pullRequest(number:414){ isInMergeQueue autoMergeRequest{enabledAt} mergeQueueEntry{ state position estimatedTimeToMerge } } } }' --jq '.data.repository.pullRequest'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}
