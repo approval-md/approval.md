@@ -116,15 +116,14 @@ test("Codex family is omitted from broad MCP and unfinished entry points refuse"
   // The broker is reached through the strict server, which publishes exactly
   // one tool; a second door on the broad catalogue would defeat the first.
   assert.equal(publishedVerbs().some((verb) => verb.name === "codex"), false);
-  // `start` still refuses codex-not-ready: the confined runner is APRV-325.3.
-  const start = spawnSync(process.execPath, [CLI, "codex", "start", "--manifest", "/tmp/example.json", "--json"], { encoding: "utf8" });
-  assert.equal(start.status, 1);
-  assert.equal(JSON.parse(start.stderr).error.code, "codex-not-ready");
-  // `serve`, `apply` and `recover` are implemented, and each still refuses a
-  // manifest it cannot validate rather than inventing an installation.
+  // Every implemented verb of the family refuses a manifest it cannot validate
+  // rather than inventing an installation. `start` (APRV-325.3) is in the list
+  // now: it validates the manifest BEFORE it asks the host about a sandbox, so
+  // a bad manifest is a manifest error and never a confinement verdict.
   for (const argv of [
     ["serve", "--manifest", "/tmp/example.json", "--json"],
     ["recover", "--manifest", "/tmp/example.json", "--json"],
+    ["start", "--manifest", "/tmp/example.json", "--json"],
     ["apply", "--manifest", "/tmp/example.json", "--proposal", "/tmp/example-proposal.json", "--json"],
   ]) {
     const result = spawnSync(process.execPath, [CLI, "codex", ...argv], { encoding: "utf8" });

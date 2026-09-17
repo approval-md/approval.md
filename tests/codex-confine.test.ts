@@ -229,7 +229,12 @@ test("an EMPTY write allow-list is meaningful, and absent is not the same as emp
   assert.match(ordinary, /\(deny network-outbound\)/u);
 });
 
-test("a session's only writable path is its own disposable workspace", () => {
+// The three cases below read a PREPARED session rather than spawning into it,
+// so they look pure. They are not: preparing one needs a working mechanism, and
+// on a host without one `planConfinedSession` refuses by design. They stand down
+// with the rest rather than asserting against a refusal they were not written
+// for.
+test("a session's only writable path is its own disposable workspace", { skip: SKIP }, () => {
   const one = unit();
   const room = session(one);
   try {
@@ -245,7 +250,7 @@ test("a session's only writable path is its own disposable workspace", () => {
   assert.equal(existsSync(room.workspace), false, "the workspace is disposable");
 });
 
-test("the session environment is an ALLOW-list, so an unknown credential is absent", () => {
+test("the session environment is an ALLOW-list, so an unknown credential is absent", { skip: SKIP }, () => {
   const one = unit();
   const planned = planConfinedSession(one.installation, {
     scratchRoot: scratch,
@@ -290,7 +295,7 @@ test("the environment allow-list carries no credential-shaped name", () => {
   assert.equal(new Set(CONFINED_ENV_ALLOW).size, CONFINED_ENV_ALLOW.length);
 });
 
-test("a command that does not resolve is REFUSED, never spawned unwrapped", () => {
+test("a command that does not resolve is REFUSED, never spawned unwrapped", { skip: SKIP }, () => {
   const one = unit();
   const room = session(one);
   try {
