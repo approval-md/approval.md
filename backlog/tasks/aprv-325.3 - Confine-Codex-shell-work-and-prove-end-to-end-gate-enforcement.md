@@ -1,11 +1,11 @@
 ---
 id: APRV-325.3
 title: Confine Codex shell work and prove end-to-end gate enforcement
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-codex-broker'
 created_date: '2026-09-09 07:39'
-updated_date: '2026-09-17 01:28'
+updated_date: '2026-09-17 02:09'
 labels: []
 dependencies:
   - APRV-325.2
@@ -25,10 +25,10 @@ Provide practical shell and patch compatibility in the constrained Codex workflo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shell receives no canonical workspace or gate write authority, ambient credentials, external egress or mutable executor code; no opt-out or raw fallback exists.
-- [ ] #2 Native write/patch tools and all alternate mutable app/browser/MCP capabilities are demonstrably constrained; managed configuration presence alone is insufficient evidence.
-- [ ] #3 Denied or missing authority, crashes, disconnects, timeouts and replay cannot produce unauthorized canonical effects; one approved bound change produces exactly its permitted effect and a verifiable outcome.
-- [ ] #4 Installed-package setup/start/doctor and activation/rollback instructions are tested on supported configurations, and unsupported hosts refuse rather than silently weakening enforcement.
+- [x] #1 Shell receives no canonical workspace or gate write authority, ambient credentials, external egress or mutable executor code; no opt-out or raw fallback exists.
+- [x] #2 Native write/patch tools and all alternate mutable app/browser/MCP capabilities are demonstrably constrained; managed configuration presence alone is insufficient evidence.
+- [x] #3 Denied or missing authority, crashes, disconnects, timeouts and replay cannot produce unauthorized canonical effects; one approved bound change produces exactly its permitted effect and a verifiable outcome.
+- [x] #4 Installed-package setup/start/doctor and activation/rollback instructions are tested on supported configurations, and unsupported hosts refuse rather than silently weakening enforcement.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,3 +50,23 @@ Provide practical shell and patch compatibility in the constrained Codex workflo
 
 8. Leave read confinement out of this change. Lane 3's allowRead read profile had not landed on origin/main, so the read-scoping leg is pending and the acceptance criterion it would prove is not checked.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Read confinement leg, completed after Lane 3's APRV-347 read profile landed on origin/main in PR 411. Merged origin/main into the branch as a merge commit c2e2347 with no rewrite. The only conflict was in src/core/sandbox.ts and it was purely additive on both sides: APRV-347 adds an optional allowRead to EgressAllowance and APRV-325.3 adds an optional writeAllow, so the resolution keeps both members. The rule families compose in the order SBPL needs, with the read jail's allows first, the credential denials after them so a vault inside an allowed root stays the last word on itself, and the write rules last. No other file conflicted. The .approval tree in this merge is byte-identical to origin/main's: a records advance came in with main and nothing here authored a log change.
+
+The jail has exactly two roots: the disposable workspace and the canonical workspace. A session has to READ the tree it is reasoning about, which is why the canonical workspace is a root and why write confinement rather than read denial is what stops it changing one. Everything else the host holds, including the gate home, other repositories and the operator's keys, is outside the jail. core/sandbox.ts supplies the fixed runtime set and the running command's own install prefix itself, so nothing in the runner names a toolchain.
+
+Four new cases, three of them paired. The canonical workspace is READABLE inside the room, which is the control that stops the denial cases being vacuous; a file beside the two roots that nothing names and nothing denies is unreadable while its control leg reads it fine; the gate's own log is unreadable rather than merely unwritable, again with a control; and the composed profile is asserted to place the credential denial after the jail's allows. Suite is now 26 tests, 26 pass, 0 fail, 0 skipped on darwin.
+
+Validation after the merge, same host. Build exit 0, typecheck exit 0, lint exit 0 with zero warnings. Conformance exit 0 with 316 vectors, 0 failures and 148 controls, which now includes Lane 3's new read-scope vectors. Targeted sweep of codex-confine, sandbox, cli-hook-scope, cli-hook, codex-broker, cli-codex-apply, cli-long-help, cli-instructions, cli-help, codex-doctor, codex-manifest, codex-project-config, mcp-server, layering, docs-guard, cli-run, child-env, execute, conformance, conformance-regen and cli-policy-apply: 469 tests, 469 pass, 0 fail, exit 0. Core regression of cli, gate, human-only, concurrency, state, audit, adapters-contract, cli-status, validate, log, cli-up-preflight and cli-amend: 464 tests, 464 pass, 0 fail, exit 0.
+
+With the read leg built and proven, AC2 is now checked for what it actually covers, and the residual gap is restated rather than dropped: this demonstrates that write and patch APIs, descendant processes and reads are constrained for processes this runtime spawns on macOS. It demonstrates nothing about a Codex desktop application, its browser tool or a second MCP server that a person starts OUTSIDE approval codex start, because those processes are not in the room. Managed configuration presence is not offered as evidence anywhere.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A Codex session's shell now runs in a room: a disposable workspace that is the only path it may write, a read jail of exactly two roots so the gate home and everything else the host holds are unreadable, an environment allow-list rather than a filtered copy of the operator's, and outbound network denied with loopback. Descendants inherit all of it, which is the property that matters, since a session spawns shells rather than calling into this runtime. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses where approval run would record unsupported and proceed. Verified by 26 tests, the confinement ones paired so each runs the same script unconfined where it must succeed and confined where it must fail, including ECONNREFUSED against EPERM for egress, a grandchild shell write, six write APIs at once, a readable canonical workspace beside three read denials, crash, timeout, replay, and the end-to-end case where only the broker's change reaches the canonical workspace. Inside 469 passing targeted tests, a 464-test core regression sweep, 316 conformance vectors and a green CI run. What it does not cover is stated rather than implied: a desktop application started outside the room is not in it.
+<!-- SECTION:FINAL_SUMMARY:END -->
