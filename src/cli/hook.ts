@@ -91,6 +91,7 @@ import {
   classifyCommand,
   commandSegmentWords,
   CODE_EXECUTING_RULES,
+  CONTRIBUTOR_SUFFIX,
   GATE_SELF_CLASS,
   protectedPathClass,
   type ClassifiedSegment,
@@ -159,7 +160,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { HOOK_GROK_HELP, HOOK_HELP } from "./help.js";
+import { HOOK_GROK_HELP, HOOK_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
@@ -340,6 +341,25 @@ export const HOOK_DENY_CODES = [
    * window. Nothing appends on this path and no gate lifecycle opens.
    */
   "hook-unsupported-execution-context",
+  /**
+   * The session names a Contributor-tier model, so every tool call is refused
+   * (APRV-350).
+   *
+   * Meta sells a Contributor variant of the Muse Spark family that "trades a
+   * lower price for permission to train on your prompts and completions". A
+   * session on one discloses every byte it reads, so the refusal is above the
+   * policy: no class resolution and no grant widens it, and an absent or
+   * unrecognised `model` is refused for the same reason an unparseable event is.
+   *
+   * Distinct from `hook-class-human-only`, which says a HUMAN must do this
+   * action; this says nothing may do it in this session, and the repair is to
+   * change the model in Muse's picker rather than to ask anybody. Distinct from
+   * `hook-io` because the event was perfectly well formed.
+   *
+   * What it cannot do is stated wherever it is documented: it stops tool calls,
+   * and it cannot recall a prompt the model has already been sent.
+   */
+  "hook-muse-contributor-model",
   /** Malformed hook input, or a log/filesystem fact that stopped the check. */
   "hook-io",
 ] as const;
@@ -477,6 +497,38 @@ interface HarnessAdapter {
    * produces.
    */
   camelCaseEnvelope?: boolean;
+  /**
+   * Tools the harness fires for its OWN bookkeeping, answered and never gated
+   * (APRV-350).
+   *
+   * Muse Code fires `PreToolUse` and `PostToolUse` for `submit_reminder_decision`
+   * continuously: 100 of the 139 events in the live capture were that one tool.
+   * It records a self-assessment and touches nothing, so gating it would put a
+   * hundred questions a turn on an approver's phone to authorize the harness
+   * thinking. It is listed rather than inferred, because a tool this runtime
+   * does not recognise must keep falling through to the ordinary path.
+   */
+  passThroughTools?: readonly string[];
+  /**
+   * The `tool_input` key carrying the PER-CALL working directory, when the
+   * harness sends one (APRV-350).
+   *
+   * Muse's `bash` tool carries `workdir`, and it is the directory the command
+   * will actually run in, which is the fact the classifier needs. The top-level
+   * `cwd` is the session's root and can differ. Codex has neither, which is why
+   * its shell arm refuses outright; Claude Code has only the top-level one.
+   */
+  shellCwdKey?: string;
+  /**
+   * Refuse every tool call when the envelope names a Contributor-tier model
+   * (APRV-350).
+   *
+   * Meta sells a Contributor variant that "trades a lower price for permission
+   * to train on your prompts and completions". A session on one is a session
+   * whose every read is disclosed, so the adapter refuses regardless of what
+   * the policy would otherwise allow. See {@link contributorModelRefusal}.
+   */
+  contributorModelGuard?: boolean;
 }
 
 const CLAUDE_ADAPTER: HarnessAdapter = {
@@ -571,6 +623,55 @@ const GROK_ADAPTER: HarnessAdapter = {
 };
 
 /**
+ * Meta Muse Code (APRV-350).
+ *
+ * Every field here is OBSERVED, from a live run on `muse-bin-1.3.0-R3233.1`
+ * whose 139 captured envelopes are the evidence. Nothing in this entry is a
+ * guess, which is the difference between it and the Grok entry above.
+ *
+ * The envelope is snake_case, so no `camelCaseEnvelope`. It carries
+ * `hook_event_name`, `tool_name`, `tool_input`, `tool_use_id`, `session_id`,
+ * `turn_id`, `cwd`, `transcript_path`, `model`, `permission_mode` and
+ * `model_provider`; `PostToolUse` adds `tool_response`. So Muse sends BOTH
+ * facts Codex lacks: a per-call working directory and a real outcome.
+ *
+ * ## What it cannot do, and why this adapter still ships
+ *
+ * Muse FAILS OPEN. A hook that crashes, hangs past its timeout, or prints
+ * anything Muse cannot parse is a hook Muse ignores, and the tool call
+ * proceeds. Worse, an output mixing verdict dialects is itself unparseable, so
+ * the belt-and-braces answer that satisfies every harness at once satisfies
+ * this one not at all: the probe's `deny` trial printed every dialect AND
+ * exited 2, and the write completed in under 80 ms.
+ *
+ * Therefore this adapter emits EXACTLY ONE dialect and nothing else: the nested
+ * `hookSpecificOutput` form at exit 0, which the default arm of
+ * {@link decision} already produces. Three forms were measured to block
+ * (nested at exit 0; `{decision:"block"}` at exit 0; empty stdout at exit 2)
+ * and the nested one is chosen because it is the only one that carries a REASON
+ * the model is shown, so a refused agent learns why instead of retrying blind.
+ * The probe watched an agent respond to an unexplained deny by shelling out to
+ * inspect the hook's own state file, which is the behaviour a silent refusal
+ * buys. `docs/muse-hook.md` records the choice and the two rejected forms.
+ */
+const MUSE_ADAPTER: HarnessAdapter = {
+  kind: "muse",
+  originApp: "muse-hook",
+  defaultActor: "agent:muse",
+  shellTool: "bash",
+  fileTools: ["write_file"],
+  // `read_file` names one path (relative to the session cwd, or absolute);
+  // `search` names an ARRAY under `paths`, and the live capture caught it
+  // reaching outside the workspace entirely — Muse applies no workspace
+  // confinement in `permission_mode: "default"`, so this is the read jail's
+  // whole reason for existing here.
+  readTools: ["read_file", "search"],
+  passThroughTools: ["submit_reminder_decision"],
+  shellCwdKey: "workdir",
+  contributorModelGuard: true,
+};
+
+/**
  * The decision object the harness reads from stdout.
  *
  * Claude Code wants the nested PreToolUse envelope. Cursor native hooks want
@@ -638,6 +739,54 @@ function deny(streams: Streams, code: string, detail: string, harness: HarnessKi
   return harness === "grok" ? GROK_DENY_EXIT : EXIT_OK;
 }
 
+/** The machine-readable code a Contributor-tier session is refused with. */
+export const MUSE_CONTRIBUTOR_REFUSAL = "hook-muse-contributor-model";
+
+/**
+ * Refuse every tool call on a Contributor-tier model, whatever the policy says.
+ *
+ * Meta sells two tiers of the Muse Spark family and marks the difference in the
+ * model id: a Contributor variant "trades a lower price for permission to train
+ * on your prompts and completions", against a Standard variant documented as
+ * never trained on. So a Contributor session discloses every file it reads, and
+ * a policy that would autonomously allow a read of the workspace was not
+ * written with that in mind.
+ *
+ * ## Why this is not a policy line
+ *
+ * A policy grants and withholds authority over CLASSES. This is not about the
+ * class of the action; the same `read.file` is fine on one model and a
+ * disclosure on another. Encoding it as policy would mean every operator's
+ * `APPROVAL.md` had to name Meta's tiering to be safe, and one that did not
+ * would be silently unsafe. So the adapter refuses, above the policy, and no
+ * policy can widen it. That is a strictness increase only, which is the one
+ * direction a hook may move a verdict on its own (SPEC §11.1 invariant 4).
+ *
+ * ## The self-reported field
+ *
+ * `model` is the harness's claim about itself, and SPEC §11.1 says a
+ * self-reported field never REDUCES scrutiny. This only ever raises it: the
+ * string can refuse a call, never authorize one. An absent, empty or
+ * unparseable `model` is refused too, because a session that will not say what
+ * it is running is exactly the one not to trust with a read.
+ *
+ * ## What it cannot do
+ *
+ * It stops tool calls. It cannot recall the prompt that was already sent — a
+ * hook fires after the model has seen it — and it cannot know what the harness
+ * attached as context before the first tool call. `docs/muse-hook.md` opens
+ * with this, because a guard people over-trust is worse than no guard.
+ */
+function contributorModelRefusal(model: string | null): string | null {
+  if (model === null || model.trim() === "") {
+    return "the envelope names no model, and a session that will not say what it is running cannot be recognised as non-contributor";
+  }
+  if (model.trim().toLowerCase().includes(CONTRIBUTOR_SUFFIX.replace(/^-/u, ""))) {
+    return `${model.trim()} is a Contributor-tier model: Meta trains on this tier's prompts and completions, so every file this session reads is disclosed. Refused regardless of policy; no grant widens it.`;
+  }
+  return null;
+}
+
 // ===========================================================================
 // Hook input
 // ===========================================================================
@@ -661,6 +810,16 @@ interface HookInput {
    * approver's phone.
    */
   hookEventName: string | null;
+  /**
+   * The model the session reports running, or `null` (APRV-350).
+   *
+   * Muse sends it on every event. Read for one purpose only, the contributor
+   * guard, and that guard can only ever refuse: a self-reported field raises
+   * scrutiny and never lowers it (SPEC §11.1). It is never logged, because it
+   * is untrusted third-party text and §11.1 invariant 3 has no provenance
+   * exception.
+   */
+  model: string | null;
   /**
    * `tool_response`, when the event carries one as an object.
    *
@@ -788,6 +947,7 @@ function parseHookInput(raw: string, camelCase = false): ParsedInput {
       toolInput,
       toolUseId: readDialectString(fields, "tool_use_id", "toolUseId", camelCase),
       hookEventName: readDialectString(fields, "hook_event_name", "hookEventName", camelCase),
+      model: readDialectString(fields, "model", "model", camelCase),
       harnessVersion: readString(fields, "version"),
       interrupted:
         fields["is_interrupt"] === true || (camelCase && fields["isInterrupt"] === true),
@@ -1861,6 +2021,31 @@ interface ReadGate {
   summary: string;
 }
 
+/**
+ * The first entry of a `paths` array that falls outside the read scope, or
+ * `null` when every entry is inside it (APRV-350).
+ *
+ * Separate from the single-path arm because the ANSWER is different: one path
+ * either is or is not in scope, while a list is out of scope if ANY member is.
+ * Returning the offending member rather than a boolean keeps the gated question
+ * specific — an approver is asked about the directory that actually left the
+ * scope, not about the whole list.
+ */
+function firstOutOfScope(
+  toolInput: Record<string, unknown>,
+  roots: readonly string[],
+  cwd: string,
+): string | null {
+  const paths = toolInput["paths"];
+  if (!Array.isArray(paths)) return null;
+  for (const entry of paths) {
+    if (typeof entry !== "string" || entry.trim() === "") continue;
+    const resolved = resolvedReadTarget(entry, cwd);
+    if (resolved === null || !isInReadScope(resolved, roots)) return entry;
+  }
+  return null;
+}
+
 function readToolGate(
   toolName: string,
   toolInput: Record<string, unknown>,
@@ -1871,7 +2056,15 @@ function readToolGate(
   const declared =
     readString(toolInput, "file_path") ??
     readString(toolInput, "notebook_path") ??
-    readString(toolInput, "path");
+    readString(toolInput, "path") ??
+    // APRV-350: Muse's `search` names an ARRAY under `paths`, and the live
+    // capture caught one pointing clean out of the workspace. The FIRST entry
+    // that resolves outside the scope is the one gated: a search over five
+    // directories where one is out of scope is an out-of-scope read, and
+    // gating the first in-scope entry instead would have let it through. An
+    // unreadable entry counts as out of scope for the same fail-closed reason
+    // the single-path arm below resolves that way.
+    firstOutOfScope(toolInput, roots, cwd);
   if (declared === null) return null;
 
   // FAIL CLOSED on an unresolvable path (the task's AC1, and SPEC.md §11.1):
@@ -3059,8 +3252,72 @@ type OutcomeReading =
  * whether two enumerated fields are present and what kind of value they hold.
  * No text from any of them reaches the log or this function's return.
  */
+/**
+ * Muse's outcome, which it actually sends (APRV-350).
+ *
+ * The shell tool's `tool_response` is a JSON STRING, not an object, carrying
+ * `exit_code`, `terminal_status`, `output` and `truncated`. The generic reader
+ * above would see a string, find neither `interrupted` nor `error` on it, and
+ * call every command completed — including the ones that failed. So Muse gets
+ * its own reading, and it is the richer one: this harness sends both facts
+ * Codex lacks.
+ *
+ * `terminal_status` leads because it distinguishes a command that ran from one
+ * that was killed or timed out; `exit_code` decides the rest. Anything this
+ * cannot read is UNREADABLE rather than assumed complete, which appends nothing
+ * and leaves the path as vacuous as it was — the same choice the generic reader
+ * makes, for the same reason. Nothing of `output` is read.
+ */
+function readMuseReportedOutcome(input: HookInput): OutcomeReading {
+  const raw = input.toolResponseRaw;
+  // The file tools answer with an object (`filePath`, `structuredPatch`) and
+  // the read tools with a plain string of file content. Neither carries an
+  // outcome, and the event name is the only fact available for them.
+  if (typeof raw !== "string") {
+    return { ok: true, outcome: "completed" };
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(raw) as unknown;
+  } catch {
+    // A non-JSON string is a read tool's content. It says nothing about
+    // success, and the event fired at all, so the event name stands.
+    return { ok: true, outcome: "completed" };
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: true, outcome: "completed" };
+  }
+  const fields = body as Record<string, unknown>;
+  const status = fields["terminal_status"];
+  if (typeof status === "string" && status !== "completed") {
+    // `aborted`, `timed_out`, and whatever else Meta adds: a command that did
+    // not finish on its own terms neither completed nor failed, exactly as an
+    // interrupt does not.
+    return {
+      ok: false,
+      detail: `terminal_status is ${JSON.stringify(status)}, so the command neither completed nor failed on its own terms`,
+    };
+  }
+  const exitCode = fields["exit_code"];
+  if (typeof exitCode === "number") {
+    return { ok: true, outcome: exitCode === 0 ? "completed" : "failed" };
+  }
+  return { ok: true, outcome: "completed" };
+}
+
 function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): OutcomeReading {
   if (adapter.kind === "codex") return readCodexReportedOutcome(input);
+  if (adapter.kind === "muse") {
+    if (input.hookEventName !== "PostToolUse") {
+      return {
+        ok: false,
+        detail: `hook_event_name is ${
+          input.hookEventName === null ? "absent" : JSON.stringify(input.hookEventName)
+        }, which is not the event this adapter reports an outcome for (PostToolUse)`,
+      };
+    }
+    return readMuseReportedOutcome(input);
+  }
   const event = input.hookEventName;
   if (event !== "PostToolUse" && event !== "PostToolUseFailure") {
     return {
@@ -3264,17 +3521,42 @@ function describeToolCall(
         detail: `${adapter.shellTool} tool_input carries no command string`,
       };
     }
+    // APRV-350: the PER-CALL working directory, where the harness sends one.
+    //
+    // Muse's `bash` carries `workdir`, and it is the directory the command will
+    // actually run in; the top-level `cwd` is the session root and the two can
+    // differ. The classifier resolves relative paths against this, so binding
+    // the session root instead would classify `rm -rf docs` against the wrong
+    // tree. Only an ABSOLUTE value is taken: a relative `workdir` is the
+    // harness describing a location this runtime cannot place, and a
+    // self-reported field may not talk its way into a narrower answer
+    // (SPEC §11.1), so the fallback is the value that was already trusted.
+    // `null` for every adapter that declares no key, which leaves both the
+    // payload and the classification EXACTLY as they were. That is not
+    // defensiveness: `input.cwd` and the hook's own `cwd` are different values,
+    // and a first version of this that used the envelope's `cwd` for every
+    // adapter re-classified Grok's commands against a directory that does not
+    // exist on disk and denied them all.
+    const perCallCwd =
+      adapter.shellCwdKey === undefined
+        ? null
+        : readString(input.toolInput, adapter.shellCwdKey);
+    const shellCwd = perCallCwd !== null && isAbsolute(perCallCwd) ? perCallCwd : null;
     // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
     // carries every byte the harness will execute. Only `summary` is shortened.
     const payload = adapter.bindToolName
       ? codexBinding(input, cwd).payload
-      : { command: raw, cwd: input.cwd };
+      : { command: raw, cwd: shellCwd ?? input.cwd };
     // APRV-108: a local rewrite of history this checkout never published is a
     // commit. APRV-267: a delete confined to the agent's own scratch is not a
     // decision. Both run in the hook's own cwd, after classification and never
     // inside it, and neither claims anything it cannot establish from the disk.
-    const refined = classifyForHook(raw, protectedPaths, cwd, readRoots);
+    // Classified against the directory the command will RUN in, not the
+    // hook's own, so a relative path in the command resolves the way the shell
+    // will resolve it. For every adapter without a per-call working directory
+    // this is `input.cwd` or the hook's own cwd exactly as before.
+    const refined = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots);
     const classified = refined.result;
     if (!classified.ok) {
       return {
@@ -3723,7 +4005,16 @@ function runHarnessHook(
     // APRV-243. Grok's help carries the `.grok/hooks/*.json` the human commits,
     // because that file's `timeout` is load-bearing: it must exceed `--timeout`
     // or Grok abandons the hook mid-wait and, failing open, runs the command.
-    streams.out(`${adapter.kind === "grok" ? HOOK_GROK_HELP : HOOK_HELP}\n`);
+    // Muse gets its own for the same reason and one more: its `.muse/hooks.json`
+    // shape is not Claude's file under a different name, and an operator who
+    // guessed would get "Hooks: 0 runnable" and a session that looks gated.
+    const harnessHelp =
+      adapter.kind === "grok"
+        ? HOOK_GROK_HELP
+        : adapter.kind === "muse"
+          ? HOOK_MUSE_HELP
+          : HOOK_HELP;
+    streams.out(`${harnessHelp}\n`);
     return EXIT_OK;
   }
   const extra = parsed.positionals[0];
@@ -3796,6 +4087,50 @@ function runHarnessHook(
   }
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
+
+  // APRV-350. The contributor guard runs BEFORE the event dispatch, the policy
+  // and everything else, because it is not a question about the action: a
+  // Contributor-tier session discloses every byte it reads, so there is nothing
+  // for a policy to authorize. Refusing first also means no unparseable payload,
+  // no missing log and no classifier quirk can route around it.
+  //
+  // On a POST event it refuses in the post vocabulary and prints no verdict:
+  // Muse rejects a permission field on a post event, and a rejected hook is a
+  // FAILED hook, which fails open. There is nothing to block after the fact
+  // anyway; the line exists so the disclosure is on a stream somebody reads.
+  if (adapter.contributorModelGuard === true) {
+    const refusal = contributorModelRefusal(input.model);
+    if (refusal !== null) {
+      const postEvent =
+        input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+      return postEvent
+        ? report(streams, MUSE_CONTRIBUTOR_REFUSAL, `${refusal} Nothing was appended.`)
+        : deny(streams, MUSE_CONTRIBUTOR_REFUSAL, refusal, adapter.kind);
+    }
+  }
+
+  // APRV-350. The harness's own bookkeeping tool, answered and never gated.
+  // Muse fires both events for `submit_reminder_decision` continuously — 100 of
+  // the 139 events in the live capture — and it records a self-assessment and
+  // touches nothing. It is answered with an explicit allow rather than left to
+  // fall through, so the verdict is one dialect and nothing else, which is the
+  // only shape this harness parses.
+  if (adapter.passThroughTools?.includes(input.toolName) === true) {
+    const passPostEvent =
+      input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+    if (passPostEvent) {
+      return report(
+        streams,
+        "post-tool-not-gated",
+        `${input.toolName} is the harness's own bookkeeping tool, so no execution.started was ever written for it`,
+      );
+    }
+    return allow(
+      streams,
+      `${input.toolName} is ${adapter.kind}'s own bookkeeping tool: it records the session's self-assessment and touches nothing outside the session`,
+      adapter.kind,
+    );
+  }
 
   // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
   // registered for two events, and they do opposite things — one answers before
@@ -4246,6 +4581,8 @@ export function commandHook(
       return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
     case "grok":
       return commandHarnessHook(rest, streams, cwd, readStdin, GROK_ADAPTER);
+    case "muse":
+      return commandHarnessHook(rest, streams, cwd, readStdin, MUSE_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

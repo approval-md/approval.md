@@ -281,11 +281,17 @@ setTimeout(() => done("BLOCKED:timeout"), 8000);
 // The matrix
 // ---------------------------------------------------------------------------
 
-export async function probe(json = false) {
+/**
+ * `write` is injectable so a test can read the matrix without hijacking the
+ * process's stdout. The first version of the suite monkey-patched
+ * `process.stdout.write` to capture this, which also captured the test
+ * runner's own output and fed it to `JSON.parse`.
+ */
+export async function probe(json = false, write = process.stdout.write.bind(process.stdout)) {
   const seatbelt = detectSeatbelt();
   if (!seatbelt.available) {
     const message = `constrained-egress probe: SKIPPED — ${seatbelt.reason}\n`;
-    process.stdout.write(json ? `${JSON.stringify({ skipped: true, reason: seatbelt.reason })}\n` : message);
+    write(json ? `${JSON.stringify({ skipped: true, reason: seatbelt.reason })}\n` : message);
     return EXIT_SANDBOX_UNAVAILABLE;
   }
 
@@ -451,9 +457,9 @@ export async function probe(json = false) {
 
   const failed = results.filter((result) => !result.pass);
   if (json) {
-    process.stdout.write(`${JSON.stringify({ skipped: false, results }, null, 2)}\n`);
+    write(`${JSON.stringify({ skipped: false, results }, null, 2)}\n`);
   } else {
-    process.stdout.write(
+    write(
       [
         "APRV-351 constrained-egress probe (offline; no credential, no provider, no model call).",
         "",

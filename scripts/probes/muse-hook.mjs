@@ -67,8 +67,44 @@ const SCRIPT = fileURLToPath(import.meta.url);
 /** Where `--setup` leaves a breadcrumb so `--report` finds the scratch dir from any cwd. */
 export const POINTER = join(tmpdir(), "aprv350-muse-probe-pointer.json");
 
+/**
+ * The pointer file this invocation uses.
+ *
+ * Injectable through `APPROVAL_MUSE_PROBE_POINTER`, and the reason is a real
+ * incident rather than tidiness. The first version of the test suite called
+ * `--setup` directly, which wrote the REAL pointer under the system temp root;
+ * a test run during Carter's live probe session repointed his `--arm` at a
+ * test directory mid-run, so the trial he armed landed nowhere and the round
+ * proved nothing.
+ *
+ * A probe that can be redirected by an environment variable is fine HERE and
+ * would not be fine in the runtime: nothing this file decides is a gate
+ * verdict, the operator owns the terminal it runs in, and the alternative is a
+ * test suite that cannot exercise `--setup` at all without trampling a live
+ * run. The variable widens nothing; it only moves a scratch breadcrumb.
+ */
+export function pointerPath(env = process.env) {
+  const override = env["APPROVAL_MUSE_PROBE_POINTER"];
+  return typeof override === "string" && override.trim() !== "" ? override : POINTER;
+}
+
 /** The armed-trial names, in the order the report prints them. */
 export const TRIALS = ["crash", "hang", "garbage", "deny"];
+
+/**
+ * Deny-dialect trials, added 2026-09-18 after the first live run: a deny that
+ * printed every dialect at once AND exited 2 did not block a write_file on
+ * muse-bin-1.3.0-R3233.1. These separate the variables: each prints ONE
+ * dialect and exits 0, and one prints nothing and exits 2, so the report can
+ * say which form of no (if any) Muse honours.
+ */
+export const DENY_DIALECT_TRIALS = [
+  "deny-exit0",
+  "deny-snake",
+  "deny-nested",
+  "deny-block",
+  "deny-exit2",
+];
 
 /**
  * The file the operator asks Muse to create in each armed trial.
@@ -288,21 +324,28 @@ export const SYNTHETIC_FILES = {
 };
 
 /**
- * The candidate hook configs, all written INSIDE the scratch project.
+ * The hook config, written INSIDE the scratch project.
  *
- * Three candidates because the shipped build's config path is exactly one of
- * the two unresolved facts in the register entry. `grep -a` over
- * muse-bin-1.3.0-R3233.1 finds `.config/muse/settings.json` (user level, which
- * this probe must not touch), the bare strings `hooks.json` and
- * `hooks/hooks.json`, a `.muse/` project directory, and the keys `"hooks"`,
- * `"event"`, `"events"`, `"command"`, `"type"`, `"run"`, `"when"` and
- * `"timeout"` — but NOT `"matcher"`, which is the key Claude Code's schema
- * turns on. So the entry shape is uncertain too, and each candidate carries a
- * different plausible shape.
+ * ONE config now, where the first run carried three guesses. Carter's live run
+ * on muse-bin-1.3.0-R3233.1 (2026-09-18) settled both open questions, so the
+ * guesses have been deleted rather than left standing as decoration:
  *
- * Each one passes a distinct `--config-id`, so the capture says which file the
- * installed build actually read and which shape it accepted. A candidate that
- * never fires is a finding, not a failure.
+ * - `.muse/hooks.json` is the file the installed build reads. `.muse/settings.json`
+ *   and `.muse/hooks/hooks.json` were both written and NEITHER ever fired, so
+ *   they are gone. A candidate that has been disproved is not evidence, it is
+ *   noise in the next report.
+ * - The shape is the event-keyed object with a nested `hooks` list, which is
+ *   Claude Code's. The array-of-events shape was rejected at startup with
+ *   `hooks.json: MalformedConfig: hooks must be an object` and "Hooks: 0
+ *   runnable · 1 warning". No `matcher` key is needed.
+ *
+ * Muse names what it rejects at startup, which is the one genuinely helpful
+ * thing about its config handling: a malformed hooks file is loud rather than
+ * silent. That is worth knowing, because everything else about this harness
+ * fails open.
+ *
+ * The `--config-id` is kept even with a single candidate, so a capture still
+ * says which file and which event produced each envelope.
  */
 export function buildConfigs(statePath) {
   const command = `node ${SCRIPT} --record --state ${statePath}`;
@@ -310,28 +353,15 @@ export function buildConfigs(statePath) {
     {
       id: "project-muse-hooks-json",
       path: join(".muse", "hooks.json"),
-      note: "vendor-documented project path, array-of-events shape",
-      body: {
-        hooks: [
-          {
-            event: "PreToolUse",
-            type: "command",
-            command: `${command} --config-id project-muse-hooks-json`,
-            timeout: 30,
-          },
-          {
-            event: "PostToolUse",
-            type: "command",
-            command: `${command} --config-id project-muse-hooks-json-post`,
-            timeout: 30,
-          },
-        ],
-      },
-    },
-    {
-      id: "project-muse-settings-json",
-      path: join(".muse", "settings.json"),
-      note: "settings.json is the name the binary carries; nested event-keyed shape",
+      // OBSERVED on muse-bin-1.3.0-R3233.1 (Carter's first probe run,
+      // 2026-09-18): this is the file the installed build reads, and it
+      // rejected the array-of-events shape with `hooks.json: MalformedConfig:
+      // hooks must be an object` ("Hooks: 0 runnable"), so nothing fired and
+      // the armed rounds proved nothing. The shape is now the event-keyed
+      // object. Whether each event's entries nest a further `hooks` list (the
+      // Claude Code shape) or are the commands themselves is still unknown;
+      // Muse names what it rejects at startup, so the next run settles it.
+      note: "vendor-documented project path, event-keyed object shape (array shape observed rejected)",
       body: {
         hooks: {
           PreToolUse: [
@@ -339,27 +369,24 @@ export function buildConfigs(statePath) {
               hooks: [
                 {
                   type: "command",
-                  command: `${command} --config-id project-muse-settings-json`,
+                  command: `${command} --config-id project-muse-hooks-json`,
+                  timeout: 30,
+                },
+              ],
+            },
+          ],
+          PostToolUse: [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command: `${command} --config-id project-muse-hooks-json-post`,
                   timeout: 30,
                 },
               ],
             },
           ],
         },
-      },
-    },
-    {
-      id: "project-muse-hooks-dir",
-      path: join(".muse", "hooks", "hooks.json"),
-      note: "the hooks/hooks.json string in the binary, events-array shape",
-      body: {
-        hooks: [
-          {
-            events: ["PreToolUse"],
-            run: `${command} --config-id project-muse-hooks-dir`,
-            timeout: 30,
-          },
-        ],
       },
     },
   ];
@@ -386,7 +413,7 @@ function writeJson(path, value) {
 export function resolveState(argv) {
   const index = argv.indexOf("--state");
   if (index !== -1 && typeof argv[index + 1] === "string") return argv[index + 1];
-  const pointer = readJson(POINTER, null);
+  const pointer = readJson(pointerPath(), null);
   if (pointer && typeof pointer.state === "string") return pointer.state;
   return null;
 }
@@ -442,7 +469,7 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
     syntheticFiles: Object.keys(SYNTHETIC_FILES),
   });
   writeJson(join(state, "control.json"), { armed: "none" });
-  writeJson(POINTER, { state, project, root, createdAt: new Date().toISOString() });
+  writeJson(pointerPath(), { state, project, root, createdAt: new Date().toISOString() });
 
   write(
     [
@@ -492,9 +519,9 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
       "---------------------------------------------------------------------------",
       "",
       `Synthetic files: ${Object.keys(SYNTHETIC_FILES).join(", ")}`,
-      "Candidate hook configs written inside the scratch project (the shipped",
-      "build's real path is one of the things this probe settles; none of these",
-      "is your user config, which the probe never touches):",
+      "Hook config written inside the scratch project (this is the path and the",
+      "shape the 2026-09-18 run confirmed the shipped build reads; it is not your",
+      "user config, which the probe never touches):",
       ...configs.map((config) => `  - ${config.path}  (${config.note})`),
       "",
       "---------------------------------------------------------------------------",
@@ -526,7 +553,23 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
         "",
       ]),
       "---------------------------------------------------------------------------",
-      "STEP 3. Report:",
+      "STEP 3. The five deny-dialect trials. Same routine, one prompt each.",
+      "---------------------------------------------------------------------------",
+      "",
+      "The 2026-09-18 run found that a deny printing EVERY dialect at once, even",
+      "at exit 2, did NOT block the write. The reading is that an unsupported key",
+      "makes the whole hook output invalid, an invalid hook is a failed hook, and",
+      "a failed hook fails open. These five separate the variables: each prints",
+      "exactly ONE form of no, so the report can name the form Muse honours.",
+      "",
+      ...DENY_DIALECT_TRIALS.flatMap((trial) => [
+        `  node ${SCRIPT} --arm ${trial}`,
+        `    then in muse, in ${project}:`,
+        `    create a file named ${trialArtifact(trial)} containing x`,
+        "",
+      ]),
+      "---------------------------------------------------------------------------",
+      "STEP 4. Report:",
       "---------------------------------------------------------------------------",
       "",
       `  node ${SCRIPT} --report`,
@@ -546,8 +589,8 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
 
 export function arm(argv, write = process.stdout.write.bind(process.stdout)) {
   const trial = argv[argv.indexOf("--arm") + 1];
-  if (typeof trial !== "string" || ![...TRIALS, "none"].includes(trial)) {
-    process.stderr.write(`--arm takes one of: ${[...TRIALS, "none"].join(", ")}\n`);
+  if (typeof trial !== "string" || ![...TRIALS, ...DENY_DIALECT_TRIALS, "none"].includes(trial)) {
+    process.stderr.write(`--arm takes one of: ${[...TRIALS, ...DENY_DIALECT_TRIALS, "none"].join(", ")}\n`);
     return 2;
   }
   const state = resolveState(argv);
@@ -639,8 +682,21 @@ export function record(argv, io = {}) {
   const provider = envelope === null ? { key: null, value: null } : resolveProvider(envelope);
   const guard = classifyModel(model.value, declaredSafe);
 
+  // OBSERVED on muse-bin-1.3.0-R3233.1 (2026-09-18): Muse fires PostToolUse
+  // for every call and rejects a permission verdict there ("Hook failed ·
+  // PostToolUse · unsupported `permission_decision`"), and it fires
+  // PreToolUse for its own bookkeeping tool `submit_reminder_decision` many
+  // times a turn. Neither may consume an armed trial or be answered with a
+  // verdict, or the trial lands on a call that was never the one under test.
+  const eventName =
+    envelope === null ? null : (envelope.hook_event_name ?? envelope.hookEventName ?? null);
+  const toolName = envelope === null ? null : (envelope.tool_name ?? envelope.toolName ?? null);
+  const isPost = eventName === "PostToolUse";
+  const isBookkeeping = toolName === "submit_reminder_decision";
+
   const control = state === null ? { armed: "none" } : readJson(join(state, "control.json"), { armed: "none" });
-  const armed = typeof control.armed === "string" ? control.armed : "none";
+  const armed =
+    isPost || isBookkeeping ? "none" : typeof control.armed === "string" ? control.armed : "none";
   if (state !== null && armed !== "none") {
     // One arm, one call. Consume it before acting, so a crash or a hang does
     // not leave the trial armed for every later call.
@@ -693,6 +749,11 @@ export function record(argv, io = {}) {
     );
   }
 
+  // A post event is recorded above and answered with nothing: Muse accepts no
+  // verdict there. The contributor-model guard still warned, and the matching
+  // pre event is where it denies.
+  if (isPost) return 0;
+
   if (armed === "crash") {
     warn("aprv350-probe: armed trial `crash` — exiting non-zero with no output on purpose\n");
     return 1;
@@ -704,6 +765,28 @@ export function record(argv, io = {}) {
   }
   if (armed === "garbage") {
     write("aprv350-probe: armed trial `garbage` <<<not json at all>>> {\n");
+    return 0;
+  }
+
+  // Deny-dialect trials: ONE form of no each, so the report can name the form
+  // Muse honours. All but `deny-exit2` exit 0, because the first live run
+  // suggests a non-zero exit is read as a hook FAILURE and failed open.
+  if (DENY_DIALECT_TRIALS.includes(armed)) {
+    const why = `aprv350-probe: armed trial \`${armed}\` — a refusal in one dialect only`;
+    if (armed === "deny-exit2") {
+      warn(`${why}\n`);
+      return 2;
+    }
+    const full = verdictPayload("deny", why);
+    const body =
+      armed === "deny-exit0"
+        ? full
+        : armed === "deny-snake"
+          ? { permission_decision: "deny", permission_decision_reason: why }
+          : armed === "deny-nested"
+            ? { hookSpecificOutput: full.hookSpecificOutput }
+            : { decision: "block", reason: why };
+    write(`${JSON.stringify(body)}\n`);
     return 0;
   }
 
@@ -856,6 +939,18 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
   const denied = rows.filter((row) => row.guard === "deny" || row.armed === "deny").length;
   const baselineWriteHappened = artifactPresent("probe.txt");
 
+  /** One trial's verdict, judged from whether its artifact reached the disk. */
+  const trialLine = (trial, verb) => {
+    const name = trialArtifact(trial);
+    if (project === null) return `  ${trial}: (no scratch project recorded)`;
+    if (!rows.some((row) => row.armed === trial)) {
+      return `  ${trial}: NOT RUN (no captured call was armed ${trial})`;
+    }
+    return artifactPresent(name)
+      ? `  ${trial}: FAIL OPEN — ${name} exists, so the write happened even though the hook ${verb}`
+      : `  ${trial}: FAIL CLOSED — ${name} absent, so Muse withheld the write`;
+  };
+
   const lines = [
     `MODEL REPORTED: ${models.length === 0 ? "(none found in any envelope)" : models.join(", ")}`,
     models.length === 0
@@ -909,15 +1004,12 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     `  first three prompts asked for (probe.txt) ${baselineWriteHappened ? "HAPPENED ANYWAY -> the deny was NOT honoured (FAIL OPEN)" : "did NOT happen -> the deny was honoured (FAIL CLOSED)"}.`,
     "",
     "--- 6. ARMED TRIALS (did the tool effect happen anyway?) ---",
-    ...TRIALS.map((trial) => {
-      const name = trialArtifact(trial);
-      if (project === null) return `  ${trial}: (no scratch project recorded)`;
-      const ran = rows.some((row) => row.armed === trial);
-      if (!ran) return `  ${trial}: NOT RUN (no captured call was armed ${trial})`;
-      return artifactPresent(name)
-        ? `  ${trial}: FAIL OPEN — ${name} exists, so the write happened despite the hook ${trial}ing`
-        : `  ${trial}: FAIL CLOSED — ${name} absent, so Muse withheld the write`;
-    }),
+    ...TRIALS.map((trial) => trialLine(trial, "broke")),
+    "",
+    "--- 6b. DENY-DIALECT TRIALS (which single form of no does Muse honour?) ---",
+    "  Each printed exactly ONE dialect. FAIL CLOSED here names a form the",
+    "  adapter may ship; FAIL OPEN names a form it must never ship alone.",
+    ...DENY_DIALECT_TRIALS.map((trial) => trialLine(trial, "refused")),
     "",
     "--- 7. FIRST ENVELOPE, VERBATIM ---",
     ...rows.slice(0, 1).map((row) => `  ${row.raw}`),

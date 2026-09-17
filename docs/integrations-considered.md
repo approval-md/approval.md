@@ -21,7 +21,7 @@ entry here is the summary and the pointer.
 | Grok Build (xAI coding-agent harness) | [docs.x.ai/build](https://docs.x.ai/build/overview), [xai-org/grok-build](https://github.com/xai-org/grok-build) | 2026-09-02 | harness | parked | APRV-243 |
 | Grok Bot (xAI agent product) | [x.ai/news/grok-bot-and-x](https://x.ai/news/grok-bot-and-x) | 2026-09-02 | agent product (MCP client) | adopted (demo) | APRV-245, APRV-246 |
 | Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
-| Muse Code (Meta coding agent) | [developer.meta.com](https://developer.meta.com/ai/products/muse-code/) | 2026-09-16 | harness | parked, unverified | APRV-347 |
+| Muse Code (Meta coding agent) | [developer.meta.com](https://developer.meta.com/ai/products/muse-code/) | 2026-09-18 | harness | adopted, with caveats | APRV-350 |
 | Codex CLI (OpenAI coding-agent harness) | [learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks), [openai/codex](https://github.com/openai/codex) | 2026-09-17 | harness | adopted, native shell gating blocked upstream | [docs/codex-hook.md](codex-hook.md), APRV-310, APRV-311, APRV-348, APRV-349 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
@@ -458,9 +458,43 @@ fill it.
 
 ## Muse Code (Meta coding agent)
 
-Assessed 2026-09-16. Verdict: **parked, and explicitly unverified**: the read
-scope this repository built for it (APRV-347) needs no Muse-specific code at
-all, and everything that WOULD need code is resting on secondary sources.
+Assessed 2026-09-16, **settled by a live probe on 2026-09-18**. Verdict:
+**adopted, with caveats** (APRV-350). `approval hook muse` ships; see
+`docs/muse-hook.md`, which opens with the caveats because two of them are
+serious.
+
+The 2026-09-16 assessment below is kept verbatim, because what it got wrong is
+the most useful thing in this entry. It parked on two questions, and a live run
+of `muse-bin-1.3.0-R3233.1` answered both — one better than hoped, one worse:
+
+- **Payload completeness: BETTER.** The envelope carries a per-call working
+  directory (`tool_input.workdir` on `bash`) *and* a real outcome
+  (`exit_code`, `terminal_status` on the post event). Muse sends both facts
+  Codex lacks, so an adapter here can produce guard evidence.
+- **Failure mode: WORSE, and worse than the third-party source suggested.** Muse
+  fails open on hook crash, timeout and malformed output — and an output that
+  merely MIXES verdict dialects is itself malformed, so the defensive payload
+  that satisfies several harnesses at once fails open here. Being more explicit
+  made the refusal weaker.
+
+A third finding nobody asked for: in `permission_mode: "default"` Muse applies
+**no workspace confinement**. The capture caught a `search` reaching outside the
+workspace, and a `read_file` and `bash` touching `~/dev/approval-md`. The read
+jail of APRV-347 is load-bearing for this harness rather than optional.
+
+On the sources: the third-party claim of a snake_case envelope with
+`hook_event_name`, `tool_name`, `tool_input`, `session_id` and `cwd` turned out
+**correct**, and the vendor-documented `.muse/hooks.json` path turned out
+**correct** against the source that disputed it. Neither was knowable without
+running it, which is exactly why the entry parked instead of guessing. The tool
+names, the dialect and the failure mode — the three facts that actually shape an
+adapter — were in no source at all.
+
+The original assessment follows.
+
+Assessed 2026-09-16. Verdict at the time: **parked, and explicitly unverified**:
+the read scope this repository built for it (APRV-347) needs no Muse-specific
+code at all, and everything that WOULD need code is resting on secondary sources.
 
 One thing about Muse is no longer parked: LAUNCHING it is a gated act.
 APRV-354 classifies `muse …` as `harness.launch.muse` with the argv bound,
@@ -566,12 +600,32 @@ join `src/cli/hook.ts`'s adapter table rather than `src/adapters/` or
 
 ### Conclusion
 
+**Superseded by the 2026-09-18 probe; see the head of this entry.** The
+conclusion as written on 2026-09-16 follows, and it held: the probe it asked for
+is the one that produced the adapter.
+
 Parked. There is no code to write until somebody runs `muse-code` and captures
 one `PreToolUse` event, and this entry deliberately does not pretend otherwise:
 the two facts that decide the integration (payload completeness, failure mode)
 are exactly the two this survey could not establish from a primary source.
 Filing an adapter task on the strength of a fan site would be the failure this
 register exists to prevent.
+
+### Caveats on the adoption
+
+`approval hook muse` is enforcement **only while the hook is healthy and answers
+inside the timeout the human commits**. On crash, timeout or malformed output
+the tool call proceeds. That does not survive SPEC.md §11.1's fail-closed
+invariant, it cannot be fixed in this repository, and so no SPEC harness row is
+proposed without the sentence that says it (the precedent is Grok Build,
+APRV-243).
+
+The adapter also carries a refusal that is not about the action at all:
+`hook-muse-contributor-model` denies every tool call when the session names a
+Contributor-tier model, because Meta trains on that tier's prompts and
+completions and every read is therefore a disclosure. It sits above the policy
+and no grant widens it. It is a backstop rather than a control: a hook fires
+after the prompt has been sent.
 
 No classifier output is quoted in this entry, which the checklist below asks
 for, because there is no verified Muse command surface to classify. The

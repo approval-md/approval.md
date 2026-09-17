@@ -884,6 +884,59 @@ const readScopeVectors = [
     input: { harness: "grok", tool: "Read", target: "inside", malformed: true },
     control: true,
   },
+
+  // --- Meta Muse Code (APRV-350) ---------------------------------------------
+  // snake_case, like Claude Code, but with its OWN tool names and one extra
+  // refusal that sits above the policy entirely. Every tool name here was
+  // observed in a live capture rather than read off a vendor page.
+  {
+    id: "muse-read-inside-allows",
+    description: "a read_file inside the gate root keeps the pass-through allow",
+    input: { harness: "muse", tool: "read_file", target: "inside" },
+  },
+  {
+    id: "muse-read-inside-relative-allows",
+    description: "a relative read_file is resolved against the hook's own directory",
+    input: { harness: "muse", tool: "read_file", target: "inside-relative" },
+  },
+  {
+    id: "muse-read-outside-denies",
+    description: "a read_file outside every read root is answered under read.file.out_of_scope",
+    input: { harness: "muse", tool: "read_file", target: "outside" },
+  },
+  {
+    id: "muse-read-unresolvable-denies",
+    description: "a read_file whose path resolves nowhere is out of scope: fail closed",
+    input: { harness: "muse", tool: "read_file", target: "unresolvable" },
+  },
+  {
+    id: "muse-search-outside-denies",
+    description:
+      "search names an ARRAY of paths, and one outside the scope gates the call: the shape a live session was seen reaching out of the workspace with",
+    input: { harness: "muse", tool: "search", target: "outside" },
+  },
+  {
+    id: "muse-search-no-path-allows",
+    description: "a search carrying no paths names no file, so it stays not-a-gated-tool",
+    input: { harness: "muse", tool: "search", target: "absent" },
+  },
+  {
+    id: "muse-shell-read-outside-denies",
+    description: "the shell reader takes the same class as the read tool, through bash's per-call workdir",
+    input: { harness: "muse", tool: "bash", target: "outside" },
+  },
+  {
+    id: "muse-contributor-model-denies-an-allowed-read",
+    description:
+      "a read INSIDE the scope, which every other vector allows, is refused because the session names a Contributor-tier model: the guard sits above the policy and no grant widens it",
+    input: { harness: "muse", tool: "read_file", target: "inside", contributor_model: true },
+  },
+  {
+    id: "muse-malformed-input-denies",
+    description: "unparseable input on the Muse envelope is a deny in the one supported dialect",
+    input: { harness: "muse", tool: "read_file", target: "inside", malformed: true },
+    control: true,
+  },
 ];
 
 /**
@@ -1559,7 +1612,16 @@ const SUITES = [
     // code is what an attestation tap gets when the policy IN FORCE cannot say
     // who is tapping: resolving it against the policy being ATTESTED would let
     // whoever edited that file name the account that approves their own edit.
-    vectors_version: "12.0.0",
+    // 13.0.0 (APRV-350): `hook_deny_codes` gains
+    // `hook-muse-contributor-model`, the refusal a Meta Muse Code session takes
+    // for EVERY tool call when it names a Contributor-tier model. Major because
+    // this suite pins each union's whole array in definition order, so a longer
+    // union is a changed expectation. It earns its own code rather than
+    // borrowing one: `hook-class-human-only` would say a human must do this
+    // action, and the truth is that nothing may do it in this session and the
+    // repair is to change the model in Muse's own picker. A caller that could
+    // not tell those apart would route somebody to an approver who cannot help.
+    vectors_version: "13.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1696,11 +1758,14 @@ const SUITES = [
     // existing expectation moved; the Grok dialect did not exist when 1.0.0
     // was written, so nothing that passed 1.0.0 fails 1.1.0 except an
     // implementation that claims the harness and answers it wrongly.
-    vectors_version: "1.1.0",
+    // 1.2.0 (APRV-350): a MINOR bump for the same reason 1.1.0 was one. The
+    // nine `muse-*` vectors are new, no existing expectation moved, and the
+    // Muse dialect did not exist when 1.1.0 was written.
+    vectors_version: "1.2.0",
     algorithm:
       "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
     description:
-      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors.",
+      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors. The `muse-*` vectors cover Meta Muse Code's own tool names (`read_file`, `search` with its ARRAY of paths, `bash` with a per-call `workdir`) and one refusal that is not about the action at all: `muse-contributor-model-denies-an-allowed-read` sends a read INSIDE the scope, which every other vector allows, and expects a deny, because a Contributor-tier session discloses every byte it reads and the guard therefore sits above policy resolution. An implementation that resolved that vector by policy would allow it.",
     vectors: readScopeVectors,
   },
   {

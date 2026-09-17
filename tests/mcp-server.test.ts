@@ -285,6 +285,10 @@ test("mcp: the exclusions are agent-facing verbs, each with a stated reason", ()
     "hook claude-code",
     "hook codex",
     "hook cursor",
+    // APRV-350. Every harness hook verb reads one event from stdin, which on a
+    // stdio server is the JSON-RPC stream, so each one joins this list as it
+    // lands. `hook grok` is absent because it has no registry entry to exclude.
+    "hook muse",
     "log follow",
   ]);
 });
