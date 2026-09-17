@@ -209,6 +209,27 @@ test("the force-unavailable override refuses too: it can only ever tighten", () 
   assert.match((planned as ConfineRefusal).message, /no opt-out and no raw fallback/u);
 });
 
+test("the write rules and APRV-347's read jail compose, and the deny order holds", () => {
+  const room = "/private/tmp/approval-codex-session-example";
+  const canonical = "/private/tmp/approval-codex-canonical-example";
+  const vault = "/private/tmp/approval-codex-canonical-example/.approval/vault.json";
+  const profile = seatbeltProfile({
+    loopback: false,
+    denyRead: [vault],
+    writeAllow: [room],
+    allowRead: [room, canonical],
+  });
+  assert.match(profile, /\(deny file-read\*\)/u);
+  assert.match(profile, /\(deny file-write\*\)/u);
+  // SBPL takes the LAST matching rule, so the credential denial must come after
+  // the jail's allows or a vault inside an allowed root would be readable.
+  assert.ok(
+    profile.indexOf(`(allow file-read* (subpath "${canonical}"))`) <
+      profile.indexOf(`(deny file-read* (literal "${vault}"))`),
+    "the credential denial must be the last word on that path",
+  );
+});
+
 test("the profile denies every write outside the disposable workspace", () => {
   const room = "/private/tmp/approval-codex-session-example";
   const profile = seatbeltProfile({ loopback: false, denyRead: [], writeAllow: [room] });
@@ -390,6 +411,80 @@ test("confined, the credential material beside the log cannot be read", { skip: 
     assert.notEqual(ran.exitCode, 0);
     assert.equal(ran.stdout.includes(TOKEN), false);
     assert.equal(ran.stderr.includes(TOKEN), false);
+  } finally {
+    room.dispose();
+  }
+});
+
+test("the read jail is two roots: the two workspaces and nothing else", { skip: SKIP }, () => {
+  const one = unit();
+  const room = session(one);
+  try {
+    assert.deepEqual(room.readAllow, [room.workspace, one.installation.root]);
+    // The gate home is not a root, so it is denied by the JAIL and not only by
+    // the credential deny-list. That is the half a deny-list cannot cover: it
+    // has to have heard of a path to deny it.
+    assert.equal(room.readAllow.some((root) => one.installation.logPath.startsWith(`${root}/`)), false);
+  } finally {
+    room.dispose();
+  }
+});
+
+test("confined, the canonical workspace is READABLE: the jail is not a wall", { skip: SKIP }, () => {
+  // The control that makes the next case mean something. A jail that denied
+  // everything would pass a denial test and be useless for the work.
+  const one = unit();
+  writeFileSync(join(one.installation.root, "readable.txt"), "visible", "utf8");
+  const room = session(one);
+  try {
+    const path = script(room.workspace, "read-canonical.mjs", "import { readFileSync } from 'node:fs';\nprocess.stdout.write(readFileSync(process.argv[2], 'utf8'));\n");
+    const ran = runConfined(room, process.execPath, [path, join(one.installation.root, "readable.txt")]);
+    if (!ran.ok) assert.fail(`${ran.code}: ${ran.message}`);
+    assert.equal(ran.exitCode, 0, ran.stderr);
+    assert.equal(ran.stdout, "visible");
+  } finally {
+    room.dispose();
+  }
+});
+
+test("confined, a file outside both workspaces is unreadable even with no deny rule", { skip: SKIP }, () => {
+  // APRV-347's jail doing the thing `denyRead` structurally cannot: this file
+  // is named by nothing, is not credential-shaped, and sits beside the two
+  // roots rather than inside either. A deny-list would have had to know it
+  // existed.
+  const one = unit();
+  const outside = join(one.dir, "unrelated-notes.txt");
+  writeFileSync(outside, "SECRET-BESIDE-THE-ROOTS", "utf8");
+  const room = session(one);
+  const path = script(room.workspace, "read-outside.mjs", "import { readFileSync } from 'node:fs';\nprocess.stdout.write(readFileSync(process.argv[2], 'utf8'));\n");
+  try {
+    const control = spawnSync(process.execPath, [path, outside], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(control.status, 0, control.stderr);
+    assert.ok(control.stdout.includes("SECRET-BESIDE-THE-ROOTS"));
+
+    const ran = runConfined(room, process.execPath, [path, outside]);
+    if (!ran.ok) assert.fail(`${ran.code}: ${ran.message}`);
+    assert.notEqual(ran.exitCode, 0);
+    assert.equal(ran.stdout.includes("SECRET-BESIDE-THE-ROOTS"), false);
+    assert.equal(ran.stderr.includes("SECRET-BESIDE-THE-ROOTS"), false);
+  } finally {
+    room.dispose();
+  }
+});
+
+test("confined, the gate's own log is unreadable, not merely unwritable", { skip: SKIP }, () => {
+  const one = unit();
+  const room = session(one);
+  const path = script(room.workspace, "read-log.mjs", "import { readFileSync } from 'node:fs';\nprocess.stdout.write(readFileSync(process.argv[2], 'utf8'));\n");
+  try {
+    const control = spawnSync(process.execPath, [path, one.installation.logPath], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(control.status, 0, control.stderr);
+    assert.ok(control.stdout.includes("policy.updated"));
+
+    const ran = runConfined(room, process.execPath, [path, one.installation.logPath]);
+    if (!ran.ok) assert.fail(`${ran.code}: ${ran.message}`);
+    assert.notEqual(ran.exitCode, 0);
+    assert.equal(ran.stdout.includes("policy.updated"), false);
   } finally {
     room.dispose();
   }

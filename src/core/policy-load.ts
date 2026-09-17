@@ -76,6 +76,7 @@ import { scanFences, type FenceScan } from "./md-fence.js";
 // must never have from the resolution it floors.
 import { resolve, STRICTNESS } from "./policy-match.js";
 import { promptBlockErrors } from "./prompt-layout.js";
+import type { ReadScope } from "./read-scope.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -268,6 +269,23 @@ export interface Policy {
    * inoperative.
    */
   protected_paths?: ProtectedPathEntry[];
+  /**
+   * Amended SPEC.md §5.2 (APRV-347): directories an agent's reads may stay
+   * inside, beyond the built-in roots.
+   *
+   * ADDITIVE, with the same discipline `protected_paths` has and for a sharper
+   * reason: the built-in roots (the gate root, the session scratchpad, the
+   * system temp root) are in scope whatever this says, because a runtime denied
+   * its own policy and log could not run, and a policy that could NARROW its
+   * own read scope would be a policy an agent could edit until nothing was
+   * gated. Absent means the built-ins alone, which is the muse jail with no
+   * grammar at all: the gate root is the directory holding this file.
+   *
+   * Nothing here is resolved by the loader. `core/read-scope.ts` turns these
+   * into effective roots and `src/cli/hook.ts` resolves them on disk, so a
+   * symlink cannot smuggle a read out of one.
+   */
+  read_scope?: ReadScope;
   approvers?: Record<string, { channels: string[] }>;
   classes?: Record<string, PolicyClassRule>;
   /**

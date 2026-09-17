@@ -51,6 +51,7 @@
 import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { constants as osConstants } from "node:os";
+import { dirname } from "node:path";
 
 import { childEnvironment } from "../core/child-env.js";
 import { loadPolicy } from "../core/policy-load.js";
@@ -62,6 +63,7 @@ import {
 } from "../core/sandbox.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import { parseFlags, boolFlag, stringFlag, type FlagKind } from "./args.js";
+import { resolveReadRoots } from "./hook.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { SANDBOX_HELP } from "./help.js";
 import type { Streams } from "./main.js";
@@ -73,6 +75,7 @@ const EXIT_COMMAND_NOT_RUN = 127;
 
 const FLAGS: Record<string, FlagKind> = {
   "--allow-loopback": "boolean",
+  "--read-jail": "boolean",
   "--log": "string",
   "--long": "boolean",
   "--help": "boolean",
@@ -126,7 +129,8 @@ export function commandSandbox(argv: string[], streams: Streams, cwd: string): n
   }
 
   const logPath = stringFlag(parsed.flags, "--log") ?? DEFAULT_LOG_PATH;
-  const child = childEnvironment({ passphraseEnv: passphraseEnvFor(loadPolicy({ dir: cwd })) });
+  const policy = loadPolicy({ dir: cwd });
+  const child = childEnvironment({ passphraseEnv: passphraseEnvFor(policy) });
   const resolved = resolveExecutable(command, child.env);
   if (resolved === null) {
     // Resolved HERE rather than left to the wrapper: `sandbox-exec` execs
@@ -136,9 +140,26 @@ export function commandSandbox(argv: string[], streams: Streams, cwd: string): n
     return EXIT_COMMAND_NOT_RUN;
   }
 
+  // APRV-347. The read jail, from the same two sources `approval run` reads it
+  // from: the policy declaring a `read_scope` block turns it on for every
+  // command this verb wraps, and `--read-jail` turns it on for one command
+  // whether the policy declares one or not. There is no flag that turns it OFF
+  // where the policy asked for it — a flag an agent can pass must only ever be
+  // able to make the room smaller.
+  const declared = policy.ok ? policy.policy.read_scope : undefined;
+  const wantJail = declared !== undefined || boolFlag(parsed.flags, "--read-jail");
+  const readJail = wantJail
+    ? resolveReadRoots(
+        cwd,
+        policy.ok ? dirname(policy.source.path) : cwd,
+        declared?.roots,
+      )
+    : [];
+
   const wrapped = wrapForSandbox(detection.mechanism, resolved, childArgv.slice(1), {
     loopback: boolFlag(parsed.flags, "--allow-loopback"),
     denyRead: credentialPathsFor(logPath),
+    ...(readJail.length === 0 ? {} : { allowRead: readJail }),
   });
   try {
     const result = spawnSync(wrapped.command, wrapped.args, {

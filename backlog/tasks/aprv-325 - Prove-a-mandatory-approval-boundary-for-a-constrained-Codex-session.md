@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@opus-lane-codex-broker'
 created_date: '2026-09-09 06:53'
-updated_date: '2026-09-17 01:59'
+updated_date: '2026-09-17 02:19'
 labels: []
 dependencies: []
 references:
@@ -74,6 +74,8 @@ AC4, activation, rollback and delivery. docs/codex-activation.md now carries bot
 Delivery to GitHub: APRV-325.1 in PR 366, APRV-325.2.1 in PR 380, APRV-325.2 in PR 406, merged at 2026-09-17T01:50:11Z as e9b6a817a2eea7ae36d9bfbf6be6e3f89c29e084, and APRV-325.3 in PR 413, fully green on run 35171566676 and in the merge queue. APRV-311's runtime landed on origin/main as 92fb4c4 and APRV-315's runbook as a3eaff3, both through PR 408.
 
 What remains, named rather than absorbed into a checked box. Read scoping is not in this boundary: Lane 3's allowRead read profile had not landed on origin/main, so a confined shell still reads whatever the host user can read, and APRV-325.3's AC2 is deliberately unchecked for that reason and because nothing here demonstrates anything about a desktop application, browser tool or second MCP server started outside the room. APRV-311's own AC1 and AC2 remain open and are Lane 4b's to finalize; its runtime is on main and its native activation stays blocked on an upstream contract. APRV-315's AC2, the live Telegram rejection-then-approval pair, is Carter's morning step and has not happened. No part of this record should be read as saying an installation is a mandatory boundary today: what is proven is that the canonical workspace is writable only through the broker, and that a shell this runtime starts cannot reach it, credentials or the network.
+
+Correction to the residual-capability list above, recorded rather than edited away. Lane 3's read profile (APRV-347) landed in PR 411 while this spike was being closed, and APRV-325.3 then built the read leg against it. A confined session's reads are jailed to exactly two roots, the disposable workspace and the canonical workspace, so the gate home, other repositories and the operator's keys are unreadable rather than merely undeclared. The residual capability that remains is narrower and different in kind: a secret committed INSIDE the canonical workspace is inside a root the session may read, because the jail is a control over paths and a session has to read the tree it is reasoning about. Everything else in the earlier list still stands, including that a desktop application started outside the room is unconstrained.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

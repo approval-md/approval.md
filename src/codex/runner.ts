@@ -14,10 +14,11 @@
  * |---|---|
  * | canonical workspace writes | Seatbelt `(deny file-write*)` with an allow-list that names only the disposable workspace |
  * | gate writes (log, policy, vault, keys) | the same deny; the gate home is not on the allow-list |
- * | ambient credentials | `core/child-env.ts` strips them from the environment before the spawn |
- * | credential material on disk | Seatbelt `denyRead` over the vault, the env map and the sealing keys |
+ * | reads of anything but the two workspaces | Seatbelt `(deny file-read*)` with an allow-list of two roots (APRV-347's read jail) |
+ * | ambient credentials | `core/child-env.ts`, then {@link CONFINED_ENV_ALLOW} |
+ * | credential material on disk | Seatbelt `denyRead` over the vault, the env map and the sealing keys, emitted after the jail's allows so it is the last word |
  * | external egress | Seatbelt `(deny network-outbound)`, loopback included |
- * | mutable executor code | the broker, the CLI and the pinned Node live under the root-owned install root, which is not on the write allow-list either |
+ * | mutable executor code | the broker, the CLI and the pinned Node live under the root-owned install root, which is on neither allow-list |
  *
  * ## No opt-out, and no raw fallback
  *
@@ -141,7 +142,24 @@ export interface ConfinedSession {
   mechanism: SandboxMechanism;
   /** Absolute subtrees the profile allows writes to. */
   writeAllow: readonly string[];
-  /** Absolute paths the profile denies reads of. */
+  /**
+   * Absolute directories the profile allows reads of (APRV-347's read jail),
+   * with everything else denied.
+   *
+   * Two roots, and no more: the disposable workspace, and the canonical
+   * workspace. A session has to READ the tree it is reasoning about, which is
+   * why the canonical workspace is here and why write confinement rather than
+   * read denial is what stops it changing one. Everything the operator's home
+   * holds beside it — other repositories, other credentials, `~/.ssh`, the gate
+   * home — is outside the jail and unreadable, which is the half `denyRead`
+   * alone could never cover, because a deny-list has to have heard of a path to
+   * deny it.
+   *
+   * `core/sandbox.ts` adds the fixed runtime set and the executable's own
+   * install prefix itself, so nothing here has to name a toolchain.
+   */
+  readAllow: readonly string[];
+  /** Absolute paths the profile denies reads of, inside the jail or out. */
   denyRead: readonly string[];
   /** The child's environment: {@link CONFINED_ENV_ALLOW} and the session's own. */
   env: Record<string, string>;
@@ -233,6 +251,7 @@ export function planConfinedSession(
       // install root and the rest of the filesystem are absent, which is what
       // makes this an allow-list rather than a wish.
       writeAllow: [workspace],
+      readAllow: [workspace, installation.root],
       denyRead: credentialPathsFor(installation.logPath),
       env,
       envStripped: stripped,
@@ -298,6 +317,7 @@ export function runConfined(
     loopback: false,
     denyRead: session.denyRead,
     writeAllow: session.writeAllow,
+    allowRead: session.readAllow,
   });
   try {
     const result = spawnSync(wrapped.command, wrapped.args, {

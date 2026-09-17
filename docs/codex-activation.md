@@ -306,9 +306,11 @@ Human-only steps are marked. Nothing an agent runs performs them.
    approval codex start --manifest /opt/approval/instance.json --json
    ```
 
-   Expect `"egress":"denied"`, a `write_allow` of exactly one path, and that
-   path not being the canonical workspace. An unsupported host refuses here with
-   `sandbox-unsupported` rather than running the shell and calling it confined.
+   Expect `"egress":"denied"`, a `write_allow` of exactly one path that is not
+   the canonical workspace, and a `read_allow` of exactly two roots — the
+   disposable workspace and the canonical workspace — with the gate home in
+   neither. An unsupported host refuses here with `sandbox-unsupported` rather
+   than running the shell and calling it confined.
 
 5. **(human)** Point the Codex host at the strict server, whose invocation the
    manifest pins:
@@ -353,9 +355,14 @@ Subtraction, and it needs no new state.
 
 ### What this activation does not buy
 
-Read scoping is not part of it: the room denies writes and egress, and a
-confined shell can still read what the host can read. The confinement covers
-processes this runtime spawns and their descendants, on macOS; a Codex desktop
-application a person starts **outside** `codex start` is not in the room, and
-`docs/codex-boundary-probe.md` holds what was measured about it. Linux refuses
-rather than running unconfined. Inbound sockets are not denied.
+The confinement covers processes this runtime spawns and their descendants, on
+macOS. A Codex desktop application a person starts **outside** `codex start` is
+not in the room, and `docs/codex-boundary-probe.md` holds what was measured
+about it. Linux refuses rather than running unconfined. Inbound sockets are not
+denied.
+
+Read scoping IS part of it, since APRV-347's jail landed, and its limit is worth
+saying plainly: the jail is a control over paths, so a secret someone committed
+inside the canonical workspace is inside a root the session may read and no
+sandbox rule changes that. What it buys is that everything outside the two roots
+is unreadable whether or not anyone thought to name it.

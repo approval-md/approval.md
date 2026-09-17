@@ -1111,11 +1111,12 @@ const VERBS: VerbSpec[] = [
   {
     name: "sandbox",
     purpose:
-      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied.",
+      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied. Since APRV-347 it also confines what the child may READ: a policy declaring a `read_scope` block turns the profile deny-default for file reads and opens the gate root and whatever that block adds, and `--read-jail` applies the same confinement to one command whether the policy declares a block or not. There is no flag that turns the jail off where a policy asked for it.",
     human_only: false,
     input: input({
       flags: {
         "--allow-loopback": "boolean",
+        "--read-jail": "boolean",
         ...LOG_FLAG,
         ...HELP_FLAGS,
       },
@@ -2835,7 +2836,7 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "start",
     purpose:
-      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable, the gate's log, policy, vault and keys are neither, credential-bearing variables are withheld from the environment, and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
+      "Prepare a confined Codex session and, with `-- <command>`, run something inside it (APRV-325.3). The shell gets a disposable workspace that is the ONLY path it may write; the canonical workspace is readable and never writable; reads are jailed to exactly those two roots, so the gate home and everything else the host holds are unreadable; the environment is an allow-list rather than a filtered copy of the operator's; and outbound network is denied with loopback. There is no opt-out flag and no unwrapped fallback: a host with no sandbox mechanism refuses rather than running the shell and calling it confined. With no `-- <command>` it reports the room and runs nothing. Its exit code is the child's.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
     input: input({

@@ -5,9 +5,9 @@ title: >-
   laundered side effects fail closed
 status: In Progress
 assignee:
-  - '@opus-193'
+  - '@opus-lane-readscope'
 created_date: '2026-09-01 03:21'
-updated_date: '2026-09-09 03:26'
+updated_date: '2026-09-17 01:25'
 labels:
   - security
   - dogfood
@@ -31,7 +31,7 @@ Deliverables: the sandbox profile and spawn wiring for dev-fleet agent sessions,
 <!-- AC:BEGIN -->
 - [ ] #1 A sandbox profile denies outbound network for allowed-class exec (loopback to the gate daemon excepted), wired into how dev-fleet agent sessions run commands; profile and wiring committed
 - [x] #2 Laundering demo: an allowed command (npm test or node script) attempting an SMTP send and a webhook POST is blocked by the sandbox, shown in a test or recorded transcript
-- [ ] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
+- [x] #3 Credential-starvation confirmed: the same laundered code cannot read vault material or .approval/env from an agent session, tested
 - [x] #4 Legitimate-exec survey: what allowed commands need network (installs, localhost test servers), each with a carve-out or a documented refusal
 - [x] #5 SPEC and CLAUDE.md amendment text drafted for human sign-off, not applied
 - [x] #6 npm test passes; lint clean
@@ -49,6 +49,12 @@ BUILD LANE (opus-193). The design lane (design/aprv-193-starve-the-code.md, comm
 6. Tests: tests/sandbox.test.ts with loopback SMTP and HTTP stubs. The laundering script (an allowed node script) reaches both stubs unsandboxed and is refused under the profile, so the test proves the profile does the blocking; the same script cannot read the vault, .approval/env, or a credential-bearing variable. Plus the classifier cases and the approval run record.
 7. docs/sandboxed-exec.md: the legitimate-exec survey as a table (installs, localhost test servers, git/gh, channels, DNS), each row with a carve-out or a documented refusal, and the fleet runbook. docs/proposals/aprv-193-amendments.md carries the SPEC 7/10.4/11.1/11.2 and CLAUDE.md text for human sign-off; SPEC.md and CLAUDE.md are NOT touched.
 8. npm run build, lint, typecheck, and the execute/hook/adapter/classifier suites plus the new ones. One commit, task file included, task left In Progress.
+
+READ-SCOPE LANE (AC1 and AC3 only). AC1: the profile wired into the two spawn sites, driven by the attested policy rather than a flag.
+
+A policy declaring read_scope turns the jail on for approval run and approval sandbox; --read-jail adds it for one command; nothing turns it off where the policy asked.
+
+AC3: tests/sandbox-credential-starvation.test.ts runs a real laundering script under sandbox-exec against the vault, the env map and the keys, with an unsandboxed control that must succeed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -126,4 +132,26 @@ VERIFICATION (this worktree, macOS 15 on arm64, 2026-09-06).
 NO PROTECTED PATH TOUCHED. SPEC.md, CLAUDE.md, AGENTS.md, APPROVAL.md, .approval/ and .claude/ are unmodified; the amendment text lives in docs/proposals/ and waits for a human.
 
 2026-09-09 Codex review against origin/main 5a4c1a1: reopened AC1 and AC3 rather than narrowing the original task to match the implementation. Merged 4c11c66 delivers macOS per-command Seatbelt containment. Hook enforcement remains opt-in/default off, unsupported platforms may run unprotected unless strict mode is set, and an unsandboxed agent harness can still access capabilities outside that child. The network profile also denies loopback by default because the daemon uses files; explicit loopback allowance is documented. Existing sandbox tests prove the bounded child boundary, not fleet-wide or whole-session isolation. AC2/4/5 remain supported by the laundering tests, execution survey and explicitly unapplied draft. AC6 now has newer evidence superseding the old lane dependency failure: APRV321 full suite log /private/tmp/aprv321-full-suite.log records 4001 tests, 4000 pass, 0 fail, 1 skip, actual process exit 0; lint passed. PR356 subsequently passed all full CI shards on the unchanged runtime baseline. No sandbox activation, policy amendment or scope narrowing was performed. Remaining work is the original fleet requirement and explicit decisions on supported-platform enforcement, fallback and class-versus-token egress authority; whole-harness isolation requires a separate constrained model-egress design.
+
+READ-SCOPE LANE (opus, worktree agent-ac08008ff153ca007), 2026-09-16. Second commit of the APRV-347 PR. Scope taken: AC3, and the read-confinement half of AC1. AC1 is NOT checked; see below.
+
+AC3, DONE. tests/sandbox-credential-starvation.test.ts runs an ordinary node script (the class the hook ALLOWS) under a real sandbox-exec against the vault, the .approval/env source map and the sealing keys. It asserts DENIED on each and that neither secret's bytes appear anywhere in what the child produced.
+
+Three controls make that evidence rather than coincidence: unsandboxed the same script reads all three (today's behaviour, pinned so closing it is visible); the denial holds with NO read jail, so the property predates APRV-347; and with the root opened and an EMPTY denyRead the files ARE readable, which is what makes the other two cases evidence about credentialPathsFor rather than about the jail.
+
+AC1, NOT CHECKED, and the reason is the 2026-09-09 review's reason rather than a new one. What this lane wired: EgressAllowance.allowRead (APRV-347) reaches both spawn sites, so a policy declaring a read_scope block turns the deny-default read profile on for approval run and approval sandbox, and --read-jail adds it for one command.
+
+The switch is the POLICY and not a flag, on the invariant-4 reasoning: a flag an agent can pass may only ever make the room smaller, so --read-jail adds confinement and nothing removes it where the policy asked. Proven end to end through the CLI in tests/sandbox.test.ts: a sibling of the gate root is readable with no jail, unreadable by flag, and unreadable by policy with no flag at all, while the gate root stays readable.
+
+What this lane did NOT close, which is what the review reopened AC1 for: the agent HARNESS is still not in the room. approval sandbox -- claude is a session that cannot think, because a harness needs the model API and that is exactly what the profile denies; Seatbelt cannot express an egress allowlist by hostname, and the prior art solves it with a local proxy. APPROVAL_HOOK_REQUIRE_SANDBOX is also still default OFF.
+
+So AC1's remaining half is a constrained model-egress design, which is a task rather than a diff, and nobody should read a checked box as saying the fleet runs in the room. Carter decides whether AC1 is narrowed to per-command containment (in which case it is done) or kept as written and split; this lane did neither.
+
+AC5 UNCHANGED. The drafted SPEC and CLAUDE.md text in docs/proposals/aprv-193-amendments.md is still NOT applied, and landing this wiring did not require applying any of it: no new refusal code, no new invariant, no event-schema change. The SPEC hunks in this PR are APRV-347's class row and policy key, not APRV-193's drafts.
+
+GLOBAL INVARIANTS TOUCHED. Self-reported fields never reduce scrutiny: the jail's only switch that loosens is the ABSENCE of a key in a file an agent may not edit, and the runtime read set the profile opens is compiled in, so nothing the child or its caller reports widens the room. Fail closed: a read the jail cannot place is a read it refuses.
+
+The log is append-only and nothing new reads it back: approval sandbox still appends nothing, and the read jail is informational on no record at all. No refusal union was widened.
+
+VERIFICATION (macOS 15 arm64, Node 26). npm run build, typecheck and lint clean. node scripts/run-tests.mjs --only sandbox sandbox-read-jail sandbox-credential-starvation sandbox-probe cli-run cli-help cli-long-help cli-instructions command-class cli-hook cli-hook-read-scope: 698 tests, 697 pass, 0 fail, 1 skip (the opt-in external curl leg of sandbox-probe), exit 0. The sandbox suite itself is 27 tests, 27 pass, up one for the new CLI read-jail case.
 <!-- SECTION:NOTES:END -->

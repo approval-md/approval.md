@@ -1950,7 +1950,7 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
 ## sandbox
 
 ```
-approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+approval sandbox [--allow-loopback] [--read-jail] [--log <path>] -- <cmd> [args…]
 ```
 
 Runs a command with outbound network denied by the operating system. It appends
@@ -1987,6 +1987,15 @@ is a sandbox somebody turns off.
 **`--allow-loopback`** carves loopback back in, for a suite that starts its own
 server. It is a real widening: a port is a port, and anything listening on one is
 reachable from inside.
+
+**`--read-jail`** (APRV-347) goes the other way and makes the room smaller: file
+reads become deny-default, with the gate root, the scratch roots and a fixed
+runtime set opened by `subpath`. It is already on, without the flag, whenever
+the policy declares a `read_scope` block, which is the spelling an operator
+commits and attests; the flag is for trying it on one command first. There is no
+flag that turns the jail OFF where a policy asked for it, because a flag an agent
+can pass must only ever narrow what it can do. See
+[docs/sandboxed-exec.md](./sandboxed-exec.md) for the profile and its limits.
 
 **Exit 127** means the command was NOT run: this machine has no working sandbox
 primitive, or the command is not on `PATH`. Unlike `approval run`, this verb
@@ -6023,13 +6032,16 @@ command inside the room and exits with the child's own code.
 
 The shell gets a disposable workspace under the system temporary directory, and
 that workspace is the only path it may write. The canonical workspace is
-readable and never writable; so are the gate's log, policy, vault, environment
-map and sealing keys, and the vault, the environment map and the keys are not
-readable either. The environment is an allow-list rather than a filtered copy of
-the operator's, so a provider key nobody taught this runtime about is absent
-rather than forgotten. Outbound network is denied, loopback included.
-Descendants inherit all of it, which is the property that matters: a session
-does not write files by calling into this runtime, it spawns shells that do.
+readable and never writable. Reads are jailed to exactly those two roots
+(APRV-347), so the gate home, other repositories and everything else the
+operator's home holds are unreadable whether or not anyone thought to name them,
+and the credential denials are emitted after the jail's allows so they remain
+the last word on the vault, the environment map and the sealing keys. The
+environment is an allow-list rather than a filtered copy of the operator's, so a
+provider key nobody taught this runtime about is absent rather than forgotten.
+Outbound network is denied, loopback included. Descendants inherit all of it,
+which is the property that matters: a session does not write files by calling
+into this runtime, it spawns shells that do.
 
 There is no opt-out flag and no unwrapped fallback. approval run has
 --no-sandbox because a human's grant over exact bytes is authority to reach the

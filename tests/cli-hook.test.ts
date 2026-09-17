@@ -1946,7 +1946,26 @@ test("a report with no tool-use id, and one for an ungated tool, append nothing"
   );
   assert.equal(reportOf(anonymous)["code"], "post-tool-unidentified");
 
+  // `WebFetch` is in none of the adapter's three tables, so no start was ever
+  // written for it. `Read` used to stand here and no longer can: since APRV-347
+  // it is a READ tool, and a read outside the scope does get a start, so the
+  // post half has to look for one. A `Read` with no start reports
+  // `not-delegated` instead, which is the next case.
   const ungated = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      tool_name: "WebFetch",
+      tool_input: {},
+      tool_use_id: "tu-w",
+      tool_response: { type: "text", text: "" },
+    }),
+  );
+  assert.equal(reportOf(ungated)["code"], "post-tool-not-gated");
+
+  const unstarted = runCli(
     ["hook", "claude-code"],
     dir,
     JSON.stringify({
@@ -1958,7 +1977,7 @@ test("a report with no tool-use id, and one for an ungated tool, append nothing"
       tool_response: { type: "text", text: "" },
     }),
   );
-  assert.equal(reportOf(ungated)["code"], "post-tool-not-gated");
+  assert.equal(reportOf(unstarted)["code"], "post-tool-gate-refused:not-delegated");
   assert.equal(rawLog(dir), before);
 });
 

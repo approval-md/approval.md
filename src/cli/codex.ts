@@ -395,6 +395,7 @@ export async function commandCodex(argv: string[], streams: Streams, cwd: string
           canonical: session.canonical,
           mechanism: session.mechanism,
           write_allow: session.writeAllow,
+          read_allow: session.readAllow,
           deny_read: session.denyRead,
           env_stripped: session.envStripped,
           egress: "denied" as const,
@@ -404,6 +405,7 @@ export async function commandCodex(argv: string[], streams: Streams, cwd: string
           streams.out(`Confined session prepared with ${session.mechanism}.\n`);
           streams.out(`  disposable workspace (the only writable path): ${session.workspace}\n`);
           streams.out(`  canonical workspace (readable, never writable): ${session.canonical}\n`);
+          streams.out(`  readable at all (nothing else, gate home included): ${session.readAllow.join(", ")}\n`);
           streams.out(`  credential-bearing variables withheld: ${String(session.envStripped)}\n`);
           streams.out("  outbound network: denied, loopback included\n");
           streams.out("Pass `-- <command>` to run something inside it.\n");
