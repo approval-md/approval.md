@@ -5,12 +5,13 @@ status: In Progress
 assignee:
   - '@opus-lane-codex-native'
 created_date: '2026-09-08 07:24'
-updated_date: '2026-09-17 00:49'
+updated_date: '2026-09-17 07:38'
 labels: []
 dependencies:
   - APRV-310
 references:
   - 'https://learn.chatgpt.com/docs/hooks'
+  - 'APRV-348 upstream payload issue draft: docs/upstream/codex-hook-payload.md'
 priority: high
 type: feature
 ordinal: 229000
@@ -59,4 +60,6 @@ SPEC 11 invariants touched: refusals are machine-readable and distinct (the new 
 Evidence: run-tests --only cli-hook-codex cli-hook gave 142 tests, 142 pass, 0 fail, exit 0; the sweep --only conformance cli-hook cli-hook-cursor cli-hook-codex cli-hook-rewrite cli-hook-scope cli-doctor-codex codex-doctor human-only hook-module-graph gave 229 tests, 229 pass, 0 fail, exit 0. node conformance/run.mjs exit 0 with 302 vectors, 145 controls, manifest ok. build, typecheck and lint all exit 0. Full npm test is CI's.
 
 New tests: Codex post-phase input rejection reports and never prints a permission verdict; Codex derives one stable id for the Pre and Post of the same native call; Codex leaves the outcome open and names the execution.started it did not close; Codex stable ids close their own delegated execution once, and a duplicate refuses.
+
+APRV-348 (lane codex, 2026-09-17) drafted the upstream issue that names the condition for reopening AC1. The draft is at docs/upstream/codex-hook-payload.md and asks openai/codex for three separate things: the effective per-call execution directory on the shell pre-event, an outcome field plus a documented stable call id on the post-event, and an option for a hook to fail closed. Ask one is what AC1 waits on; ask two is what the outcome clause of AC2 waits on. docs/codex-hook.md and docs/integrations-considered.md now both name that issue as the activation condition. The operator posts the issue; the URL lands in APRV-348's notes.
 <!-- SECTION:NOTES:END -->
