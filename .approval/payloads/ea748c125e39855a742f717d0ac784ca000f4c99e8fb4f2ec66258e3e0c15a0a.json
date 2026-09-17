@@ -1,0 +1,1 @@
+{"command":"gh pr merge 379 --auto 2>&1; gh pr view 379 --json autoMergeRequest --jq '.autoMergeRequest'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

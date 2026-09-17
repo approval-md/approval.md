@@ -1,0 +1,1 @@
+{"command":"gh pr merge 407 --merge --auto 2>&1 | tail -5; echo \"---\"; gh pr view 407 --json autoMergeRequest,state,mergeStateStatus 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213"}

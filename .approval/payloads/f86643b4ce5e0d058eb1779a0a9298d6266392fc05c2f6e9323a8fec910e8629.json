@@ -1,0 +1,1 @@
+{"command":"git add backlog && git commit -m \"backlog: record APRV-325.2 CI outcome and the SPEC grant Carter owns\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\" 2>&1 | tail -3 && git push 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4ffb760dfce29add"}

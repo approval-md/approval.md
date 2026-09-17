@@ -1,0 +1,1 @@
+{"command":"gh pr merge 379 --merge --auto 2>&1; git fetch origin main 2>&1 | tail -1; git rev-parse origin/main HEAD","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}
