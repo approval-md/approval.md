@@ -1,0 +1,1 @@
+{"command":"gh run rerun 35155078883 --failed && echo rerun-requested","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

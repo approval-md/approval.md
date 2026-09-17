@@ -749,6 +749,44 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "policy",
+    subcommand: "apply",
+    purpose:
+      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
+    human_only: true,
+    input: input({
+      positionals: positionals(
+        [{ name: "proposal", description: "the proposal document to apply" }],
+        1,
+      ),
+      flags: {
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...AS_FLAG,
+        "--dry-run": "boolean",
+        "--no-amend": "boolean",
+        "--pr": "boolean",
+        "--yes": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        policy: STRING,
+        proposal: STRING,
+        pairs: INTEGER,
+        noop: BOOLEAN,
+        dryRun: BOOLEAN,
+      },
+      ["ok", "policy", "proposal", "pairs", "noop", "dryRun"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "register",
     purpose:
       "Validate a task file's `approval:` envelope against envelope.schema.json and append one task.registered event carrying the declared actions. FAIL CLOSED: an invalid envelope appends nothing. The file is read only. Registration is a proposal rather than a decision, so an agent may perform it, and it is the step that makes every later question about an action ('what class is this key?') answerable from the log.",
@@ -1078,11 +1116,12 @@ const VERBS: VerbSpec[] = [
   {
     name: "sandbox",
     purpose:
-      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied.",
+      "Run a command with outbound network denied by the operating system (macOS sandbox-exec), with the credential-bearing variables scrubbed out of its environment and the credential material beside the log unreadable to it. It exits with the child's own exit code and appends NOTHING: it removes a capability rather than authorizing anything, so there is no record to write and the gate stays reachable because its IPC is a file rather than a socket. This is what the hook cannot do for the commands it merely ALLOWS: `npm test` runs whatever an agent wrote a minute ago, so the command's name stopped describing its effect, and this is how such a command runs where its effects cannot leave. The classifier reads `approval sandbox -- <cmd>` as the class of <cmd>, so wrapping a command neither hides it from the gate nor is punished by it. Refuses with 127 on a machine with no sandbox primitive: it makes one promise and will not run a command it cannot keep that promise for. An agent HARNESS cannot run under this, because a harness needs the model API and that is exactly what is denied. Since APRV-347 it also confines what the child may READ: a policy declaring a `read_scope` block turns the profile deny-default for file reads and opens the gate root and whatever that block adds, and `--read-jail` applies the same confinement to one command whether the policy declares a block or not. There is no flag that turns the jail off where a policy asked for it.",
     human_only: false,
     input: input({
       flags: {
         "--allow-loopback": "boolean",
+        "--read-jail": "boolean",
         ...LOG_FLAG,
         ...HELP_FLAGS,
       },
@@ -2748,9 +2787,61 @@ const VERBS: VerbSpec[] = [
   },
   {
     name: "codex",
+    subcommand: "apply",
+    purpose:
+      "Apply one bounded typed workspace proposal through the gate (APRV-325.2). The manifest supplies the actor, workspace root, policy and log, and the proposal file supplies only operations and the policy digest it was built against; an unknown key is refused rather than ignored. One action is registered per distinct path class and never collapsed, every leg is authorized and started before any byte moves, and the change is staged, journaled and applied under a workspace lock. The outcome reported is what reading the workspace back proved: applied, not applied, or honestly unknown.",
+    human_only: true,
+    human_only_note:
+      "The broker is reached by a constrained Codex session through `codex serve`, which publishes exactly one tool. Publishing this verb on the broad agent MCP catalog would put a second door beside that one, and the whole point of the strict server is that there is only the one.",
+    input: input({
+      flags: {
+        "--manifest": "string",
+        "--proposal": "string",
+        "--token": "string",
+        "--require-exclusive-custody": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        version: { const: "approval.codex.broker.v1" },
+        task: STRING,
+        payload_hash: SHA256,
+        policy_sha256: SHA256,
+        legs: arrayOf(object(
+          { class: STRING, actionKey: STRING, mode: { enum: ["policy", "token"] } },
+          ["class", "actionKey", "mode"],
+        )),
+        custody: object(
+          { kind: { enum: ["os-exclusive", "advisory"] }, findings: arrayOf(STRING) },
+          ["kind", "findings"],
+        ),
+        state: { const: "after" },
+      },
+      ["ok", "version", "task", "payload_hash", "policy_sha256", "legs", "custody", "state"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
+    subcommand: "recover",
+    purpose:
+      "Read a workspace's retained transaction journal and report whether the workspace is in the approved before-state, the approved after-state, or neither. It changes nothing: a mixed workspace is a person's to reconcile, and a recovery that rolled one either way would be guessing which half was approved. Exits 1 on mixed.",
+    human_only: true,
+    human_only_note: "Reading a half-applied workspace is an operator's diagnosis and belongs beside the reconcile verb, which is human-only for the same reason.",
+    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
+  },
+  {
+    name: "codex",
     subcommand: "start",
     purpose:
-      "Reserved constrained-session launcher. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Reserved constrained-session launcher. It refuses codex-not-ready until the confined runner of APRV-325.3 ships; the broker alone confines no shell.",
     human_only: true,
     human_only_note: "Starting a constrained host session is an operator action and is absent from broad MCP.",
     input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
@@ -2762,13 +2853,13 @@ const VERBS: VerbSpec[] = [
     name: "codex",
     subcommand: "serve",
     purpose:
-      "Reserved strict MCP shim. It refuses codex-not-ready until the policy-bound broker and confined runner ship.",
+      "Serve the workspace broker over stdio as EXACTLY ONE MCP tool, `codex_workspace_apply`, with a positive server-side allowlist checked at call time as well as at list time. Distinct from `mcp serve`, whose catalog is this whole registry: a constrained session must reach one door and the same door next month. The published input schema carries no identity, path, class, token or sandbox argument, because none exists to remove.",
     human_only: true,
-    human_only_note: "The strict server is separate from and never published by the broad MCP server.",
-    input: input({ flags: { "--manifest": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    human_only_note: "The strict server is separate from and never published by the broad MCP server; starting one is an operator's act, as `mcp serve` is.",
+    input: input({ flags: { "--manifest": "string", "--require-exclusive-custody": "boolean", ...JSON_FLAG, ...HELP_FLAGS } }),
     output: null,
     error: ERROR_SCHEMA,
-    exit_codes: [OK, INTEGRITY, USAGE],
+    exit_codes: [OK, INTEGRITY, USAGE, IO],
   },
 
   {

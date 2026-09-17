@@ -349,6 +349,11 @@ Five overrides sit on top of the table:
   Paths the runtime does not protect on its own are unfloored. `design/` is
   protected only because the policy lists it, so its author is choosing the
   autonomy of a surface they invented, and a loose choice there narrows nothing.
+- **`read-out-of-scope` / `read-unreadable-path` / `read-out-of-scope-resolved`
+  → `read.file.out_of_scope`.** The read jail (APRV-347). A shell reader whose
+  target falls outside every read root takes this class instead of `read.shell`,
+  with the resolved path bound to the segment. Full rules in [The read
+  scope](#the-read-scope) below.
 - **`credential-path` / `credential-env` / `env-dump` → `account.credential`.**
   Credential material, whatever binary names it (APRV-194). A segment naming
   `.approval/vault*`, `.approval/keys/` or `.approval/env` is
@@ -590,6 +595,89 @@ reported value still has to resolve to a directory that is already a root.
 
 `approval hook classify` runs both halves in the same directory, so what it
 prints is what the hook decides.
+
+### The read scope
+
+`read.file.out_of_scope` (APRV-347) is the read-side mirror of the delete rule
+above. Before it, writes and deletes were path-scoped and reads were not, at any
+layer: every shell reader classified `read.shell` with no path bound, and `Read`,
+`Glob` and `Grep` were answered `allow` before classification ran. A policy could
+say a great deal about what an agent may write and nothing at all about what it
+may see.
+
+**The roots.** The GATE ROOT (the directory holding the policy file this hook
+resolved), the session scratchpad, and the system temp root. They are the same
+roots the delete rule computes, with the same three guards, plus the gate root
+at the front. A policy may WIDEN them and may not narrow them:
+
+```yaml
+read_scope:
+  roots:
+    - /opt/reference-corpus   # absolute, taken as written
+    - ../vendor               # relative, resolved against the gate root
+```
+
+The gate root is the whole of the feature for a single-project session. An agent
+working in `~/dev/muse` under a `~/dev/muse/APPROVAL.md` has `~/dev/muse` as its
+gate root, so every sibling under `~/dev` is out of scope with no grammar at all.
+
+**Text (pure, in the classifier).** For a reader the table knows — `cat`, `head`,
+`tail`, `grep`, `rg`, `ls`, `find`, `sed`, `wc`, `stat`, `file`, `diff`, `du`,
+`sort`, `uniq`, `cut`, `jq`, `tree`, and the checksum tools — the classifier
+works out which words are paths (all positionals for most; everything after the
+pattern for `grep`, `rg`, `sed` and `jq`, unless the pattern came in through
+`-e` or `-f`, in which case all of them; everything before the first primary for
+`find`) and answers only what the text settles: an ABSOLUTE target outside every
+root is `read.file.out_of_scope` (rule `read-out-of-scope`), and a target whose
+expansion is not in the text (`$VAR`, a glob, `~`) is too (rule
+`read-unreadable-path`). A relative target means nothing without a working
+directory, so it is left alone for the disk pass. `echo`, `printf`, `basename`,
+`dirname`, `readlink`, `realpath`, `test`, `which` and `pwd` are NOT scoped: they
+take a path without opening it, or their positionals are not paths at all.
+
+**Disk (impure, in the hook).** Every remaining `read.shell` segment is re-read
+against the hook's OWN directory, resolving the nearest existing ancestor and
+re-appending the tail, exactly as the delete rule does. It tightens and never
+loosens (rule `read-out-of-scope-resolved`):
+
+| the hook finds | class |
+|---|---|
+| every target resolves and lands inside a root | `read.shell`, rule unchanged |
+| a relative target resolves out of every root (`cat ../other/x`) | `read.file.out_of_scope` |
+| a symlink inside a root resolves out of it | `read.file.out_of_scope` |
+| nothing on the path resolves | `read.file.out_of_scope` |
+| the command names NO target (`ls`, a piped `grep needle`) | checked against the working directory |
+
+**The read tools.** `Read`, `Glob` and `Grep` are gated by the same roots, from
+the path in `file_path`, `notebook_path` or `path`. A call naming no path at all
+keeps the `is not a gated tool` allow it has always had: `Glob` and `Grep`
+default to the workspace, and a path the harness did not send is not one this
+runtime may invent. The bytes a grant binds are `{tool, rule, file, input}` with
+`file` RESOLVED, so a grant over one spelling cannot be spent on another.
+
+**Registering it.** The read gate only sees a tool call the harness sends it, so
+add the three tools to the `PreToolUse` matcher when you want it:
+
+```json
+{ "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Glob|Grep" }
+```
+
+This is left out of the matchers under [Installing it](#installing-it) on
+purpose, and the reason is cost rather than doubt. A read is the most frequent
+tool call a session makes, and every matched call is a Node process start. The
+hook keeps that as cheap as it can — an in-scope read is answered before the
+policy is loaded, before the log is read and before the window is looked up,
+because `read_scope` can only widen the roots and a target already inside the
+built-in ones is inside the effective ones whatever the policy says — but a
+process is still a process. Register the three tools when the scope is worth
+that, and leave them out when it is not.
+
+**What it does not reach.** A read performed by a tool this runtime has no name
+for, a read inside code the session runs (`node script.mjs` opening whatever it
+likes), and a read by any process the harness did not route here. The classifier
+is a gate on what is ASKED for. For custody over what a process CAN open, the
+Seatbelt read jail in [docs/sandboxed-exec.md](./sandboxed-exec.md) denies file
+reads by default and opens the same roots.
 
 ### What the approver reads (APRV-124)
 

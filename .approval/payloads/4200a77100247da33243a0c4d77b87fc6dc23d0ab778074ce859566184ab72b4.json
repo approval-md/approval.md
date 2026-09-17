@@ -1,0 +1,1 @@
+{"command":"gh pr create --title \"feat: human sign-off record for protected paths (APRV-338)\" --body-file /tmp/lane2-pr.md 2>&1 | tail -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213"}

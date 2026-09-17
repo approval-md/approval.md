@@ -23,6 +23,7 @@
     "LICENSE",
     "NOTICE",
     "docs/codex-enforced-session.md",
+    "docs/codex-workspace-broker.md",
     "templates/codex"
   ],
   "repository": "github:approval-md/approval.md",

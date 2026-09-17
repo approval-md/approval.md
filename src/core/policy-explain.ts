@@ -36,6 +36,8 @@
  * `resolve()` already imposes a total order on candidates.
  */
 
+import { dirname } from "node:path";
+
 import type {
   Autonomy,
   DeclaredAutonomy,
@@ -50,6 +52,11 @@ import {
   type Provenance,
   type Specificity,
 } from "./policy-match.js";
+import {
+  READ_OUT_OF_SCOPE_CLASS,
+  effectiveReadRoots,
+  renderReadRoots,
+} from "./read-scope.js";
 
 /**
  * Action-class grammar for a *concrete* class (not a pattern).
@@ -158,6 +165,31 @@ export interface Explanation {
 export interface ExplainOptions {
   /** `false` engages the SPEC.md §7 irreversibility floor. */
   reversible?: boolean;
+  /**
+   * The system read roots the CALLER resolved — the session scratchpad and the
+   * temp root (APRV-347).
+   *
+   * Passed in rather than computed here, because this module is pure and those
+   * come off an environment and a filesystem. Absent means the line names the
+   * gate root and the policy's own entries and says the system roots were not
+   * resolved, which is the honest thing for a caller that did not resolve them.
+   */
+  systemReadRoots?: readonly string[];
+}
+
+/**
+ * Classes whose explanation should name the read scope in force (APRV-347).
+ *
+ * The FILE readers, and not every `read.*`. `read.web` and `read.vcs.remote`
+ * reach no file, so a scope line under them would be noise on an explanation
+ * that is otherwise exactly as long as it needs to be.
+ */
+function scopesReads(actionClass: string): boolean {
+  return (
+    actionClass === READ_OUT_OF_SCOPE_CLASS ||
+    actionClass === "read.shell" ||
+    actionClass.startsWith("read.file")
+  );
 }
 
 
@@ -223,6 +255,31 @@ export function explain(
   }
 
   decisionPath.push(`policy loaded from ${load.source.path}`);
+
+  // APRV-347. The read scope is the fact a reader of a read class most needs
+  // and cannot get anywhere else: the autonomy answers "what happens", and this
+  // answers "to which reads". Printed for read classes only, so no other
+  // explanation grows a line about a key it does not turn on.
+  if (scopesReads(actionClass)) {
+    const gateRoot = dirname(load.source.path);
+    const declared = load.policy.read_scope?.roots;
+    const roots = effectiveReadRoots({
+      gateRoot,
+      ...(declared === undefined ? {} : { declared }),
+      ...(options.systemReadRoots === undefined ? {} : { systemRoots: options.systemReadRoots }),
+    });
+    decisionPath.push(
+      `read scope (APRV-347): reads resolving inside ${renderReadRoots(roots)} are ordinary ${
+        declared === undefined
+          ? "reads; the policy declares no `read_scope`, so these are the built-in roots"
+          : `reads; \`read_scope.roots\` widened them with ${renderReadRoots(declared)}`
+      }. A read resolving outside all of them is \`${READ_OUT_OF_SCOPE_CLASS}\`${
+        options.systemReadRoots === undefined
+          ? " (the session scratchpad and the system temp root are resolved by the runtime and are not shown here)"
+          : ""
+      }`,
+    );
+  }
 
   const candidates = annotate(final.candidates, final.matched?.pattern ?? null);
   describeCandidates(decisionPath, actionClass, candidates);
