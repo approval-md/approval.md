@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 22:56'
-updated_date: '2026-09-17 00:26'
+updated_date: '2026-09-17 01:59'
 labels: []
 dependencies: []
 modified_files:
@@ -43,6 +43,8 @@ Closeout verification (lane/closeouts, 2026-09-16). The code is on main: PR #380
 AC1 re-verified against the merged bytes rather than against intent: tests/daemon-advance-adopt.test.ts:85-120 defines withReliableCleanup, which runs every registered closer whether the body resolved or threw, rethrows the original body error unchanged when all cleanups succeed, and otherwise raises an AggregateError carrying the body error as cause. The async adoption test at :562-601 registers the daemon stop and mock.close() through it, so both handles close on the assertion path as well as the success path. Assertions and timeouts are unchanged; no src/ file is touched by the diff.
 
 AC2 re-verified by running the focused suite from a clean worktree at merged main: node scripts/run-tests.mjs --only daemon-advance-adopt, wrapper exit 0, tests 8 / pass 8 / fail 0 (log /tmp/lane5.log). The suite terminates instead of hanging, which is the regression's whole point. The full-suite half of AC2 stands on the run already recorded above (4,097 passed, 1 skipped, 0 failed, exit 0, 544.96s, /private/tmp/aprv328-full-final.log) plus the three merged full-gate shards in run 34416802253, all of which produced an actual exit and summary.
+
+Closeout delivered in pull request #414 (lane/closeouts).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

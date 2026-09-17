@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 22:11'
-updated_date: '2026-09-17 00:27'
+updated_date: '2026-09-17 01:59'
 labels: []
 dependencies: []
 documentation:
@@ -56,6 +56,8 @@ Closeout verification (lane/closeouts, 2026-09-16). Source is on main: PR #380 M
 Re-ran the adversarial suite from a clean worktree at merged main: node scripts/run-tests.mjs --only codex-workspace-plan, wrapper exit 0, tests 13 / pass 13 / fail 0 (/tmp/lane5.log). The thirteen cases are the AC evidence, one to one. AC1: closed-operation binding, the exact 1 MiB canonical base64 boundary, malformed and noncanonical base64 with aggregate overflow, unknown fields/kinds/over-64 operations plus non-agent contexts (the caller-authority override refusal), ambiguous/non-NFC/malformed-Unicode/escaping paths, duplicate/case-aliased/overlapping/chained endpoints, and missing or aliased parents, existing destinations, symlinks, hardlinks and directories. AC2: human-only built-ins and routed classes refused before endpoint inspection, and one sorted action leg per distinct permitted endpoint class, each bound to the full proposal and the trusted policy digest. AC3: the four-operation binding case plus expected-hash and combined-size checks, and revalidation refusing content, context and intermediate ancestor identity drift, with a symbolic workspace root rejected outright.
 
 AC4 had one real gap, now closed. The adversarial tests passed, and docs/codex-workspace-planner.md already stated that the path snapshots do not establish OS custody or confine hostile concurrent renames, and that a future broker must retain exclusive write custody and authorize every leg. It did not state the atomic-write half of the criterion. Rather than check AC4 on three of its four clauses, this closeout added a short explicit list to the end of that document naming all four things a plan is not: not OS custody, not an atomic write (the planner writes nothing, and a broker applying legs one at a time could still stop halfway), not approval (classification names a class and mints no grant or token), and not race-proof enforcement (revalidation reports the state it observed when it looked). Documentation only, no source change. Verified: build exit 0; docs-guard plus codex-workspace-plan 29/29, fail 0, exit 0.
+
+Closeout delivered in pull request #414 (lane/closeouts).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

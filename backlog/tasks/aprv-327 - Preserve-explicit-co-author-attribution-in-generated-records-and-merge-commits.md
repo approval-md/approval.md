@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 22:39'
-updated_date: '2026-09-17 00:30'
+updated_date: '2026-09-17 01:58'
 labels: []
 dependencies: []
 priority: high
@@ -55,4 +55,6 @@ AC3 checked. tests/cli-log-verbs.test.ts has the three cases the criterion names
 AC4 NOT checked, and it is the only thing left. Its historical half holds: no shared history was rewritten by this task. Its live half needs the repository setting this package deliberately does not change. Read today, the repository merge_commit_message is still PR_TITLE, with merge_commit_title MERGE_MESSAGE which is already correct, so a queued merge commit still cannot carry the PR body's trailer and there is as yet nothing to verify. That flip is Carter's, section 3 of private/runbook-2026-09-16.md, one command: gh api -X PATCH repos/approval-md/approval.md -f merge_commit_message=PR_BODY. After it, the first records pull request the daemon merges is the proof, and AC4 closes on that merge commit's body carrying the trailer. The task stays In Progress until then.
 
 Typo correction to the AC3 note above: the cli-reference sentence reads that the trailer does not set an event actor, name an approver, grant authority, or derive an identity from the log. The word was mistyped as ident in the preceding paragraph.
+
+Closeout delivered in pull request #414 (lane/closeouts). AC4 still waits on the repository setting, runbook section 3.
 <!-- SECTION:NOTES:END -->

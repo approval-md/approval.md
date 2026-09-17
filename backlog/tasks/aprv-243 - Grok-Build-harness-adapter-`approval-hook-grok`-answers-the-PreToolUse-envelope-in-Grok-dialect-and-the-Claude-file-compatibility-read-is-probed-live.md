@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-02 21:10'
-updated_date: '2026-09-17 01:21'
+updated_date: '2026-09-17 01:58'
 labels: []
 dependencies: []
 references:
@@ -68,4 +68,6 @@ The register entry in docs/integrations-considered.md stays PARKED, with a dated
 Verification, all from a clean worktree, nothing run against the primary. Build, typecheck and lint each exit 0. node scripts/run-tests.mjs --only cli-hook-grok cli-hook cli-hook-cursor cli-hook-codex command-class cli-help cli-long-help cli-instructions docs-guard classify-tier ci-guard hook-module-graph: 725 tests, 725 pass, 0 fail, exit 0. node scripts/run-tests.mjs --only conformance conformance-regen harness-version cli-doctor cli-doctor-codex codex-doctor: 137 tests, 137 pass, 0 fail, exit 0. One existing test needed a one-line edit rather than a fix: harness-version pins the harness list literally, so the new kind is an explicit edit there, which is the property that test is protecting. The probe was exercised by hand end to end (arm, record with a synthetic envelope, report) and its scratch directory removed.
 
 ACs 2, 3 and 5 checked. AC4 checked on the documentation clause, which it fully meets, with the SPEC row declined on the criterion's own condition and the proposed hunk left for the human. AC1 unchecked, runbook section 7. Task stays In Progress.
+
+Delivered in pull request #414 (lane/closeouts), auto-merge armed; all three full-gate shards green.
 <!-- SECTION:NOTES:END -->

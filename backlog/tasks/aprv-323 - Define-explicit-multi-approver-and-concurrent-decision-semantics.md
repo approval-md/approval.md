@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-08 22:51'
-updated_date: '2026-09-17 01:27'
+updated_date: '2026-09-17 01:58'
 labels: []
 dependencies:
   - APRV-249
@@ -51,6 +51,8 @@ AC2. Section 5 lists the required changes as sixteen numbered items across SPEC.
 The design's own recommendation, which is the part to argue with. A quorum of N over identities that are not distinguishable is a quorum of one counted N times. Today every Telegram tap is recorded against the actor the listener process was launched with, and the callback's from field is never read, so two approvers in one chat both endorse as the same actor. The recommendation is therefore not to build quorum until APRV-324 lands, and to make quorum greater than one a load-time refusal naming APRV-324 in the meantime. A gate that refuses to pretend is worth more than a gate that counts. The task declares a dependency on APRV-249; the document argues it should declare one on APRV-324 too.
 
 AC3. The task references issue #138, and the issue stays open: the design is not the behaviour the issue asks for. Adding a comment on the issue itself is a network write and a gated action, so it is left to the human rather than done here.
+
+Delivered in pull request #414 (lane/closeouts).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

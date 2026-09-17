@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-astra'
 created_date: '2026-09-08 22:40'
-updated_date: '2026-09-17 00:46'
+updated_date: '2026-09-17 01:58'
 labels: []
 dependencies: []
 priority: high
@@ -100,4 +100,6 @@ Step 5, paste the run's output into this task. That is what closes AC2 and AC3.
 Policy observation for Carter, offered as a suggestion and not acted on. A bulk remote-ref deletion classifies vcs.push.main, which APPROVAL.md makes supervised-retro: it proceeds and is sampled afterwards. That is the right setting for landing a pull request and arguably the wrong one for destroying 233 refs, which is irreversible and which this task has twice tried to route through a human. The cost that prompts the suggestion is concrete: without a class that resolves manual, the driver would have had no grant record to check, and its whole authorization story would have collapsed to whether someone typed the command. Two ways to close it, both yours: a distinct class for ref deletion in the classifier and the policy, or a documented convention that deletions declare an unlisted class and ride the manual default, which is what the runbook above does today. No change was made to APPROVAL.md or to the classifier.
 
 AC status after this lane. AC1 checked: every open pull request and issue now has a verified disposition or an explicit remaining-work record, in the task notes and in the inventory's followups section, and the items the snapshot closed keep their gate outcome seqs. AC2 and AC3 NOT checked: no remote ref has been deleted, so there is nothing yet to record as removed and no post-change GitHub state to check. They close on the runbook above, on Carter's grant. AC4 NOT checked: this lane's changes are committed on lane/closeouts and delivered by its pull request, and the criterion closes when that merges through the queue. One honest note on AC4's wording, which asks for Codex co-author attribution: that was written when the task was Codex's. These commits carry this session's own co-author trailer instead, because attributing them to Codex would be a false credit; the original Codex-authored commits keep theirs. Task stays In Progress.
+
+Delivered in pull request #414 (lane/closeouts), auto-merge armed. One check is red and it is the records path rather than this work: the protected-path guard fails no-evidence on the two design documents delivered by APRV-323 and APRV-324 in the same pull request, because their writes classified policy.edit.design and proceeded, and the committed log stops at seq 37145 (2026-09-17T01:20:45Z) while the writes happened after that. The guard's policy-authorized tier accepts exactly those execution records once a log advance carries them. AC4 closes when this merges.
 <!-- SECTION:NOTES:END -->

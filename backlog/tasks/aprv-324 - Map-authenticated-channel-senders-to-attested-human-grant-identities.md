@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-08 22:53'
-updated_date: '2026-09-17 01:28'
+updated_date: '2026-09-17 01:58'
 labels: []
 dependencies:
   - APRV-249
@@ -57,4 +57,6 @@ So the five cases are enumerated in full instead, as section 7 of the design, as
 AC2 closes when the implementation task runs them green. AC3 checked: the task references issue #137, the issue stays open because the design is not the behaviour it asks for, and the design states exactly what each channel can authenticate, as a table in section 2 with the recommendation that the table belongs in SPEC section 10.3 rather than only in design/. Adding a comment to the issue itself is a network write and a gated action, so it is left to the human.
 
 Task stays In Progress on AC2.
+
+Delivered in pull request #414 (lane/closeouts).
 <!-- SECTION:NOTES:END -->
