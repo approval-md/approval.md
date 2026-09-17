@@ -825,7 +825,7 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **30 rows** and a tally, in the order their failures
+`approval doctor` prints **31 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope
 integrity, the vault, the environment source map, then the rows that ask git
@@ -835,17 +835,17 @@ and the harness what happened (`log-drift`, `reconciliation`,
 `main-behind-origin`, `attested-policy-on-main`,
 `harness-version-unverified`, `live-draw`,
 `values-block`, `checkpoint`, `gate-organs`, `sealed-keys`,
-`codex-hook-wiring`, `autonomy-alias`). Each failure
+`codex-hook-wiring`, `autonomy-alias`, `pending-sign-off`). Each failure
 carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
 and repairs nothing, and no credential value appears in its output. Three
-of the 30 lines from a fresh directory, plus the tally:
+of the 31 lines from a fresh directory, plus the tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-10 ok · 19 not applicable · 1 failed
+11 ok · 19 not applicable · 1 failed
 ```
 
 That one failure is expected on the scaffolded policy: it samples supervised
@@ -854,7 +854,7 @@ names, and a control that looks on while the party under oversight could steer
 it is worse than one that is visibly off. Name the secret when you want
 sampling, or delete the `audit` block if one person's gate has no use for it.
 
-**19 of the 30 report `not applicable` in a fresh directory**, and each names
+**19 of the 31 report `not applicable` in a fresh directory**, and each names
 the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 (no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
 `read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),

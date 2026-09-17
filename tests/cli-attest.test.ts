@@ -532,3 +532,174 @@ test("the help documents --organ and what it is for", () => {
   assert.match(run.stdout, /gate\.organ\.attested/);
   assert.match(run.stdout, /policy\.core/);
 });
+
+// ---------------------------------------------------------------------------
+// --path: the protected-path sign-off (APRV-338)
+// ---------------------------------------------------------------------------
+
+/** A policy that widens the protected set to SPEC.md, as this repository's does. */
+const POLICY_PROTECTING_SPEC = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "protected_paths:",
+  "  - SPEC.md",
+  "```",
+  "",
+].join("\n");
+
+const SPEC_TEXT = "# Spec\n\nA sentence. (Amended APRV-338, pending sign-off.)\n";
+
+/** A case directory carrying a policy that protects SPEC.md, and SPEC.md. */
+function signOffCaseDir(policy = POLICY_PROTECTING_SPEC, spec = SPEC_TEXT): string {
+  const dir = caseDir(policy);
+  writeFileSync(join(dir, "SPEC.md"), spec, "utf8");
+  return dir;
+}
+
+test("--path signs off a protected file and names it in the record", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(["policy", "attest", "--path", "SPEC.md", "--as", "human:carter"], dir);
+
+  assert.equal(run.code, 0);
+  assert.equal(run.stderr, "");
+  assert.match(run.stdout, /^signed off SPEC\.md at seq 1: sha256 [a-f0-9]{64}\n$/);
+
+  const records = logRecords(dir);
+  assert.equal(records.length, 1);
+  // Never `policy.updated` and never `gate.organ.attested`: three claims, three
+  // types, and no reader of one can be answered by another.
+  assert.equal(records[0]?.["event"], "gate.path.signed_off");
+  assert.equal(records[0]?.["actor"], "human:carter");
+  assert.deepEqual(Object.keys(firstPayload(dir)).sort(), ["path", "sha256"]);
+  assert.equal(firstPayload(dir)["path"], "SPEC.md");
+
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+test("--path computes the digest itself, from the bytes on disk", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--path", "SPEC.md", "--as", "human:carter", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 0);
+  const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(parsed).sort(), ["ok", "path", "seq", "sha256", "signed_path"]);
+  assert.equal(parsed["ok"], true);
+  assert.equal(parsed["signed_path"], "SPEC.md");
+  assert.equal(
+    parsed["sha256"],
+    createHash("sha256").update(readFileSync(join(dir, "SPEC.md"))).digest("hex"),
+  );
+});
+
+test("--path takes an absolute path under the directory and records it relative", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--path", join(dir, "SPEC.md"), "--as", "human:carter"],
+    dir,
+  );
+
+  assert.equal(run.code, 0);
+  assert.equal(firstPayload(dir)["path"], "SPEC.md");
+});
+
+test("--path refuses an agent identity at exit 2 and writes nothing", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(
+    ["policy", "attest", "--path", "SPEC.md", "--as", "agent:claude-code"],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /human-only|human:<id>/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--path with no declared identity is refused at exit 2", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(["policy", "attest", "--path", "SPEC.md"], dir);
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /APPROVAL_HUMAN/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--path refuses the policy file, a gate organ, and an ordinary file", () => {
+  for (const [target, code] of [
+    ["APPROVAL.md", "path-is-policy"],
+    [".claude/settings.json", "path-is-core"],
+    ["src/core/gate.ts", "path-not-protected"],
+  ] as const) {
+    const dir = signOffCaseDir();
+    const run = runCli(
+      ["policy", "attest", "--path", target, "--as", "human:carter", "--json"],
+      dir,
+    );
+    assert.equal(run.code, 2, target);
+    const parsed = JSON.parse(run.stderr) as { error: { code: string } };
+    assert.equal(parsed.error.code, code, target);
+    assert.deepEqual(logRecords(dir), [], target);
+  }
+});
+
+test("--path refuses a path the policy has not widened to", () => {
+  // The same file, the same verb, and a policy with no `protected_paths`:
+  // eligibility comes from the loaded policy, and a policy that does not
+  // protect a file leaves nothing about it to ratify.
+  const dir = signOffCaseDir(POLICY_TEXT);
+  const run = runCli(
+    ["policy", "attest", "--path", "SPEC.md", "--as", "human:carter", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  const parsed = JSON.parse(run.stderr) as { error: { code: string } };
+  assert.equal(parsed.error.code, "path-not-protected");
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--organ and --path together are a usage error, never a guess", () => {
+  const dir = signOffCaseDir();
+  const run = runCli(
+    [
+      "policy",
+      "attest",
+      "--organ",
+      ".claude/settings.json",
+      "--path",
+      "SPEC.md",
+      "--as",
+      "human:carter",
+      "--json",
+    ],
+    dir,
+  );
+
+  assert.equal(run.code, 2);
+  const parsed = JSON.parse(run.stderr) as { error: { code: string } };
+  assert.equal(parsed.error.code, "usage");
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("--path naming a protected file that is not there is exit 4, not a sign-off", () => {
+  const dir = caseDir(POLICY_PROTECTING_SPEC);
+  const run = runCli(["policy", "attest", "--path", "SPEC.md", "--as", "human:carter"], dir);
+
+  assert.equal(run.code, 4);
+  assert.match(run.stderr, /SPEC\.md/);
+  assert.deepEqual(logRecords(dir), []);
+});
+
+test("the help documents --path and what it is for", () => {
+  const dir = caseDir();
+  const run = runCli(["policy", "attest", "--help"], dir);
+
+  assert.equal(run.code, 0);
+  assert.match(run.stdout, /--path <path>/);
+  assert.match(run.stdout, /gate\.path\.signed_off/);
+});

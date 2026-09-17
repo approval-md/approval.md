@@ -53,6 +53,7 @@ const EVENT_TYPES = [
   "gate.bypassed",
   "audit.decision_refused",
   "gate.organ.attested",
+  "gate.path.signed_off",
 ] as const;
 
 /** Fields each event type requires beyond the base record shape. */
@@ -109,6 +110,9 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   // APRV-272. The whole content of an organ attestation is which file and which
   // bytes, so a record with no payload asserts nothing and must not validate.
   "gate.organ.attested": ["payload"],
+  // APRV-338. The whole content of a sign-off is which file and which bytes,
+  // so a record with no payload asserts nothing and must not validate.
+  "gate.path.signed_off": ["payload"],
 };
 
 /**

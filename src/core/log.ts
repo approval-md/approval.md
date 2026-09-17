@@ -136,6 +136,22 @@ export const GENESIS_PREV = null;
  * attested policy as `hash-mismatch` and refused every gate operation until
  * somebody re-attested it. The `gate.` prefix already carries the write-boundary
  * clock in `core/verify.ts`, which is what an attestation's `ts` has to be.
+ *
+ * `gate.path.signed_off` (APRV-338) is the sixteenth: a human's sign-off on the
+ * exact bytes of one PROTECTED PATH whose edits classify `policy.edit` or a
+ * `policy.edit.*` sub-class (amended SPEC.md §5.2, §8, §10.1). `human:` actor,
+ * and the schema refuses any other.
+ *
+ * It is a sibling of `gate.organ.attested` and not the same type, because the
+ * surfaces differ in what evidence is available for them. An organ is
+ * `policy.core`, the gate mints nothing for it, and content attestation is
+ * therefore the ONLY evidence that can exist. A protected path has grants
+ * available to it, and the after-the-fact checker of §10.1 prefers them: a
+ * grant binds the exact hunk, this record stands for the whole file, and one
+ * type carrying both claims would have let the weaker one be read as the
+ * stronger. It is in the `gate.` namespace for the reason the organ record is:
+ * §8 keys the write-boundary clock on that prefix, and a human who could
+ * backdate a sign-off could place it before bytes they never saw.
  */
 export type EventType =
   | "task.registered"
@@ -168,6 +184,7 @@ export type EventType =
   | "gate.closed"
   | "gate.bypassed"
   | "gate.organ.attested"
+  | "gate.path.signed_off"
   | "log.checkpoint";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */

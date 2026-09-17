@@ -429,13 +429,20 @@ async function main() {
     // not the bytes the machine running CI happens to have. A path the head
     // tree does not carry (a deletion) is `null`, which the guard reads as "no
     // attestation can match", the fail-closed direction.
-    const organShaCache = new Map();
-    const organSha256AtHead = (path) => {
-      if (organShaCache.has(path)) return organShaCache.get(path);
+    // APRV-338: the same function also answers for ORDINARY protected paths,
+    // where it feeds the sign-off half of the `attested` verdict. One cache and
+    // one computation, because the question is identical — what do this path's
+    // bytes at the head commit hash to — and two would be two chances to hash
+    // the working tree by mistake. The guard keeps the two INPUTS separate so
+    // that a caller wired for organs alone does not silently begin answering
+    // for sign-offs; here, one caller answers both.
+    const headShaCache = new Map();
+    const sha256AtHead = (path) => {
+      if (headShaCache.has(path)) return headShaCache.get(path);
       const blob = showBlob(repo, head, path);
       const value =
         blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
-      organShaCache.set(path, value);
+      headShaCache.set(path, value);
       return value;
     };
 
@@ -525,7 +532,8 @@ async function main() {
       policyProtectedPaths,
       policySha256AtHead,
       policyPath: POLICY_PATH,
-      organSha256AtHead,
+      organSha256AtHead: sha256AtHead,
+      pathSha256AtHead: sha256AtHead,
       payloadFor,
       changeTsFor,
       window,

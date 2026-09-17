@@ -661,12 +661,13 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272).",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime.",
     human_only: true,
     input: input({
       flags: {
         ...POLICY_FLAGS,
         "--organ": "string",
+        "--path": "string",
         ...AS_FLAG,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -683,6 +684,10 @@ const VERBS: VerbSpec[] = [
         // repository-relative spelling the record carries, which is the
         // identity the guard matches on and is not derivable from `path`.
         organ_path: STRING,
+        // The same fact for the --path route, under its own name so that a
+        // reader of one object can never take a sign-off for an organ
+        // attestation: the two records are different claims (APRV-338).
+        signed_path: STRING,
       },
       ["ok", "seq", "sha256", "path"],
     ),

@@ -134,6 +134,13 @@ export const DOCTOR_ROW_ORDER = [
   // health report to surface a deprecation the loader's note only reaches
   // whoever happened to run a verb that prints notes.
   "autonomy-alias",
+  // APRV-338: which protected files still carry SPEC.md's pending-sign-off
+  // marker with no `gate.path.signed_off` record over their current bytes,
+  // appended for the same reason. Never a fail: unratified prose breaks
+  // nothing on this machine, and the enforcement is the CI-side guard. It
+  // passes in a fresh directory rather than skipping, because "no protected
+  // file carries a marker" is a clean state and not a missing configuration.
+  "pending-sign-off",
 ] as const;
 
 /**

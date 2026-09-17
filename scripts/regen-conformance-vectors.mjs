@@ -1374,7 +1374,12 @@ const SUITES = [
     // adds one accepted and one refused fixture. Existing expectations do not
     // move; implementations conforming to 2.1.0 simply do not know this new
     // packaged manifest shape.
-    vectors_version: "2.2.0",
+    // 2.3.0 (APRV-338): a MINOR bump, the same shape 2.1.0 was.
+    // `gate.path.signed_off` is a new event type with four new fixtures (one
+    // accepted, three refused: an agent actor, an absolute `path`, and a
+    // missing one). No existing expectation moves, so an implementation that
+    // passed 2.2.0 fails this only by not knowing a type the enum has gained.
+    vectors_version: "2.3.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

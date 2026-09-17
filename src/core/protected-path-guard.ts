@@ -53,6 +53,18 @@
  *    match: a digest attested for one organ is not evidence for another, which
  *    is why the organ record carries a whole relative path where the policy
  *    record carries a basename.
+ *
+ *    Since APRV-338 the verdict ALSO covers an ordinary `policy.edit` path on a
+ *    `gate.path.signed_off` record carrying that path and the digest at head —
+ *    and it is reached LAST, after every grant search below has failed. That
+ *    ordering is the whole design. A sign-off is whole-file evidence: it says a
+ *    human read this file at these bytes, not that they saw a particular line
+ *    change. A grant binds the hunk. So a change a grant covers passes on the
+ *    grant and prints the grant as its reason, and the sign-off answers only
+ *    the case the pending-sign-off suffix was invented for — text a human has
+ *    read and agrees with, for which no grant was ever taken. The organ's
+ *    verdict stays first because an organ can have no grant at all, so for one
+ *    there is nothing weaker to prefer.
  * 2. `policy-authorized-file` — an exact Edit or Write whose verified
  *    `execution.started` is preceded by its unique matching registration and no
  *    approval request. The registration, start and recomputed stored payload
@@ -242,7 +254,7 @@
  * git plumbing and file reads live in the caller.
  */
 
-import { organAttestationOf } from "./attest.js";
+import { organAttestationOf, pathSignOffOf } from "./attest.js";
 import { parseApplyPatch } from "./apply-patch.js";
 import {
   classifyCommand,
@@ -473,6 +485,23 @@ export interface GuardInput {
    * outside a pull request, not a record about bytes that no longer exist.
    */
   organSha256AtHead?: (path: string) => string | null;
+  /**
+   * SHA-256 of ANY guarded path's bytes at the head commit, or `null` when the
+   * head tree does not carry it (APRV-338).
+   *
+   * The same computation {@link organSha256AtHead} performs and a separate
+   * field, because the two answer for different surfaces and a caller wired for
+   * one must not silently start answering for the other. Only used for the
+   * sign-off half of the `attested` verdict, on `policy.edit` and
+   * `policy.edit.*` paths.
+   *
+   * OPTIONAL and fail-closed in the same direction: a caller that omits it gets
+   * no sign-off verdict at all, so a change falls through to the ordinary
+   * failure rather than passing on a record nothing was checked against. A
+   * DELETED path resolves to `null` here, so removing a protected file cannot
+   * pass by sign-off — there are no bytes at head for a human to have read.
+   */
+  pathSha256AtHead?: (path: string) => string | null;
   /**
    * Resolve bound material from the committed payload store, by hash.
    * Returns `null` when the head tree does not carry that payload.
@@ -1581,6 +1610,41 @@ function organKey(organPath: string, sha256: string): string {
   return `${normalizePathSpelling(organPath)}\0${sha256}`;
 }
 
+/**
+ * May this path be evidenced by a `gate.path.signed_off` record? (APRV-338.)
+ *
+ * `policy.edit` and its sub-classes, and nothing else. The organs and the
+ * approval home are `policy.core` and answered by their own record; the log
+ * directory is `log.mutate` and answered by nobody. Asked with the policy's own
+ * entries, so a path a project routed to `policy.edit.design` is signable while
+ * a path no list protects is not.
+ */
+function signOffEligible(path: string, extra: readonly ProtectedPathEntry[]): boolean {
+  const routed = protectedPathClass(path, extra);
+  return routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed));
+}
+
+/**
+ * The sentence a failing `policy.edit` path gets about the sign-off route, or
+ * nothing at all.
+ *
+ * Deliberately last in every message it appears in, and deliberately hedged.
+ * The first repair for an uncovered change is to take it to the gate, which
+ * binds the hunk; a sign-off stands for the whole file and is what the
+ * pending-sign-off suffix was invented for — text a human has read at this
+ * commit and agrees with. Printing it first would read as an invitation to
+ * route around the gate, which is the one thing this guard exists to notice.
+ */
+function signOffRepair(path: string, digest: string | null): string {
+  if (digest === null) return "";
+  // The two flags are named because the digest is the thing that has to match,
+  // and the bytes under review are on the BRANCH while the log lives in the
+  // primary checkout. `--dir` says which bytes to hash and `--log` says where
+  // the record goes, so one command can span both without the log ever being
+  // written from a worktree.
+  return ` If a human has READ this change at this commit and stands behind the file as it now is, they may ratify it with \`approval policy attest --path ${path} --dir <a checkout at this commit> --log <the primary checkout's log> --as human:<id>\`, which must hash to ${digest}, followed by a log advance carrying that record; that is whole-file evidence and weaker than a grant, so prefer the gate wherever the edit can still go through it.`;
+}
+
 /** The ordering rule, stated identically on every failure that could be lag. */
 const ORDERING_RULE =
   "the committed log trails the primary checkout's live log, so if this edit WAS granted, " +
@@ -1648,6 +1712,18 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     const fields = organAttestationOf(record);
     if (fields === null) continue;
     organAttestations.set(organKey(fields.organPath, fields.sha256), record);
+  }
+
+  // The SIGN-OFF index (APRV-338), keyed the same way and fed by its own event
+  // type, so a sign-off can never answer an organ's question or the policy
+  // file's and neither can answer a sign-off's. Built here and consulted at the
+  // END of each path's evidence search: see the module note on why hunk
+  // evidence has to be preferred over whole-file evidence.
+  const signOffs = new Map<string, EventRecord>();
+  for (const record of records) {
+    const fields = pathSignOffOf(record);
+    if (fields === null) continue;
+    signOffs.set(organKey(fields.path, fields.sha256), record);
   }
 
   // The grants of a class that can authorize a protected write.
@@ -2102,6 +2178,36 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       continue;
     }
 
+    // The LAST thing tried for this path, and deliberately last: a human's
+    // whole-file sign-off (APRV-338).
+    //
+    // Everything above is hunk evidence, and everything above has now failed
+    // to cover this change. Only here does the guard ask the weaker question —
+    // did a human read this file at exactly these bytes and say so — and the
+    // finding says in words that this is what it rests on, so a reader can
+    // never mistake it for a grant. Running it here rather than beside the
+    // organ verdict is what keeps that true: consulted first, a sign-off would
+    // have silently answered for every change a grant already covered, and the
+    // reasons this guard prints are half its value.
+    const signOffDigest = signOffEligible(path, input.policyProtectedPaths)
+      ? (input.pathSha256AtHead?.(path) ?? null)
+      : null;
+    if (signOffDigest !== null) {
+      const signed = signOffs.get(organKey(path, signOffDigest));
+      if (signed !== undefined) {
+        findings.push({
+          path,
+          ok: true,
+          evidence: "attested",
+          seq: signed.seq,
+          ts: signed.ts,
+          actor: signed.actor,
+          detail: `${path} at ${input.window.head} hashes to ${signOffDigest}, which ${signed.actor} signed off FOR THAT PATH at seq ${signed.seq}. This is WHOLE-FILE evidence and weaker than a grant: it says a human read this file at these exact bytes, not that they saw this hunk. It was read only because no grant covers this change — ${candidates.length} ${evidenceNoun} name this path ${boundText}${contributors.length > 0 ? `, and ${contributors.length} of them covered part of it (seq ${contributors.map((one) => one.record.seq).join(", ")})` : ""}`,
+        });
+        continue;
+      }
+    }
+
     // Naming grants exist and the change is not made of them: the repeat-edit
     // shape. Its own code, because the reader's next move differs from
     // `no-evidence` — take THIS change to the gate, rather than hunt for a
@@ -2121,7 +2227,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
           rejected.length > 0
             ? `${rejected.slice(0, 6).join("; ")}${rejected.length > 6 ? `; … and ${rejected.length - 6} other naming grants set aside for the same kinds of reason` : ""}. `
             : ""
-        }uncovered: ${sample.map((line) => JSON.stringify(line)).join(", ")}${uncovered.length > sample.length ? `, … ${uncovered.length - sample.length} more` : ""}. ${windowText(input.window)}. ${ORDERING_RULE}.`,
+        }uncovered: ${sample.map((line) => JSON.stringify(line)).join(", ")}${uncovered.length > sample.length ? `, … ${uncovered.length - sample.length} more` : ""}. ${windowText(input.window)}. ${ORDERING_RULE}.${signOffRepair(path, signOffDigest)}`,
       });
       continue;
     }
@@ -2148,6 +2254,15 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         `no policy.updated record attests the bytes this pull request would install (${input.policySha256AtHead}); an amendment lands through \`approval policy amend --commit\`, whose attestation record is the evidence`,
       );
     }
+    if (signOffDigest !== null) {
+      // A protected path that COULD have been signed off and was not. Named
+      // second to the grant advice above, not first: taking the edit to the
+      // gate binds the hunk, and a sign-off stands for the whole file
+      // (APRV-338).
+      diagnosis.push(
+        `no gate.path.signed_off record signs off ${path} at ${signOffDigest}, and a digest signed for some OTHER path is not evidence for this one`,
+      );
+    }
     if (isGateOrganPath(path)) {
       // The one failure in this guard whose repair is NOT "take the change to
       // the gate": there is no gate for it. `policy.core` is human-only, the
@@ -2166,7 +2281,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       path,
       ok: false,
       code: "no-evidence",
-      detail: `${path} is a protected path (edits classify policy.edit) and changed between ${input.window.base} and ${input.window.head}, and the committed log carries no evidence that a human decided it. ${windowText(input.window)}. ${diagnosis.join("; ")}. ${ORDERING_RULE}.`,
+      detail: `${path} is a protected path (edits classify policy.edit) and changed between ${input.window.base} and ${input.window.head}, and the committed log carries no evidence that a human decided it. ${windowText(input.window)}. ${diagnosis.join("; ")}. ${ORDERING_RULE}.${signOffRepair(path, signOffDigest)}`,
     });
   }
 
