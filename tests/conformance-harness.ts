@@ -68,6 +68,7 @@ import { readVerifiedRecords } from "../src/core/state.js";
 import { canonicalize, JcsError } from "../src/core/jcs.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
 import { resolve as resolveClass } from "../src/core/policy-match.js";
+import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate, type ValidationMode } from "../src/core/validate.js";
 import { verifyText } from "../src/core/verify.js";
@@ -325,6 +326,11 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   // belong where a change to them is a visible diff.
   hook_deny_codes: HOOK_DENY_CODES,
   post_tool_codes: POST_TOOL_CODES,
+  // APRV-324. The refusals the decision SURFACE makes, before the gate is
+  // called: its own union rather than two more members of the gate's, because
+  // `decide` cannot emit them and a second implementation reading them there
+  // would be told its gate must.
+  channel_decision_refusal_codes: CHANNEL_DECISION_REFUSAL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {

@@ -42,6 +42,15 @@
  * identity is required only when a decision could be recorded — listing the
  * queue asks nothing of anyone.
  *
+ * APRV-324's sender mapping does not reach this surface and does not need to.
+ * A local prompt has no separate sender to authenticate: whoever runs the
+ * process with this environment is the approver, which is inherent to a
+ * terminal rather than a gap in it. So this channel reports no sender, every
+ * decision here stays attributed to the declared identity whatever the policy
+ * maps, and that is also the property that keeps a repository recoverable — a
+ * policy whose sender block is broken still has a surface that can decide and a
+ * terminal that can repair the file.
+ *
  * ## Where the payload comes from
  *
  * v0.1's log records `payload_hash`, never the payload bytes, so the material to

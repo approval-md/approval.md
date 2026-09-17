@@ -2918,6 +2918,21 @@ The checks, at length:
   `approval policy attest --path <p> --as human:<id>`, to be run after reading
   the file; a marker whose text was later granted through the gate should lose
   the suffix instead.
+- **sender-mapping** — which approvers a channel whose senders the policy maps
+  can still recognize (APRV-324). A SKIP where no approver declares a `senders`
+  block, which is every installation before the key existed: decisions are
+  recorded against the identity the deciding process was launched with, no
+  channel enforces a mapping, and nothing is wrong. A FAIL where the policy
+  maps senders for a channel and lists an approver on that channel with no id
+  of their own there — that person's next tap is refused `sender-unmapped` and
+  nothing is recorded, so the file says they may decide on a surface where they
+  cannot. A PASS where every approver a mapped channel reaches carries an id
+  there. The `fix` is `approval policy amend`, which owns the edit and the
+  re-attestation it costs. The row reads the policy and nothing else: no log,
+  no network, no credential, and it prints nobody's account id — the mapping is
+  in a file the operator can open, and a health row is read over shoulders.
+
+
 
 **`--json`** (one object on stdout):
 

@@ -449,6 +449,13 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // A pass and not a skip for the same reason autonomy-alias is one — the
       // question was asked and the answer is "none" (APRV-338).
       "pass",
+      // sender-mapping skips: the fixture policy declares no `senders` block,
+      // so every decision is recorded against the identity the deciding
+      // process was launched with and no channel enforces a mapping. A skip
+      // rather than a pass, because it is a configuration this deployment has
+      // not adopted rather than a question with a clean answer, and it is what
+      // every installation looked like before APRV-324 (APRV-324).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -487,7 +494,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 31);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 32);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -957,8 +964,10 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   // (whether a daemon is answering supervised-live draws for this log),
   // APRV-272 appended `gate-organs` (which harness files carry no attestation
   // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
-  // sealed-delivery private key is tracked or unignored).
-  assert.equal(parsed.checks.length, 31);
+  // sealed-delivery private key is tracked or unignored). 32: APRV-324
+  // appended `sender-mapping` (which approvers a channel whose senders the
+  // policy maps can still recognize).
+  assert.equal(parsed.checks.length, 32);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

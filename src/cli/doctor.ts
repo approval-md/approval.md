@@ -106,6 +106,7 @@ import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { openObligations } from "../core/audit.js";
+import { SENDER_CHANNELS, mapsSendersFor } from "../core/sender-identity.js";
 import { classSampling, resolveSampler, type Sampler } from "../core/sampler.js";
 import {
   checkVault,
@@ -962,6 +963,81 @@ function checkAutonomyAlias(policyLoad: PolicyLoadResult): DoctorCheck {
     // that owns both. The prose after it is the edit itself: write
     // supervised-retro.
     fix: "approval policy amend — write supervised-retro in place of the bare supervised on the rules above, and re-attest in the same step; the paste-ready draft for this repo is docs/proposals/approval-md-2026-09.md",
+  };
+}
+
+/**
+ * Which approvers can still be recognized by the channels they are listed for
+ * (APRV-324, `design/channel-sender-identity.md` §5 item 13).
+ *
+ * The row exists for one transition and says which side of it this deployment
+ * is on. Declaring the first `senders` entry for a channel turns enforcement on
+ * for that whole channel: from then on a decision arriving with an account the
+ * policy does not name is REFUSED rather than recorded under the listener's own
+ * identity. An operator who maps themselves and forgets a colleague has built a
+ * gate that will refuse that colleague's next tap, and the file reads as though
+ * both are approvers.
+ *
+ * Three answers, and the verdicts are chosen for what each one actually is:
+ *
+ * - **SKIP** when no approver declares a mapping. That is every installation
+ *   before this key existed and most of them after, it is fully correct, and a
+ *   red row for it would be a red row people learn to skip past.
+ * - **FAIL** for an approver listed for a mapped channel with no id of their
+ *   own on it. Not a state: the policy says that person decides on that
+ *   channel, and the runtime will not honour it.
+ * - **PASS** when every approver the policy can reach on a mapped channel is
+ *   recognizable there.
+ *
+ * It reads the policy and nothing else — no log, no network, no credential —
+ * and it prints the id of nobody: a doctor row is read over a shoulder, the
+ * mapping is in a file the operator can open, and the row's job is to name who
+ * is missing rather than to recite everyone who is not.
+ */
+function checkSenderMapping(policyLoad: PolicyLoadResult): DoctorCheck {
+  if (!policyLoad.ok) {
+    return {
+      check: "sender-mapping",
+      status: "skip",
+      detail: `the policy did not load (${policyLoad.code}), so no approver roster could be read. A failed load carries no sender mapping either, and a decision arriving with an authenticated sender is refused \`sender-unmapped\` until the file parses again — the \`attestation\` row above and \`approval policy check\` say what is wrong with it.`,
+    };
+  }
+
+  const approvers = policyLoad.policy.approvers;
+  const mapped = SENDER_CHANNELS.filter((channel) => mapsSendersFor(approvers, channel));
+  if (mapped.length === 0) {
+    return {
+      check: "sender-mapping",
+      status: "skip",
+      detail: `${policyLoad.source.filename}: no approver declares a \`senders\` block, so every decision is recorded against the identity the deciding process was launched with (\`--as\` / APPROVAL_HUMAN), exactly as it was before the mapping existed. Anyone who can reach a configured channel decides as that identity; map an approver's account id to record who actually tapped (SPEC.md §5.2, APRV-324).`,
+    };
+  }
+
+  const gaps: string[] = [];
+  for (const channel of mapped) {
+    for (const id of Object.keys(approvers ?? {}).sort()) {
+      const entry = approvers?.[id];
+      if (entry === undefined) continue;
+      if (!entry.channels.includes(channel)) continue;
+      if (entry.senders?.[channel] === undefined) gaps.push(`${id} on ${channel}`);
+    }
+  }
+
+  if (gaps.length > 0) {
+    return {
+      check: "sender-mapping",
+      status: "fail",
+      detail: oneLine(
+        `${policyLoad.source.filename} maps ${mapped.join(", ")} senders, and ${String(gaps.length)} approver(s) listed for a mapped channel carry no id there: ${gaps.join(", ")}. A decision from an account this file does not name is refused \`sender-unmapped\` and nothing is recorded, so the policy currently says those people may decide on a channel where their taps will not be honoured.`,
+      ),
+      fix: "approval policy amend — give each approver above a `senders` entry for that channel, or drop the channel from their `channels` list if they are not meant to decide there; the mapping is attested policy, so the edit is inoperative until it is re-attested",
+    };
+  }
+
+  return {
+    check: "sender-mapping",
+    status: "pass",
+    detail: `${policyLoad.source.filename} maps ${mapped.join(", ")} senders, and every approver listed for a mapped channel carries an id there. Each decision on those channels is recorded against the person the operator attested that account to; an account this file does not name is refused rather than attributed to the listener (SPEC.md §10.3, APRV-324).`,
   };
 }
 
@@ -3332,6 +3408,12 @@ export function commandDoctor(
       // this machine is broken by unratified prose, and a health check that
       // graded prose would be the runtime marking a human's homework.
       checkPendingSignOff(dir, verified.records, policyLoad),
+      // APRV-324: appended, twenty-second time, same reason. The row design
+      // §5 item 13 asks for, and the one an operator needs BEFORE the first
+      // tap is refused: declaring a `senders` entry turns enforcement on for
+      // that whole channel, so an approver left out of it is a person the
+      // policy still lists and the gate will no longer honour.
+      checkSenderMapping(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

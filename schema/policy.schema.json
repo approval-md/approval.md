@@ -118,6 +118,23 @@
               "uniqueItems": true,
               "description": "SPEC.md §5.1/§10.3: channel names this approver can decide on, e.g. [telegram, cli]. At least one, since an approver reachable nowhere can never grant.",
               "items": { "type": "string", "minLength": 1 }
+            },
+            "senders": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "description": "SPEC.md §5.2/§10.3 (amended, APRV-324): the transport account ids this person decides from, per channel. ADDITIVE and OPTIONAL: a policy that declares none behaves exactly as every build before this key existed, recording each decision against the actor the listener process was launched with. Declaring the first mapping for a channel is what turns enforcement on for that channel — from then on a sender that channel authenticates and this block does not name is REFUSED (`sender-unmapped`) rather than attributed to the listener's own identity, because a fallback there would let anyone who can reach the configured chat approve as the operator. Written person to sender rather than sender to person, so each human's identity is in one place and a duplicate id is visible on the page; the runtime inverts it at lookup and REFUSES a policy in which two approvers claim one id (`sender-ambiguous`, a load failure, so every class resolves `manual`). The value is the transport's own attribution and never a name the sender chose: for `telegram` it is the numeric `callback_query.from.id`, as a string, and never `from.username`, which is mutable and reusable and would transfer an identity with a handle. This block is an operator ASSERTION that an account belongs to a person, which is what the `policy.core` attestation ceremony makes accountable; it is not, and cannot be, proof of personhood.",
+              "propertyNames": { "$ref": "#/$defs/senderChannel" },
+              "properties": {
+                "telegram": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[0-9]+$",
+                  "description": "The Telegram account id the Bot API reports as `callback_query.from.id`, written as a decimal string. Digits only: Telegram user ids are numeric and a `@handle` here would be a mapping key the transport never sends.",
+                  "examples": ["12345678"]
+                }
+              },
+              "examples": [{ "telegram": "12345678" }]
             }
           }
         }
@@ -374,6 +391,12 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9_-]*$",
       "description": "SPEC.md §5.1: lowercase identifier used for approver ids — starts alphanumeric, then alphanumerics, `_` or `-`. Case-insensitive collisions are excluded by construction."
+    },
+    "senderChannel": {
+      "type": "string",
+      "enum": ["telegram"],
+      "description": "SPEC.md §10.3 (amended, APRV-324): a channel whose transport attributes a gesture to an account id, and therefore the only kind of channel an `approvers.<id>.senders` entry may name. `telegram` qualifies because the Bot API reports `callback_query.from.id`, which the sender cannot choose. `web` and `cli` are deliberately absent: an unauthenticated form post names nobody and a local process names whoever runs it, so a sender mapping for either would be a binding the runtime cannot check and an identity key the channel cannot support.",
+      "examples": ["telegram"]
     },
     "classPattern": {
       "type": "string",

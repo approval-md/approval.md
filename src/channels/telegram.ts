@@ -40,16 +40,35 @@
  * > flag); the trust boundary is the local machine, and anyone who can set that
  * > configuration and write to the log is inside it.
  *
- * This channel does **not** authenticate the person who tapped the button. It
- * checks that the callback arrived from the configured chat id, and the
- * decision is then recorded against the human actor the *runtime* was
- * configured with (`APPROVAL_HUMAN` / `--as`), not against anything the
- * callback carried. So the guarantee is "someone with access to the configured
- * chat, on a runtime configured by someone with local control, tapped Approve"
- * — not "alice tapped Approve". Anyone in that chat can approve as the
- * configured actor. Use a private chat with the bot, and treat the chat's
- * membership as part of the trust boundary. Cryptographic identity is future
- * work and is not a v0.1 claim.
+ * What this channel authenticates, exactly: that the callback arrived **from
+ * the configured chat id**, and which **Telegram account** the Bot API
+ * attributes the tap to (`callback_query.from.id`). It authenticates no
+ * person, because no transport can: an account id is evidence about an
+ * account.
+ *
+ * What is done with the second fact is the operator's to decide, and since
+ * APRV-324 there are two settings:
+ *
+ * - **No `senders` block in the policy.** Nothing changes from every build
+ *   before it. The decision is recorded against the human actor the *runtime*
+ *   was configured with (`APPROVAL_HUMAN` / `--as`), so the guarantee is
+ *   "someone with access to the configured chat, on a runtime configured by
+ *   someone with local control, tapped Approve" — not "alice tapped Approve".
+ *   Anyone in that chat can approve as the configured actor. Use a private chat
+ *   with the bot, and treat the chat's membership as part of the trust
+ *   boundary.
+ * - **A `senders` block mapping account ids to approvers.** The decision is
+ *   recorded against the person the operator attested that account to, and a
+ *   tap from an account the policy does not name is REFUSED rather than
+ *   recorded under the listener's identity. The guarantee becomes "the account
+ *   the operator attested to alice tapped Approve", which is a statement about
+ *   Telegram's session handling and the operator's assertion, and still not a
+ *   proof of personhood. Cryptographic identity is future work and is not a
+ *   v0.1 claim.
+ *
+ * The channel itself resolves nothing either way. It reports the account it
+ * saw; `channels/contract.ts` resolves it against the attested policy, and
+ * `core/gate.ts` decides. See `design/channel-sender-identity.md`.
  *
  * ## Formatting: HTML, not MarkdownV2 — a deliberate choice
  *
@@ -198,7 +217,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
-import type { GateRefusal } from "../core/gate.js";
+import type { ChannelSender } from "../core/sender-identity.js";
 // APRV-299. The reaction vocabulary and the verdict type, imported for the
 // reason `core/audit.ts` states where it exports them: they are shown here and
 // decided nowhere. Nothing in this file branches on a reaction, and SPEC.md
@@ -1732,6 +1751,44 @@ export function parseCheckpointCallback(
   const nonce = data.slice(2);
   if (nonce.length === 0 || nonce.includes(":")) return null;
   return { sign: verb === "k", nonce };
+}
+
+/**
+ * The account the Bot API attributes a callback to (APRV-324, amended SPEC.md
+ * §10.3).
+ *
+ * `callback_query.from.id` and nothing else. Telegram assembles the `from`
+ * object itself, from the session the tap arrived on, which is why it is the
+ * one field on an update this channel treats as evidence about a person. Three
+ * neighbours are deliberately not read:
+ *
+ * - **`from.username`.** Mutable and reusable, so a mapping keyed on it would
+ *   hand an identity over with a handle. Never a key here and never recorded
+ *   (`core/sender-identity.ts` states the argument in full).
+ * - **`message.from`.** The author of the message the button sits on — this bot
+ *   — rather than the person who pressed it.
+ * - **`data`, and any text.** What the sender says about themselves, which
+ *   §11.1 invariant 4 says may raise scrutiny and never lower it. A callback
+ *   whose payload names a user id names it about itself; the id here comes from
+ *   the transport, and the two disagreeing changes nothing.
+ *
+ * `undefined` when the update carries no usable id: a sender this channel could
+ * not read is not a sender it may guess at, and the decision then travels with
+ * none, which the contract reads as today's configured attribution.
+ */
+export function senderOf(
+  query: Record<string, unknown>,
+  channel: string,
+): ChannelSender | undefined {
+  const from = query["from"];
+  if (typeof from !== "object" || from === null) return undefined;
+  const id = (from as Record<string, unknown>)["id"];
+  // Telegram sends a JSON number; a string is accepted for the same reason the
+  // chat check accepts one, and nothing else is: an object or an array here is
+  // a shape this channel does not understand rather than an id to stringify.
+  if (typeof id !== "number" && typeof id !== "string") return undefined;
+  const text = String(id);
+  return text.length === 0 ? undefined : { channel, id: text };
 }
 
 interface ParsedCallback {
@@ -3328,6 +3385,13 @@ export class TelegramChannel implements TestableChannel {
     const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
 
     // (a) Not our chat. Counted, answered, never decided, never logged.
+    //
+    // APRV-324 leaves this check exactly where it is, FIRST and ahead of the
+    // sender, on purpose: the mapping widens WHO may decide and never WHERE
+    // from. A callback carrying a perfectly mapped `from.id` but arriving in a
+    // chat this listener does not answer to is ignored here, before anything
+    // reads a sender, because a bot that accepted it would be one an operator
+    // could not scope by conversation.
     if (chatId !== this.chatId) {
       await this.ignore(
         result,
@@ -3372,11 +3436,21 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-324. The one field on this update that identifies a PERSON rather
+    // than a conversation, read once, here, after the chat check and before any
+    // decision is assembled. `callback_query.from` is the Bot API's own
+    // attribution of the tap to an account; nothing inside `message`, `data` or
+    // any text is consulted, because those are what the sender says about
+    // themselves. It is an observation and nothing more: this channel resolves
+    // no identity and chooses no actor, it reports what it saw and
+    // `channels/contract.ts` resolves it against the attested policy.
+    const sender = senderOf(query, this.name);
+
     // APRV-115. An "all" button names a digest, not a request: the set it
     // decides is whatever is still open on that delivery right now, which this
     // process knows and the callback bytes deliberately do not say.
     if (parsed.scope === "all") {
-      await this.handleDigestAll(parsed.decision, parsed.nonce, callbackId, result);
+      await this.handleDigestAll(parsed.decision, parsed.nonce, callbackId, result, sender);
       return;
     }
 
@@ -3440,6 +3514,7 @@ export class TelegramChannel implements TestableChannel {
       action_key: delivery.actionKey,
       decision: parsed.decision,
       deliveryId: delivery.deliveryId,
+      ...(sender === undefined ? {} : { sender }),
       ...(delivery.batchDeliveryId === undefined
         ? {}
         : { batchDeliveryId: delivery.batchDeliveryId }),
@@ -3557,6 +3632,10 @@ export class TelegramChannel implements TestableChannel {
     nonce: string,
     callbackId: string,
     result: TelegramPollResult,
+    // APRV-324: one gesture, one sender, on every member it decides. An "all"
+    // tap is N decisions by one person, so each of the N carries the account
+    // the one tap came from.
+    sender?: ChannelSender,
   ): Promise<void> {
     const deliveryId = this.allNonces.get(nonce);
     const digest = deliveryId === undefined ? undefined : this.digests.get(deliveryId);
@@ -3597,6 +3676,7 @@ export class TelegramChannel implements TestableChannel {
         decision,
         deliveryId: digest.deliveryId,
         batchDeliveryId: digest.batchDeliveryId,
+        ...(sender === undefined ? {} : { sender }),
         ...(decision === "reject"
           ? { note: `${TELEGRAM_REJECT_NOTE} (callback ${callbackId}, all)` }
           : {}),
@@ -3691,7 +3771,7 @@ export class TelegramChannel implements TestableChannel {
    * wordings to believe. The edit puts {@link TELEGRAM_NOT_RECORDED} above it
    * and clears the buttons, in `annotate`'s single call.
    */
-  private answerFor(outcome: GateRefusal): string {
+  private answerFor(outcome: { code: string }): string {
     return refusedDecisionLine(outcome.code);
   }
 

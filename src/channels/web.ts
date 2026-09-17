@@ -50,6 +50,15 @@
  * queue in a browser tab should not have to have read the source to know what
  * their click proves.
  *
+ * APRV-324 gave the Telegram channel a way to say WHICH account decided, and
+ * deliberately gave this one nothing. The sender mapping keys on a fact the
+ * transport authenticates, and an unauthenticated form post authenticates
+ * nothing at all: a `sender` field in a body here would be the poster naming
+ * themselves. So this channel reports no sender, its decisions stay attributed
+ * to the configured actor whatever the policy says, and the policy schema
+ * refuses a `senders.web` key outright rather than carrying a mapping nothing
+ * backs.
+ *
  * ## CSRF — inside the stated boundary, with cheap hardening. FLAGGED.
  *
  * There is no CSRF token in v0.1, and the reasoning is worth writing down
@@ -1024,6 +1033,14 @@ export class WebChannel implements TestableChannel {
       return;
     }
 
+    // APRV-324. Three fields are read off this form and a fourth is not: there
+    // is no `sender` here and there cannot be one. A form post carries no
+    // session, no origin binding and no authentication of any kind, so a
+    // `sender` field in the body would be the poster naming themselves — the
+    // self-reported field of SPEC.md §11.1 invariant 4 wearing an identity's
+    // clothes. This channel supplies none, the contract then keeps the actor
+    // the runtime was configured with, and a body that carries one is ignored
+    // exactly as any other unknown field is: never parsed, never forwarded.
     const decision: ChannelDecision = {
       action_key: actionKey,
       decision: verb,

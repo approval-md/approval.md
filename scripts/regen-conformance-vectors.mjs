@@ -358,6 +358,10 @@ const unionVectors = [
     "post_tool_codes",
     "every line the post-execution half of `approval hook <harness>` can print instead of closing a delegated execution; `post-tool-gate-refused` carries the gate's own code after a colon",
   ],
+  [
+    "channel_decision_refusal_codes",
+    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -1309,7 +1313,17 @@ const SUITES = [
     // only rely on if it is pinned, and the whole enforcement surface a second
     // implementation has to reproduce is a hook. Major for the reason 7.0.0 and
     // 8.0.0 were: this suite pins WHICH unions exist.
-    vectors_version: "9.0.0",
+    // 10.0.0 (APRV-324): a TENTH union, `channel_decision_refusal_codes`, for
+    // the two refusals a decision SURFACE makes before the gate is called —
+    // `sender-unmapped` and `sender-ambiguous`. It is not part of
+    // `gate_refusal_codes` and must not be: that union is documented as every
+    // way `approval register|request|decide|withdraw|expire` can refuse, and
+    // `decide` emits neither, because the sender is resolved against the
+    // attested policy before it runs. A second implementation whose gate
+    // emitted one would be describing a different boundary from this one.
+    // Major for the reason 7.0.0, 8.0.0 and 9.0.0 were: this suite pins WHICH
+    // unions exist.
+    vectors_version: "10.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

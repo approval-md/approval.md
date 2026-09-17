@@ -8,8 +8,8 @@
     "conformance/vectors/hook-read-scope.v1.json": "a7e6cb27b7f9226fcf9d32ee9fefe1045b49e3f2270ba4c31602571229a8d399",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "f6c3d42642877efbbfe12e5d2666ccba5d8e694fb271b18bb4f94aea1c447a81",
-    "conformance/vectors/refusal-unions.v1.json": "872f9a3c0eecae03b6175a06350118503f987618869690df5f85f4aef37f1800",
+    "conformance/vectors/refusal-unions.v1.json": "b8a675a6515943cf0501e3bef0da63833644de70210603e05fed661f208adea5",
     "conformance/vectors/schema-validation.v1.json": "4c25647da234f99c8a6dd82011d4fd3b01d209ae191bb3f3cc73f0ded4557ee9",
-    "tests/conformance-harness.ts": "d3092044a3cddf75106a09ce1af17c11c94588bf0f41c7bc085ba34930543700"
+    "tests/conformance-harness.ts": "e6d456290854c17f20eb36ac82cd70b7d0f93c971fb736cceef91694ee0cd2c0"
   }
 }

@@ -14,12 +14,18 @@
  *    are read here and passed to the channel as values (SPEC.md §5.1: policy
  *    carries the env-var *names*, never the secrets). Nothing in `channels/`
  *    touches `process.env`.
- * 2. **It declares who is approving.** The decision is recorded against the
- *    human actor from `--as` / `APPROVAL_HUMAN`, never against anything the
- *    callback carried. SPEC.md §11: identity in v0.1 is config-declared, the
- *    trust boundary is the local machine, and everyone who can reach the
- *    configured chat can approve as that actor. This is stated in `--help`
- *    because an operator has to be able to see it without reading the source.
+ * 2. **It declares the identity the process itself acts under.** `--as` /
+ *    `APPROVAL_HUMAN` is what this listener is, and it is what a decision is
+ *    recorded as whenever the policy maps no sender for this channel: SPEC.md
+ *    §11's config-declared identity, where the trust boundary is the local
+ *    machine and everyone who can reach the configured chat can approve as that
+ *    actor. Since APRV-324 a policy MAY map Telegram account ids to approvers,
+ *    and then the decision is recorded against the person the operator attested
+ *    the tapping account to, and an unmapped account is refused rather than
+ *    recorded as this listener. Either way the choosing happens in
+ *    `channels/contract.ts` against the attested policy, never here and never
+ *    in the channel. Both settings are stated in `--help` because an operator
+ *    has to be able to see which one they are in without reading the source.
  * 3. **It holds the token.** A grant mints a single-use execution token;
  *    `recordChannelDecision` returns it to *this* handler, which prints it on
  *    **stdout** and never hands it back to the channel. It is never sent to
@@ -2184,8 +2190,11 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
         })}\n`,
       );
     } else if (result.outcome.ok) {
+      // APRV-324: the actor off the RECORD, not the one this process was
+      // launched with. Under a sender mapping they differ, and the line a human
+      // reads on the operator's terminal has to say who the log says decided.
       streams.out(
-        `${decision.decision === "grant" ? "granted" : "rejected"} ${decision.action_key} (seq ${result.outcome.record.seq}) by ${setup.actor} via telegram\n`,
+        `${decision.decision === "grant" ? "granted" : "rejected"} ${decision.action_key} (seq ${result.outcome.record.seq}) by ${result.outcome.record.actor} via telegram\n`,
       );
     } else {
       streams.err(

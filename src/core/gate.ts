@@ -833,6 +833,29 @@ function parsePolicy(read: PolicyRead, options: GateOptions): PolicyLoadResult {
   );
 }
 
+/**
+ * The policy as a gate operation would load it: one read through the seam of
+ * {@link GateOptions.policy}, parsed, failing closed (APRV-324).
+ *
+ * Exported for one caller, `channels/contract.ts`, which resolves an
+ * authenticated sender to an approver identity BEFORE it calls {@link decide}
+ * and must do so against the same file, discovered the same way, through the
+ * same injectable reader. Writing a second `loadPolicy` call there would have
+ * been a second discovery path that could find a different file.
+ *
+ * It is still a SECOND read of the bytes, one operation earlier, and that is
+ * deliberate rather than overlooked: `decide` reads once per attempt on purpose
+ * (see {@link PolicyRead}), and pinning bytes across its bounded retry would
+ * make a re-attestation inside the retry window invisible to the drift check.
+ * What closes the gap is the check itself — a policy that changes between the
+ * two reads is either unattested or a different hash from the one the request
+ * pinned, and `decide` refuses `policy-not-attested` or `policy-drift` rather
+ * than authorizing under bytes the resolution never saw.
+ */
+export function readGatePolicy(options: GateOptions): PolicyLoadResult {
+  return parsePolicy(readPolicyOnce(options), options);
+}
+
 function appendOptionsOf(options: GateOptions): AppendOptions {
   const append: AppendOptions = { ...options.append };
   if (options.schemaDir !== undefined) append.schemaDir = options.schemaDir;
@@ -2424,6 +2447,40 @@ export interface DecideOptions extends GateOptions {
    * grade beside a refusal is a second answer to a question with one.
    */
   reaction?: Reaction;
+  /**
+   * The surface that collected the decision (amended SPEC.md §8, APRV-324),
+   * recorded as the record's top-level `channel`.
+   *
+   * The base event schema has defined the field since v0.1 and the decision
+   * events never set it, so a reader of a grant could not tell a tap on a phone
+   * from a line typed into a terminal. Set by the decision surface, from its own
+   * name, exactly as `audit.decision_refused` has always set it.
+   */
+  channel?: string;
+  /**
+   * The authenticated sender the `actor` was resolved from (amended SPEC.md
+   * §6.3, APRV-324), recorded as `payload.sender`.
+   *
+   * ABSENT is meaningful and is the common case: it says the attribution came
+   * from the surface's configuration rather than from anything the transport
+   * authenticated, which is how every decision before this key existed was
+   * made. Present, it is the transport's own attribution — never a name, handle
+   * or id a message claimed about itself (§11.1 invariant 4).
+   *
+   * This is a RECORD of how the actor was chosen, and it is not the choosing:
+   * `channels/contract.ts` resolves the sender against the attested policy
+   * before calling this verb, and no check here reads this field. There is no
+   * CLI flag that supplies it, so no agent-reachable surface mints one.
+   */
+  sender?: { channel: string; id: string };
+  /**
+   * How {@link DecideOptions.sender} became the actor (APRV-324), recorded as
+   * `payload.sender_source`. `policy` is the attested `approvers[id].senders`
+   * mapping, and it is the only member today — a closed vocabulary so a future
+   * source (a signed receipt, APRV-249) is distinguishable in a log rather than
+   * silently mixed in with policy-attested ones.
+   */
+  senderSource?: "policy";
 }
 
 /**
@@ -2767,6 +2824,18 @@ function attemptDecide(
   ) {
     payload["batch_delivery_id"] = options.batchDeliveryId;
   }
+  // APRV-324. On all three decisions, because all three are answers a person
+  // gives and all three are worth attributing. Written only when the surface
+  // observed one: an omitted sender leaves no key, and that absence is the
+  // record's own statement that the actor came from configuration rather than
+  // from anything a transport authenticated. Copied, never derived — the
+  // resolution that chose `actor` from this sender happened at the decision
+  // surface against the attested policy, and re-deriving it here would be a
+  // second answer to a question that already has one.
+  if (options.sender !== undefined) {
+    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
+  }
 
   if (decision === "grant") {
     const cls = derivation.declared.class ?? "";
@@ -2915,6 +2984,15 @@ function attemptDecide(
       actor,
       ...(derivation.task === null ? {} : { task: derivation.task }),
       action_key: actionKey,
+      // APRV-324, and worth doing on its own merits: the base schema has
+      // defined `channel` since v0.1 (SPEC.md §8's own example record carries
+      // `"channel":"telegram"`) and the decision events never set it, so a
+      // reader of a grant could not tell which surface collected it. Named by
+      // the surface, from its own name; a decision that reached the runtime
+      // through no channel names none.
+      ...(options.channel === undefined || options.channel.length === 0
+        ? {}
+        : { channel: options.channel }),
       payload,
     },
     options,

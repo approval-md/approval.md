@@ -28,6 +28,7 @@ import { HOOK_DENY_CODES, POST_TOOL_CODES } from "../src/cli/hook.js";
 import { APPEND_ERROR_CODES } from "../src/core/log.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
+import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import {
   checkManifest,
@@ -264,6 +265,13 @@ test("the §11.1 invariant 6 refusal unions are covered in full", () => {
   // post-execution lines carry are as much of invariant 6 as the gate's are.
   assert.deepEqual(pinned.get("hook_deny_codes"), [...HOOK_DENY_CODES]);
   assert.deepEqual(pinned.get("post_tool_codes"), [...POST_TOOL_CODES]);
+  // APRV-324: the decision surface's own two. A caller branches on them exactly
+  // as it branches on the gate's, and they are NOT the gate's — `decide` cannot
+  // emit either.
+  assert.deepEqual(
+    pinned.get("channel_decision_refusal_codes"),
+    [...CHANNEL_DECISION_REFUSAL_CODES],
+  );
 });
 
 test("every gate refusal code a scripted scenario can reach is pinned by a vector", () => {

@@ -106,6 +106,7 @@ import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import { appendEvent, type AppendError, type EventInput, type EventRecord, type LogHead } from "./log.js";
 import { readVerifiedRecords, requestState, type Decision } from "./state.js";
 import type { GateOptions } from "./gate.js";
+import type { ChannelSender, SenderSource } from "./sender-identity.js";
 
 /**
  * The actor every record here carries. `system:`, and the same id the runtime's
@@ -136,10 +137,29 @@ export interface RefusedDecision {
   actionKey: string;
   /** Which of the three human-only verbs was attempted. */
   decision: Decision;
-  /** The approver, `human:<id>`, from the surface's configured identity. */
-  actor: string;
+  /**
+   * The approver, `human:<id>`, from the surface's configured identity or from
+   * the sender mapping that resolved one.
+   *
+   * `null` since APRV-324, for the one refusal where the runtime cannot name a
+   * person: a transport authenticated an account the attested policy binds to
+   * nobody. Writing the listener's own identity there would say the operator's
+   * decision was refused when the operator did not decide, which is the false
+   * record this whole module exists to avoid. The record then carries
+   * {@link RefusedDecision.sender} and no `actor`, and the event schema requires
+   * one or the other.
+   */
+  actor: string | null;
   /** The surface that collected the gesture: `telegram`, `web`, `cli`. */
   channel: string;
+  /**
+   * The authenticated sender the gesture arrived from (APRV-324), when the
+   * surface observed one. The transport's own attribution, never anything the
+   * message claimed about itself (§11.1 invariant 4).
+   */
+  sender?: ChannelSender;
+  /** How the sender became the actor, when one did. */
+  senderSource?: SenderSource;
 }
 
 /** The gate refusal being recorded. Only these fields are ever read. */
@@ -217,7 +237,16 @@ export function recordRefusedDecision(
   // No person, no record. See {@link HUMAN_ACTOR}: `actor-not-human` is the
   // refusal a misconfigured channel gets, and it is the one refusal that says
   // nobody's attention was spent.
-  if (!HUMAN_ACTOR.test(decided.actor)) return { ok: true, audit: null, withdrawn: null };
+  if (decided.actor !== null && !HUMAN_ACTOR.test(decided.actor)) {
+    return { ok: true, audit: null, withdrawn: null };
+  }
+  // APRV-324. An unresolved sender is the other way to have no person — and the
+  // opposite case, because somebody's attention WAS spent: a human tapped from
+  // an account the policy names nobody for. The record is the only place an
+  // operator can learn that, and the id is the only thing it can say.
+  if (decided.actor === null && decided.sender === undefined) {
+    return { ok: true, audit: null, withdrawn: null };
+  }
 
   const attempts = attemptsOf(options.retryOnHeadMoved);
   const audit = withHeadRetry(attempts, () => appendAudit(logPath, decided, refusal, options));
@@ -255,11 +284,19 @@ function appendAudit(
   const derivation = requestState(read.records, decided.actionKey, ts, null);
 
   const payload: Record<string, unknown> = {
-    actor: decided.actor,
+    ...(decided.actor === null ? {} : { actor: decided.actor }),
     decision: decided.decision,
     code: refusal.code,
     message: refusal.message,
   };
+  // APRV-324. The account the gesture came from, when the surface authenticated
+  // one. On an unmapped sender it is the whole of what is known about who
+  // tapped; on any other refusal of a sender-resolved decision it says which
+  // account spent the attention the record is accounting for.
+  if (decided.sender !== undefined) {
+    payload["sender"] = { channel: decided.sender.channel, id: decided.sender.id };
+    if (decided.senderSource !== undefined) payload["sender_source"] = decided.senderSource;
+  }
   if (refusal.drift !== undefined) {
     payload["policy_sha256_requested"] = refusal.drift.requested;
     payload["policy_sha256_attested"] = refusal.drift.attested;
