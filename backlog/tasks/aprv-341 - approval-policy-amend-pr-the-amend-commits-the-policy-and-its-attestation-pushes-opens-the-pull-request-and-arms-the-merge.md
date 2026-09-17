@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-ergonomics'
 created_date: '2026-09-16 17:59'
-updated_date: '2026-09-17 00:59'
+updated_date: '2026-09-17 02:01'
 labels:
   - cli
   - policy
@@ -26,9 +26,9 @@ After appending the attestation, approval policy amend prints a six-command runb
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 approval policy amend --pr appends the attestation, then commits exactly APPROVAL.md and events.jsonl on a scratch index based on origin/main, pushes policy-amend-<seq>, opens the pull request (or updates an open one for that branch) and arms the auto-merge; the checkout ends the verb on the same branch with the same index and working tree
-- [x] #2 A dirty working tree, staged unrelated paths, or an origin/main that already carries a later policy edit each refuse with a distinct machine-readable code before anything is pushed; the attestation is never withheld or duplicated by a refusal of the git half
-- [x] #3 Without --pr, or when gh is unavailable, the verb prints the runbook it prints today, byte for byte
-- [x] #4 Tests exercise the commit content (exactly two paths), the refusal codes, and the idempotent second run; docs/cli-reference.md and docs/dogfood-cutover.md describe the flag
+- [x] #2 Without --pr, or when gh is unavailable, the verb prints the runbook it prints today, byte for byte
+- [x] #3 Tests exercise the commit content (exactly two paths), the refusal codes, and the idempotent second run; docs/cli-reference.md and docs/dogfood-cutover.md describe the flag
+- [x] #4 The verb refuses with a distinct machine-readable code, before anything is pushed, when a ceremony file (APPROVAL.md or events.jsonl) is staged in one state and edited again in the working tree (dirty-tree), when unrelated paths are staged (staged-unrelated), or when origin/main already carries a later policy edit; unrelated dirty working-tree paths are not a refusal, because the scratch index keeps them out of the commit and the primary carries daemon envelope write-backs as a matter of course (narrowed from the original wording and accepted by Carter, 2026-09-17); the attestation is never withheld or duplicated by a refusal of the git half
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -57,6 +57,8 @@ DECISION on AC2's 'dirty working tree'. A literal refusal on any unstaged path o
 SPEC 11.1 global invariants touched: none is weakened. The attestation still goes through appendAttestation's compare-and-append, refusals are machine-readable and distinct by repair, and no self-reported field reduces scrutiny: --pr chooses a ceremony, it does not choose a policy class. The verb stays policy.core and human-only.
 
 Verification: node scripts-run-tests --only cli-amend is 97 tests, 97 pass, 0 fail, exit 0, with seven new cases. Exactly two paths in the commit while the working tree carried an untracked backlog task file; the checkout's branch, HEAD, index, other-path status and policy bytes are deep-equal before and after; a second run edits the open PR and never calls gh pr create; a re-run with nothing to amend is a no-op that attests nothing twice; both new codes fire before the attestation and before any push; base-policy-diverged likewise; the two usage errors; and a fixture pinning the six runbook commands printed without --pr. A wider run over cli-amend, cli-help, cli-long-help and cli-doctor is 204 tests, 204 pass, 0 fail, exit 0. Build, typecheck and lint exit 0.
+
+AC2 narrowed 2026-09-17 with Carter: the literal refusal on any dirty working tree would block the ceremony in the primary, which always carries daemon write-backs on task files; the scratch index already keeps unrelated dirt out of the commit. The implemented refusals are dirty-tree (ceremony file staged then edited) and staged-unrelated (index strays), plus the later-policy-edit check. The criterion now appears as #4 after the rewrite.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
