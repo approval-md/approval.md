@@ -279,6 +279,36 @@ const FIXTURES: readonly Fixture[] = [
   { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
   { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
   { command: "node dist/src/cli/main.js gate close", class: "policy.core", rule: "approval-gate-close", row: "node" },
+  // APRV-338: the protected-path sign-off, and the one refinement that reads a
+  // FLAG, because the flag is what changes the act. With `--path` the verb
+  // ratifies protected TEXT and resolves SPEC.md's pending-sign-off suffix, so
+  // an agent able to run it could ratify its own amendments; without it the
+  // verb attests the gate's own configuration and stays pass-through, as it
+  // always has.
+  {
+    command: "approval policy attest --path SPEC.md --as human:carter",
+    class: "policy.core",
+    rule: "approval-policy-signoff",
+    row: "approval",
+  },
+  {
+    command: "approval --json policy attest --path=SPEC.md",
+    class: "policy.core",
+    rule: "approval-policy-signoff",
+    row: "approval",
+  },
+  {
+    command: "node ./cli.js policy attest --path SPEC.md",
+    class: "policy.core",
+    rule: "approval-policy-signoff",
+    row: "node",
+  },
+  { command: "approval policy attest --as human:carter", class: GATE_SELF_CLASS, rule: "approval" },
+  {
+    command: "approval policy attest --organ .claude/settings.json",
+    class: GATE_SELF_CLASS,
+    rule: "approval",
+  },
   // Reporting the window is the gate reading itself, and stays pass-through.
   { command: "approval gate status --json", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "approval gate", class: GATE_SELF_CLASS, rule: "approval" },

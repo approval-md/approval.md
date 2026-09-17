@@ -21,7 +21,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
+import {
+  appendAttestation,
+  appendOrganAttestation,
+  appendPathSignOff,
+} from "../src/core/attest.js";
 import {
   executeThroughAdapter,
   type Adapter,
@@ -1764,6 +1768,226 @@ test("a policy change whose bytes nothing attests fails, and says how amendments
     assert.equal(report.ok, false);
     assert.equal(report.findings[0]?.code, "no-evidence");
     assert.match(report.findings[0]?.detail ?? "", /approval policy amend --commit/u);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the protected-path sign-off (APRV-338)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sign off one protected path's bytes through the real append path, writing
+ * them first. The digest in the record is the runtime's own, taken from the
+ * file it just wrote, so a test cannot accidentally sign bytes nobody has.
+ */
+function signOffFile(
+  unit: World,
+  path: string,
+  bytes: string,
+  minute: number,
+): EventRecord {
+  const onDisk = join(unit.unit.dir, ...path.split("/"));
+  mkdirSync(join(onDisk, ".."), { recursive: true });
+  writeFileSync(onDisk, bytes, "utf8");
+  const result = appendPathSignOff(
+    unit.unit.logPath,
+    { path, root: unit.unit.dir, protectedPaths: ["SPEC.md"] },
+    HUMAN,
+    { clock: fixedClock(at(minute)) },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) throw new Error("unreachable");
+  return result.record;
+}
+
+const HEAD_TEXT = "new\n";
+
+test("a protected path with no grant passes on a sign-off of its bytes at head", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff");
+  try {
+    const unit = world(root);
+    const record = signOffFile(unit, "SPEC.md", HEAD_TEXT, 1);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(HEAD_TEXT) }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "attested");
+    assert.equal(report.findings[0]?.seq, record.seq);
+    // The reason has to say what it rests on, or a reader takes whole-file
+    // evidence for a grant.
+    assert.match(report.findings[0]?.detail ?? "", /WHOLE-FILE evidence and weaker than a grant/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a digest signed for ANOTHER path is not evidence for this one", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-crosspath");
+  try {
+    const unit = world(root);
+    // The human signed CLAUDE.md. SPEC.md at head happens to hash to exactly
+    // the same digest, and that is not a statement about SPEC.md.
+    signOffFile(unit, "CLAUDE.md", HEAD_TEXT, 1);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(HEAD_TEXT) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(report.findings[0]?.detail ?? "", /signed for some OTHER path/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a file edited after its sign-off fails: the digest at head is not signed", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-stale");
+  try {
+    const unit = world(root);
+    signOffFile(unit, "SPEC.md", HEAD_TEXT, 1);
+    // The pull request carries LATER bytes than the ones the human read.
+    const edited = "new\nand one more line\n";
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(edited) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(
+      report.findings[0]?.detail ?? "",
+      /no gate\.path\.signed_off record signs off SPEC\.md/u,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unevidenced protected path names the sign-off route, last and hedged", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-route");
+  try {
+    const unit = world(root);
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => "a".repeat(64) }),
+    );
+    assert.equal(report.ok, false);
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    const detail = report.findings[0]?.detail ?? "";
+    assert.match(detail, /approval policy attest --path SPEC\.md --as human:<id>/u);
+    // And it says plainly that the gate is the better route, so the sentence
+    // cannot be read as an invitation to route around it.
+    assert.match(detail, /prefer the gate/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a caller that supplies no path digest gets no sign-off verdict — fail closed", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-nodigest");
+  try {
+    const unit = world(root);
+    signOffFile(unit, "SPEC.md", HEAD_TEXT, 1);
+
+    // `pathSha256AtHead` omitted entirely: the sign-off is in the log and the
+    // guard still refuses, because nothing told it what the bytes at head hash
+    // to.
+    const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+  } finally {
+    cleanup();
+  }
+});
+
+test("hunk evidence still leads: a covered change passes on its grant, not the sign-off", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-prefers-hunks");
+  try {
+    const unit = world(root);
+    // Both exist for the same path at the same commit. The grant covers the
+    // change, so it is the grant that must appear in the verdict and in the
+    // reason: whole-file evidence consulted first would have silently answered
+    // for every change a grant already covered.
+    const grant = grantEdit(unit, "spec", fileMaterial("SPEC.md"), 1);
+    const signed = signOffFile(unit, "SPEC.md", HEAD_TEXT, 3);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(HEAD_TEXT) }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "granted-file");
+    assert.equal(report.findings[0]?.seq, grant.seq);
+    assert.notEqual(report.findings[0]?.seq, signed.seq);
+    assert.doesNotMatch(report.findings[0]?.detail ?? "", /WHOLE-FILE/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a sign-off rescues the repeat-edit shape a naming grant cannot cover", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-uncovered");
+  try {
+    const unit = world(root);
+    // A grant naming SPEC.md that covers some OTHER edit: the `uncovered-hunk`
+    // shape, which is exactly where a human who has read the diff used to have
+    // no route at all.
+    grantEdit(unit, "spec", fileMaterial("SPEC.md", "gone", "elsewhere"), 1);
+    signOffFile(unit, "SPEC.md", HEAD_TEXT, 3);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(HEAD_TEXT) }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "attested");
+    // And it says why it was reached: no grant covered this change.
+    assert.match(report.findings[0]?.detail ?? "", /no grant covers this change/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an uncovered change with no sign-off names the route in its failure too", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-uncovered-none");
+  try {
+    const unit = world(root);
+    grantEdit(unit, "spec", fileMaterial("SPEC.md", "gone", "elsewhere"), 1);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { pathSha256AtHead: () => shaOf(HEAD_TEXT) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+    assert.match(
+      report.findings[0]?.detail ?? "",
+      /approval policy attest --path SPEC\.md --as human:<id>/u,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a sign-off is not evidence for the POLICY file or for a gate organ", () => {
+  const { root, cleanup } = scratchRoot("guard-signoff-not-core");
+  try {
+    const unit = world(root);
+    signOffFile(unit, "SPEC.md", HEAD_TEXT, 1);
+
+    // The policy index is fed by `policy.updated` alone and the organ index by
+    // `gate.organ.attested` alone, so the sign-off answers neither — even at
+    // the same digest. (The verb refuses both paths outright as well; this is
+    // the reader's half of the same rule.)
+    for (const path of ["APPROVAL.md", ".claude/settings.json"]) {
+      const report = evaluateProtectedPaths(
+        inputFor(unit, [path], {
+          policySha256AtHead: shaOf(HEAD_TEXT),
+          organSha256AtHead: () => shaOf(HEAD_TEXT),
+          pathSha256AtHead: () => shaOf(HEAD_TEXT),
+        }),
+      );
+      assert.equal(report.ok, false, `${path}: ${JSON.stringify(report.findings)}`);
+      assert.equal(report.findings[0]?.code, "no-evidence", path);
+    }
   } finally {
     cleanup();
   }

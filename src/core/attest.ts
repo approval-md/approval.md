@@ -45,6 +45,9 @@ import {
   builtinProtectedPathClass,
   isGateOrganPath,
   normalizePathSpelling,
+  POLICY_EDIT_SUBCLASS,
+  protectedPathClass,
+  type ProtectedPathEntry,
 } from "./command-class.js";
 import {
   APPEND_ERROR_CODES,
@@ -727,6 +730,327 @@ export function latestOrganAttestation(
     const fields = organAttestationOf(record);
     if (fields === null) continue;
     if (fields.organPath === want) return { ...fields, record };
+  }
+  return null;
+}
+
+// ===========================================================================
+// Protected-path sign-off (APRV-338, amended SPEC.md §5.2, §8 and §10.1)
+// ===========================================================================
+
+/**
+ * The event a protected-path SIGN-OFF is: a human's statement that they read
+ * one `policy.edit` file at these exact bytes and stand behind them.
+ *
+ * ## The hole this fills
+ *
+ * SPEC.md's amendment-provenance rule says text that reached a protected file
+ * without a grant carries `(Amended APRV-n, pending sign-off.)` until a human
+ * ratifies it, and doubt resolves to pending. Nothing recorded the
+ * ratification. A human who had read a diff and agreed with it had exactly two
+ * ways to get it past the protected-path guard: re-make the edit under a grant,
+ * or change the guard. Both are the wrong shape — the first re-does work the
+ * human has already done with their eyes, and the second edits an enforcement
+ * path to admit one change.
+ *
+ * ## Why it is not the organ record, and not a grant either
+ *
+ * It sits between them, and the ordering is the point.
+ *
+ * A grant binds the exact hunk: `{before, after}` bytes a human saw in a
+ * prompt. It is the strongest evidence in the system about a CHANGE, and
+ * nothing here weakens it — {@link findPathSignOff} is asked only after the
+ * guard's hunk search has failed, so a covered change still passes on its
+ * grants and still prints them as its reason.
+ *
+ * {@link ORGAN_ATTESTATION_EVENT} is the other end. An organ is `policy.core`,
+ * a policy may resolve `policy.core` to `human-only`, and the gate mints
+ * nothing for a human-only class (§11.1 invariant 9), so for an organ content
+ * attestation is not the weaker evidence, it is the only evidence that can
+ * exist. A protected path is not in that position: a `policy.edit` grant for it
+ * is obtainable, so this record must never be the first thing a reader reaches
+ * for. A separate type is what makes that ordering structural rather than a
+ * convention every reader has to remember, and it is why the organ verb's
+ * refusals and this one's are not merged.
+ *
+ * The `gate.` prefix is deliberate: SPEC.md §8 keys the write-boundary clock on
+ * it, and a signer who could supply the moment could place a sign-off before
+ * bytes they had not yet seen.
+ */
+export const PATH_SIGN_OFF_EVENT = "gate.path.signed_off" as const;
+
+/**
+ * The payload field naming which file was signed off.
+ *
+ * Repository-relative and `/`-separated, for the reason {@link ORGAN_PATH_FIELD}
+ * is: the log is copied and read on other machines, and an absolute path would
+ * leak the signer's home directory into a permanent record. Spelled `path`
+ * rather than `signed_path` because the record type already says what kind of
+ * statement it is, and a reader should not have to learn a second noun.
+ */
+export const SIGN_OFF_PATH_FIELD = "path";
+
+/**
+ * Why a sign-off was refused: the attestation codes, plus the three path rules
+ * this verb has of its own.
+ *
+ * Three and not one, because the repair differs in each case and a caller has
+ * to be able to tell them apart without reading prose:
+ *
+ * - `path-is-policy` — the policy file, whose sign-off is its attestation and
+ *   which the gate reads on every operation. A second record that looked like
+ *   a statement about the policy's bytes is exactly what the organ verb refuses
+ *   to create, for the same reason.
+ * - `path-is-core` — a `policy.core` surface or the log directory. An organ is
+ *   signed off with `--organ`, which is a different record under different
+ *   rules; the approval home and the log are the human's own ceremony surface
+ *   and are not ratified by any verb at all.
+ * - `path-not-protected` — an ordinary file, or a path that is not
+ *   repository-relative. Nothing to ratify: an unprotected file's edits are not
+ *   gated, so a record about them would assert authority over nothing.
+ */
+export const PATH_SIGN_OFF_ERROR_CODES = [
+  ...ATTEST_ERROR_CODES,
+  "path-not-protected",
+  "path-is-policy",
+  "path-is-core",
+] as const;
+
+export type PathSignOffErrorCode = (typeof PATH_SIGN_OFF_ERROR_CODES)[number];
+
+export interface PathSignOffError {
+  code: PathSignOffErrorCode;
+  message: string;
+  /** Schema errors, present when `code` is "validation". */
+  errors?: ValidationError[];
+}
+
+/** {@link appendPathSignOff}'s result: the append's, widened by three codes. */
+export type PathSignOffAppendResult =
+  | { ok: true; record: EventRecord; line: string }
+  | { ok: false; error: PathSignOffError };
+
+/**
+ * Which file to sign off, in the two spellings that are not the same fact,
+ * plus the policy's own protected list.
+ *
+ * `path` is the identity the record carries and the checker matches on, so it
+ * is repository-relative; `root` is where that path is rooted on THIS machine
+ * and never reaches the log. `protectedPaths` is `policy.protected_paths`: a
+ * project that widened its protected surface may sign off the files it added,
+ * and a caller that omits the list gets the built-in set alone, which is the
+ * strictly NARROWER answer and therefore the fail-closed one.
+ */
+export interface SignOffTarget {
+  /** Repository-relative, e.g. `SPEC.md`. */
+  path: string;
+  /** The checkout `path` is relative to; `join(root, path)` is hashed. */
+  root: string;
+  /** `policy.protected_paths`, widening which paths are signable. */
+  protectedPaths?: readonly ProtectedPathEntry[];
+}
+
+/** The identity and digest a sign-off carries, or `null`. */
+export interface PathSignOffFields {
+  path: string;
+  sha256: string;
+}
+
+/** A sign-off found in the log, with the record it came from. */
+export interface PathSignOff extends PathSignOffFields {
+  record: EventRecord;
+}
+
+/**
+ * Append a `gate.path.signed_off` record for `target` to `logPath`.
+ *
+ * The rules, refused as structured results and never as throws, in the order
+ * they are checked — and the order is normative, because a path can break more
+ * than one of them and the caller's repair depends on which they are told:
+ *
+ * 1. `actor` MUST match `^human:.+`. This is the verb an agent must not
+ *    perform: a record the party under oversight could write would let it
+ *    ratify its own text, which is the whole of what the pending-sign-off
+ *    suffix exists to prevent (§11.1 invariants 4 and 9).
+ * 2. The path must be repository-relative: absolute paths and `..` are refused,
+ *    because the recorded identity has to mean the same file on the machine
+ *    that later reads the log.
+ * 3. The policy file is refused with its own code; it has its own attestation.
+ * 4. `policy.core` and `log.mutate` surfaces are refused with their own code.
+ * 5. What remains must classify `policy.edit` or a `policy.edit.*` sub-class.
+ *    Anything else is not a protected path, and this verb is not a general
+ *    "bless these bytes" primitive.
+ *
+ * Every one of those is decided BEFORE the file is read, so a path this verb
+ * would never sign off is refused whether or not it exists.
+ *
+ * The digest is computed by the runtime from the file's exact bytes. There is
+ * no parameter for it and none for `ts`, for the reason
+ * {@link appendOrganAttestation} has neither: a caller who could supply the
+ * hash could ratify bytes nobody read, and one who could supply the moment
+ * could backdate what they had seen when.
+ *
+ * Like the attestations this append carries no `expectedHead`: it reads nothing
+ * from the log, so it has no check-then-act window to close.
+ */
+export function appendPathSignOff(
+  logPath: string,
+  target: SignOffTarget,
+  actor: string,
+  options: AttestOptions = {},
+): PathSignOffAppendResult {
+  if (!HUMAN_ACTOR.test(actor)) {
+    return {
+      ok: false,
+      error: {
+        code: "actor-not-human",
+        message: `signing off a protected path requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; this record is what resolves the pending-sign-off suffix, so an agent that could write one could ratify its own text, and the log was left unchanged`,
+      },
+    };
+  }
+
+  const refusal = signOffPathRefusal(target.path, target.protectedPaths ?? []);
+  if (refusal !== null) return { ok: false, error: refusal };
+  const path = normalizePathSpelling(target.path);
+
+  let sha256: string;
+  try {
+    sha256 = policyFileHash(join(target.root, path));
+  } catch (cause) {
+    return {
+      ok: false,
+      error: {
+        code: "io",
+        message: `protected path ${path} could not be read under ${target.root} for sign-off: ${detail(cause)}`,
+      },
+    };
+  }
+
+  return appendEvent(
+    logPath,
+    {
+      ts: tick(options),
+      event: PATH_SIGN_OFF_EVENT,
+      actor,
+      payload: { [SIGN_OFF_PATH_FIELD]: path, sha256 },
+    },
+    options,
+  );
+}
+
+/** Rules 2 to 5 of {@link appendPathSignOff}, or `null` when the path passes. */
+function signOffPathRefusal(
+  candidate: string,
+  extra: readonly ProtectedPathEntry[],
+): PathSignOffError | null {
+  const normalized = normalizePathSpelling(candidate);
+  if (normalized.length === 0 || isAbsolute(candidate) || normalized.split("/").includes("..")) {
+    return {
+      code: "path-not-protected",
+      message: `${JSON.stringify(candidate)} is not a repository-relative path; a sign-off records the path itself, so it must name the same file on every machine that later reads the log`,
+    };
+  }
+
+  const builtin = builtinProtectedPathClass(normalized);
+  if (builtin === "policy.core") {
+    const last = normalized.split("/").pop() ?? normalized;
+    if (POLICY_FILE_NAMES.includes(last)) {
+      return {
+        code: "path-is-policy",
+        message: `${normalized} is the policy file, whose sign-off is its attestation: \`approval policy attest\` with no --path, which the gate reads on every operation. A second record about those bytes would be a thing that looks like an attestation and is not one`,
+      };
+    }
+    return {
+      code: "path-is-core",
+      message: isGateOrganPath(normalized)
+        ? `${normalized} is one of the gate's organs, which is signed off by content with \`approval policy attest --organ ${normalized}\`; that is a different record under different rules, because an organ is policy.core and can have no grant at all, while a protected path can`
+        : `${normalized} is inside the approval home, which is the human's own ceremony surface and is ratified by no verb`,
+    };
+  }
+  if (builtin === "log.mutate") {
+    return {
+      code: "path-is-core",
+      message: `${normalized} is inside the log directory, which no verb of this runtime signs off: the log is append-only and its contents are evidence rather than text anyone ratifies`,
+    };
+  }
+
+  const routed = protectedPathClass(normalized, extra);
+  if (routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed))) {
+    return null;
+  }
+  return {
+    code: "path-not-protected",
+    message: `${normalized} does not classify policy.edit or a policy.edit.* sub-class${extra.length === 0 ? " under the built-in protected set (no policy.protected_paths were supplied, which is the narrower reading)" : " under the built-in protected set widened by policy.protected_paths"}, so it is not a protected path and nothing about it is gated; a sign-off on it would assert authority over nothing`,
+  };
+}
+
+/**
+ * Is this record a protected-path sign-off, and which bytes of which file does
+ * it stand behind?
+ *
+ * A record missing either field is ignored, for the reason a `policy.updated`
+ * with no `sha256` is ignored: a record that asserts nothing about bytes must
+ * never be able to SATISFY a check about bytes. Fail closed.
+ */
+export function pathSignOffOf(record: EventRecord): PathSignOffFields | null {
+  if (record.event !== PATH_SIGN_OFF_EVENT) return null;
+  const payload = record.payload;
+  if (payload === undefined) return null;
+  const path = payload[SIGN_OFF_PATH_FIELD];
+  const sha256 = payload["sha256"];
+  if (typeof path !== "string" || typeof sha256 !== "string") return null;
+  const normalized = normalizePathSpelling(path);
+  if (normalized.length === 0) return null;
+  return { path: normalized, sha256 };
+}
+
+/**
+ * The record in which a human signed off THIS digest FOR THIS path, latest
+ * first, or `null`.
+ *
+ * Both halves are required and that is the whole rule, exactly as it is for an
+ * organ: a digest signed for some other file is not evidence about this one,
+ * and bytes edited after a sign-off are bytes nobody signed. Two files that
+ * happen to hash alike are still two files, and a human who read one has said
+ * nothing about the other.
+ *
+ * There is no "latest wins" supersession. A sign-off stands for the bytes it
+ * names: the checker asks about a blob at a commit that may be old, and the
+ * newest sign-off of a file says nothing about whether an earlier state was
+ * once ratified.
+ */
+export function findPathSignOff(
+  records: readonly EventRecord[],
+  path: string,
+  sha256: string,
+): EventRecord | null {
+  const want = normalizePathSpelling(path);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index] as EventRecord;
+    const fields = pathSignOffOf(record);
+    if (fields === null) continue;
+    if (fields.path === want && fields.sha256 === sha256) return record;
+  }
+  return null;
+}
+
+/**
+ * The most recent sign-off of `path` at ANY digest, or `null`.
+ *
+ * What a status surface needs to tell "this file was never signed off" from
+ * "this file was signed off and has been edited since". Nothing enforcing reads
+ * it: {@link findPathSignOff} is the question the guard asks.
+ */
+export function latestPathSignOff(
+  records: readonly EventRecord[],
+  path: string,
+): PathSignOff | null {
+  const want = normalizePathSpelling(path);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index] as EventRecord;
+    const fields = pathSignOffOf(record);
+    if (fields === null) continue;
+    if (fields.path === want) return { ...fields, record };
   }
   return null;
 }

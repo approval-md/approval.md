@@ -439,6 +439,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // and the answer is "none", which is a pass rather than a skip, exactly
       // as values-block treats a file that declares no values (APRV-335).
       "pass",
+      // pending-sign-off passes: the fixture home carries no protected file
+      // bearing SPEC.md's pending-sign-off marker, so no ratification is owed.
+      // A pass and not a skip for the same reason autonomy-alias is one — the
+      // question was asked and the answer is "none" (APRV-338).
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -477,7 +482,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 29);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 30);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -936,15 +941,17 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 29: APRV-335 appended `autonomy-alias` (which rules still write the
-  // deprecated bare `supervised`), and APRV-313 appended `codex-hook-wiring`.
-  // APRV-227 appended `harness-version-unverified` (whether the binary
-  // hosting the hook changed under it), APRV-208 appended `live-draw`
-  // (whether a daemon is answering supervised-live draws for this log),
-  // APRV-272 appended `gate-organs` (which harness files carry no attestation
-  // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
-  // sealed-delivery private key is tracked or unignored).
-  assert.equal(parsed.checks.length, 29);
+  // 30: APRV-338 appended `pending-sign-off` (which protected files still
+  // carry SPEC.md's pending-sign-off marker with no record ratifying their
+  // current bytes), APRV-335 appended `autonomy-alias` (which rules still
+  // write the deprecated bare `supervised`), and APRV-313 appended
+  // `codex-hook-wiring`. APRV-227 appended `harness-version-unverified`
+  // (whether the binary hosting the hook changed under it), APRV-208 appended
+  // `live-draw` (whether a daemon is answering supervised-live draws for this
+  // log), APRV-272 appended `gate-organs` (which harness files carry no
+  // attestation of their current bytes), and APRV-285 appended `sealed-keys`
+  // (whether a sealed-delivery private key is tracked or unignored).
+  assert.equal(parsed.checks.length, 30);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -2134,6 +2141,86 @@ test("doctor: attesting the organ turns the row green, and editing it turns it b
   const drifted = checkNamed(
     await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {}),
     "gate-organs",
+  );
+  assert.equal(drifted.status, "skip");
+  assert.match(drifted.detail, /edited since seq \d+/u);
+});
+
+// ---------------------------------------------------------------------------
+// pending-sign-off (APRV-338)
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a protected prose file into a doctor home.
+ *
+ * `CLAUDE.md` rather than `SPEC.md`, so the case rests on the BUILT-IN
+ * protected set and not on a policy fixture: the row's question is about the
+ * marker, and a widened policy would add a second thing that could be wrong.
+ */
+function writeProse(home: string, text: string): void {
+  writeFileSync(join(home, "CLAUDE.md"), text, "utf8");
+}
+
+const PENDING_TEXT = "# Claude\n\nA rule. (Amended APRV-338, pending sign-off.)\n";
+
+test("doctor: a protected file carrying the marker with no record is listed, and never fails", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeProse(home, PENDING_TEXT);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+  const row = checkNamed(run, "pending-sign-off");
+
+  assert.equal(row.status, "skip");
+  assert.match(row.detail, /AWAITING SIGN-OFF/u);
+  assert.match(row.detail, /CLAUDE\.md/u);
+  assert.match(row.detail, /never signed off/u);
+  assert.match(row.fix ?? "", /approval policy attest --path CLAUDE\.md/u);
+  // Informational, exactly as gate-organs is: unratified prose breaks nothing
+  // on this machine and the enforcement is the CI-side guard.
+  assert.equal(
+    parseDoctor(run).checks.some(
+      (entry) => entry.check === "pending-sign-off" && entry.status === "fail",
+    ),
+    false,
+  );
+});
+
+test("doctor: a file with no marker is not reported at all", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeProse(home, "# Claude\n\nA rule nobody is waiting to ratify.\n");
+
+  const row = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {}),
+    "pending-sign-off",
+  );
+  assert.equal(row.status, "pass");
+  assert.match(row.detail, /no protected file/u);
+  assert.equal(row.fix, undefined);
+});
+
+test("doctor: signing the file off turns the row green, and editing it turns it back", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeProse(home, PENDING_TEXT);
+
+  const signed = await runCli(["policy", "attest", "--path", "CLAUDE.md"], home, {
+    APPROVAL_HUMAN: "human:carter",
+  });
+  assert.equal(signed.code, 0, signed.stderr);
+
+  const green = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {}),
+    "pending-sign-off",
+  );
+  assert.equal(green.status, "pass");
+  assert.match(green.detail, /signed off at these bytes/u);
+  assert.equal(green.fix, undefined);
+
+  // One more edit, and the row names the record the bytes have moved past: a
+  // sign-off stands for the bytes it read and for no later ones.
+  writeProse(home, `${PENDING_TEXT}\nA second rule, also pending sign-off.\n`);
+  const drifted = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {}),
+    "pending-sign-off",
   );
   assert.equal(drifted.status, "skip");
   assert.match(drifted.detail, /edited since seq \d+/u);

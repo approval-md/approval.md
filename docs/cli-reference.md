@@ -769,6 +769,69 @@ current bytes carry no attestation. It never moves doctor's exit code: an
 unattested organ breaks nothing on this machine, and the enforcement for one is
 the guard in CI.
 
+### `--path <path>`: signing off a protected file (APRV-338)
+
+SPEC.md's amendment-provenance rule says text that reached a protected file
+without a grant carries `(Amended APRV-n, pending sign-off.)` and holds no more
+authority than a proposal until a human ratifies it. Nothing recorded the
+ratification: no event, no verb, and no way for CI or doctor to tell a ratified
+amendment from a pending one. This flag is that record.
+
+```
+approval policy attest --path SPEC.md --as human:carter
+```
+
+One path per call, repository-relative (an absolute path under `--dir` is
+accepted and recorded relative). The runtime hashes the bytes on disk; there is
+no flag for the digest. The record is a **`gate.path.signed_off`** event:
+
+```
+{"event":"gate.path.signed_off","actor":"human:<id>",
+ "payload":{"path":"SPEC.md","sha256":"<64 hex>"}}
+```
+
+**Which paths.** Exactly those whose edits classify `policy.edit` or a
+`policy.edit.*` sub-class: the built-in prose set (`CLAUDE.md`, `AGENTS.md`,
+`.npmrc`, `.github/workflows/`) plus everything the live policy's
+`protected_paths` widens to, including a path routed to a sub-class such as
+`policy.edit.design`. The policy is loaded to answer that, and a policy that
+does not load contributes nothing, which narrows what may be signed rather than
+widening it.
+
+Three refusals are specific to this flag, all exit 2:
+
+```
+path-is-policy       the policy file: use `approval policy attest` with no flag
+path-is-core         a gate organ (use --organ), the approval home, or the log
+                     directory, which no verb ratifies
+path-not-protected   an ordinary file, or a path that is not repository-relative
+```
+
+`--organ` and `--path` together are a usage error, as are `--policy` and
+`--path`: each pair names two different claims and guessing which one was meant
+is how the wrong record gets written. `--json` adds `signed_path`:
+
+```
+success  {"ok":true,"seq":7,"sha256":"<64 hex>","path":"/abs/SPEC.md",
+          "signed_path":"SPEC.md"}
+```
+
+**Weaker than a grant, and read last.** A grant binds the exact hunk a human saw
+in a prompt; a sign-off stands for the whole file. So the protected-path guard
+asks about a sign-off only after its search for a grant covering the change has
+come up empty, and the finding it prints says so in words. A change that a grant
+does cover still passes on the grant and still names it. Signing off is for the
+case the pending-sign-off suffix was invented for: text a human has read at that
+commit and agrees with, for which no grant was ever taken.
+
+The verb classifies `policy.core` when `--path` is present (without it the verb
+attests the gate's own configuration and stays pass-through), so under this
+repository's policy the harness hook denies it to an agent with
+`hook-class-human-only` before the verb's own `actor-not-human` refusal is
+reached. `approval doctor`'s `pending-sign-off` row lists the protected files
+that still carry the marker with no record over their current bytes; like
+`gate-organs` it never moves doctor's exit code.
+
 ## policy amend
 
 **Progress, on stderr.** The verb re-verifies the whole chain and recovers the
@@ -2640,6 +2703,20 @@ The checks, at length:
   an operator wants before a future schema version drops the alias. A policy
   that did not load is a SKIP: it names no level at all, and its own failure is
   reported by the attestation row and by `approval policy check`.
+- **pending-sign-off** — which protected files carry SPEC.md's
+  `(Amended APRV-n, pending sign-off.)` marker with no `gate.path.signed_off`
+  record over their current bytes (APRV-338). Informational and never a FAIL,
+  for the two reasons `gate-organs` is: nothing on this machine is broken by
+  unratified prose, and the enforcement that does bite is the CI-side
+  protected-path guard. What the row buys is that the debt is visible at the
+  terminal rather than discovered when a pull request fails. It reads the
+  enumerated directories (`.`, `.github/workflows/`, `docs/`, `design/`) plus
+  every path the policy's `protected_paths` names, keeps only what classifies
+  `policy.edit` or a `policy.edit.*` sub-class, and reports a file whose current
+  bytes ARE signed off as ratified rather than pending. The `fix` is
+  `approval policy attest --path <p> --as human:<id>`, to be run after reading
+  the file; a marker whose text was later granted through the gate should lose
+  the suffix instead.
 
 **`--json`** (one object on stdout):
 

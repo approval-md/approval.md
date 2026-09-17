@@ -35,6 +35,15 @@
  * above hold there too — bytes not parse, declared identity, an agent actor
  * refused at exit 2 — and two refusals are added, both usage errors, for a path
  * that is the policy file and for a path that is not an organ at all.
+ *
+ * **`--path <path>` signs off an ordinary PROTECTED path (APRV-338)**, and
+ * appends a third event (`gate.path.signed_off`) for a third reason: SPEC.md's
+ * amendment-provenance rule says text that reached a protected file without a
+ * grant is pending until a human ratifies it, and nothing recorded the
+ * ratification. This is that record. It is whole-file evidence and therefore
+ * weaker than the hunk a grant binds, which is why the protected-path guard
+ * reads it only after its grant search has failed; the verb's own job is
+ * simply to refuse every path that is not a `policy.edit` surface.
  */
 
 import { accessSync, constants, statSync } from "node:fs";
@@ -44,10 +53,14 @@ import {
   HUMAN_ACTOR_ENV,
   appendAttestation,
   appendOrganAttestation,
+  appendPathSignOff,
   resolveHumanActor,
 } from "../core/attest.js";
-import { normalizePathSpelling } from "../core/command-class.js";
-import { POLICY_FILENAMES } from "../core/policy-load.js";
+import {
+  normalizePathSpelling,
+  type ProtectedPathEntry,
+} from "../core/command-class.js";
+import { POLICY_FILENAMES, loadPolicy } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_TORN_TAIL, EXIT_USAGE } from "./exit-codes.js";
 import { POLICY_ATTEST_HELP } from "./help.js";
@@ -59,6 +72,7 @@ const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
   "--dir": "string",
   "--organ": "string",
+  "--path": "string",
   "--as": "string",
   "--log": "string",
   "--json": "boolean",
@@ -74,10 +88,18 @@ function absolute(value: string, cwd: string): string {
   return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
 }
 
-/** Relativize an organ path against the root whose bytes it names. */
-function organRelativePath(
+/**
+ * Relativize a flag's path against the root whose bytes it names.
+ *
+ * Shared by `--organ` and `--path` (APRV-338) because the rule is one rule: the
+ * record names a path a reader on another machine resolves against their own
+ * checkout, so it must sit under the checkout the record was written in.
+ */
+function flagRelativePath(
+  flag: string,
   value: string,
   root: string,
+  what: string,
 ): { ok: true; path: string } | { ok: false; message: string } {
   // An absolute path is accepted and reduced, because a human tab-completing a
   // path at a terminal produces one and refusing it would be pedantry. What is
@@ -89,7 +111,7 @@ function organRelativePath(
   if (normalized.length === 0 || normalized.split("/").includes("..")) {
     return {
       ok: false,
-      message: `--organ ${JSON.stringify(value)} does not name a path inside ${root}; an organ attestation records a repository-relative path, so it must sit under the checkout it is attested in (pass --dir to name a different one)`,
+      message: `${flag} ${JSON.stringify(value)} does not name a path inside ${root}; ${what} records a repository-relative path, so it must sit under the checkout it is written in (pass --dir to name a different one)`,
     };
   }
   return { ok: true, path: normalized };
@@ -210,7 +232,12 @@ function attestOrgan(organFlag: string, run: OrganRun): number {
     );
   }
 
-  const resolved = organRelativePath(organFlag, run.dir);
+  const resolved = flagRelativePath(
+    "--organ",
+    organFlag,
+    run.dir,
+    "an organ attestation",
+  );
   if (!resolved.ok) return usageError(streams, json, resolved.message);
 
   // The file is NOT stat'd here: `core/attest.ts` decides the path rules before
@@ -272,6 +299,143 @@ function attestOrgan(organFlag: string, run: OrganRun): number {
   }
 }
 
+/**
+ * `policy.protected_paths` as the live policy declares it, or `[]`.
+ *
+ * Loaded so a project that widened its own protected surface can sign off the
+ * files it added: without it `--path design/decisions.md` would refuse in a
+ * repository whose policy protects `design/`. A policy that will not load
+ * yields `[]`, which is the BUILT-IN set alone and therefore the narrower
+ * answer — the fail-closed direction for a verb whose list decides what may be
+ * signed, and the same direction `classifyCommand` takes when the list is
+ * omitted.
+ */
+function policyProtectedPaths(
+  policyFlag: string | null,
+  dir: string,
+  cwd: string,
+): readonly ProtectedPathEntry[] {
+  const load = loadPolicy(
+    policyFlag === null ? { dir } : { file: absolute(policyFlag, cwd) },
+  );
+  return load.ok ? (load.policy.protected_paths ?? []) : [];
+}
+
+/** What {@link signOffPath} needs from the parsed command line. */
+interface SignOffRun {
+  streams: Streams;
+  json: boolean;
+  actor: string;
+  /** The checkout the signed path is relative to (`--dir`, else the cwd). */
+  dir: string;
+  cwd: string;
+  logPath: string;
+  policyFlag: string | null;
+  organFlag: string | null;
+}
+
+/**
+ * `approval policy attest --path <path>` (APRV-338) — the human route for
+ * ratifying a protected file's current bytes.
+ *
+ * One path per call, for the reason `--organ` takes one: the checker's question
+ * is always about one path, and a set attested in one record would have to be
+ * unpicked by whoever asks "what did I sign off".
+ *
+ * `--organ` alongside `--path` is a usage error rather than a precedence
+ * puzzle. The two flags name two different records about two different kinds of
+ * surface, and a caller who passed both has not decided which claim they are
+ * making. `--policy` alongside either is refused for the same reason it is
+ * refused beside `--organ`.
+ *
+ * Everything that decides is in `core/attest.ts`: the human-actor rule, the
+ * three path refusals, and the digest. This function resolves a path, loads the
+ * policy's protected list, picks an exit code, and prints.
+ */
+function signOffPath(pathFlag: string, run: SignOffRun): number {
+  const { streams, json } = run;
+  if (run.organFlag !== null) {
+    return usageError(
+      streams,
+      json,
+      "--organ and --path name two different records about two different surfaces; pass one of them (an organ is policy.core and has no grant available to it, an ordinary protected path does)",
+    );
+  }
+  if (run.policyFlag !== null) {
+    return usageError(
+      streams,
+      json,
+      "--policy and --path name two different files to hash; pass one of them (the policy file is attested by `approval policy attest` with no --path)",
+    );
+  }
+
+  const resolved = flagRelativePath("--path", pathFlag, run.dir, "a sign-off");
+  if (!resolved.ok) return usageError(streams, json, resolved.message);
+
+  // Not stat'd here, for the reason the organ route is not: `core/attest.ts`
+  // decides every path rule before it reads anything, so `--path src/core/gate.ts`
+  // is a usage error whether or not it exists, and an absent protected file
+  // comes back as that module's `io` refusal with the path and the root named.
+  const onDisk = join(run.dir, resolved.path);
+
+  // No timestamp is passed: `gate.path.signed_off` carries the `gate.` prefix,
+  // so amended SPEC.md §8 (A2) has core stamp it at the write boundary.
+  const result = appendPathSignOff(
+    run.logPath,
+    {
+      path: resolved.path,
+      root: run.dir,
+      protectedPaths: policyProtectedPaths(run.policyFlag, run.dir, run.cwd),
+    },
+    run.actor,
+  );
+
+  if (result.ok) {
+    const sha256 = (result.record.payload as Record<string, unknown>)["sha256"] as string;
+    if (json) {
+      streams.out(
+        `${JSON.stringify({
+          ok: true,
+          seq: result.record.seq,
+          sha256,
+          path: onDisk,
+          signed_path: resolved.path,
+        })}\n`,
+      );
+    } else {
+      streams.out(
+        `signed off ${resolved.path} at seq ${result.record.seq}: sha256 ${sha256}\n`,
+      );
+    }
+    return EXIT_OK;
+  }
+
+  if (json) {
+    streams.err(
+      `${JSON.stringify({ ok: false, error: { code: result.error.code, message: result.error.message } })}\n`,
+    );
+  } else {
+    streams.err(`approval: ${result.error.message}\n`);
+  }
+  switch (result.error.code) {
+    // A path this verb will not sign off, and an actor who may not sign one,
+    // are both bad invocations: the caller has to change what they typed, not
+    // retry. The three path codes stay distinct in the payload because the
+    // repairs differ — `approval policy attest` with no flag, `--organ`, and
+    // nothing at all.
+    case "path-is-policy":
+    case "path-is-core":
+    case "path-not-protected":
+    case "actor-not-human":
+    case "validation":
+      return EXIT_USAGE;
+    case "corrupt-tail":
+      return EXIT_TORN_TAIL;
+    default:
+      return EXIT_IO;
+  }
+}
+
 /** `approval policy attest …` — hash the live policy file and log the human's sign-off. */
 export function commandPolicyAttest(argv: string[], streams: Streams, cwd: string): number {
   const json = argv.includes("--json");
@@ -310,6 +474,21 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
 
   const organFlag = stringFlag(parsed.flags, "--organ");
+  const pathFlag = stringFlag(parsed.flags, "--path");
+  // `--path` is decided first so that passing both flags reports the conflict
+  // rather than silently running the organ route with a `--path` nobody read.
+  if (pathFlag !== null) {
+    return signOffPath(pathFlag, {
+      streams,
+      json,
+      actor,
+      dir,
+      cwd,
+      logPath,
+      policyFlag: stringFlag(parsed.flags, "--policy"),
+      organFlag,
+    });
+  }
   if (organFlag !== null) {
     return attestOrgan(organFlag, {
       streams,

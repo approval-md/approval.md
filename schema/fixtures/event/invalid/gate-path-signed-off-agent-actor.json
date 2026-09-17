@@ -1,0 +1,14 @@
+{
+  "seq": 61,
+  "ts": "2026-09-16T11:42:19Z",
+  "event": "gate.path.signed_off",
+  "actor": "agent:claude-code",
+  "channel": "cli",
+  "payload": {
+    "path": "SPEC.md",
+    "sha256": "b83a1e6f45c90d27ea1b3f8c5027d4196be0a73c85f21d604ca97e3b18d520af"
+  },
+  "alg": "sha256/jcs",
+  "prev": "2c9a41f8e07d5b6139fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e70f",
+  "hash": "9d41b7ca2e08f536c1a94db7e230f85b6417cd90a2f35e8b1c76d0492ab3f158"
+}

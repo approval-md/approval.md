@@ -1715,12 +1715,31 @@ function isGateEntrypoint(path: string): boolean {
  * ritual reached the approver's phone as `policy.edit` over a protected path —
  * true, and useless. Classified by name it arrives as what it is.
  *
- * `positionals` is read rather than `args`, so a flag between the words cannot
- * hide the verb: `approval --json log sync` is the same invocation.
+ * `policy attest --path` (APRV-338) is the newest member and the one that reads
+ * a FLAG, because the flag is what changes the act. Without it the verb attests
+ * the policy file or a gate organ, which are records about the gate's own
+ * configuration; with it the verb ratifies protected TEXT, and that record is
+ * what resolves SPEC.md's pending-sign-off suffix. An agent able to write one
+ * could ratify its own amendments, so it is classified where the rest of the
+ * gate's ceremonies are: `policy.core`, which this repository's policy holds
+ * human-only, so the hook denies it with `hook-class-human-only` before the
+ * verb's own `actor-not-human` refusal is ever reached. It mints no new class
+ * (§11.1 invariant 9): `policy.core` already exists and is already in the row's
+ * `emits`.
+ *
+ * `positionals` is read rather than `args` for the verb words, so a flag between
+ * them cannot hide the verb: `approval --json log sync` is the same invocation.
+ * `args` is read only where a flag is the act, as it is above.
  */
-function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
+function refineApprovalVerb(
+  positionals: readonly string[],
+  args: readonly string[] = [],
+): Refinement | null {
   const verb = positionals[0];
   const sub = positionals[1];
+  if (verb === "policy" && sub === "attest" && hasFlag(args, ["--path"])) {
+    return { class: "policy.core", rule: "approval-policy-signoff" };
+  }
   if (verb === "quickstart") {
     return { class: "policy.core", rule: "approval-quickstart" };
   }
@@ -1771,7 +1790,9 @@ function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
  * two log verbs keeps the pass-through class and the row's own rule id.
  */
 function refineApproval(ctx: RuleContext): Refinement {
-  return refineApprovalVerb(ctx.positionals) ?? { class: GATE_SELF_CLASS, rule: "approval" };
+  return (
+    refineApprovalVerb(ctx.positionals, ctx.args) ?? { class: GATE_SELF_CLASS, rule: "approval" }
+  );
 }
 
 /**
@@ -1785,7 +1806,7 @@ function refineNode(ctx: RuleContext): Refinement | null {
     // `node cli.js log sync` is `approval log sync` spelled the long way, and
     // it must classify identically or the classification is a spelling test.
     return (
-      refineApprovalVerb(ctx.positionals.slice(1)) ?? {
+      refineApprovalVerb(ctx.positionals.slice(1), ctx.args) ?? {
         class: GATE_SELF_CLASS,
         rule: "node-approval-cli",
       }
