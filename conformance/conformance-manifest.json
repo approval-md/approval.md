@@ -4,7 +4,7 @@
   "files": {
     "conformance/run.mjs": "6b1b58c6e190244b0ace06ac7f2ae272b8161c267d8ce2e192f2eab219f19457",
     "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
-    "conformance/vectors/command-class.v1.json": "41251e1543d5df65a0165dbd1ea15f564fe76e5d04e96d0018923317d80783ef",
+    "conformance/vectors/command-class.v1.json": "86945cb0346ca7b376341c46a74255da550b9f06c4e2f4e0653eba5468325713",
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/hook-read-scope.v1.json": "a7e6cb27b7f9226fcf9d32ee9fefe1045b49e3f2270ba4c31602571229a8d399",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",

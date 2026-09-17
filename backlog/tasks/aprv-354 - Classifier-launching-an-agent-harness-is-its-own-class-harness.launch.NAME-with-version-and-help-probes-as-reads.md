@@ -1,0 +1,96 @@
+---
+id: APRV-354
+title: >-
+  Classifier: launching an agent harness is its own class, harness.launch.NAME,
+  with version and help probes as reads
+status: Done
+assignee:
+  - '@opus-lane-classifier'
+created_date: '2026-09-17 08:49'
+updated_date: '2026-09-17 09:14'
+labels:
+  - classifier
+  - harness
+  - policy
+  - muse
+  - codex
+dependencies: []
+priority: high
+ordinal: 271000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Carter chose this on 2026-09-17 (option B for APRV-349 AC4). Today any command whose first word is an agent harness binary (codex, muse, grok, claude, cursor-agent) is hook-unclassified and refused. That is fail closed, and it is also blunt: Lane 4b could not read a harness version (it read package.json instead), the APRV-349 probe spawns codex app-server which no rule names, and launching a harness is not a policy-visible act an operator can reason about. Add a class family harness.launch.NAME (harness.launch.codex, harness.launch.muse, harness.launch.grok, harness.launch.claude, harness.launch.cursor), matched by policies as harness.launch.* or per harness, with the argv bound. Version and help probes (--version, -V, --help, -h, help as the only argument) classify as reads with their own rule id, because they start no session. Everything else is a launch. The family is never inferred autonomous: an unknown class already falls to defaults.autonomy, and this repository policy line is manual for the family and human-only for Muse. Two hazards are the reason this is a task and not a table row, and both must be written into SPEC and the docs. First, laundering: a launched harness runs its own tools OUTSIDE this gate unless its own adapter is installed and attested, so a grant covers the launch and never the inner actions; the blessed Codex entry point is the confined approval codex start (APRV-325.3), and the docs say so. Second, Muse: Carter has ruled that Muse Code must never run with a Contributor model selected (model ids ending -contributor trade price for permission to train on prompts and completions) and must not run over real repositories until its adapter, the read jail policy line and his own confirmation are in place; harness.launch.muse is therefore human-only in this repository proposal, and the classifier additionally binds the --model argument when present so a prompt can show it, and marks a muse launch whose --model ends in -contributor with a distinct rule id so policy and prompts can see it (self-reported, so it may raise scrutiny and never lower it). Binary spellings to cover: bare name, absolute and home-relative paths (/opt/homebrew/bin/codex, ~/.local/bin/muse), env-prefixed forms (FOO=1 codex ...), and package-runner forms (npx @openai/codex, npx codex); a wrapper the classifier cannot see through stays unclassified. approval codex start and the other approval verbs keep their existing classes. Related: APRV-349 (its AC4 becomes satisfiable: the probe spawn is classifier-readable), APRV-311, APRV-325.3, APRV-350, APRV-352 (same shape of change), APRV-353.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [x] #1 approval hook classify returns harness.launch.NAME with argv bound for a session-starting invocation of each of the five harnesses in bare, absolute-path, home-relative, env-prefixed and package-runner spellings; version and help probes classify as reads with a distinct rule id; approval verbs and unrelated commands are unchanged; a wrapper that hides the binary stays unclassified; tests cover each spelling and each harness
+- [x] #2 A muse launch binds the --model value when present, and a --model ending in -contributor carries a distinct rule id; tests cover present, absent and contributor values; nothing in the classifier treats a Standard model id as lowering scrutiny
+- [x] #3 SPEC 7 gains the harness.launch.* row and a paragraph stating what a grant of the class covers and does not cover (the launch, never the inner actions), that the family is never inferred autonomous, and the Codex confined entry point; the amendment is called out; docs/claude-code-hook.md lists the family and docs/codex-hook.md, docs/grok-hook.md and the Muse docs or register entry point at it
+- [x] #4 docs/proposals/ carries the Current and Replace-with pair adding harness.launch.* as manual and harness.launch.muse as human-only to this repository APPROVAL.md, with the contributor-model reason in the comment, anchored on a line that occurs exactly once
+- [x] #5 APRV-349 notes record that codex app-server now classifies harness.launch.codex, so its AC4 wording is satisfiable; conformance vectors cover the family; build, typecheck, lint and the classifier suites pass
+<!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read the rule table, matchRule, the basename derivation and the existing harness-update row before writing anything, and check what npx classifies as today so nothing about it loosens.
+2. One table, HARNESS_BINS, mapping binary basename to harness name (codex, muse, grok, claude, cursor-agent to cursor), and one refinement, refineHarness, in the shape refineGitPush established. Five rows generated from that table so each class enters CLASSIFIER_CLASSES and each rule id gets a docs row.
+3. Place the rows BELOW harness-update, so codex update and claude update keep deps.upgrade, which is the stricter existing class.
+4. Probe forms first inside the refinement: an argv that is exactly one of --version, -V, --help, -h or a lone help is read.shell with rule harness-probe. Anything else is a launch, which is the fail-closed direction for a probe flag mixed with other arguments.
+5. Launch returns harness.launch.NAME with the argv bound to the segment path field, the same field the protected-path and ref-delete bindings use.
+6. Muse: read the --model value in both spellings, and when it ends in -contributor return the distinct rule id harness-launch-muse-contributor. A Standard id returns the ordinary rule id, identical to no model at all, so a self-reported value can only raise scrutiny.
+7. npx: a refinement on the workspace-tool row that maps an EXACT package spec, version suffix stripped, to a harness, and returns the workspace-tool answer unchanged for everything else. No substring matching.
+8. Add every new rule id to CODE_EXECUTING_RULES, including the probe and the contributor id, so the sandbox requirement does not quietly stop applying to npx codex.
+9. SPEC section 7: the harness.launch.* row plus a paragraph on what a grant covers and does not cover, that the family is never inferred autonomous, and the confined Codex entry point, closing with the amendment marker.
+10. docs/proposals/harness-launch-2026-09.md in the contract, anchored on a line verified to occur exactly once; read src/core/policy-match.ts and state which of the wildcard and the specific line wins for harness.launch.muse.
+11. Tests: a spelling matrix per harness (bare, absolute, home-relative, HOME-relative, env-prefixed, package-runner), the probe forms, the muse model cases, the unchanged cases (approval verbs, harness update, npx of an unknown package, a wrapper that hides the binary), and a hook test with a scratch policy proving harness.launch.muse human-only is inert to an agent.
+12. Docs, conformance vectors, APRV-349 note, then build, typecheck, lint, the suites and conformance.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented. One table (HARNESS_BINS, basename to harness name), one refinement (harnessRefinement, shared by the direct rows and the package runner), five rows generated from the table so each class enters CLASSIFIER_CLASSES and each rule id gets a docs row and a positive fixture. cursor-agent carries the name cursor, so the class reads harness.launch.cursor beside the cursor adapter and the .cursor protected paths.
+
+Five spellings reach one class because the classifier already derives the BASENAME of the first word before any rule sees a command: bare, absolute, home-relative in both the tilde and the HOME form, env-prefixed (the assignment skip was already there), and the package runner. Nothing new resolves a path; a spelling the basename cannot see through, such as a bare parameter or a wrapper of another name, stays unclassified exactly as before, which is the fail-closed half the task asked to keep.
+
+Package runner: a refinement on the workspace-tool row that fires only for npx, only on an EXACT package spec with the version suffix stripped, scope and version told apart so a scoped spec parses. Everything else returns that row own answer byte for byte. npx codex-helper is not a codex launch, which is the case that would break under substring matching, and it has its own test and its own conformance vector as the control.
+
+Probes: an argv that is exactly one of --version, -V, --help, -h or a lone help is read.shell with rule harness-probe. A probe word beside other arguments is a LAUNCH, because text cannot say which of the two the binary honours and a session is the stricter reading. That is a deliberate fail-closed choice and it is stated in SPEC, in the docs and in a test.
+
+Ordering: the rows sit BELOW harness-update, so codex update and claude update keep deps.upgrade. An upgrade swaps the binary that hosts the hook, which is a supply-chain decision and the stricter of the two readings. A test asserts the row order rather than trusting it.
+
+Muse: the --model value is read in both spellings, the value is bound, and a value ending -contributor returns the distinct rule id harness-launch-muse-contributor. A Standard id returns the ordinary rule id, byte for byte identical to naming no model at all, and there is a test asserting exactly that equality, because a self-reported field that could lower scrutiny is one an agent would learn to write. The classifier does not pretend to enforce a model choice: a session can pick one in the Muse UI where no command line shows it, and the docs and the proposal both say so.
+
+Binding: the argv after the binary is bound to the segment path field, the same field the protected-path binding (APRV-143) and the ref-delete binding (APRV-352) use. The model value is inside that argv verbatim in both spellings, which is how AC2 binding is satisfied with the one binding field the shape has; the contributor fact travels separately as the rule id, where a policy and a prompt can both read it without parsing.
+
+Sandbox: every new rule id is added to CODE_EXECUTING_RULES, the launch ids, the probe id and the contributor id. Without that, npx codex would have quietly stopped requiring a sandbox under APPROVAL_HOOK_REQUIRE_SANDBOX by gaining a better class than workspace-tool. A test covers it.
+
+Global invariants touched, named per CLAUDE.md. Fail closed: an unreadable binary spelling, an unknown package, a probe word beside other arguments and a wrapper all resolve to the stricter answer, and an unmatched class still falls to defaults.autonomy. Self-reported fields never reduce scrutiny: the Standard-equals-absent test is that invariant, written as an assertion. Human-only classes are inert to agents with no verb minting authority: proved through the hook against a scratch policy, below. No verb was added and no existing class was relabelled downward.
+
+Precedence finding, checked rather than assumed. src/core/policy-match.ts orders candidates by (literal segments DESC, wildcard segments ASC). harness.launch.muse has three literal segments and no wildcard; harness.launch.* has two literals and one wildcard, so the SPECIFIC line wins and declaration order is irrelevant. I ran both orders through loadPolicyText and resolve and got human-only with matched harness.launch.muse either way, and harness.launch.codex resolving manual through the wildcard with provenance rule. Two smaller findings recorded in the proposal: a trailing .* matches one or more segments, so harness.launch.* does NOT match a bare harness.launch, and nothing emits that bare class (a test asserts it is absent from CLASSIFIER_CLASSES), so a policy line naming it would never fire. The precedence is pinned by a test through approval policy check on a scratch policy that lists the wildcard first.
+
+Verification, with the evidence per criterion. node scripts/run-tests.mjs --only over twenty affected suites exited 0 with 958 tests, 958 pass, 0 fail. node conformance/run.mjs exited 0 over 359 vectors. npm run build, npm run typecheck and npm run lint each exited 0. No harness binary was executed at any point: every test is over command TEXT, which is Carter constraint on Muse held for all five.
+
+AC1 is proved by tests/command-class-harness-launch.test.ts. Six spelling tests per harness, generated over the five: the bare spelling is harness.launch.NAME with the argv bound; an absolute path is the same launch; a home-relative path is the same launch, in both spellings; an env-prefixed invocation is the same launch; the package-runner spelling is the same launch; a bare invocation with no arguments is still a launch, nothing bound. Five probe tests per harness assert read.shell with rule harness-probe for --version, -V, --help, -h and help, and one more per harness asserts that a probe word beside other arguments is a launch. Four more cover the runner: a versioned package spec still resolves, a package-runner probe is a read, npx flags before the package do not hide it, and codex app-server is a launch. Unchanged is eleven named cases (approval codex start, approval codex serve, approval hook classify, codex update, claude update, npx codex-helper, npx some-random-package, npx tsx, bare npx, tsc, backlog, npm test) plus a wrapper the classifier cannot see through stays unclassified, a binary name the tokenizer cannot expand stays unclassified, a harness behind an opaque wrapper is still opaque, and gemini is deliberately not in the family.
+
+AC2 is proved by a muse launch binds the --model value, in both spellings; a --model ending in -contributor takes a distinct rule id, in both spellings; a contributor model reached through the package runner is marked too; a Standard model id is treated exactly as no model at all; a --model with no value is an ordinary launch, never a softer one; and only muse reads a model, the other harnesses take no branch on it.
+
+AC3: SPEC section 7 gains the harness.launch.* row and a paragraph with the MUSTs, closing Amended APRV-354. docs/claude-code-hook.md gains five rule-table rows, a note on the workspace-tool row and a full section; docs/cursor-hook.md gains the rows and a pointer; docs/codex-hook.md and docs/grok-hook.md gain a paragraph each; the Muse register section in docs/integrations-considered.md gains one. docs/muse-hook.md was deliberately NOT created: it is Lane C work. The docs-guard test that asserts the hook doc lists every rule and every class passes.
+
+AC4: docs/proposals/harness-launch-2026-09.md follows the docs/proposals/README.md contract. The Current anchor is the account.credential line, verified mechanically to occur exactly once in origin/main APPROVAL.md, and the two new lines match the file column convention. The contributor-model reason is in the muse line comment and has a section of its own.
+
+AC5: APRV-349 notes now record that codex app-server classifies harness.launch.codex, with the two things that does not do; no criterion of that task was checked and no field but its notes was touched. conformance/vectors/command-class.v1.json gains fourteen vectors at version 1.2.0, including the unknown-package control and a negative control for the wrapper. Build, typecheck, lint and the classifier suites pass as above.
+
+Two things a human should know. First, a hook test proves the human-only half end to end: a human-only harness launch is inert to an agent, denied, nothing appended, which asserts hook-class-human-only naming harness.launch.muse and that the log is byte for byte unchanged. Its pair, a harness launch the wildcard governs reaches the gate rather than being refused outright, shows the manual member opening an ordinary lifecycle, which is what separates a class a human can grant from one reserved to human hands. Second, shipping before the paste moves a harness launch from hook-unclassified (refused outright) to manual by defaults.autonomy, which is one step looser and is the step the task asks for; the paste is what adds Muse at human-only, which is stricter than the default.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Launching an agent harness is now harness.launch.NAME (codex, muse, grok, claude, cursor) with the argv bound, built from one binary table and one refinement in the shape refineGitPush established. Five spellings reach one class because the classifier already derives the basename of the first word: bare, absolute, home-relative in both forms, env-prefixed, and the package runner on an EXACT spec with the version stripped. A version or help probe is read.shell with its own rule id, because it starts no session; a probe word beside other arguments is a launch, which is the fail-closed reading. Nothing else moved: codex update and claude update keep deps.upgrade from the row above, approval codex start keeps gate.self, npx of anything this table does not know keeps workspace-tool, and a wrapper that hides the binary stays unclassified. Muse binds its --model in both spellings and a -contributor value takes a distinct rule id; a Standard id is byte for byte the same answer as naming no model, which is the self-reported-fields invariant written as an assertion. Every new rule id is in CODE_EXECUTING_RULES so the sandbox requirement did not quietly stop applying to npx codex. SPEC section 7 carries the row and a paragraph on what a grant covers (the launch) and does not cover (anything the launched session then does, which runs outside this gate unless that harness adapter is installed and attested), and docs/proposals/harness-launch-2026-09.md carries the two policy lines for Carter with the anchor verified unique and the wildcard-versus-specific precedence checked against policy-match.ts rather than assumed. Verified: twenty affected suites at 958 tests, 958 pass, 0 fail, exit 0; conformance exit 0 over 359 vectors with fourteen new; build, typecheck and lint exit 0; and a hook test against a scratch policy proving a human-only harness launch is denied with nothing appended. No harness binary was run at any point.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -123,8 +123,13 @@ an addition).
 | `npm-network` | npm, pnpm, yarn, bun | audit \| outdated \| view \| search \| info \| login \| whoami | network.call |
 | `npm-list` | npm, pnpm, yarn, bun | ls \| list \| config \| help | read.shell |
 | `npm-script` | npm, pnpm, yarn, bun | run \| run-script \| test \| start \| build \| lint \| exec | files.write.workspace |
-| `harness-update` | claude, codex, gemini | update | deps.upgrade (APRV-228: the harness's own self-update verb; a version probe, a one-shot prompt and a bare launch stay unclassified) |
+| `harness-update` | claude, codex, gemini | update | deps.upgrade (APRV-228: the harness's own self-update verb, matched above the launch rows so an upgrade keeps the stricter class) |
 | `harness-updater` | uca | (any) | deps.upgrade (APRV-228: the unattended harness updater, `--dry-run` included, taken at its strictest) |
+| `harness-launch-codex` | codex | (any) | harness.launch.codex, read.shell (APRV-354) |
+| `harness-launch-muse` | muse | (any) | harness.launch.muse, read.shell (APRV-354) |
+| `harness-launch-grok` | grok | (any) | harness.launch.grok, read.shell (APRV-354) |
+| `harness-launch-claude` | claude | (any) | harness.launch.claude, read.shell (APRV-354) |
+| `harness-launch-cursor` | cursor-agent | (any) | harness.launch.cursor, read.shell (APRV-354) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
@@ -257,6 +262,18 @@ unchanged and unconditional: what happens at the far end is not written in the
 argv, so there is no read-shaped invocation to carve out. A GET-shaped fetch
 redirected into a file is still `files.write.workspace`, by the `redirect-write`
 override above.
+
+### Launching an agent harness (APRV-354)
+
+Starting a second agent (`codex`, `muse`, `grok`, `claude`, `cursor-agent`) is
+`harness.launch.NAME` with the argv bound; a version or help probe is
+`read.shell`, rule `harness-probe`. A grant covers the LAUNCH and nothing the
+launched session then does, because that session's tools run outside this gate
+unless its own adapter is installed and attested. The full account, including
+the spellings, the Muse model binding and why the family is never inferred
+autonomous, is in
+[docs/claude-code-hook.md](claude-code-hook.md#launching-an-agent-harness-aprv-354);
+the classifier is the same file for both harnesses.
 
 ### Deleting a remote ref (APRV-352)
 

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-codex'
 created_date: '2026-09-17 01:25'
-updated_date: '2026-09-17 08:07'
+updated_date: '2026-09-17 09:05'
 labels:
   - codex
   - spike
@@ -59,6 +59,12 @@ Criterion three is unchecked on one clause. docs/codex-app-server-bridge.md answ
 Criterion four cannot be evaluated before the run, and reading it carefully turned up something worth the operator's attention rather than my silent judgement. Its first clause is already true of this lane: nothing here touched a harness home, a credential, the primary checkout or a production policy, and the probe is written so a run cannot either. Its second clause says every command the probe runs is one the classifier reads or one routed through approval run. The command the OPERATOR types classifies cleanly: approval hook classify on the probe invocation returns files.write.workspace by the node-script rule. The subprocess the probe then spawns does not: approval hook classify on the harness binary in app-server mode returns unclassified, no rule, which is the fail-closed default and the same refusal APRV-311 recorded for the version check. So the literal reading of that clause is not satisfied by any probe that starts this harness at all. Two ways out, and the choice is the operator's: add a classifier rule for the harness binary in app-server mode, or accept that this probe is an operator-run command from a runbook, which is the path APRV-310 and APRV-325 both used for exactly this reason. Recording it rather than quietly checking the box.
 
 Verification for this lane: build, typecheck and lint all exit 0; the sweep of docs-guard, probe-codex-app-server, codex-hook-probe and cli-hook-codex gave 51 tests, 51 pass, 0 fail, exit 0. Full npm test is CI's.
+
+From Lane A (APRV-354), so this is on the record where AC4 will be checked: `codex app-server` is no longer a command the classifier cannot read. As of APRV-354 it classifies harness.launch.codex, rule harness-launch-codex, with app-server bound as the argv, and the same holds for the absolute-path, home-relative, env-prefixed and package-runner spellings, so a probe that spawns it is spawning something the classifier reads rather than something that reaches hook-unclassified. A version probe (codex --version, -V, --help, -h, or a lone help as the whole argv) classifies read.shell with rule harness-probe, so the probe can read the installed version without a prompt. AC4 wording is therefore satisfiable on the classifier side once APRV-354 merges.
+
+Two things this does NOT do, and the probe still has to. First, the class is manual in the reference proposal and human-only for Muse, so a spawn reaches the gate rather than proceeding: the probe will need a grant, or a policy of its own in its scratch instance. Second, a grant of harness.launch.codex covers the LAUNCH and nothing the launched session then does, which is the laundering boundary SPEC 7 now states; the probe report should not read a granted launch as a gated inner session. The confined approval codex start keeps gate.self and is not a launch.
+
+Lane A checked no criterion here and changed no field of this task but these notes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
