@@ -24,15 +24,24 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 
 import { appendAttestation } from "../src/core/attest.js";
 import {
   recordChannelDecision,
   type ChannelDecision,
+  type ChannelDecisionResult,
   type DecisionOutcome,
 } from "../src/channels/contract.js";
+import {
+  decideAttestation,
+  inForcePolicyText,
+  proposeAttestation,
+} from "../src/core/policy-proposal.js";
+import { payloadStoreDirFor } from "../src/core/payload-store.js";
+import { readVerifiedRecords } from "../src/core/state.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   TelegramChannel,
@@ -48,6 +57,7 @@ import {
   resolveSender,
   senderIndex,
   senderRefusalLine,
+  type ChannelSender,
 } from "../src/core/sender-identity.js";
 import type { EventRecord } from "../src/core/log.js";
 import { register, request } from "./clock-adapters.js";
@@ -90,6 +100,8 @@ function policyText(options: {
   senders?: Record<string, string>;
   classApprovers?: string[];
   autonomy?: string;
+  /** An unrelated knob, so an amendment can change something that is not the mapping. */
+  ttl?: string;
 }): string {
   const lines = [
     "# Policy",
@@ -98,7 +110,7 @@ function policyText(options: {
     'version: "0.1"',
     "defaults:",
     "  autonomy: manual",
-    '  approval_ttl: "24h"',
+    `  approval_ttl: "${options.ttl ?? "24h"}"`,
     "  on_expiry: reject",
     "approvers:",
   ];
@@ -925,12 +937,195 @@ test("the sender index inverts the policy's person-to-sender map and the refusal
   assert.equal(load.ok, true, JSON.stringify(load));
   const index = load.ok ? senderIndex(load.policy.approvers) : new Map<string, string[]>();
   assert.deepEqual([...index.values()], [["carter"], ["dana"]]);
-  assert.deepEqual([...CHANNEL_DECISION_REFUSAL_CODES], ["sender-unmapped", "sender-ambiguous"]);
+  assert.deepEqual(
+    [...CHANNEL_DECISION_REFUSAL_CODES],
+    ["sender-unmapped", "sender-ambiguous", "attest-requires-terminal"],
+  );
 
   // An update with no readable id is not a sender to guess at.
   assert.equal(senderOf({}, "telegram"), undefined);
   assert.equal(senderOf({ from: { username: "carter" } }, "telegram"), undefined);
   assert.equal(senderOf({ from: { id: {} } }, "telegram"), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The other three callback families (design §7a, added on review)
+//
+// A Telegram callback is routed to one of four handlers, and the first
+// implementation resolved senders in one of them. These pin the other three.
+// The checkpoint family's end-to-end signature lives in
+// `tests/checkpoint-tap.test.ts`, which already holds a real signing key, and
+// the review family's in `tests/channels-telegram.test.ts`, which already holds
+// a sampled action; both are named here so the set is findable from one place.
+// ---------------------------------------------------------------------------
+
+test("20. the sender is read before the branch split, so a checkpoint tap carries it too", async () => {
+  const w = world(1);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(w.unit));
+
+  // A stub handler that records only what the channel handed it. The claim is
+  // about the CHANNEL: `senderOf` runs directly after the chat-id check, above
+  // the branch that returns into this handler, so a gesture that never reaches
+  // the decision ladder still arrives with the observation in hand. The review
+  // branch is the same `const` two lines further down, and its end-to-end case
+  // is in `tests/channels-telegram.test.ts`, where a sampled action and a real
+  // review card already exist.
+  let seen: ChannelSender | undefined;
+  let calls = 0;
+  channel.onCheckpoint((tap) => {
+    seen = tap.sender;
+    calls += 1;
+    return { ok: true, headline: "SIGNED", detail: [], toast: "ok" };
+  });
+
+  await channel.offerCheckpoint({ head: { seq: 3, hash: "a".repeat(64) }, lines: ["sign it"] });
+  mock.queueUpdate(
+    callbackUpdate({ data: signButtonData(), chatId: CHAT, fromId: STRANGER_ID }),
+  );
+  await channel.pollOnce();
+
+  assert.equal(calls, 1, "the checkpoint handler was not reached");
+  assert.deepEqual(seen, { channel: "telegram", id: STRANGER_ID });
+  // And a tap from a chat this listener does not answer to never gets that far,
+  // because the chat check still runs first.
+  await channel.offerCheckpoint({ head: { seq: 4, hash: "b".repeat(64) }, lines: ["again"] });
+  mock.queueUpdate(
+    callbackUpdate({ data: signButtonData(), chatId: "-100999", fromId: CARTER_ID }),
+  );
+  await channel.pollOnce();
+  assert.equal(calls, 1, "a foreign chat reached the checkpoint handler");
+});
+
+// ---------------------------------------------------------------------------
+// Attestation answers (design §7a): the privileged family, and the strict rule
+// ---------------------------------------------------------------------------
+
+test("21. a mapped sender attests as the mapped human when the amendment leaves the mapping alone", () => {
+  const w = attested(POLICY_MAPPED, policyText({ senders: MAPPED, ttl: "48h" }));
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.ok(result.outcome.ok, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.record.event, "policy.updated");
+  assert.equal(result.outcome.record.actor, "human:carter");
+  assert.deepEqual(payloadOf(result.outcome.record)["sender"], {
+    channel: "telegram",
+    id: CARTER_ID,
+  });
+  assert.equal(payloadOf(result.outcome.record)["sender_source"], "policy");
+  assertClean(w.unit);
+});
+
+test("22. an unmapped sender attests nothing, and the refusal names the account", () => {
+  const w = attested(POLICY_MAPPED, policyText({ senders: MAPPED, ttl: "48h" }));
+
+  const result = tapAttestation(w, STRANGER_ID);
+  assert.equal(result.outcome.ok, false, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.ok === false ? result.outcome.code : "", "sender-unmapped");
+  assert.equal(attestations(w.unit).length, 1, "a second policy.updated was appended");
+
+  const refusal = refusals(w.unit);
+  assert.equal(refusal.length, 1);
+  assert.deepEqual(payloadOf(refusal[0] as EventRecord)["sender"], {
+    channel: "telegram",
+    id: STRANGER_ID,
+  });
+  assertClean(w.unit);
+});
+
+test("23. a proposal that ADDS a mapping cannot be attested from the phone by the account it adds", () => {
+  // The attack the in-force rule exists for: edit the policy to name your own
+  // account as an approver's sender, then tap Approve on your own amendment.
+  const w = attested(POLICY_UNMAPPED, POLICY_MAPPED);
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.equal(result.outcome.ok, false, JSON.stringify(result.outcome));
+  assert.equal(
+    result.outcome.ok === false ? result.outcome.code : "",
+    "attest-requires-terminal",
+  );
+  assert.equal(attestations(w.unit).length, 1, "the amendment was attested from the phone");
+  assert.match(
+    result.outcome.ok === false ? result.outcome.message : "",
+    /cannot be signed for by the identity system it introduces/u,
+  );
+  assertClean(w.unit);
+});
+
+test("24. the terminal attests regardless: no sender, no rule, and the repair path stays open", () => {
+  const w = attested(POLICY_UNMAPPED, POLICY_MAPPED);
+
+  // The same amendment test 23 refused from a phone. A terminal authenticates
+  // no sender, so it is never subject to a mapping — which is what keeps a
+  // repository with a broken or hostile mapping repairable at all.
+  const result = recordChannelDecision(
+    w.unit.logPath,
+    { action_key: w.actionKey, decision: "grant", deliveryId: "cli-1" },
+    { actor: LISTENER, channel: "cli" },
+    { ...w.unit.options, clock: fixedClock(at(4)) },
+  );
+  assert.ok(result.outcome.ok, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.record.actor, LISTENER);
+  assert.equal("sender" in payloadOf(result.outcome.record), false);
+  assert.equal(attestations(w.unit).length, 2);
+  assertClean(w.unit);
+});
+
+test("25. with no mapping on either side, an attestation tap is byte-for-byte today's attribution", () => {
+  const w = attested(POLICY_UNMAPPED, policyText({ ttl: "48h" }));
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.ok(result.outcome.ok, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.record.actor, LISTENER);
+  const payload = payloadOf(result.outcome.record);
+  assert.equal("sender" in payload, false, JSON.stringify(payload));
+  assert.equal("sender_source" in payload, false, JSON.stringify(payload));
+  assertClean(w.unit);
+});
+
+test("26. in-force bytes that cannot be recovered refuse a mapping-bearing amendment", () => {
+  // The COMMON path, and the reason the rule has a second half: a policy
+  // attested at a terminal stores nothing, so its bytes are gone and the
+  // runtime cannot tell whether this amendment touches the mapping.
+  const w = attestedFromTerminal(POLICY_UNMAPPED, POLICY_MAPPED);
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.equal(result.outcome.ok, false, JSON.stringify(result.outcome));
+  assert.equal(
+    result.outcome.ok === false ? result.outcome.code : "",
+    "attest-requires-terminal",
+  );
+  assert.match(
+    result.outcome.ok === false ? result.outcome.message : "",
+    /not recoverable/u,
+  );
+  assert.equal(attestations(w.unit).length, 1);
+  assertClean(w.unit);
+});
+
+test("27. unrecoverable in-force bytes and no mapping in the amendment is today's behaviour", () => {
+  const w = attestedFromTerminal(POLICY_UNMAPPED, policyText({ ttl: "48h" }));
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.ok(result.outcome.ok, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.record.actor, LISTENER);
+  assert.equal("sender" in payloadOf(result.outcome.record), false);
+  assertClean(w.unit);
+});
+
+test("28. the in-force bytes are recovered only when they hash to the attestation", () => {
+  const w = attested(POLICY_MAPPED, policyText({ senders: MAPPED, ttl: "48h" }));
+  const store = payloadStoreDirFor(w.unit.logPath);
+
+  const recovered = inForcePolicyText(verifiedRecords(w.unit.logPath), store);
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.ok ? recovered.text : "", POLICY_MAPPED);
+
+  // Nothing here trusts the store: a payload swapped under the runtime's feet
+  // is a recovery failure, not a different policy wearing the attested hash.
+  const swapped = inForcePolicyText(verifiedRecords(w.unit.logPath), tamperedStore(w.unit, store));
+  assert.equal(swapped.ok, false);
+  assert.match(swapped.ok ? "" : swapped.reason, /not recoverable/u);
 });
 
 // ---------------------------------------------------------------------------
@@ -983,4 +1178,132 @@ function readPolicy(unit: Scenario): string {
 
 function writePolicy(unit: Scenario, text: string): void {
   writeFileSync(unit.policyPath, text, "utf8");
+}
+
+/** The mapping both fixture people carry, so an amendment can leave it alone. */
+const MAPPED: Record<string, string> = { carter: CARTER_ID, dana: DANA_ID };
+
+interface AttestationWorld {
+  unit: Scenario;
+  /** `policy.attest:<sha256>` of the amendment awaiting an answer. */
+  actionKey: string;
+}
+
+/**
+ * A log whose policy in force was attested THROUGH THE PHONE, with an
+ * amendment proposed and waiting.
+ *
+ * The ceremony is run for real, twice, because the in-force bytes are
+ * recoverable only as a side effect of the first run: `proposeAttestation`
+ * binds the whole policy text into the payload store, so the proposal that was
+ * attested is what makes the attested bytes addressable afterwards.
+ */
+function attested(before: string, after: string): AttestationWorld {
+  fixtureCounter += 1;
+  const unit = newScenario(scratch.root, before);
+
+  const first = proposeAttestation(
+    unit.logPath,
+    { policyPath: unit.policyPath, waitUntil: at(10_000) },
+    AGENT,
+    { ...unit.options, clock: fixedClock(at(0)) },
+  );
+  assert.ok(first.ok, `proposal failed: ${JSON.stringify(first)}`);
+  const signed = decideAttestation(unit.logPath, first.record.seq, "attest", LISTENER, {
+    ...unit.options,
+    policyPath: unit.policyPath,
+    clock: fixedClock(at(1)),
+  });
+  assert.ok(signed.ok, `attestation failed: ${JSON.stringify(signed)}`);
+
+  return proposeAmendment(unit, after);
+}
+
+/**
+ * The same, with the policy in force attested at a TERMINAL — so its bytes were
+ * never stored and cannot be recovered.
+ *
+ * This is the ordinary shape of a chain that has never been amended from a
+ * phone, including this repository's own.
+ */
+function attestedFromTerminal(before: string, after: string): AttestationWorld {
+  fixtureCounter += 1;
+  const unit = newScenario(scratch.root, before);
+  attestPolicy(unit);
+  return proposeAmendment(unit, after);
+}
+
+/** Edit the policy to `after` and put the amendment in front of a human. */
+function proposeAmendment(unit: Scenario, after: string): AttestationWorld {
+  writePolicy(unit, after);
+  const proposal = proposeAttestation(
+    unit.logPath,
+    { policyPath: unit.policyPath, waitUntil: at(10_000) },
+    AGENT,
+    { ...unit.options, clock: fixedClock(at(2)) },
+  );
+  assert.ok(proposal.ok, `amendment proposal failed: ${JSON.stringify(proposal)}`);
+  const actionKey = proposal.record.action_key;
+  assert.ok(typeof actionKey === "string" && actionKey.length > 0);
+  return { unit, actionKey };
+}
+
+/** Tap Approve on the waiting amendment, as `fromId`. */
+function tapAttestation(w: AttestationWorld, fromId: string): ChannelDecisionResult {
+  return recordChannelDecision(
+    w.unit.logPath,
+    {
+      action_key: w.actionKey,
+      decision: "grant",
+      deliveryId: `tg-${fromId}`,
+      sender: { channel: "telegram", id: fromId },
+    },
+    { actor: LISTENER, channel: "telegram" },
+    { ...w.unit.options, clock: fixedClock(at(3)) },
+  );
+}
+
+function attestations(unit: Scenario): EventRecord[] {
+  return records(unit).filter((record) => record.event === "policy.updated");
+}
+
+/** A store directory holding the same payload names and different bytes. */
+function tamperedStore(unit: Scenario, from: string): string {
+  const to = join(dirname(unit.logPath), "tampered-payloads");
+  mkdirSync(to, { recursive: true });
+  for (const name of readdirSync(from)) {
+    const raw = readFileSync(join(from, name), "utf8");
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof value["text"] === "string") value["text"] = `${value["text"]}\n<!-- swapped -->\n`;
+    writeFileSync(join(to, name), JSON.stringify(value), "utf8");
+  }
+  return to;
+}
+
+/** Read the verified chain, for the cases that assert over records directly. */
+function verifiedRecords(logPath: string): EventRecord[] {
+  const read = readVerifiedRecords(logPath);
+  assert.equal(read.ok, true, `log did not verify: ${JSON.stringify(read)}`);
+  return read.ok ? read.records : [];
+}
+
+/**
+ * The `callback_data` of the newest `Sign` button the mock received.
+ *
+ * Read off the keyboard exactly as a phone would: nothing here decodes a
+ * nonce, and the newest keyboard wins because a redraw replaces the buttons.
+ */
+function signButtonData(): string {
+  for (let index = mock.requests.length - 1; index >= 0; index -= 1) {
+    const entry = mock.requests[index];
+    if (entry === undefined || entry.method !== "sendMessage") continue;
+    const markup = entry.body["reply_markup"] as
+      | { inline_keyboard?: { text: string; callback_data: string }[][] }
+      | undefined;
+    for (const row of markup?.inline_keyboard ?? []) {
+      const sign = row.find((button) => button.text === "Sign");
+      if (sign !== undefined) return sign.callback_data;
+    }
+  }
+  throw new Error("the mock received no checkpoint prompt");
 }

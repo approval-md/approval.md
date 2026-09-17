@@ -5457,6 +5457,34 @@ const REVIEW_POLICY = [
   "",
 ].join("\n");
 
+/**
+ * The same policy with a sender mapping (APRV-324).
+ *
+ * `dana` is mapped to an account that is NOT the listener's configured
+ * identity, which is the only shape in which "the mapping moved the
+ * attribution" can be told apart from "nothing happened".
+ */
+const REVIEW_POLICY_MAPPED = REVIEW_POLICY.replace(
+  "classes:",
+  [
+    "approvers:",
+    "  carter:",
+    "    channels: [telegram, cli]",
+    "    senders:",
+    '      telegram: "42"',
+    "  dana:",
+    "    channels: [telegram]",
+    "    senders:",
+    '      telegram: "77"',
+    "classes:",
+  ].join("\n"),
+);
+
+/** The account each fixture person taps from. */
+const CARTER_TG = "42";
+const DANA_TG = "77";
+const STRANGER_TG = "999";
+
 interface Sampled extends Live {
   /** The `audit.sampled` seqs the sweep appended, oldest first. */
   samples: number[];
@@ -5471,10 +5499,10 @@ interface Sampled extends Live {
  * have refused, and the cards are built from the same verified log the CLI
  * reads.
  */
-function sampledWorld(count: number): Sampled {
+function sampledWorld(count: number, policyText: string = REVIEW_POLICY): Sampled {
   fixtureCounter += 1;
   const prefix = `sampled${fixtureCounter}`;
-  const unit = newScenario(scratch.root, REVIEW_POLICY);
+  const unit = newScenario(scratch.root, policyText);
   attest(unit, T0);
 
   const payloads = new Map<string, unknown>();
@@ -5603,8 +5631,15 @@ async function tapReview(
   channel: TelegramChannel,
   choice: ReviewChoice,
   chatId: string = CHAT,
+  fromId?: string,
 ): Promise<TelegramPollResult> {
-  mock.queueUpdate(callbackUpdate({ data: reviewButtonFor(choice), chatId }));
+  mock.queueUpdate(
+    callbackUpdate({
+      data: reviewButtonFor(choice),
+      chatId,
+      ...(fromId === undefined ? {} : { fromId }),
+    }),
+  );
   return channel.pollOnce();
 }
 
@@ -5623,9 +5658,15 @@ async function replyWithNote(
   channel: TelegramChannel,
   text: string,
   chatId: string = CHAT,
+  fromId?: string,
 ): Promise<TelegramPollResult> {
   mock.queueUpdate(
-    messageUpdate({ chatId, text, replyToMessageId: notePromptId() }),
+    messageUpdate({
+      chatId,
+      text,
+      replyToMessageId: notePromptId(),
+      ...(fromId === undefined ? {} : { fromId }),
+    }),
   );
   return channel.pollOnce();
 }
@@ -6110,6 +6151,99 @@ test("APRV-302: a review tap is acked as a review, not as a decision", async () 
     false,
     `a review tap was acked with the request card's toast: ${since().join(" | ")}`,
   );
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Who reviewed it (APRV-324): the sender mapping reaches this family too
+//
+// A review confers no authority, which is why it was the last family to be
+// resolved and the easiest to argue was fine as it was. It is still recorded as
+// a HUMAN's observation, and `approval feedback` hands it to agents as
+// human-authored guidance — so a review attributed to the wrong person is
+// guidance in somebody else's name. The other two families are pinned in
+// `tests/sender-identity.test.ts` (attestations) and
+// `tests/checkpoint-tap.test.ts` (signatures).
+// ---------------------------------------------------------------------------
+
+test("APRV-324: a mapped sender's review is recorded as that person, not as the listener", async () => {
+  const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "ok", CHAT, DANA_TG);
+
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  // The listener was launched as `human:carter`; the tap came from Dana's
+  // account, and the record says Dana.
+  assert.equal(reviews[0]?.actor, "human:dana");
+  assert.notEqual(reviews[0]?.actor, HUMAN);
+  const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
+  assert.deepEqual(payload["sender"], { channel: "telegram", id: DANA_TG });
+  assert.equal(payload["sender_source"], "policy");
+  assertClean(world.unit);
+});
+
+test("APRV-324: an unmapped sender's review is refused, and nothing is appended", async () => {
+  const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
+  const { channel, err } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+  const before = recordsOf(world.unit.logPath).length;
+
+  await tapReview(channel, "ok", CHAT, STRANGER_TG);
+
+  assert.equal(reviewsIn(world).length, 0);
+  assert.equal(recordsOf(world.unit.logPath).length, before, "the refusal appended a record");
+  assert.ok(
+    err.some((line) => line.includes("sender-unmapped")),
+    `the operator was not told: ${err.join(" | ")}`,
+  );
+  // The card says why, and the sample stays open for somebody who may review it.
+  const edits = mock.edits().map((edit) => edit.text).join("\n");
+  assert.match(edits, /not one the attested policy names as an approver/u);
+  assertClean(world.unit);
+});
+
+test("APRV-324: with no mapping, a review is attributed exactly as it was before", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A real, authenticated account on the callback, and a policy that maps none.
+  await tapReview(channel, "ok", CHAT, STRANGER_TG);
+
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, HUMAN);
+  const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
+  assert.equal("sender" in payload, false, JSON.stringify(payload));
+  assertClean(world.unit);
+});
+
+test("APRV-324: a note prompt answers only to the account that armed it", async () => {
+  const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // Dana grades it `loved`, which asks for words before anything is written.
+  await tapReview(channel, "loved", CHAT, DANA_TG);
+  assert.equal(reviewsIn(world).length, 0);
+
+  // Carter replies to Dana's prompt. The words are not Dana's, and the grade is
+  // not Carter's, so nothing is recorded and the prompt stays open.
+  await replyWithNote(channel, "looks fine to me", CHAT, CARTER_TG);
+  assert.equal(reviewsIn(world).length, 0);
+
+  // Dana's own reply records, as Dana, with her account on the record.
+  await replyWithNote(channel, "clean and well scoped", CHAT, DANA_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:dana");
+  const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["reaction"], "loved");
+  assert.equal(payload["note"], "clean and well scoped");
+  assert.deepEqual(payload["sender"], { channel: "telegram", id: DANA_TG });
   assertClean(world.unit);
 });
 

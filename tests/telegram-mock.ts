@@ -587,6 +587,12 @@ export function messageUpdate(options: {
   firstName?: string;
   title?: string;
   /**
+   * The account the Bot API attributes this message to (APRV-324). A note
+   * reply is a gesture like any other, and which account sent it is what
+   * decides whose words the runtime records.
+   */
+  fromId?: string | number;
+  /**
    * The `message_id` this message is a reply to (APRV-299).
    *
    * Telegram puts the whole replied-to message in `reply_to_message`; the only
@@ -604,7 +610,11 @@ export function messageUpdate(options: {
   if (options.firstName !== undefined) chat["first_name"] = options.firstName;
   const message: Record<string, unknown> = {
     message_id: 1,
-    from: { id: 42, is_bot: false, username: options.username ?? "approver" },
+    from: {
+      id: options.fromId ?? 42,
+      is_bot: false,
+      username: options.username ?? "approver",
+    },
     chat,
     date: 1_700_000_000,
     text: options.text ?? "hello",

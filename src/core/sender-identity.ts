@@ -144,6 +144,20 @@ export const CHANNEL_DECISION_REFUSAL_CODES = [
    * pick.
    */
   "sender-ambiguous",
+  /**
+   * An attestation tap that would decide WHO MAY DECIDE, from a phone, under a
+   * policy that cannot answer who is tapping.
+   *
+   * The attestation ceremony is the one act whose subject can be the sender
+   * mapping itself, so resolving it against the file being attested would let
+   * whoever edited that file name themselves as the approver of their own
+   * edit. It is resolved against the policy IN FORCE instead, and this code is
+   * what fires when that policy cannot answer: its bytes are not recoverable,
+   * or it maps no sender for this channel while the amendment changes the
+   * mapping. The repair is a terminal, which supplies no sender and is where a
+   * `policy.core` edit happens anyway.
+   */
+  "attest-requires-terminal",
 ] as const;
 
 export type ChannelDecisionRefusalCode = (typeof CHANNEL_DECISION_REFUSAL_CODES)[number];
@@ -291,6 +305,99 @@ export function resolveSender(
 }
 
 /**
+ * Every `(channel, id)` pair a policy declares, as a sorted, comparable list.
+ *
+ * The shape {@link sendersDiffer} compares. Sorted and flattened so that two
+ * policies differing only in key order are the same mapping, and a policy whose
+ * load failed is `null` rather than an empty mapping — "no senders" and "I
+ * could not read the senders" are different answers and only one of them is
+ * safe to act on.
+ */
+export function senderPairs(load: PolicyLoadResult): string[] | null {
+  if (!load.ok) return null;
+  const pairs: string[] = [];
+  for (const [key, claimed] of senderIndex(load.policy.approvers)) {
+    for (const approver of claimed) pairs.push(`${approver} ${key}`);
+  }
+  return pairs.sort();
+}
+
+/**
+ * Does the amendment change who may be recognized, anywhere, on any channel?
+ *
+ * The question the attestation rule turns on (§10.3). An amendment that adds,
+ * removes or repoints ANY `senders` entry is an amendment about the identity
+ * system itself, and the policy in force is the only honest place to ask who
+ * may sign for it: asking the proposed file would let whoever wrote it name
+ * themselves as the approver of their own edit.
+ *
+ * `true` when either side could not be read, which is the strict direction: an
+ * unreadable mapping is one this runtime cannot prove is unchanged.
+ */
+export function sendersDiffer(before: PolicyLoadResult, after: PolicyLoadResult): boolean {
+  const first = senderPairs(before);
+  const second = senderPairs(after);
+  if (first === null || second === null) return true;
+  if (first.length !== second.length) return true;
+  return first.some((pair, index) => pair !== second[index]);
+}
+
+/**
+ * The actor a surface records, from the sender it observed and the policy it
+ * resolved against — or the refusal that replaces it.
+ *
+ * One function, every surface (APRV-324 follow-up). Decisions, checkpoint
+ * signatures and retrospective reviews all ask the same question of the same
+ * two inputs, and three copies of the ladder would be three chances for one of
+ * them to keep the pre-mapping behaviour on the gesture that matters most.
+ * What differs between the surfaces is what they do with the answer, which is
+ * theirs; what must not differ is who the answer names.
+ */
+export type SenderActorResolution =
+  | {
+      ok: true;
+      actor: string;
+      /** Present only where the actor was RESOLVED from the sender. */
+      sender?: ChannelSender;
+      source?: SenderSource;
+    }
+  | {
+      ok: false;
+      code: ChannelDecisionRefusalCode;
+      message: string;
+      sender: ChannelSender;
+    };
+
+/**
+ * Resolve `sender` against `load`, falling back to `configured`.
+ *
+ * The `configured` actor is what the surface was launched as, and it survives
+ * exactly the two modes {@link resolveSender} calls `configured`: no sender
+ * observed, and no mapping declared for the channel that observed one.
+ */
+export function actorForSender(
+  load: PolicyLoadResult,
+  configured: string,
+  sender: ChannelSender | undefined,
+): SenderActorResolution {
+  const resolution = resolveSender(load, sender);
+  if (resolution.kind === "configured") return { ok: true, actor: configured };
+  if (resolution.kind === "mapped") {
+    return {
+      ok: true,
+      actor: resolution.actor,
+      ...(sender === undefined ? {} : { sender, source: resolution.source }),
+    };
+  }
+  return {
+    ok: false,
+    code: resolution.kind === "unmapped" ? "sender-unmapped" : "sender-ambiguous",
+    message: resolution.message,
+    sender: resolution.sender,
+  };
+}
+
+/**
  * What the person who tapped is told, in one line (APRV-235's rule, applied to
  * these two codes).
  *
@@ -302,6 +409,9 @@ export function resolveSender(
 export function senderRefusalLine(code: ChannelDecisionRefusalCode): string {
   if (code === "sender-unmapped") {
     return "Not recorded — this account is not one the attested policy names as an approver for this gate. The attempt is on the record; ask the operator to map it.";
+  }
+  if (code === "attest-requires-terminal") {
+    return "Not attested — this amendment decides who may decide, and the policy in force cannot say who is tapping. Attest it from a terminal.";
   }
   return "Not recorded — the policy maps this account to more than one approver, so the runtime cannot say who decided. Ask the operator to fix the policy.";
 }

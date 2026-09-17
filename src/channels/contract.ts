@@ -59,22 +59,28 @@ import {
   type GateRefusal,
 } from "../core/gate.js";
 import {
+  actorForSender,
   isChannelDecisionRefusalCode,
-  resolveSender,
+  mapsSendersFor,
   senderRefusalLine,
+  sendersDiffer,
   type ChannelDecisionRefusalCode,
   type ChannelSender,
+  type SenderActorResolution,
   type SenderSource,
 } from "../core/sender-identity.js";
 import type { EventRecord } from "../core/log.js";
 import {
   attestationKeySha256,
   decideAttestation,
+  inForcePolicyText,
   isAttestationActionKey,
   openProposalFor,
   proposalPolicyPath,
   type DecideAttestationOptions,
 } from "../core/policy-proposal.js";
+import { payloadStoreDirFor } from "../core/payload-store.js";
+import { loadPolicyText } from "../core/policy-load.js";
 import type { Autonomy } from "../core/policy-load.js";
 import type { Provenance } from "../core/policy-match.js";
 import { readVerifiedRecords, type RequestState } from "../core/state.js";
@@ -832,12 +838,6 @@ export function recordChannelDecision(
   // this function exists at all: there is one place a reported gesture becomes a
   // log event, and adding a second would be adding a second decision path.
   if (isAttestationActionKey(decision.action_key)) {
-    // APRV-324 deliberately does NOT resolve a sender here. An attestation is
-    // the ceremony that puts a policy in force, including the sender mapping
-    // itself, and resolving a tap against the policy it is about would make a
-    // file that fails to load unrepairable from the surface the operator is
-    // holding. It stays on the configured identity, which is where every
-    // attestation has always been recorded, and the repair path stays open.
     return recordAttestationDecision(logPath, decision, actorOptions, gateOptions);
   }
 
@@ -856,13 +856,15 @@ export function recordChannelDecision(
   // mapping the operator attested, and the gate's own authorization logic is
   // untouched by it. `namesApprover` and `actor-not-approver` then run exactly
   // as they always have, over an identity that is better evidenced.
-  const resolution = resolveSender(readGatePolicy(gateOptions), decision.sender);
-  if (resolution.kind === "unmapped" || resolution.kind === "ambiguous") {
-    const code: ChannelDecisionRefusalCode =
-      resolution.kind === "unmapped" ? "sender-unmapped" : "sender-ambiguous";
+  const resolution = actorForSender(
+    readGatePolicy(gateOptions),
+    actorOptions.actor,
+    decision.sender,
+  );
+  if (!resolution.ok) {
     const refusal: ChannelDecisionRefusal = {
       ok: false,
-      code,
+      code: resolution.code,
       message: `decision on ${decision.action_key} refused: ${resolution.message}`,
     };
     // The refusal is the record. Nothing is decided, no token is minted, and
@@ -881,10 +883,10 @@ export function recordChannelDecision(
     return { outcome: refusal };
   }
 
-  const actor = resolution.kind === "mapped" ? resolution.actor : actorOptions.actor;
-  if (resolution.kind === "mapped" && decision.sender !== undefined) {
-    options.sender = decision.sender;
-    options.senderSource = resolution.source;
+  const actor = resolution.actor;
+  if (resolution.sender !== undefined) {
+    options.sender = resolution.sender;
+    if (resolution.source !== undefined) options.senderSource = resolution.source;
   }
 
   const result = decide(logPath, decision.action_key, decision.decision, actor, options);
@@ -916,7 +918,7 @@ export function recordChannelDecision(
         ? {}
         : {
             sender: decision.sender,
-            ...(resolution.kind === "mapped" ? { senderSource: resolution.source } : {}),
+            ...(resolution.source === undefined ? {} : { senderSource: resolution.source }),
           },
     );
     return { outcome: result };
@@ -1020,6 +1022,113 @@ function listenerPolicyPath(options: DecideOptions): string | null {
   return policy.dir === undefined ? null : proposalPolicyPath(policy.dir);
 }
 
+/**
+ * Who may attest, from a phone, and under whose rules (APRV-324 follow-up,
+ * amended SPEC.md §10.3).
+ *
+ * ## Why this is not the decision rule
+ *
+ * A decision is resolved against the policy in force, and so is this — but for
+ * an attestation the two candidate policies are different documents, and the
+ * difference is the whole problem. The tap answers a prompt about the LIVE
+ * file, which is the amendment; the amendment may add, remove or repoint the
+ * `senders` mapping itself. Resolving against the proposed file would let
+ * whoever edited it name their own account as the approver of their own edit,
+ * which is a gate that authorizes its own widening. So the oracle is the policy
+ * IN FORCE — the bytes the latest attestation names — and never the bytes being
+ * attested.
+ *
+ * ## The ladder
+ *
+ * 1. **No sender.** The terminal and the web page, which authenticate nobody.
+ *    Unchanged, and this is the path that keeps a repository recoverable: a
+ *    `policy.core` edit happens at a terminal anyway, so no mapping, however
+ *    broken, can strand the repair.
+ * 2. **In-force bytes recovered, and the amendment changes the mapping.** Only
+ *    an account the IN-FORCE policy maps may answer. Where the policy in force
+ *    maps nobody on this channel, nobody qualifies and the answer is
+ *    `attest-requires-terminal`: an amendment that introduces the identity
+ *    system cannot be signed for by the identity system it introduces.
+ * 3. **In-force bytes recovered, mapping unchanged.** The ordinary rule, run
+ *    against the policy in force: mapped answers, unmapped is refused.
+ * 4. **In-force bytes NOT recovered.** They frequently are not — an attestation
+ *    records only a digest, and a terminal attestation stores nothing
+ *    ({@link inForcePolicyText} says so in full). Then the runtime cannot tell
+ *    whether this amendment touches the mapping, so it refuses
+ *    `attest-requires-terminal` whenever the PROPOSED policy maps senders for
+ *    this channel, and otherwise behaves exactly as it did before this rule.
+ *
+ * The residual, stated rather than hidden: in case 4 an amendment that REMOVES
+ * a mapping is indistinguishable from a policy that never had one, so it falls
+ * to the pre-mapping behaviour. Closing that would need the in-force bytes,
+ * which is case 2; and reaching it requires an attacker who can already write
+ * `APPROVAL.md`, whom SPEC.md §11 already places inside the trust boundary.
+ */
+function resolveAttestationSender(
+  logPath: string,
+  records: readonly EventRecord[],
+  decision: ChannelDecision,
+  actorOptions: ChannelActorOptions,
+  gateOptions: DecideOptions,
+  policyPath: string | null,
+): SenderActorResolution {
+  const sender = decision.sender;
+  if (sender === undefined) return { ok: true, actor: actorOptions.actor };
+
+  const proposed = readGatePolicy(gateOptions);
+  // The same store `proposeAttestation` wrote the policy text to, resolved the
+  // same way, so the bytes a prompt displayed and the bytes this reads back are
+  // never two different files.
+  const inForce = inForcePolicyText(
+    records,
+    gateOptions.payloadStoreDir ?? payloadStoreDirFor(logPath),
+  );
+
+  if (!inForce.ok) {
+    if (!mapsSendersFor(proposed.ok ? proposed.policy.approvers : undefined, sender.channel)) {
+      return { ok: true, actor: actorOptions.actor };
+    }
+    return {
+      ok: false,
+      code: "attest-requires-terminal",
+      sender,
+      message: `the policy being attested maps ${sender.channel} senders and the policy IN FORCE cannot be read to check who may sign for that: ${inForce.reason}. Resolving this tap against the file it is attesting would let whoever wrote that file name the account that approves it, so nothing was attested. Attest from a terminal, which authenticates no sender and is where a policy.core edit happens anyway.`,
+    };
+  }
+
+  const before = loadPolicyText(
+    policyPath ?? "APPROVAL.md",
+    inForce.text,
+    gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+  );
+  if (sendersDiffer(before, proposed)) {
+    if (!mapsSendersFor(before.ok ? before.policy.approvers : undefined, sender.channel)) {
+      return {
+        ok: false,
+        code: "attest-requires-terminal",
+        sender,
+        message: `this amendment changes the sender mapping, and the policy in force maps no ${sender.channel} sender, so there is no account it could recognize as entitled to sign for that change. An amendment that introduces the identity system cannot be signed for by the identity system it introduces. Nothing was attested; attest from a terminal.`,
+      };
+    }
+    const resolution = actorForSender(before, actorOptions.actor, sender);
+    if (!resolution.ok) return resolution;
+    // A mapped account under the policy in force. Belt and braces on the mode
+    // the ladder above already excluded: an amendment that changes the mapping
+    // is never answered on the configured identity.
+    if (resolution.sender === undefined) {
+      return {
+        ok: false,
+        code: "attest-requires-terminal",
+        sender,
+        message: `this amendment changes the sender mapping and this tap resolved to no account under the policy in force. Nothing was attested; attest from a terminal.`,
+      };
+    }
+    return resolution;
+  }
+
+  return actorForSender(before, actorOptions.actor, sender);
+}
+
 export function recordAttestationDecision(
   logPath: string,
   decision: ChannelDecision,
@@ -1068,11 +1177,48 @@ export function recordAttestationDecision(
   const policyPath = listenerPolicyPath(gateOptions);
   if (policyPath !== null) options.policyPath = policyPath;
 
+  // APRV-324 follow-up. The privileged gesture, resolved last and most
+  // carefully: an attestation decides which rules are in force, and the rules
+  // it can decide include the sender mapping itself.
+  const resolved = resolveAttestationSender(
+    logPath,
+    read.records,
+    decision,
+    actorOptions,
+    gateOptions,
+    policyPath,
+  );
+  if (!resolved.ok) {
+    const refusal: ChannelDecisionRefusal = {
+      ok: false,
+      code: resolved.code,
+      message: `attestation of ${sha256} refused: ${resolved.message}`,
+    };
+    // The same audit-tier record a refused decision writes, and it fits without
+    // straining: the attestation prompt HAS an action key the log carries
+    // (`policy.attest:<sha256>`), and the gesture IS one of the two decision
+    // words this event's payload admits, because that is exactly how a tap on a
+    // prompt is routed to `attest` or `decline` above.
+    noteRefusedDecision(
+      logPath,
+      decision,
+      { ...actorOptions, actor: null },
+      gateOptions,
+      refusal,
+      { sender: resolved.sender },
+    );
+    return { outcome: refusal };
+  }
+  if (resolved.sender !== undefined) {
+    options.sender = resolved.sender;
+    if (resolved.source !== undefined) options.senderSource = resolved.source;
+  }
+
   const result = decideAttestation(
     logPath,
     proposal.seq,
     decision.decision === "grant" ? "attest" : "decline",
-    actorOptions.actor,
+    resolved.actor,
     options,
   );
   if (!result.ok) return { outcome: result };

@@ -58,6 +58,7 @@ import { basename, join } from "node:path";
 
 import {
   POLICY_HASH_FIELD,
+  attestationSha256,
   checkAttestationOfBytes,
   policyBytesHash,
   type AttestationStatus,
@@ -71,7 +72,7 @@ import {
   type LogHead,
 } from "./log.js";
 import { payloadHash } from "./payload.js";
-import { payloadStoreDirFor, storePayload } from "./payload-store.js";
+import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
 import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "./policy-diff.js";
 import { loadPolicyText, POLICY_FILENAMES, type PolicyLoadResult } from "./policy-load.js";
 import { readVerifiedRecords } from "./state.js";
@@ -347,6 +348,78 @@ export function proposalPayloadValue(policyPath: string, text: string): Record<s
   return { policy_path: basename(policyPath), text };
 }
 
+/** What {@link inForcePolicyText} could recover, or why it could not. */
+export type InForcePolicy =
+  | { ok: true; text: string; sha256: string }
+  | { ok: false; reason: string };
+
+/**
+ * The bytes of the policy currently IN FORCE, recovered and hash-verified
+ * (APRV-324 follow-up).
+ *
+ * The attestation ceremony records only the SHA-256 of the bytes it attests, so
+ * the log alone cannot produce them — `summarizeDiff` above says exactly that,
+ * and takes its baseline from a caller. What CAN produce them is the payload
+ * store: every `policy.proposed` binds the whole policy text as its payload
+ * (SPEC.md §10.4, so an approver can read the file rather than a summary of
+ * it), and a proposal that was attested therefore left the attested text
+ * addressable by its own `payload_hash`.
+ *
+ * So: find the hash in force, find any proposal that named exactly those bytes,
+ * read its stored text, and **verify**. Nothing here trusts the store — the
+ * recovered text is hashed and compared against the attested digest from the
+ * verified log, so a tampered, truncated or swapped payload file is a failure
+ * rather than a different policy wearing the attested hash.
+ *
+ * It fails, legitimately and often, and callers MUST have an answer for that:
+ * a policy attested at a terminal (`approval policy attest`, and `policy amend`
+ * on its human path) appends a `policy.updated` and stores nothing, so a chain
+ * that has never been attested from a phone has no recoverable bytes at all.
+ * `channels/contract.ts` is the caller, and its fallback is to refuse the
+ * privileged gesture rather than to assume.
+ */
+export function inForcePolicyText(
+  records: readonly EventRecord[],
+  storeDir: string,
+): InForcePolicy {
+  let attested: string | null = null;
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const sha = attestationSha256(records[index] as EventRecord);
+    if (sha !== null) {
+      attested = sha;
+      break;
+    }
+  }
+  if (attested === null) {
+    return { ok: false, reason: "no policy is in force: the log carries no attestation" };
+  }
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index] as EventRecord;
+    if (record.event !== PROPOSAL_EVENT) continue;
+    const payload = record.payload;
+    if (payload === undefined) continue;
+    if (payload["sha256"] !== attested) continue;
+    const bound = payload["payload_hash"];
+    if (typeof bound !== "string") continue;
+    const stored = loadPayload(storeDir, bound);
+    if (!stored.ok) continue;
+    const value = stored.value;
+    if (typeof value !== "object" || value === null) continue;
+    const text = (value as Record<string, unknown>)["text"];
+    if (typeof text !== "string") continue;
+    // The verification, and the only reason reading a file beside the log is
+    // allowed to answer a question about authority at all.
+    if (policyBytesHash(Buffer.from(text, "utf8")) !== attested) continue;
+    return { ok: true, text, sha256: attested };
+  }
+
+  return {
+    ok: false,
+    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: an attestation records only their digest, and no policy.proposed record naming those bytes has a readable payload beside this log. A policy attested at a terminal stores nothing, so this is the ordinary state of a chain that has never been amended from a phone.`,
+  };
+}
+
 /**
  * Append a `policy.proposed` asking a human to attest `policyPath`'s bytes.
  *
@@ -599,6 +672,19 @@ export interface DecideAttestationOptions extends ProposalOptions {
   policyPath?: string;
   /** The channel delivery id this gesture answered, for audit. */
   batchDeliveryId?: string;
+  /**
+   * The authenticated account this answer arrived from (APRV-324 follow-up),
+   * recorded as `payload.sender`, and the kind of evidence it is.
+   *
+   * Absent means what it means everywhere else: the answer was attributed by
+   * configuration rather than by anything a transport authenticated, which is
+   * what every attestation before this field says. The RESOLUTION that decides
+   * whether a sender may answer at all is the decision surface's
+   * (`channels/contract.ts`), against the policy in force rather than the one
+   * being attested, and nothing here re-derives or second-guesses it.
+   */
+  sender?: { channel: string; id: string };
+  senderSource?: "policy";
 }
 
 /**
@@ -686,6 +772,15 @@ export function decideAttestation(
     sha256: derived.sha256,
     proposed_seq: derived.seq,
   };
+  // APRV-324 follow-up. The account the tap came from, when a surface
+  // authenticated one and the policy IN FORCE mapped it to this actor. The
+  // resolution is `channels/contract.ts`'s and is deliberately not repeated
+  // here: what this function records is which account the answer came from,
+  // not which account is allowed to give one.
+  if (options.sender !== undefined) {
+    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
+  }
   if (options.note !== undefined) payload["note"] = options.note;
   if (options.batchDeliveryId !== undefined && options.batchDeliveryId.length > 0) {
     payload["batch_delivery_id"] = options.batchDeliveryId;

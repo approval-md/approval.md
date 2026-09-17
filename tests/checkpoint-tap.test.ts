@@ -89,6 +89,11 @@ function policyText(options: {
   keys?: readonly string[];
   every?: string;
   passphraseEnv?: string;
+  /**
+   * The Telegram account each approver signs from (APRV-324). Absent means no
+   * mapping at all, which is what every case here but the sender ones want.
+   */
+  senders?: Record<string, string>;
 }): string {
   const lines = [
     "# Policy",
@@ -99,10 +104,18 @@ function policyText(options: {
     "  autonomy: manual",
     '  approval_ttl: "1h"',
     "  on_expiry: reject",
+  ];
+  if (options.senders !== undefined) {
+    lines.push("approvers:");
+    for (const [id, sender] of Object.entries(options.senders)) {
+      lines.push(`  ${id}:`, "    channels: [telegram, cli]", "    senders:", `      telegram: "${sender}"`);
+    }
+  }
+  lines.push(
     "classes:",
     "  read.*:",
     "    autonomy: autonomous",
-  ];
+  );
   if (options.passphraseEnv !== undefined) {
     lines.push("vault:", `  passphrase_env: ${options.passphraseEnv}`);
   }
@@ -146,6 +159,7 @@ function newHome(
     keys?: "own" | "none";
     every?: string;
     vault?: boolean;
+    senders?: Record<string, string>;
   } = {},
 ): Home {
   counter += 1;
@@ -161,6 +175,7 @@ function newHome(
     policyText({
       keys: options.keys === "none" ? [] : [pair.publicKey],
       ...(options.every === undefined ? {} : { every: options.every }),
+      ...(options.senders === undefined ? {} : { senders: options.senders }),
       passphraseEnv,
     }),
     "utf8",
@@ -698,14 +713,18 @@ function checkpointButtons(
 }
 
 async function tapWorld(
-  options: { every?: string } = {},
+  options: { every?: string; senders?: Record<string, string> } = {},
 ): Promise<{
   home: Home;
   setup: ListenSetup;
   mock: Awaited<ReturnType<typeof startMockBotApi>>;
   close: () => Promise<void>;
 }> {
-  const home = newHome({ records: 3, every: options.every ?? "1h" });
+  const home = newHome({
+    records: 3,
+    every: options.every ?? "1h",
+    ...(options.senders === undefined ? {} : { senders: options.senders }),
+  });
   const mock = await startMockBotApi(TOKEN);
   const channel = new TelegramChannel({
     token: TOKEN,
@@ -947,6 +966,98 @@ test("the cli channel's answer is only a gesture: signing is the runtime's", () 
 
   const signedRecord = records(home.logPath).find((record) => record.seq === result.seq);
   assert.equal(signedRecord?.channel, "cli");
+});
+
+// ===========================================================================
+// Who signed it (APRV-324): the sender mapping reaches this family too
+//
+// A checkpoint signature is a human-only act saying this log's head is what
+// this person saw. Before APRV-324's follow-up it was recorded against the
+// actor the listener process was launched with, whoever tapped, and the
+// checkpoint branch of `routeCallback` returned before the sender was read at
+// all. The other two families are pinned in `tests/sender-identity.test.ts`
+// (attestations, and the channel's threading) and `tests/channels-telegram.
+// test.ts` (reviews).
+// ===========================================================================
+
+const SIGNER_ID = "42";
+const STRANGER_ID = "999";
+
+test("a mapped sender signs the checkpoint as the person the policy attested that account to", async (t) => {
+  const world = await tapWorld({ every: "1ms", senders: { tester: SIGNER_ID } });
+  t.after(world.close);
+
+  const state = newDispatchState();
+  const offered = await cycle(world.setup, state);
+  assert.ok(offered.checkpoint !== undefined);
+
+  const buttons = checkpointButtons(world.mock.requests);
+  world.mock.queueUpdate(
+    callbackUpdate({ data: buttons.sign, chatId: CHAT, fromId: SIGNER_ID }),
+  );
+  await world.setup.channel.pollOnce();
+
+  const checkpoints = records(world.home.logPath).filter(
+    (record) => record.event === "log.checkpoint",
+  );
+  assert.equal(checkpoints.length, 1);
+  // `human:tester`, from the mapping, and identical to the configured actor in
+  // this fixture — which is the point of the next test rather than of this one.
+  assert.equal(checkpoints[0]?.actor, HUMAN);
+  assert.equal(check(world.home).status, "pass");
+  // The signature is over a payload this rule did not touch: no `sender` key
+  // sits beside it, because an unsigned field next to a signature reads as
+  // covered by one.
+  const payload = checkpoints[0]?.payload as Record<string, unknown> | undefined;
+  assert.equal(payload === undefined ? true : "sender" in payload, false);
+});
+
+test("an unmapped sender signs nothing, and the message says why", async (t) => {
+  const world = await tapWorld({ every: "1ms", senders: { tester: SIGNER_ID } });
+  t.after(world.close);
+
+  const state = newDispatchState();
+  const offered = await cycle(world.setup, state);
+  assert.ok(offered.checkpoint !== undefined);
+  const before = records(world.home.logPath).length;
+
+  const buttons = checkpointButtons(world.mock.requests);
+  world.mock.queueUpdate(
+    callbackUpdate({ data: buttons.sign, chatId: CHAT, fromId: STRANGER_ID }),
+  );
+  await world.setup.channel.pollOnce();
+
+  // Nothing at all: a checkpoint refusal has never appended, and this one is no
+  // different. The account that tried is on the operator's terminal, not in a
+  // record shaped for a decision that has an action key and a verdict.
+  assert.equal(records(world.home.logPath).length, before);
+  const edits = world.mock.edits();
+  const last = edits[edits.length - 1];
+  assert.match(String(last?.text ?? ""), /not one the attested policy names as an approver/u);
+});
+
+test("with no mapping, a checkpoint tap is attributed exactly as it was before", async (t) => {
+  const world = await tapWorld({ every: "1ms" });
+  t.after(world.close);
+
+  const state = newDispatchState();
+  const offered = await cycle(world.setup, state);
+  assert.ok(offered.checkpoint !== undefined);
+
+  // A real, authenticated account on the callback, and a policy that maps none:
+  // the signature is the configured identity's, byte for byte as before.
+  const buttons = checkpointButtons(world.mock.requests);
+  world.mock.queueUpdate(
+    callbackUpdate({ data: buttons.sign, chatId: CHAT, fromId: STRANGER_ID }),
+  );
+  await world.setup.channel.pollOnce();
+
+  const checkpoints = records(world.home.logPath).filter(
+    (record) => record.event === "log.checkpoint",
+  );
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0]?.actor, HUMAN);
+  assert.equal(check(world.home).status, "pass");
 });
 
 // ===========================================================================

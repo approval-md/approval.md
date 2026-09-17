@@ -420,6 +420,79 @@ channel harness, in the manner of `tests/channels-telegram.test.ts`.
 
 ---
 
+## 7a. The other three callback families (added during implementation, APRV-324)
+
+§3.2 is written about `recordChannelDecision`, and the first implementation
+resolved senders there and nowhere else. Review of that implementation found
+the gap: a Telegram callback is routed to one of four handlers, and three of
+them never reached the resolution. A stranger in the configured chat therefore
+kept the exact power this design removes, on the gestures that matter most.
+
+The rule binds all four. `senderOf` is read once, directly after the chat-id
+check, so every branch below it sees the same observation and no future branch
+can be written that quietly does not.
+
+**Decisions** — §3.2, unchanged.
+
+**Checkpoint signatures** (`log.checkpoint`). A signature says this log's head
+is what this person saw, which is a human-only act with no request behind it.
+Resolved exactly as a decision: mapped signs as the mapped human, unmapped or
+ambiguous is refused, no mapping for the channel is the configured identity.
+The signature's `payload` is deliberately NOT given a `sender` field: it is a
+signed structure, and an unsigned field beside a signature invites a reader to
+treat it as covered by one. What the mapping changes here is the ACTOR, which
+is what the signature is over.
+
+**Retrospective reviews** (`audit.reviewed`), including the note-reply path. A
+review confers no authority, and `approval feedback` hands it to agents as
+human-authored guidance, so a review attributed to the wrong person is guidance
+in somebody else's name. Resolved as a decision is; the record carries
+`payload.sender` on the same terms. The ForceReply note prompt additionally
+remembers which account armed it, and a reply from a different account records
+nothing and leaves the prompt open: the prompt is addressed to the person who
+tapped, and its words are recorded as theirs.
+
+**Attestation answers** (`policy.updated` / `policy.declined`) — the one that is
+stricter rather than the same, because the amendment being attested may itself
+add, remove or repoint the mapping. Resolving a tap against the file it is
+attesting would let whoever wrote that file name the account that approves
+their own edit: a gate authorizing its own widening. So the oracle is the
+policy **in force**, and the ladder is:
+
+1. No sender (terminal, web): unchanged. This is what keeps a repository
+   recoverable — a `policy.core` edit happens at a terminal anyway, so no
+   mapping, however broken, can strand the repair.
+2. In-force bytes recovered and the amendment CHANGES the mapping: only an
+   account the in-force policy maps may answer. Where it maps nobody on this
+   channel, nobody qualifies and the answer is `attest-requires-terminal`. An
+   amendment that introduces the identity system cannot be signed for by the
+   identity system it introduces.
+3. In-force bytes recovered and the mapping is unchanged: the ordinary rule,
+   run against the policy in force.
+4. In-force bytes NOT recovered: refuse `attest-requires-terminal` whenever the
+   proposed policy maps senders for this channel; otherwise behave as before.
+
+**Recovering the in-force bytes, and why it often fails.** An attestation
+records only a SHA-256 (`summarizeDiff` says so in as many words), so the log
+alone cannot produce them. The payload store can: every `policy.proposed` binds
+the whole policy text as its payload, so a proposal that was attested left the
+attested text addressable by its own `payload_hash`. The recovery finds the hash
+in force, finds a proposal that named exactly those bytes, reads the stored text
+and **re-hashes it against the attested digest** — nothing trusts the store.
+
+It fails in the ordinary case and the implementation says so rather than
+pretending otherwise: `approval policy attest`, and `policy amend` on its human
+path, append a `policy.updated` and store nothing. A chain that has never been
+amended from a phone has no recoverable bytes at all, which is this
+repository's own state. Step 4 is therefore the common path, and it is
+fail-closed.
+
+**The residual, stated.** In step 4 an amendment that REMOVES a mapping is
+indistinguishable from a policy that never had one, so it falls back to the
+pre-mapping behaviour. Closing it needs the in-force bytes, which is step 2.
+Reaching it requires an attacker who can already write `APPROVAL.md`, whom
+SPEC §11 already places inside the trust boundary.
+
 ## 8. What this document does not do
 
 It changes no runtime code. `resolveHumanActor` is untouched, `routeCallback`

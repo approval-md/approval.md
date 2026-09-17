@@ -164,6 +164,11 @@ import {
 } from "../core/harness-wait.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
+import {
+  actorForSender,
+  senderRefusalLine,
+  type ChannelSender,
+} from "../core/sender-identity.js";
 import { promptLayoutFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
@@ -2238,11 +2243,52 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
  * request here to reject, and a checkpoint that is owed is a warning at every
  * layer and a refusal at none.
  */
+/**
+ * Where this listener's policy lives, as `loadPolicy` wants it (APRV-324
+ * follow-up).
+ *
+ * The same location every gate operation this process performs resolves,
+ * because the handlers below ask the policy who a sender is and the gate asks
+ * it what a class resolves to, and two different files answering those two
+ * questions would be a listener enforcing one policy and attributing under
+ * another.
+ */
+function policyLoadOptions(setup: ListenSetup): { file?: string; dir?: string } {
+  const policy = setup.gateOptions.policy;
+  if (policy?.file !== undefined) return { file: policy.file };
+  if (policy?.dir !== undefined) return { dir: policy.dir };
+  return {};
+}
+
 export function checkpointHandlerFor(
   setup: ListenSetup,
   streams: Streams,
-): (tap: { sign: boolean; head: { seq: number; hash: string } }) => CheckpointTapResponse {
+): (tap: {
+  sign: boolean;
+  head: { seq: number; hash: string };
+  sender?: ChannelSender;
+}) => CheckpointTapResponse {
   return (tap) => {
+    // APRV-324 follow-up, and FIRST, before the decline branch is even
+    // considered: a signature says this log's head is what this person saw, so
+    // an account the attested policy does not name may not produce one. Under
+    // no mapping this resolves to the configured identity and the whole branch
+    // is today's behaviour.
+    const resolved = actorForSender(
+      loadPolicy(policyLoadOptions(setup)),
+      setup.actor,
+      tap.sender,
+    );
+    if (!resolved.ok) {
+      streams.err(`approval: telegram checkpoint refused (${resolved.code}): ${resolved.message}\n`);
+      return {
+        ok: false,
+        headline: TELEGRAM_NOT_RECORDED,
+        detail: [senderRefusalLine(resolved.code)],
+        toast: "Not signed.",
+      };
+    }
+
     if (!tap.sign) {
       return {
         ok: true,
@@ -2258,7 +2304,7 @@ export function checkpointHandlerFor(
     const result = signCheckpointOffer(
       setup.checkpoint,
       tap.head,
-      setup.actor,
+      resolved.actor,
       "telegram",
       process.cwd(),
     );
@@ -2277,7 +2323,7 @@ export function checkpointHandlerFor(
       );
     } else if (result.ok) {
       streams.out(
-        `checkpoint ${String(result.seq)}: signed head seq ${String(result.signed.seq)} ${result.signed.hash} by ${setup.actor} via telegram\n`,
+        `checkpoint ${String(result.seq)}: signed head seq ${String(result.signed.seq)} ${result.signed.hash} by ${resolved.actor} via telegram\n`,
       );
     } else {
       streams.err(`approval: telegram checkpoint refused (${result.code}): ${result.message}\n`);
@@ -2321,17 +2367,44 @@ export function reviewHandlerFor(
   verdict: "ok" | "denied";
   reaction?: "disliked" | "indifferent" | "liked" | "loved";
   note?: string;
+  sender?: ChannelSender;
 }) => ReviewTapResponse {
   return (tap) => {
+    // APRV-324 follow-up. A review confers no authority and is still a HUMAN's
+    // observation: `approval feedback` hands it to agents as human-authored
+    // guidance, so a review attributed to the wrong person is guidance in
+    // somebody else's name. Resolved exactly as a decision is, and under no
+    // mapping this is the configured identity and today's behaviour.
+    const resolved = actorForSender(
+      loadPolicy(policyLoadOptions(setup)),
+      setup.actor,
+      tap.sender,
+    );
+    if (!resolved.ok) {
+      streams.err(`approval: telegram review refused (${resolved.code}): ${resolved.message}\n`);
+      return {
+        ok: false,
+        headline: TELEGRAM_NOT_RECORDED,
+        detail: [senderRefusalLine(resolved.code)],
+        toast: "Not recorded.",
+      };
+    }
+
     const result = reviewSample(
       setup.logPath,
       { kind: "seq", seq: tap.sampleSeq },
-      setup.actor,
+      resolved.actor,
       tap.note ?? null,
       {
         ...(setup.gateOptions.policy === undefined ? {} : { policy: setup.gateOptions.policy }),
         verdict: tap.verdict,
         ...(tap.reaction === undefined ? {} : { reaction: tap.reaction }),
+        ...(resolved.sender === undefined
+          ? {}
+          : {
+              sender: resolved.sender,
+              ...(resolved.source === undefined ? {} : { senderSource: resolved.source }),
+            }),
       },
     );
 

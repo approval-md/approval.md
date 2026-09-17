@@ -665,6 +665,13 @@ export interface CheckpointTapResponse {
 export type CheckpointTapHandler = (tap: {
   sign: boolean;
   head: { seq: number; hash: string };
+  /**
+   * The account the transport authenticated (APRV-324 follow-up), when it
+   * authenticated one. The channel resolves nothing: the runtime's handler
+   * asks the attested policy who this is, refuses an account it does not name,
+   * and signs as the person it does.
+   */
+  sender?: ChannelSender;
 }) => CheckpointTapResponse | Promise<CheckpointTapResponse>;
 
 export const TELEGRAM_COMMANDS = ["queue", "skip", "next"] as const;
@@ -1915,6 +1922,18 @@ export interface ReviewTap {
   reaction?: Reaction;
   /** The human's words, when a note prompt collected any. */
   note?: string;
+  /**
+   * The account the transport authenticated (APRV-324 follow-up), when it
+   * authenticated one.
+   *
+   * A review confers no authority, which is why it took the paragraph above so
+   * long to stop being true. It is still recorded as a HUMAN's observation and
+   * `approval feedback` presents it to agents as human-authored guidance, so a
+   * review attributed to the wrong person is guidance in somebody else's name.
+   * The channel resolves nothing; the runtime's handler asks the attested
+   * policy, refuses an account it does not name, and records the one it does.
+   */
+  sender?: ChannelSender;
 }
 
 /** What the runtime did with a review tap, as it reports it back. */
@@ -1986,8 +2005,21 @@ export interface ReviewCardState {
    * saying what it is about.
    */
   notice: { headline: string; lines: string[] } | null;
-  /** The outstanding note prompt, and what its reply will record. */
-  awaitingNote: { promptId: DeliveryId; verdict: ReviewVerdict; reaction: Reaction } | null;
+  /**
+   * The outstanding note prompt, and what its reply will record.
+   *
+   * `sender` is the account that asked for the prompt (APRV-324 follow-up),
+   * when the transport authenticated one. A ForceReply prompt is addressed to
+   * the person who tapped, and the words it collects are recorded as theirs, so
+   * a reply from a different account is not the answer to this question: it is
+   * left unrecorded and the prompt stays live for whoever armed it.
+   */
+  awaitingNote: {
+    promptId: DeliveryId;
+    verdict: ReviewVerdict;
+    reaction: Reaction;
+    sender?: ChannelSender;
+  } | null;
   /** When this process delivered the card, on {@link TelegramConfig.now}'s clock. */
   deliveredAtMs: number;
 }
@@ -3403,13 +3435,27 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-324. The one field on this update that identifies a PERSON rather
+    // than a conversation, read once, here, directly after the chat check and
+    // BEFORE every branch below. Its position is the fix for the follow-up
+    // review: read later, three callback families — checkpoint signatures,
+    // review cards and the decision ladder — would each have had their own
+    // chance to keep the pre-mapping behaviour, and two of them are privileged
+    // gestures. `callback_query.from` is the Bot API's own attribution of the
+    // tap to an account; nothing inside `message`, `data` or any text is
+    // consulted, because those are what the sender says about themselves. It is
+    // an observation and nothing more: this channel resolves no identity and
+    // chooses no actor, it reports what it saw and the runtime's handlers
+    // resolve it against the attested policy.
+    const sender = senderOf(query, this.name);
+
     // APRV-257, before the decision vocabulary and in a parser of its own. A
     // checkpoint button decides no request, so it must never reach the ladder
     // below — where an unresolved nonce falls back to an action reference, and
     // a signature gesture would start looking for something to approve.
     const checkpoint = parseCheckpointCallback(query["data"]);
     if (checkpoint !== null) {
-      await this.handleCheckpointTap(checkpoint, callbackId, result);
+      await this.handleCheckpointTap(checkpoint, callbackId, result, sender);
       return;
     }
 
@@ -3420,7 +3466,7 @@ export class TelegramChannel implements TestableChannel {
     // happened would start looking for something to approve.
     const review = parseReviewCallback(query["data"]);
     if (review !== null) {
-      await this.handleReviewTap(review, callbackId, result);
+      await this.handleReviewTap(review, callbackId, result, sender);
       return;
     }
 
@@ -3435,16 +3481,6 @@ export class TelegramChannel implements TestableChannel {
       );
       return;
     }
-
-    // APRV-324. The one field on this update that identifies a PERSON rather
-    // than a conversation, read once, here, after the chat check and before any
-    // decision is assembled. `callback_query.from` is the Bot API's own
-    // attribution of the tap to an account; nothing inside `message`, `data` or
-    // any text is consulted, because those are what the sender says about
-    // themselves. It is an observation and nothing more: this channel resolves
-    // no identity and chooses no actor, it reports what it saw and
-    // `channels/contract.ts` resolves it against the attested policy.
-    const sender = senderOf(query, this.name);
 
     // APRV-115. An "all" button names a digest, not a request: the set it
     // decides is whatever is still open on that delivery right now, which this
@@ -3799,6 +3835,10 @@ export class TelegramChannel implements TestableChannel {
     tap: { sign: boolean; nonce: string },
     callbackId: string,
     result: TelegramPollResult,
+    // APRV-324 follow-up. A checkpoint signature is a human-only act and says
+    // this log's head is what this person saw, so it carries the account the
+    // tap came from exactly as a decision does.
+    sender?: ChannelSender,
   ): Promise<void> {
     const held = this.checkpointNonces.get(tap.nonce);
     if (held === undefined) {
@@ -3830,7 +3870,11 @@ export class TelegramChannel implements TestableChannel {
       tap.sign ? "Heard — signing. The message will say what the log recorded." : "Not now.",
     );
 
-    const response = await handler({ sign: tap.sign, head: held.head });
+    const response = await handler({
+      sign: tap.sign,
+      head: held.head,
+      ...(sender === undefined ? {} : { sender }),
+    });
     // Edited here rather than through `annotate`, which renders an action key
     // under its headline. A checkpoint has none, and an empty `<code></code>`
     // where a request's key belongs would be this channel implying a request.
@@ -3868,6 +3912,7 @@ export class TelegramChannel implements TestableChannel {
     tap: { nonce: string; choice: ReviewChoice },
     callbackId: string,
     result: TelegramPollResult,
+    sender?: ChannelSender,
   ): Promise<void> {
     const deliveryId = this.reviewNonces.get(tap.nonce);
     const state = deliveryId === undefined ? undefined : this.reviewCards.get(deliveryId);
@@ -3910,7 +3955,15 @@ export class TelegramChannel implements TestableChannel {
       const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
       state.denyArmed = chosen === "denied";
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
-      await this.recordReview(state, { sampleSeq: state.card.sampleSeq, verdict: chosen }, result);
+      await this.recordReview(
+        state,
+        {
+          sampleSeq: state.card.sampleSeq,
+          verdict: chosen,
+          ...(sender === undefined ? {} : { sender }),
+        },
+        result,
+      );
       return;
     }
 
@@ -3924,14 +3977,19 @@ export class TelegramChannel implements TestableChannel {
     const conflicts = verdict === "denied" && (reaction === "liked" || reaction === "loved");
     if (!conflicts && (reaction === "loved" || reaction === "disliked")) {
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_NOTE_TOAST);
-      await this.askForNote(state, verdict, reaction);
+      await this.askForNote(state, verdict, reaction, sender);
       return;
     }
 
     await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
     await this.recordReview(
       state,
-      { sampleSeq: state.card.sampleSeq, verdict, reaction },
+      {
+        sampleSeq: state.card.sampleSeq,
+        verdict,
+        reaction,
+        ...(sender === undefined ? {} : { sender }),
+      },
       result,
     );
   }
@@ -3955,6 +4013,7 @@ export class TelegramChannel implements TestableChannel {
     state: ReviewCardState,
     verdict: ReviewVerdict,
     reaction: Reaction,
+    sender?: ChannelSender,
   ): Promise<void> {
     if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
     const lines = reviewNotePromptLines(reaction, verdict, state.card.fields.action_key.value);
@@ -3968,7 +4027,7 @@ export class TelegramChannel implements TestableChannel {
       reply_markup: { force_reply: true },
     });
     const promptId = String(sent.message_id);
-    state.awaitingNote = { promptId, verdict, reaction };
+    state.awaitingNote = { promptId, verdict, reaction, ...(sender === undefined ? {} : { sender }) };
     this.reviewNotePrompts.set(promptId, state.deliveryId);
   }
 
@@ -4010,6 +4069,25 @@ export class TelegramChannel implements TestableChannel {
 
     const state = this.reviewCards.get(deliveryId);
     const pending = state?.awaitingNote ?? null;
+
+    // APRV-324 follow-up, and checked BEFORE the prompt is forgotten, so a
+    // reply from the wrong account costs the right one nothing. A note prompt
+    // is a ForceReply addressed to the person who armed the grade, and its
+    // words are recorded as that person's; a different account replying to it
+    // is answering a question nobody asked them.
+    const sender = senderOf(message, this.name);
+    if (
+      pending !== null &&
+      pending.promptId === promptId &&
+      pending.sender !== undefined &&
+      (sender === undefined || sender.id !== pending.sender.id)
+    ) {
+      this.complain(
+        "approval: telegram ignored a review note: it replied to a prompt issued for a different account, and the prompt is still open for the account that armed it",
+      );
+      return true;
+    }
+
     this.reviewNotePrompts.delete(promptId);
     if (state === undefined || pending === null || pending.promptId !== promptId) return true;
     state.awaitingNote = null;
@@ -4021,6 +4099,7 @@ export class TelegramChannel implements TestableChannel {
         verdict: pending.verdict,
         reaction: pending.reaction,
         note: text,
+        ...(sender === undefined ? {} : { sender }),
       },
       result,
     );

@@ -360,7 +360,7 @@ const unionVectors = [
   ],
   [
     "channel_decision_refusal_codes",
-    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy",
+    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the gesture is an attestation whose in-force policy cannot say who is tapping",
   ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
@@ -1323,7 +1323,16 @@ const SUITES = [
     // emitted one would be describing a different boundary from this one.
     // Major for the reason 7.0.0, 8.0.0 and 9.0.0 were: this suite pins WHICH
     // unions exist.
-    vectors_version: "10.0.0",
+    // 11.0.0 (APRV-324, follow-up): `attest-requires-terminal` joined
+    // `channel_decision_refusal_codes`. The first cut resolved senders on the
+    // decision path and left three callback families — attestation taps,
+    // checkpoint signatures and review cards — deciding under the listener's
+    // configured identity, so a stranger in the configured chat kept exactly
+    // the power the mapping removes, on the most privileged gestures. The new
+    // code is what an attestation tap gets when the policy IN FORCE cannot say
+    // who is tapping: resolving it against the policy being ATTESTED would let
+    // whoever edited that file name the account that approves their own edit.
+    vectors_version: "11.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

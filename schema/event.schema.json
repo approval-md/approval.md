@@ -887,6 +887,60 @@
       }
     },
     {
+      "$comment": "SPEC.md §10.3 (amended, APRV-324): the same two fields on the other human acts a channel collects. An attestation decides which rules are in force and a retrospective review is handed to agents as human-authored guidance, so both are recorded as a person's and both are worth attributing to an account rather than to whichever process was listening. Optional and additive on exactly the terms the decision events carry them: absent means the attribution came from the deciding process's configuration. `log.checkpoint` is deliberately NOT in this list — its payload is a signed structure, and an unsigned field sitting beside a signature invites a reader to treat it as covered by one; a checkpoint tap resolves its ACTOR from the sender exactly as these do, and the account it came from is not written next to the signature.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "policy.updated",
+              "policy.declined",
+              "audit.reviewed"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "sender": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "channel",
+                  "id"
+                ],
+                "description": "The authenticated sender the `actor` was resolved from, on the same terms as a decision's.",
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "sender_source": {
+                "type": "string",
+                "enum": [
+                  "policy"
+                ],
+                "description": "How the sender became the actor. `policy` is the attested `approvers[id].senders` mapping of SPEC.md §5.2 — and for an attestation specifically, the mapping of the policy IN FORCE, never the one being attested."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §5.2/§8 (amended, APRV-118): a request and the grant that answers it each pin the SHA-256 of the attested policy the runtime evaluated them under, so a reader can see whether the approver decided by the rules the requester was routed by. The runtime assigns the value at the write boundary from its own attestation check, exactly as it assigns `ts` to a gate-typed event; a grant whose hash differs from its request's is refused `policy-drift` and never reaches this schema. Optional, and deliberately: the field is additive, so records written before it existed still validate and still verify, and only its SHAPE is constrained here — a 64-character lowercase hex digest, never an empty string or a truncated one that audit would have to guess at. Whether the hash names an attestation the log actually carries is not expressible in a schema that sees one record, and is the gate's check.",
       "if": {
         "type": "object",
