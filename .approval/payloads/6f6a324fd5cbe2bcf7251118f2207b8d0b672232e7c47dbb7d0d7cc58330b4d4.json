@@ -1,0 +1,1 @@
+{"command":"git add backlog && git commit -m \"backlog: APRV-338 CI state at hand-off\" -m \"Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\" 2>&1 | tail -2 && git push 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa27efcf2f436f213"}

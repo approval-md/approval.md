@@ -1,0 +1,1 @@
+{"command":"gh pr merge 404 --merge --auto 2>&1 | tail -1; gh pr view 404 --json autoMergeRequest --jq '\"404 auto-merge: \\(.autoMergeRequest.enabledAt)\"'; git worktree remove /Users/carter/dev/approval-md/.claude/worktrees/backlog-up-autosync 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

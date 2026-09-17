@@ -1,0 +1,1 @@
+{"command":"gh pr merge 405 --merge --auto 2>&1 | tail -1; gh pr view 405 --json autoMergeRequest --jq '\"405 auto-merge: \\(.autoMergeRequest.enabledAt)\"'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

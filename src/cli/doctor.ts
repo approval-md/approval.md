@@ -145,6 +145,7 @@ import {
 import { git, repoPath, repoRoot } from "./git-scope.js";
 import {
   ScanError,
+  checkAttestedPolicyOnMain,
   checkBuildFreshness,
   checkMainBehindOrigin,
   installationRoot,
@@ -3103,6 +3104,15 @@ export function commandDoctor(
       // network to be more accurate would be acting on its own account, so the
       // answer is as fresh as the operator's last fetch and says so.
       checkMainBehindOrigin(logPath, queuePath, root),
+      // APRV-342: the interregnum between an attestation and its pull request
+      // merging. `attestation` above asks whether the LOCAL policy is attested;
+      // this asks whether the attested policy is on the remote, which is the
+      // question a fresh checkout of main answers with `policy-not-attested`.
+      checkAttestedPolicyOnMain({
+        policyPath,
+        records: verified.records,
+        root: repoRoot(dirname(logPath)),
+      }),
       // APRV-227: appended, fourteenth time, same reason. The only row that
       // asks a question about a binary OUTSIDE this repository, and it asks it
       // the one way a log can: what the last record said the harness was,
