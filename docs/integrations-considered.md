@@ -258,6 +258,21 @@ the gate to hold, and treat `grok` as the unclassified command it is.
   and a hook doc that names the fail-open cases. The entry moves to adopted
   or declined on the probe's result.
 
+**Status update, 2026-09-16.** The code half of APRV-243 has landed and the
+entry STAYS PARKED, because parked is about the probe and not about the
+adapter. What exists now: `approval hook grok` (camelCase envelope in,
+`{decision,reason}` out, deny at exit 2, post-execution always exit 0),
+`.grok/hooks/` classified `policy.core` beside `.cursor/hooks.json`,
+`docs/grok-hook.md` naming the fail-open cases the adapter cannot cover, and
+`tests/cli-hook-grok.test.ts`. The probe Carter runs inside a Grok session is
+`scripts/probes/grok-build-hook.mjs`: `--arm` prints the `.claude/settings.json`
+entry to install by hand, `--report` prints the three answers. It is read-only
+and writes only under the system temp root. Both facts the verdict rests on are
+still undocumented and still unobserved, so the standing warning above is
+unchanged: do not run Grok Build in this repository expecting the gate to hold.
+SPEC.md was deliberately not amended; `docs/grok-hook.md` carries the proposed
+hunk and the reason it is not a match for the Cursor row.
+
 ## Grok Bot (xAI agent product)
 
 Assessed 2026-09-02. Verdict: **adopted (demo)**, through the MCP surface

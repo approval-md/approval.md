@@ -680,19 +680,31 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
     throw new ConformanceError(`the fixture policy could not be attested: ${attested.error.code}`);
   }
 
-  const stdin =
-    input["malformed"] === true
-      ? "{not json at all"
-      : JSON.stringify({
+  // APRV-243. Grok Build's envelope is this one with camelCase keys, and a
+  // vector that sent it snake_case would pass through the adapter's
+  // snake_case-first fallback and prove nothing about the dialect.
+  const camelCase = harness === "grok";
+  const body = {
+    // Self-reported and deliberately wrong: a conforming runtime resolves
+    // the scope from its own directory (SPEC.md §11.1 invariant 4).
+    cwd: "/somewhere/else",
+    ...(camelCase
+      ? {
+          sessionId: "conformance-read-scope",
+          hookEventName: "PreToolUse",
+          toolName: str(input, "tool"),
+          toolInput: readScopeInput(input, dir),
+          toolUseId: "conformance-tu-1",
+        }
+      : {
           session_id: "conformance-read-scope",
-          // Self-reported and deliberately wrong: a conforming runtime resolves
-          // the scope from its own directory (SPEC.md §11.1 invariant 4).
-          cwd: "/somewhere/else",
           hook_event_name: harness === "cursor" ? "preToolUse" : "PreToolUse",
           tool_name: str(input, "tool"),
           tool_input: readScopeInput(input, dir),
           tool_use_id: "conformance-tu-1",
-        });
+        }),
+  };
+  const stdin = input["malformed"] === true ? "{not json at all" : JSON.stringify(body);
 
   const out: string[] = [];
   const err: string[] = [];
@@ -702,17 +714,36 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
     dir,
     () => stdin,
   );
-  if (code !== 0) {
+  // Every other harness answers both verdicts at exit 0 and treats anything
+  // else as a broken hook. Grok Build reads EXIT 2 as the deny and exit 0 as
+  // the allow, whatever stdout said, so 2 is a verdict there and not a failure.
+  if (code !== 0 && !(camelCase && code === 2)) {
     throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
   }
   const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
   const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;
   const permission = String(
-    harness === "cursor" ? parsed["permission"] : nested?.["permissionDecision"],
+    harness === "cursor"
+      ? parsed["permission"]
+      : camelCase
+        ? parsed["decision"]
+        : nested?.["permissionDecision"],
   );
   const reason = String(
-    harness === "cursor" ? parsed["agent_message"] : nested?.["permissionDecisionReason"],
+    harness === "cursor"
+      ? parsed["agent_message"]
+      : camelCase
+        ? parsed["reason"]
+        : nested?.["permissionDecisionReason"],
   );
+  // The exit code is the third field of Grok's protocol, so the body and the
+  // exit must agree. A deny printed at exit 0 is the exact hazard the adapter
+  // exists to remove, and it would read as an ALLOW.
+  if (camelCase && code !== (permission === "deny" ? 2 : 0)) {
+    throw new ConformanceError(
+      `the Grok verdict ${JSON.stringify(permission)} was answered at exit ${String(code)}; deny is 2 and allow is 0`,
+    );
+  }
   const colon = reason.indexOf(":");
   return {
     valid: permission === "allow",

@@ -1498,16 +1498,17 @@ ${why("quickstart")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor|codex [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex|grok [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
   claude-code  Claude Pre/PostToolUse JSON in; decision JSON out. REGISTER BOTH
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
   codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
+  grok         Grok Build camelCase Pre/PostToolUse JSON in; {decision,reason} out, DENY IS EXIT 2. \`approval hook grok --help\` prints the config
   classify     print what the classifier makes of a command line and exit
 
-  --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex)
+  --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex / agent:grok)
   --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
@@ -1515,10 +1516,35 @@ Commands:
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable,
-hook-unsupported-execution-context, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
+${why("hook")}`;
+
+export const HOOK_GROK_HELP = `approval hook grok — the gate in front of Grok Build (APRV-243)
+
+Usage:
+  approval hook grok [--as agent:<id>] [--timeout <d>] [--interval <d>]
+                     [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+
+camelCase in (hookEventName, sessionId, cwd, workspaceRoot, toolName, toolInput);
+{"decision":"allow"|"deny","reason":"…"} out, never "ask". DENY IS EXIT 2,
+allow is 0, post-execution always 0.
+
+READ docs/grok-hook.md BEFORE COMMITTING THIS: Grok Build fails OPEN on hook
+timeout, crash and malformed output, with no setting to change that. It
+contradicts the fail-closed invariant and the adapter cannot fix it.
+
+The file the human commits, .grok/hooks/pre-tool-use.json:
+  {"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+    {"type":"command","command":"approval hook grok --dir <repo>",
+     "timeout": 600}]}]}}
+
+That "timeout" MUST EXCEED --timeout (default 9m), or Grok abandons the call
+mid-wait and, failing open, runs the command while a human is still deciding.
+.grok/hooks/ classifies policy.core, like .cursor/hooks.json.
+
+${EXIT_CODES_POINTER} (0 allow, 2 deny; never "ask")
 ${why("hook")}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy

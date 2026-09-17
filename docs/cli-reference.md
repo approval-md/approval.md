@@ -3944,6 +3944,20 @@ A HUMAN commits those files: they are `policy.edit`. `docs/agent-sdk-hook.md`
 is the third caller: a Python Agent SDK application has no settings file, so it
 spawns this same verb from a hook callback (APRV-242).
 
+**`hook grok` is the one exception to the exit codes above (APRV-243).** Grok
+Build reads exit 2 as the deny and exit 0 as the allow, whatever stdout said,
+so on that harness alone a deny is exit 2 with `{"decision":"deny","reason":…}`
+on stdout, and the post-execution event exits 0 in every case rather than
+using 2 for visibility. Its envelope is camelCase (`toolName`, `toolInput`,
+`sessionId`, `hookEventName`, plus a `workspaceRoot` this runtime ignores in
+favour of `cwd`); snake_case is still read and wins when both spellings are
+present. `approval hook grok --help` prints the `.grok/hooks/pre-tool-use.json`
+the human commits, and that entry's own `timeout` must exceed `--timeout`.
+Grok Build FAILS OPEN on hook timeout, crash and malformed output, with no
+setting to change it, which the fail-closed invariant does not survive;
+`docs/grok-hook.md` states which cases the adapter cannot cover and is worth
+reading before the file is committed.
+
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
 `PostToolUseFailure` run closes the delegated `execution.started` the

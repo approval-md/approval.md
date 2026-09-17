@@ -52,3 +52,13 @@ ordinary content, identity, ancestor, policy, actor, and root drift. These
 path-based checks do not confine hostile concurrent renames and do not establish
 OS custody. The future applying broker needs exclusive workspace write custody
 for that guarantee.
+
+To say the same thing as a list, because a snapshot is easy to mistake for a
+guarantee: a returned plan establishes none of the following. It is not OS
+custody, so another process may hold or change the same paths. It is not an
+atomic write, because the planner writes nothing at all and a broker that
+applied these legs one at a time could still stop halfway. It is not approval,
+because classification names the class a leg would need and mints no grant and
+no token. It is not race-proof enforcement, because revalidation reports the
+state it observed at the moment it looked. Every one of those properties has
+to come from the applying broker, not from this file.

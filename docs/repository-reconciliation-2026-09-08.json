@@ -3,6 +3,71 @@
   "date": "2026-09-08",
   "base": "2e5fc1897638975c14d8bcc09c480672765e71f3",
   "scope": "Snapshot at the start of the compatibility wave; remote deletion candidates remain pending the primary gate. Preserved refs are not claimed permanently active.",
+  "followups": [
+    {
+      "date": "2026-09-16",
+      "by": "lane/closeouts",
+      "note": "Addendum only. Nothing in the 2026-09-08 arrays below was edited; this records what has since become true about the items they left pending.",
+      "open_prs": [
+        {
+          "number": 405,
+          "state": "open",
+          "disposition": "out of wave, opened 2026-09-17 by a parallel lane to land HANDOVER-2026-09-16.md; not part of the compatibility-wave inventory and not this task's to dispose of"
+        }
+      ],
+      "resolved_since_snapshot": [
+        {
+          "kind": "pr",
+          "number": 289,
+          "task": "APRV-265",
+          "disposition": "merged; the remaining_prs entry below is closed out"
+        },
+        {
+          "kind": "pr",
+          "number": 379,
+          "task": "APRV-319",
+          "disposition": "merged at b44adfc9531102daaad9b64d1f7bf448e48a1fec; it was the records delivery this wave was waiting on"
+        },
+        {
+          "kind": "issue",
+          "number": 141,
+          "disposition": "closed 2026-09-09T23:15:39Z through the gate, outcome seq 30367"
+        },
+        {
+          "kind": "issue",
+          "number": 139,
+          "task": "APRV-322",
+          "disposition": "closed"
+        }
+      ],
+      "open_issues": [
+        {
+          "number": 137,
+          "task": "APRV-324",
+          "disposition": "stays open. The design lands in design/channel-sender-identity.md under APRV-324; the issue asks for grant attribution to the actual sender, which is implementation, and the issue closes when that ships, not when the design does."
+        },
+        {
+          "number": 138,
+          "task": "APRV-323",
+          "disposition": "stays open. The design lands in design/multi-approver-semantics.md under APRV-323; quorum does not exist in the runtime and the issue closes when it does."
+        },
+        {
+          "number": 140,
+          "tasks": ["APRV-307", "APRV-321"],
+          "disposition": "stays open. Two halves: the release itself is APRV-307 (0.2.0 is published; the task is open on the operator's NPM_TOKEN-absence confirmation) and the supported exports surface the issue also asks for is APRV-321, which has not started."
+        }
+      ],
+      "ref_recheck": {
+        "method": "scripts/reconcile-delete-merged-branches.mjs --plan against origin",
+        "candidates": 233,
+        "still_at_recorded_tip": 233,
+        "already_gone": 0,
+        "drifted": 0,
+        "remote_heads": 356,
+        "blocker": "core.hooksPath in the primary's .git/config is /Users/carter/dev/approval-md/hooks and that directory does not exist. This is the same condition that made execution start 30359 indeterminate at 30360 on 2026-09-09, and it is still true. It must be resolved by hand before any deletion is attempted."
+      }
+    }
+  ],
   "closed_prs": [
     {
       "number": 167,
