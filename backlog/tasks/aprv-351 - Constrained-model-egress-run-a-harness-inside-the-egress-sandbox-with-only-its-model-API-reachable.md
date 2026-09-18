@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-muse'
 created_date: '2026-09-17 02:22'
-updated_date: '2026-09-17 08:00'
+updated_date: '2026-09-18 06:30'
 labels:
   - sandbox
   - design
@@ -26,7 +26,7 @@ Split from APRV-193 AC1 on 2026-09-17 with Carter. APRV-193 now proves per-comma
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A design document under design/ names the egress the harness needs (provider hosts, ports, protocols), the mechanism that admits only that egress, how ambient credentials are kept out of the harness environment, and what is lost; each claim about Seatbelt or the harness is backed by a probe result
-- [ ] #2 A probe shows a harness session under the constrained posture completing one model round-trip while a command it spawns is denied outbound network and a direct connection from the harness to a non-provider host is denied
+- [x] #2 A probe shows a harness session under the constrained posture completing one model round-trip while a command it spawns is denied outbound network and a direct connection from the harness to a non-provider host is denied
 - [ ] #3 Either approval sandbox gains a documented harness mode with tests, or the task closes with a declined recommendation and the evidence; docs/sandboxed-exec.md describes the outcome either way
 - [x] #4 No credential is read or embedded; every probe runs in scratch directories through commands the classifier reads or approval run
 <!-- AC:END -->
@@ -67,4 +67,6 @@ AC4 is satisfied by construction: no credential is read, embedded or logged anyw
 Verification: node scripts/run-tests.mjs --only probe-constrained-egress sandbox-probe, 18 tests, 17 pass, 0 fail, 1 skipped (the opt-in external leg), exit 0. Build, typecheck and lint each exit 0.
 
 Remaining for AC2 and AC3: the credentialed harness round trip, one command, left for Carter in docs/sandboxed-exec.md under Harness round trip. It uses the allow-loopback flag that ships today rather than the narrow per-port flag, because the per-port flag arrives with the harness mode; the docs say so plainly instead of implying a narrowness that has not shipped.
+
+Round trip run by the operator 2026-09-18 (Claude Code 2.1.261, proxy after PR 443): PASS. confined returned; proxy admitted api.anthropic.com:443 (20 tunnels) and refused pypi.org:443, registry.npmjs.org:443, mcp-proxy.anthropic.com:443 and http-intake.logs.us5.datadoghq.com:443, each more than once, all arriving at the proxy, so the harness honours HTTPS_PROXY for all egress and completes with a one-authority allow-list. First attempt the same evening was void: the harness reset a refused tunnel, the proxy died on an unhandled ECONNRESET before logging the refusal, and the sandboxed harness hung; fixed in PR 443 (error handler before any branch, one printed line per decision, regression test). AC2 checked: the model round trip is the live half, and the spawned-command denial and the direct non-provider denial are the offline matrix (15/15 including the new reset case). AC3 stays open: the round trip says --harness ships as designed, and the mode itself has not been built; docs/sandboxed-exec.md carries the observed result and the four hosts a --harness claude allow-list would have to name.
 <!-- SECTION:NOTES:END -->

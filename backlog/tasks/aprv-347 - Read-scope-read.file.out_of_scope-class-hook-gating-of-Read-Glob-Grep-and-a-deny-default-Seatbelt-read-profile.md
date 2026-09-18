@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-readscope'
 created_date: '2026-09-17 00:18'
-updated_date: '2026-09-17 01:19'
+updated_date: '2026-09-18 02:54'
 labels:
   - hook
   - classifier
@@ -95,6 +95,8 @@ SCOPE NOT TAKEN. The wiring of the jail into approval run and approval sandbox i
 VERIFICATION (this worktree, macOS 15 arm64, Node 26). npm run build, typecheck and lint clean. node scripts/run-tests.mjs --only cli-hook-read-scope sandbox-read-jail command-class cli-hook cli-hook-cursor cli-hook-codex cli-policy conformance conformance-regen cli-long-help: 677 tests, 677 pass, 0 fail, exit 0.
 
 Wider matrix including sandbox, sandbox-probe, cli-run, cli-doctor and the other hook suites: 794 tests, 793 pass, 0 fail, 1 skip (the opt-in external curl leg of sandbox-probe). node conformance/run.mjs exits 0 with the new hook-read-scope suite at 14 vectors, 3 of them negative controls.
+
+2026-09-18: the policy line is being applied at supervised-retro, not manual, on the operator decision (the record is the value on this repo; a tap per out-of-scope read stalled a diagnosis six times that evening). The ceremony was refused dogfood-suite-failed by the read.* pin in tests/dogfood.test.ts, which required every classifier read.* class to be autonomous; the pin now requires read.file.out_of_scope to resolve by a rule and leaves its autonomy to the policy (PR 442). Combined proposal page: docs/proposals/policy-2026-09-18b.md.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

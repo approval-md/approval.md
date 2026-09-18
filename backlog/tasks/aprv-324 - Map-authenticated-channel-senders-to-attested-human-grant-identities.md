@@ -1,11 +1,11 @@
 ---
 id: APRV-324
 title: Map authenticated channel senders to attested human grant identities
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-identity'
 created_date: '2026-09-08 22:53'
-updated_date: '2026-09-17 08:55'
+updated_date: '2026-09-18 06:20'
 labels: []
 dependencies:
   - APRV-249
@@ -114,4 +114,12 @@ A fixture correction fell out of it. tests/checkpoint-tap.test.ts grew its log b
 Three wording and coverage items from the verification pass, folded in. Design section 7 item 1 said a policy with no senders produces a log byte-identical to today's, which contradicts item 18 and section 4 item 1, both of which require the record to carry channel; it now says what the test pins, same actor, same payload keys, neither new key, with channel as the one additive field, and the correction is marked as made during implementation. Design section 7 item 13 said a human-only class is refused before any sender resolution, which is not what the code does: the channel boundary owns the resolution and the gate owns the class check, and ordering them the other way would duplicate the gate's read. It now says what is true and what the test pins, that no record the runtime writes about a human-only class carries a sender or a resolution, so no authority and no attribution flows from the computation. And a thirtieth test covers an ordinary policy load failure, the kind a typo produces rather than the ambiguous mapping this feature authors: a sender-bearing tap through the Telegram channel refuses sender-unmapped and writes no decision, while the terminal path still decides.
 
 Possible follow-up, left undone deliberately and recorded here on the orchestrator's instruction: a gesture-refused audit event. An unmapped checkpoint tap records nothing, because audit.decision_refused requires an action_key and a payload.decision of grant, reject or revoke and a signature has neither. An event type for a refused gesture that is not a decision would let the log account for that spent attention; it is a schema change and therefore its own task.
+
+Live on this gate, 2026-09-18. Policy line applied by the operator via approval policy apply docs/proposals/policy-2026-09-18b.md --pr (PR 444, attested seq 44607): approvers.carter.senders.telegram set to the operator numeric id. Two manual-class requests fired from an agent session through the hook (vcs.ref.delete on a nonexistent branch, harmless either way): seq 44618 requested, 44620 approval.granted by human:carter with payload.sender {channel telegram, id 7345216485} and sender_source policy; seq 44630 requested, 44631 approval.rejected, same sender fields, same actor. approval log verify: chain clean (the seq 2957 timestamp anomaly is the long-standing reported one). The grant names human:carter from the mapping, not the listener launch identity. Disclosure noted by the operator after the fact: the raw numeric id is now in the public APPROVAL.md and in every phone decision record; a hashed sender form is proposed as a follow-up so the public pattern does not require publishing the id.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Authenticated channel senders map to attested human identities: design, implementation and tests landed in PR 427; the live policy line landed in PR 444 (seq 44607); verified live on 2026-09-18 with one approve (seq 44620) and one reject (seq 44631), both carrying payload.sender and sender_source policy and an actor of human:carter resolved from the mapping. Issue 137 closes on those two seqs.
+<!-- SECTION:FINAL_SUMMARY:END -->
