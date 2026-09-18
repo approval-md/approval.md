@@ -86,20 +86,29 @@ export function authorityAllowed(authority, allowList) {
  * to a loopback stub, so assertion 3 and 4 demonstrate hostname pinning without
  * touching the internet. A real session passes no map and ordinary DNS applies.
  */
-export function startPinningProxy({ allow, map = {}, port = 0 }) {
+export function startPinningProxy({ allow, map = {}, port = 0, onDecision = () => {} }) {
   const refusals = [];
   const admitted = [];
   const server = createHttpServer();
 
   server.on("connect", (request, clientSocket, head) => {
+    // The client side may reset at any point, including right after a 403 (a
+    // harness that gets refused drops the socket without reading the reply).
+    // An unhandled socket error would take the whole proxy down, and a proxy
+    // that dies on its first refusal never reports the refusal, which is the
+    // one line the operator's round trip exists to produce. So the handler
+    // goes on BEFORE any branch, and a reset is a closed tunnel, nothing more.
+    clientSocket.on("error", () => clientSocket.destroy());
     const authority = request.url ?? "";
     if (!authorityAllowed(authority, allow)) {
       refusals.push(authority);
+      onDecision("refused", authority);
       clientSocket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       clientSocket.end();
       return;
     }
     admitted.push(authority);
+    onDecision("admitted", authority);
     const target = map[authority.toLowerCase()] ?? authority;
     const [host, rawPort] = target.split(":");
     const upstream = createConnection(
@@ -112,10 +121,12 @@ export function startPinningProxy({ allow, map = {}, port = 0 }) {
       },
     );
     upstream.on("error", () => {
-      clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-      clientSocket.end();
+      if (!clientSocket.destroyed) {
+        clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+        clientSocket.end();
+      }
     });
-    clientSocket.on("error", () => upstream.destroy());
+    clientSocket.on("close", () => upstream.destroy());
   });
 
   // A plain (non-CONNECT) request is refused too: the proxy is a tunnel, and an
@@ -507,7 +518,16 @@ async function runProxyVerb(argv) {
     return 2;
   }
   const portFlag = flagValues(argv, "--port")[0];
-  const started = await startPinningProxy({ allow, port: portFlag ? Number(portFlag) : 0 });
+  // Every decision is printed as it happens: the operator's round trip is read
+  // off these lines, and a refusal naming a host that was not pinned is the
+  // finding that matters most (a second egress path in the harness).
+  const started = await startPinningProxy({
+    allow,
+    port: portFlag ? Number(portFlag) : 0,
+    onDecision: (decision, authority) => {
+      process.stdout.write(`${new Date().toISOString()} ${decision} ${authority}\n`);
+    },
+  });
   process.stdout.write(
     [
       `pinning proxy listening on 127.0.0.1:${String(started.port)}`,
