@@ -26,6 +26,8 @@ defaults:
 approvers:
   carter:
     channels: [telegram, cli]
+    senders:
+      telegram: "7345216485"   # numeric callback_query.from.id, NOT a @handle (APRV-324)
 
 protected_paths:            # widens policy.edit; the built-ins hold regardless
   - { path: SPEC.md, class: policy.edit.spec }
@@ -48,6 +50,7 @@ classes:
   vcs.history.rewrite:       { autonomy: human-only }   # a person rewrites shared history, never an agent (APRV-185)
   vcs.ref.delete:            { autonomy: manual }       # git push --delete / -d / :refspec: removing a remote branch, refs named in the prompt (APRV-352)
   files.delete.out_of_scope: { autonomy: manual }
+  read.file.out_of_scope:    { autonomy: supervised-retro }   # a read resolving outside this checkout, the scratchpad and the temp root: proceeds, logged, sampled (APRV-347)
   deps.add:                  { autonomy: manual }       # every new package, runtime or dev
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
