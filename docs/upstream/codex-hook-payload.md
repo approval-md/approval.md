@@ -1,14 +1,25 @@
-# Draft upstream issue for openai/codex (for human review, not filed)
+# Draft upstream issue for openai/codex (not filed: every ask already had one)
 
-APRV-348. This file is the issue text, ready to paste. It has not been posted.
-No agent session in this repository posts publicly; the operator opens the
-issue, then records the URL in the task notes, which is what closes APRV-348's
-first acceptance criterion.
+APRV-348. This file was the issue text, ready to paste. It was NOT posted.
+GitHub's duplicate check on 2026-09-18 turned up open issues for all three
+asks, so the operator commented our 0.152.1 evidence on the canonical one for
+each instead, and this draft stays as the source of those comments:
 
-Everything below the rule is the issue body as it should appear on
-`openai/codex`. Replace `<this repository>` with the public URL of the
-approval.md repository at posting time, or drop the links and paste the
-evidence inline if the repository is not public yet.
+- ask 1, the per-call execution directory on the shell pre-event:
+  [openai/codex#32360](https://github.com/openai/codex/issues/32360)
+  ([our comment](https://github.com/openai/codex/issues/32360#issuecomment-5723563802));
+  later duplicates #33986, #34855, #37251, #40348.
+- ask 2, an outcome on the post-event:
+  [openai/codex#34289](https://github.com/openai/codex/issues/34289)
+  ([our comment](https://github.com/openai/codex/issues/34289#issuecomment-5723571873));
+  #24907 proposes the `PostToolUseFailure` shape.
+- ask 3, opt-in fail-closed:
+  [openai/codex#41979](https://github.com/openai/codex/issues/41979)
+  ([our comment](https://github.com/openai/codex/issues/41979#issuecomment-5723583661));
+  #45293 is one specific fail-open case.
+
+No agent session in this repository posts publicly. The body below is kept
+verbatim so the asks stay readable in one place.
 
 ---
 

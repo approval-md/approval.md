@@ -705,22 +705,24 @@ are ordinary shell and are already covered.
 Adopted for direct `apply_patch` and for the confined broker session. Native
 shell gating is refused unconditionally with
 `hook-unsupported-execution-context`, and **the condition under which it
-becomes activatable is the upstream issue drafted in
-[docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md)** (APRV-348;
-issue URL pending, recorded in that task's notes once posted). Concretely:
-native Codex shell gating becomes activatable when a Codex release carries the
-effective per-call execution directory on the shell pre-event, which is ask 1 of
-that issue. Outcome records additionally need ask 2. Treating the hook as a
-boundary rather than as one control among several additionally needs ask 3.
-Until then the shell answer is the confined session, whose enforcement does not
-depend on the hook at all.
+becomes activatable is
+[openai/codex#32360](https://github.com/openai/codex/issues/32360)** (the
+effective per-call execution directory on the shell pre-event; APRV-348). Our
+draft at [docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md)
+was not filed as a fourth issue: each of its asks already had one, and the
+operator commented our 0.152.1 evidence on each instead on 2026-09-18. Outcome
+records additionally need
+[openai/codex#34289](https://github.com/openai/codex/issues/34289). Treating the
+hook as a boundary rather than as one control among several additionally needs
+[openai/codex#41979](https://github.com/openai/codex/issues/41979). Until then
+the shell answer is the confined session, whose enforcement does not depend on
+the hook at all.
 
 ### Next steps
 
-- The operator posts the issue from `docs/upstream/codex-hook-payload.md` and
-  records the URL in APRV-348. No agent session posts it.
-- If ask 1 ships, APRV-311's AC1 reopens and the adapter's unconditional `Bash`
-  refusal is replaced by ordinary classification against the bound directory.
+- If openai/codex#32360 ships, APRV-311's AC1 reopens and the adapter's
+  unconditional `Bash` refusal is replaced by ordinary classification against
+  the bound directory.
 - APRV-349 asks whether the app-server approval protocol can bind what the hook
   cannot, independently of anything upstream chooses to do.
 

@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-lane-codex-native'
 created_date: '2026-09-08 07:24'
-updated_date: '2026-09-17 07:38'
+updated_date: '2026-09-18 01:24'
 labels: []
 dependencies:
   - APRV-310
@@ -62,4 +62,6 @@ Evidence: run-tests --only cli-hook-codex cli-hook gave 142 tests, 142 pass, 0 f
 New tests: Codex post-phase input rejection reports and never prints a permission verdict; Codex derives one stable id for the Pre and Post of the same native call; Codex leaves the outcome open and names the execution.started it did not close; Codex stable ids close their own delegated execution once, and a duplicate refuses.
 
 APRV-348 (lane codex, 2026-09-17) drafted the upstream issue that names the condition for reopening AC1. The draft is at docs/upstream/codex-hook-payload.md and asks openai/codex for three separate things: the effective per-call execution directory on the shell pre-event, an outcome field plus a documented stable call id on the post-event, and an option for a hook to fail closed. Ask one is what AC1 waits on; ask two is what the outcome clause of AC2 waits on. docs/codex-hook.md and docs/integrations-considered.md now both name that issue as the activation condition. The operator posts the issue; the URL lands in APRV-348's notes.
+
+2026-09-18: APRV-348 did not file a new issue; every ask already had one on openai/codex. AC1 of this task now waits on openai/codex 32360 (effective per-call execution directory on the shell pre-event), and the outcome clause of AC2 on 34289. Our evidence is commented on both.
 <!-- SECTION:NOTES:END -->

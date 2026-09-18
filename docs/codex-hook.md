@@ -98,14 +98,22 @@ the conformance suite pins, so a caller may branch on it.
 
 ### What would lift the refusal
 
-The omission is upstream, so the repair is upstream. APRV-348 drafts an issue
-for `openai/codex`, checked in at
-[docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md), with
-three separate asks: the effective per-call execution directory on the shell
-pre-event, an outcome field plus a documented stable call id on the post-event,
-and an option for a hook to fail closed on crash, timeout and malformed output.
-The issue URL is recorded in APRV-348's notes once the operator posts it; no
-agent session posts it.
+The omission is upstream, so the repair is upstream. Each of the three asks
+already has an open issue on `openai/codex`, and the operator added our
+0.152.1 evidence to each on 2026-09-18 (APRV-348):
+
+- the effective per-call execution directory on the shell pre-event:
+  [openai/codex#32360](https://github.com/openai/codex/issues/32360), which is
+  the condition for lifting this refusal;
+- an outcome field plus a documented stable call id on the post-event:
+  [openai/codex#34289](https://github.com/openai/codex/issues/34289);
+- an option for a hook to fail closed on crash, timeout and malformed output:
+  [openai/codex#41979](https://github.com/openai/codex/issues/41979).
+
+The draft that was to become a fourth issue is kept at
+[docs/upstream/codex-hook-payload.md](upstream/codex-hook-payload.md) as the
+source of the comments; it was not filed, because it would have duplicated all
+three.
 
 **Native Codex Bash gating becomes activatable when a Codex release carries the
 effective per-call execution directory on the shell pre-event** (ask 1). That
