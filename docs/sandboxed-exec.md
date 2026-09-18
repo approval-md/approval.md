@@ -305,6 +305,25 @@ that matters most). Kill the backgrounded proxy afterwards.
 Report the result on APRV-351. It decides whether `--harness` ships as designed
 or ships narrower.
 
+**Observed, 2026-09-18 (operator's machine, Claude Code 2.1.261, the proxy
+after its reset fix in PR #443):** a pass. `confined` came back in about five
+seconds. The proxy admitted `api.anthropic.com:443` twenty times and refused
+four other authorities the harness reached for on its own, each more than
+once: `pypi.org:443`, `registry.npmjs.org:443`, `mcp-proxy.anthropic.com:443`
+and `http-intake.logs.us5.datadoghq.com:443`. Every one of those arrived AT the
+proxy, which is the point: the harness honoured `HTTPS_PROXY` for all of its
+egress, the refusals cost it nothing it needed for the round trip, and nothing
+reached the network by another path (under the profile there is no other
+path; a harness with one would have hung or failed rather than completed). So
+a pinned proxy is a working posture for this harness, and the allow-list for a
+model round trip is exactly one authority. The refused four are what a
+`--harness claude` mode would have to name if an operator wants package
+lookups, MCP connectors or telemetry inside the session, and by default it
+should not. A first run the same evening, before the fix, ended when the
+harness reset a refused tunnel and the proxy died on the unhandled error
+before logging the refusal; the sandboxed harness then hung. That was the
+probe's bug, and it is the reason the proxy now prints every decision.
+
 ## What this does not claim
 
 - **A sandboxed child can still write files**, including a file some later
