@@ -25,6 +25,7 @@ const {
     allow: string[];
     map?: Record<string, string>;
     port?: number;
+    onDecision?: (decision: "admitted" | "refused", authority: string) => void;
   }) => Promise<{ port: number; refusals: string[]; admitted: string[]; close: () => Promise<void> }>;
 };
 
@@ -111,6 +112,60 @@ test("the proxy refuses a non-listed authority with 403 and never opens a tunnel
     assert.match(answer, /403 Forbidden/u);
     assert.deepEqual(proxy.refusals, ["telemetry.vendor.test:443"]);
     assert.deepEqual(proxy.admitted, [], "nothing was admitted");
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("a client that resets the socket on a refusal does not take the proxy down (APRV-351)", async () => {
+  // Observed 2026-09-18 on the operator's round trip: the harness sent a
+  // CONNECT for an authority off the allow-list, got the 403 and reset the
+  // connection without reading it; the unhandled ECONNRESET killed the proxy
+  // before it had logged the refusal, and the sandboxed harness then hung on a
+  // proxy that no longer existed. The refusal is the one line that run exists
+  // to produce, so a reset is a closed tunnel and the proxy keeps serving.
+  const decisions: string[] = [];
+  const proxy = await startPinningProxy({
+    allow: ["api.provider.test:443"],
+    onDecision: (decision, authority) => decisions.push(`${decision} ${authority}`),
+  });
+  try {
+    const { createConnection } = await import("node:net");
+    await new Promise<void>((resolve) => {
+      const socket = createConnection({ host: "127.0.0.1", port: proxy.port }, () => {
+        socket.write("CONNECT telemetry.vendor.test:443 HTTP/1.1\r\nHost: telemetry.vendor.test:443\r\n\r\n", () => {
+          // RST rather than FIN: the shape a dropped connection takes on the wire.
+          socket.resetAndDestroy();
+          resolve();
+        });
+      });
+      socket.on("error", () => resolve());
+    });
+    // Let the server side observe the reset before asking it anything else.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The proxy is still alive and still deciding.
+    const answer = await new Promise<string>((resolve) => {
+      const socket = createConnection({ host: "127.0.0.1", port: proxy.port }, () => {
+        socket.write("CONNECT other.vendor.test:443 HTTP/1.1\r\nHost: other.vendor.test:443\r\n\r\n");
+      });
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString();
+        if (buffer.includes("\r\n\r\n")) {
+          socket.destroy();
+          resolve(buffer);
+        }
+      });
+      socket.on("error", () => resolve("ERROR"));
+      setTimeout(() => {
+        socket.destroy();
+        resolve(buffer || "TIMEOUT");
+      }, 5000);
+    });
+    assert.match(answer, /403 Forbidden/u);
+    assert.deepEqual(proxy.refusals, ["telemetry.vendor.test:443", "other.vendor.test:443"]);
+    assert.deepEqual(decisions, ["refused telemetry.vendor.test:443", "refused other.vendor.test:443"]);
   } finally {
     await proxy.close();
   }
