@@ -46,6 +46,7 @@ classes:
   vcs.push.main:             { autonomy: supervised-retro }   # proceeds, sampled for retrospective review; includes gh pr merge
   vcs.pr.*:                  { autonomy: supervised-retro }   # gh pr create / edit / comment on a feature branch
   vcs.history.rewrite:       { autonomy: human-only }   # a person rewrites shared history, never an agent (APRV-185)
+  vcs.ref.delete:            { autonomy: manual }       # git push --delete / -d / :refspec: removing a remote branch, refs named in the prompt (APRV-352)
   files.delete.out_of_scope: { autonomy: manual }
   deps.add:                  { autonomy: manual }       # every new package, runtime or dev
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
@@ -60,6 +61,8 @@ classes:
   policy.core:               { autonomy: human-only }   # APPROVAL.md and .approval/* except the log (APRV-198)
   log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
   account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
+  harness.launch.*:          { autonomy: manual }       # starting a second agent: the grant covers the launch, never what the launched session then does (APRV-354)
+  harness.launch.muse:       { autonomy: human-only }   # Muse Code: a -contributor model trains on prompts and completions, and no adapter or read jail is in place yet (APRV-354)
   log.sync:                  { autonomy: autonomous }       # ff-pull with chain reconcile; APRV-125
   log.advance:               { autonomy: supervised-live, live_rate: 0.01 }       # records commit to a records branch; APRV-125
 
