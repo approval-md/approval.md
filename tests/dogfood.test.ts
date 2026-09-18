@@ -294,8 +294,24 @@ test("a routed policy makes every one of its literal classes reachable (APRV-266
 test("the classifier's read.* classes are covered by the policy's read.* rule", () => {
   const load = loadRepoPolicy();
   for (const cls of CLASSIFIER_CLASSES.filter((candidate) => candidate.startsWith("read."))) {
+    const resolution = resolve(load, cls);
+    // APRV-347: a read that resolves OUTSIDE the checkout, the scratchpad and
+    // the temp root is the one read class the policy may hold above
+    // autonomous. What this suite pins for it is that a rule covers it at all
+    // (the wildcard or its own line, never the fail-closed default), so the
+    // class the jail emits is a class the policy has read. Its autonomy is the
+    // operator's line: manual per docs/proposals/read-scope-2026-09.md,
+    // supervised-retro per the 2026-09-18 ceremony.
+    if (cls === "read.file.out_of_scope") {
+      assert.equal(
+        resolution.provenance,
+        "rule",
+        `${cls} is emitted by the classifier and no policy rule covers it, so it resolves to the fail-closed default`,
+      );
+      continue;
+    }
     assert.equal(
-      resolve(load, cls).autonomy,
+      resolution.autonomy,
       "autonomous",
       `${cls} is emitted by the classifier and must be covered by the policy's read.* rule`,
     );

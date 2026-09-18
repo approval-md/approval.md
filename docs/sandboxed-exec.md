@@ -286,7 +286,7 @@ your Claude Code credential already works, with the repository built:
 ```bash
 node scripts/probes/constrained-egress.mjs proxy --allow api.anthropic.com:443 --port 8931 & \
   sleep 1 && HTTPS_PROXY=http://127.0.0.1:8931 NO_PROXY= \
-  node dist/src/cli.js sandbox --allow-loopback -- claude -p "reply with the single word: confined"
+  node dist/src/cli/main.js sandbox --allow-loopback -- claude -p "reply with the single word: confined"
 ```
 
 Note `--allow-loopback`, not a per-port flag. The narrow single-port carve-out
