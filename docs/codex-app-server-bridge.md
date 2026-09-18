@@ -488,8 +488,8 @@ answer is decline, recorded with the failing evidence exactly as APRV-325 did.
 
 ## The tasks an adopt would need
 
-Named here, not filed. Filing follows the operator's decision on the probe
-report.
+Filed 2026-09-18 on the operator's decision, in this order: APRV-361 (the
+bridge), then 362 to 368 depending on it.
 
 1. **The bridge client itself.** An `approval codex bridge` verb that starts
    `codex app-server`, speaks the protocol, and puts each approval request
