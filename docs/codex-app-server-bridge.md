@@ -21,10 +21,15 @@ Every answer below is marked one of two ways, and the difference matters.
   sources at commit `b0659c53865dd48b0cd69c454368cea3980017cc`. A source claim
   says what the code does. It does not say what the binary on a particular
   machine does.
-- **observed (pending)** means it is a question only a run can answer, and the
-  run has not happened. `scripts/probes/codex-app-server.mjs` is written and
-  tested; the operator runs it once (runbook step 2) and the report replaces
-  these markers with observations.
+- **observed (2026-09-18)** means it was seen on the operator's machine in one
+  run of `scripts/probes/codex-app-server.mjs` against `codex-cli 0.155.0`
+  (`/Users/carter/.local/bin/codex`, ChatGPT login, `approvalPolicy:
+  "untrusted"`, `sandbox: "read-only"`). One machine, one version, once. The
+  verbatim requests are in the primary checkout's `private/aprv349-probe-2026-09-18/`.
+  A first run against 0.152.1 the same evening was void: the operator's
+  `~/.codex/config.toml` pinned a model that release could not serve, every turn
+  ended in a 400 before any tool call, and the report still printed the hold
+  sentence (APRV-359 makes the probe say void instead).
 
 One third kind of evidence appears twice and is labelled where it does:
 **installed binary**, meaning a string table read out of the shipped 0.152.1
@@ -33,9 +38,12 @@ exists in the release the operator will run, which is weaker than source and
 stronger than hope, and it is used here only to check that the source read at
 `b0659c5` describes the same protocol the installed version speaks.
 
-Version under discussion throughout: `@openai/codex` 0.152.1, read from
-`/opt/homebrew/lib/node_modules/@openai/codex/package.json`, the same version
-APRV-310, APRV-311 and APRV-325 pinned.
+Version under discussion for the source and string-table claims: `@openai/codex`
+0.152.1, read from `/opt/homebrew/lib/node_modules/@openai/codex/package.json`,
+the same version APRV-310, APRV-311 and APRV-325 pinned. The observed claims
+are from 0.155.0, three releases later; the method names, key paths and
+decision vocabulary matched the source read, and the one place the wire differs
+from the source names is recorded under question 5.
 
 ## Question 1: what does an approval request carry, and does it bind the action?
 
@@ -116,10 +124,18 @@ guard evidence that names the directory the effect will land in.
 grant root. The bytes come from elsewhere, so the binding is only as good as the
 correlation.
 
-**observed (pending):** whether the installed binary populates `cwd` on every
-exec request or leaves it null for some routes, and whether `availableDecisions`
-is present in practice. The probe reports both, per approval kind, as key paths
-plus a presence line.
+**observed (2026-09-18):** all five exec requests carried `cwd` populated with
+the trial workspace and `command` as the shell-joined rendering
+(`/bin/zsh -lc 'printf marker > probe-command-marker.txt'`), plus `itemId`,
+`threadId`, `turnId`, `environmentId: "local"`, `commandActions` (with
+`type: "unknown"`) and `proposedExecpolicyAmendment`. `availableDecisions` was
+present and advertised `accept`, `acceptWithExecpolicyAmendment` and `cancel`,
+and did not advertise `decline`; the probe sent `decline` anyway as its
+fallback and the server treated it as a refusal (no effect, turn completed).
+Both file-change requests carried only `itemId`, `threadId`, `turnId`,
+`startedAtMs`, `reason: null` and `grantRoot: null`: no content, no `cwd`, no
+decision list. The source claim above holds on the wire: a client on the
+item-based API approves a reference.
 
 ## Question 2: crash, disconnect, timeout, malformed reply
 
@@ -153,10 +169,13 @@ and it is answerable by whatever connects next. "Only our client decides" is
 therefore a statement about who may open that socket, not a statement the
 protocol makes on its own.
 
-**observed (pending):** trial `crash`. The probe destroys its own stdin and
-stdout with the request outstanding and then reads the workspace back. The
-report's row says whether the marker file and the patched file exist, and
-whether the server was still alive at settle.
+**observed (2026-09-18):** trial `crash`. One exec request arrived, the probe
+destroyed its stdin and stdout with it outstanding, and the server process
+exited on its own with code 0 (not alive at settle, 178 bytes on stderr). No
+marker and no patched file. So on this build a client crash ends the server
+rather than leaving a thread running with a pending question; the replay-on-
+reconnect path in the source was therefore not exercised and stays a source
+claim only.
 
 ### No reply, ever
 
@@ -181,8 +200,10 @@ A transport with no deadline removes the ceiling rather than widening it. A
 question could wait as long as the policy's TTL allows, and a human who answers
 in eleven minutes would be answering rather than arriving too late.
 
-**observed (pending):** trial `no-reply`. The probe holds the question for its
-configured hold and then reads the workspace back.
+**observed (2026-09-18):** trial `no-reply`. One exec request arrived, the probe
+held it for 60,000 ms, and the server was still alive with the question open
+when the hold elapsed. No marker and no patched file, and no second request:
+the turn had not moved past the first question. Silence blocked.
 
 ### Malformed reply, or an unknown decision value
 
@@ -198,8 +219,10 @@ The type's own default agrees: `ReviewDecision::default()` is
 `Denied { rejection: "denied" }`
 (`codex-rs/protocol/src/protocol.rs:4180-4184 @ b0659c5`).
 
-**observed (pending):** trial `malformed`. The probe answers with truncated JSON
-carrying a decision value that is not in the enum.
+**observed (2026-09-18):** trial `malformed`. One exec request arrived, the
+probe answered with a malformed frame, the server logged (368 bytes on stderr)
+and stayed alive, and the settle window elapsed with no marker, no patched file
+and no further request. Consistent with deserialization to a denial.
 
 ### The decision vocabulary, for completeness
 
@@ -275,10 +298,18 @@ which is agent-authored content. Whether that creates a practical path for the
 acting model to influence its own review was not established from the code and
 is not asserted here in either direction. It is one of the follow-ups below.
 
-**observed (pending):** the probe records every `item/autoApprovalReview` and
-`guardian` notification it sees and leads its report with the count. A run in
-which an auto-reviewer spoke is a run in which the client was not the only
-decider, and the report says exactly that.
+**observed (2026-09-18):** zero auto-review notifications across the five
+trials. The full method vocabulary seen on the wire was
+`account/rateLimits/updated`, `item/agentMessage/delta`,
+`item/commandExecution/requestApproval`, `item/completed`,
+`item/fileChange/requestApproval`, `item/started`,
+`mcpServer/startupStatus/updated`, `remoteControl/status/changed`,
+`serverRequest/resolved`, `thread/started`, `thread/status/changed`,
+`thread/tokenUsage/updated`, `turn/completed`, `turn/diff/updated` and
+`turn/started`. `serverRequest/resolved` (seen on `approve` and `deny`) is the
+server announcing that a question was resolved, which a bridge can use to
+confirm its answer landed. This says the auto-reviewer did not run under the
+operator's configuration that evening; it does not say it cannot.
 
 ## Question 4: how a decision would reach the phone and the log
 
@@ -313,9 +344,10 @@ operator actually feels is unchanged, with one improvement: today a manual class
 denies when the harness ceiling runs out and asks the agent to retry, and here
 it would simply keep waiting.
 
-**observed (pending):** the per-call round-trip latency on real hardware. The
-probe does not measure it yet, since a first run has a model call on the same
-wire and the two would not be separable.
+**observed (2026-09-18):** still not separable. On `approve` the first request
+arrived 9 s after `turn/start` and the second 3 s after the first was answered,
+and both intervals include a model call. The bridge's own cost is the two
+appends and the reply, which this run cannot isolate.
 
 ## Question 5: does it compose with the sandbox and the broker, or replace them?
 
@@ -340,6 +372,13 @@ how much the bridge sees. A read-only sandbox with `OnRequest` produces very few
 questions, and a bridge under it would be gating escapes rather than gating
 work. `UnlessTrusted` is the only variant under which "every command asked" is
 true, and it is a setting in the harness's own configuration.
+
+**observed (2026-09-18):** the wire name is `untrusted`. `thread/start` with
+`approvalPolicy: "unless-trusted"` was refused with `unknown variant
+\`unless-trusted\`, expected one of \`untrusted\`, \`on-request\`, \`granular\`,
+\`never\``, and `"untrusted"` was accepted. Follow-up 6 below pins that
+spelling. Under it, with `sandbox: "read-only"`, every command and every patch
+in the run produced a question.
 
 **Against the broker.** `approval codex apply` and its one-tool server
 (`docs/codex-workspace-broker.md`) are a MANDATORY door: the canonical workspace
@@ -411,9 +450,13 @@ presence line for `cwd`, a call id, command bytes, patch content and a reason;
 then the count of auto-review notifications; then one row per trial saying
 whether each effect happened. Four of those rows must say no.
 
-## Recommendation, provisional
+## Recommendation
 
-**Adopt, narrowly, and do not call it a boundary.**
+**Adopt, narrowly, and do not call it a boundary.** Provisional when written;
+confirmed by the 2026-09-18 run, which met all three conditions below: no
+effect on any refusal trial, zero auto-review notifications, and `command` plus
+`cwd` populated on every exec request. Confirmed once, on one machine, at
+0.155.0.
 
 Adopt as the everyday-gating answer for Codex sessions this runtime starts: the
 exec request carries the `{command, cwd}` pair that APRV-311's refusal is
@@ -445,8 +488,8 @@ answer is decline, recorded with the failing evidence exactly as APRV-325 did.
 
 ## The tasks an adopt would need
 
-Named here, not filed. Filing follows the operator's decision on the probe
-report.
+Filed 2026-09-18 on the operator's decision, in this order: APRV-361 (the
+bridge), then 362 to 368 depending on it.
 
 1. **The bridge client itself.** An `approval codex bridge` verb that starts
    `codex app-server`, speaks the protocol, and puts each approval request
@@ -468,9 +511,9 @@ report.
    pending request is replayed to the next connection. Until that is settled,
    the bridge's claim is "this client decided every question it was asked",
    which is narrower than "every question was decided here".
-6. **Pin the approval policy.** `UnlessTrusted` is the only variant under which
-   every command asks. An adoption that does not pin it is gating an unknown
-   fraction of the session.
+6. **Pin the approval policy.** `UnlessTrusted` (`"untrusted"` on the wire) is
+   the only variant under which every command asks. An adoption that does not
+   pin it is gating an unknown fraction of the session.
 7. **Refuse `acceptForSession`.** Standing authority for a whole session is a
    grant shape this project does not have, and a bridge must never emit it.
 8. **Conformance vectors** for the bridge's refusal union, and a SPEC §6.3 row,

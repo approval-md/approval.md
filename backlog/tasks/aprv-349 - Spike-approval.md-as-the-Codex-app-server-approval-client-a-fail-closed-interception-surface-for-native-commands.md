@@ -3,11 +3,11 @@ id: APRV-349
 title: >-
   Spike: approval.md as the Codex app-server approval client, a fail-closed
   interception surface for native commands
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-codex'
 created_date: '2026-09-17 01:25'
-updated_date: '2026-09-17 09:05'
+updated_date: '2026-09-18 00:38'
 labels:
   - codex
   - spike
@@ -25,10 +25,10 @@ Codex can run under an approval policy where, before executing a command or appl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Probe scripts under scripts/probes/ drive the installed Codex CLI in app-server mode against a scratch workspace and record, verbatim, the approval request payloads for one shell command and one patch, including whether cwd and a call id are present
-- [ ] #2 Crash, disconnect, timeout and malformed-reply behaviour of the client side is observed and recorded with exit codes and file effects; a failure to block is reported as a failure, never as enforcement
-- [ ] #3 A design note under docs/ answers the five questions in the description with the evidence, states what the bridge can and cannot bind, and ends in adopt or decline; adopt names the tasks that would follow
-- [ ] #4 No host Codex configuration, credential, primary checkout or production policy is touched; every command the probe runs is one the classifier reads or one routed through approval run
+- [x] #1 Probe scripts under scripts/probes/ drive the installed Codex CLI in app-server mode against a scratch workspace and record, verbatim, the approval request payloads for one shell command and one patch, including whether cwd and a call id are present
+- [x] #2 Crash, disconnect, timeout and malformed-reply behaviour of the client side is observed and recorded with exit codes and file effects; a failure to block is reported as a failure, never as enforcement
+- [x] #3 A design note under docs/ answers the five questions in the description with the evidence, states what the bridge can and cannot bind, and ends in adopt or decline; adopt names the tasks that would follow
+- [x] #4 No host Codex configuration, credential, primary checkout or production policy is touched; every command the probe runs is one the classifier reads or one routed through approval run
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -65,10 +65,12 @@ From Lane A (APRV-354), so this is on the record where AC4 will be checked: `cod
 Two things this does NOT do, and the probe still has to. First, the class is manual in the reference proposal and human-only for Muse, so a spawn reaches the gate rather than proceeding: the probe will need a grant, or a policy of its own in its scratch instance. Second, a grant of harness.launch.codex covers the LAUNCH and nothing the launched session then does, which is the laundering boundary SPEC 7 now states; the probe report should not read a granted launch as a gated inner session. The confined approval codex start keeps gate.self and is not a launch.
 
 Lane A checked no criterion here and changed no field of this task but these notes.
+
+Observation half done 2026-09-18 by the operator, two runs. Run one, codex-cli 0.152.1: void. ~/.codex/config.toml pinned model gpt-6-astra, which that release could not serve; all five turns ended in task_complete with a 400 before any tool call (read from the Codex rollouts whose cwd was the probe root), zero approval requests, and the report still printed the hold sentence. Filed APRV-359 so the probe prints a void verdict when the approve control asks nothing and lands nothing. Run two, after npm install -g @openai/codex@latest gave codex-cli 0.155.0 at /Users/carter/.local/bin/codex: 7 approval requests across five trials. approve: 2 requests, both markers landed. deny, crash, no-reply, malformed: one exec request each, no marker, no patched file. crash ended the server (exit 0, not alive at settle); no-reply held 60 s with the server alive and the question open; malformed left the server alive with 368 bytes on stderr and no further request. Zero auto-review notifications. Every exec request carried command (shell-joined rendering under /bin/zsh -lc), cwd populated, itemId, threadId, turnId, environmentId and availableDecisions (accept, acceptWithExecpolicyAmendment, cancel; decline was not advertised but a decline reply was honoured). File-change requests carried only itemId, threadId, turnId, startedAtMs, reason null, grantRoot null: no content, as the source read predicted. Wire spelling of the approval policy is untrusted; unless-trusted is refused with the enum untrusted, on-request, granular, never. Verbatim requests preserved in private/aprv349-probe-2026-09-18/results-0.155.0.json (gitignored). docs/codex-app-server-bridge.md: every observed (pending) marker replaced with the observation, dated, scoped to one machine and one version; recommendation section now reads confirmed with the three conditions met. AC1 and AC2 checked on the recorded payloads and effects above. AC3 checked: the note answers all five questions with observed evidence and ends in adopt, naming eight follow-ups (still named, not filed; filing waits on the operator). AC4 checked: no host Codex configuration, credential, primary checkout or production policy was touched by the probe (the model pin that voided run one was read, not written); the operator ran the probe from a terminal that is not behind the hook, and per APRV-354 the spawn of codex app-server now classifies harness.launch.codex rather than unclassified, so the clause is satisfiable on the classifier side too. Invariants touched: none weakened; fail closed is what the run confirmed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-The source half of the spike is finished and the observation half is one operator command away. Read at openai/codex b0659c53865dd48b0cd69c454368cea3980017cc with a file and line for every claim, cross-checked against the installed 0.152.1 string table: the exec approval request carries the command and its directory on the same frame, which is the pair the native hook cannot get; the item-based file-change request carries no patch content at all, only an item identifier, so a client on that API approves a reference; there is no timeout anywhere on the approval await, so silence blocks; a malformed reply or an unknown decision deserializes to a denial and the decision type's own default is denied; a disconnected client leaves the question pending and a reconnect replays it to whatever connects next; and a server-side auto-reviewer runs before the client path and can resolve an approval with a model call. That last one is what caps the answer. docs/codex-app-server-bridge.md recommends adopting the bridge as the everyday gate for sessions this runtime starts and declining it as a replacement for the broker or for confinement, conditional on three things the probe must show, with eight follow-up tasks named rather than filed. scripts/probes/codex-app-server.mjs is the observation half, exercised end to end in tests/probe-codex-app-server.test.ts against a stub server, including a fail-open stub whose result the report must call a failure to block in those words. Verified: build, typecheck and lint exit 0; docs-guard, probe-codex-app-server, codex-hook-probe and cli-hook-codex gave 51 tests, 51 pass, 0 fail, exit 0. No criterion is checked and the notes say why for each. Delivered in PR 424.
+Spike complete. Source half in PR 424; observation half run by the operator on 2026-09-18 against codex-cli 0.155.0: all three adoption conditions met (no effect on deny, crash, no-reply or malformed; zero auto-review notifications; command and cwd populated on every exec request), file-change requests carry no content, wire policy name is untrusted, and a first void run against 0.152.1 produced APRV-359. docs/codex-app-server-bridge.md carries the dated observations and the confirmed narrow-adopt recommendation with eight follow-ups named. Verified by reading results.json and the Codex rollouts for the void run; docs-guard test passes.
 <!-- SECTION:FINAL_SUMMARY:END -->
