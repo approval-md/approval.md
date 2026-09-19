@@ -6321,6 +6321,26 @@ stays declined.
 The thread is started with `approvalPolicy: untrusted` and `sandbox: read-only`.
 `untrusted` is the wire spelling of the source's `UnlessTrusted`, the only
 variant under which every command asks, and the server refuses the source name.
+There is no flag for it: a session gating an unknown fraction of itself is what
+the pin exists to prevent (APRV-366).
+
+The pin is checked as well as sent, and a failure ends the run rather than
+declining one request:
+
+```
+bridge-thread-start-refused       the server refused thread/start, so no thread
+                                  exists and no policy was established; its own
+                                  error is carried verbatim
+bridge-approval-policy-mismatch   the server reported an effective approval
+                                  policy that is not untrusted
+```
+
+A server that reports no policy at all is run against, because the observed
+0.155.0 server echoes none and a client demanding an echo could not start. The
+report says which case it was: `thread.requested` is what went on the wire,
+`thread.effective` is what the server said, and `thread.confirmed` is false when
+nothing confirmed it. Both stops exit 4, as every other protocol stop in this
+verb does; the code in the report is the part to branch on.
 
 **It is an advisory checkpoint and not a boundary**, for reasons
 docs/codex-app-server-bridge.md states in full: Codex's auto-reviewer can
