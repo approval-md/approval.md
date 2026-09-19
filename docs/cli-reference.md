@@ -4143,7 +4143,11 @@ its own flags are not parsed as this verb's.
   policy has spoken and reserved the class; the repair there is for a person to
   run the command, and here it is to write a line).
 - `hook-opaque` — a construct whose effect cannot be read from the text
-  (`bash -c`, `eval`, backticks, a non-read substitution).
+  (`eval`, `xargs`, backticks, a non-read substitution). A login shell around
+  ONE inline script is classified by that script since APRV-380, so
+  `zsh -lc 'git push origin main'` is `vcs.push.main`; a script file, an extra
+  word, a redirection on the wrapper, an assignment prefix and a nested shell
+  all stay opaque.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.
