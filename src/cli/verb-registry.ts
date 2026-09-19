@@ -2919,6 +2919,32 @@ const VERBS: VerbSpec[] = [
     error: ERROR_SCHEMA,
     exit_codes: [OK, INTEGRITY, USAGE, IO],
   },
+  {
+    name: "codex",
+    subcommand: "bridge",
+    purpose:
+      "Start `codex app-server` and answer every approval request it raises through the policy and the log (APRV-361). Each exec request carries `command` and `cwd` on one frame, minted by the harness runtime, which is the pair the native hook lacks and refuses for want of; the request goes through the hook's own decision path — classify, the human-only refusal, the loop floor, register, request, wait on the verified view — and the answer is `{id, result: {decision}}` on the connection. Accept or decline only, in the vocabulary the request advertised, never `acceptForSession`, `cancel` or `abort`. The deadline is the policy's `approval_ttl`, because this transport has no timeout. An ADVISORY checkpoint and never a boundary: see docs/codex-app-server-bridge.md.",
+    human_only: true,
+    human_only_note:
+      "An OPERATOR process, like `codex serve`: it launches a long-lived server, holds the acting identity every answer is recorded under, and decides questions on a connection this transport owns. An agent that could start one would gain a second writer against the log nobody supervises.",
+    input: input({
+      flags: {
+        "--prompt": "string",
+        "--workspace": "string",
+        ...AS_FLAG,
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        "--wait": "string",
+        "--interval": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+      trailing: TRAILING,
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO],
+  },
 
   {
     name: "mcp",

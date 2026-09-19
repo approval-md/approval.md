@@ -362,6 +362,10 @@ const unionVectors = [
     "channel_decision_refusal_codes",
     "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the gesture is an attestation whose in-force policy cannot say who is tapping",
   ],
+  [
+    "bridge_refusal_codes",
+    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a file change whose content arrived on a frame it is not correlating, and a server request it has no reading for",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -1621,7 +1625,20 @@ const SUITES = [
     // action, and the truth is that nothing may do it in this session and the
     // repair is to change the model in Muse's own picker. A caller that could
     // not tell those apart would route somebody to an approver who cannot help.
-    vectors_version: "13.0.0",
+    // 14.0.0 (APRV-361): an ELEVENTH union, `bridge_refusal_codes`, for the
+    // three refusals `approval codex bridge` reaches on its own. Major for the
+    // reason 7.0.0 through 11.0.0 were: this suite pins WHICH unions exist.
+    // They are not members of `hook_deny_codes` and must not be: that union is
+    // documented as every way `approval hook <harness>` can deny a tool call,
+    // and the hook emits none of these — it is handed one event on stdin and
+    // has no transport to be asked an unreadable question over. A second
+    // implementation whose hook emitted one would be describing a different
+    // boundary from this one. The three are distinct rather than one
+    // `bridge-refused`, because the repairs differ: a request missing `cwd` is
+    // a server that changed shape, an unknown method is a protocol this client
+    // has not caught up with, and a file change is a correlation this client
+    // has deliberately not made (APRV-363).
+    vectors_version: "14.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
