@@ -215,8 +215,22 @@ export function listCommits(
   return { ok: true, commits };
 }
 
-/** The guarded paths a merge commit's result carries that no parent carried. */
-function denseCombinedPaths(
+/**
+ * The guarded paths a merge commit's result carries that no parent carried:
+ * the merge's own work, which is what an evil merge is made of.
+ *
+ * EXPORTED because arm A of `core/dark-session.ts` asks the same question of a
+ * merge it finds on main (APRV-374), and two implementations of "what did this
+ * merge invent" would be two things to keep in step — the disagreement APRV-369
+ * was filed about. The observer there lists a window rather than a range, so it
+ * cannot reuse {@link listCommits}; it reuses this.
+ *
+ * The two-step shape is the correctness (see {@link listCommits}): `-c
+ * --name-only` gives candidates and over-reports, and the per-path `--cc` patch
+ * is the discriminator, empty for every merge whose every hunk came from a
+ * parent verbatim.
+ */
+export function denseCombinedPaths(
   read: GitReader,
   sha: string,
   judged: (path: string) => boolean,

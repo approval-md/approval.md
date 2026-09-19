@@ -59,6 +59,35 @@
  * cost of the alternative (no branch key at all) is an alarm on every worktree
  * whose session worked entirely outside the payload store's reach.
  *
+ * ## What unit arm A judges, merges included (APRV-374)
+ *
+ * One commit, base to commit, which is the unit a grant binds and the unit the
+ * CI guard judges since APRV-375. The inputs are built by
+ * `core/commit-guard.ts`, so the two sides cannot drift apart.
+ *
+ * A MERGE commit is judged on what it invented and on nothing else. `git log
+ * --name-only` reports no path at all for a merge, so until APRV-374 every
+ * merge dropped out of arm A, which is right for an ordinary merge and wrong
+ * for the evil one: a conflict resolution, or a hand edit made while resolving,
+ * is the merge commit's own work, made in the checkout that made the merge, and
+ * no other commit carries those bytes. So a merge is judged for the paths whose
+ * DENSE COMBINED PATCH (`git log --cc`, {@link denseCombinedPaths}) is
+ * non-empty, against its FIRST PARENT, which is the state the checkout was in
+ * before the merge and therefore the before-state a grant for the resolution
+ * would have bound.
+ *
+ * The dense patch and not `--cc --name-only`, which over-reports: a merge blob
+ * differs from every parent blob whenever both sides edited one file, so
+ * `--name-only` lists a file two lanes happened to edit concurrently and git
+ * merged without a human in the room. Replaying that as the merge's own change
+ * would report dark for work every side of it had evidence for, which is the
+ * class of false alarm APRV-369 and APRV-375 exist to remove. The dense patch
+ * is empty for exactly those merges and non-empty for the resolutions.
+ *
+ * Scope is the guard's scope: guarded paths. A merge that resolved a conflict
+ * in a file no policy protects is not this detector's business, so the dense
+ * question is only ever asked about paths {@link isGuardedPath} accepts.
+ *
  * ## Fail closed in the report
  *
  * Uncertainty is never "fine". A log that does not verify, a payload whose
@@ -90,9 +119,13 @@
  *
  * ## Layout
  *
- * The evaluator ({@link evaluateDarkSessions}) is PURE: no IO, no clock, no
- * git, so a fixture is enough to test it and a repository is never required.
- * The observing half below the fold does run git and read the payload store,
+ * The evaluator ({@link evaluateDarkSessions}) takes no clock and reads no
+ * file, so a fixture drives everything but arm A's replay: the ONE thing it
+ * runs git for is reading the blobs of a commit it is judging, which cannot be
+ * carried in the observation because which blobs are wanted is not known until
+ * the verdict is being computed. A fixture whose commits change no guarded path
+ * needs no repository at all. The observing half below the fold runs the rest
+ * of the git and reads the payload store,
  * and it lives here rather than under `daemon/` because `approval doctor`
  * reports the same findings and `src/cli/` may not import `src/daemon/`
  * (APRV-59). The one thing that stays in `daemon/dark-session.ts` is the
@@ -105,7 +138,7 @@ import { basename, join } from "node:path";
 
 import { policyBytesHash } from "./attest.js";
 import { childEnvironment } from "./child-env.js";
-import { commitGuardInputParts, type GitReader } from "./commit-guard.js";
+import { commitGuardInputParts, denseCombinedPaths, type GitReader } from "./commit-guard.js";
 import type { ProtectedPathEntry } from "./command-class.js";
 import { tick as readClock, type Clock } from "./clock.js";
 import { loadPayload, payloadStoreDirFor } from "./payload-store.js";
@@ -210,8 +243,23 @@ export interface ObservedCommit {
   author: string;
   /** The author's email alone, lowercased, or `""` when git named none. */
   authorEmail: string;
-  /** Repository-relative, `/`-separated paths this commit changed. */
+  /**
+   * Repository-relative, `/`-separated paths this commit changed.
+   *
+   * For a MERGE commit these are the guarded paths whose result differs from
+   * every parent hunk by hunk — the merge's own resolution work, and nothing
+   * its parents did (APRV-374). An ordinary merge has none.
+   */
   changedPaths: readonly string[];
+  /**
+   * The commit's parents in git's own order, when the observer asked.
+   *
+   * OPTIONAL, and absence means "unknown", which the per-commit input builder
+   * reads as "assume it has a parent": the modest direction, since the base it
+   * then judges against is the first parent rather than nothing at all.
+   * Two or more parents is what makes a commit a merge here.
+   */
+  parents?: readonly string[];
   /** The branch or worktree this commit was observed on, for the message. */
   ref: string;
   /**
@@ -475,6 +523,18 @@ function attribute(
   return { seqs, unresolved };
 }
 
+/**
+ * Is this a merge commit, as far as the observer could tell?
+ *
+ * Unknown parents answer `false`, which is the modest direction for a SENTENCE:
+ * an observation that does not know a commit's parents does not get to call it
+ * a merge. Nothing about the verdict turns on this, only the wording of the row
+ * (APRV-374).
+ */
+function isMergeCommit(commit: ObservedCommit): boolean {
+  return (commit.parents ?? []).length > 1;
+}
+
 /** Did this commit touch anything but the daemon's own append surface? */
 function touchesOnlyEvidence(commit: ObservedCommit): boolean {
   return commit.changedPaths.length > 0 && commit.changedPaths.every((path) => isExemptPath(path));
@@ -658,22 +718,31 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
     // whose earlier commits were rescued by a sign-off at its head merges into
     // main as several commits, and this sweep credits none of them, because no
     // in-window commit's blob equals the ratified bytes. That is a false alarm
-    // in a health report and never a hole in the gate. Naming the right anchor
-    // for it means asking git which merge brought each commit in and reading
-    // that merge's second parent, which is APRV-374's neighbourhood and a
-    // design ruling rather than an implementation detail.
+    // in a health report and never a hole in the gate. The right anchor for it
+    // is the merge that brought the commit in, read through that merge's second
+    // parent, which is a different traversal from the one APRV-374 added and
+    // changes non-merge commits too: APRV-377 carries it.
     const read: GitReader = (args) => {
       const run = git([...args], checkout.root);
       return run.ok ? run.stdout : null;
     };
     for (const commit of substantive) {
       const changed = commit.changedPaths.filter((path) => guarded.has(path)).sort();
-      // A merge commit reports no paths at all under `--name-only`, so it drops
-      // out here rather than being judged for what its parents did. APRV-374
-      // asks whether it should instead be judged on its dense combined diff, as
-      // the CI guard now is; until that is decided the modest reading stands.
+      // A MERGE arrives here carrying the paths its result differs from every
+      // parent on, and nothing else (APRV-374): its resolution, which is the
+      // merge's own work and which the observer asked git for with the dense
+      // combined question. An ordinary merge carries none and costs nothing
+      // here, exactly as it did when a merge could carry no path at all.
       if (changed.length === 0) continue;
-      const parts = commitGuardInputParts(read, { sha: commit.sha, ts: datesOf(commit) });
+      const parts = commitGuardInputParts(read, {
+        sha: commit.sha,
+        ts: datesOf(commit),
+        // The base is the first parent, which for a merge is the state this
+        // checkout was in before it: the before-state a grant for the
+        // resolution would have bound. Passing the parents also lets a root
+        // commit be judged as the add it is.
+        ...(commit.parents === undefined ? {} : { parents: commit.parents }),
+      });
       const report = evaluateProtectedPaths({
         changedPaths: changed,
         blobsFor: parts.blobsFor,
@@ -718,6 +787,20 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
       : merged.length > 0
         ? `${String(merged.length)} of them reached this checkout through a merge rather than being authored here.`
         : "They are on this checkout's own first-parent history, so they were made here.";
+    // A merge resolution says something a sha alone does not: these bytes are
+    // the MERGE's own, carried by no parent, so the place to look is whoever
+    // resolved that merge rather than either side of it (APRV-374).
+    const resolutions = [
+      ...new Set(
+        failures
+          .filter((failure) => isMergeCommit(failure.commit))
+          .map((failure) => failure.commit.sha.slice(0, 12)),
+      ),
+    ];
+    const resolved =
+      resolutions.length === 0
+        ? ""
+        : ` ${resolutions.join(", ")} ${resolutions.length === 1 ? "is a merge" : "are merges"} judged on the resolution itself, the bytes the merge carries that no parent carried, against the first parent.`;
     return base(
       checkout,
       "dark",
@@ -726,10 +809,12 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
       attribution.seqs,
       `${where}: ${String(failures.length)} guarded-path change(s) in ${input.window.from}..${
         input.window.to
-      } carry no evidence in the log that a human decided them. Judged commit(s): ${judged.join(", ")}. ${origin} — ${failures
+      } carry no evidence in the log that a human decided them. Judged commit(s): ${judged.join(", ")}. ${origin}${resolved} — ${failures
         .map(
           (failure) =>
-            `${failure.commit.sha.slice(0, 12)} ${failure.finding.path}: ${failure.finding.detail}`,
+            `${failure.commit.sha.slice(0, 12)} ${failure.finding.path}${
+              isMergeCommit(failure.commit) ? " (merge resolution)" : ""
+            }: ${failure.finding.detail}`,
         )
         .join(" | ")}`,
     );
@@ -998,20 +1083,32 @@ function trunkOf(root: string): string | null {
  * not answer — marks nothing, which attributes every commit to this checkout:
  * the direction that claims less about where work happened.
  */
-function parseCommits(text: string, ref: string, firstParent: ReadonlySet<string>): ObservedCommit[] {
+function parseCommits(
+  text: string,
+  ref: string,
+  firstParent: ReadonlySet<string>,
+  mergePaths: (sha: string) => readonly string[],
+): ObservedCommit[] {
   const commits: ObservedCommit[] = [];
   for (const chunk of text.split(RS)) {
     const lines = chunk.split("\n").filter((line) => line.length > 0);
     const header = lines.shift();
     if (header === undefined) continue;
-    const [sha, ts, author, email] = header.split(FS);
+    const [sha, ts, author, email, parents] = header.split(FS);
     if (sha === undefined || sha.length === 0) continue;
+    const parentList = (parents ?? "")
+      .split(" ")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
     commits.push({
       sha,
       ts: ts === undefined || ts.length === 0 ? null : ts,
       author: author ?? "",
       authorEmail: (email ?? "").toLowerCase(),
-      changedPaths: lines,
+      // `--name-only` reports nothing for a merge, so a merge's own work is
+      // asked for separately and by a different question (APRV-374).
+      changedPaths: parentList.length > 1 ? [...mergePaths(sha)] : lines,
+      parents: parentList,
       ref,
       ...(firstParent.size > 0 && !firstParent.has(sha) ? { arrivedByMerge: true } : {}),
     });
@@ -1027,12 +1124,19 @@ function parseCommits(text: string, ref: string, firstParent: ReadonlySet<string
  * would attribute every merged commit to whichever worktree happened to branch
  * from it. For the primary the range is plain `HEAD`, because the primary's own
  * commits are exactly what arm A is there to check.
+ *
+ * `protectedPaths` is the policy's widening list, and it is here for one
+ * reason: a merge commit's paths are asked for with a git invocation PER
+ * CANDIDATE PATH (APRV-374), so the question is only worth asking about paths
+ * the guard could have an opinion on. It narrows nothing a non-merge commit
+ * reports.
  */
 function commitsOf(
   checkout: ObservedCheckout,
   trunk: string | null,
   from: string,
   to: string,
+  protectedPaths: readonly ProtectedPathEntry[],
 ): { ok: true; commits: ObservedCommit[] } | { ok: false; message: string } {
   const range = checkout.primary || trunk === null ? ["HEAD"] : ["HEAD", "--not", trunk];
   const run = git(
@@ -1041,7 +1145,7 @@ function commitsOf(
       ...range,
       `--since=${from}`,
       `--until=${to}`,
-      `--pretty=format:${RS}%H${FS}%aI${FS}%an <%ae>${FS}%ae`,
+      `--pretty=format:${RS}%H${FS}%aI${FS}%an <%ae>${FS}%ae${FS}%P`,
       "--name-only",
     ],
     checkout.root,
@@ -1064,11 +1168,38 @@ function commitsOf(
   const firstParent = new Set(
     spine.ok ? spine.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0) : [],
   );
-  return { ok: true, commits: parseCommits(run.stdout, checkout.branch ?? "HEAD", firstParent) };
+  // A merge's own work, through the same helper the CI guard judges a pull
+  // request's merges with (APRV-374, `core/commit-guard.ts`). Git answers with
+  // nothing at all when it cannot be run, so a merge nobody could ask about is
+  // reported as having changed nothing, which is the same place it stood
+  // before this question was asked.
+  const read: GitReader = (args) => {
+    const attempt = git([...args], checkout.root);
+    return attempt.ok ? attempt.stdout : null;
+  };
+  const mergePaths = (sha: string): readonly string[] =>
+    denseCombinedPaths(read, sha, (path) => isGuardedPath(path, protectedPaths));
+  return {
+    ok: true,
+    commits: parseCommits(run.stdout, checkout.branch ?? "HEAD", firstParent, mergePaths),
+  };
 }
 
-/** Everything git could tell the sweep about a repository in one window. */
-export function observeGitActivity(root: string, from: string, to: string): GitActivity {
+/**
+ * Everything git could tell the sweep about a repository in one window.
+ *
+ * `protectedPaths` is the policy's `protected_paths`, and omitting it asks the
+ * merge question about the BUILT-IN guarded set only. That is the fail-closed
+ * direction for a caller that has no policy to hand: it narrows which merges
+ * are examined and never which evidence is required, and
+ * {@link reportDarkSessions} always passes the loaded list.
+ */
+export function observeGitActivity(
+  root: string,
+  from: string,
+  to: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+): GitActivity {
   const listed = worktrees(root);
   if (!listed.ok) return { checkouts: [], unavailable: listed.message };
 
@@ -1076,7 +1207,7 @@ export function observeGitActivity(root: string, from: string, to: string): GitA
   const checkouts: ObservedCheckout[] = [];
   for (const checkout of listed.found) {
     if (!existsSync(checkout.root)) continue;
-    const found = commitsOf(checkout, trunk, from, to);
+    const found = commitsOf(checkout, trunk, from, to, protectedPaths);
     if (!found.ok) return { checkouts: [], unavailable: found.message };
     checkouts.push({ ...checkout, commits: found.commits });
   }
@@ -1096,8 +1227,19 @@ export interface DarkSessionSweepOptions {
   /** Verified records. The caller has already read them; nothing re-reads. */
   records: readonly EventRecord[] | null;
   logDetail?: string;
-  /** Test seam: an observer that answers without running git. */
-  observe?: (root: string, from: string, to: string) => GitActivity;
+  /**
+   * Test seam: an observer that answers without running git.
+   *
+   * It is offered the policy's protected paths as a fourth argument, which the
+   * real observer needs to know which merges to ask git about (APRV-374); a
+   * seam that ignores it answers exactly as it did before.
+   */
+  observe?: (
+    root: string,
+    from: string,
+    to: string,
+    protectedPaths: readonly ProtectedPathEntry[],
+  ) => GitActivity;
 }
 
 /** The policy file's name and byte digest, for the `attested` verdict. */
@@ -1139,10 +1281,13 @@ export function reportDarkSessions(options: DarkSessionSweepOptions): {
   const now = readClock(options.clock === undefined ? {} : { clock: options.clock });
   const at = Date.parse(now);
   const from = new Date((Number.isNaN(at) ? Date.now() : at) - options.windowMs).toISOString();
-  const observe = options.observe ?? observeGitActivity;
-  const activity = observe(options.root, from, now);
-
+  // The policy is read BEFORE git is asked anything: the observer needs the
+  // guarded set to know which of a merge's paths to ask about (APRV-374), and
+  // one evaluation must not be told two different guarded sets.
   const facts = policyFacts(options);
+  const observe = options.observe ?? observeGitActivity;
+  const activity = observe(options.root, from, now, facts.protectedPaths);
+
   const storeDir = payloadStoreDirFor(options.logPath);
   const cache = new Map<string, unknown | null>();
   const payloadFor = (hash: string): unknown | null => {
