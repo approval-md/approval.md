@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/site-serve.mjs", "8787"],
+      "port": 8787
+    },
+    {
+      "name": "site-render",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/site-serve.mjs", "8788", "--sink"],
+      "port": 8788
+    }
+  ]
+}

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>approval.md: human approval for agent actions</title>
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
 <meta name="description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
 <meta name="robots" content="index,follow">
 <meta name="color-scheme" content="dark light">
@@ -16,7 +20,12 @@
 <meta property="og:locale" content="en">
 <meta property="og:title" content="approval.md: human approval for agent actions">
 <meta property="og:description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://approval.md/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="approval.md wordmark: human approval for agent actions">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://approval.md/og-image.png">
 <meta name="twitter:title" content="approval.md: human approval for agent actions">
 <meta name="twitter:description" content="A harness-agnostic, open-source framework for approving agent actions with a human in the loop. Policy is an attested markdown file, decisions append to a hash-chained log, and execution needs a single-use token.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -171,6 +180,7 @@
   }
   .mark{display:inline-flex;align-items:center;font-weight:700;letter-spacing:-.5px}
   .mark svg{height:.82em;width:auto;display:block;margin:0 .02em}
+  .mark .bx{fill:currentColor}
   .mark .md{color:var(--muted)}
   h1 .claim{margin-left:.7em;color:var(--fg)}
   .sub{margin:0;color:var(--muted);max-width:70ch}
@@ -537,12 +547,12 @@ leaves the machine is declared below.
 version: "0.1"
 defaults: { autonomy: manual, channel: telegram }
 approvers:
-  carter: { channels: [telegram, cli] }
+  alice: { channels: [telegram, cli] }
 classes:
   read.*:                    { autonomy: autonomous }
   files.write.workspace:     { autonomy: autonomous }
   vcs.push.main:             { autonomy: supervised-live, live_rate: 0.1 }
-  communicate.email.external: { autonomy: manual, approvers: [carter] }
+  communicate.email.external: { autonomy: manual, approvers: [alice] }
   financial.spend:           { autonomy: manual, limits: { per_action_usd: 25 } }
   account.credential:        { autonomy: human-only }
 ```
@@ -626,7 +636,7 @@ approval up</code></pre>
             </div>
           </div>
           <div class="logs" id="mail-logs">
-            <div id="log-1">{"event":"<span class="g">approval.granted</span>","actor":"human:carter","action_key":"aprv-842:chaser"}</div>
+            <div id="log-1">{"event":"<span class="g">approval.granted</span>","actor":"human:alice","action_key":"aprv-842:chaser"}</div>
             <div id="log-2">{"event":"execution.completed","adapter":"adapter-email"}</div>
           </div>
         </div>
@@ -1030,38 +1040,32 @@ approval up</code></pre>
 
     if (still) { reveal(text.length); return; }
 
+    /* The file is typed once, the first time the terminal is on screen, and
+       then stays put so the example can be read (APRV-388). Scrolling away
+       mid-pass pauses the typing; coming back resumes from the same character. */
     var MS_PER_CHAR = 12;
-    var startedAt = 0, raf = 0, running = false;
+    var startedAt = 0, raf = 0, running = false, typed = 0;
     function frame(now) {
-      var n = Math.floor((now - startedAt) / MS_PER_CHAR);
-      reveal(Math.min(n, text.length));
-      if (n < text.length && running) { raf = window.requestAnimationFrame(frame); }
-      else { raf = 0; }
+      typed = Math.min(Math.floor((now - startedAt) / MS_PER_CHAR), text.length);
+      reveal(typed);
+      if (typed < text.length && running) { raf = window.requestAnimationFrame(frame); }
+      else { raf = 0; running = false; }
     }
-    function pass() {
-      reveal(0);
+    function resume() {
+      if (typed >= text.length || running) { return; }
       running = true;
-      startedAt = window.performance ? performance.now() : Date.now();
+      startedAt = (window.performance ? performance.now() : Date.now()) - typed * MS_PER_CHAR;
       raf = window.requestAnimationFrame(frame);
     }
-    function stop() {
+    function pause() {
       running = false;
       if (raf) { window.cancelAnimationFrame(raf); raf = 0; }
     }
 
-    var timer = 0, onScreen = false;
-    function cycle() {
-      pass();
-      timer = window.setTimeout(function () {
-        if (!onScreen) { return; }
-        cycle();
-      }, text.length * MS_PER_CHAR + 2400);
-    }
     if (!window.IntersectionObserver) { reveal(text.length); return; }
     new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
-        if (e.isIntersecting && !onScreen) { onScreen = true; cycle(); }
-        else if (!e.isIntersecting && onScreen) { onScreen = false; stop(); window.clearTimeout(timer); }
+        if (e.isIntersecting) { resume(); } else { pause(); }
       });
     }, { threshold: 0.15 }).observe(host);
   })();
