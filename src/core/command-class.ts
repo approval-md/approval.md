@@ -2803,6 +2803,41 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
 })();
 
 /**
+ * The class the DAEMON's own cadence advance is gated as (APRV-382).
+ *
+ * The sub-class exists because the policy grammar has no actor condition and
+ * this repository wanted one: an advance publishes records the log already
+ * holds, so the daemon may make it unattended, while the same act from a
+ * session in a worktree or a human terminal stays supervised. Two classes are
+ * how that is written down, and which of them a cycle asks under is decided by
+ * `core/advance-cycle.ts` from the running process, never from an argument.
+ *
+ * NO COMMAND SPELLS IT, on purpose. `approval log advance` classifies
+ * `log.advance` whoever types it, so the looser line is unreachable from a
+ * shell an agent can drive: it is reached only from inside the daemon process,
+ * which an agent cannot become without a `gate.self` command this policy holds
+ * at the manual default.
+ */
+export const ADVANCE_DAEMON_CLASS = "log.advance.daemon";
+
+/**
+ * Classes this RUNTIME emits for its own gated actions, which no command spells.
+ *
+ * Separate from {@link CLASSIFIER_CLASSES}, which is the binary table's own set
+ * and is what `docs/claude-code-hook.md` documents row by row. A class here is
+ * emitted by a runtime cycle that registers and requests it directly — the
+ * daemon's advance is the first — so a policy declaring it is declaring a line
+ * that CAN fire, and the reachability check `core/policy-expectations.ts` runs
+ * at the amendment ceremony must say so. Without this list that ceremony would
+ * refuse the line `unreachable`, which is a true statement about the command
+ * classifier and a false one about the runtime.
+ *
+ * Adding a name here is a claim that some path in this codebase asks the gate
+ * for that class, and widening it is a reviewable diff.
+ */
+export const RUNTIME_CLASSES: readonly string[] = [ADVANCE_DAEMON_CLASS];
+
+/**
  * Can the classifier emit `actionClass` for a project whose policy carries
  * these `protected_paths`? (APRV-266.)
  *
@@ -2817,12 +2852,18 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
  * A routed name is reachable exactly when some entry routes to it. A
  * `policy.edit.spec` rule in a policy whose `protected_paths` routes nothing to
  * it is a line that will never fire, and saying so is the whole point.
+ *
+ * {@link RUNTIME_CLASSES} is the third answer (APRV-382): a class no command
+ * spells and a runtime cycle asks for directly is reachable in every project,
+ * with no policy entry needed, because the path that emits it is in this
+ * codebase rather than in the operator's file.
  */
 export function emittableClass(
   actionClass: string,
   protectedPaths: readonly ProtectedPathEntry[] = [],
 ): boolean {
   if (CLASSIFIER_CLASSES.includes(actionClass)) return true;
+  if (RUNTIME_CLASSES.includes(actionClass)) return true;
   if (!POLICY_EDIT_SUBCLASS.test(actionClass)) return false;
   return protectedPaths.some((entry) => parseProtectedEntry(entry)?.routed === actionClass);
 }
