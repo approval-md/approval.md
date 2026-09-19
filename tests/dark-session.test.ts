@@ -26,7 +26,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -37,6 +38,7 @@ import {
   DAEMON_EVIDENCE_EMAILS,
   DARK_SESSION_CODES,
   DARK_SESSION_VERDICTS,
+  DARK_VERDICT_CODES,
   evaluateDarkSessions,
   observationKey,
   renderDarkSessionReport,
@@ -50,6 +52,9 @@ import {
 import { decide, register, request } from "../src/core/gate.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
+import { loadPayload, payloadStoreDirFor } from "../src/core/payload-store.js";
+import { evaluateProtectedPaths } from "../src/core/protected-path-guard.js";
+import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
 import { GIT_EVIDENCE_AUTHOR_EMAIL } from "../src/daemon/git-evidence.js";
 import { verifyWithRecords } from "../src/core/verify.js";
 import { at, fixedClock, newScenario, type Scenario } from "./scenario.js";
@@ -122,8 +127,14 @@ function grantOfClass(
   key: string,
   cls: string,
   material: unknown,
-  minute: number,
+  // APRV-369: `null` means the real clock. The integration fixtures below make
+  // real git commits at the real instant, and the guard's recency bound is
+  // measured against the commit's own date, so a grant frozen at T0 in 2026-08
+  // would be a month stale the moment it was written.
+  minute: number | null,
 ): EventRecord {
+  const clockAt = (offset: number): { clock?: () => string } =>
+    minute === null ? {} : { clock: fixedClock(at(offset)) };
   const hash = payloadHash(material);
   const task = `hook:${key}`;
   const actionKey = `${task}:${cls}`;
@@ -148,7 +159,7 @@ function grantOfClass(
       },
     },
     AGENT,
-    { ...unit.unit.options, clock: fixedClock(at(minute)) },
+    { ...unit.unit.options, ...clockAt(minute ?? 0) },
   );
   assert.equal(registered.ok, true, JSON.stringify(registered));
 
@@ -165,13 +176,13 @@ function grantOfClass(
       execution: "harness",
     },
     AGENT,
-    { ...unit.unit.options, clock: fixedClock(at(minute)) },
+    { ...unit.unit.options, ...clockAt(minute ?? 0) },
   );
   assert.equal(requested.ok, true, JSON.stringify(requested));
 
   const granted = decide(unit.unit.logPath, actionKey, "grant", HUMAN, {
     ...unit.unit.options,
-    clock: fixedClock(at(minute + 1)),
+    ...clockAt((minute ?? 0) + 1),
   });
   assert.equal(granted.ok, true, JSON.stringify(granted));
   if (!granted.ok) throw new Error("unreachable");
@@ -258,6 +269,41 @@ function inputFor(
 // The frozen vocabulary (SPEC.md §11.1 invariant 6)
 // ---------------------------------------------------------------------------
 
+/**
+ * The `code` enum the event schema puts on an `audit.dark_session` record.
+ *
+ * Found by walking to the `audit.dark_session` branch of the event schema's
+ * per-type constraints rather than by a path constant, so a restructure of the
+ * schema is a test failure rather than a silently empty assertion.
+ */
+function schemaDarkCodes(schema: Record<string, unknown>): string[] {
+  const found: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (typeof node !== "object" || node === null) return;
+    const fields = node as Record<string, unknown>;
+    const condition = fields["if"] as Record<string, unknown> | undefined;
+    const matched = condition?.["properties"] as Record<string, Record<string, unknown>> | undefined;
+    if (matched?.["event"]?.["const"] === "audit.dark_session") {
+      const consequent = fields["then"] as Record<string, unknown> | undefined;
+      const properties = consequent?.["properties"] as Record<string, Record<string, unknown>> | undefined;
+      const payload = properties?.["payload"] as Record<string, unknown> | undefined;
+      const payloadProperties = payload?.["properties"] as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      const code = payloadProperties?.["code"]?.["enum"];
+      if (Array.isArray(code)) found.push(...(code as string[]));
+    }
+    for (const value of Object.values(fields)) walk(value);
+  };
+  walk(schema);
+  assert.notEqual(found.length, 0, "the event schema no longer constrains audit.dark_session.code");
+  return found;
+}
+
 test("the verdict and code unions are frozen public API, listed", () => {
   assert.deepEqual([...DARK_SESSION_VERDICTS], ["hooked", "dark", "exempt", "undetermined"]);
   assert.deepEqual(
@@ -265,6 +311,12 @@ test("the verdict and code unions are frozen public API, listed", () => {
     [
       "no-records",
       "no-evidence",
+      // APRV-369. The same failure and the same `dark` verdict as
+      // `no-evidence`, under its own code because every failing commit reached
+      // the checkout through a merge: the row names the checkout that synced
+      // the change rather than the one that made it, and the repair is in the
+      // branch the commit came from.
+      "no-evidence-merged",
       "evidence-surface",
       "daemon-authored",
       "primary-checkout",
@@ -274,6 +326,23 @@ test("the verdict and code unions are frozen public API, listed", () => {
       "activity-undated",
     ],
   );
+  // APRV-369, and APRV-358's lesson applied here: the codes a `dark` verdict
+  // can carry are exactly the enum the event schema accepts on an
+  // `audit.dark_session` record. A code the sweep can produce and the write
+  // boundary refuses is an observation that never reaches a human, and nothing
+  // fails loudly when it happens.
+  const schema = JSON.parse(
+    readFileSync(join(DEFAULT_SCHEMA_DIR, "event.schema.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const recorded = schemaDarkCodes(schema);
+  assert.deepEqual([...recorded].sort(), [...DARK_VERDICT_CODES].sort());
+  for (const code of DARK_VERDICT_CODES) {
+    assert.ok(
+      (DARK_SESSION_CODES as readonly string[]).includes(code),
+      `${code} is recordable but is not a dark-session code`,
+    );
+  }
+
   // The events a hooked session cannot avoid writing, named in one place.
   // APRV-214 adds `gate.bypassed`: a session running behind an open window
   // writes no request and no execution, and it is the opposite of dark — every
@@ -636,8 +705,14 @@ function runCli(args: string[], cwd: string): Run {
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** git, inside a temp repository and nowhere else. */
-function git(args: string[], cwd: string): Run {
+/**
+ * git, inside a temp repository and nowhere else.
+ *
+ * `dates` backdates a commit (APRV-369): the window these sweeps judge is the
+ * last 24 hours, and a fixture's own seed commit is seconds old, so without it
+ * the repository's creation is itself activity under judgment.
+ */
+function git(args: string[], cwd: string, dates?: string): Run {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
@@ -647,6 +722,7 @@ function git(args: string[], cwd: string): Run {
       GIT_AUTHOR_EMAIL: "fixture@example.invalid",
       GIT_COMMITTER_NAME: "Fixture",
       GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+      ...(dates === undefined ? {} : { GIT_AUTHOR_DATE: dates, GIT_COMMITTER_DATE: dates }),
     },
   });
   assert.equal(result.error, undefined, `git failed to run: ${String(result.error)}`);
@@ -760,4 +836,220 @@ test("doctor reports the dark worktree and appends nothing of its own", () => {
 
   const after3 = verifyWithRecords(join(root, ".approval", "log", "events.jsonl")).records.length;
   assert.equal(after3, before, "doctor appended a record; it is a reader");
+});
+
+// ---------------------------------------------------------------------------
+// APRV-369: arm A and the CI guard, on the same commits, agree
+// ---------------------------------------------------------------------------
+
+/**
+ * {@link POLICY} in the spelling the LOADER reads.
+ *
+ * The fixtures above hand `policyProtectedPaths` to the evaluator directly, so
+ * the nesting in `POLICY` never mattered to them. These cases go through the
+ * real CLI, where `policyFacts` reads the loaded policy, and
+ * `protected_paths` is a top-level key there — the same place this
+ * repository's own `APPROVAL.md` puts it.
+ */
+const LOADABLE_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "protected_paths:",
+  "  - SPEC.md",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  files.write.*:",
+  "    autonomy: autonomous",
+  "  policy.edit:",
+  "    autonomy: manual",
+  "```",
+  "",
+].join("\n");
+
+/**
+ * The `ea7427a` shape, small enough to build: one protected file edited by
+ * three commits on three branches, all merged into main inside one window, each
+ * edit evidenced on its own.
+ *
+ * That is what a day of lanes looks like in the primary, and it is what arm A
+ * used to replay as ONE change spanning all of them. Replayed that way a
+ * grant's after-state is gone from the head blob and the next grant's
+ * before-state is gone from the base blob, so neither covers on its own, and
+ * the middle edit — ratified by a human's whole-file SIGN-OFF at its own commit
+ * (APRV-338) — has no step the replay can compose at all. The row failed for
+ * changes CI had passed. Replayed per commit, which is what CI does and what
+ * each piece of evidence binds, all three clear.
+ *
+ * The middle edit is doubly load-bearing: arm A used to pass neither
+ * `pathSha256AtHead` nor `organSha256AtHead`, so a sign-off was evidence the CI
+ * guard could read and the doctor could not.
+ *
+ * Real git, real merges, and every record appended through `core/gate` or the
+ * real `policy attest` verb.
+ */
+function repoWithMergedGrantedEdits(options: { grantLast: boolean }): {
+  root: string;
+  first: string;
+  middle: string;
+  last: string;
+} {
+  counter += 1;
+  const root = realpathSync(mkdtempSync(join(scratch, `merged-${counter}-`)));
+  writeFileSync(join(root, "APPROVAL.md"), LOADABLE_POLICY, "utf8");
+  writeFileSync(join(root, "SPEC.md"), "alpha\n", "utf8");
+  assert.equal(git(["init", "--initial-branch=main"], root).code, 0);
+  assert.equal(git(["add", "-A"], root).code, 0);
+  // Backdated a month, so the repository's own creation is history rather than
+  // activity inside the 24h window this sweep judges.
+  const long_ago = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  assert.equal(git(["commit", "--no-verify", "-q", "-m", "seed"], root, long_ago).code, 0);
+  assert.equal(runCli(["policy", "attest", "--as", HUMAN], root).code, 0);
+
+  const logPath = join(root, ".approval", "log", "events.jsonl");
+  const store = new Map<string, unknown>();
+  const gate: World = {
+    unit: {
+      dir: root,
+      logPath,
+      policyPath: join(root, "APPROVAL.md"),
+      options: { policy: { file: join(root, "APPROVAL.md") } },
+    },
+    store,
+  };
+
+  // The grant comes FIRST and the commit after it, because the guard measures
+  // ordering against the committer date: a grant that arrives after the bytes
+  // were committed is post-hoc and is refused. No clock is injected, so these
+  // are real instants a few milliseconds apart, exactly as a live session's are.
+  const edit = (before: string, after: string, key: string): void => {
+    grantOfClass(
+      gate,
+      key,
+      "policy.edit",
+      { tool: "Edit", rule: "protected path", file: join(root, "SPEC.md"), before, after },
+      null,
+    );
+  };
+  const onBranch = (
+    branch: string,
+    before: string,
+    after: string,
+    key: string,
+    evidence: "grant" | "sign-off" | "none",
+  ): string => {
+    assert.equal(git(["checkout", "-q", "-b", branch, "main"], root).code, 0);
+    if (evidence === "grant") edit(before, after, key);
+    writeFileSync(join(root, "SPEC.md"), `${after}\n`, "utf8");
+    assert.equal(git(["add", "SPEC.md"], root).code, 0);
+    assert.equal(git(["commit", "--no-verify", "-q", "-m", key], root).code, 0);
+    if (evidence === "sign-off") {
+      // The working tree is at this commit's bytes, which is what the verb
+      // hashes, so the record covers exactly the file this commit carries.
+      assert.equal(
+        runCli(["policy", "attest", "--path", "SPEC.md", "--as", HUMAN], root).code,
+        0,
+      );
+    }
+    const sha = git(["rev-parse", "HEAD"], root).stdout.trim();
+    assert.equal(git(["checkout", "-q", "main"], root).code, 0);
+    assert.equal(git(["merge", "--no-ff", "-q", "-m", `merge ${key}`, branch], root).code, 0);
+    return sha;
+  };
+
+  const first = onBranch("pr-one", "alpha", "beta", "first-edit", "grant");
+  const middle = onBranch("pr-two", "beta", "gamma", "middle-edit", "sign-off");
+  const last = onBranch("pr-three", "gamma", "delta", "last-edit", options.grantLast ? "grant" : "none");
+  return { root, first, middle, last };
+}
+
+/** Bound material, read from the repository's own payload store. */
+function payloadFromStore(root: string): (hash: string) => unknown | null {
+  const storeDir = payloadStoreDirFor(join(root, ".approval", "log", "events.jsonl"));
+  return (hash) => {
+    const loaded = loadPayload(storeDir, hash);
+    return loaded.ok ? loaded.value : null;
+  };
+}
+
+/**
+ * The guard's inputs for ONE change over `SPEC.md`, built here exactly as
+ * `scripts/protected-path-guard.mjs` builds them for a pull request range.
+ */
+function guardSpan(root: string, baseRev: string, headRev: string, records: readonly EventRecord[]) {
+  const show = (rev: string): string | null => {
+    const shown = git(["show", `${rev}:SPEC.md`], root);
+    return shown.code === 0 ? shown.stdout : null;
+  };
+  const digest = (rev: string): string | null => {
+    const blob = show(rev);
+    return blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
+  };
+  return evaluateProtectedPaths({
+    changedPaths: ["SPEC.md"],
+    blobsFor: () => ({ base: show(baseRev), head: show(headRev) }),
+    records,
+    logStatus: "ok",
+    policyProtectedPaths: ["SPEC.md"],
+    policySha256AtHead: null,
+    policyPath: "APPROVAL.md",
+    organSha256AtHead: () => digest(headRev),
+    pathSha256AtHead: () => digest(headRev),
+    payloadFor: payloadFromStore(root),
+    changeTsFor: () => git(["log", "-1", "--format=%aI", headRev], root).stdout.trim(),
+    window: { firstSeq: null, lastSeq: null, firstTs: null, lastTs: null, base: baseRev, head: headRev },
+  });
+}
+
+test("APRV-369: the doctor row reaches the CI guard's verdict on merged, evidenced edits", () => {
+  const { root, first, middle, last } = repoWithMergedGrantedEdits({ grantLast: true });
+  const records = verifyWithRecords(join(root, ".approval", "log", "events.jsonl")).records;
+
+  // The CI guard's verdict, per commit: what PR #432's `protected paths` job
+  // computed for `ea7427a`, and passed.
+  for (const sha of [first, middle, last]) {
+    const report = guardSpan(root, `${sha}^`, sha, records);
+    assert.equal(report.ok, true, `${sha.slice(0, 12)}: ${JSON.stringify(report.findings)}`);
+  }
+
+  // The doctor's, through the CLI, over all three commits in one window.
+  const run = runCli(["doctor", "--json"], root);
+  const parsed = JSON.parse(run.stdout) as { checks: { check: string; status: string; detail: string }[] };
+  const row = parsed.checks.find((check) => check.check === "dark-sessions");
+  assert.notEqual(row, undefined);
+  assert.notEqual(row?.status, "fail", `dark-sessions disagreed with the guard: ${row?.detail ?? ""}`);
+
+  // What is NOT asserted here, and why. On `ea7427a` the union span ALSO
+  // failed, and the reproduction recorded the reason: with six commits over a
+  // 200 KB SPEC.md the exact base-to-head replay "refused after reaching its
+  // byte limit" before it could compose the grants, leaving per-grant matching,
+  // which the union defeats. On a fixture this size the replay finishes and
+  // rescues the union, so a `union.ok === false` assertion here would be
+  // asserting the byte budget rather than the span. That budget is APRV-357's
+  // subject. What this case pins instead is the half that holds at any size:
+  // the doctor and the guard agree per commit, and the middle commit's SIGN-OFF
+  // counts for the doctor, which it could not before arm A supplied
+  // `pathSha256AtHead`.
+  const union = guardSpan(root, `${first}^`, last, records);
+  assert.equal(typeof union.ok, "boolean");
+});
+
+test("APRV-369: an unevidenced edit that arrived by merge names its commit and its origin", () => {
+  const { root, last: second } = repoWithMergedGrantedEdits({ grantLast: false });
+
+  const run = runCli(["doctor", "--json"], root);
+  const parsed = JSON.parse(run.stdout) as { checks: { check: string; status: string; detail: string }[] };
+  const row = parsed.checks.find((check) => check.check === "dark-sessions");
+  assert.equal(row?.status, "fail", row?.detail ?? "");
+  // AC2: the row does not read as the primary checkout's own dark activity.
+  assert.match(row?.detail ?? "", /\[no-evidence-merged\]/u);
+  assert.match(row?.detail ?? "", /reached this checkout through a merge/u);
+  // AC3: it names the commit it judged.
+  assert.match(row?.detail ?? "", new RegExp(second.slice(0, 12), "u"));
 });
