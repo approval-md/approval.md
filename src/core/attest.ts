@@ -55,6 +55,7 @@ import {
   type AppendOptions,
   type EventRecord,
 } from "./log.js";
+import { payloadHash } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import type { ValidationError } from "./validate.js";
 
@@ -238,6 +239,31 @@ export function policyBytesHash(bytes: Uint8Array): string {
  * moment, and the *latest* attestation is the one `checkAttestation` honors.
  * Passing a precondition here would only manufacture spurious failures.
  */
+/**
+ * The value a terminal attestation stores for the bytes it attests (APRV-356).
+ *
+ * One author for the shape, because two parties need it and they must agree:
+ * {@link appendAttestation} writes it, and `cli/amend.ts` has to name the file
+ * it will land in before the append happens, so the ceremony commit can carry
+ * it. A second spelling of `{ text }` anywhere would be a store file the
+ * ceremony quietly left behind.
+ *
+ * Deliberately narrower than `proposalPayloadValue` in `core/policy-proposal.ts`,
+ * which carries `policy_path` beside the text: a proposal is a prompt and names
+ * the file it is asking about, while an attestation is a binding and the bytes
+ * are the whole of it. The two therefore address different files in the store
+ * for the same policy, which costs one duplicate and keeps each record's
+ * binding meaning exactly one thing.
+ */
+export function attestedPolicyPayload(text: string): { text: string } {
+  return { text };
+}
+
+/** The store hash {@link attestedPolicyPayload} addresses for these bytes. */
+export function attestedPolicyPayloadHash(text: string): string {
+  return payloadHash(attestedPolicyPayload(text));
+}
+
 export function appendAttestation(
   logPath: string,
   policyPath: string,
@@ -302,7 +328,7 @@ export function appendAttestation(
   // write anyway. The alternative considered — append without the binding, as
   // before — was rejected because it would make the recoverability guarantee
   // conditional on a condition no reader of the record can see.
-  const stored = storePayload(payloadStoreDirFor(logPath), { text });
+  const stored = storePayload(payloadStoreDirFor(logPath), attestedPolicyPayload(text));
   if (!stored.ok) {
     return {
       ok: false,

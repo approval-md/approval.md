@@ -433,7 +433,7 @@ export function inForcePolicyText(
 
   return {
     ok: false,
-    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: an attestation records only their digest, and no policy.proposed record naming those bytes has a readable payload beside this log. A policy attested at a terminal stores nothing, so this is the ordinary state of a chain that has never been amended from a phone.`,
+    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: no record naming those bytes — neither a policy.proposed nor the attestation itself — binds a payload this log can read beside it. Since APRV-356 every attestation stores the attested text, so this is the ordinary state of a chain last attested BEFORE that landed, where a terminal attestation recorded only the digest.`,
   };
 }
 

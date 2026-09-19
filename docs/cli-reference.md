@@ -719,7 +719,21 @@ refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
 
 `path` is the file that was hashed; the logged payload carries its basename only,
 so an exported log leaks no home directory. The event's payload is
-`{"policy_path":"APPROVAL.md","sha256":"<64 hex>"}`.
+`{"policy_path":"APPROVAL.md","sha256":"<64 hex>","payload_hash":"<64 hex>"}`.
+
+**`payload_hash`: the attested bytes, recoverable (APRV-356).** The verb also
+writes the attested text to the payload store beside the log and binds that
+file's hash on the record, so the policy IN FORCE can be produced rather than
+only named. A digest cannot produce the file it names, and the privileged-gesture
+rule (`policy.core` gestures from a channel, SPEC.md §10.3) has to be decided
+against the policy in force rather than against the one being proposed. A reader
+re-hashes the recovered text against `sha256` from the verified log, so the store
+is checked rather than trusted, and a store that cannot be written REFUSES the
+attestation: nothing is appended, because a record claiming a binding whose bytes
+are absent is a worse artifact than no record. Records written before this
+existed still validate and verify; a reader treats the absent field as the
+pre-amendment state, where the in-force bytes are unrecoverable and the
+fail-closed fallback applies.
 
 ### `--organ <path>`: the gate's organs (APRV-272)
 
@@ -1102,9 +1116,9 @@ beneath it.
   sha256  8acbd01cda98
 
 Committed
-  ✓ committed the policy and the log together:
+  ✓ committed the policy, the log and the attested policy text together:
 
-    git add APPROVAL.md .approval/log/events.jsonl
+    git add APPROVAL.md .approval/log/events.jsonl .approval/payloads/8acbd01cda98….json
     git commit -m "Policy: amend APPROVAL.md: 1 class resolution(s) (attested seq 2)"
 
 Publishing
@@ -1197,10 +1211,16 @@ is the human rendering only.
    prints the SEMANTIC diff, computed by the real engine on both versions;
 4. runs the load advisory;
 5. asks for confirmation (skipped by `--yes` and `--dry-run`);
-6. attests: one `policy.updated` event, identical to `approval policy attest`;
-7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`
-   (plus the pins when they moved), a `git commit` citing the attestation seq,
-   and the push (and, on the branch flow, the branch and the pull request);
+6. attests: one `policy.updated` event, identical to `approval policy attest`,
+   which since APRV-356 also stores the attested bytes in the payload store and
+   binds their hash on the record;
+7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>
+   <attested bytes>` (plus the pins when they moved), a `git commit` citing the
+   attestation seq, and the push (and, on the branch flow, the branch and the
+   pull request). The store file rides in the same commit because a committed
+   log carrying a binding whose bytes were never committed leaves the policy in
+   force unrecoverable for everyone reading that copy, the CI protected-path
+   guard included;
 8. publishes, unless `--no-publish`: a push the remote refuses is answered by
    the branch, push, pull request and auto-merge above, each reported as it
    lands, and a step that fails drops to the runbook from there.

@@ -285,11 +285,12 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
     // — a non-empty list DOES move `healthy` and the exit code, because an
     // unreconciled denial is a "no" that has so far changed nothing.
     reconciliation: [],
-    // Additive (APRV-35). This fixture binds hashes but never supplies bytes,
-    // so nothing was ever stored and the directory does not exist, which is
-    // the normal state of a repo that has made no request carrying --payload,
-    // and does not move `healthy` or the exit code above.
-    payload_store: { present: false, files: 0, pruned: 0, orphans: 0, note: PAYLOAD_STORE_NOTE },
+    // Additive (APRV-35). This fixture binds hashes and never supplies bytes
+    // for a request, so the one file the store holds is the one APRV-356 put
+    // there: the attested policy text, bound by the `policy.updated` at seq 1.
+    // Nothing here is dangling, and none of it moves `healthy` or the exit code
+    // above.
+    payload_store: { present: true, files: 1, pruned: 0, orphans: 0, note: PAYLOAD_STORE_NOTE },
   });
   assert.equal(rawLog(dir), rawLog(dir), "status must not write");
   assertClean(dir);
@@ -337,7 +338,9 @@ test("status text mode names health, attestation, verification, dangling and bud
   // APRV-245: informational too, and in a scratch directory it says why it has
   // no number rather than printing a zero it cannot stand behind.
   assert.match(run.stdout, /^git coverage {2,}not a git checkout$/mu);
-  assert.match(run.stdout, /^payload store {2,}not created yet, 0 pruned, 0 unbound$/mu);
+  // APRV-356: the attestation stores the attested policy text, so even a repo
+  // that has made no request carrying --payload holds one bound file.
+  assert.match(run.stdout, /^payload store {2,}1 file\(s\), 0 pruned, 0 unbound$/mu);
   // The log path is written the way the operator would type it, and piped
   // output carries no escape codes.
   assert.match(run.stdout, /^log {2,}\.approval\/log\/events\.jsonl$/mu);
@@ -382,9 +385,11 @@ test("status counts the payload store once a real request has stored bytes", () 
   assert.equal(code, 0);
   assert.deepEqual(body["payload_store"], {
     present: true,
-    files: 1,
+    // Two, and both bound: the request's own material, and the attested policy
+    // text APRV-356 stores for the `policy.attest` above.
+    files: 2,
     // APRV-41: what the log says about the store, beside what the store holds.
-    // Nothing has been pruned here, and the one file is bound by the request.
+    // Nothing has been pruned here, and every file is bound by some record.
     pruned: 0,
     orphans: 0,
     note: PAYLOAD_STORE_NOTE,
@@ -393,7 +398,7 @@ test("status counts the payload store once a real request has stored bytes", () 
 
   const text = runCli(["status"], dir);
   assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /^payload store {2,}1 file\(s\), 0 pruned, 0 unbound$/mu);
+  assert.match(text.stdout, /^payload store {2,}2 file\(s\), 0 pruned, 0 unbound$/mu);
   assertClean(dir);
 });
 

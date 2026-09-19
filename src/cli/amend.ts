@@ -73,8 +73,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve as resolvePathSe
 import {
   HUMAN_ACTOR_ENV,
   appendAttestation,
+  attestedPolicyPayloadHash,
   checkAttestation,
-  policyFileHash,
+  policyBytesHash,
   resolveHumanActor,
 } from "../core/attest.js";
 import { compareChains } from "../core/log-reconcile.js";
@@ -96,7 +97,10 @@ import {
   POLICY_FILENAMES,
   type PolicyLoadResult,
 } from "../core/policy-load.js";
+import { payloadHash } from "../core/payload.js";
+import { payloadPath, payloadStoreDirFor } from "../core/payload-store.js";
 import {
+  proposalPayloadValue,
   proposalState,
   proposeAttestation,
   type DiffSummary,
@@ -1024,6 +1028,15 @@ interface CommitPlan {
    * staged-changes check does not treat as a stray.
    */
   pinsArg: string | null;
+  /**
+   * The store file holding the attested policy text, repo-relative (APRV-356).
+   *
+   * The fourth file the amendment commit carries, and the fourth path the
+   * staged-changes check does not treat as a stray. Unlike the pins it is never
+   * `null`: every attestation this ceremony can perform leaves the text in the
+   * store, so every amendment commit has one to carry.
+   */
+  payloadArg: string;
 }
 
 /**
@@ -1390,8 +1403,20 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   const policyPath = policy.path;
 
   let liveSha256: string;
+  /**
+   * The live bytes as text, for the payload file this ceremony will commit
+   * (APRV-356).
+   *
+   * One read for both, on the rule `core/attest.ts` states for the same pair:
+   * two reads of a file an operator may still be editing can disagree, and the
+   * digest reported in the report has to be the digest of the bytes whose store
+   * file the `git add` names.
+   */
+  let liveText: string;
   try {
-    liveSha256 = policyFileHash(policyPath);
+    const liveBytes = readFileSync(policyPath);
+    liveSha256 = policyBytesHash(liveBytes);
+    liveText = liveBytes.toString("utf8");
   } catch (cause) {
     return refuse(
       streams,
@@ -1403,6 +1428,39 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
+
+  /**
+   * The store file holding the attested policy text, absolute (APRV-356).
+   *
+   * The ceremony commit carries it beside the policy and the log, because a
+   * committed log carrying a binding whose payload file was never committed is
+   * a chain whose in-force bytes are unrecoverable to every reader of the
+   * committed copy, which is the state this task exists to end. The CI
+   * protected-path guard resolves payloads out of committed trees, so that copy
+   * is the one it reads.
+   *
+   * Which file it is depends on which door the attestation comes through, and
+   * both are addressable from the bytes on disk before anything is appended:
+   *
+   * - The HUMAN path appends the attestation here, and since APRV-356 that
+   *   record binds `{ text }` (`core/attest.ts`).
+   * - The AGENT path proposes and waits for a tap. The phone's attestation
+   *   stores nothing, which APRV-356 left unchanged; what carries the text on
+   *   that chain is the `policy.proposed` this ceremony appends, binding
+   *   `{ policy_path, text }` (`core/policy-proposal.ts`).
+   *
+   * Addressed from `liveText` rather than read back from the appended record,
+   * so it is a ceremony file from the start: `--dry-run` names it in the `git
+   * add` it would run, and `--commit` counts it as its own rather than as a
+   * stray in the index. An edit landing between here and the append moves the
+   * hash, and the append refuses on the digest before this path is used.
+   */
+  const payloadFile = payloadPath(
+    payloadStoreDirFor(logPath),
+    agentActor === null
+      ? attestedPolicyPayloadHash(liveText)
+      : payloadHash(proposalPayloadValue(policyPath, liveText)),
+  );
 
   // (a-pre) The thirty-three seconds of silence, ended (APRV-167).
   //
@@ -1539,7 +1597,12 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
    */
   let pinsChange: PinsChange | null = null;
   if (wantCommit && !dryRun) {
-    const plan = planCommit(policyPath, logPath, useBranch ? { branch: branchFlag } : null);
+    const plan = planCommit(
+      policyPath,
+      logPath,
+      payloadFile,
+      useBranch ? { branch: branchFlag } : null,
+    );
     if (!plan.ok) {
       return refuse(streams, json, plan.code, plan.message, EXIT_USAGE);
     }
@@ -1644,7 +1707,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   /**
-   * The same command, with the two long absolute paths written the way the
+   * The same command, with the long absolute paths written the way the
    * operator would type them.
    *
    * This is a HUMAN transform and nothing else: `--json`'s `git.commands` keeps
@@ -1657,7 +1720,9 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       .split(policyPath)
       .join(relPath(policyPath, cwd))
       .split(logPath)
-      .join(relPath(logPath, cwd));
+      .join(relPath(logPath, cwd))
+      .split(payloadFile)
+      .join(relPath(payloadFile, cwd));
     return pinsChange === null
       ? shortened
       : shortened.split(pinsChange.path).join(relPath(pinsChange.path, cwd));
@@ -1675,8 +1740,13 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 
   const summary = summarize(policyPath, diff, pinsChange);
   // APRV-274: the pins file is a member of the `git add` exactly when it moved,
-  // so a copied command lands the same three (or two) files the verb would.
-  const ceremonyFiles = [policyPath, logPath, ...(pinsChange === null ? [] : [pinsChange.path])];
+  // so a copied command lands the same three (or four) files the verb would.
+  const ceremonyFiles = [
+    policyPath,
+    logPath,
+    ...(pinsChange === null ? [] : [pinsChange.path]),
+    payloadFile,
+  ];
   const commitCommands = (seq: string): string[] => [
     `git add ${ceremonyFiles.join(" ")}`,
     `git commit -m ${JSON.stringify(`Policy: ${summary} (attested seq ${seq})`)}`,
@@ -2144,6 +2214,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         commitPlan.policyArg,
         commitPlan.logArg,
         ...(pinsChange === null ? [] : [pinsChange.arg]),
+        // APRV-356: the attested policy text, so the commit carrying the
+        // binding carries the bytes it binds. Without it the in-force policy is
+        // unrecoverable for every reader of the committed copy, the CI guard
+        // included.
+        commitPlan.payloadArg,
       ],
       message,
     });
@@ -2525,7 +2600,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       // APRV-274: the headline names what the commit actually carries. A reader
       // who is told "the policy and the log" and finds a third file in the diff
       // has been told something false about the one commit that must not lie.
-      const carried = pinsChange === null ? "the policy and the log" : "the policy, the log and the pins";
+      // APRV-356 added the fourth: the store file holding the attested bytes.
+      const carried =
+        pinsChange === null
+          ? "the policy, the log and the attested policy text"
+          : "the policy, the log, the pins and the attested policy text";
       const done: string[] = [
         branch === null
           ? `${st.glyph("ok")} committed ${carried} together:`
@@ -2624,6 +2703,8 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 function planCommit(
   policyPath: string,
   logPath: string,
+  /** The store file holding the attested policy text, absolute (APRV-356). */
+  payloadFile: string,
   /**
    * The branch flow's preconditions, checked here for the same reason: an
    * `origin` that does not exist, or a branch name already taken, would fail
@@ -2644,6 +2725,10 @@ function planCommit(
   }
   const policyArg = repoPath(root, policyPath);
   const logArg = repoPath(root, logPath);
+  // APRV-356. The payload store is a sibling of the log directory, so a log
+  // inside the repository puts this inside it too; the check below covers both
+  // with one sentence rather than naming a path no operator chose.
+  const payloadArg = repoPath(root, payloadFile);
   // APRV-274. `null` where these pins do not govern this policy, and where the
   // repository simply has no pins module: in both cases the ceremony's file set
   // is the two it always was.
@@ -2667,8 +2752,11 @@ function planCommit(
       message: `--commit could not read git status: ${status.stderr.trim()}`,
     };
   }
-  const ceremonyFiles = [policyArg, logArg, ...(pinsArg === null ? [] : [pinsArg])];
-  const carried = pinsArg === null ? "the policy and the log" : `the policy, the log and ${pinsArg}`;
+  const ceremonyFiles = [policyArg, logArg, payloadArg, ...(pinsArg === null ? [] : [pinsArg])];
+  const carried =
+    pinsArg === null
+      ? "the policy, the log and the attested policy text"
+      : `the policy, the log, the attested policy text and ${pinsArg}`;
   const strays: string[] = [];
   /** Ceremony files staged in one state and left in another (APRV-341). */
   const split: string[] = [];
@@ -2726,7 +2814,7 @@ function planCommit(
       }
     }
   }
-  return { ok: true, plan: { root, policyArg, logArg, pinsArg } };
+  return { ok: true, plan: { root, policyArg, logArg, pinsArg, payloadArg } };
 }
 
 /**

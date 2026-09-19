@@ -804,7 +804,7 @@ function committedPaths(dir: string, rev = "HEAD"): string[] {
     .sort();
 }
 
-test("advance: carries exactly the three paths, names the seq range, pushes a records branch", () => {
+test("advance: carries exactly the log, the queue and the payload store, and names the seq range", () => {
   const repo = newRepo();
   const from = appendRecord(repo.dir, "advance-1");
   const to = appendRecord(repo.dir, "advance-2");
@@ -830,9 +830,25 @@ test("advance: carries exactly the three paths, names the seq range, pushes a re
   assert.equal(result.report.pushed, true);
 
   const commit = String(result.report.commit);
+  // APRV-356 put payload files of its own in this fixture's store (the
+  // attestations each write the attested policy text), and some of them the
+  // base already carries, so a diff against the base names an unstable subset
+  // of the directory. What stays exact is the KINDS: the log, the queue, and
+  // the payload store, with the file this case wrote among them, and nothing
+  // else at all. An advance carries records, never work.
+  const carried = committedPaths(repo.dir, commit);
+  assert.ok(carried.includes(LOG_RELATIVE), carried.join(" "));
+  assert.ok(carried.includes(QUEUE_RELATIVE), carried.join(" "));
+  assert.ok(carried.includes(".approval/payloads/abc.json"), carried.join(" "));
   assert.deepEqual(
-    committedPaths(repo.dir, commit),
-    [LOG_RELATIVE, QUEUE_RELATIVE, ".approval/payloads/abc.json"].sort(),
+    carried.filter(
+      (path) =>
+        path !== LOG_RELATIVE &&
+        path !== QUEUE_RELATIVE &&
+        !path.startsWith(".approval/payloads/"),
+    ),
+    [],
+    "the advance carried a path that is not the log, the queue or the store",
   );
   assert.equal(
     git(["log", "-1", "--pretty=%s", commit], repo.dir).stdout.trim(),
@@ -1133,8 +1149,17 @@ test("advance: a local main BEHIND and DIVERGED from origin still bases on origi
   );
   // The local-only commit is NOT in it: an advance publishes records, not work.
   assert.equal(git(["cat-file", "-e", `${String(commit)}:LOCAL.md`], repo.dir).code === 0, false);
-  // Only the log actually changed, so only the log is in the diff.
-  assert.deepEqual(committedPaths(repo.dir, String(commit)), [LOG_RELATIVE]);
+  // Only the log and the store changed, so only they are in the diff. APRV-356
+  // put the store in it: the fixture's attestation writes the attested bytes
+  // beside the log, origin's tree does not carry them all, and an advance
+  // carries the store.
+  const carried = committedPaths(repo.dir, String(commit));
+  assert.ok(carried.includes(LOG_RELATIVE), carried.join(" "));
+  assert.deepEqual(
+    carried.filter((path) => path !== LOG_RELATIVE && !path.startsWith(".approval/payloads/")),
+    [],
+    "the advance carried a path that is not the log or the store",
+  );
 
   // The checkout is exactly as it was found.
   assert.equal(git(["rev-parse", "HEAD"], repo.dir).stdout.trim(), headBefore);

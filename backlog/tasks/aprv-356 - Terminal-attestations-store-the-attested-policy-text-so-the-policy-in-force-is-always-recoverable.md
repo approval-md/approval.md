@@ -3,10 +3,11 @@ id: APRV-356
 title: >-
   Terminal attestations store the attested policy text, so the policy in force
   is always recoverable
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-17 20:09'
-updated_date: '2026-09-19 11:12'
+updated_date: '2026-09-19 11:30'
 labels:
   - policy
   - attestation
@@ -33,13 +34,13 @@ Found while landing APRV-324 (PR #427, 2026-09-17). Attestation answers from the
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. core/attest.ts: appendAttestation reads the policy once, stores { text } in the payload store beside the log, and binds the hash on the policy.updated it appends. A store write that fails REFUSES the attestation.
-2. core/policy-proposal.ts: inForcePolicyText accepts an ATTESTATION carrying payload_hash as well as a proposal, re-hashing the recovered text against the attested digest.
-3. schema: policy.updated payload gains an optional, described payload_hash. Additive; records written before it still validate.
-4. Retention: nothing new to write. The binding sits on a record with no action key, so planPrune treats it as unattributable and therefore live forever. Pin it with a test.
-5. SPEC 5.2 (a new bullet) and 10.4 (one sentence on the retention rule), one commit. design/channel-sender-identity.md residual paragraph rewritten as closed.
-6. Tests: sender-identity 26 becomes the closure case (in force MAPPED, amendment UNMAPPED, tap attributed to human:carter) and fails on the old behaviour; 26a pins the bootstrap refusal; 26b pins the fail-closed fallback for a pre-change chain, built through the real append path.
-7. Fall-out to finish: every suite that counts payload-store files or asserts the exact set of paths a commit carries.
+1. Lane 3 picks up branch lane/attest-stores-text-356b at 88f2652. The SPEC and design edits stay in 5b1e1d1; no later commit on this branch touches SPEC.md or design/.
+2. Orchestrator ruling (2026-09-19): option 1. The ceremony verbs MUST commit the payload file the attestation binds. A committed log carrying a binding whose payload file was never committed has unrecoverable in-force bytes for every reader of the committed copy, and the CI protected-path guard resolves payloads out of committed trees.
+3. attest.ts exports the payload value and its hash as one function, so the store shape { text } has one author and amend can name the file the attestation will bind.
+4. src/cli/amend.ts: the ceremony file set gains the attested-policy payload beside the policy, the log and the pins. It is named in the printed git add, in the dry-run preview, and in the paths commitOnBase lays over the base tree. Human path binds the attestation payload; agent path binds the proposal payload, which is what makes that chain recoverable. approval policy apply inherits it (it runs amend). approval log advance already carries .approval/payloads.
+5. Update the tests that pinned the old path sets and the old payload-store counts: cli-amend (3), cli-log-verbs advance (2), cli-policy-apply-publish (1), cli-attest (1), cli-doctor (3), cli-status (3), cli-hook prompts (2), payload-store (2), render-queue (1). Where a count is all that moved, move the count; where a fixture assertion assumed an empty store, assert the delta rather than the absolute.
+6. build, typecheck, lint, npm test. The 22 SMTP/email failures are pre-existing on Node v26 on this laptop and are not touched.
+7. PR against main. Protected paths in this branch (SPEC.md, design/channel-sender-identity.md) mean a records advance before the guard can pass: report to the orchestrator the moment the branch is pushed and do not arm until it replies.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
