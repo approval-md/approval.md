@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>approval.md asset renderer</title>
+<!-- Renders the icon PNGs and the share card from brand/icon.svg and the wordmark
+     paths, in a browser so JetBrains Mono is the real font. Serve the repo
+     (node scripts/site-serve.mjs), open /brand/render-assets.html, and read
+     window.assets (name -> data URL) or click each download link. With the
+     server started as `node scripts/site-serve.mjs 8788 --sink`, opening
+     /brand/render-assets.html?sink POSTs every PNG to brand/out/, and
+     `node scripts/build-site-icons.mjs` moves them into place. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>body{font:14px ui-monospace,monospace;background:#222;color:#ddd;padding:20px}canvas{display:block;margin:12px 0;background:repeating-conic-gradient(#333 0 25%,#444 0 50%) 0 0/16px 16px}</style>
+<div id="out"></div>
+<script>
+const BX1 = 'M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z';
+const BX2 = 'M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z';
+const TK  = 'M 74 176 L 116 220 L 232 80';
+const assets = {};
+function glyph(ctx, ink, x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = ink; ctx.fill(new Path2D(BX1)); ctx.fill(new Path2D(BX2));
+  ctx.strokeStyle = '#17A15E'; ctx.lineWidth = 30; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.stroke(new Path2D(TK)); ctx.restore();
+}
+function icon(size) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d'); const s = size / 320;
+  ctx.fillStyle = '#F6F3EC'; ctx.beginPath(); ctx.roundRect(0, 0, size, size, 64 * s); ctx.fill();
+  glyph(ctx, '#17191D', 27 * s, -4 * s, s);
+  return c;
+}
+async function card() {
+  await document.fonts.load('700 120px "JetBrains Mono"');
+  await document.fonts.load('400 40px "JetBrains Mono"');
+  const c = document.createElement('canvas'); c.width = 1200; c.height = 630;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#050608'; ctx.fillRect(0, 0, 1200, 630);
+  // faint dot field, like the landing hero
+  ctx.fillStyle = 'rgba(247,248,248,.07)';
+  for (let y = 24; y < 630; y += 28) for (let x = 24; x < 1200; x += 28) { ctx.beginPath(); ctx.arc(x, y, 1.2, 0, Math.PI * 2); ctx.fill(); }
+  const F = 120, y = 318; ctx.textBaseline = 'alphabetic';
+  ctx.font = `700 ${F}px "JetBrains Mono"`; ctx.fillStyle = '#f7f8f8';
+  const s = F * 0.82 / 208;               // glyph height matches .mark svg{height:.82em}
+  const gw = 224 * s, w1 = ctx.measureText('appr').width, w3 = ctx.measureText('val').width, w4 = ctx.measureText('.md').width;
+  const total = w1 + gw + w3 + w4, x0 = (1200 - total) / 2;
+  ctx.fillText('appr', x0, y);
+  // the bracket foot (path y=250) sits on the baseline, as it does in the header
+  glyph(ctx, "#f7f8f8", x0 + w1 - 24 * s, y - 250 * s, s);
+  ctx.fillText('val', x0 + w1 + gw, y);
+  ctx.fillStyle = '#8a8a88'; ctx.fillText('.md', x0 + w1 + gw + w3, y);
+  ctx.font = '400 40px "JetBrains Mono"'; ctx.fillStyle = '#f7f8f8'; ctx.textAlign = 'center';
+  ctx.fillText('human approval for agent actions', 600, 420);
+  return c;
+}
+(async () => {
+  const out = document.getElementById('out');
+  const add = (name, c) => { assets[name] = c.toDataURL('image/png'); const a = document.createElement('a'); a.download = name; a.href = assets[name]; a.textContent = name; out.append(a, c); };
+  for (const [n, sz] of [['f16.png', 16], ['f32.png', 32], ['f48.png', 48], ['apple-touch-icon.png', 180], ['icon-192.png', 192], ['icon-512.png', 512]]) add(n, icon(sz));
+  add('og-image.png', await card());
+  window.assets = assets;
+  if (new URLSearchParams(location.search).has("sink")) {
+    for (const [name, url] of Object.entries(assets)) {
+      const blob = await (await fetch(url)).blob();
+      const r = await fetch("/sink/" + name, { method: "POST", body: blob });
+      out.append(document.createTextNode(await r.text()));
+    }
+  }
+  document.title = "ready";
+})();
+</script>
