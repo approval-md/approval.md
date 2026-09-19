@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='{ repository(owner:\"approval-md\", name:\"approval.md\") { p456: pullRequest(number:456){ state } p457: pullRequest(number:457){ state isInMergeQueue } p458: pullRequest(number:458){ state mergeStateStatus } } }'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
