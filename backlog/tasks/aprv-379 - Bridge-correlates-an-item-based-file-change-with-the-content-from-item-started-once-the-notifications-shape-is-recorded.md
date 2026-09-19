@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-19 14:10'
-updated_date: '2026-09-19 14:10'
+updated_date: '2026-09-19 14:24'
 labels:
   - codex
   - bridge
@@ -36,3 +36,9 @@ UNDER (a) THERE IS A THIRD THING: decideHarnessCall derives its classes from des
 - [ ] #2 An item-based file-change request whose content the bridge recorded is classified against that content and the registered payload binds the content sha256 beside the paths
 - [ ] #3 A request whose content cannot be produced from the bridge own record stays declined under bridge-file-change-unbound, and a correlation that matched the wrong item is impossible or refused (say which)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+CORRECTION (lane 4, 2026-09-19, orchestrator accepted): the description above says APRV-363 added a SEAM that lets a caller hand the hook a description it computed itself. It did not, and the difference matters. APRV-363 added a BRANCH inside describeToolCall in src/cli/hook.ts, for an apply_patch call carrying a change map instead of an envelope. There is deliberately no caller-supplied description: a caller that could hand the hook its own classes would be the party under oversight choosing its own scrutiny (SPEC section 11.1 invariant 4). This task extends that branch rather than using a seam that does not exist.
+<!-- SECTION:NOTES:END -->
