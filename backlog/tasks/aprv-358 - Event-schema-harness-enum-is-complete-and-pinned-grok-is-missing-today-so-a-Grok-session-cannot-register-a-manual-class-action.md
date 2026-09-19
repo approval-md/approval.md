@@ -3,9 +3,11 @@ id: APRV-358
 title: >-
   Event schema harness enum is complete and pinned: grok is missing today, so a
   Grok session cannot register a manual-class action
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-17 22:06'
+updated_date: '2026-09-19 08:00'
 labels:
   - schema
   - hook
@@ -29,3 +31,16 @@ Found by the Muse adapter lane on 2026-09-18 (PR #437). schema/event.schema.json
 - [ ] #3 A Grok session registering a manual-class action through the hook appends a valid approval.requested in a scratch log built through the real append path (the failing case today, as a regression test), and the same is asserted for muse, codex, cursor and claude-code
 - [ ] #4 build, typecheck, lint, the hook suites and conformance pass
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. schema/event.schema.json: add "grok" to the payload.harness enum, in HARNESS_KINDS order, and note in the description that the list is pinned equal to the runtime set by test.
+2. src/cli/hook.ts: replace the five-arm switch in commandHook with an exported HARNESS_ADAPTERS map typed Readonly<Record<HarnessKind, HarnessAdapter>>, so the compiler requires an adapter for every kind and a test can read the table.
+3. src/cli/verb-registry.ts: add the missing hook grok entry (oversight from APRV-243; no comment claims it is deliberate).
+4. src/mcp/server.ts: add hook grok to EXCLUDED_VERBS with the same stdin reason as its four siblings, and update the pinned list in tests/mcp-server.test.ts.
+5. New tests/harness-enum.test.ts: one test asserting set-equality with HARNESS_KINDS for the schema enum, the adapter table and its kind/originApp fields, the verb-registry hook subcommands, the MCP exclusions, and the HOOK_HELP usage line; a sibling covering the command-class launch tables, whose vocabulary differs on purpose (claude, not claude-code) and is pinned through an explicit alias map.
+6. AC3 regression in the same file: for each of the five kinds, drive the compiled CLI with that harness dialect on a manual class against a scratch repo attested through the real CLI, and assert task.registered carries harness=<kind> and that approval.requested follows, then approval log verify exits 0. The envelope carries a version field so provenance does not depend on a binary being on PATH.
+7. Conformance: five valid event fixtures schema/fixtures/event/valid/harness-kind-<kind>.json, one per harness, then regenerate conformance vectors.
+8. build, typecheck, lint, npm test, npm run conformance.
+<!-- SECTION:PLAN:END -->

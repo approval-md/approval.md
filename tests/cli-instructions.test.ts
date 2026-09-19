@@ -524,6 +524,10 @@ const AGENT_FACING: readonly string[] = [
   "hook claude-code",
   "hook cursor",
   "hook codex",
+  // APRV-358. The registry entry APRV-243 never wrote. Agent-facing by
+  // construction, like every other harness hook: Grok Build invokes it around
+  // the agent's own tool calls.
+  "hook grok",
   // APRV-350. Agent-facing by construction, like every other harness hook:
   // Muse invokes it around the agent's own tool calls.
   "hook muse",
@@ -582,6 +586,7 @@ test("registry: a human_only decision that needed an argument carries its note",
     "hook claude-code",
     "hook cursor",
     "hook codex",
+    "hook grok",
     "consume",
   ]) {
     const spec = findVerb(label);

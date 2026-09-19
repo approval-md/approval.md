@@ -1,0 +1,23 @@
+{
+  "seq": 54,
+  "ts": "2026-09-19T08:17:44Z",
+  "event": "task.registered",
+  "task": "hook:grok-sess-1:toolu-14",
+  "actor": "agent:grok",
+  "payload": {
+    "state": "proposed",
+    "actions": [
+      {
+        "class": "deps.add",
+        "summary": "npm install --save-dev oxlint",
+        "idempotency_key": "hook:grok-sess-1:toolu-14:deps.add",
+        "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f"
+      }
+    ],
+    "harness": "grok",
+    "harness_version": "grok 0.4.2"
+  },
+  "alg": "sha256/jcs",
+  "prev": "83b5e1097cd264af3b0e7195c84fd6a201e73bc94f58026dae1f7c3b950de846",
+  "hash": "c6410d97b28e53fa0716d8c4b93e250fa8d17c6b4093e5ad21fc80b7e5943d1a"
+}

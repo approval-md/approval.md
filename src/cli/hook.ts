@@ -115,6 +115,7 @@ import {
 } from "../core/gate-window.js";
 import {
   harnessProvenance,
+  isHarnessKind,
   type HarnessKind,
   type HarnessProvenance,
 } from "../core/harness-version.js";
@@ -669,6 +670,31 @@ const MUSE_ADAPTER: HarnessAdapter = {
   passThroughTools: ["submit_reminder_decision"],
   shellCwdKey: "workdir",
   contributorModelGuard: true,
+};
+
+/**
+ * Every harness this runtime speaks a hook protocol for, by kind (APRV-358).
+ *
+ * The table is `Record<HarnessKind, HarnessAdapter>` rather than a list of
+ * consts and a switch, and the type is the point: a kind added to
+ * `HARNESS_KINDS` with no adapter beside it fails to compile, so the two lists
+ * cannot drift by forgetting. The subcommand dispatch below reads this map, so
+ * `approval hook <kind>` is answerable for exactly the kinds named here.
+ *
+ * The kinds that are enumerated OUTSIDE this module — the schema's
+ * `payload.harness` enum, the verb registry's `hook` subcommands, the MCP
+ * exclusions, the help — are pinned set-equal to `HARNESS_KINDS` by
+ * `tests/harness-enum.test.ts`, which exists because `grok` shipped an adapter
+ * in APRV-243 and reached none of them. A Grok session's manual-class
+ * registration was refused at the write boundary for eleven days and nothing
+ * failed.
+ */
+export const HARNESS_ADAPTERS: Readonly<Record<HarnessKind, HarnessAdapter>> = {
+  "claude-code": CLAUDE_ADAPTER,
+  cursor: CURSOR_ADAPTER,
+  codex: CODEX_ADAPTER,
+  grok: GROK_ADAPTER,
+  muse: MUSE_ADAPTER,
 };
 
 /**
@@ -4572,20 +4598,12 @@ export function commandHook(
     return EXIT_OK;
   }
 
-  switch (sub) {
-    case "claude-code":
-      return commandHarnessHook(rest, streams, cwd, readStdin, CLAUDE_ADAPTER);
-    case "cursor":
-      return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
-    case "codex":
-      return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
-    case "grok":
-      return commandHarnessHook(rest, streams, cwd, readStdin, GROK_ADAPTER);
-    case "muse":
-      return commandHarnessHook(rest, streams, cwd, readStdin, MUSE_ADAPTER);
-    case "classify":
-      return commandClassify(rest, streams, cwd);
-    default:
-      return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
+  // APRV-358: one list. `isHarnessKind` is the same predicate the write
+  // boundary and doctor use, so a kind that can be recorded is a kind that can
+  // be invoked, and neither can be added without the other.
+  if (isHarnessKind(sub)) {
+    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub]);
   }
+  if (sub === "classify") return commandClassify(rest, streams, cwd);
+  return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
 }

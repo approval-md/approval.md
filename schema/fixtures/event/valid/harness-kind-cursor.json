@@ -1,0 +1,23 @@
+{
+  "seq": 52,
+  "ts": "2026-09-19T08:15:11Z",
+  "event": "task.registered",
+  "task": "hook:cursor-sess-1:toolu-12",
+  "actor": "agent:cursor",
+  "payload": {
+    "state": "proposed",
+    "actions": [
+      {
+        "class": "deps.add",
+        "summary": "npm install --save-dev oxlint",
+        "idempotency_key": "hook:cursor-sess-1:toolu-12:deps.add",
+        "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f"
+      }
+    ],
+    "harness": "cursor",
+    "harness_version": "cursor-agent 2026.08.19"
+  },
+  "alg": "sha256/jcs",
+  "prev": "129eaa2bad261af1367f963979287653173eba8adce9961f09f08970f38d838f",
+  "hash": "2f7c4ab1d0e58936b47c0f1a85d2e6b390c47f1825ad9603be7cd41f5029a8b7"
+}

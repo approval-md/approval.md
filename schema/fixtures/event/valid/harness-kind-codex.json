@@ -1,0 +1,23 @@
+{
+  "seq": 53,
+  "ts": "2026-09-19T08:16:27Z",
+  "event": "task.registered",
+  "task": "hook:codex-sess-1:toolu-13",
+  "actor": "agent:codex",
+  "payload": {
+    "state": "proposed",
+    "actions": [
+      {
+        "class": "deps.add",
+        "summary": "npm install --save-dev oxlint",
+        "idempotency_key": "hook:codex-sess-1:toolu-13:deps.add",
+        "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f"
+      }
+    ],
+    "harness": "codex",
+    "harness_version": "codex-cli 0.155.0"
+  },
+  "alg": "sha256/jcs",
+  "prev": "2f7c4ab1d0e58936b47c0f1a85d2e6b390c47f1825ad9603be7cd41f5029a8b7",
+  "hash": "83b5e1097cd264af3b0e7195c84fd6a201e73bc94f58026dae1f7c3b950de846"
+}
