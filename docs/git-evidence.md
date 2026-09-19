@@ -217,6 +217,42 @@ rotation rule and what to do about a lost key are in
 [cli-reference](cli-reference.md#setup-checkpoint); the design and the decisions
 inside it are in [checkpoints](checkpoints.md).
 
+## The other direction: git as the thing being judged
+
+Everything above uses git as a second witness to the log. The protected-path
+guard (`scripts/protected-path-guard.mjs`, `src/core/protected-path-guard.ts`)
+runs the relation the other way round: it reads git history and asks the log
+whether a human decided each protected change. Both layers read committed trees
+only, and neither ever reads a working copy.
+
+**The unit of judgment is one commit** (APRV-375). For every commit in
+`base..head`, base is that commit's first parent, head is the commit, and the
+pull request's verdict is the conjunction. The guard does not replay the
+combined base-to-head diff, which it did until 2026-09-19, because a grant binds
+ONE edit: a before-state, an after-state, and a human who was shown them. The
+combined diff of a branch is a change nobody made, so no record can cover it,
+and PR #427 is the worked example — judged as one change it failed with fourteen
+lines tracing to no authorized material while every commit in it was separately
+granted.
+
+The security argument for judging a smaller thing:
+
+1. Every byte that differs between the two trees was written by some commit of
+   `base..head`. Two-dot range semantics is what makes that true.
+2. A non-merge commit's whole contribution is its diff against its parent, which
+   is what the guard judges.
+3. A merge commit contributes only what it resolved: the bytes its result
+   carries that no parent carried, which is git's dense combined diff (`--cc`).
+   A merge with a non-empty one on a guarded path is judged against its first
+   parent. A merge whose result on a path is some parent's bytes verbatim
+   invented nothing and is listed as skipped.
+
+Work a branch absorbed by merging `origin/main` is main's own, it passed its own
+pull request, and two-dot semantics excludes it by construction, since CI's base
+is `git merge-base origin/main HEAD`. `approval doctor`'s dark-session sweep
+judges the same unit through the same helper (`src/core/commit-guard.ts`), so
+the health row and the CI verdict agree by construction.
+
 ## Demonstrating both layers
 
 `tests/daemon-git-evidence.test.ts` runs the demonstration: commit a log,

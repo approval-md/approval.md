@@ -26,7 +26,6 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +33,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { appendAttestation } from "../src/core/attest.js";
+import { commitGuardInputParts } from "../src/core/commit-guard.js";
 import {
   DAEMON_EVIDENCE_EMAILS,
   DARK_SESSION_CODES,
@@ -60,6 +60,8 @@ import { verifyWithRecords } from "../src/core/verify.js";
 import { at, fixedClock, newScenario, type Scenario } from "./scenario.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+/** dist/tests/…test.js -> the repository root, and the CI guard beside it. */
+const GUARD_SCRIPT = fileURLToPath(new URL("../../scripts/protected-path-guard.mjs", import.meta.url));
 
 const HUMAN = "human:carter";
 const AGENT = "agent:claude-code";
@@ -979,32 +981,76 @@ function payloadFromStore(root: string): (hash: string) => unknown | null {
 }
 
 /**
- * The guard's inputs for ONE change over `SPEC.md`, built here exactly as
- * `scripts/protected-path-guard.mjs` builds them for a pull request range.
+ * The guard's verdict on ONE commit, built from the SHARED per-commit helper
+ * (APRV-375).
+ *
+ * `core/commit-guard.ts` is the one place either side constructs these inputs:
+ * `scripts/protected-path-guard.mjs` calls it for every commit of a pull
+ * request's range, and `core/dark-session.ts`'s arm A calls it for every commit
+ * in its window. Calling it here too is the point — if the doctor and CI could
+ * disagree about the unit, this helper is where that would have to show up.
  */
-function guardSpan(root: string, baseRev: string, headRev: string, records: readonly EventRecord[]) {
-  const show = (rev: string): string | null => {
-    const shown = git(["show", `${rev}:SPEC.md`], root);
-    return shown.code === 0 ? shown.stdout : null;
+function guardCommit(root: string, sha: string, records: readonly EventRecord[]) {
+  const read = (args: readonly string[]): string | null => {
+    const run = git([...args], root);
+    return run.code === 0 ? run.stdout : null;
   };
-  const digest = (rev: string): string | null => {
-    const blob = show(rev);
-    return blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
-  };
+  const authored = git(["log", "-1", "--format=%aI", sha], root).stdout.trim();
+  const committed = git(["log", "-1", "--format=%cI", sha], root).stdout.trim();
+  const parts = commitGuardInputParts(read, {
+    sha,
+    ts: { author: authored, committer: committed },
+  });
   return evaluateProtectedPaths({
     changedPaths: ["SPEC.md"],
-    blobsFor: () => ({ base: show(baseRev), head: show(headRev) }),
+    blobsFor: parts.blobsFor,
     records,
     logStatus: "ok",
     policyProtectedPaths: ["SPEC.md"],
     policySha256AtHead: null,
     policyPath: "APPROVAL.md",
-    organSha256AtHead: () => digest(headRev),
-    pathSha256AtHead: () => digest(headRev),
+    organSha256AtHead: parts.sha256At,
+    pathSha256AtHead: parts.sha256At,
     payloadFor: payloadFromStore(root),
-    changeTsFor: () => git(["log", "-1", "--format=%aI", headRev], root).stdout.trim(),
-    window: { firstSeq: null, lastSeq: null, firstTs: null, lastTs: null, base: baseRev, head: headRev },
+    changeTsFor: parts.changeTsFor,
+    window: {
+      firstSeq: null,
+      lastSeq: null,
+      firstTs: null,
+      lastTs: null,
+      base: parts.window.base,
+      head: parts.window.head,
+    },
   });
+}
+
+interface ScriptCommit {
+  sha: string;
+  merge: boolean;
+  judged: boolean;
+  ok: boolean;
+  findings: Array<{ path: string; ok: boolean; code?: string }>;
+}
+
+/**
+ * The REAL CI guard, over this fixture's whole history.
+ *
+ * The fixture keeps its log untracked, because that is what a live checkout
+ * looks like while a session is running; the CI guard reads committed trees
+ * only, so the log and its payload store are committed first, in a commit that
+ * touches nothing but the daemon's own append surface.
+ */
+function runCiGuard(root: string): { code: number; stdout: string; commits: ScriptCommit[] } {
+  assert.equal(git(["add", "-A"], root).code, 0);
+  assert.equal(git(["commit", "--no-verify", "-q", "-m", "log advance"], root).code, 0);
+  const seed = git(["rev-list", "--max-parents=0", "HEAD"], root).stdout.trim();
+  const run = spawnSync(
+    process.execPath,
+    [GUARD_SCRIPT, "--repo", root, "--base", seed, "--head", "HEAD", "--json"],
+    { encoding: "utf8" },
+  );
+  const parsed = JSON.parse(run.stdout) as { commits: ScriptCommit[] };
+  return { code: run.status ?? -1, stdout: run.stdout, commits: parsed.commits };
 }
 
 test("APRV-369: the doctor row reaches the CI guard's verdict on merged, evidenced edits", () => {
@@ -1014,7 +1060,7 @@ test("APRV-369: the doctor row reaches the CI guard's verdict on merged, evidenc
   // The CI guard's verdict, per commit: what PR #432's `protected paths` job
   // computed for `ea7427a`, and passed.
   for (const sha of [first, middle, last]) {
-    const report = guardSpan(root, `${sha}^`, sha, records);
+    const report = guardCommit(root, sha, records);
     assert.equal(report.ok, true, `${sha.slice(0, 12)}: ${JSON.stringify(report.findings)}`);
   }
 
@@ -1025,19 +1071,33 @@ test("APRV-369: the doctor row reaches the CI guard's verdict on merged, evidenc
   assert.notEqual(row, undefined);
   assert.notEqual(row?.status, "fail", `dark-sessions disagreed with the guard: ${row?.detail ?? ""}`);
 
+  // APRV-375 AC5: the REAL CI guard, over the same repository, names the same
+  // unit and reaches the same verdict. It judges these three commits and no
+  // other; the merges that carried them into main resolved SPEC.md to one
+  // parent's bytes and are listed as skipped.
+  const ci = runCiGuard(root);
+  assert.equal(ci.code, 0, ci.stdout);
+  for (const sha of [first, middle, last]) {
+    const judged = ci.commits.find((commit) => commit.sha === sha);
+    assert.ok(judged !== undefined, `the CI guard did not judge ${sha.slice(0, 12)}`);
+    assert.equal(judged.judged, true);
+    assert.equal(judged.ok, true);
+  }
+  for (const merge of ci.commits.filter((commit) => commit.merge)) {
+    assert.equal(merge.judged, false, `${merge.sha.slice(0, 12)} was judged for what its parents did`);
+  }
+
   // What is NOT asserted here, and why. On `ea7427a` the union span ALSO
-  // failed, and the reproduction recorded the reason: with six commits over a
-  // 200 KB SPEC.md the exact base-to-head replay "refused after reaching its
-  // byte limit" before it could compose the grants, leaving per-grant matching,
-  // which the union defeats. On a fixture this size the replay finishes and
-  // rescues the union, so a `union.ok === false` assertion here would be
-  // asserting the byte budget rather than the span. That budget is APRV-357's
-  // subject. What this case pins instead is the half that holds at any size:
-  // the doctor and the guard agree per commit, and the middle commit's SIGN-OFF
-  // counts for the doctor, which it could not before arm A supplied
-  // `pathSha256AtHead`.
-  const union = guardSpan(root, `${first}^`, last, records);
-  assert.equal(typeof union.ok, "boolean");
+  // failed, and APRV-357's reproduction recorded the reason: with six commits
+  // over a 200 KB SPEC.md the exact base-to-head replay "refused after reaching
+  // its byte limit" before it could compose the grants, leaving per-grant
+  // matching, which the union defeats. On a fixture this size the replay
+  // finishes and rescues the union, so asserting that the union fails here
+  // would be asserting the byte budget rather than the span. Since APRV-375 no
+  // production path replays a union at all, so what remains to pin is the half
+  // that holds at any size: the doctor and the guard agree per commit, and the
+  // middle commit's SIGN-OFF counts for the doctor, which it could not before
+  // arm A supplied `pathSha256AtHead`.
 });
 
 test("APRV-369: an unevidenced edit that arrived by merge names its commit and its origin", () => {
@@ -1052,4 +1112,16 @@ test("APRV-369: an unevidenced edit that arrived by merge names its commit and i
   assert.match(row?.detail ?? "", /reached this checkout through a merge/u);
   // AC3: it names the commit it judged.
   assert.match(row?.detail ?? "", new RegExp(second.slice(0, 12), "u"));
+
+  // APRV-375 AC5: the CI guard fails the SAME commit, and only that one. Same
+  // unit, same verdict, from the shared per-commit input construction.
+  const ci = runCiGuard(root);
+  assert.equal(ci.code, 1, ci.stdout);
+  const failed = ci.commits.filter((commit) => !commit.ok);
+  assert.deepEqual(
+    failed.map((commit) => commit.sha),
+    [second],
+    ci.stdout,
+  );
+  assert.equal(failed[0]?.findings[0]?.path, "SPEC.md");
 });

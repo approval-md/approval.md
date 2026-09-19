@@ -14,6 +14,29 @@
  * `git show <ref>:<path>`. A guard that read the checkout could be told a
  * different story than the one the pull request carries.
  *
+ * ## The unit of judgment: one commit (APRV-375)
+ *
+ * This guard judges a pull request ONE COMMIT AT A TIME. For every commit in
+ * `base..head`, base is that commit's first parent, head is the commit,
+ * `changedPaths` are the paths it touched, and the timestamps are its own pair;
+ * the pull request's verdict is the conjunction. It does NOT replay the
+ * combined base-to-head diff, which it used to, because a grant binds ONE edit
+ * and the combined diff is a change nobody made and nobody approved. PR #427 is
+ * the worked example: judged as one change it failed with fourteen uncovered
+ * lines while every one of its commits was separately granted (APRV-357's
+ * reproduction, PR #452; Carter ruled per commit on 2026-09-19).
+ *
+ * The security argument, in one line: every byte that differs between the two
+ * trees was written by some commit of the range, a non-merge commit's whole
+ * contribution is its diff against its parent, and a merge commit's is what its
+ * result carries that no parent carried — git's dense combined diff — which is
+ * judged against its first parent here. Nothing goes unjudged. Work the branch
+ * ABSORBED by merging `origin/main` is main's own and is excluded by two-dot
+ * range semantics, since CI's base is `git merge-base origin/main HEAD`.
+ * `src/core/commit-guard.ts` holds the reasoning in full and builds the
+ * per-commit inputs that `approval doctor`'s dark-session arm A also uses, so
+ * the two sides agree by construction rather than by being kept in step.
+ *
  * ## The two dates each protected path is anchored to (APRV-339)
  *
  * For every protected path this script asks git for both dates of the newest
@@ -56,7 +79,6 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -328,11 +350,11 @@ async function main() {
   if (!parsed.ok) return usage(parsed.message);
   const { base, head, repo, json, logRefs } = parsed.flags;
 
-  let guard;
+  let commitGuard;
   let verifyModule;
   let policyModule;
   try {
-    guard = await import("../dist/src/core/protected-path-guard.js");
+    commitGuard = await import("../dist/src/core/commit-guard.js");
     verifyModule = await import("../dist/src/core/verify.js");
     policyModule = await import("../dist/src/core/policy-load.js");
   } catch (cause) {
@@ -350,13 +372,6 @@ async function main() {
     );
     return EXIT_CANNOT_LOOK;
   }
-
-  const diff = git(repo, ["diff", "--name-only", `${base}`, `${head}`]);
-  if (diff === null) {
-    process.stderr.write(`protected-path-guard: git could not diff ${base}..${head} in ${repo}\n`);
-    return EXIT_CANNOT_LOOK;
-  }
-  const changedPaths = diff.split("\n").filter((line) => line.trim().length > 0);
 
   // The policy's own widening entries, from both ends of the range.
   const readEntries = (text) => {
@@ -418,34 +433,6 @@ async function main() {
       candidates: source.candidates,
     };
 
-    const policyBytes = showBlob(repo, head, POLICY_PATH);
-    const policySha256AtHead =
-      policyBytes === null ? null : createHash("sha256").update(policyBytes, "utf8").digest("hex");
-
-    // The same digest, per GATE ORGAN, for the `attested` verdict on the
-    // harness files that install the hook (APRV-272). Computed exactly as the
-    // policy digest above is — from the blob at the HEAD COMMIT, never from the
-    // working tree, so the guard hashes the bytes the pull request carries and
-    // not the bytes the machine running CI happens to have. A path the head
-    // tree does not carry (a deletion) is `null`, which the guard reads as "no
-    // attestation can match", the fail-closed direction.
-    // APRV-338: the same function also answers for ORDINARY protected paths,
-    // where it feeds the sign-off half of the `attested` verdict. One cache and
-    // one computation, because the question is identical — what do this path's
-    // bytes at the head commit hash to — and two would be two chances to hash
-    // the working tree by mistake. The guard keeps the two INPUTS separate so
-    // that a caller wired for organs alone does not silently begin answering
-    // for sign-offs; here, one caller answers both.
-    const headShaCache = new Map();
-    const sha256AtHead = (path) => {
-      if (headShaCache.has(path)) return headShaCache.get(path);
-      const blob = showBlob(repo, head, path);
-      const value =
-        blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
-      headShaCache.set(path, value);
-      return value;
-    };
-
     // Bound material, from the payload store beside the log that was chosen and
     // then from head's. A grant only reachable in a records branch has its
     // payload only there, and a grant head already carried has it at head.
@@ -468,76 +455,34 @@ async function main() {
       return value;
     };
 
-    // When each protected path last changed in this range: BOTH of git's dates
-    // for that commit (APRV-339). The author date (`%aI`) is what the staleness
-    // bound is measured from, because a rebase does not move it. The committer
-    // date (`%cI`) is what the ordering checks are measured against, because it
-    // is the moment those bytes were committed and an amend only moves it
-    // later. They are the same instant on an ordinary commit.
-    const changeTsCache = new Map();
-    const changeTsFor = (path) => {
-      if (changeTsCache.has(path)) return changeTsCache.get(path);
-      const out = git(repo, [
-        "log",
-        "-1",
-        "--format=%aI%n%cI",
-        `${base}..${head}`,
-        "--",
-        path,
-      ]);
-      const lines =
-        out === null ? [] : out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-      // One date and not the other is the pair the core reads as "this is all
-      // git could say", and it then answers both questions.
-      const value =
-        lines.length === 0 ? null : { author: lines[0], committer: lines[1] ?? lines[0] };
-      changeTsCache.set(path, value);
-      return value;
-    };
-
-    // The bytes of each protected path at BOTH commits: what the hunk-level
-    // coverage check is made of (APRV-202). Read from the trees, never the
-    // working copy. A path absent at one end is an add or a delete and is
-    // reported as `null` there; a blob the guard cannot read as text (binary,
-    // detected by a NUL byte) yields `null` for the whole change, which fails
-    // `change-unreadable` rather than falling back to the path-level rule.
-    const blobCache = new Map();
-    const blobsFor = (path) => {
-      if (blobCache.has(path)) return blobCache.get(path);
-      const inTree = (ref) => {
-        const listed = git(repo, ["ls-tree", "-z", "--name-only", ref, "--", path]);
-        return listed !== null && listed.replace(/\0/gu, "").trim().length > 0;
-      };
-      let value = null;
-      const baseHas = inTree(base);
-      const headHas = inTree(head);
-      const baseText = baseHas ? showBlob(repo, base, path) : null;
-      const headText = headHas ? showBlob(repo, head, path) : null;
-      const unreadable =
-        (baseHas && baseText === null) ||
-        (headHas && headText === null) ||
-        (baseText !== null && baseText.includes("\u0000")) ||
-        (headText !== null && headText.includes("\u0000"));
-      if (!unreadable) value = { base: baseText, head: headText };
-      blobCache.set(path, value);
-      return value;
-    };
-
-    const report = guard.evaluateProtectedPaths({
-      changedPaths,
-      blobsFor,
-      records,
-      logStatus,
-      logDetail,
-      policyProtectedPaths,
-      policySha256AtHead,
-      policyPath: POLICY_PATH,
-      organSha256AtHead: sha256AtHead,
-      pathSha256AtHead: sha256AtHead,
-      payloadFor,
-      changeTsFor,
-      window,
+    // ONE COMMIT AT A TIME (APRV-375). Every per-commit input is built by
+    // `core/commit-guard.ts`: the blobs at the commit and at its first parent
+    // (APRV-202's change-level question), the digest at the commit for the
+    // `attested` verdict's organ (APRV-272) and sign-off (APRV-338) halves, and
+    // the commit's own pair of dates (APRV-339). This script builds none of
+    // them any more, and it no longer replays the COMBINED base-to-head diff:
+    // that replay asked about a change nobody made and nobody could approve.
+    // The same helper feeds `approval doctor`'s dark-session arm A, so the two
+    // sides agree by construction rather than by being kept in step.
+    const report = commitGuard.judgeCommits({
+      read: (args) => git(repo, [...args]),
+      base,
+      head,
+      shared: {
+        records,
+        logStatus,
+        logDetail,
+        policyProtectedPaths,
+        policyPath: POLICY_PATH,
+        payloadFor,
+        window,
+      },
     });
+
+    if (report.unavailable !== null) {
+      process.stderr.write(`protected-path-guard: ${report.unavailable} in ${repo}\n`);
+      return EXIT_CANNOT_LOOK;
+    }
 
     if (json) {
       process.stdout.write(`${JSON.stringify({ ...report, log_source: logSource }, null, 2)}\n`);
@@ -564,7 +509,7 @@ async function main() {
           `  ${diverged.length} candidate ref(s) did not anchor to head's chain and were not read: ${named}${more}\n`,
         );
       }
-      process.stdout.write(guard.renderGuardReport(report));
+      process.stdout.write(commitGuard.renderCommitGuardReport(report));
     }
 
     return report.ok ? EXIT_OK : EXIT_FAIL;
