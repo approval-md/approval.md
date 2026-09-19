@@ -1,0 +1,1 @@
+{"command":"grep -rn 'harness_version\\|harnessProvenance\\|harness:' src/cli/hook.ts src/core/*.ts | grep -v '^src/core/harness-version.ts' | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

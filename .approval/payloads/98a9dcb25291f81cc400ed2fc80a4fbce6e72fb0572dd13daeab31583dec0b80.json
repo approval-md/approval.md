@@ -1,0 +1,1 @@
+{"command":"git tag | tail -5; grep -n '\"version\"' package.json; git log --oneline -1 --format='%h %cI %s' -- package.json; ls CHANGELOG* 2>/dev/null; grep -n \"^## \" CHANGELOG.md 2>/dev/null | head -4; git log --oneline v0.1.0..origin/main | wc -l","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-19 09:46'
+updated_date: '2026-09-19 10:43'
 labels:
   - doctor
   - guard
@@ -28,3 +29,15 @@ Residual of APRV-369 (PR 450). Arm A of src/core/dark-session.ts now replays one
 - [ ] #3 Header of src/core/dark-session.ts and docs/git-evidence.md say what unit a merge commit is judged on and why
 - [ ] #4 build, typecheck, lint, dark-session and doctor suites pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Residual from APRV-375 (PR #455), recorded here at the orchestrator request on 2026-09-19.
+
+PR #455 made the CI guard judge a pull request one commit at a time and, in its second commit, anchored WHOLE-FILE evidence (gate.path.signed_off, gate.organ.attested, the policy attestation) at the RANGE HEAD while grants stay per commit. Arm A of the dark-session sweep kept the per-commit anchor, because it has no range: it judges commits that are already merged, each of which passed its own pull request and was ratified, if at all, at that pull request head.
+
+The gap that leaves: a MULTI-COMMIT pull request whose earlier commits were rescued by a sign-off at its head merges into main as several commits, and arm A credits none of them, because no in-window commit blob equals the ratified bytes. CI passed that pull request; the sweep would report it dark. It is a false alarm in a health report and never a hole in the gate, and it is the same shape of disagreement APRV-369 removed.
+
+The fix belongs with this task because it needs the same git question: ask which merge on the checkout first-parent spine brought each commit in, and use THAT merge second parent (the pull request head) as the commit range head for whole-file evidence. Arm A already asks git for the first-parent spine (commitsOf, APRV-369), so the extra call is one rev-list per failing commit rather than a new traversal.
+<!-- SECTION:NOTES:END -->

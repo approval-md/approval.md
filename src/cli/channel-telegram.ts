@@ -170,6 +170,10 @@ import {
   type ChannelSender,
   type SenderSource,
 } from "../core/sender-identity.js";
+import {
+  recordRefusedGesture,
+  type RefusedGestureKind,
+} from "../core/gesture-refusal.js";
 import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import { promptLayoutFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
@@ -2328,6 +2332,44 @@ function senderIdentityFor(
   return actorForSender(load, setup.actor, sender);
 }
 
+/**
+ * Record that a gesture this listener refused was made (APRV-355).
+ *
+ * Best-effort, and after the refusal is already decided: the card the person
+ * sees does not depend on this write landing. A failure is reported on stderr
+ * beside the refusal it was about, because a record that silently did not land
+ * is exactly the gap this task exists to close, and one that fails quietly is
+ * the same gap wearing a fix.
+ *
+ * The runtime cannot name a person on `sender-unmapped` or `sender-ambiguous`,
+ * which is the whole point of those refusals, so `actor` is the listener's
+ * configured identity ONLY where the resolution produced one. The observed
+ * account goes in either way; it is the only thing known about who tapped.
+ */
+function recordGestureRefusal(
+  setup: ListenSetup,
+  streams: Streams,
+  gesture: RefusedGestureKind,
+  refused: { ok: false; code: string; message: string; sender: ChannelSender },
+): void {
+  const recorded = recordRefusedGesture(
+    setup.logPath,
+    {
+      gesture,
+      actor: null,
+      channel: "telegram",
+      sender: refused.sender,
+    },
+    { code: refused.code, message: refused.message },
+    setup.gateOptions,
+  );
+  if (!recorded.ok) {
+    streams.err(
+      `approval: telegram ${gesture} refusal could not be recorded (${recorded.code}): ${recorded.message}\n`,
+    );
+  }
+}
+
 export function checkpointHandlerFor(
   setup: ListenSetup,
   streams: Streams,
@@ -2345,6 +2387,7 @@ export function checkpointHandlerFor(
     const resolved = senderIdentityFor(setup, tap.sender);
     if (!resolved.ok) {
       streams.err(`approval: telegram checkpoint refused (${resolved.code}): ${resolved.message}\n`);
+      recordGestureRefusal(setup, streams, "checkpoint-signature", resolved);
       return {
         ok: false,
         headline: TELEGRAM_NOT_RECORDED,
@@ -2443,6 +2486,15 @@ export function reviewHandlerFor(
     const resolved = senderIdentityFor(setup, tap.sender);
     if (!resolved.ok) {
       streams.err(`approval: telegram review refused (${resolved.code}): ${resolved.message}\n`);
+      // `review-note` when the tap carried words: a note is attention spent
+      // writing rather than attention spent tapping, and an operator reading
+      // this record wants to know which they lost (APRV-355).
+      recordGestureRefusal(
+        setup,
+        streams,
+        tap.note === undefined || tap.note.trim().length === 0 ? "review" : "review-note",
+        resolved,
+      );
       return {
         ok: false,
         headline: TELEGRAM_NOT_RECORDED,

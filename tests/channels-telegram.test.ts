@@ -6185,7 +6185,7 @@ test("APRV-324: a mapped sender's review is recorded as that person, not as the 
   assertClean(world.unit);
 });
 
-test("APRV-324: an unmapped sender's review is refused, and nothing is appended", async () => {
+test("APRV-324: an unmapped sender's review is refused, and APRV-355 records the attempt", async () => {
   const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
   const { channel, err } = reviewChannelFor(world);
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
@@ -6193,8 +6193,21 @@ test("APRV-324: an unmapped sender's review is refused, and nothing is appended"
 
   await tapReview(channel, "ok", CHAT, STRANGER_TG);
 
+  // No review: the gesture was refused. One `audit.gesture_refused`, which is
+  // the whole of APRV-355 — the attention spent by an account the operator did
+  // not map used to leave no trace in the log at all.
   assert.equal(reviewsIn(world).length, 0);
-  assert.equal(recordsOf(world.unit.logPath).length, before, "the refusal appended a record");
+  const after = recordsOf(world.unit.logPath);
+  assert.equal(after.length, before + 1, "the refusal appended more than the audit record");
+  const refused = after[after.length - 1];
+  assert.equal(refused?.event, "audit.gesture_refused");
+  assert.equal(refused?.actor, "system:gate");
+  assert.equal(refused?.channel, "telegram");
+  const payload = (refused?.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["gesture"], "review");
+  assert.equal(payload["code"], "sender-unmapped");
+  assert.equal("actor" in payload, false);
+  assert.deepEqual(payload["sender"], { channel: "telegram", id: STRANGER_TG });
   assert.ok(
     err.some((line) => line.includes("sender-unmapped")),
     `the operator was not told: ${err.join(" | ")}`,
@@ -6218,6 +6231,12 @@ test("APRV-324: with no mapping, a review is attributed exactly as it was before
   assert.equal(reviews[0]?.actor, HUMAN);
   const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
   assert.equal("sender" in payload, false, JSON.stringify(payload));
+  // APRV-355: nothing was refused, so nothing is recorded about a refusal.
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "audit.gesture_refused")
+      .length,
+    0,
+  );
   assertClean(world.unit);
 });
 

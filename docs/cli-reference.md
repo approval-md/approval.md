@@ -3852,6 +3852,32 @@ leaves the sample exactly where it was: open, listed by `approval audit list`,
 and reviewable with `approval audit review <seq>`. Nothing in this channel can
 empty the backlog, which is the property a sampled-audit backlog exists to have.
 
+**A refused gesture leaves a record (APRV-355).** When the policy maps senders,
+a checkpoint signature or a review from an account the attested policy names
+nobody for is refused before any verb runs, and since this change the attempt is
+recorded: one **`audit.gesture_refused`**, with a `system:gate` actor, the
+channel, and a payload carrying `gesture`
+(`checkpoint-signature`, `review`, `review-note`), `code`
+(`sender-unmapped`, `sender-ambiguous`, `policy-not-attested`), the refusal
+`message`, the observed `sender`, and `actor` only where the runtime could name
+a person.
+
+```
+{"event":"audit.gesture_refused","actor":"system:gate","channel":"telegram",
+ "payload":{"gesture":"checkpoint-signature","code":"sender-unmapped",
+ "sender":{"channel":"telegram","id":"5551234567"},"message":"…"}}
+```
+
+It exists because the only refusal record before it,
+`audit.decision_refused`, requires an `action_key` and a `decision` of grant,
+reject or revoke, and a signature or a review has neither; writing one there
+would mean inventing both. The record is audit tier in the strict sense: it
+authorizes nothing, settles no request, charges no budget, is not sampled, and
+no enforcement path reads it. `approval log tail` and `approval log export`
+show it like any other record. Nothing about the refusal itself changed — no
+signature is appended and no review is recorded — and a listener whose policy
+maps no senders never reaches this path at all.
+
 **A settled request stops looking live.** Every terminal state the listener
 observes for a message it sent edits that message: the text becomes the outcome
 (`✓ APPROVED`, `✗ REJECTED`, `✗ REVOKED`, `✗ EXPIRED`, `WITHDRAWN`) with the

@@ -1,0 +1,1 @@
+{"command":"grep -rln \"checkpointHandlerFor\\|reviewHandlerFor\" tests/ | head && grep -n \"checkpointHandlerFor\\|reviewHandlerFor\" tests/*.ts | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}
