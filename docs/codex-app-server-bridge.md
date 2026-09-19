@@ -663,9 +663,14 @@ bridge), then 362 to 368 depending on it.
    moved to APRV-378 with the audit record, because the record is the only
    durable fact a row could read; a row built here would always skip.
 5. **Custody of the socket.** Decide and enforce who may connect, given that a
-   pending request is replayed to the next connection. Until that is settled,
-   the bridge's claim is "this client decided every question it was asked",
-   which is narrower than "every question was decided here".
+   pending request is replayed to the next connection. **Landed (APRV-365),
+   and the answer was already in the code.** The bridge starts the app-server
+   itself, as a child process over stdio pipes: there is no socket, nothing
+   binds a path, and no other process holds a descriptor to speak on. Custody
+   is the operating system's, which is the strongest kind available and the
+   only kind this project would not have to attest. The claim is now scoped to
+   what that makes true: "this client decided every question this app-server
+   child asked in this session".
 6. **Pin the approval policy.** `UnlessTrusted` (`"untrusted"` on the wire) is
    the only variant under which every command asks. An adoption that does not
    pin it is gating an unknown fraction of the session. **Landed (APRV-366):**
