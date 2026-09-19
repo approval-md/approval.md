@@ -539,11 +539,29 @@ because the gate's wait is synchronous: frames queue while a decision is being
 made, which is the fail-closed direction and matches the observed protocol,
 where a turn does not move past an unanswered question.
 
-Follow-ups 2 through 8 below are separate tasks and none of them is done here:
-in particular the command is bound as the string that arrived (APRV-362), the
-auto-reviewer is not proved off (APRV-364), the policy pin is requested rather
-than verified (APRV-366), and socket custody is unsettled (APRV-365). Until
-those land, the claim stays exactly what the recommendation says it is.
+Follow-ups 2 through 8 below are separate tasks: the command is bound as the
+string that arrived (APRV-362), the auto-reviewer is not proved off (APRV-364),
+and socket custody is unsettled (APRV-365). Until those land, the claim stays
+exactly what the recommendation says it is.
+
+**The approval policy pin is now checked (APRV-366, landed).** The thread is
+still started with `approvalPolicy: "untrusted"` and `sandbox: "read-only"`, and
+what changed is that the answer is read. A refused `thread/start` stops the run
+with `bridge-thread-start-refused`, carrying the server's own error, which is
+where a refusal of the value itself arrives. A server that reports an effective
+approval policy of its own, on the `thread/start` result or on a thread
+notification, stops the run with `bridge-approval-policy-mismatch` when that
+policy is not `untrusted`. Neither is a member of the declines union: those are
+answers to one approval request, and these end the session.
+
+What it still cannot do is make a silent server speak. The 0.155.0 server echoes
+no approval policy at all, so a client that demanded an echo could not run
+against the server this verb exists for; an absent value is therefore not a
+stop, and the report says so rather than claiming more. `thread.requested` is
+what went on the wire, `thread.effective` is what the server said, and
+`thread.confirmed` is false when nothing confirmed it. An operator reading
+`confirmed: false` knows the pin was asked for and not proved, which is a
+different fact from the pin holding.
 
 ## The tasks an adopt would need
 
@@ -572,7 +590,10 @@ bridge), then 362 to 368 depending on it.
    which is narrower than "every question was decided here".
 6. **Pin the approval policy.** `UnlessTrusted` (`"untrusted"` on the wire) is
    the only variant under which every command asks. An adoption that does not
-   pin it is gating an unknown fraction of the session.
+   pin it is gating an unknown fraction of the session. **Landed (APRV-366):**
+   sent with no flag to override it, and checked, with a stop code for a
+   refusal and a stop code for a different effective policy. A server that
+   reports none is run against and recorded as unconfirmed.
 7. **Refuse `acceptForSession`.** Standing authority for a whole session is a
    grant shape this project does not have, and a bridge must never emit it.
    **Landed (APRV-367):** the reply vocabulary is a closed type, the encoder is

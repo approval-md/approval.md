@@ -15,12 +15,29 @@
  * Every reply it receives is appended to `APPROVAL_STUB_REPLIES` as one JSON
  * line, so a test reads what the bridge actually sent rather than what the
  * bridge said it sent. Frames carry no `jsonrpc` member, per the protocol.
+ *
+ * Three more knobs, all additive, for the approval-policy pin (APRV-366). Unset,
+ * every one of them leaves the stub behaving exactly as it did:
+ *
+ *   APPROVAL_STUB_THREAD_ERROR    JSON error object: `thread/start` is refused
+ *                                 with it, as the real server refuses an
+ *                                 approval policy variant it does not know.
+ *   APPROVAL_STUB_THREAD_RESULT   JSON object merged into `thread/start`'s
+ *                                 result, for a server that reports its own
+ *                                 effective settings.
+ *   APPROVAL_STUB_THREAD_STARTED  JSON object sent as a `thread/started`
+ *                                 notification's params after the thread is
+ *                                 started, which is where the real server
+ *                                 narrates the thread it just made.
  */
 
 import { appendFileSync } from "node:fs";
 
 const script = JSON.parse(process.env["APPROVAL_STUB_SCRIPT"] ?? "[]");
 const repliesPath = process.env["APPROVAL_STUB_REPLIES"] ?? null;
+const threadError = JSON.parse(process.env["APPROVAL_STUB_THREAD_ERROR"] ?? "null");
+const threadResult = JSON.parse(process.env["APPROVAL_STUB_THREAD_RESULT"] ?? "null");
+const threadStarted = JSON.parse(process.env["APPROVAL_STUB_THREAD_STARTED"] ?? "null");
 
 let buffer = "";
 let next = 0;
@@ -75,7 +92,12 @@ process.stdin.on("data", (chunk) => {
     if (frame.method === "initialized") continue;
     if (frame.method === "thread/start") {
       record({ kind: "thread/start", params: frame.params ?? {} });
-      write({ id: frame.id, result: { threadId: "thread-1" } });
+      if (threadError !== null) {
+        write({ id: frame.id, error: threadError });
+        continue;
+      }
+      write({ id: frame.id, result: { threadId: "thread-1", ...threadResult } });
+      if (threadStarted !== null) write({ method: "thread/started", params: threadStarted });
       continue;
     }
     if (frame.method === "turn/start") {

@@ -73,6 +73,22 @@
  * A server request this verb does not recognise is declined too, on the same
  * rule: a question nobody classified is not a question to answer yes to.
  *
+ * ## The approval policy is pinned, and the pin is checked (APRV-366)
+ *
+ * The thread starts with `approvalPolicy: "untrusted"`, which is `UnlessTrusted`
+ * on the wire and the only variant under which every command and every patch
+ * asks. Under `on-request` or `never` an unknown fraction of the session never
+ * reaches this client, and "this client decided every question it was asked"
+ * would still be true while meaning nothing. There is no flag.
+ *
+ * What the verb can prove about it depends on the server. A `thread/start` the
+ * server refuses stops the run, carrying its error verbatim, which is where a
+ * refusal of the value itself lands. A server that reports an effective policy
+ * of its own, on `thread/start`'s result or on a thread notification, stops the
+ * run when that policy is not the pinned one. A server that reports nothing is
+ * run against, and the report then claims only what happened: the pin was
+ * requested and no frame confirmed it.
+ *
  * ## One at a time, on purpose
  *
  * The gate's wait is synchronous, so while one question is being decided this
@@ -117,14 +133,14 @@ const ADAPTER = HARNESS_ADAPTERS["codex"];
  * `UnlessTrusted` is the only variant under which every command asks
  * (`docs/codex-app-server-bridge.md`, question 5), and `unless-trusted` is
  * REFUSED by the server: the accepted spelling is `untrusted`, established by
- * the 2026-09-18 probe. Pinning it here rather than exposing a flag is
- * deliberate for this task; APRV-366 makes the pin something the verb proves
- * rather than something it merely requests.
+ * the 2026-09-18 probe. There is no flag: a session gating an unknown fraction
+ * of itself is the thing this pin exists to prevent, and an operator who could
+ * pass `on-request` would have exactly that session (APRV-366).
  */
-const APPROVAL_POLICY = "untrusted";
+export const APPROVAL_POLICY = "untrusted";
 
 /** The sandbox posture the thread starts under. */
-const SANDBOX = "read-only";
+export const SANDBOX = "read-only";
 
 /** Polling interval for the gate's verified read, in milliseconds. */
 const DEFAULT_INTERVAL_MS = 2000;
@@ -215,6 +231,87 @@ export const BRIDGE_REFUSAL_CODES = [
 ] as const;
 
 export type BridgeRefusalCode = (typeof BRIDGE_REFUSAL_CODES)[number];
+
+/**
+ * Every way this verb STOPS a session instead of answering a question
+ * (APRV-366), closed and machine-readable.
+ *
+ * A separate array from {@link BRIDGE_REFUSAL_CODES}, and deliberately not a
+ * member of it. Those are answers: one approval request declined, the turn
+ * carrying on. These end the run before or instead of a turn, because the
+ * session could not be established as the kind of session this verb is willing
+ * to sit in front of. The conformance union `bridge_refusal_codes` is
+ * documented as "every way the bridge can decline an app-server approval
+ * request", so a stop code inside it would describe a different boundary, which
+ * is the reasoning that kept these out of `hook_deny_codes` too.
+ *
+ * The process exit for both is {@link EXIT_IO}, as it is for every other
+ * protocol stop here: the exit codes are frozen public API and a session that
+ * could not be started is not a new number. The code below is the distinct part
+ * a caller branches on.
+ */
+export const BRIDGE_STOP_CODES = [
+  /**
+   * The server refused `thread/start`, so no thread exists and the approval
+   * policy this verb requires was never established. The server's own error is
+   * carried verbatim in the detail, which is where a refusal of the policy
+   * VALUE shows up (the 2026-09-18 probe's `unknown variant \`unless-trusted\`,
+   * expected one of \`untrusted\`, \`on-request\`, \`granular\`, \`never\``).
+   */
+  "bridge-thread-start-refused",
+  /**
+   * The server started a thread and reported an effective approval policy that
+   * is not {@link APPROVAL_POLICY}. Under any other variant an unknown fraction
+   * of the session never produces a question at all, so "this client decided
+   * every question it was asked" would be true and would mean nothing.
+   */
+  "bridge-approval-policy-mismatch",
+] as const;
+
+export type BridgeStopCode = (typeof BRIDGE_STOP_CODES)[number];
+
+/**
+ * The thread this verb started, as the report records it (APRV-366).
+ *
+ * `requested` is what went on the wire, `effective` is what the server said
+ * about it, and `confirmed` is the difference between the two: a server that
+ * echoes the policy back proves the pin, and one that says nothing leaves this
+ * client able to claim only that it asked. That distinction is recorded rather
+ * than smoothed over, because a report that said "untrusted" for both cases
+ * would be asserting something no frame carried.
+ */
+export interface BridgeThreadRecord {
+  id: string | null;
+  cwd: string;
+  requested: { approvalPolicy: string; sandbox: string };
+  effective: { approvalPolicy: string | null };
+  confirmed: boolean;
+}
+
+/**
+ * The effective approval policy a server frame reports, or `null` when it
+ * reports none.
+ *
+ * The locations are a documented short list rather than a generic walk: this
+ * value can STOP a session, so it is read from places whose meaning is known,
+ * and a stray `approvalPolicy` nested inside some unrelated structure must not
+ * be able to end a run. The observed 0.155.0 server echoes none of them, which
+ * is why an absent value is not itself a stop.
+ */
+export function effectiveApprovalPolicy(value: unknown): string | null {
+  const object = (candidate: unknown): Record<string, unknown> | null =>
+    candidate !== null && typeof candidate === "object"
+      ? (candidate as Record<string, unknown>)
+      : null;
+  const top = object(value);
+  if (top === null) return null;
+  for (const holder of [top, object(top["thread"]), object(top["config"]), object(top["settings"])]) {
+    if (holder === null) continue;
+    const named = holder["approvalPolicy"] ?? holder["approval_policy"];
+    if (typeof named === "string" && named.length > 0) return named;
+  }
+  return null;
+}
 
 /** One answered question, for the report and for the tests. */
 export interface BridgeAnswer {
@@ -648,14 +745,32 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       return;
     }
 
-    const finish = (code: number, reason: string): void => {
+    // What this session asked for, before the server has said anything about
+    // it. Recorded from the start so a run that stops at `thread/start` still
+    // reports which pin it was refused over (APRV-366).
+    const thread: BridgeThreadRecord = {
+      id: null,
+      cwd: plan.workspace,
+      requested: { approvalPolicy: APPROVAL_POLICY, sandbox: SANDBOX },
+      effective: { approvalPolicy: null },
+      confirmed: false,
+    };
+
+    const finish = (code: number, reason: string, stop: BridgeStopCode | null = null): void => {
       if (settled) return;
       settled = true;
       child.kill("SIGTERM");
       if (plan.json) {
-        streams.out(`${JSON.stringify({ ok: code === EXIT_OK, reason, answers })}\n`);
+        streams.out(
+          `${JSON.stringify({ ok: code === EXIT_OK, reason, ...(stop === null ? {} : { code: stop }), thread, answers })}\n`,
+        );
       } else {
-        streams.out(`${reason}\n`);
+        streams.out(`${stop === null ? reason : `${stop}: ${reason}`}\n`);
+        streams.out(
+          `  thread ${thread.id ?? "(none)"}  approvalPolicy ${thread.requested.approvalPolicy}` +
+            ` (${thread.confirmed ? "confirmed by the server" : `requested; the server reported ${thread.effective.approvalPolicy ?? "none"}`})` +
+            `  sandbox ${thread.requested.sandbox}\n`,
+        );
         for (const answer of answers) {
           streams.out(
             `  ${answer.outcome === "accept" ? "granted" : "declined"}  ${answer.decision}` +
@@ -664,6 +779,31 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
         }
       }
       done(code);
+    };
+
+    /**
+     * Take what a frame says about the effective approval policy, and stop the
+     * session when it names one this verb did not ask for.
+     *
+     * Returns true when the caller should stop. A frame naming nothing leaves
+     * `confirmed` false and is NOT a stop: the observed server echoes no policy
+     * at all, and a client that demanded an echo could not run against it. What
+     * the report then claims is only that the pin was requested.
+     */
+    const pinnedOrStop = (value: unknown, where: string): boolean => {
+      const named = effectiveApprovalPolicy(value);
+      if (named === null) return false;
+      thread.effective.approvalPolicy = named;
+      if (named === APPROVAL_POLICY) {
+        thread.confirmed = true;
+        return false;
+      }
+      finish(
+        EXIT_IO,
+        `${where} reports the thread's effective approval policy as ${JSON.stringify(named)}, and this verb starts a session only under ${JSON.stringify(APPROVAL_POLICY)}, the one variant under which every command and every patch asks. Under any other variant an unknown part of the session never reaches this client at all, so nothing was answered and the session was stopped`,
+        "bridge-approval-policy-mismatch",
+      );
+      return true;
     };
 
     let threadId: string | null = null;
@@ -732,9 +872,17 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       }
       if (frame.id === threadStartId && threadStartId !== -1) {
         if (frame.error !== undefined) {
-          finish(EXIT_IO, `the app-server refused thread/start: ${JSON.stringify(frame.error)}`);
+          // The request that carries the pin was refused, so no thread exists
+          // and nothing about this session's approval policy was established.
+          // A refusal of the VALUE arrives here too, in the server's own words.
+          finish(
+            EXIT_IO,
+            `the app-server refused thread/start with approvalPolicy ${JSON.stringify(APPROVAL_POLICY)} and sandbox ${JSON.stringify(SANDBOX)}: ${JSON.stringify(frame.error)}`,
+            "bridge-thread-start-refused",
+          );
           return;
         }
+        if (pinnedOrStop(frame.result, "thread/start")) return;
         threadId =
           stringField(frame.result, "threadId") ??
           stringField((frame.result as Record<string, unknown> | undefined)?.["thread"], "id");
@@ -742,6 +890,7 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           finish(EXIT_IO, "thread/start succeeded and named no thread this client could find");
           return;
         }
+        thread.id = threadId;
         turnStartId = connection.request("turn/start", {
           threadId,
           input: [{ type: "text", text: plan.prompt }],
@@ -753,9 +902,15 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
         return;
       }
 
-      // Notifications. Only the turn's end is acted on; everything else is the
-      // server narrating, and a client that branched on narration would be
-      // deciding from something no hash bound.
+      // Notifications. The turn's end is acted on, and so is anything the
+      // server says about the thread's own approval policy: `thread/started` is
+      // where a server that reports one is most likely to (APRV-366). That is
+      // not a client branching on narration, which is the thing this verb does
+      // not do: it is the one fact that decides whether this session is the
+      // kind of session the verb will sit in front of at all.
+      if (method === "thread/started" || method === "thread/status/changed") {
+        if (pinnedOrStop(frame.params, method)) return;
+      }
       if (method === "turn/completed" || method === "turn/failed") {
         finish(
           EXIT_OK,
@@ -798,11 +953,18 @@ export const CODEX_BRIDGE_HELP = [
   "  --dir/--policy/--log  where the policy and the log are, as the hook resolves them",
   "  --wait <duration>     the deadline (default: the policy's approval_ttl)",
   "  --interval <duration> how often the verified view is re-read (default: 2s)",
-  "  --json                one object: {ok, reason, answers[]}",
+  "  --json                one object: {ok, reason, code?, thread, answers[]}",
   "  -- <command...>       the app-server to start (default: codex app-server)",
   "",
   "It answers accept or decline only, never acceptForSession, cancel or abort.",
   "A file-change request carries no content on the item-based API, so it is",
   "declined (bridge-file-change-unbound). An open gate window is not honoured.",
+  "",
+  "The thread is started with approvalPolicy untrusted, the only variant under",
+  "which every command and every patch asks, and there is no flag for it. A",
+  "server that refuses thread/start stops the run (bridge-thread-start-refused),",
+  "and one that reports another effective policy stops it too",
+  "(bridge-approval-policy-mismatch). A server that reports no policy at all is",
+  "run against, and the report says the pin was requested and not confirmed.",
   "See docs/codex-app-server-bridge.md.",
 ].join("\n");
