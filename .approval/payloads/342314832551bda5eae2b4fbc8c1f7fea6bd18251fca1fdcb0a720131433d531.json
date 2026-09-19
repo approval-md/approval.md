@@ -1,0 +1,1 @@
+{"command":"cat tsconfig.json && echo \"--- tests importing mjs:\" && grep -rl \"await import(\" tests/ | head -5 && grep -rn \"scripts/\" tests/*.ts | grep -i \"import\\|SCRIPT =\" | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

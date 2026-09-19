@@ -1,0 +1,1 @@
+{"command":"grep -rn 'probes/' tests/*.ts | grep -i 'import\\|await' | head -10 && grep -rn '\\.mjs' tests/*.ts | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

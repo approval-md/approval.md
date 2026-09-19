@@ -1,0 +1,1 @@
+{"command":"npm run build > /dev/null 2>&1; echo \"build=$?\"; npm run typecheck > /dev/null 2>&1; echo \"typecheck=$?\"; git push 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a27452dfe58b83aa6"}

@@ -1,0 +1,1 @@
+{"command":"grep -n 'DarkSessionCode' src/core/dark-session.ts src/core/*.ts src/cli/*.ts schema/*.json | head && sed -n '/export type DarkSessionCode/,/;/p' src/core/dark-session.ts && sed -n '/export type DarkSessionVerdict/,/;/p' src/core/dark-session.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

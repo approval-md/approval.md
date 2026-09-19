@@ -1,0 +1,1 @@
+{"command":"F=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-emilia-protocol-comparison-af4ffb/e53d96c7-c42d-4ec8-a52f-708a14964f8e/scratchpad/pr455.diff; sed -n '1770,1795p' $F; echo =====GUARD; grep -a -n \"^diff --git\" $F; ","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

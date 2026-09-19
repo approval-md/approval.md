@@ -1,0 +1,1 @@
+{"command":"git fetch origin --quiet && git merge --no-edit origin/main 2>&1 | tail -3 && npm run build 2>&1 | tail -3 && git push 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}

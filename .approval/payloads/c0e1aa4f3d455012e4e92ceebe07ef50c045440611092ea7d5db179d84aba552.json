@@ -1,0 +1,1 @@
+{"command":"ls -a | head -30 && echo \"---\" && cat eslint.config.js 2>/dev/null || cat .eslintrc* 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

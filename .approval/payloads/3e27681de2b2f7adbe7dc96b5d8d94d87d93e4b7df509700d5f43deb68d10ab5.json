@@ -1,0 +1,1 @@
+{"command":"grep -rn 'hook grok\\|subcommand: \"grok\"\\|\"grok\"' src/cli/verb-registry.ts src/cli/help.ts src/mcp/*.ts tests/ docs/ | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}
