@@ -1,0 +1,1 @@
+{"command":"grep -rn \"in-force bytes that cannot be recovered refuse a mapping-bearing amendment\" -A 40 tests/*.ts | head -48","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}

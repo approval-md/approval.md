@@ -278,6 +278,7 @@ test("request with material stores it, and the store never touches the log", () 
 test("material that hashes to something else refuses payload-mismatch and stores nothing", () => {
   const world = registered();
   const before = logBytes(world.unit);
+  const storeBefore = readdirSync(world.storeDir).sort();
 
   const result = request(
     world.unit.logPath,
@@ -296,7 +297,11 @@ test("material that hashes to something else refuses payload-mismatch and stores
 
   assert.equal(result.ok, false);
   assert.equal(result.ok === false && result.code, "payload-mismatch");
-  assert.equal(existsSync(world.storeDir), false, "a refused request stored bytes");
+  // APRV-356: the store already holds the attested policy text the fixture's
+  // own attestation wrote, so what is asserted is that this refusal added
+  // nothing to it. "The directory does not exist" would now be a claim about
+  // the fixture rather than about the refusal.
+  assert.deepEqual(readdirSync(world.storeDir).sort(), storeBefore, "a refused request stored bytes");
   assert.equal(logBytes(world.unit), before, "a refused request appended");
 });
 
@@ -512,6 +517,11 @@ test("request --payload with the wrong bytes refuses and writes nothing at all",
   writeFileSync(wrong, JSON.stringify({ ...PAYLOAD, to: ["attacker@example.com"] }), "utf8");
   const logPath = join(world.dir, ".approval", "log", "events.jsonl");
   const before = readFileSync(logPath, "utf8");
+  // APRV-356: the fixture's attestation already stored the attested policy
+  // text, so "writes nothing at all" is a claim about the DELTA. An absolute
+  // "the store does not exist" would now be a claim about the fixture.
+  const storeDir = join(world.dir, ".approval", PAYLOAD_STORE_DIRNAME);
+  const storeBefore = readdirSync(storeDir).sort();
 
   const refused = runCli(
     ["request", TASK, "--action", ACTION, "--payload", "wrong.json", "--as", AGENT, "--json"],
@@ -522,7 +532,7 @@ test("request --payload with the wrong bytes refuses and writes nothing at all",
     error: { code: string };
   }).error;
   assert.equal(error.code, "payload-mismatch");
-  assert.equal(existsSync(join(world.dir, ".approval", PAYLOAD_STORE_DIRNAME)), false);
+  assert.deepEqual(readdirSync(storeDir).sort(), storeBefore, "a refused request stored bytes");
   assert.equal(readFileSync(logPath, "utf8"), before, "a refused request appended");
 });
 

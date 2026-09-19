@@ -466,11 +466,14 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
   assert.match(checkNamed(run, "attestation").detail, /attested at seq 1/u);
   assert.match(checkNamed(run, "telegram").detail, /@approval_md_test_bot/u);
   assert.match(checkNamed(run, "web-port").detail, new RegExp(`127\\.0\\.0\\.1:${port} is free`, "u"));
-  // The healthy fixture has never made a request carrying --payload, so the
-  // store does not exist yet: a pass with the reason, plus the warning every
-  // verdict of this check carries.
+  // The healthy fixture has never made a request carrying --payload, and since
+  // APRV-356 it holds one file all the same: its attestation stores the
+  // attested policy text, bound by the `policy.updated` at seq 1. So the row
+  // counts one file and nothing dangling, plus the warning every verdict of
+  // this check carries.
   const store = checkNamed(run, "payload-store");
-  assert.match(store.detail, /not created until the first request --payload/u);
+  assert.match(store.detail, /is writable and holds 1 payload file\(s\)/u);
+  assert.match(store.detail, /0 bound to no record/u);
   assert.match(store.detail, /CANNOT be rebuilt from the log/u);
   assert.match(store.detail, /payload-unavailable/u);
 
@@ -893,16 +896,24 @@ test("doctor: a writable payload store passes and counts what it holds", async (
   mkdirSync(storeDir, { recursive: true });
   writeFileSync(join(storeDir, `${"a".repeat(64)}.json`), '{"body":"x"}');
 
+  // APRV-356: the fixture's own attestation already stored the attested policy
+  // text, so this hand-written file is the SECOND, and the only one bound to no
+  // record. Both halves of the count are asserted, because a row that said
+  // "2 files, 2 unbound" would be reporting a real fault.
+  const before = readdirSync(storeDir).sort();
+  assert.equal(before.length, 2, before.join(" "));
+
   const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
   const check = checkNamed(run, "payload-store");
   assert.equal(check.status, "pass");
   assert.equal(check.fix, undefined);
-  assert.match(check.detail, /is writable and holds 1 payload file\(s\)/u);
+  assert.match(check.detail, /is writable and holds 2 payload file\(s\)/u);
+  assert.match(check.detail, /1 bound to no record/u);
   assert.match(check.detail, /CANNOT be rebuilt from the log/u);
 
-  // The probe leaves nothing behind: the store still holds exactly the one file.
-  assert.deepEqual(readdirSync(storeDir), [`${"a".repeat(64)}.json`]);
+  // The probe leaves nothing behind: the store still holds exactly what it did.
+  assert.deepEqual(readdirSync(storeDir).sort(), before);
 });
 
 test("doctor: an existing payload store that cannot be written fails with a fix", async (t) => {
@@ -918,6 +929,10 @@ test("doctor: an existing payload store that cannot be written fails with a fix"
   const storeDir = join(home, ".approval", "payloads");
   mkdirSync(storeDir, { recursive: true });
   const before = readFileSync(logPathOf(home));
+  // APRV-356: the fixture's attestation already put a file here, so the claim
+  // below is that doctor left the store as it found it, not that the store is
+  // empty.
+  const storeBefore = readdirSync(storeDir).sort();
   chmodSync(storeDir, 0o555);
 
   try {
@@ -935,7 +950,7 @@ test("doctor: an existing payload store that cannot be written fails with a fix"
     // A failing check is still a report: doctor repaired nothing and wrote
     // nothing, including to the log.
     assert.deepEqual(readFileSync(logPathOf(home)), before);
-    assert.deepEqual(readdirSync(storeDir), []);
+    assert.deepEqual(readdirSync(storeDir).sort(), storeBefore);
   } finally {
     chmodSync(storeDir, 0o755);
   }

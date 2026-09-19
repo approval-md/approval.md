@@ -591,7 +591,18 @@ test("the human amend report short-hashes and relativizes what --json leaves who
   assert.ok(!run.stdout.includes(ESC));
   // Twelve characters, never sixty-four, and never the absolute path.
   assert.match(run.stdout, /^ {2}live {2,}[0-9a-f]{12}$/mu);
-  assert.equal(/[0-9a-f]{64}/u.test(run.stdout), false, "a 64-hex digest reached human output");
+  // APRV-356: the printed `git add` names a file in the content-addressed
+  // payload store, and that file's NAME is a 64-hex digest. It is a path the
+  // operator has to type exactly, not a digest put on display, so it is masked
+  // before the rule is applied rather than shortened into a command that would
+  // not run. Everything the rule is actually about — the live hash, the
+  // attested hash — is still subject to it.
+  const masked = run.stdout.replace(
+    /\.approval\/payloads\/[0-9a-f]{64}\.json/gu,
+    ".approval/payloads/<hash>.json",
+  );
+  assert.notEqual(masked, run.stdout, "the ceremony no longer names its payload file");
+  assert.equal(/[0-9a-f]{64}/u.test(masked), false, "a 64-hex digest reached human output");
   assert.match(run.stdout, /^ {2}file {2,}APPROVAL\.md$/mu);
   assert.equal(run.stdout.includes(dir), false, "an absolute path reached human output");
   // The four section labels the brief named.

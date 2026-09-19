@@ -226,6 +226,28 @@ test("APRV-360: apply publishes the branch, opens the PR and arms the merge, wit
   assert.equal(branches.length, 1, `remote branches: ${remoteBranches(remote).join(", ")}`);
   const branch = branches[0] as string;
 
+  // APRV-356: apply runs an amend, so it carries what an amend carries. The
+  // published branch holds the store copy of the attested bytes beside the
+  // policy and the log, and its name is the `payload_hash` the attestation
+  // bound — so the committed log's binding can be resolved out of the committed
+  // tree, which is the only tree a reviewer or the CI guard ever sees.
+  const carried = git(["show", "--name-only", "--pretty=format:", branch], remote)
+    .stdout.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .sort();
+  const records = readFileSync(join(dir, ".approval", "log", "events.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as { payload?: Record<string, unknown> });
+  const bound = records[records.length - 1]?.payload?.["payload_hash"];
+  assert.match(String(bound), /^[a-f0-9]{64}$/u, "the attestation bound no payload");
+  assert.deepEqual(carried, [
+    ".approval/log/events.jsonl",
+    `.approval/payloads/${String(bound)}.json`,
+    "APPROVAL.md",
+  ]);
+
   const calls = ghCalls(stub.log);
   assert.ok(calls.includes("create"), `gh pr create was never called: ${calls.join(" ")}`);
   assert.ok(calls.includes(branch), `the pull request was not opened for ${branch}`);
@@ -239,7 +261,16 @@ test("APRV-360: apply publishes the branch, opens the PR and arms the merge, wit
     .stdout.split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .filter((line) => !line.includes("APPROVAL.md") && !line.includes("events.jsonl"));
+    // The three the ceremony owns. APRV-356 made the payload store the third:
+    // the attestation writes the attested bytes beside the log, and a `--pr`
+    // flow never moves HEAD, so the file it committed to the branch is still an
+    // untracked file here. It is the ceremony's own, exactly as the log is.
+    .filter(
+      (line) =>
+        !line.includes("APPROVAL.md") &&
+        !line.includes("events.jsonl") &&
+        !line.includes(".approval/payloads/"),
+    );
   assert.deepEqual(dirty, [], "the ceremony touched a path that is not its own");
 });
 

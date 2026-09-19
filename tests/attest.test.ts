@@ -28,6 +28,7 @@ import {
   resolveHumanActor,
 } from "../src/core/attest.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
+import { payloadHash } from "../src/core/payload.js";
 import { appendAttestation } from "./clock-adapters.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-attest-"));
@@ -131,9 +132,14 @@ test("attesting makes the live file attested at the recorded seq and hash", () =
   assert.equal(appended.ok, true);
   assert.equal(appended.ok && appended.record.event, "policy.updated");
   assert.equal(appended.ok && appended.record.actor, "human:carter");
+  // APRV-356: the record also binds the attested BYTES, stored beside the log,
+  // so the policy in force is recoverable from the chain rather than only its
+  // digest. `payloadHash` is over `{ text }`, which is the shape
+  // `inForcePolicyText` reads.
   assert.deepEqual(appended.ok ? appended.record.payload : null, {
     policy_path: "APPROVAL.md",
     sha256: policyFileHash(policyPath),
+    payload_hash: payloadHash({ text: readFileSync(policyPath, "utf8") }),
   });
 
   const status = checkAttestation(readRecords(logPath), policyPath);

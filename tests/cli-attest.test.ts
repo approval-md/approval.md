@@ -135,10 +135,21 @@ test("--as attests the discovered policy and reports seq and sha256", () => {
   assert.equal(records.length, 1);
   assert.equal(records[0]?.["event"], "policy.updated");
   assert.equal(records[0]?.["actor"], "human:carter");
+  // APRV-356: three keys, and the third is the binding for the attested bytes
+  // in the payload store, so the policy in force is recoverable from the log
+  // rather than only nameable by its digest.
   assert.deepEqual(Object.keys(records[0]?.["payload"] as object).sort(), [
+    "payload_hash",
     "policy_path",
     "sha256",
   ]);
+  const bound = firstPayload(dir)["payload_hash"];
+  assert.match(String(bound), /^[a-f0-9]{64}$/u);
+  assert.equal(
+    existsSync(join(dir, ".approval", "payloads", `${String(bound)}.json`)),
+    true,
+    "the record binds a payload the store does not hold",
+  );
 });
 
 test("APPROVAL_HUMAN supplies the identity when --as is absent", () => {

@@ -506,18 +506,24 @@ attested text addressable by its own `payload_hash`. The recovery finds the hash
 in force, finds a proposal that named exactly those bytes, reads the stored text
 and **re-hashes it against the attested digest** — nothing trusts the store.
 
-It fails in the ordinary case and the implementation says so rather than
+It used to fail in the ordinary case, and the implementation said so rather than
 pretending otherwise: `approval policy attest`, and `policy amend` on its human
-path, append a `policy.updated` and store nothing. A chain that has never been
-amended from a phone has no recoverable bytes at all, which is this
-repository's own state. Step 4 is therefore the common path, and it is
-fail-closed.
+path, appended a `policy.updated` and stored nothing, so a chain that had never
+been amended from a phone had no recoverable bytes at all — which was this
+repository's own state. Step 4 was therefore the common path.
 
-**The residual, stated.** In step 4 an amendment that REMOVES a mapping is
-indistinguishable from a policy that never had one, so it falls back to the
-pre-mapping behaviour. Closing it needs the in-force bytes, which is step 2.
-Reaching it requires an attacker who can already write `APPROVAL.md`, whom
-SPEC §11 already places inside the trust boundary.
+**The residual, closed (APRV-356, 2026-09-19).** Every attestation now stores
+the attested text in the payload store and binds its hash on the
+`policy.updated` it appends, terminal and phone alike, and the recovery reads
+an attestation's own binding as readily as a proposal's. So an amendment that
+REMOVES a mapping is no longer indistinguishable from a policy that never had
+one: the in-force bytes are recovered, re-hashed against the attested digest
+from the verified log, and read. Step 4 remains, and is now reached only by a
+chain attested BEFORE that change, where there is still nothing to recover and
+the fail-closed fallback is the honest answer. Nothing about the trust boundary
+moved: reaching any of this still requires an attacker who can already write
+`APPROVAL.md`, whom SPEC §11 already places inside it, and the store is checked
+rather than trusted on every read.
 
 ## 8. What this document does not do
 

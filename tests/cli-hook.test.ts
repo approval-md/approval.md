@@ -3191,10 +3191,21 @@ function promptFor(dir: string): { header: string; payload: string; summary: str
   };
 }
 
-/** The `payload_hash` the log records for the single request in `dir`. */
+/**
+ * The `payload_hash` the log records for the single REQUEST in `dir`.
+ *
+ * Read off the `approval.requested` line rather than off the first
+ * `payload_hash` anywhere in the log: since APRV-356 the fixture's own
+ * attestation binds one too, at seq 1, and a first-match read would answer with
+ * the policy text instead of the change under test.
+ */
 function boundHashOf(dir: string): string {
-  const found = /"payload_hash":"([0-9a-f]{64})"/u.exec(rawLog(dir));
-  assert.ok(found !== null, "the log records a payload hash");
+  const line = rawLog(dir)
+    .split("\n")
+    .find((candidate) => candidate.includes('"event":"approval.requested"'));
+  assert.ok(line !== undefined, "the log carries a request");
+  const found = /"payload_hash":"([0-9a-f]{64})"/u.exec(line);
+  assert.ok(found !== null, "the request records a payload hash");
   return found[1] as string;
 }
 

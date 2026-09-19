@@ -606,6 +606,11 @@ test("writeQueue writes QUEUE.md and nothing else, and never touches the log", (
   const logBefore = readFileSync(world.unit.logPath);
   const logStatBefore = statSync(world.unit.logPath);
   const dirBefore = readdirSync(world.unit.dir).sort();
+  // APRV-356: the fixture's attestation stores the attested policy text, so the
+  // approval home already holds `payloads` before this verb runs. What is
+  // asserted below is the DELTA this verb is responsible for.
+  const homeBefore = readdirSync(join(world.unit.dir, ".approval")).sort();
+  assert.equal(homeBefore.includes("QUEUE.md"), false, "the fixture already wrote the queue");
 
   const written = writeQueue(world.unit.logPath, queuePath, world.options, NOW);
   assert.equal(written.ok, true, JSON.stringify(written));
@@ -623,7 +628,11 @@ test("writeQueue writes QUEUE.md and nothing else, and never touches the log", (
   // Exactly one new file, in the approval home, and it is the queue.
   assert.deepEqual(readdirSync(world.unit.dir).sort(), dirBefore, "a stray file appeared");
   const home = readdirSync(join(world.unit.dir, ".approval")).sort();
-  assert.deepEqual(home, ["QUEUE.md", "log"], "the approval home grew something else");
+  assert.deepEqual(
+    home,
+    [...homeBefore, "QUEUE.md"].sort(),
+    "the approval home grew something else",
+  );
 
   const contents = readFileSync(queuePath, "utf8");
   assert.equal(contents, markdownOf(world), "the written bytes are not the rendered bytes");
