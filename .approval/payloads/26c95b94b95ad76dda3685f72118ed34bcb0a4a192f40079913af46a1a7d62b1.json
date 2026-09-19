@@ -1,0 +1,1 @@
+{"command":"grep -n \"policy.updated\" -A 40 schema/event.schema.json | grep -n \"payload_hash\\|policy_path\\|const\\\": \\\"policy.updated\" | head -10; echo \"=== amend terminal path ===\"; grep -n \"appendAttestation\" src/cli/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}
