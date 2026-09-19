@@ -35,6 +35,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+// The probe is a standalone `.mjs` with no declaration file, imported the way
+// tests/probe-muse-hook.test.ts imports its own subject. The report and the two
+// predicates beneath it are pure, so APRV-359's three outcomes are driven here
+// directly rather than through three more stub servers.
+// @ts-expect-error no declaration file for the standalone probe script
+import * as probeModule from "../../scripts/probes/codex-app-server.mjs";
+
+const buildReport = probeModule.buildReport as (results: unknown, path: string) => string;
+const carriesTrouble = probeModule.carriesTrouble as (method: unknown, params: unknown) => boolean;
+
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SCRIPT = join(REPO_ROOT, "scripts", "probes", "codex-app-server.mjs");
@@ -508,4 +518,139 @@ setInterval(() => {}, 60_000);
   };
   assert.equal(results.trials.length, 0, "no trial may run without authentication");
   assert.equal(results.stopped_early, "authentication required");
+});
+
+// ---------------------------------------------------------------------------
+// APRV-359: the three report outcomes, and the run that proves nothing
+// ---------------------------------------------------------------------------
+
+/**
+ * A trial record with only the fields the report reads.
+ *
+ * The report is a pure function of the results file, so the three outcomes are
+ * driven here directly rather than by arranging three stub servers: the
+ * interesting input is the SHAPE of a results file, and a run that cannot reach
+ * a tool call is precisely the shape no stub can produce on purpose.
+ */
+function trialRecord(
+  trial: string,
+  fields: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    trial,
+    approval_requests: [],
+    replies_sent: [],
+    auto_review_notifications: [],
+    turn_errors: [],
+    notification_methods: [],
+    notes: [],
+    server: { exit_code: 0, signal: null, alive_at_settle: false, stderr_bytes: 0 },
+    effects: { command_marker: false, patch_marker: false, other_new_files: [] },
+    framing_observed: "ndjson",
+    ...fields,
+  };
+}
+
+/** An approve trial that asked and landed, which is what a real control is. */
+function workingControl(): Record<string, unknown> {
+  return trialRecord("approve", {
+    approval_requests: [
+      { at: "2026-09-19T00:00:00.000Z", kind: "command", method: "item/commandExecution/requestApproval", key_paths: [], available_decisions: ["accept"], verbatim: {} },
+    ],
+    effects: { command_marker: true, patch_marker: true, other_new_files: [] },
+  });
+}
+
+test("APRV-359: the hold sentence needs a control that asked AND landed", () => {
+  const held = buildReport(
+    { trials: [workingControl(), trialRecord("deny"), trialRecord("crash")] },
+    "/tmp/results.json",
+  );
+  assert.match(held, /No effect landed on deny, crash, no-reply or malformed/u);
+  assert.doesNotMatch(held, /VOID/u);
+  assert.doesNotMatch(held, /FAILURE TO BLOCK/u);
+});
+
+test("APRV-359: a run whose approve control never asked is VOID, never a hold", () => {
+  // The 2026-09-18 shape: five trials, zero approval requests, every turn
+  // ending in a `task_complete` that carried a 400.
+  const silent = buildReport(
+    {
+      trials: [
+        trialRecord("approve", {
+          turn_errors: [
+            {
+              at: "2026-09-18T00:00:00.000Z",
+              method: "task_complete",
+              verbatim: { method: "task_complete", params: { error: { status: 400, message: "model not available" } } },
+            },
+          ],
+        }),
+        trialRecord("deny"),
+        trialRecord("crash"),
+        trialRecord("no-reply"),
+        trialRecord("malformed"),
+      ],
+    },
+    "/tmp/results.json",
+  );
+  assert.match(silent, /VOID/u);
+  assert.match(silent, /recorded zero approval requests/u);
+  assert.doesNotMatch(silent, /No effect landed on deny, crash, no-reply or malformed/u);
+  // AC2: the reason is in the report, so nobody opens the rollouts to find it.
+  assert.match(silent, /errors and warnings on the wire: 1/u);
+  assert.match(silent, /model not available/u);
+
+  // Asked, but nothing landed: the control is still not a control.
+  const asked = buildReport(
+    {
+      trials: [
+        trialRecord("approve", {
+          approval_requests: [{ at: "x", kind: "command", method: "m", key_paths: [], available_decisions: [], verbatim: {} }],
+        }),
+        trialRecord("deny"),
+      ],
+    },
+    "/tmp/results.json",
+  );
+  assert.match(asked, /VOID/u);
+  assert.match(asked, /landed neither marker/u);
+
+  // And a results file with no approve trial at all.
+  const absent = buildReport({ trials: [trialRecord("deny")] }, "/tmp/results.json");
+  assert.match(absent, /VOID/u);
+  assert.match(absent, /no approve trial/u);
+});
+
+test("APRV-359: a leak still outranks a void, and reads exactly as it did", () => {
+  // A run whose control never asked AND whose deny trial executed anyway. The
+  // void is true and the leak is worse: absence of evidence never outranks
+  // evidence of failure.
+  const leaked = buildReport(
+    {
+      trials: [
+        trialRecord("approve"),
+        trialRecord("deny", {
+          effects: { command_marker: true, patch_marker: false, other_new_files: [] },
+        }),
+      ],
+    },
+    "/tmp/results.json",
+  );
+  assert.match(leaked, /FAILURE TO BLOCK/u);
+  assert.match(leaked, /It is not enforcement and must not be written up/u);
+  assert.doesNotMatch(leaked, /VOID/u);
+  assert.doesNotMatch(leaked, /No effect landed on deny/u);
+});
+
+test("APRV-359: trouble is recognised by the payload, not only by the method name", () => {
+  // The case this exists for: the method name says nothing.
+  assert.equal(carriesTrouble("task_complete", { error: { status: 400 } }), true);
+  assert.equal(carriesTrouble("codex/event", { msg: { type: "error", message: "boom" } }), true);
+  assert.equal(carriesTrouble("turn/failed", {}), true);
+  assert.equal(carriesTrouble("session/warning", null), true);
+  // And the ordinary traffic stays out of the block.
+  assert.equal(carriesTrouble("item/started", { item: { id: "x" } }), false);
+  assert.equal(carriesTrouble("turn/completed", { usage: { tokens: 12 } }), false);
+  assert.equal(carriesTrouble("task_complete", { error: null }), false);
 });

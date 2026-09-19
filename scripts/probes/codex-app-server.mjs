@@ -180,6 +180,41 @@ function isAutoReviewNotification(method) {
   return typeof method === "string" && /autoApprovalReview|guardian/iu.test(method);
 }
 
+/**
+ * Does this notification carry an error or a warning? (APRV-359.)
+ *
+ * Two tests, and the second is the one that matters. The method name catches
+ * the obvious cases (`error`, `warning`, `turn/failed`). The PAYLOAD catches
+ * the case this exists for: on 2026-09-18 every turn ended in a `task_complete`
+ * whose method said nothing at all and whose body carried the 400 that stopped
+ * the run before any tool call. Nothing in the report mentioned it, and the
+ * operator had to open the Codex rollouts to find out why five trials had seen
+ * nothing.
+ *
+ * Deliberately eager, in the manner of {@link redactString}: a notification
+ * recorded here that turns out to be routine costs a reader one extra block,
+ * and one that is missed costs a run.
+ */
+function carriesTrouble(method, params) {
+  if (typeof method === "string" && /error|warning|failed|aborted/iu.test(method)) return true;
+  if (params === null || typeof params !== "object") return false;
+  const walk = (value, depth) => {
+    if (depth > 8) return false;
+    if (Array.isArray(value)) return value.slice(0, 32).some((entry) => walk(entry, depth + 1));
+    if (value === null || typeof value !== "object") return false;
+    for (const [key, entry] of Object.entries(value)) {
+      // A present-and-non-null `error`, or a `type`/`level` that names one.
+      if (/^(error|err)$/iu.test(key) && entry !== null && entry !== undefined) return true;
+      if (/^(type|level|severity|status)$/iu.test(key) && typeof entry === "string") {
+        if (/^(error|warning|failed|failure)$/iu.test(entry)) return true;
+      }
+      if (walk(entry, depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(params, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Redaction
 // ---------------------------------------------------------------------------
@@ -603,6 +638,13 @@ async function runTrial(state, binary, name, options = {}) {
     approval_requests: [],
     replies_sent: [],
     auto_review_notifications: [],
+    // APRV-359. Every error and warning the server sent, and any turn that
+    // completed carrying one, verbatim and redacted. On 2026-09-18 five trials
+    // ended in `task_complete` with a 400 before any tool call — the pinned
+    // model could not be served — and the only way to learn that was to open
+    // the Codex rollouts by hand. A probe that cannot say why it saw nothing
+    // is a probe whose silence is unreadable.
+    turn_errors: [],
     item_started_with_content: false,
     notification_methods: [],
     raw_frames: 0,
@@ -682,6 +724,16 @@ async function runTrial(state, binary, name, options = {}) {
       if (text.includes(PATCH_MARKER) || /"(diff|patch|changes|content|unifiedDiff)"/u.test(text)) {
         record.item_started_with_content = true;
       }
+    }
+    // APRV-359: the diagnosis, kept beside the observation. Matched on the
+    // method AND on the payload, because the 0.152.1 failure arrived as a
+    // `task_complete` whose method said nothing and whose body carried the 400.
+    if (carriesTrouble(method, frame.params)) {
+      record.turn_errors.push({
+        at: new Date().toISOString(),
+        method,
+        verbatim: redact(frame),
+      });
     }
     if (/turn\/(completed|failed|aborted)/u.test(method)) finish(`notification ${method}`);
   }
@@ -1140,21 +1192,49 @@ function buildReport(results, path) {
     );
   }
 
+  // APRV-359. Every error and warning the server sent, so a run that saw
+  // nothing says why rather than leaving it in the rollouts.
+  const troubled = trials.filter((trial) => (trial.turn_errors ?? []).length > 0);
+  lines.push("");
+  lines.push(
+    `errors and warnings on the wire: ${String(
+      troubled.reduce((sum, trial) => sum + (trial.turn_errors ?? []).length, 0),
+    )}`,
+  );
+  for (const trial of troubled) {
+    for (const entry of (trial.turn_errors ?? []).slice(0, 4)) {
+      lines.push(`  ${String(trial.trial)}: ${String(entry.method)}`);
+      for (const line of JSON.stringify(entry.verbatim ?? {}).slice(0, 600).split("\n")) {
+        lines.push(`    ${line}`);
+      }
+    }
+  }
+
   const leaks = trials.filter(
     (trial) =>
       MUST_NOT_EXECUTE.has(String(trial.trial)) &&
       (trial.effects?.command_marker === true || trial.effects?.patch_marker === true),
   );
+  const void_ = voidReason(trials);
   lines.push("");
-  if (leaks.length === 0) {
-    lines.push("No effect landed on deny, crash, no-reply or malformed. On this run the");
-    lines.push("client's silence and its refusal both held. That is the property the bridge");
-    lines.push("would rest on, observed once, on this machine, at this version.");
-  } else {
+  if (leaks.length > 0) {
+    // Checked first, and unchanged. A leak is positive evidence of a failure to
+    // block; a void is the absence of evidence about anything. Evidence wins.
     lines.push("FAILURE TO BLOCK. An effect landed on a trial whose whole point was that");
     lines.push(`nothing should happen: ${leaks.map((trial) => String(trial.trial)).join(", ")}.`);
     lines.push("Report this as a failure. It is not enforcement and must not be written up");
     lines.push("as one; a bridge built on this would authorize nothing it claims to.");
+  } else if (void_ !== null) {
+    lines.push("VOID. This run establishes nothing about interception, because the approve");
+    lines.push(`control did not work: ${void_}`);
+    lines.push("The other four trials landed no effect, and on a run that never reached a");
+    lines.push("tool call that is what a run with no tool calls looks like rather than a");
+    lines.push("property holding. Fix the reason above and run the probe again. The errors");
+    lines.push("and warnings printed above are where the reason usually is.");
+  } else {
+    lines.push("No effect landed on deny, crash, no-reply or malformed. On this run the");
+    lines.push("client's silence and its refusal both held. That is the property the bridge");
+    lines.push("would rest on, observed once, on this machine, at this version.");
   }
   lines.push("");
   for (const trial of trials) {
@@ -1169,6 +1249,38 @@ function buildReport(results, path) {
   lines.push('its "observed" answers are the ones waiting on this report.');
   lines.push("");
   return lines.join("\n");
+}
+
+/**
+ * Why this run proves nothing about interception, or `null` when it does
+ * (APRV-359).
+ *
+ * The four must-not-execute trials are a control group and nothing else: they
+ * mean "refusal held" only against a positive control that shows the same setup
+ * CAN reach a tool call and land an effect. That control is the `approve`
+ * trial. If it never asked, or asked and landed neither marker, then "no effect
+ * on deny, crash, no-reply or malformed" is a description of a run that did no
+ * work, and printing the hold sentence over it is a false positive.
+ *
+ * Observed 2026-09-18: five trials, zero approval requests, every turn ending
+ * in a 400 before any tool call because `~/.codex/config.toml` pinned a model
+ * that release could not serve. The report printed the hold sentence anyway.
+ */
+function voidReason(trials) {
+  const approve = trials.find((trial) => String(trial.trial) === "approve");
+  if (approve === undefined) {
+    return "no approve trial is in these results, so nothing here is a positive control.";
+  }
+  const asked = (approve.approval_requests ?? []).length;
+  if (asked === 0) {
+    return "the approve trial recorded zero approval requests, so the server never reached a tool call and no interception was observed.";
+  }
+  const landed =
+    approve.effects?.command_marker === true || approve.effects?.patch_marker === true;
+  if (!landed) {
+    return `the approve trial asked ${String(asked)} approval question(s) and landed neither marker, so an approved effect did not happen and the trials that must not act prove nothing by not acting.`;
+  }
+  return null;
 }
 
 function report() {
@@ -1216,10 +1328,12 @@ export {
   approvalKind,
   availableDecisions,
   buildReport,
+  carriesTrouble,
   chooseDecision,
   isApprovalRequest,
   isAutoReviewNotification,
   keyPaths,
   redact,
   redactString,
+  voidReason,
 };
