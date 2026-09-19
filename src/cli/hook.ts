@@ -1899,50 +1899,104 @@ function tierOf(target: string, cwd: string): FileTier {
 const WORKSPACE_WRITE_CLASS = "files.write.workspace";
 
 /**
- * The Codex app-server's inline change map, when a call carries one (APRV-363).
+ * The Codex app-server's change set, when a call carries one (APRV-363,
+ * APRV-379).
+ *
+ * TWO SHAPES, because the protocol has two. The LEGACY `applyPatchApproval`
+ * carries `fileChanges`, a map of path to change, inline on the request. The
+ * ITEM-BASED API puts the same material on an earlier `item/started` frame as
+ * an ARRAY of `{path, kind, diff}`, and the bridge correlates that frame to the
+ * approval request by item id before handing it here (APRV-379). Both arrive as
+ * the server sent them and neither is re-rendered into the other.
  *
  * `null` for every other `apply_patch` call, which keeps the envelope path
  * exactly as it was: the native hook's `apply_patch` tool sends a command
  * string and reaches this function's `null` on the first test.
  */
-function codexFileChanges(toolInput: Record<string, unknown>): Record<string, unknown> | null {
+function codexFileChanges(
+  toolInput: Record<string, unknown>,
+): Record<string, unknown> | readonly unknown[] | null {
   const value = toolInput["file_changes"] ?? toolInput["fileChanges"];
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value === null || typeof value !== "object") return null;
+  if (Array.isArray(value)) return value.length === 0 ? null : (value as readonly unknown[]);
   const map = value as Record<string, unknown>;
   return Object.keys(map).length === 0 ? null : map;
 }
 
 /**
- * What a change MAP asks for: one class per path it names, and the change bound
- * whole (APRV-363).
+ * The paths a change set names, in the order this runtime will classify them,
+ * or `null` when an entry names none (APRV-379).
+ *
+ * The map's keys ARE its paths, sorted so one change set is one description
+ * whatever key order the server used. The array's entries each carry a `path`
+ * string, and the order is the server's own: an array is a sequence and
+ * reordering it would be this runtime describing a change set nobody sent. An
+ * entry that is not an object, or whose `path` is not a string, yields `null`
+ * and the caller refuses the whole set, because a change set with one
+ * unreadable member is a change set this runtime cannot say the extent of.
+ */
+function codexChangePaths(changes: Record<string, unknown> | readonly unknown[]): string[] | null {
+  if (!Array.isArray(changes)) return Object.keys(changes as Record<string, unknown>).sort();
+  const paths: string[] = [];
+  for (const entry of changes) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const declared = (entry as Record<string, unknown>)["path"];
+    if (typeof declared !== "string") return null;
+    paths.push(declared);
+  }
+  return paths;
+}
+
+/**
+ * What a change SET asks for: one class per path it names, and the change bound
+ * whole (APRV-363, APRV-379).
  *
  * The class rule is the file tools' rule and not a second one: a protected
  * target takes its derived protected class, every other target is
  * `files.write.workspace`, and the policy decides the autonomy of either. The
  * payload is the change rather than the touch, for the reason
- * {@link fileToolGate} states at length, plus `content_sha256` over the map as
+ * {@link fileToolGate} states at length, plus `content_sha256` over the set as
  * it ARRIVED, so a human's grant binds the bytes the server sent and a later
- * reader can check that it did.
+ * reader can check that it did. The set goes into the payload in the shape it
+ * arrived in, map or array; nothing here reads `diff`, `kind` or any other
+ * member, because one observed `add` is not a licence to parse Codex patch
+ * semantics in this repository.
  *
- * Fails closed on a path this runtime cannot place: an absolute path, one that
- * climbs out of the directory the server named, or one carrying a NUL. A change
- * whose target cannot be resolved cannot be classified, and a classification
- * against the wrong tree is the failure this whole file exists to avoid.
+ * Fails closed on a path this runtime cannot place: one that lands outside the
+ * directory the server named, or one carrying a NUL. A change whose target
+ * cannot be resolved cannot be classified, and a classification against the
+ * wrong tree is the failure this whole file exists to avoid.
+ *
+ * An ABSOLUTE path is accepted when it resolves INSIDE that directory, which
+ * APRV-379 changed: the observed item frame names absolute paths
+ * (`docs/codex-app-server-bridge.md`, question 1), and an absolute path inside
+ * the directory is exactly as placeable as a relative one. Containment is what
+ * was ever doing the work here, and it still decides: a path outside is refused
+ * whichever way it was spelled.
  */
 function describeCodexFileChanges(
-  changes: Record<string, unknown>,
+  changes: Record<string, unknown> | readonly unknown[],
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
   const classes: string[] = [];
   const notes: string[] = [];
   const paths: string[] = [];
-  for (const declared of Object.keys(changes).sort()) {
-    if (declared.length === 0 || declared.includes("\0") || isAbsolute(declared)) {
+  const declaredPaths = codexChangePaths(changes);
+  if (declaredPaths === null) {
+    return {
+      kind: "deny",
+      code: "hook-io",
+      detail:
+        "the file change set carries an entry that names no path string, so the extent of the change cannot be stated; nothing was classified",
+    };
+  }
+  for (const declared of declaredPaths) {
+    if (declared.length === 0 || declared.includes("\0")) {
       return {
         kind: "deny",
         code: "hook-io",
-        detail: `the file change names ${JSON.stringify(declared)}, which is not a relative path inside the directory the server named; a change whose target cannot be placed cannot be classified`,
+        detail: `the file change names ${JSON.stringify(declared)}, which is not a path this runtime can place; a change whose target cannot be placed cannot be classified`,
       };
     }
     const resolved = resolvePathSegments(cwd, declared);
@@ -3645,6 +3699,14 @@ function describeToolCall(
     // caller because one describer answers "what is this call", and a caller
     // that could hand this module its own classes would be the party under
     // oversight choosing its own scrutiny (SPEC §11.1 invariant 4).
+    //
+    // APRV-379 widened the material this branch reads and changed nothing about
+    // the reading. The ITEM-BASED API delivers the same change set as an ARRAY
+    // on an earlier `item/started` frame, and the bridge correlates that frame
+    // to the approval request by item id before calling in here. One describer
+    // still answers the question for both APIs, which is the point: two
+    // describers would be two answers to "what is this call", and the second
+    // one would be the one nobody reviewed.
     const changes = codexFileChanges(input.toolInput);
     if (changes !== null) {
       return describeCodexFileChanges(changes, protectedPaths, cwd);

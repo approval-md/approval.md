@@ -3,11 +3,11 @@ id: APRV-370
 title: >-
   Sender mapping accepts a hashed id, so a public policy and a public log never
   carry the raw Telegram account id
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-18 06:20'
-updated_date: '2026-09-19 21:14'
+updated_date: '2026-09-19 21:16'
 labels:
   - channel
   - telegram

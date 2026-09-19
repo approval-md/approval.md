@@ -12,6 +12,12 @@
  *
  *   [{"method": "...", "params": {...}}, ...]
  *
+ * An entry spelled `{"notify": "...", "params": {...}}` is sent as a
+ * NOTIFICATION instead: no id, nothing waited for, and the script moves on at
+ * once (APRV-379). That is what lets a case send the `item/started` that
+ * carries a file change, then the approval request that refers to it by item
+ * id, then the `item/completed` — the order the 2026-09-19 probe recorded.
+ *
  * Every reply it receives is appended to `APPROVAL_STUB_REPLIES` as one JSON
  * line, so a test reads what the bridge actually sent rather than what the
  * bridge said it sent. Frames carry no `jsonrpc` member, per the protocol. The
@@ -94,6 +100,14 @@ function advance() {
   }
   const entry = script[next];
   next += 1;
+  // A NOTIFICATION: sent with no id, so nothing is waiting for a reply and the
+  // script continues immediately (APRV-379). The recursion is the script's own
+  // length deep and a script is a handful of entries.
+  if (typeof entry.notify === "string") {
+    write({ method: entry.notify, params: entry.params ?? {} });
+    advance();
+    return;
+  }
   const id = nextId;
   nextId += 1;
   write({ id, method: entry.method, params: entry.params ?? {} });

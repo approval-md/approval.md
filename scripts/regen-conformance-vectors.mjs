@@ -364,7 +364,7 @@ const unionVectors = [
   ],
   [
     "bridge_refusal_codes",
-    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, a file change whose content arrived on a frame it is not correlating, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
+    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, an item-based file change whose content it cannot produce from the `item/started` frame that item id names, one whose item had already completed when the question arrived, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
   ],
   [
     "bridge_stop_codes",
@@ -1797,10 +1797,30 @@ const SUITES = [
     // request would be saying something false about what it did. Each union's
     // description now names the other, so a checker that reads one knows it has
     // read half.
-    // 18.0.0 (APRV-370): `channel_decision_refusal_codes` gains
+    // 17.0.0 (APRV-379): `bridge_refusal_codes` gains
+    // `bridge-file-change-already-completed`, the refusal an item-based
+    // file-change request takes when `item/completed` for its item arrived
+    // BEFORE the question about it. Major for the reason every union growth
+    // here is major: the vector pins each whole array in definition order, so a
+    // longer union is a changed expectation.
+    //
+    // A fifth code rather than a fifth reading of `bridge-file-change-unbound`,
+    // because the two say opposite things about the correlation. Unbound means
+    // the content could not be produced: no frame, the wrong item, an empty
+    // change set, or a frame belonging to another thread or turn. This one
+    // means the content WAS produced and the order was wrong, so the repairs
+    // differ: an unbound change points at a client that missed a frame or a
+    // protocol that changed shape, and this one points at a session whose
+    // approval policy is not the one it was pinned to. A second implementation
+    // on the item-based API has to answer it, because holding the content from
+    // an earlier frame is the only way to answer that API at all, and anything
+    // holding that state can be asked about an item it has already seen
+    // finished.
+    //
+    // 19.0.0 (APRV-370): `channel_decision_refusal_codes` gains
     // `sender-key-unavailable`, the refusal a decision surface reaches when the
     // attested policy maps that channel's senders in the KEYED form and the
-    // process holds no key. Major because the vector pins the whole array in
+    // process holds no key. Major because the vector pins each whole array in
     // definition order, so a longer union is a changed expectation.
     //
     // A fourth code rather than a `sender-unmapped`, because the two say
@@ -1811,12 +1831,15 @@ const SUITES = [
     // alternative to refusing is comparing a raw id against a digest and
     // finding nothing, which reads exactly like a stranger tapping.
     //
-    // 17.0.0 IS DELIBERATELY SKIPPED. APRV-379's lane bumped `refusal-unions`
-    // to 17.0.0 on its own branch in the same session, and two branches naming
-    // one version for two different vector sets is the collision
-    // `conformance/README.md` warns about. The rule it gives is to take one
-    // above the highest version either side saw.
-    vectors_version: "18.0.0",
+    // 18.0.0 DOES NOT EXIST, and this is the record of why. APRV-379 and
+    // APRV-370 were two lanes of one session; 379 took 17.0.0 on its branch
+    // and 370 took 18.0.0 on its own, each reading 16.0.0 as the highest it
+    // had seen. Two branches naming one version for two different vector sets
+    // is the collision `conformance/README.md` warns about, and the rule it
+    // gives is one minor — here one major — above the highest version either
+    // side saw. 379 merged first, so this is 19.0.0 and no published suite ever
+    // carried an 18.
+    vectors_version: "19.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
