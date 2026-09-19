@@ -1,0 +1,23 @@
+{
+  "seq": 55,
+  "ts": "2026-09-19T08:18:59Z",
+  "event": "task.registered",
+  "task": "hook:muse-sess-1:toolu-15",
+  "actor": "agent:muse",
+  "payload": {
+    "state": "proposed",
+    "actions": [
+      {
+        "class": "deps.add",
+        "summary": "npm install --save-dev oxlint",
+        "idempotency_key": "hook:muse-sess-1:toolu-15:deps.add",
+        "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f"
+      }
+    ],
+    "harness": "muse",
+    "harness_version": "muse-bin-1.3.0-R3233.1"
+  },
+  "alg": "sha256/jcs",
+  "prev": "c6410d97b28e53fa0716d8c4b93e250fa8d17c6b4093e5ad21fc80b7e5943d1a",
+  "hash": "7d925ec380b14fa6c05e971b3d4287ac6fb015e93c2a480df6b1e7c05a83942f"
+}

@@ -2677,6 +2677,33 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "hook",
+    subcommand: "grok",
+    purpose:
+      "Read one Grok Build PreToolUse event on stdin (camelCase keys), classify its Bash command and its Edit, Write, MultiEdit and NotebookEdit paths, resolve the class against APPROVAL.md, and answer {decision, reason} on stdout — waiting on a real decision when the class is manual. THE VERDICT IS NEVER 'ask'. A DENY IS EXIT 2, not exit 0 with a body: Grok reads the exit code, so the Claude dialect's exit-0 deny would be read as an allow, and Grok states that it reads .claude/settings.json for compatibility, which is how that dialect can fire under a Grok session in the first place. Exit 0 is an allow whatever stdout said.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: Grok Build invokes it around the agent's own tool calls. It records the agent's proposal and waits for a human; it never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        "--retry-grace": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the tool call is allowed; the {decision, reason} object is on stdout" },
+      { code: 2, meaning: "the tool call is DENIED, or the hook is misconfigured; either way Grok blocks and reads the reason" },
+    ],
+  },
+
+  {
+    name: "hook",
     subcommand: "muse",
     purpose:
       "Read one Meta Muse Code PreToolUse or PostToolUse event on stdin (snake_case), classify its bash command or its write_file, read_file and search paths, resolve the class against APPROVAL.md, and answer allow or deny — waiting on a real decision when the class is manual. THE VERDICT IS NEVER 'ask'. It answers in ONE dialect and nothing else, the nested permissionDecision object at exit 0, because Muse treats output carrying any unsupported key as a failed hook and a failed hook FAILS OPEN. A Contributor-tier model is refused for every tool call regardless of policy (hook-muse-contributor-model): Meta trains on that tier's prompts and completions, so every read is a disclosure. Muse fails open on hook crash, timeout and malformed output, so this is enforcement only while the hook is healthy and answers inside the timeout the human commits.",
