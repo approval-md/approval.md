@@ -648,13 +648,13 @@ export const POLICY_APPLY_HELP = `approval policy apply — apply a proposal doc
 
 Usage:
   approval policy apply <proposal.md> [--policy <p>] [--dir <p>] [--log <p>]
-      [--as human:<id>] [--dry-run] [--no-amend] [--pr] [--yes] [--json]
+      [--as human:<id>] [--dry-run] [--no-amend] [--no-publish] [--yes] [--json]
 
 Flags:
   <proposal.md>                   the document whose Current/Replace-with pairs to apply
   --policy <p> / --dir <p>        the policy file, or the directory to discover it in
   --dry-run / --no-amend          show the replacements only / write them and stop
-  --pr / --yes / --json / -h      pass --pr to the amend / skip both prompts / machine
+  --no-publish / --yes / --json   stop at the commit / skip both prompts / machine
 
 HUMAN-ONLY: an agent identity refuses apply-agent-actor, and the verb classifies
 policy.core, human-only in this project's policy. Every pair resolves against an
@@ -664,8 +664,8 @@ fenced blocks WITH a declared language (APRV-273), labelled \`Current:\` and
 instead. Whole-file replacement is NOT accepted: every byte written is anchored
 to a byte proved present. The values block is treated as the policy block is.
 Refusals: usage, io, apply-agent-actor, proposal-empty, proposal-malformed,
-proposal-stale, proposal-ambiguous. Then it runs \`policy amend\`, whose refusals
-are its own; answering no is exit 0 and \`aborted:\`, as it is there.
+proposal-stale, proposal-ambiguous. Then it runs \`policy amend --pr\`, which
+PUBLISHES: refspec push, pull request, merge armed, checkout never moved.
 
 ${EXIT_CODES_POINTER}
 ${why("policy-apply")}`;
