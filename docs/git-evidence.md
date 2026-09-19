@@ -253,6 +253,22 @@ is `git merge-base origin/main HEAD`. `approval doctor`'s dark-session sweep
 judges the same unit through the same helper (`src/core/commit-guard.ts`), so
 the health row and the CI verdict agree by construction.
 
+**A merge is judged on the dense combined PATCH, never on a `--name-only`
+listing** (APRV-374). The two answer different questions. `git log --cc
+--name-only` and `git log -c --name-only` both list a path whose result differs
+from every parent as a blob, which is true of any file two branches edited
+concurrently and git merged with nobody in the room; the dense patch for that
+path is empty, because every hunk of it came from one side verbatim. Taking the
+listing as the merge's own work would replay a change nobody made and report it
+unevidenced, which is the false alarm this unit of judgment exists to remove. So
+each candidate path is re-asked with `git log -1 --cc <sha> -- <path>`, and a
+non-empty answer is a resolution: bytes the merge invented while resolving a
+conflict, made in the checkout that made the merge, carried by no parent and
+covered by no other commit's evidence. The dark-session sweep asks this of every
+merge it finds in its window, for guarded paths only, and judges what comes back
+against the merge's first parent, which is the state that checkout was in before
+the merge and therefore the before-state a grant for the resolution binds.
+
 **Whole-file evidence is anchored to the range head, not to a commit.** A grant
 binds a hunk and is evidence about one commit, so it is matched per commit. A
 sign-off (`gate.path.signed_off`), an organ attestation
