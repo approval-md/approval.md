@@ -3,9 +3,11 @@ id: APRV-355
 title: >-
   Audit event for a refused gesture that is not a decision, so an unmapped
   checkpoint or review tap leaves a record
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-09-17 20:09'
+updated_date: '2026-09-19 11:00'
 labels:
   - audit
   - schema
@@ -23,8 +25,55 @@ Found while landing APRV-324 (PR #427, 2026-09-17). When the policy maps Telegra
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new audit event type for a refused non-decision gesture is defined in schema/event.schema.json and SPEC 8, validated at the write boundary, with the gesture kind and refusal code closed enums, payload.sender optional, and actor required only when no sender is present
-- [ ] #2 An unmapped, ambiguous or unattested-policy checkpoint tap and review tap each append exactly one such record and nothing else; a no-mapping policy appends none; tests run through the real append path and the mock Telegram server
-- [ ] #3 No enforcement path reads the record (a test or a module-graph assertion pins that), approval audit or approval status can list them, and docs/cli-reference.md describes the record
-- [ ] #4 Conformance vectors cover the new event; build, typecheck, lint and the channel and schema suites pass; the SPEC amendment is called out
+- [x] #1 A new audit event type for a refused non-decision gesture is defined in schema/event.schema.json and SPEC 8, validated at the write boundary, with the gesture kind and refusal code closed enums, payload.sender optional, and actor required only when no sender is present
+- [x] #2 An unmapped, ambiguous or unattested-policy checkpoint tap and review tap each append exactly one such record and nothing else; a no-mapping policy appends none; tests run through the real append path and the mock Telegram server
+- [x] #3 Conformance vectors cover the new event; build, typecheck, lint and the channel and schema suites pass; the SPEC amendment is called out
+- [x] #4 No enforcement path reads the record (a test or a module-graph assertion pins that), the record is visible where every record is (approval log tail, approval log export), and docs/cli-reference.md describes it. REWORDED 2026-09-19 on the orchestrator ruling: the original said approval audit or approval status can list them, which is a new surface neither verb offers for audit.decision_refused either; listing both refusal families on approval status is filed as APRV-376 so that neither is listed alone.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read the two gesture sites: checkpointHandlerFor and reviewHandlerFor in src/cli/channel-telegram.ts, both refused by senderIdentityFor before any verb runs, both recording nothing today. The closed refusal set reaching them is exactly three codes: sender-unmapped and sender-ambiguous from actorForSender, and policy-not-attested from attestationRefusal (and from the unreadable-log branch, which hard-codes it).
+2. schema/event.schema.json: add audit.gesture_refused to the event enum and an if/then block modelled on audit.decision_refused. Required: a system: actor (the runtime states what the runtime did; neither party to the refusal authors the record), a channel, and a payload carrying gesture (closed enum: checkpoint-signature, review, review-note) and code (closed enum: the three above) and message. Optional payload.sender (channel plus id) and sender_source. payload.actor is ^human: and required only when no sender is present, the same conditional rule APRV-324 gave audit.decision_refused. No action_key and no decision: a signature and a review have neither, and manufacturing them is what Lane D correctly declined to do.
+3. src/core/log.ts: add the type to the union and to the header count.
+4. New src/core/gesture-refusal.ts, modelled on decision-refusal.ts: recordRefusedGesture(logPath, gesture, refusal, options), one append through withHeadRetry, best-effort (returns a failure, never throws), no withdrawal half because a gesture has no request to void. No attestation check, for the same reason decision-refusal has none: the write confers no authority and policy-not-attested is exactly the refusal an operator most needs remembered.
+5. src/cli/channel-telegram.ts: both handlers call it on the not-ok branch of senderIdentityFor, before returning the card. review-note when the tap carried a note, review otherwise.
+6. SPEC 8: ONE bullet, few lines, defining the type and saying it authorizes nothing and no enforcement path reads it. One commit, and no later commit touches it.
+7. docs/cli-reference.md: describe the record where audit.decision_refused is described.
+8. Conformance: a schema-validation vector for a valid record and for the two invalid shapes (no actor and no sender; an unknown gesture kind).
+9. Tests: tests/gesture-refusal.test.ts through the real append path (one record and nothing else for each of the two gesture kinds and each refusal code; a no-mapping policy appends none), a module-graph assertion that no enforcement path reads the type, and the channel suite through the mock Telegram server.
+10. build, typecheck, lint, conformance, the channel and schema suites.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+APRV-355 implemented, with ONE acceptance criterion deliberately left open. See the AC3 paragraph.
+
+WHAT LANDED
+
+- SCHEMA CHANGE, called out in the PR body: audit.gesture_refused joins the closed event enum (now thirty-three types) with two new allOf branches in schema/event.schema.json. Required: a ^system: actor, a channel, and payload.gesture plus payload.code, both closed enums. payload.sender is optional and payload.actor is ^human: and required exactly when no sender is present, which is the conditional APRV-324 gave audit.decision_refused. Five schema fixtures (two valid, three invalid) and 379/379 conformance, up from 374 with 3 new negative controls.
+- SPEC.md 8 gains ONE bullet defining the type, in one commit, and no later commit touches it. It states the audit-tier terms, the system: actor rule, the conditional actor-or-sender rule, and that no enforcement path reads it.
+- New src/core/gesture-refusal.ts, modelled on decision-refusal.ts: one append through withHeadRetry, best-effort, no withdrawal half because a gesture has no request to void, and no attestation check for the same reason decision-refusal has none.
+- src/cli/channel-telegram.ts records one on the refused branch of both gesture handlers. review-note when the tap carried words, review otherwise.
+- docs/cli-reference.md describes the record under channel telegram listen, with the JSON shape.
+
+DECISIONS
+
+1. Three gesture kinds, not two. review and review-note are separate members because a note is attention spent WRITING rather than tapping, and an operator reading this record to decide whether to map an account wants to know which they lost. The task named all three.
+2. The code enum is exactly three: sender-unmapped and sender-ambiguous from CHANNEL_DECISION_REFUSAL_CODES, and policy-not-attested from ATTESTATION_REFUSAL. attest-requires-terminal is NOT here: it belongs to an attestation tap, which is a decision and is recorded as one.
+3. No action_key and no decision on the record. That is the whole reason the type exists; Lane D was right to refuse to manufacture them.
+4. A code outside the enum appends NOTHING rather than widening the union from inside a best-effort path. Same for a non-human actor and for a gesture with neither a person nor an account.
+5. The record never carries the listener configured identity on a sender refusal. The runtime cannot name a person there, which is what the refusal means, and writing the operator name would be the false record the whole family avoids.
+
+SECTION 11 INVARIANTS TOUCHED: invariant 6 (refusals machine-readable and distinct) is extended rather than weakened, by giving a refusal that had no record one of its own with its own closed codes. Invariant 4 holds: the sender is the transport own attribution and the record only ADDS to what a reviewer sees. The write boundary validates it like everything else, and the gate-typed clock rule is unchanged (no ts parameter exists).
+
+AC3 IS NOT TICKED, and the reason is scope rather than difficulty. Two of its three clauses are done: a module-graph test reads ten enforcement modules and asserts none of them names the type or imports the writer, and docs/cli-reference.md describes the record. The third, "approval audit or approval status can list them", is a NEW SURFACE: neither verb lists audit.decision_refused today either, so adding a listing for this type alone would be inconsistent with the record it is modelled on. approval log tail and approval log export show it now, like every other record. Two options for whoever rules: (a) add a refused-gesture count to approval status informational fields and list both refusal families there, which is the consistent version and is its own small task; (b) leave listing to log tail and reword the criterion. This lane did not choose.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+audit.gesture_refused: a refused checkpoint signature or review from an unmapped, ambiguous or unattested-policy sender now leaves exactly one audit-tier record where it left none. Schema change (closed event enum to thirty-three types, two allOf branches, five fixtures, conformance 374 to 379 with 3 new negative controls) and a one-bullet SPEC 8 amendment, both in one commit. New src/core/gesture-refusal.ts, wired into both Telegram gesture handlers; docs/cli-reference.md describes the record. Verified: tests/gesture-refusal.test.ts covers every gesture kind by every code through the real append path, the three cases that append nothing, the two vocabularies asserted equal to the schema enums, a module-graph assertion over ten enforcement modules, and a derivation taken across the record that does not move; the checkpoint and Telegram suites drive the real mock Bot API and assert the record shape where they used to assert a count, and both no-mapping cases assert that nothing is recorded. build, typecheck, lint clean; conformance 379/379; npm test 4681 / 4658 pass / 1 skip with the 22 pre-existing Node v26 SMTP failures untouched. AC4 was reworded on the orchestrator ruling of 2026-09-19; the status listing is APRV-376.
+<!-- SECTION:FINAL_SUMMARY:END -->

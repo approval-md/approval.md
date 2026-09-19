@@ -137,6 +137,15 @@ export const GENESIS_PREV = null;
  * somebody re-attested it. The `gate.` prefix already carries the write-boundary
  * clock in `core/verify.ts`, which is what an attestation's `ts` has to be.
  *
+ * `audit.gesture_refused` (APRV-355) is the seventeenth: a human made a gesture
+ * on a decision surface that is NOT a decision — a checkpoint signature, a
+ * review — and the surface refused it before any verb ran. `audit.decision_refused`
+ * cannot carry one: it requires an `action_key` and a `decision` of grant,
+ * reject or revoke, and a signature has neither, so recording a refused
+ * signature there would mean manufacturing both. Audit tier on the same strict
+ * terms, `system:` actor for the same reason, and `core/gesture-refusal.ts`
+ * states the asymmetry it inherits.
+ *
  * `gate.path.signed_off` (APRV-338) is the sixteenth: a human's sign-off on the
  * exact bytes of one PROTECTED PATH whose edits classify `policy.edit` or a
  * `policy.edit.*` sub-class (amended SPEC.md §5.2, §8, §10.1). `human:` actor,
@@ -177,6 +186,7 @@ export type EventType =
   | "audit.reviewed"
   | "audit.dark_session"
   | "audit.decision_refused"
+  | "audit.gesture_refused"
   | "reconciliation.required"
   | "reconciliation.satisfied"
   | "payload.pruned"

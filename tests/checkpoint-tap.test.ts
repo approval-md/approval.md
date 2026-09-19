@@ -1030,10 +1030,28 @@ test("an unmapped sender signs nothing, and the message says why", async (t) => 
   );
   await world.setup.channel.pollOnce();
 
-  // Nothing at all: a checkpoint refusal has never appended, and this one is no
-  // different. The account that tried is on the operator's terminal, not in a
-  // record shaped for a decision that has an action key and a verdict.
-  assert.equal(records(world.home.logPath).length, before);
+  // Nothing is SIGNED, and since APRV-355 exactly one thing is recorded: an
+  // `audit.gesture_refused`, which is not a decision record and claims to be
+  // none. It carries the observed account and no person, because naming a
+  // person is exactly what the runtime could not do.
+  const after = records(world.home.logPath);
+  assert.equal(after.length, before + 1);
+  const refused = after[after.length - 1] as EventRecord;
+  assert.equal(refused.event, "audit.gesture_refused");
+  assert.equal(refused.actor, "system:gate");
+  assert.equal(refused.channel, "telegram");
+  const payload = refused.payload as Record<string, unknown>;
+  assert.equal(payload["gesture"], "checkpoint-signature");
+  assert.equal(payload["code"], "sender-unmapped");
+  assert.equal("actor" in payload, false);
+  assert.deepEqual(payload["sender"], { channel: "telegram", id: STRANGER_ID });
+  // No `log.checkpoint`: the gesture was refused, and the record ABOUT the
+  // refusal is not the thing that was refused.
+  assert.equal(
+    after.slice(before).filter((record) => record.event === "log.checkpoint").length,
+    0,
+  );
+
   const edits = world.mock.edits();
   const last = edits[edits.length - 1];
   assert.match(String(last?.text ?? ""), /not one the attested policy names as an approver/u);
@@ -1070,14 +1088,34 @@ test("a mapping edited and not attested signs nothing: an edited policy is inope
   };
 
   await tap(STRANGER_ID);
-  assert.equal(records(world.home.logPath).length, before, "an unattested mapping signed");
+  // Nothing is signed. Since APRV-355 the ATTEMPT is recorded, once, and the
+  // code is the attestation refusal rather than the mapping one: the file on
+  // disk is not the file in force.
+  const afterStranger = records(world.home.logPath);
+  assert.equal(afterStranger.length, before + 1, "an unattested mapping signed");
+  assert.equal(
+    afterStranger.slice(before).filter((record) => record.event === "log.checkpoint").length,
+    0,
+  );
+  const strangerRefusal = afterStranger[afterStranger.length - 1] as EventRecord;
+  assert.equal(strangerRefusal.event, "audit.gesture_refused");
+  assert.equal(
+    (strangerRefusal.payload as Record<string, unknown>)["code"],
+    "policy-not-attested",
+  );
   const edits = world.mock.edits();
   assert.match(String(edits[edits.length - 1]?.text ?? ""), /nobody has attested it yet/u);
 
   // The account the ATTESTED policy names is refused too, for the same reason:
-  // the file on disk is not the file in force, whoever is tapping.
+  // the file on disk is not the file in force, whoever is tapping. One more
+  // refusal record, and still no signature.
   await tap(SIGNER_ID);
-  assert.equal(records(world.home.logPath).length, before);
+  const afterSigner = records(world.home.logPath);
+  assert.equal(afterSigner.length, before + 2);
+  assert.equal(
+    afterSigner.slice(before).filter((record) => record.event === "log.checkpoint").length,
+    0,
+  );
 
   // Put the attested bytes back and the same tap signs.
   writeFileSync(world.home.policyPath, attested, "utf8");
@@ -1106,12 +1144,14 @@ test("with no mapping, a checkpoint tap is attributed exactly as it was before",
   );
   await world.setup.channel.pollOnce();
 
-  const checkpoints = records(world.home.logPath).filter(
-    (record) => record.event === "log.checkpoint",
-  );
+  const all = records(world.home.logPath);
+  const checkpoints = all.filter((record) => record.event === "log.checkpoint");
   assert.equal(checkpoints.length, 1);
   assert.equal(checkpoints[0]?.actor, HUMAN);
   assert.equal(check(world.home).status, "pass");
+  // APRV-355: nothing was refused, so nothing is recorded about a refusal. A
+  // policy that maps no senders never reaches that path at all.
+  assert.equal(all.filter((record) => record.event === "audit.gesture_refused").length, 0);
 });
 
 // ===========================================================================
