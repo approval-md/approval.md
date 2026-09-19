@@ -120,10 +120,13 @@ function ready(policyText: string = POLICY): string {
   return dir;
 }
 
-interface ScriptEntry {
-  method: string;
-  params?: Record<string, unknown>;
-}
+/**
+ * One thing the stub says: a request it waits for a reply to, or, since
+ * APRV-379, a notification it sends and moves straight past.
+ */
+type ScriptEntry =
+  | { method: string; params?: Record<string, unknown> }
+  | { notify: string; params?: Record<string, unknown> };
 
 interface BridgeAnswerRow {
   method: string;
@@ -489,26 +492,15 @@ test("an exec request missing cwd or command is declined bridge-request-unbound"
 test("a file-change request is declined bridge-file-change-unbound: no content, no approval", () => {
   const dir = ready();
   const before = rawLog(dir);
-  const { report } = bridge(dir, [
-    {
-      method: "item/fileChange/requestApproval",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        itemId: "item-2",
-        startedAtMs: 0,
-        reason: null,
-        grantRoot: null,
-      },
-    },
-  ]);
+  const { report } = bridge(dir, [itemFileChangeRequest("item-2")]);
 
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "decline");
   assert.equal(answer.code, "bridge-file-change-unbound");
-  // The follow-up that would let it be approved, once the shape of the frame
-  // the content arrives on is recorded (APRV-363 landed the legacy half).
-  assert.match(answer.detail, /APRV-379/u);
+  // No `item/started` for that id ever reached this client, so the request is
+  // an identifier and nothing else. This is the refusal the verb has answered
+  // since APRV-361, and APRV-379 left it exactly here for that case.
+  assert.match(answer.detail, /no item\/started for it reached this client/u);
   assert.equal(rawLog(dir), before);
 });
 
@@ -611,6 +603,266 @@ test("APRV-363: a legacy patch approval with no directory is declined bridge-req
   assert.equal(answer.code, "bridge-request-unbound", answer.detail);
   assert.match(answer.detail, /cwd or grantRoot/u);
   assert.equal(rawLog(dir), before);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-379 — the item-based request names an item, and the content arrived on
+// that item's own `item/started` frame
+// ---------------------------------------------------------------------------
+
+/**
+ * The `item/started` frame the 2026-09-19 probe recorded, in its observed
+ * shape.
+ *
+ * `changes` is an ARRAY of `{path, kind: {type}, diff}` and the path is
+ * ABSOLUTE, which is what the capture in `docs/codex-app-server-bridge.md`
+ * shows. Nothing here is a convenient simplification of it: a fixture in a
+ * shape the server does not send is a suite agreeing with itself, which is the
+ * APRV-380 lesson.
+ */
+function itemStarted(
+  itemId: string,
+  changes: unknown[],
+  overrides: Record<string, unknown> = {},
+): ScriptEntry {
+  return {
+    notify: "item/started",
+    params: {
+      item: { type: "fileChange", id: itemId, changes, status: "inProgress" },
+      threadId: "thread-1",
+      turnId: "turn-1",
+      startedAtMs: 1789848549897,
+      ...overrides,
+    },
+  };
+}
+
+/** The same item, completed, as the probe saw it repeated back. */
+function itemCompleted(itemId: string, changes: unknown[]): ScriptEntry {
+  return {
+    notify: "item/completed",
+    params: {
+      item: { type: "fileChange", id: itemId, changes, status: "completed" },
+      threadId: "thread-1",
+      turnId: "turn-1",
+      startedAtMs: 1789848549897,
+      completedAtMs: 1789848549947,
+    },
+  };
+}
+
+/** One `add`, the only change kind the probe observed. */
+function addChange(path: string, diff = "patched\n"): Record<string, unknown> {
+  return { path, kind: { type: "add" }, diff };
+}
+
+/**
+ * The item-based approval request, carrying exactly what the probe recorded:
+ * an item id, a thread, a turn, a start time, a null reason and a null
+ * `grantRoot`. No content, no `cwd`, no advertised decisions.
+ */
+function itemFileChangeRequest(
+  itemId: string,
+  overrides: Record<string, unknown> = {},
+): ScriptEntry {
+  return {
+    method: "item/fileChange/requestApproval",
+    params: {
+      grantRoot: null,
+      itemId,
+      reason: null,
+      startedAtMs: 1789848549897,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      ...overrides,
+    },
+  };
+}
+
+test("APRV-379: the change from item/started is what the request is decided against", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const target = join(dir, "probe-patch-marker.txt");
+  // The observed order: the content, then the question about it, then the
+  // completion once this client has answered.
+  const { run, report } = bridge(dir, [
+    itemStarted("exec-57f5bb5e", [addChange(target)]),
+    itemFileChangeRequest("exec-57f5bb5e"),
+    itemCompleted("exec-57f5bb5e", [addChange(target)]),
+  ]);
+
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const answer = report.answers[0] as BridgeAnswerRow;
+  // `files.write.workspace` is autonomous in this policy, so the change is
+  // classified, charged and accepted without a human. Before APRV-379 this same
+  // script answered `bridge-file-change-unbound`.
+  assert.equal(answer.outcome, "accept", answer.detail);
+  assert.equal(answer.code, null);
+  const grown = rawLog(dir).slice(before.length);
+  assert.doesNotMatch(grown, /"event":"approval\.requested"/u);
+  assert.match(grown, /"event":"execution\.started"/u);
+  assertVerifies(dir);
+});
+
+test("APRV-379: the payload binds the paths and the digest of the change as it arrived", () => {
+  // SPEC.md is protected here and `policy.edit` is manual, so the change is
+  // REGISTERED and waits, which is what makes the bound payload readable.
+  // Nobody grants it, so the wait runs out and the answer is no.
+  const dir = ready(
+    POLICY.replace("classes:", "protected_paths:\n  - SPEC.md\nclasses:\n  policy.edit:\n    autonomy: manual"),
+  );
+  const before = rawLog(dir);
+  const target = join(dir, "SPEC.md");
+  const { report } = bridge(dir, [
+    itemStarted("exec-aa", [addChange(target, "@@ -1 +1 @@\n-one\n+two\n")]),
+    itemFileChangeRequest("exec-aa"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-timeout", answer.detail);
+  // The class came from the PATH the server named, through the same
+  // protected-path rule every other file tool uses.
+  const grown = rawLog(dir).slice(before.length);
+  assert.match(grown, /"event":"approval\.requested"/u);
+  assert.match(grown, /"class":"policy\.edit"/u);
+
+  // AC2: the bound material names the path and carries the digest of the
+  // change AS RECEIVED, and the change itself is in the shape the server sent
+  // it — an array of entries, not a map this runtime rewrote it into.
+  const stored = storedPayloads(dir);
+  assert.match(stored, /"content_sha256":"[0-9a-f]{64}"/u);
+  assert.match(stored, /"changes":\[\{/u);
+  assert.match(stored, /"kind":\{"type":"add"\}/u);
+  assert.match(stored, /-one\\n\+two/u);
+  assert.ok(stored.includes(target), stored);
+  assertVerifies(dir);
+});
+
+test("APRV-379: a change landing outside the directory the client named is refused", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    // An absolute path, and a real one, that is simply not in this thread's
+    // workspace. The containment check is what decides, and it decides no.
+    itemStarted("exec-bb", [addChange(join(scratch, "escape.md"))]),
+    itemFileChangeRequest("exec-bb"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-io", answer.detail);
+  assert.match(answer.detail, /resolves outside/u);
+  assert.equal(rawLog(dir), before, "a refused change appended something");
+});
+
+test("APRV-379: an item id that names something other than a fileChange is unbound", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    // `userMessage` was one of the other item types the probe saw on the wire.
+    {
+      notify: "item/started",
+      params: {
+        item: { type: "userMessage", id: "exec-cc", text: "do the thing" },
+        threadId: "thread-1",
+        turnId: "turn-1",
+      },
+    },
+    itemFileChangeRequest("exec-cc"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
+  assert.match(answer.detail, /recorded as "userMessage"/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-379: a fileChange item carrying no change set is unbound", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    itemStarted("exec-dd", []),
+    itemFileChangeRequest("exec-dd"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
+  assert.match(answer.detail, /carried no change set/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-379: a request naming another thread than the frame is unbound", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    itemStarted("exec-ee", [addChange(join(dir, "notes.md"))]),
+    itemFileChangeRequest("exec-ee", { threadId: "thread-other" }),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
+  assert.match(answer.detail, /disagree about which conversation/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-379: a request naming another turn than the frame is unbound", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    itemStarted("exec-ff", [addChange(join(dir, "notes.md"))]),
+    itemFileChangeRequest("exec-ff", { turnId: "turn-other" }),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
+  assert.match(answer.detail, /disagree about which turn/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-379: an item that completed BEFORE the question gets its own code", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const target = join(dir, "notes.md");
+  const { report } = bridge(dir, [
+    // The timestamp-order case: the change finished, and only then was this
+    // client asked about it. The content correlates perfectly, and that is
+    // exactly why this is not `bridge-file-change-unbound`.
+    itemStarted("exec-gg", [addChange(target)]),
+    itemCompleted("exec-gg", [addChange(target)]),
+    itemFileChangeRequest("exec-gg"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-file-change-already-completed", answer.detail);
+  assert.match(answer.detail, /arrived BEFORE the approval request/u);
+  // Nothing was registered: an effect that already happened is not an action to
+  // open a request about.
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-379: the completion frame does not overwrite the content the question was asked about", () => {
+  const dir = ready();
+  const target = join(dir, "notes.md");
+  const { report } = bridge(dir, [
+    itemStarted("exec-hh", [addChange(target, "first\n")]),
+    itemFileChangeRequest("exec-hh"),
+    // A completion naming a DIFFERENT change set, after the answer. The
+    // decision above was made against the frame this client was holding when
+    // the question arrived, and this frame cannot reach back and change it.
+    itemCompleted("exec-hh", [addChange(target, "second\n")]),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "accept", answer.detail);
+  const stored = storedPayloads(dir);
+  if (stored.length > 0) assert.doesNotMatch(stored, /second/u);
+  assertVerifies(dir);
 });
 
 test("a server request with no reading is declined bridge-unknown-request", () => {
@@ -1167,6 +1419,7 @@ test("APRV-367: what goes on the wire is this runtime's own spelling of the word
 test("the refusal codes are a closed, distinct vocabulary", () => {
   assert.deepEqual([...BRIDGE_REFUSAL_CODES].sort(), [
     "bridge-command-unbound",
+    "bridge-file-change-already-completed",
     "bridge-file-change-unbound",
     "bridge-request-unbound",
     "bridge-unknown-request",

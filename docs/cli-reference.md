@@ -6390,9 +6390,24 @@ Its own refusals, beside the gate's:
 ```
 bridge-request-unbound       no command, no cwd, or no call identity on the request
 bridge-command-unbound       a command string that names no argv this client can bind (APRV-362)
-bridge-file-change-unbound   an item-based file change carries no content (APRV-379)
+bridge-file-change-unbound   an item-based file change whose content this client cannot
+                             produce from the item/started frame its item id names: no such
+                             frame, an item that is not a fileChange, an empty change set, or
+                             a frame belonging to another thread or turn (APRV-379)
+bridge-file-change-already-completed
+                             item/completed for that item arrived before the question, so the
+                             change had finished before this client was asked (APRV-379)
 bridge-unknown-request       a server request this client has no reading for
 ```
+
+The **item-based file change is correlated, not guessed** (APRV-379). That API
+puts the content on an earlier `item/started` notification and the approval
+request refers to it by `itemId`, so the bridge keeps every item the thread
+announces and decides the request against the frame that id names: the paths
+take their classes, the payload binds the change set verbatim with
+`content_sha256` over it as received, and nothing parses the `diff`. The request
+carries no directory, so the paths resolve against the workspace the bridge
+named on `thread/start`, and one landing outside it is refused `hook-io`.
 
 The **exec request binds words, not a rendering** (APRV-362). The item-based API
 delivers the command as one string, joined from the argv Codex will run, so the

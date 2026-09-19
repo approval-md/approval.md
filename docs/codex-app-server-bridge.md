@@ -137,6 +137,49 @@ Both file-change requests carried only `itemId`, `threadId`, `turnId`,
 decision list. The source claim above holds on the wire: a client on the
 item-based API approves a reference.
 
+### Where the file-change content actually arrives (APRV-379)
+
+**observed (2026-09-19), `codex-cli` 0.155.0**, from the probe's `approve-patch`
+trial, which asks Codex to create a marker file with its file editing tool and
+forbids the shell for that file, so the server reaches a file-change item rather
+than a command item.
+
+The APPROVAL REQUEST is `item/fileChange/requestApproval`, and its params key
+paths are `grantRoot`, `itemId`, `reason`, `startedAtMs`, `threadId`, `turnId`.
+No `cwd`, no command bytes, no patch content, and no advertised decisions. The
+API form is item-based: `itemId` was
+`exec-57f5bb5e-45de-4100-ae6b-0867086606ff`.
+
+The CONTENT arrives EARLIER, on `item/started`, whose `params.item.type` is
+`fileChange`. The frame, verbatim except for the elided scratch path and ids:
+
+```json
+{"method":"item/started","params":{"item":{"type":"fileChange","id":"exec-57f5bb5e-45de-4100-ae6b-0867086606ff","changes":[{"path":"/var/folders/.../workspaces/approve-patch/probe-patch-marker.txt","kind":{"type":"add"},"diff":"patched\n"}],"status":"inProgress"},"threadId":"01a0bb49-...","turnId":"01a0bb49-...","startedAtMs":1789848549897},"emittedAtMs":1789848549898}
+```
+
+`item/completed` repeats the SAME item with `status: "completed"`
+(`completedAtMs` 1789848549947).
+
+What that capture supports, and what it does not:
+
+- `changes` is an ARRAY of `{path, kind: {type}, diff}`. It is not the map of
+  path to change that the legacy `applyPatchApproval` carries inline, and the
+  `path` is ABSOLUTE.
+- for an `add`, `diff` is the file's content. For `update` and `delete` the
+  shape is UNOBSERVED. Nothing in this runtime parses `diff`: it is carried as
+  the change bytes as received, which is the only reading a single observed
+  operation licenses.
+- other item types seen on the wire in the same run: `userMessage` and
+  `agentMessage` (the latter carrying `phase`), plus `turn/diff/updated` and
+  `serverRequest/resolved` notifications.
+- `grantRoot` was `null` in the 2026-09-18 capture and its key is present in the
+  2026-09-19 key paths. Nothing observed has ever put a directory on a
+  file-change request.
+
+This is one capture, of one `add`, on one machine, at one version. It is enough
+to write a correlation against, and it is not enough to write a patch parser
+against, which is why the bridge does the first and refuses the second.
+
 ## Question 2: crash, disconnect, timeout, malformed reply
 
 Each of these has a source answer and an observed answer, and they are not
@@ -530,14 +573,32 @@ a decline, since the only safe substitute for a word you cannot name is no. The
 `bridge-decisions` conformance suite states the same rule for a second
 implementation, including the two vectors a prefix matcher fails.
 
-Four refusals are the bridge's own rather than the gate's:
+Five refusals are the bridge's own rather than the gate's:
 `bridge-request-unbound` (no command, no `cwd`, or no call identity),
 `bridge-command-unbound` (a command string that names no argv this client can
-bind, APRV-362), `bridge-file-change-unbound` (an item-based file change carries
-no content, and approving an identifier is not approving a change), and
-`bridge-unknown-request` (a server request this client has no reading for). They
-are a conformance union, so a second implementation answers all four or has
-left a door open.
+bind, APRV-362), `bridge-file-change-unbound` (an item-based file change whose
+content this client cannot produce from the `item/started` frame its item id
+names: no such frame, an item that is not a `fileChange`, an empty change set,
+or a frame belonging to another thread or turn),
+`bridge-file-change-already-completed` (the item's `item/completed` arrived
+before the question, so the change had finished before this client was asked
+about it, APRV-379), and `bridge-unknown-request` (a server request this client
+has no reading for). They are a conformance union, so a second implementation
+answers all five or has left a door open.
+
+**How an item-based file change is decided (APRV-379).** The bridge keeps every
+item the thread announces on `item/started`, by item id, for the thread's life.
+When `item/fileChange/requestApproval` arrives it looks the item id up, and the
+change set on that frame is what it decides against: each path takes its
+protected class or `files.write.workspace`, and the registered payload binds the
+changes verbatim with `content_sha256` over them as received. Nothing is
+re-rendered into an `apply_patch` envelope and nothing parses `diff`. The
+request carries no directory (`grantRoot` was `null` in both captures), so the
+paths are resolved against the workspace the bridge itself named on
+`thread/start`; a path landing outside it is refused `hook-io`. The four unbound
+cases above and the completed case are the whole of what the correlation will
+not do, and each of them is a decline rather than a resolution in favour of
+going ahead.
 
 **Two limits, stated rather than implied.** An open gate window is NOT honoured:
 the hook's bypass prints a hook verdict and appends a record shaped for the
