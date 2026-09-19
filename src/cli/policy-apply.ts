@@ -66,6 +66,23 @@
  * all, so "a stale proposal cannot half-apply" is a property of the code rather
  * than of the order somebody wrote the sections in.
  *
+ * ## It publishes, because one command means one command (APRV-360)
+ *
+ * The amendment runs with `--pr` unless `--no-publish` says otherwise. Before
+ * this, `apply` ran the amend with no flag: the policy was written and
+ * attested, and the operator was handed a printed procedure for getting it onto
+ * main. On 2026-09-18 that procedure opened with `git checkout -b
+ * policy-amend-<seq> origin/main`, the primary's main was fourteen commits
+ * behind, and the switch refused rather than overwrite `QUEUE.md`, the working
+ * log and six payloads. The ceremony stalled with an edited, attested,
+ * unpublished policy, which is the one state in which every gated operation on
+ * the box refuses.
+ *
+ * A verb whose whole value is that the edit and its attestation are ONE act has
+ * no business stopping one step short of the act being visible. `--no-publish`
+ * is the operator who wants it to stop at the commit; `--pr` is accepted and
+ * does nothing, because runbooks already say it.
+ *
  * ## Human-only
  *
  * `approval policy apply` classifies `policy.core` (`core/command-class.ts`),
@@ -99,6 +116,10 @@ const FLAGS: Record<string, FlagKind> = {
   "--dry-run": "boolean",
   "--no-amend": "boolean",
   "--pr": "boolean",
+  // APRV-360: the opt-out from the publishing this verb now does by default.
+  // It is the same word `policy amend` uses, and it reaches the amend
+  // unchanged, so an operator who knows one knows the other.
+  "--no-publish": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -455,6 +476,18 @@ export function commandPolicyApply(argv: string[], streams: Streams, cwd: string
     return usageRefusal(streams, json, `unexpected argument ${JSON.stringify(extra)}`);
   }
 
+  // APRV-360. `--pr` is the default now, so passing it is a no-op kept for the
+  // runbooks that already say it; passing both asks for opposite ceremonies,
+  // and the amend refuses that pair in the same words.
+  const noPublish = boolFlag(parsed.flags, "--no-publish");
+  if (boolFlag(parsed.flags, "--pr") && noPublish) {
+    return usageRefusal(
+      streams,
+      json,
+      "--pr and --no-publish ask for opposite ceremonies: --pr opens the pull request (which is what apply does anyway), --no-publish stops at the commit. Pass one of them",
+    );
+  }
+
   // Identity first, as the amendment ceremony does it, and for the stricter
   // reason: an agent may not write this file at all, so telling it after it has
   // read a diff would be telling it too late.
@@ -611,7 +644,7 @@ export function commandPolicyApply(argv: string[], streams: Streams, cwd: string
   }
 
   if (boolFlag(parsed.flags, "--no-amend")) {
-    const owed = "approval policy amend --pr";
+    const owed = noPublish ? "approval policy amend --no-publish" : "approval policy amend --pr";
     if (json) {
       streams.out(
         `${JSON.stringify({
@@ -650,15 +683,23 @@ export function commandPolicyApply(argv: string[], streams: Streams, cwd: string
     ...(asFlag === null ? [] : ["--as", asFlag]),
     ...(assumeYes ? ["--yes"] : []),
     ...(json ? ["--json"] : []),
-    ...(boolFlag(parsed.flags, "--pr") ? ["--pr"] : []),
+    // APRV-360: the ceremony finishes its own job. This verb exists to be ONE
+    // command for the human, and a run that attested the policy and then
+    // printed a procedure for publishing it is not one command; on 2026-09-18
+    // the procedure it printed was a branch switch the primary refused, and the
+    // ceremony stalled with an edited, attested, unpublished policy. So `--pr`
+    // is passed unless the operator asked for the quiet form, and `--pr` on
+    // this verb's own argv is now a no-op that changes nothing.
+    ...(noPublish ? ["--no-publish"] : ["--pr"]),
   ];
   const code = commandPolicyAmend(amendArgv, streams, cwd);
   if (code !== EXIT_OK) {
     // The write happened and the amendment did not. Said plainly, on stderr,
     // because the operator is now holding an edited policy no attestation
     // covers and the next gate operation will tell them so in a worse place.
+    const owed = noPublish ? "approval policy amend --no-publish" : "approval policy amend --pr";
     streams.err(
-      `approval: the replacements ARE written to ${policyPath}, and \`approval policy amend\` exited ${String(code)}: the policy is edited and unattested until it succeeds. Fix what it reported and run \`approval policy amend --pr\`\n`,
+      `approval: the replacements ARE written to ${policyPath}, and \`approval policy amend\` exited ${String(code)}: the policy is edited and unattested until it succeeds. Fix what it reported and run \`${owed}\`\n`,
     );
   }
   return code;

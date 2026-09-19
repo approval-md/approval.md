@@ -1684,15 +1684,31 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   const gitCommands = (seq: string): string[] => {
     // APRV-203: `--commit` runs none of these; it assembles the commit on the
     // remote's tip without a checkout. These are the HAND procedure, and they
-    // start where `--commit` starts: at the remote, so the branch is not built
-    // on a local trunk that has fallen behind.
+    // start where `--commit` starts: with the checkout brought current, so the
+    // branch is not built on a local trunk that has fallen behind.
+    //
+    // APRV-360: and they never switch branches. The form printed before this
+    // opened with `git checkout -b policy-amend-<seq> origin/main`, which is
+    // the shape that forked the log on 2026-09-16 and that refused outright on
+    // 2026-09-18, when the primary's main was fourteen commits behind and the
+    // switch would have overwritten QUEUE.md, the working log and six
+    // payloads. A branch switch in the primary is never the right answer: the
+    // daemon is appending to the working log while the operator reads this.
+    //
+    // What replaces it is what the 2026-09-18 recovery actually did. `approval
+    // log sync` brings the checkout current (and refuses `log-diverged` rather
+    // than fast-forwarding over a fork), the commit is made where the operator
+    // is standing, and the branch is created on the REMOTE by refspec, so it
+    // exists without any local ref ever being checked out.
     if (useBranch) {
+      const branch = branchName(seq);
+      const base = probe.defaultBranch === null ? "" : ` --base ${probe.defaultBranch}`;
       return [
-        "git fetch origin",
-        `git checkout -b ${branchName(seq)} origin/${probe.defaultBranch ?? "main"}`,
+        "approval log sync",
         ...commitCommands(seq),
-        `git push -u origin ${branchName(seq)}`,
-        `gh pr create --title ${JSON.stringify(prTitle(summary, seq))} --body ${JSON.stringify(prBody(seq))}`,
+        `git push origin HEAD:refs/heads/${branch}`,
+        `gh pr create --title ${JSON.stringify(prTitle(summary, seq))} --body ${JSON.stringify(prBody(seq))} --head ${branch}${base}`,
+        `gh pr merge ${branch} --auto --merge`,
       ];
     }
     return amendRoot === null

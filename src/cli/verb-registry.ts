@@ -752,7 +752,7 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "apply",
     purpose:
-      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
+      "Apply a proposal document's quoted Current/Replace-with pairs to APPROVAL.md and then run the amendment, so the edit and its attestation stay one act. It PUBLISHES by default (APRV-360): the amendment runs with --pr, so the branch is created on the remote by refspec, the pull request is opened and auto-merge is armed, and the checkout never moves; --no-publish stops at the commit and --pr is accepted as a no-op. HUMAN-ONLY twice over: an agent identity refuses `apply-agent-actor`, and the verb classifies `policy.core`, which the reference policy holds human-only. Every pair is resolved against an in-memory copy before a byte is written, so a stale proposal writes nothing at all; a whole-file replacement is not accepted, because every byte written is anchored to a byte proved present in the live file. Fences are read by their backtick run, so a wrapper fence around a block is the wrapper it is (APRV-273).",
     human_only: true,
     input: input({
       positionals: positionals(
@@ -766,6 +766,7 @@ const VERBS: VerbSpec[] = [
         "--dry-run": "boolean",
         "--no-amend": "boolean",
         "--pr": "boolean",
+        "--no-publish": "boolean",
         "--yes": "boolean",
         ...JSON_FLAG,
         ...HELP_FLAGS,
