@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"audit.sampled\" src/daemon/*.ts src/core/sampl*.ts 2>/dev/null | /usr/bin/grep -v \"^\\s*//\" | head -8; /usr/bin/grep -rn \"append-refused\" src/daemon/ | head -3; /usr/bin/grep -n \"2000\\|LOCK_TIMEOUT\\|timeoutMs\" src/core/log.ts | head -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

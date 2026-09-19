@@ -482,10 +482,18 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
 | `hook-io` | malformed hook input, or an unreadable log |
 
-`hook-opaque` is the one worth knowing by sight. `bash -c …`, `eval`, `source`,
-`sudo`, `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion,
-and any `$(…)` that is not purely a read: all deny. The fix is to write the
-command out, or to run the effect through `approval run` with a granted token.
+`hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
+`env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion, and
+any `$(…)` that is not purely a read: all deny. The fix is to write the command
+out, or to run the effect through `approval run` with a granted token.
+
+**A login shell around one inline script is the exception** (APRV-380). Words
+that are exactly a known shell, one inline-script flag (`-c`, `-lc`, `-ic` and
+the like) and one script are classified by the SCRIPT, through this same
+classifier: `/bin/zsh -lc 'git push origin main'` is `vcs.push.main`, and the
+record still binds the outer command you wrote. A script FILE, a fourth word, a
+redirection on the wrapper, an assignment prefix and a nested shell all stay
+opaque. `docs/claude-code-hook.md` has the full rule.
 
 Sandbox wrappers classify as the command INSIDE them (APRV-193):
 `approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id

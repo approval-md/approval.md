@@ -10,8 +10,11 @@
  * which records are an advance's own.
  */
 
+import { ADVANCE_DAEMON_CLASS } from "./command-class.js";
 import { danglingExecutions } from "./execute.js";
 import type { EventRecord } from "./log.js";
+import type { PolicyLoadResult } from "./policy-load.js";
+import { resolve } from "./policy-match.js";
 import { payloadOf, requestState, type RequestState } from "./state.js";
 
 /**
@@ -27,6 +30,72 @@ export const ADVANCE_ACTOR = "agent:daemon";
 
 /** The class an advance is gated as. Declared, resolved, and never assumed. */
 export const ADVANCE_CLASS = "log.advance";
+
+// The daemon's own class travels from `core/command-class.ts`, where the
+// reachability answer lives, so the class a cycle asks under and the class the
+// amendment ceremony accepts as fireable are one string (APRV-382).
+export { ADVANCE_DAEMON_CLASS };
+
+/** Every class an advance cycle may be gated as, newest first. */
+export const ADVANCE_CLASSES: readonly string[] = [ADVANCE_DAEMON_CLASS, ADVANCE_CLASS];
+
+/** The refusal a non-daemon actor gets where the route would be autonomous. */
+export const ADVANCE_ACTOR_REFUSAL = "advance-actor-not-daemon";
+
+/** Which class this cycle asks under, or the refusal that stops it. */
+export type AdvanceRoute =
+  | { ok: true; cls: string; daemon: boolean }
+  | { ok: false; code: typeof ADVANCE_ACTOR_REFUSAL; message: string };
+
+/**
+ * The class this advance asks under, decided by WHO is running it (APRV-382).
+ *
+ * Carter's 2026-09-19 question, answered as policy plus one check. An advance
+ * appends nothing and decides nothing: it publishes records the log already
+ * holds to a records branch, and the CI guard reads grants that exist whether
+ * or not an advance ran. So the DAEMON may make it unattended. Every other
+ * actor — a session in a worktree, a human terminal — stays where the class was
+ * declared at seq 513, because a lane that could publish the log could choose
+ * which records the world sees first.
+ *
+ * The policy grammar has no actor condition, so the rule is two classes and
+ * this function is the actor half of it. Three outcomes, and each one is the
+ * stricter reading of its case:
+ *
+ * 1. **The daemon, with a rule on {@link ADVANCE_DAEMON_CLASS}.** The daemon's
+ *    own class, whatever autonomy the operator gave it.
+ * 2. **The daemon, with no such rule.** {@link ADVANCE_CLASS}, exactly as every
+ *    build before this one. A policy that has not declared the daemon class has
+ *    not decided anything about it, and resolving to the fail-closed default
+ *    there would put a phone tap on every cadence advance between the day this
+ *    code ships and the day the page is applied. Falling back to the class the
+ *    operator DID write is the behaviour they attested to.
+ * 3. **Any other actor.** {@link ADVANCE_CLASS}, unless that class resolves
+ *    `autonomous`, which is refused {@link ADVANCE_ACTOR_REFUSAL}. The
+ *    autonomous route is the daemon's, so an actor that is not the daemon
+ *    taking it is a policy that was loosened past what this repository decided,
+ *    and the refusal says so rather than publishing the log unattended.
+ *
+ * PURE: the policy load is an argument and the actor answer is a boolean the
+ * caller read from `core/daemon-actor.ts`, so the whole rule is testable in
+ * both directions with no daemon, no git, and no clock.
+ */
+export function advanceRoute(daemon: boolean, load: PolicyLoadResult): AdvanceRoute {
+  if (daemon) {
+    const own = resolve(load, ADVANCE_DAEMON_CLASS);
+    if (own.provenance === "rule") return { ok: true, cls: ADVANCE_DAEMON_CLASS, daemon };
+    return { ok: true, cls: ADVANCE_CLASS, daemon };
+  }
+  const base = resolve(load, ADVANCE_CLASS);
+  if (base.autonomy === "autonomous") {
+    return {
+      ok: false,
+      code: ADVANCE_ACTOR_REFUSAL,
+      message: `${ADVANCE_CLASS} resolves autonomous and this process is not the daemon, so nothing was asked and nothing was committed. An unattended advance is the daemon's route alone (${ADVANCE_DAEMON_CLASS}); run the advance from the daemon, or run \`approval log advance\` yourself, where the gate can see who is asking.`,
+    };
+  }
+  return { ok: true, cls: ADVANCE_CLASS, daemon };
+}
 
 /** The task id every advance cycle registers under, plus its head seq. */
 export const ADVANCE_TASK_PREFIX = "daemon-advance";
@@ -105,8 +174,12 @@ export function openAdvanceRequest(
     if (typeof key !== "string" || !key.startsWith(`${ADVANCE_KEY_PREFIX}-`)) continue;
     // The class is read off the record rather than assumed from the prefix: a
     // key that merely LOOKS like the daemon's must not be able to make the
-    // daemon adopt somebody else's question.
-    if (payloadOf(record)["class"] !== ADVANCE_CLASS) continue;
+    // daemon adopt somebody else's question. Either advance class counts
+    // (APRV-382): a question opened under `log.advance` before the daemon had
+    // its own class is still this cadence's question, and a daemon that refused
+    // to adopt it would ask the human a second time for the same span.
+    const declared = payloadOf(record)["class"];
+    if (typeof declared !== "string" || !ADVANCE_CLASSES.includes(declared)) continue;
     actionKey = key;
   }
   if (actionKey === null) return null;

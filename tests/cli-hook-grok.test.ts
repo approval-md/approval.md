@@ -192,7 +192,10 @@ test("a deny arrives as exit 2 with the reason in the body, and writes nothing",
   const before = rawLog(dir);
 
   // Opaque: the classifier cannot read what this runs, so it cannot be gated.
-  const opaque = runCli(["hook", "grok"], dir, shellEvent("bash -c 'git push --force'"));
+  // `xargs` since APRV-380, which made a bare `bash -c '…'` classify by its
+  // script on every adapter; what stays opaque is a command built from input
+  // this file cannot see.
+  const opaque = runCli(["hook", "grok"], dir, shellEvent("xargs git push --force"));
   const verdict = verdictOf(opaque);
   assert.equal(verdict.decision, "deny");
   assert.equal(opaque.code, 2);
