@@ -1,0 +1,1 @@
+{"command":"gh secret list 2>&1 | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

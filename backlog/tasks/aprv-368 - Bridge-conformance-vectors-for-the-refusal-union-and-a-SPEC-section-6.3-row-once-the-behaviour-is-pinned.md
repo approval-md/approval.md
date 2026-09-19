@@ -46,6 +46,24 @@ AC2. One SPEC section 6.3 row, at the end of the lifecycle section: what a harne
 VALIDATION. build, typecheck and lint exit 0. npm run conformance: 396 vectors passed, 0 failed, exit 0 (13 union vectors now, one of them the new stop union). codex-bridge, conformance-regen and docs-guard: 64 tests, 64 pass, exit 0. Full npm test recorded in the PR.
 
 PROTECTED PATH: SPEC.md. The records advance is the orchestrator and this PR is not armed until they reply.
+
+---
+
+THE OPTIONS THIS RULING CHOSE FROM, recorded on main at 3a6d1ea before the ruling and kept here because the ruling is only legible next to them.
+
+NOT STARTED as code by lane 6 (2026-09-19). Two things block it, one of them the open question the notes above already name.
+
+BLOCKER 1, THE OPEN QUESTION, restated with what today added. The bridge now carries FOUR stop codes, not two: APRV-364 added bridge-auto-reviewer-active and bridge-preflight-void beside bridge-thread-start-refused and bridge-approval-policy-mismatch, and all four stayed OUT of the bridge_refusal_codes union for the reason APRV-366 gave (that union is documented as every way the bridge can DECLINE an approval request, and a stop ends the session instead). So the question is sharper now, and the options are:
+
+(a) A SECOND UNION, bridge_stop_codes, beside the declines. A second implementation then answers both vocabularies and a checker that read only one knows it has read only one. The cost is a new union name in the conformance manifest and the version bump that carries.
+(b) ONE UNION, renamed, carrying all seven codes with a field saying which are declines and which are stops. Cheaper for a reader, and it moves an existing union that a second implementation may already hold itself to, which is the MAJOR-bump shape.
+(c) LEAVE THE STOPS UNPINNED and document, in the vector file own description, that the declines union is not the whole vocabulary. Cheapest and the weakest: a door left open is exactly what a conformance union exists to close.
+
+Lane 6 would pick (a) and say so in both union descriptions, but this is a conformance-surface decision and the lane did not take it.
+
+BLOCKER 2, PROCESS. AC2 is a SPEC section 6.3 row, which is a protected-path edit and therefore its own records advance and orchestrator ceremony. Today already spent one on APRV-378. Worth sequencing deliberately rather than stacking a second inside the same session.
+
+WHAT THE SPEC ROW SHOULD SAY, since the behaviour is now settled enough to write it: the Codex app-server surface binds the command as words and as the rendering that arrived (APRV-362), the cwd the harness minted, and a stable call identity; it does NOT bind item-based patch content (APRV-379), the guarantee that an action produces a question (the approval policy and sandbox posture decide that, and APRV-366 pins and checks the policy), or the guarantee that a question reaches this client (APRV-364 probes one command and records a pre-emption as audit.question_preempted, APRV-378). The reply vocabulary is two words in eight spellings (APRV-367), and a login-shell exec is classified by its inner script while the outer argv stays bound (APRV-380).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

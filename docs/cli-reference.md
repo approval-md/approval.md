@@ -492,6 +492,12 @@ range they cover, and pushed to a short-lived records branch that exists for
 exactly that commit. Main is protected here, so the commit reaches it through a
 pull request; `--pr` opens that pull request through the ordinary `gh` path.
 
+This verb carries the class `log.advance` for everyone who runs it, in a
+session, in an orchestrator, or at a human terminal. The daemon's cadence
+advance is the one that may carry `log.advance.daemon` instead, and only from
+inside the daemon process: see the `--advance` paragraph under `daemon run`
+(APRV-382).
+
 `--co-author "Name <email>"` adds one validated `Co-authored-by` trailer to the
 generated records commit and to the pull request body. When the day's pull
 request already exists, the verb preserves its body and adds the trailer once.
@@ -938,6 +944,16 @@ policy declares and no pin names is ACCEPTED: declaring a new `supervised` or
 resolution still prints in the semantic diff below for the human who attests it.
 Until APRV-296 every declared class had to be pinned, in both directions, and a
 one-line TTL amendment on 2026-09-07 took three runs to land because of it.
+
+The one check every declared class still faces is REACHABILITY: a class nothing
+can emit is a line that will never fire, and the ceremony refuses it rather than
+leaving an operator believing in it for a year. Three ways to be reachable: the
+command classifier's fixed table, a `protected_paths` entry routing a path
+family to a `policy.edit` sub-class, and `RUNTIME_CLASSES` in
+`src/core/command-class.ts`, which names the classes a runtime cycle asks the
+gate for directly and no command spells (`log.advance.daemon` is the first,
+APRV-382). A new class of that third kind needs its line there in the SAME build
+the ceremony runs, or the amendment refuses `policy-suite-failed`.
 
 **And then the whole dogfood suite, still before the attestation.** The pin check
 is a subset of `tests/dogfood.test.ts`, and the seq 23351 ceremony passed the pins
@@ -4143,7 +4159,11 @@ its own flags are not parsed as this verb's.
   policy has spoken and reserved the class; the repair there is for a person to
   run the command, and here it is to write a line).
 - `hook-opaque` — a construct whose effect cannot be read from the text
-  (`bash -c`, `eval`, backticks, a non-read substitution).
+  (`eval`, `xargs`, backticks, a non-read substitution). A login shell around
+  ONE inline script is classified by that script since APRV-380, so
+  `zsh -lc 'git push origin main'` is `vcs.push.main`; a script file, an extra
+  word, a redirection on the wrapper, an assignment prefix and a nested shell
+  all stay opaque.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.
@@ -4650,7 +4670,22 @@ the clock starts when the daemon starts), and at a clean shutdown when records
 are still owed. Every attempt goes through the gate as `agent:daemon`: the cycle
 registers, requests, and proceeds only where the policy lets it, so a
 `supervised-live` draw that selects the advance, or a class that resolves
-`manual`, stops it with nothing committed and the question in the queue. A gated
+`manual`, stops it with nothing committed and the question in the queue.
+
+**Which class it asks under, and which actor may advance autonomously
+(APRV-382).** Two classes, and the running process picks between them.
+`log.advance.daemon` is the daemon's own, asked only by the cadence advance
+inside `approval daemon run` and `approval up`; `log.advance` is what every
+other actor asks under, a session in a worktree and a human terminal alike. A
+policy may hold the daemon's class `autonomous` (this repository's does, since
+the advance publishes records the log already holds, appends nothing and decides
+nothing) while leaving the base class where it was. Nothing an agent can type
+reaches the looser line: `approval log advance` classifies `log.advance`
+whoever runs it. The choice is read from the process rather than from any
+argument, a policy that declares no rule for the daemon's class leaves the
+cadence gated exactly as it was, and a cycle that is NOT the daemon's whose
+class resolves `autonomous` is refused `advance-actor-not-daemon` before
+anything is appended. A gated
 or failed attempt is an `advance` line plus an `advance-refused` warning, and the
 next tick tries again — the cadence interval is the retry bound, so a refusal
 never loops. One records branch and ONE PULL REQUEST PER DAY: the first advance

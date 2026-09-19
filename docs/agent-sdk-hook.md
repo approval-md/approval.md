@@ -57,7 +57,7 @@ callback returns:
 ```
 
 ```json
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-opaque: bash runs a shell script (segment: bash -c 'git push --force'). Rewrite it as a command the classifier can read, or run the effect through `approval run` with a granted token."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-opaque: xargs runs a command built from its input (segment: xargs git push --force). Rewrite it as a command the classifier can read, or run the effect through `approval run` with a granted token."}}
 ```
 
 Both are pinned as fixtures under `tests/fixtures/agent-sdk/`, and

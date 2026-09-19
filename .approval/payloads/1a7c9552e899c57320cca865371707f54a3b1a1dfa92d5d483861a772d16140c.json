@@ -1,0 +1,1 @@
+{"command":"gh pr merge 474 --merge 2>&1 | tail -1; gh api graphql -f query='{ repository(owner:\"approval-md\", name:\"approval.md\") { pullRequest(number:474) { mergeQueueEntry { state position } autoMergeRequest { enabledAt } } } }' --jq '.data.repository.pullRequest'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

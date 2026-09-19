@@ -961,10 +961,24 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter, which is Anthropic's; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
 | `hook-io` | malformed hook input, or an unreadable log |
 
-`hook-opaque` is the one worth knowing by sight. `bash -c …`, `eval`, `source`,
-`sudo`, `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion,
-and any `$(…)` that is not purely a read: all deny. The fix is to write the
-command out, or to run the effect through `approval run` with a granted token.
+`hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
+`env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion, and
+any `$(…)` that is not purely a read: all deny. The fix is to write the command
+out, or to run the effect through `approval run` with a granted token.
+
+**A login shell around one inline script is the exception** (APRV-380). When
+the words are exactly a known shell (`bash`, `sh`, `zsh`, `dash`, `ksh`,
+`fish`, with or without a path), one inline-script flag (`-c`, `-lc`, `-ic` and
+the like), and one script, the SCRIPT is classified, through this same
+classifier and the same segment rules. So `/bin/zsh -lc 'git push origin main'`
+is `vcs.push.main`, and the command bound in the record is still the outer one
+you wrote. That is not a second parser for shell text: the script is the same
+string a `Bash` call hands this hook directly.
+
+Everything else about a shell stays opaque, and the line is exact: a script
+FILE (`zsh -l script.sh`), a fourth word, a redirection on the wrapper, an
+assignment prefix, or a shell nested inside the script. Each is a shape whose
+effect the words alone do not state.
 
 ### When the wait runs out (APRV-106, revised by APRV-117)
 

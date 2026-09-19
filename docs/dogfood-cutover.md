@@ -619,6 +619,21 @@ commit when CI is green and never before; the verb's `auto-merge` row says
 whether the arm took. `--no-auto-merge` puts it back on you, and so does the
 verb itself when the branch carries a path an advance may not carry.
 
+**Which actor may advance without asking (APRV-382).** The daemon, and only the
+daemon. Its cadence advance (inside `approval up` or `approval daemon run
+--advance`) asks under `log.advance.daemon`, which this repository's policy
+holds `autonomous`: the advance publishes records the log already holds, appends
+nothing and decides nothing, and three advances on 2026-09-19 each stopped on
+the one-in-a-hundred live draw while nobody was at the phone. Everything else
+asks under `log.advance`, unchanged: the command above typed by you, the same
+command run by an orchestrator, and any session anywhere. The line an agent
+could reach is the one it always could, because `approval log advance`
+classifies `log.advance` whoever runs it; the daemon's class is reached only
+from inside the daemon process, which is read from the process itself rather
+than from anything a caller passes. A cycle that is not the daemon's and whose
+class resolves `autonomous` is refused `advance-actor-not-daemon` with nothing
+appended, so a policy loosened past this decision does not quietly grant it.
+
 Merge it with a **merge commit** where the arm did not take. A branch that
 exists for one commit and is merged the moment CI passes is not a feature
 branch in the sense the rule
@@ -791,6 +806,15 @@ the irreversibility floor keeps `vcs.push.main` manual for an irreversible
 action, and the dogfood suite still asserts the fail-closed defaults
 (`defaults.autonomy: manual`, `on_expiry: reject`, and a TTL that exists and is
 positive).
+
+One thing a new class still needs from the build: to be REACHABLE. The ceremony
+refuses a declared class nothing can emit, and there are three ways to be
+emittable — the command classifier's fixed table, a `protected_paths` route to a
+`policy.edit` sub-class, and `RUNTIME_CLASSES` in `src/core/command-class.ts`,
+which names the classes a runtime cycle asks the gate for directly and no
+command spells. `log.advance.daemon` is the first of those (APRV-382), which is
+why its page says to sync and rebuild before applying: a build without the line
+refuses the amendment `policy-suite-failed`.
 
 Adding a pin is a human decision that a class has joined that floor. The line
 takes the shape the list already uses, and it needs a note saying why loosening

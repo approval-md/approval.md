@@ -111,6 +111,7 @@ import {
 import { validate } from "../core/validate.js";
 import { publishedState, type AutoMergeState } from "../cli/log-advance.js";
 import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
+import { markDaemonProcess } from "../core/daemon-actor.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
@@ -938,6 +939,14 @@ export class Daemon {
 
   constructor(options: DaemonOptions) {
     this.options = options;
+    // APRV-382. This process is the daemon, and the gated advance path asks
+    // `core/daemon-actor.ts` rather than being told: `log.advance.daemon` is
+    // autonomous in this repository's policy and `log.advance` is not, so which
+    // class a cycle asks under must not be a field any caller can set. Marked
+    // at CONSTRUCTION rather than in `run()` so that a shutdown flush, a
+    // `--once` tick and a test driving this object one tick at a time are all
+    // the same actor as the loop.
+    markDaemonProcess();
   }
 
   /** Run until stopped (or, with `once`, for exactly one tick). */

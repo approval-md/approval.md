@@ -21,7 +21,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
+import {
+  ADVANCE_CLASS,
+  ADVANCE_DAEMON_CLASS,
+  advanceRoute,
+} from "../src/core/advance-cycle.js";
 import { CLASSIFIER_CLASSES, emittableClass } from "../src/core/command-class.js";
+import { parseProposal, planApply } from "../src/cli/policy-apply.js";
 import {
   diffPolicies,
   policyTopLevelKeys,
@@ -316,6 +322,109 @@ test("the classifier's read.* classes are covered by the policy's read.* rule", 
       `${cls} is emitted by the classifier and must be covered by the policy's read.* rule`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// 4b. The advance pair: autonomy by actor (APRV-382)
+// ---------------------------------------------------------------------------
+
+/**
+ * The pin `docs/proposals/log-advance-daemon-2026-09.md` moves (APRV-382).
+ *
+ * Two properties, and they hold on both sides of the ceremony, the way the
+ * values-block test holds in every state the live file can be in. Carter
+ * applies the page by hand and a test that demanded the applied state would be
+ * demanding it of the wrong party.
+ *
+ * 1. `log.advance` is never `autonomous`. That is the line a session, an
+ *    orchestrator and a human terminal all ask under, and the whole argument
+ *    for the daemon's own class is that it did NOT need loosening.
+ * 2. The autonomy, wherever it is, is reached only by the daemon. Before the
+ *    page is applied the daemon's class carries no rule and the cadence asks
+ *    under `log.advance`; after it, the daemon asks under `log.advance.daemon`
+ *    and every other actor still asks under `log.advance`.
+ */
+test("APPROVAL.md keeps log.advance supervised and puts any autonomy on the daemon's class (APRV-382)", () => {
+  const load = loadRepoPolicy();
+
+  assert.notEqual(
+    resolve(load, ADVANCE_CLASS).autonomy,
+    "autonomous",
+    "log.advance is the class every non-daemon actor asks under; an autonomous line here would let a lane publish the committed log",
+  );
+
+  const forDaemon = advanceRoute(true, load);
+  assert.equal(forDaemon.ok, true, "the daemon is refused its own advance by the live policy");
+  const own = resolve(load, ADVANCE_DAEMON_CLASS);
+  if (own.provenance === "rule") {
+    assert.equal(own.autonomy, "autonomous");
+    assert.equal(forDaemon.ok && forDaemon.cls, ADVANCE_DAEMON_CLASS);
+  } else {
+    // Pre-ceremony: no rule on the daemon's class, so the cadence is exactly
+    // where it was, gated as `log.advance`.
+    assert.equal(forDaemon.ok && forDaemon.cls, ADVANCE_CLASS);
+  }
+
+  const forOthers = advanceRoute(false, load);
+  assert.equal(forOthers.ok && forOthers.cls, ADVANCE_CLASS);
+});
+
+/**
+ * The ceremony's own laptop check, run against the proposal rather than the
+ * file (APRV-382).
+ *
+ * `approval policy apply` parses the page, resolves every pair against the live
+ * bytes and hands the result to `policy amend`, which refuses before it attests
+ * anything if the amended policy fails {@link checkPolicyExpectations}. That is
+ * the refusal the 2026-09-18 ceremony hit (`dogfood-suite-failed`, #442), and
+ * this test is it: the same parser, the same planner, the same check, over an
+ * in-memory copy. APPROVAL.md is never written, and the `after` hook above
+ * proves it.
+ */
+test("the log.advance proposal applies to the live policy and passes the pins (APRV-382)", () => {
+  const page = readFileSync(
+    join(REPO_ROOT, "docs", "proposals", "log-advance-daemon-2026-09.md"),
+    "utf8",
+  );
+  const parsed = parseProposal(page);
+  assert.equal(parsed.ok, true, parsed.ok ? "" : `${parsed.code}: ${parsed.message}`);
+  if (!parsed.ok) return;
+  assert.equal(parsed.pairs.length, 1, "the page carries exactly one replacement");
+
+  const live = readFileSync(APPROVAL_MD, "utf8");
+  const plan = planApply(live, parsed.pairs);
+  assert.equal(
+    plan.ok,
+    true,
+    plan.ok
+      ? ""
+      : `${plan.code}: ${plan.message} — the page quotes bytes APPROVAL.md no longer carries; rewrite it against the live file`,
+  );
+  if (!plan.ok) return;
+
+  const amended = loadPolicyText(APPROVAL_MD, plan.text);
+  assert.equal(amended.ok, true, amended.ok ? "" : `${amended.code}: ${amended.message}`);
+  const checked = checkPolicyExpectations(amended, REPO_POLICY_EXPECTATIONS);
+  assert.deepEqual(
+    checked.failures.map(describeFailure),
+    [],
+    "the amended policy fails its pins, so `approval policy apply` would refuse on the laptop",
+  );
+
+  // And the resolutions the page exists to produce.
+  assert.equal(resolve(amended, ADVANCE_DAEMON_CLASS).autonomy, "autonomous");
+  assert.equal(resolve(amended, ADVANCE_DAEMON_CLASS).provenance, "rule");
+  assert.deepEqual(
+    {
+      autonomy: resolve(amended, ADVANCE_CLASS).autonomy,
+      provenance: resolve(amended, ADVANCE_CLASS).provenance,
+    },
+    {
+      autonomy: resolve(loadRepoPolicy(), ADVANCE_CLASS).autonomy,
+      provenance: resolve(loadRepoPolicy(), ADVANCE_CLASS).provenance,
+    },
+    "the page moved the line every other actor asks under; it must leave log.advance exactly as it found it",
+  );
 });
 
 // ---------------------------------------------------------------------------

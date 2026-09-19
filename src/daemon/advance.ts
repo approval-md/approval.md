@@ -55,6 +55,16 @@
  * carries a path an advance may not carry, so what gets armed is only ever
  * evidence. `--no-advance-auto-merge` turns the whole thing off.
  *
+ * ## Which class a cycle asks under (APRV-382)
+ *
+ * Two, and the running process picks. `log.advance.daemon` is the daemon's own
+ * class and this repository's policy makes it autonomous: an advance publishes
+ * records the log already holds, appends nothing and decides nothing, so the
+ * cadence does not need a hand. `log.advance` is what everybody else asks
+ * under, unchanged. `core/advance-cycle.ts`'s `advanceRoute` is the rule, read
+ * against `core/daemon-actor.ts` rather than against anything a caller passed,
+ * and a policy with no daemon line leaves the cadence exactly where it was.
+ *
  * ## The self-perpetuation trap, and how the trigger avoids it
  *
  * One advance cycle appends three records of its own (`task.registered`,
@@ -80,9 +90,9 @@ import { fileURLToPath } from "node:url";
 import { tick, type Clock } from "../core/clock.js";
 import {
   ADVANCE_ACTOR,
-  ADVANCE_CLASS,
   RESOLVE_DANGLING_COMMAND,
   advanceActionKey,
+  advanceRoute,
   advanceTaskId,
   danglingAdvances,
   openAdvanceRequest,
@@ -90,6 +100,7 @@ import {
   type DanglingAdvance,
 } from "../core/advance-cycle.js";
 import { childEnvironment } from "../core/child-env.js";
+import { isDaemonProcess } from "../core/daemon-actor.js";
 import {
   finishExecution,
   startExecution,
@@ -745,6 +756,17 @@ export function authorizeAdvance(
     ...(input.policy.dir === undefined ? {} : { dir: input.policy.dir }),
     ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
   });
+  // WHO is running this cycle, and therefore which class it asks under
+  // (APRV-382). Read from the process rather than from `input`, because a field
+  // a caller sets is a self-reported field and a self-reported field never
+  // reduces scrutiny (SPEC.md §11.1 invariant 4). Asked before anything is
+  // appended, so a refusal here leaves the log exactly as it found it.
+  const route = advanceRoute(isDaemonProcess(), loaded);
+  if (!route.ok) {
+    return no({ outcome: "refused", code: route.code, message: route.message });
+  }
+  const cls = route.cls;
+
   const open = openAdvanceRequest(records, ts, loaded.ok ? loaded.durations.approvalTtlMs : null);
   const adopted = open !== null && open.actionKey === actionKey;
 
@@ -793,7 +815,7 @@ export function authorizeAdvance(
           state: "proposed",
           actions: [
             {
-              class: ADVANCE_CLASS,
+              class: cls,
               idempotency_key: actionKey,
               summary: `log advance: seq ${String(state.publishedSeq + 1)}..${String(state.substantiveSeq)} onto ${recordsBranch}`,
               reversible: true,
@@ -818,7 +840,7 @@ export function authorizeAdvance(
       {
         task,
         actionKey,
-        cls: ADVANCE_CLASS,
+        cls,
         reversible: true,
         est_cost_usd: "0",
         summary: `log advance: seq ${String(state.publishedSeq + 1)}..${String(state.substantiveSeq)}`,
@@ -842,7 +864,7 @@ export function authorizeAdvance(
         code: asked.live?.reason ?? "manual",
         message: `the gate sent this advance to a human (${
           asked.live === undefined
-            ? `class ${ADVANCE_CLASS} resolves ${asked.autonomy}`
+            ? `class ${cls} resolves ${asked.autonomy}`
             : `supervised-live draw: ${asked.live.reason} at rate ${String(asked.live.rate)}`
         }); nothing was committed. The question is in the queue as ${actionKey}, and the next tick adopts it rather than asking again.`,
       });
