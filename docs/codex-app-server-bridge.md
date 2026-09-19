@@ -523,12 +523,13 @@ a decline, since the only safe substitute for a word you cannot name is no. The
 `bridge-decisions` conformance suite states the same rule for a second
 implementation, including the two vectors a prefix matcher fails.
 
-Three refusals are the bridge's own rather than the gate's:
+Four refusals are the bridge's own rather than the gate's:
 `bridge-request-unbound` (no command, no `cwd`, or no call identity),
-`bridge-file-change-unbound` (an item-based file change carries no content, and
-approving an identifier is not approving a change), and
+`bridge-command-unbound` (a command string that names no argv this client can
+bind, APRV-362), `bridge-file-change-unbound` (an item-based file change carries
+no content, and approving an identifier is not approving a change), and
 `bridge-unknown-request` (a server request this client has no reading for). They
-are a conformance union, so a second implementation answers all three or has
+are a conformance union, so a second implementation answers all four or has
 left a door open.
 
 **Two limits, stated rather than implied.** An open gate window is NOT honoured:
@@ -539,10 +540,29 @@ because the gate's wait is synchronous: frames queue while a decision is being
 made, which is the fail-closed direction and matches the observed protocol,
 where a turn does not move past an unanswered question.
 
-Follow-ups 2 through 8 below are separate tasks: the command is bound as the
-string that arrived (APRV-362), the auto-reviewer is not proved off (APRV-364),
-and socket custody is unsettled (APRV-365). Until those land, the claim stays
-exactly what the recommendation says it is.
+Follow-ups 4 and 5 below are separate tasks: the auto-reviewer is not proved off
+(APRV-364) and socket custody is unsettled (APRV-365). Until those land, the
+claim stays exactly what the recommendation says it is.
+
+**The command is bound as words, not as a rendering (APRV-362, landed).** The
+item-based API delivers the command as one string joined from the argv Codex
+will run, so the bridge un-joins it and the registered payload carries the
+string that arrived and the argv beside it. A string that is not readable as a
+join is `bridge-command-unbound`: an unterminated quote, a double quote outside
+a quoted run, a trailing backslash, or separation a join does not produce.
+Approving one of those would approve this client's own re-parse.
+
+What it deliberately does NOT require is that re-rendering the argv reproduce
+the received bytes. That would pin the counterpart's quoting predicate, and this
+note records one command string, consistent with every candidate predicate; a
+join written for shell safety quotes more than a minimal one does, so demanding
+equality would refuse ordinary traffic over a rule nobody here has read. The
+checkable part is required and the rest is recorded, which is why the payload
+carries both values rather than asserting they agree.
+`proposedExecpolicyAmendment` is still not read: the 2026-09-18 run recorded
+that the field was present and recorded nothing about its shape, and a
+comparison written against a guessed shape matches nothing while looking like a
+check.
 
 **The approval policy pin is now checked (APRV-366, landed).** The thread is
 still started with `approvalPolicy: "untrusted"` and `sandbox: "read-only"`, and
@@ -575,7 +595,10 @@ bridge), then 362 to 368 depending on it.
 2. **Bind argv rather than a rendering.** Decide between the legacy API's argv
    and the item-based API's shell-joined string, and if the latter is required,
    record the re-parse alongside the received string so a mismatch is visible
-   rather than silent.
+   rather than silent. **Landed (APRV-362):** the bridge speaks the item-based
+   API, so the string is what it consumes; it is un-joined, both values reach
+   the registered payload, and a string that is not readable as a join is
+   refused with `bridge-command-unbound`.
 3. **Refuse a file-change approval whose content is unbound.** Correlate the
    `itemId` with the content from `item/started`, and refuse with a distinct
    machine-readable code when the correlation cannot be made. Approving an

@@ -11,6 +11,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { payloadHash } from "../core/payload.js";
+import { shlexSplit } from "../core/shlex.js";
 
 /** The only Codex events this adapter understands. */
 export const CODEX_PRE_TOOL_EVENT = "PreToolUse";
@@ -170,12 +171,60 @@ export function readCodexReportedOutcome(_input: CodexHookInput): CodexOutcomeRe
 }
 
 export interface CodexBinding {
-  /** Exact bytes the gate and a future counterpart both bind. */
-  payload: { tool: "Bash" | "apply_patch"; command: string; cwd: string };
+  /**
+   * Exact bytes the gate and a future counterpart both bind.
+   *
+   * `argv` is present only where the caller supplied one and it AGREES with
+   * `command` (APRV-362): the app-server bridge knows the words the kernel will
+   * receive, and a payload that named only their rendering would put the
+   * approver one parse away from the action. See {@link codexArgv} for why
+   * agreement is checked here rather than trusted.
+   */
+  payload: { tool: "Bash" | "apply_patch"; command: string; cwd: string; argv?: string[] };
   /** Passed to the legacy finish helper; reconstructs the four-segment task. */
   finishSessionId: string;
   finishToolUseId: string;
   task: string;
+}
+
+/**
+ * The argv a call carries, when it carries one that says nothing new (APRV-362).
+ *
+ * `tool_input.argv` reaches this runtime from the app-server bridge, which
+ * un-joins the command string the server sent so the payload can name the words
+ * rather than their rendering. It is READ back out of `tool_input` rather than
+ * threaded down a private channel, which is the shape APRV-363 established for
+ * the change map beside it, and that raises the obvious question: `tool_input`
+ * on a NATIVE Codex event is the model's own tool-call arguments, so a model
+ * could put an `argv` there too.
+ *
+ * It cannot buy anything by doing so, because this function does not believe
+ * it. An argv is accepted only when `command` splits to exactly it, which makes
+ * the field a DERIVATION of bytes already bound rather than a second claim
+ * beside them. A disagreeing argv is `null`, and the caller refuses the call
+ * outright rather than quietly binding the command alone: a call whose two
+ * accounts of itself differ is one this runtime cannot describe, and SPEC §11.1
+ * invariant 4 is kept by construction rather than by care.
+ */
+export function codexArgv(toolInput: Record<string, unknown>, command: string): string[] | null {
+  const value = toolInput["argv"];
+  if (!Array.isArray(value)) return null;
+  const argv = value.filter((entry): entry is string => typeof entry === "string");
+  if (argv.length !== value.length) return null;
+  const split = shlexSplit(command);
+  if (!split.ok || split.argv.length !== argv.length) return null;
+  return split.argv.every((word, at) => word === argv[at]) ? argv : null;
+}
+
+/**
+ * Does this call carry an `argv` that {@link codexArgv} will not accept?
+ *
+ * The caller's cue to refuse rather than fall back. Absence is not
+ * disagreement: a call with no `argv` is every call this runtime made before
+ * APRV-362 and is bound exactly as it was.
+ */
+export function codexArgvDisagrees(toolInput: Record<string, unknown>, command: string): boolean {
+  return toolInput["argv"] !== undefined && codexArgv(toolInput, command) === null;
 }
 
 /**
@@ -194,7 +243,13 @@ export function codexBinding(input: CodexHookInput, processCwd: string): CodexBi
   }
   if (input.toolUseId === null) throw new Error("codexBinding requires a validated tool_use_id");
   const tool: "Bash" | "apply_patch" = input.toolName;
-  const payload = { tool, command, cwd: realpathSync(processCwd) };
+  const argv = codexArgv(input.toolInput, command);
+  const payload = {
+    tool,
+    command,
+    cwd: realpathSync(processCwd),
+    ...(argv === null ? {} : { argv }),
+  };
   const sessionDigest = payloadHash({
     domain: "approval.md/codex-hook-session/v1",
     harness: "codex",

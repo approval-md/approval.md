@@ -1718,7 +1718,20 @@ const SUITES = [
     // a server that changed shape, an unknown method is a protocol this client
     // has not caught up with, and a file change is a correlation this client
     // has deliberately not made (APRV-363).
-    vectors_version: "14.0.0",
+    // 15.0.0 (APRV-362): `bridge_refusal_codes` gains `bridge-command-unbound`,
+    // the refusal an exec request takes when its command string names no argv
+    // the bridge can bind. Major for the reason every union growth here is
+    // major: the vector pins each whole array in definition order, so a longer
+    // union is a changed expectation. It is a fourth code rather than a widening
+    // of `bridge-request-unbound` because that one says a field is MISSING and
+    // this one says a field ARRIVED and could not be read as the rendering of an
+    // argv; a caller that could not tell them apart would tell an operator to
+    // fix a server that changed shape when what changed was the quoting of one
+    // command. A second implementation on the item-based API has to answer it:
+    // that API delivers the argv already joined, so un-joining it is not
+    // optional, and a client that skipped the step would be classifying its own
+    // re-parse with nothing recording that it had.
+    vectors_version: "15.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
