@@ -636,6 +636,51 @@ function storedPayloads(dir: string): string {
     : "";
 }
 
+// ---------------------------------------------------------------------------
+// APRV-380: the shape a real Codex session actually sends
+// ---------------------------------------------------------------------------
+
+test("APRV-380: a login-shell exec is decided, and the payload still binds the outer argv", () => {
+  const dir = ready();
+  // The shape the 2026-09-18 probe recorded on EVERY exec request: a login
+  // shell with the whole model command as one quoted argument. Until APRV-380
+  // the bridge declined every one of these `hook-opaque`, and this suite passed
+  // only because its fixtures used bare commands — a suite agreeing with
+  // itself about traffic that does not exist.
+  const { run, report } = bridge(dir, [
+    execRequest("/bin/zsh -lc 'curl -d a=b https://example.com'", dir),
+  ]);
+
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const answer = report.answers[0] as BridgeAnswerRow;
+  // `network.call` is manual in this policy and nobody grants it, so the wait
+  // runs out. What matters is that it was CLASSIFIED: the old answer was
+  // `hook-opaque` before any policy was consulted.
+  assert.equal(answer.code, "hook-timeout", answer.detail);
+
+  // AC3: the payload binds the OUTER argv and command, exactly as APRV-362
+  // built them. The inner script is what was classified and never what is bound.
+  const stored = storedPayloads(dir);
+  assert.match(stored, /"command":"\/bin\/zsh -lc 'curl -d a=b https:\/\/example\.com'"/u);
+  assert.match(stored, /"argv":\["\/bin\/zsh","-lc","curl -d a=b https:\/\/example\.com"\]/u);
+  assert.match(rawLog(dir), /"class":"network\.call"/u);
+  assertVerifies(dir);
+});
+
+test("APRV-380: a login-shell exec outside the narrow shape is still declined opaque", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    // A shell nested inside the script: one level of unwrap, by construction.
+    execRequest("/bin/zsh -lc 'bash -lc \"curl -d a=b https://example.com\"'", dir),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-opaque", answer.detail);
+  assert.equal(rawLog(dir), before, "an opaque command appended something");
+});
+
 test("APRV-362: the registered payload carries the received string and the argv beside it", () => {
   const dir = ready();
   // `network.call` is manual in this policy, so the action is REGISTERED and

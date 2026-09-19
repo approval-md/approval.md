@@ -531,7 +531,9 @@ test("hook classify moves gh pr update-branch but leaves gh pr view reading", ()
 
 test("hook classify reports a refusal without failing", () => {
   const dir = caseDir();
-  const run = runCli(["hook", "classify", "--json", "--", "bash -c 'rm -rf /'"], dir);
+  // `eval` builds the command it runs, which no parser here can read. A bare
+  // `bash -c '…'` is not this example since APRV-380.
+  const run = runCli(["hook", "classify", "--json", "--", "eval 'rm -rf /'"], dir);
   assert.equal(run.code, 0, run.stderr);
   const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
   assert.equal(parsed["ok"], false);
@@ -777,10 +779,50 @@ test("a harness self-update is gated as deps.upgrade, not refused as unclassifie
 
 test("an opaque command denies", () => {
   const dir = ready();
-  const run = runCli(["hook", "claude-code"], dir, bashEvent("bash -c 'git push --force'"));
+  // `xargs` builds its command from its input, which is a thing no parser here
+  // can see. Since APRV-380 a bare `bash -c '…'` is no longer an example of
+  // this: the script is classified through the same classifier, and the
+  // wrappers that stay opaque are the ones whose effect the argv does not say.
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("xargs git push --force"));
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-opaque: /u);
+});
+
+test("APRV-380: a login-shell wrapper is decided by the script it runs", () => {
+  const dir = ready();
+  // The shape the 2026-09-18 Codex probe recorded on every exec request. Before
+  // this it was `hook-opaque` on every adapter, which made the bridge
+  // fail-closed and useless against the traffic it was built for.
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("/bin/zsh -lc 'cat README.md'"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  // And the BINDING is unchanged: what a human would see and what the record
+  // carries is the outer command, exactly as it arrived.
+  assert.match(verdict.reason, /read\./u);
+});
+
+test("APRV-380: anything outside the three-word shape stays opaque", () => {
+  const dir = ready();
+  for (const command of [
+    // A script FILE rather than an inline string: `-l` takes no argument, so
+    // the shell reads the file, and what is in it is not in the argv.
+    "zsh -l script.sh",
+    // A fourth word: an option this rule does not model could change what runs.
+    "bash -lc 'cat README.md' extra",
+    // A redirection, which belongs to the OUTER shell and not to the script.
+    "bash -lc 'cat README.md' > out.txt",
+    // An assignment prefix, which changes the environment the script runs in.
+    "FOO=1 bash -lc 'cat README.md'",
+    // A shell nested inside the script: the unwrap is one level deep by
+    // construction, and this is the shape the opaque position still covers.
+    "bash -lc \"bash -lc 'cat README.md'\"",
+  ]) {
+    const run = runCli(["hook", "claude-code"], dir, bashEvent(command));
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", command);
+    assert.match(verdict.reason, /^hook-opaque: /u, command);
+  }
 });
 
 test("malformed stdin denies with hook-io", () => {
