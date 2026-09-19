@@ -95,6 +95,16 @@ const HUMAN_ACTOR = /^human:.+/u;
  */
 export const PROPOSAL_EVENT = "policy.proposed";
 
+/**
+ * The attestation's own event type (APRV-356).
+ *
+ * Spelled here rather than imported from `core/attest.ts` for the reason that
+ * module's header gives about direction: attestation knows nothing about
+ * proposals, and a cycle between the two would be a dependency neither needs.
+ * `attestationSha256` above already selects on the same string.
+ */
+const ATTESTATION_EVENT = "policy.updated";
+
 /** The event a decline appends. An attestation appends `policy.updated`. */
 export const DECLINE_EVENT = "policy.declined";
 
@@ -394,9 +404,16 @@ export function inForcePolicyText(
     return { ok: false, reason: "no policy is in force: the log carries no attestation" };
   }
 
+  // Two kinds of record can name the attested bytes, and both are read
+  // (APRV-356). A `policy.proposed` binds the whole text so an approver can
+  // read the file on a phone; since APRV-356 an ATTESTATION binds it too, so a
+  // chain only ever attested at a terminal is recoverable as well. Newest
+  // first, and the two are not ranked against each other: both are verified
+  // against the same digest from the same verified log, so whichever is found
+  // first carries bytes that hash to it or it is skipped.
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index] as EventRecord;
-    if (record.event !== PROPOSAL_EVENT) continue;
+    if (record.event !== PROPOSAL_EVENT && record.event !== ATTESTATION_EVENT) continue;
     const payload = record.payload;
     if (payload === undefined) continue;
     if (payload["sha256"] !== attested) continue;
@@ -416,7 +433,7 @@ export function inForcePolicyText(
 
   return {
     ok: false,
-    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: an attestation records only their digest, and no policy.proposed record naming those bytes has a readable payload beside this log. A policy attested at a terminal stores nothing, so this is the ordinary state of a chain that has never been amended from a phone.`,
+    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: no record naming those bytes — neither a policy.proposed nor the attestation itself — binds a payload this log can read beside it. Since APRV-356 every attestation stores the attested text, so this is the ordinary state of a chain last attested BEFORE that landed, where a terminal attestation recorded only the digest.`,
   };
 }
 

@@ -1158,7 +1158,7 @@ test("--json without --yes is a usage refusal in JSON", () => {
 // (g) The git ceremony
 // ---------------------------------------------------------------------------
 
-test("--commit lands exactly the policy and the log in one commit citing the seq", () => {
+test("--commit lands exactly the policy, the log and the attested bytes, citing the seq", () => {
   const dir = repoDir();
   attest(dir);
   git(["add", "-A"], dir);
@@ -1176,7 +1176,15 @@ test("--commit lands exactly the policy and the log in one commit citing the seq
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .sort();
-  assert.deepEqual(files, [".approval/log/events.jsonl", "APPROVAL.md"]);
+  // APRV-356: three files, and the third is not a guess. The attestation binds
+  // a `payload_hash`, and the commit carries the store file that hash addresses
+  // — without it the committed log names bytes nobody reading that commit can
+  // produce, which is the state APRV-356 exists to end.
+  assert.deepEqual(files, [
+    ".approval/log/events.jsonl",
+    payloadFileOf(dir),
+    "APPROVAL.md",
+  ]);
   // The tree is clean afterwards: the amendment left nothing behind.
   assert.equal(git(["status", "--porcelain"], dir).stdout.trim(), "");
 });
@@ -1297,6 +1305,7 @@ test("a protected default branch turns --commit into branch, push, and a PR of o
   );
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   assert.match(
@@ -1376,6 +1385,7 @@ test("--branch forces the branch flow even where nothing is protected", () => {
   assert.equal(git(["rev-parse", "--verify", "--quiet", "refs/heads/policy-tuesday"], dir).code, 0);
   assert.deepEqual(remoteFiles(remote, "policy-tuesday"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
 });
@@ -1612,6 +1622,7 @@ test("with gh absent the branch flow still branches, commits and pushes, and pri
   assert.equal(run.code, 0, run.stderr);
   assert.deepEqual(remoteFiles(remote, "policy-solo"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   assert.match(run.stdout, /gh is not available, so the pull request was not opened/u);
@@ -1773,7 +1784,11 @@ test("the direct flow pushes, and the amendment reaches origin", () => {
   assert.equal(gitPlan["flow"], "direct");
   assert.equal(gitPlan["committed"], true);
   assert.equal(gitPlan["pushed"], true);
-  assert.deepEqual(remoteFiles(remote, "main"), [".approval/log/events.jsonl", "APPROVAL.md"]);
+  assert.deepEqual(remoteFiles(remote, "main"), [
+    ".approval/log/events.jsonl",
+    payloadFileOf(dir),
+    "APPROVAL.md",
+  ]);
   assert.equal(remoteHead(remote, "main"), git(["rev-parse", "HEAD"], dir).stdout.trim());
 });
 
@@ -1853,6 +1868,7 @@ test("a protected main takes the branch flow, and the protected remote accepts i
   assert.equal(gitPlan["pushed"], true);
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   // main is exactly where it was: the amendment reaches it through the PR.
@@ -2178,6 +2194,7 @@ test("a rejected push is published through a branch, and the ceremony reads as a
   // The amendment is on origin as a branch, and main is untouched.
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   assert.equal(
@@ -2300,6 +2317,7 @@ test("gh absent degrades the recovery to the runbook, with the branch on origin"
   assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
@@ -2919,11 +2937,16 @@ test("APRV-274: a ceremony whose pins moved commits policy, log and pins as ONE 
   );
   assert.equal(run.code, 0, run.stderr);
 
-  // ONE commit, carrying exactly the three files: no second push, and nothing
+  // ONE commit, carrying exactly the four files: no second push, and nothing
   // left over for a later cherry-pick to add.
   assert.deepEqual(
     remoteFiles(remote, "policy-amend-2"),
-    [".approval/log/events.jsonl", "APPROVAL.md", "src/core/policy-expectations.ts"].sort(),
+    [
+      ".approval/log/events.jsonl",
+      payloadFileOf(dir),
+      "APPROVAL.md",
+      "src/core/policy-expectations.ts",
+    ].sort(),
   );
   assert.equal(
     git(["rev-list", "--count", "main..policy-amend-2"], remote).stdout.trim(),
@@ -2939,7 +2962,12 @@ test("APRV-274: a ceremony whose pins moved commits policy, log and pins as ONE 
   // The pin change is reported beside the class changes, and the commit says so.
   assert.match(run.stdout, /pins\s+src\/core\/policy-expectations\.ts moves with this amendment/u);
   assert.match(run.stdout, /log\.sync: autonomous\/rule -> manual\/rule/u);
-  assert.match(run.stdout, /committed the policy, the log and the pins together/u);
+  // The headline names what the commit carries, all four of them since
+  // APRV-356 added the store copy of the attested bytes.
+  assert.match(
+    run.stdout,
+    /committed the policy, the log, the pins and the attested policy text together/u,
+  );
   assert.match(
     git(["log", "-1", "--pretty=%s", "policy-amend-2"], remote).stdout,
     /1 pin\(s\)/u,
@@ -2960,10 +2988,10 @@ test("APRV-274: a pins file the base already carries is left out of the commit",
   );
   assert.equal(run.code, 0, run.stderr);
   assert.equal(report(run)["pins"], null, "an unmoved pins file was reported as part of the ceremony");
-  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
-    ".approval/log/events.jsonl",
-    "APPROVAL.md",
-  ].sort());
+  assert.deepEqual(
+    remoteFiles(remote, "policy-amend-2"),
+    [".approval/log/events.jsonl", payloadFileOf(dir), "APPROVAL.md"].sort(),
+  );
 });
 
 test("APRV-274: a staged pins edit is not a stray, and a staged anything-else still is", () => {
@@ -2974,7 +3002,7 @@ test("APRV-274: a staged pins edit is not a stray, and a staged anything-else st
   git(["add", "src/core/policy-expectations.ts"], dir);
 
   // The rule did not become "sweep in whatever is staged": one unrelated staged
-  // file is still a refusal, and it names the three the commit may carry.
+  // file is still a refusal, and it names the four the commit may carry.
   writeFileSync(join(dir, "UNRELATED.md"), "# not part of the amendment\n", "utf8");
   git(["add", "UNRELATED.md"], dir);
   const recordsBefore = logRecords(dir).length;
@@ -2989,7 +3017,7 @@ test("APRV-274: a staged pins edit is not a stray, and a staged anything-else st
   assert.match(errorOf(refused).message, /UNRELATED\.md/u);
   assert.match(
     errorOf(refused).message,
-    /the policy, the log and src\/core\/policy-expectations\.ts/u,
+    /the policy, the log, the attested policy text and src\/core\/policy-expectations\.ts/u,
   );
   assert.equal(logRecords(dir).length, recordsBefore, "a refused precondition attested something");
 
@@ -3004,7 +3032,12 @@ test("APRV-274: a staged pins edit is not a stray, and a staged anything-else st
   assert.equal(run.code, 0, run.stderr);
   assert.deepEqual(
     remoteFiles(remote, "policy-amend-2"),
-    [".approval/log/events.jsonl", "APPROVAL.md", "src/core/policy-expectations.ts"].sort(),
+    [
+      ".approval/log/events.jsonl",
+      payloadFileOf(dir),
+      "APPROVAL.md",
+      "src/core/policy-expectations.ts",
+    ].sort(),
   );
 });
 
@@ -3145,11 +3178,13 @@ test("APRV-296: a class the policy declares and no pin names runs the ceremony c
 /**
  * The branch, index and working tree of a checkout, as one comparable object.
  *
- * The working log is left out, and only the working log: the attestation IS an
- * append to it, so a ceremony that left `events.jsonl` byte-identical would be a
- * ceremony that attested nothing. Everything else — the branch, HEAD, the index,
- * every other path's status, the policy bytes — must come through untouched,
- * and that is the claim the 2026-09-16 fork made false.
+ * The working log is left out, and since APRV-356 the payload store with it,
+ * for one reason that covers both: the attestation IS an append to the log and
+ * a write of the attested bytes beside it, so a ceremony that left either
+ * byte-identical would be a ceremony that attested nothing. Everything else —
+ * the branch, HEAD, the index, every other path's status, the policy bytes —
+ * must come through untouched, and that is the claim the 2026-09-16 fork made
+ * false.
  */
 function checkoutState(dir: string): Record<string, string> {
   return {
@@ -3157,13 +3192,35 @@ function checkoutState(dir: string): Record<string, string> {
     head: git(["rev-parse", "HEAD"], dir).stdout.trim(),
     status: git(["status", "--porcelain"], dir)
       .stdout.split("\n")
-      .filter((line) => !line.includes(".approval/log/events.jsonl"))
+      .filter(
+        (line) =>
+          !line.includes(".approval/log/events.jsonl") &&
+          !line.includes(".approval/payloads/"),
+      )
       .join("\n"),
     policy: readFileSync(join(dir, "APPROVAL.md"), "utf8"),
   };
 }
 
-test("APRV-341: --pr commits exactly the two paths, pushes, opens the PR and arms the merge", () => {
+/**
+ * The store file the log's LAST record binds, as the path a commit carries.
+ *
+ * APRV-356: the ceremony commit carries the bytes its binding names, and the
+ * name is read out of the log rather than written into a fixture, so these
+ * cases pin the RELATION (the commit carries what the record binds) instead of
+ * a hash that any edit to the fixture policy would move. The last record is the
+ * one this ceremony appended, on either path: the attestation the human
+ * performed, or the proposal the agent left waiting for a tap.
+ */
+function payloadFileOf(dir: string): string {
+  const records = logRecords(dir);
+  const payload = records[records.length - 1]?.["payload"] as Record<string, unknown> | undefined;
+  const hash = payload?.["payload_hash"];
+  assert.match(String(hash), /^[a-f0-9]{64}$/u, "the log's last record binds no payload hash");
+  return `.approval/payloads/${String(hash)}.json`;
+}
+
+test("APRV-341: --pr commits exactly the ceremony's paths, pushes, opens the PR and arms the merge", () => {
   const { dir, remote } = repoWithRemote();
   const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/341" });
   attest(dir);
@@ -3190,9 +3247,11 @@ test("APRV-341: --pr commits exactly the two paths, pushes, opens the PR and arm
   const gitPlan = report(run)["git"] as Record<string, unknown>;
   assert.equal(gitPlan["flow"], "branch");
   assert.equal(gitPlan["pushed"], true);
-  // EXACTLY two paths. Not the untracked task file, not the README.
+  // EXACTLY the ceremony's paths. Not the untracked task file, not the README.
+  // APRV-356 made the store copy of the attested bytes the third of them.
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   const publishing = report(run)["publishing"] as Record<string, unknown>;
@@ -3237,6 +3296,7 @@ test("APRV-341: a second run updates the open pull request instead of failing to
   assert.ok(!calls.includes("create"), `gh pr create ran anyway:\n${calls.join("\n")}`);
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
+    payloadFileOf(dir),
     "APPROVAL.md",
   ]);
   assert.deepEqual(checkoutState(dir), before);
