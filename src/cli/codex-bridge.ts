@@ -133,6 +133,7 @@ import type { Streams } from "./main.js";
 import { HOOK_RETRY_GRACE_MS } from "../core/harness-wait.js";
 import { canonicalize } from "../core/jcs.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import { shlexJoin, shlexRoundTrips, shlexSplit } from "../core/shlex.js";
 
 /** The adapter every decision here is made under: Codex, through its own protocol. */
 const ADAPTER = HARNESS_ADAPTERS["codex"];
@@ -237,6 +238,18 @@ export const BRIDGE_REFUSAL_CODES = [
   "bridge-file-change-unbound",
   /** A server request this verb has no reading for. */
   "bridge-unknown-request",
+  /**
+   * An exec request whose command string names no argv this client can bind
+   * (APRV-362).
+   *
+   * Distinct from `bridge-request-unbound`, which says a field is MISSING. This
+   * one says the field arrived and could not be read as the rendering of an
+   * argv: an unterminated quote, a bare double quote, a trailing backslash, or
+   * whitespace no join produces. The repairs differ, which is why the codes do:
+   * a missing `cwd` is a server that changed shape, and this is a command
+   * string that did not come from joining the words that will run.
+   */
+  "bridge-command-unbound",
   /** An exec request carrying no command string, or no cwd. */
   "bridge-request-unbound",
 ] as const;
@@ -416,22 +429,89 @@ function stringField(source: unknown, key: string): string | null {
 }
 
 /**
- * The exec request's command, as one string.
+ * The exec request's command, as BOTH the words that will run and the string
+ * that renders them (APRV-362).
  *
- * The item-based API sends a shell-joined rendering and the legacy API an argv
- * array; both are accepted, and an array is joined here so the classifier sees
- * one command either way. That join is a re-rendering, and APRV-362 is the task
- * that records the re-parse beside the received string so a mismatch is visible
- * rather than silent. Until it lands, what is bound is what arrived.
+ * ## Which API, and why the string has to be un-joined
+ *
+ * The two live shapes differ in the one way that matters. The legacy
+ * `execCommandApproval` sends `command` as an argv array, which is what the
+ * kernel receives. The item-based `item/commandExecution/requestApproval` sends
+ * it as a single string, produced by `shlex_join` over that same argv
+ * (`docs/codex-app-server-bridge.md`, question 1). This verb drives the
+ * ITEM-BASED API, so the string is what it must consume, and the decision the
+ * task asked for is settled by which API the bridge speaks rather than by
+ * preference: the legacy array is still read, because a request in that shape
+ * is a request this client can answer, but it is not the path in use.
+ *
+ * Consuming the string means un-joining it. A classifier handed the rendering
+ * and never the words is classifying its own re-parse, and the gap between the
+ * two is where an approval could authorize words nobody read. So both are
+ * produced here, both reach the registered payload, and a reader can see the
+ * one against the other instead of being asked to trust that they agree.
+ *
+ * ## What this refuses, and what it deliberately does not
+ *
+ * A string that is not readable as a join — an unterminated quote, a bare
+ * double quote, a trailing backslash, or separation no join emits — is refused
+ * with `bridge-command-unbound`. So is an argv this runtime cannot render and
+ * read back unchanged, which is unreachable for a correct {@link shlexJoin} and
+ * checked anyway, because the cost is one pass over a short string and the
+ * failure it guards against is binding words nobody will run.
+ *
+ * It does NOT demand that {@link shlexJoin} reproduce the received bytes. That
+ * would pin the counterpart's quoting predicate, which this repository has no
+ * record of: the probe captured one command string and it is consistent with
+ * every candidate. A join written for shell safety quotes more than this one
+ * does, so demanding byte equality would refuse ordinary traffic on a guess.
+ * What is demanded instead is the part that is checkable without knowing which
+ * characters the counterpart chose to quote, and the rest is recorded.
+ *
+ * `proposedExecpolicyAmendment` is deliberately not read, though the task names
+ * it as a candidate second source. The 2026-09-18 observation records that the
+ * field was PRESENT and records nothing about its shape, and a comparison
+ * written against a guessed shape silently matches nothing, which is worse than
+ * the check it pretends to be. It becomes usable once a probe captures it.
  */
-function commandOf(params: unknown): string | null {
+export type BoundCommand =
+  | { ok: true; command: string; argv: string[]; source: "rendering" | "argv" }
+  | { ok: false; reason: string };
+
+export function bindCommand(params: unknown): BoundCommand | null {
   if (params === null || typeof params !== "object") return null;
   const value = (params as Record<string, unknown>)["command"];
-  if (typeof value === "string" && value.length > 0) return value;
-  if (Array.isArray(value)) {
-    const words = value.filter((entry): entry is string => typeof entry === "string");
-    if (words.length > 0 && words.length === value.length) return words.join(" ");
+
+  if (typeof value === "string" && value.length > 0) {
+    const split = shlexSplit(value);
+    if (!split.ok) return { ok: false, reason: split.reason };
+    // An all-whitespace string carries a command field and no command, which is
+    // the missing-field answer rather than this one.
+    if (split.argv.length === 0) return null;
+    if (!split.joinShaped) {
+      return {
+        ok: false,
+        reason:
+          "its words are not separated the way a join separates them (one space each, none leading or trailing), so the string did not come from joining the argv that will run",
+      };
+    }
+    if (!shlexRoundTrips(split.argv)) {
+      return { ok: false, reason: "the words it names cannot be rendered and read back unchanged" };
+    }
+    return { ok: true, command: value, argv: split.argv, source: "rendering" };
   }
+
+  if (Array.isArray(value)) {
+    const argv = value.filter((entry): entry is string => typeof entry === "string");
+    if (argv.length === 0 || argv.length !== value.length) return null;
+    if (!shlexRoundTrips(argv)) {
+      return { ok: false, reason: "the words it names cannot be rendered and read back unchanged" };
+    }
+    // Rendered, not concatenated. `argv.join(" ")` hands the classifier
+    // `bash -lc rm -rf build` for `["bash","-lc","rm -rf build"]`, which is
+    // four more words than the kernel will ever see and a different command.
+    return { ok: true, command: shlexJoin(argv), argv, source: "argv" };
+  }
+
   return null;
 }
 
@@ -565,15 +645,15 @@ export function decideExecRequest(
   plan: BridgePlan,
   params: unknown,
 ): { verdict: HarnessVerdict; threadId: string | null } {
-  const command = commandOf(params);
+  const bound = bindCommand(params);
   const cwd = stringField(params, "cwd");
   const callId = callIdOf(params);
   const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
-  if (command === null || cwd === null || callId === null) {
+  if (bound === null || cwd === null || callId === null) {
     // The three fields a decision needs. Missing any one of them, there is
     // nothing to bind and nothing to classify, and the answer is no.
     const missing = [
-      command === null ? "command" : null,
+      bound === null ? "command" : null,
       cwd === null ? "cwd" : null,
       callId === null ? "a call identity (itemId, callId or approvalId)" : null,
     ]
@@ -588,13 +668,30 @@ export function decideExecRequest(
       },
     };
   }
+  if (!bound.ok) {
+    // APRV-362. The command arrived and this client cannot say which words it
+    // renders. Approving it would approve a parse, so it is declined before
+    // anything is classified and nothing is appended.
+    return {
+      threadId,
+      verdict: {
+        permission: "deny",
+        code: "bridge-command-unbound",
+        detail: `the approval request's command cannot be bound to the argv it will run: ${bound.reason}; a decision here would authorize this client's own re-parse rather than the words the server holds, so it is declined and nothing was appended`,
+      },
+    };
+  }
 
   const input: HookInput = {
     sessionId: threadId ?? "codex-bridge",
     sessionIdPresent: threadId !== null,
     cwd,
     toolName: ADAPTER.shellTool,
-    toolInput: { command },
+    // Both accounts of the call, so the registered payload names the words and
+    // the rendering side by side (APRV-362). `codexArgv` re-splits the command
+    // and accepts the argv only when the two agree, so what reaches the payload
+    // is a derivation of bytes already bound rather than a second claim.
+    toolInput: { command: bound.command, argv: bound.argv },
     toolUseId: callId,
     hookEventName: null,
     model: null,

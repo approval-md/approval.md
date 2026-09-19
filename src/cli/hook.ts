@@ -168,6 +168,7 @@ import { refusal as renderRefusal, style, table, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 import {
   checkCodexHookInput,
+  codexArgvDisagrees,
   codexBinding,
   CODEX_POST_TOOL_EVENT,
   readCodexReportedOutcome,
@@ -3673,6 +3674,21 @@ function describeToolCall(
         kind: "deny",
         code: "hook-io",
         detail: `${adapter.shellTool} tool_input carries no command string`,
+      };
+    }
+    // APRV-362. A call may state the argv its command renders, and the app-server
+    // bridge does, so the payload can name the words the kernel receives rather
+    // than a string somebody still has to parse. Two accounts of one call that
+    // disagree describe no call at all, so the disagreement is refused here
+    // instead of being resolved in favour of either. `codexArgv` accepts an
+    // argv only when the command splits to exactly it, which is why the only
+    // reachable outcomes are "absent", "agrees" and this.
+    if (adapter.kind === "codex" && codexArgvDisagrees(input.toolInput, raw)) {
+      return {
+        kind: "deny",
+        code: "hook-io",
+        detail:
+          "the call states an argv that its own command string does not split to; a payload cannot bind two readings of one command, so nothing was classified",
       };
     }
     // APRV-350: the PER-CALL working directory, where the harness sends one.

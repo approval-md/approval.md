@@ -6313,9 +6313,23 @@ Its own refusals, beside the gate's:
 
 ```
 bridge-request-unbound       no command, no cwd, or no call identity on the request
+bridge-command-unbound       a command string that names no argv this client can bind (APRV-362)
 bridge-file-change-unbound   an item-based file change carries no content (APRV-379)
 bridge-unknown-request       a server request this client has no reading for
 ```
+
+The **exec request binds words, not a rendering** (APRV-362). The item-based API
+delivers the command as one string, joined from the argv Codex will run, so the
+bridge un-joins it and the registered payload carries the string that arrived
+and the argv beside it. A string that is not readable as a join (an unterminated
+quote, a double quote outside a quoted run, a trailing backslash, or separation
+no join produces) is `bridge-command-unbound`, because approving it would
+approve this client's own re-parse. Byte equality with a re-rendering is
+deliberately not required: a join written for shell safety quotes more than this
+one does, and demanding equality would refuse ordinary traffic over a quoting
+rule nothing here records. A legacy argv array is rendered word by word rather
+than concatenated, so `["bash", "-lc", "rm -rf build"]` reaches the classifier
+as `bash -lc 'rm -rf build'` and not as five separate words.
 
 A **legacy `applyPatchApproval` is decided rather than declined** (APRV-363).
 Its `fileChanges` map rides on the request, so there is nothing to correlate and

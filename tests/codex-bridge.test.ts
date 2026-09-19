@@ -609,6 +609,110 @@ test("a server request with no reading is declined bridge-unknown-request", () =
 });
 
 // ---------------------------------------------------------------------------
+// APRV-362 — the payload names the words, not only their rendering
+// ---------------------------------------------------------------------------
+
+/** Everything the payload store holds for this case, as one string. */
+function storedPayloads(dir: string): string {
+  const store = join(dir, ".approval", "payloads");
+  return existsSync(store)
+    ? readdirSync(store)
+        .map((entry) => readFileSync(join(store, entry), "utf8"))
+        .join("\n")
+    : "";
+}
+
+test("APRV-362: the registered payload carries the received string and the argv beside it", () => {
+  const dir = ready();
+  // `network.call` is manual in this policy, so the action is REGISTERED and
+  // waits, which is what makes the bound payload readable. Nobody grants it.
+  const { report } = bridge(dir, [
+    execRequest("curl -d 'a=b c' https://example.com", dir),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-timeout", answer.detail);
+
+  // AC1: both accounts of the call are in the bound material. The string is the
+  // bytes that arrived; the argv is the words the kernel will receive, and the
+  // quoted third word is one word rather than three.
+  const stored = storedPayloads(dir);
+  assert.match(stored, /"command":"curl -d 'a=b c' https:\/\/example\.com"/u);
+  assert.match(stored, /"argv":\["curl","-d","a=b c","https:\/\/example\.com"\]/u);
+  assertVerifies(dir);
+});
+
+test("APRV-362: a legacy argv array is rendered word by word, never concatenated", () => {
+  const dir = ready();
+  const { report } = bridge(dir, [
+    {
+      method: "execCommandApproval",
+      params: {
+        conversationId: "thread-1",
+        callId: "call-9",
+        command: ["curl", "-d", "a=b c", "https://example.com"],
+        cwd: dir,
+        reason: null,
+      },
+    },
+  ]);
+
+  assert.equal((report.answers[0] as BridgeAnswerRow).code, "hook-timeout");
+  // The old join produced `curl -d a=b c https://example.com`, which is one
+  // more word than the kernel will ever see. The rendering keeps the argv's
+  // shape, and the argv itself is bound beside it.
+  const stored = storedPayloads(dir);
+  assert.match(stored, /"command":"curl -d 'a=b c' https:\/\/example\.com"/u);
+  assert.match(stored, /"argv":\["curl","-d","a=b c","https:\/\/example\.com"\]/u);
+  assertVerifies(dir);
+});
+
+test("APRV-362: a command string that is not the rendering of an argv is declined", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  // A join emits bare words and single-quoted ones, never a double quote, so
+  // this string did not come from joining the words that will run.
+  const { report } = bridge(dir, [execRequest('echo "hello world"', dir)]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-command-unbound", answer.detail);
+  assert.match(answer.detail, /double quote/u);
+  assert.equal(rawLog(dir), before, "an unbindable command appended something");
+});
+
+test("APRV-362: an unreadable command string is declined, and nothing is classified", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    execRequest("echo 'oops", dir),
+    execRequest("echo one  two", dir),
+  ]);
+
+  const quoted = report.answers[0] as BridgeAnswerRow;
+  const spaced = report.answers[1] as BridgeAnswerRow;
+  assert.equal(quoted.code, "bridge-command-unbound", quoted.detail);
+  assert.match(quoted.detail, /never closed/u);
+  // Separation a join does not produce: the argv is readable, and that the
+  // string came from a join is not, so it is refused rather than guessed at.
+  assert.equal(spaced.code, "bridge-command-unbound", spaced.detail);
+  assert.match(spaced.detail, /one space each/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("APRV-362: a request carrying only whitespace is still the missing-field refusal", () => {
+  const dir = ready();
+  // A `command` that names no words at all is an absent command, and the code
+  // that says a field is missing is the one that fits.
+  const { report } = bridge(dir, [execRequest("   ", dir)]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.code, "bridge-request-unbound", answer.detail);
+  assert.match(answer.detail, /command/u);
+});
+
+// ---------------------------------------------------------------------------
 // The thread is started under the one policy that asks about everything
 // ---------------------------------------------------------------------------
 
@@ -819,6 +923,7 @@ test("APRV-367: what goes on the wire is this runtime's own spelling of the word
 
 test("the refusal codes are a closed, distinct vocabulary", () => {
   assert.deepEqual([...BRIDGE_REFUSAL_CODES].sort(), [
+    "bridge-command-unbound",
     "bridge-file-change-unbound",
     "bridge-request-unbound",
     "bridge-unknown-request",

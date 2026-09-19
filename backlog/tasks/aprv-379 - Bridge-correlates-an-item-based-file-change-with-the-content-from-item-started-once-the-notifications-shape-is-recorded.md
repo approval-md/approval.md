@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-19 14:10'
-updated_date: '2026-09-19 14:24'
+updated_date: '2026-09-19 15:03'
 labels:
   - codex
   - bridge
@@ -27,7 +27,7 @@ THE DESIGN CHOICE, once the shape is known.
 (a) CLASSIFY THE PATHS, BIND THE BYTES. Classify each path in the recorded change set through protectedPathClass and the file-write classes, and bind {itemId, paths, sha256 of the content as it arrived}. Nothing is invented. The cost is that a grant covers a path rather than a hunk, which is weaker evidence than an Edit gives the protected-path guard. This is the shape APRV-363 landed for the legacy request, so following it here keeps one answer rather than two.
 (b) RE-RENDER TO AN apply_patch ENVELOPE and refuse unless the envelope reproduces the received change set field for field, which buys hunk-level evidence at the price of a second implementation of Codex patch semantics living in this repository.
 
-UNDER (a) THERE IS A THIRD THING: decideHarnessCall derives its classes from describeToolCall, whose only Codex file-tool branch wants an apply_patch envelope. APRV-363 added the seam that lets a caller hand the hook a description it computed itself; this task should use that seam rather than growing a second one.
+UNDER (a) THERE IS A THIRD THING: decideHarnessCall derives its classes from describeToolCall, whose only Codex file-tool branch wants an apply_patch envelope. APRV-363 added the branch inside describeToolCall that reads an inline change map instead of an envelope; this task should extend that branch rather than growing a second one. There is deliberately no caller-supplied description to reach for: a caller that could hand the hook its own classes would be the party under oversight choosing its own scrutiny (SPEC section 11.1 invariant 4).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

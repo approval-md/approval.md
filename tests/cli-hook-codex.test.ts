@@ -16,7 +16,12 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { codexBinding, type CodexHookInput } from "../src/cli/hook-codex.js";
+import {
+  codexArgv,
+  codexArgvDisagrees,
+  codexBinding,
+  type CodexHookInput,
+} from "../src/cli/hook-codex.js";
 import { decide, finishHarnessExecution, register, request } from "../src/core/gate.js";
 import { openWindow } from "../src/core/gate-window.js";
 import { harnessSessionOf } from "../src/core/loop.js";
@@ -194,6 +199,50 @@ test("Codex correlation is injective over native ids, tool bytes, cwd, and sessi
     "different native sessions retain separate session floors",
   );
   assert.equal(harnessSessionOf("hook:legacy-session:legacy-tool"), "hook:legacy-session");
+});
+
+test("APRV-362: an argv is bound only when the command string splits to exactly it", () => {
+  const dir = ready();
+  const input = (toolInput: Record<string, unknown>): CodexHookInput => ({
+    sessionId: "session-1",
+    sessionIdPresent: true,
+    cwd: dir,
+    toolName: "Bash",
+    toolInput,
+    toolUseId: "call-1",
+    hookEventName: "PreToolUse",
+    toolResponseRaw: undefined,
+  });
+
+  // The bridge's own shape: the argv agrees, so the payload names both.
+  const agreeing = { command: "curl -d 'a=b c' https://x.test", argv: ["curl", "-d", "a=b c", "https://x.test"] };
+  assert.deepEqual(codexArgv(agreeing, agreeing.command), agreeing.argv);
+  assert.deepEqual(codexBinding(input(agreeing), dir).payload.argv, agreeing.argv);
+
+  // A call with no argv binds exactly as every call did before APRV-362: the
+  // key is absent from the payload rather than present and empty, so the hash
+  // of an untouched call is untouched.
+  const plain = { command: "curl -d 'a=b c' https://x.test" };
+  assert.equal(codexArgv(plain, plain.command), null);
+  assert.equal(codexArgvDisagrees(plain, plain.command), false);
+  assert.equal("argv" in codexBinding(input(plain), dir).payload, false);
+
+  // `tool_input` on a native event is the MODEL's tool-call arguments, so an
+  // argv can arrive that the command does not split to. It buys nothing: the
+  // field is a derivation of bytes already bound or it is not accepted at all,
+  // and the caller refuses the call rather than binding one of two readings.
+  for (const argv of [
+    ["curl", "-d", "a=b", "c", "https://x.test"],
+    ["rm", "-rf", "/"],
+    ["curl"],
+    ["curl", "-d", "a=b c"],
+    "not-an-array",
+    [1, 2],
+  ]) {
+    const lying = { command: "curl -d 'a=b c' https://x.test", argv };
+    assert.equal(codexArgv(lying, lying.command), null, JSON.stringify(argv));
+    assert.equal(codexArgvDisagrees(lying, lying.command), true, JSON.stringify(argv));
+  }
 });
 
 test("Codex manual intake reuses the gate and binds tool, command, and actual cwd", () => {
