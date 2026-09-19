@@ -9,9 +9,12 @@
  *
  * Three stage demos share one provisioning ceremony:
  *
- *   --instance web-agent   ~/demo-gate    examples/web-agent-demo/runbook.md
- *   --instance guest       ~/demo-guest   the same runbook's crowd track (§4)
- *   --instance grok-bot    ~/demo-gate    examples/grok-bot-connector/runbook.md
+ *   --instance web-agent   ~/demo-gate      examples/web-agent-demo/runbook.md
+ *   --instance guest       ~/demo-guest     the same runbook's crowd track (§4)
+ *   --instance grok-bot    ~/demo-grok-bot  examples/grok-bot-connector/runbook.md
+ *
+ * One default directory each, never a shared one: a marker can refuse a second
+ * demo in a directory, but only after the operator has already typed it.
  *
  * Until this script existed, each of them was a command sequence a human
  * pasted out of a document, which made every rehearsal a fresh chance to skip
@@ -184,7 +187,12 @@ const INSTANCES = {
   },
   "grok-bot": {
     id: "grok-bot",
-    defaultPath: join(homedir(), "demo-gate"),
+    // Its own directory, and not `~/demo-gate` as its runbook first named.
+    // Two demos sharing a default path is a footgun the marker can only report
+    // after the fact: the operator who typed the wrong --instance has already
+    // found out by being refused. Three defaults, three directories, and
+    // --path for anyone who wants otherwise.
+    defaultPath: join(homedir(), "demo-grok-bot"),
     title: "the Grok Bot connector demo gate",
     runbook: "examples/grok-bot-connector/runbook.md",
     vault: true,
@@ -1013,9 +1021,9 @@ Usage:
   node examples/demo-provision.mjs --instance <id> --reset [--vault]
 
 Instances:
-  web-agent   ~/demo-gate    the web-agent demo (examples/web-agent-demo/runbook.md)
-  guest       ~/demo-guest   the crowd track's throwaway gate, EMPTY VAULT (§4)
-  grok-bot    ~/demo-gate    the Grok Bot connector demo
+  web-agent   ~/demo-gate      the web-agent demo (examples/web-agent-demo/runbook.md)
+  guest       ~/demo-guest     the crowd track's throwaway gate, EMPTY VAULT (§4)
+  grok-bot    ~/demo-grok-bot  the Grok Bot connector demo
 
 Flags:
   --instance <id>  which demo (required)
@@ -1142,7 +1150,9 @@ async function main() {
       return;
     }
     // A reset also clears the marker's claim on this directory, so that a
-    // retired ~/demo-gate can be re-provisioned for the other demo.
+    // retired instance can be re-provisioned for a different demo. The three
+    // defaults no longer collide, but --path means one directory can still be
+    // asked to hold a second demo, and a reset is how that is allowed.
     const markerPath = join(dir, MARKER_FILE);
     if (existsSync(markerPath)) {
       const destination = join(dir, RETIRED_DIR, "marker");

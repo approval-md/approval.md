@@ -25,12 +25,17 @@ the same demo next month:
 | --- | --- | --- |
 | The web-agent demo | `~/demo-gate` | `node examples/demo-provision.mjs --instance web-agent` |
 | The crowd track's guest gate | `~/demo-guest` | `node examples/demo-provision.mjs --instance guest` |
-| The Grok Bot connector demo | `~/demo-gate` | `node examples/demo-provision.mjs --instance grok-bot` |
+| The Grok Bot connector demo | `~/demo-grok-bot` | `node examples/demo-provision.mjs --instance grok-bot` |
 
 Build the repository first (`npm run build`); everything shells out to
-`dist/src/cli/main.js`. `--path <dir>` puts an instance somewhere else, which is
-also how to keep the web-agent demo and the Grok demo apart: both runbooks name
-`~/demo-gate`, and one directory holds one demo at a time.
+`dist/src/cli/main.js`. `--path <dir>` puts an instance somewhere else.
+
+**One directory holds one demo.** The three defaults are three separate
+directories on purpose, and a `demo-instance.json` marker records which demo a
+directory was provisioned for: a run whose `--instance` disagrees with the
+marker refuses and names the two ways out (`--path`, or `--reset` to retire what
+is there and rebuild it as the other demo). The marker is the backstop; separate
+defaults are what keep anyone from needing it.
 
 **Run it as often as you like.** An instance that already exists is detected and
 nothing in it is overwritten, so a rerun the morning of a demo tells you what is
