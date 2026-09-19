@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='{repository(owner:\"approval-md\",name:\"approval.md\"){mergeQueue(branch:\"main\"){entries(first:10){nodes{position state pullRequest{number}}}}}}'; gh pr view 466 --json state,mergeStateStatus -q '.state+\" \"+.mergeStateStatus'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4de5200797f700ce"}

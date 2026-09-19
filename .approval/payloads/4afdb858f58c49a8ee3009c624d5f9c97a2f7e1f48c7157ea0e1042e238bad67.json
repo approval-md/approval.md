@@ -1,0 +1,1 @@
+{"command":"grep -rn \"refusal-unions\\|refusal_unions\\|unions\" tests/*.ts conformance/*.mjs | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a8830fe0a6a8c02c6"}

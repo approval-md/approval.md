@@ -1,0 +1,1 @@
+{"command":"git fetch origin 2>&1 | tail -2; git log --oneline origin/main -3; gh api graphql -f query='query { repository(owner:\"approval-md\", name:\"approval.md\") { pullRequest(number:462) { state isInMergeQueue } } }' 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a8830fe0a6a8c02c6"}

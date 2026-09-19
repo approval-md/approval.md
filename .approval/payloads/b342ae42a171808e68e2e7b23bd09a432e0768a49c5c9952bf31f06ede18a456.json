@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"thirty-two rows\\|32 rows\\|doctor prints\" README.md docs/*.md | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-acae5a8b0dfd86966"}

@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin && git merge -q --ff-only origin/main 2>&1 | tail -1; /usr/bin/grep -rn \"append-refused\\|audit sampling\" src/ | head -8; /usr/bin/grep -rn \"lock-timeout\" src/core/*.ts | head -5; backlog search \"sampling append lock\" --plain | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

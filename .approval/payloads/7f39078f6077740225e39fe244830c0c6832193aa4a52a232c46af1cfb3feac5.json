@@ -1,0 +1,1 @@
+{"command":"npm run build > /dev/null 2>&1; echo \"build=$?\"; gh pr merge 470 --merge 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-acae5a8b0dfd86966"}
