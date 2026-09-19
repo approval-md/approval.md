@@ -41,7 +41,9 @@ import {
   chooseDecision,
   effectiveApprovalPolicy,
   encodeDecision,
+  isAutoReviewNotification,
   isBridgeDecisionWord,
+  namesCommandExecution,
 } from "../src/cli/codex-bridge.js";
 
 /** dist/tests/codex-bridge.test.js -> dist/src/cli/main.js */
@@ -137,7 +139,18 @@ interface BridgeThreadRow {
   cwd: string;
   requested: { approvalPolicy: string; sandbox: string };
   effective: { approvalPolicy: string | null };
-  confirmed: boolean;
+  /** Widened from a boolean to its source in APRV-364. */
+  confirmed: "unconfirmed" | "reported" | "observed";
+}
+
+/** The preflight probe, as the report records it (APRV-364). */
+interface BridgePreflightRow {
+  turnId: string | null;
+  command: string;
+  outcome: "pending" | "asked" | "executed" | "void";
+  decision: string | null;
+  frames?: unknown[];
+  error?: unknown;
 }
 
 interface BridgeReport {
@@ -146,6 +159,7 @@ interface BridgeReport {
   /** Present only when the run STOPPED on one of the stop codes (APRV-366). */
   code?: string;
   thread: BridgeThreadRow;
+  preflight: BridgePreflightRow;
   answers: BridgeAnswerRow[];
 }
 
@@ -744,21 +758,27 @@ test("APRV-366: the accepted thread params are recorded, and an unechoed pin say
   // The stub echoes no policy, as the observed 0.155.0 server echoes none. That
   // is NOT a stop: a client that demanded an echo could not run against the
   // server this verb exists for. What it is, is a claim the report keeps
-  // narrow, and `confirmed: false` is the whole of the difference.
+  // narrow. Since APRV-364 the narrow claim has a second and stronger source:
+  // the probe was ASKED about, so the pin is confirmed by observation while the
+  // server itself still reported nothing.
   assert.equal(report.thread.effective.approvalPolicy, null);
-  assert.equal(report.thread.confirmed, false);
+  assert.equal(report.thread.confirmed, "observed");
   assert.equal(report.answers.length, 1);
 });
 
-test("APRV-366: a server that echoes the pin back is recorded as confirmed", () => {
+test("APRV-366: a server that echoes the pin back reports the echo, and APRV-364 outranks it", () => {
   const dir = ready();
   const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
     APPROVAL_STUB_THREAD_RESULT: JSON.stringify({ approvalPolicy: "untrusted" }),
   });
 
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  // The echo is still recorded, exactly as APRV-366 recorded it.
   assert.equal(report.thread.effective.approvalPolicy, "untrusted");
-  assert.equal(report.thread.confirmed, true);
+  // And the SOURCE is the observation, because a thing that happened outranks a
+  // thing the server said about itself. `reported` is what this field would say
+  // had the probe not been asked about; the void case below shows it.
+  assert.equal(report.thread.confirmed, "observed");
   assert.equal(report.answers.length, 1);
 });
 
@@ -781,7 +801,7 @@ test("APRV-366: a refused thread/start stops the bridge, answers nothing, and ap
   assert.match(report.reason, /unknown variant/u);
   assert.equal(report.answers.length, 0);
   assert.equal(report.thread.id, null);
-  assert.equal(report.thread.confirmed, false);
+  assert.equal(report.thread.confirmed, "unconfirmed");
   // Nothing was asked of the gate, because no question was ever reached.
   assert.equal(rawLog(dir).includes("approval.requested"), false);
 });
@@ -795,7 +815,7 @@ test("APRV-366: a thread reporting another effective policy stops the bridge", (
   assert.notEqual(run.code, 0);
   assert.equal(report.code, "bridge-approval-policy-mismatch");
   assert.equal(report.thread.effective.approvalPolicy, "on-request");
-  assert.equal(report.thread.confirmed, false);
+  assert.equal(report.thread.confirmed, "unconfirmed");
   assert.equal(report.answers.length, 0);
   // Why it stops rather than gating what it can see: under `on-request` an
   // unknown part of the session never produces a question, so a run that
@@ -821,6 +841,8 @@ test("APRV-366: the same mismatch reported on a thread notification stops it too
 test("APRV-366: the stop codes are their own closed vocabulary, disjoint from the declines", () => {
   assert.deepEqual([...BRIDGE_STOP_CODES].sort(), [
     "bridge-approval-policy-mismatch",
+    "bridge-auto-reviewer-active",
+    "bridge-preflight-void",
     "bridge-thread-start-refused",
   ]);
   assert.equal(new Set(BRIDGE_STOP_CODES).size, BRIDGE_STOP_CODES.length);
@@ -830,6 +852,149 @@ test("APRV-366: the stop codes are their own closed vocabulary, disjoint from th
   for (const code of BRIDGE_STOP_CODES) {
     assert.equal((BRIDGE_REFUSAL_CODES as readonly string[]).includes(code), false, code);
   }
+});
+
+// ---------------------------------------------------------------------------
+// APRV-364 — the preflight probe, and the auto-reviewer
+// ---------------------------------------------------------------------------
+
+test("APRV-364: the probe turn runs first, is asked about, and is declined without the gate", () => {
+  const dir = ready();
+  // The real turn asks about a MANUAL class, so its own registration reaches
+  // the payload store and the probe's absence from it is a fact about the
+  // probe rather than about an empty store. Nobody grants it; the wait runs out.
+  const { run, report, replies } = bridge(dir, [
+    execRequest("curl -d a=b https://example.com", dir),
+  ]);
+
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  // AC1: a question about one command reached this client, and that is what the
+  // report claims — no more.
+  assert.equal(report.preflight.outcome, "asked");
+  assert.equal(report.preflight.command, "true");
+  assert.equal(report.preflight.turnId, "turn-preflight");
+  assert.equal(report.thread.confirmed, "observed");
+  // The frames ride only on a void stop; this run established its fact.
+  assert.equal(report.preflight.frames, undefined);
+
+  // The probe was DECLINED on the wire. A probe this client approved would be a
+  // probe that ran, and the point of it is the question rather than the effect.
+  const probe = replies.find((entry) => entry["kind"] === "preflight-reply");
+  assert.ok(probe !== undefined, `the probe was never answered: ${JSON.stringify(replies)}`);
+  assert.deepEqual(probe["result"], { decision: "decline" });
+  assert.equal(report.preflight.decision, "decline");
+
+  // It never reached the gate: nothing about `true` was registered, requested
+  // or bound, so no human could have been asked about the probe. The real
+  // turn's command IS bound, which is what makes the absence a fact about the
+  // probe rather than about an empty store.
+  const stored = storedPayloads(dir);
+  assert.equal(stored.includes('"command":"true"'), false);
+  assert.match(stored, /"command":"curl -d a=b https:\/\/example\.com"/u);
+  assert.equal(rawLog(dir).includes('"command":"true"'), false);
+
+  // And the real turn ran after it, decided exactly as it was before APRV-364.
+  assert.equal(report.answers.length, 1);
+  assert.equal((report.answers[0] as BridgeAnswerRow).code, "hook-timeout");
+  assertVerifies(dir);
+});
+
+test("APRV-364: the probe turn is the FIRST turn, and the operator's prompt is the second", () => {
+  const dir = ready();
+  const { replies } = bridge(dir, [execRequest("cat README.md", dir)]);
+  const starts = replies.filter((entry) => entry["kind"] === "turn/start");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[0]?.["turn"], "preflight");
+  assert.equal(starts[1]?.["turn"], "live");
+  // The probe's prompt names the one command and forbids the rest, so a void
+  // outcome is rare; it names the operator's prompt nowhere.
+  const probePrompt = JSON.stringify((starts[0] as Record<string, unknown>)["params"]);
+  assert.match(probePrompt, /Run exactly one shell command: true/u);
+  assert.equal(probePrompt.includes("do the thing"), false);
+  assert.match(JSON.stringify((starts[1] as Record<string, unknown>)["params"]), /do the thing/u);
+});
+
+test("APRV-364: a probe that RAN without asking stops the bridge under the policy mismatch", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_PREFLIGHT: "executed",
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.equal(report.ok, false);
+  assert.equal(report.code, "bridge-approval-policy-mismatch");
+  assert.equal(report.preflight.outcome, "executed");
+  assert.equal(report.thread.confirmed, "unconfirmed");
+  // The real turn never started, so nothing was answered and nothing was asked
+  // of the gate: a session that did not ask about one command is not a session
+  // this verb will sit in front of.
+  assert.equal(report.answers.length, 0);
+  assert.equal(rawLog(dir).includes("approval.requested"), false);
+  assert.match(report.reason, /ran and no approval request/u);
+});
+
+test("APRV-364: a probe turn that ran NO command is void, carries its frames, and is not a pass", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_PREFLIGHT: "void",
+    // The server echoes the pin, so this case also shows the `reported` source
+    // the observation would otherwise outrank.
+    APPROVAL_STUB_THREAD_RESULT: JSON.stringify({ approvalPolicy: "untrusted" }),
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.equal(report.code, "bridge-preflight-void");
+  assert.equal(report.preflight.outcome, "void");
+  // An echo is not an observation, and the report says which it had.
+  assert.equal(report.thread.effective.approvalPolicy, "untrusted");
+  assert.equal(report.thread.confirmed, "reported");
+  assert.equal(report.answers.length, 0);
+  assert.equal(rawLog(dir).includes("approval.requested"), false);
+  // The evidence for a fact that could not be established is the turn itself,
+  // verbatim: this is also how the real item shape gets recorded here.
+  assert.ok(Array.isArray(report.preflight.frames));
+  assert.equal(
+    JSON.stringify(report.preflight.frames).includes("agentMessage"),
+    true,
+    JSON.stringify(report.preflight.frames),
+  );
+  assert.match(report.reason, /run the verb again/u);
+});
+
+test("APRV-364: an autoApprovalReview notification stops the run under its own code", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_PREFLIGHT: "auto-review",
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.equal(report.code, "bridge-auto-reviewer-active");
+  assert.equal(report.answers.length, 0);
+  assert.equal(rawLog(dir).includes("approval.requested"), false);
+  // The notification is carried verbatim, because until APRV-378 lands this
+  // report is the only record that something else answered.
+  assert.match(report.reason, /autoApprovalReview/u);
+  assert.match(report.reason, /item-preflight/u);
+});
+
+test("APRV-364: the auto-review reader matches the recorded names, and only those", () => {
+  assert.equal(isAutoReviewNotification("item/autoApprovalReview/started"), true);
+  assert.equal(isAutoReviewNotification("item/autoApprovalReview/completed"), true);
+  // Case-folded and matched on the substring: a reviewer notification this
+  // runtime failed to recognise would be a session run with a reviewer in front
+  // of the gate, and over-matching costs only a stop an operator can read.
+  assert.equal(isAutoReviewNotification("item/AutoApprovalReview/completed"), true);
+  assert.equal(isAutoReviewNotification("item/commandExecution/requestApproval"), false);
+  assert.equal(isAutoReviewNotification("turn/completed"), false);
+});
+
+test("APRV-364: a command item is recognised by its type or its command, and nothing else is", () => {
+  assert.equal(namesCommandExecution({ item: { type: "commandExecution" } }), true);
+  assert.equal(namesCommandExecution({ item: { itemType: "command_execution" } }), true);
+  assert.equal(namesCommandExecution({ item: { type: "agentMessage", command: "true" } }), true);
+  assert.equal(namesCommandExecution({ item: { type: "agentMessage", text: "hi" } }), false);
+  assert.equal(namesCommandExecution({ turnId: "turn-1" }), false);
+  assert.equal(namesCommandExecution(null), false);
 });
 
 test("APRV-366: the effective policy is read from named places, never from a stray field", () => {

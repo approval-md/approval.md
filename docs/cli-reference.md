@@ -6362,9 +6362,39 @@ bridge-approval-policy-mismatch   the server reported an effective approval
 A server that reports no policy at all is run against, because the observed
 0.155.0 server echoes none and a client demanding an echo could not start. The
 report says which case it was: `thread.requested` is what went on the wire,
-`thread.effective` is what the server said, and `thread.confirmed` is false when
-nothing confirmed it. Both stops exit 4, as every other protocol stop in this
-verb does; the code in the report is the part to branch on.
+`thread.effective` is what the server said, and `thread.confirmed` names where
+the claim comes from: `unconfirmed`, `reported` (a frame echoed the pin back)
+or `observed` (a probe command produced an approval request that reached this
+client). Both stops exit 4, as every other protocol stop in this verb does; the
+code in the report is the part to branch on.
+
+**A preflight probe runs before every turn** (APRV-364). Codex's auto-reviewer
+can resolve an approval with a model call before this client is asked, and
+nothing in the protocol reports whether it is running, so the bridge watches one
+command instead of reading a setting. Each start asks a preflight turn for
+`true` and nothing else, before the operator's prompt, with no flag to skip it;
+it costs one turn per start. The probe's own request is declined immediately as
+an observation and never reaches the gate, so nothing is registered for it and
+no approver is asked about it.
+
+```
+bridge-preflight-void             the preflight turn ran no command at all, so
+                                  nothing was established; the report carries
+                                  the turn's frames verbatim and nothing is
+                                  retried. Run the verb again
+bridge-auto-reviewer-active       an item/autoApprovalReview notification
+                                  arrived in either turn: something other than
+                                  this client answered a question
+```
+
+A probe that RAN without asking is `bridge-approval-policy-mismatch`, because a
+policy under which one command did not ask is not `untrusted` whatever the
+server reports about itself. A probe that was asked about lets the real turn
+run, and `thread.confirmed` becomes `observed`. That word is narrow on purpose:
+it says one question reached this client unanswered by anything else, and it is
+not a claim that the auto-reviewer is off. The report's `preflight` block
+carries the turn id, the command, the outcome (`asked`, `executed`, `void` or
+`pending`), the word sent, and, on a void, the frames.
 
 **It is an advisory checkpoint and not a boundary**, for reasons
 docs/codex-app-server-bridge.md states in full: Codex's auto-reviewer can

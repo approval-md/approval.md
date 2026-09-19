@@ -3,11 +3,11 @@ id: APRV-364
 title: >-
   Bridge proves the Codex auto-reviewer is off before it runs, and refuses when
   it is not: a preflight and a doctor row
-status: To Do
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-18 01:30'
-updated_date: '2026-09-19 15:14'
+updated_date: '2026-09-19 15:45'
 labels:
   - codex
   - bridge
@@ -26,9 +26,9 @@ From docs/codex-app-server-bridge.md follow-up 4 (APRV-349). A server-side auto-
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Bridge start refuses with a distinct code when the auto-reviewer cannot be shown off, and, when the server reports no effective approval policy, one harmless probe command must produce an approval request before any real turn runs (the APRV-366 residual, orchestrator ruling 2026-09-19): no request means the session is not under untrusted whatever the server says, and it stops under bridge-approval-policy-mismatch with the thread record naming the confirmation as observed rather than merely requested
-- [ ] #2 An autoApprovalReview notification during a session stops the run under its own code and is reported; the audit RECORD for it is APRV-378, split out on the orchestrator ruling of 2026-09-19 because it needs a new event type, a schema change and a SPEC section 8 amendment
-- [ ] #3 The doctor row is NOT here: moved to APRV-378 on the orchestrator ruling of 2026-09-19, as an added acceptance criterion there, because the row's only durable input is the audit record 378 creates. A row built in this task would always skip and would be rewritten the moment 378 landed
+- [x] #1 Bridge start refuses with a distinct code when the auto-reviewer cannot be shown off, and, when the server reports no effective approval policy, one harmless probe command must produce an approval request before any real turn runs (the APRV-366 residual, orchestrator ruling 2026-09-19): no request means the session is not under untrusted whatever the server says, and it stops under bridge-approval-policy-mismatch with the thread record naming the confirmation as observed rather than merely requested
+- [x] #2 An autoApprovalReview notification during a session stops the run under its own code and is reported; the audit RECORD for it is APRV-378, split out on the orchestrator ruling of 2026-09-19 because it needs a new event type, a schema change and a SPEC section 8 amendment
+- [x] #3 The doctor row is NOT here: moved to APRV-378 on the orchestrator ruling of 2026-09-19, as an added acceptance criterion there, because the row's only durable input is the audit record 378 creates. A row built in this task would always skip and would be rewritten the moment 378 landed
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,6 +50,8 @@ From docs/codex-app-server-bridge.md follow-up 4 (APRV-349). A server-side auto-
 7. THREE PROBE OUTCOMES, told apart by the commandExecution item notifications: request arrived = observed, continue; executed with no request = stop bridge-approval-policy-mismatch; no command ran = stop bridge-preflight-void, reported as void with the turn error and notifications verbatim, never as a pass and never silently retried.
 8. The probe prompt names exactly one harmless command and forbids anything else, so void is rare; the doc says an operator reruns a void stop.
 9. Two new entries in BRIDGE_STOP_CODES (bridge-auto-reviewer-active, bridge-preflight-void), neither in the declines union, so conformance refusal-unions is unchanged by this task.
+
+10. CONFIRMED by the implementing lane (lane 6, 2026-09-19) after reading src/cli/codex-bridge.ts at f733eae: the plan above stands as written. Two details it did not settle, decided here and recorded: (a) an approval request raised by the preflight turn is told from a real one by turnId, falling back to which turn is running when a frame names none, and a file-change request in the preflight is declined as an observation too without setting the asked outcome; (b) the probe decline is recorded in the report preflight block and NOT in answers, so answers keeps meaning questions answered on the gate behalf and every pre-364 count still reads the same.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -115,4 +117,28 @@ RULING 1, THE THREE OUTCOMES. The bridge reads the commandExecution item notific
 RULING 2, WHEN. The probe runs ALWAYS, one extra turn per bridge start, with NO opt-out flag, because the auto-reviewer fact AC1 wants needs the probe whatever the server echoed about the approval policy. This supersedes the narrower scoping carried in from APRV-366 (which said to probe only when the server reports no effective policy): that scoping closes the policy question alone, and this task needs the reviewer question closed too.
 
 SO THE STOP CODES THIS TASK ADDS ARE TWO: bridge-auto-reviewer-active (an item/autoApprovalReview notification in either turn, covering AC1 and AC2) and bridge-preflight-void. Both into BRIDGE_STOP_CODES, neither into the declines union, so conformance refusal-unions is unchanged by this task. The audit RECORD for the first remains APRV-378.
+
+IMPLEMENTED by lane 6, 2026-09-19, on the rulings above and nothing beyond them.
+
+WHAT IS IN THE DIFF. src/cli/codex-bridge.ts: a preflight turn before the real one on every start, PROBE_COMMAND (true) and PROBE_PROMPT; two new BRIDGE_STOP_CODES (bridge-auto-reviewer-active, bridge-preflight-void), neither in the declines union; BridgeThreadRecord.confirmed widened from a boolean to BRIDGE_PIN_SOURCES (unconfirmed, reported, observed); a BridgePreflightRecord in the report (turnId, command, outcome, decision, frames only on a void, error); three readers (turnIdOf, isAutoReviewNotification, namesCommandExecution). tests/fixtures/codex-app-server-stub.mjs: two turns, and APPROVAL_STUB_PREFLIGHT with asked (the default), executed, void and auto-review. tests/codex-bridge.test.ts: seven new cases and the three APRV-366 boolean assertions moved. docs/codex-app-server-bridge.md and docs/cli-reference.md.
+
+DECISIONS THE DIFF DOES NOT SHOW.
+1. The probe request is told from a real one by turnId, and by which turn is running when a frame names none. The fallback is the strict direction: during the probe an unlabelled approval request is DECLINED without reaching the gate.
+2. A file-change approval raised inside the preflight is declined as an observation too, and does NOT set the asked outcome. The probe asks for a command; a file change proves nothing about one.
+3. The probe decline is recorded in the report preflight block and never in answers, so answers keeps meaning questions answered on the gate behalf and every pre-364 count reads the same.
+4. observed outranks reported and never the other way round. A run that stops void with an echoing server reports reported, which is the case the new void test pins.
+5. namesCommandExecution is written against an item shape nobody recorded in full. That is acceptable only because of the direction it fails in: it chooses between two STOPS, so a miss turns a mismatch into a void and can never turn either into a pass, since a pass needs a request this client was handed. The void report carries the frames verbatim, which is how the real shape gets recorded at last (the same fact APRV-379 waits on).
+6. The auto-reviewer check sits above everything, so it fires on a notification in either turn, matched on the case-folded substring autoapprovalreview rather than the two exact names: under-matching would cost the whole point of the check and over-matching costs a stop an operator can read.
+
+SPEC section 11 INVARIANTS TOUCHED: none weakened. The probe never appends, so no check-then-append changes; the two new codes are machine-readable and distinct (invariant 7); the preflight reads only frames the server sent, so no self-reported field reduces scrutiny (invariant 4); enforcement paths are untouched.
+
+THE COST OF THE SPLIT, restated because it is live between now and APRV-378: a session that sees an auto-reviewer notification stops, and the log carries no trace of why. Said in BRIDGE_STOP_CODES and in docs/codex-app-server-bridge.md rather than left implicit.
+
+VALIDATION. npm run build, npm run typecheck and npm run lint all exit 0. tests/codex-bridge.test.ts: 40 tests, 40 pass, exit 0. Full npm test on this laptop: 4756 tests, 4733 pass, 22 fail, exit 1; the baseline measured on the same checkout before any change was 4749 tests, 4725 pass, 23 fail, exit 1, and the failing set is identical apart from one flaky Telegram preflight case that failed in the baseline and passed after. Every one of the 22 is the pre-existing Node 26 SMTP and email adapter set (TLS ServerName may not be an IP); CI on Node 22 is the truth. No conformance vectors changed, so no conformance version moved.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The bridge now runs a preflight probe turn on every start, before the operator turn, and stops the session when it cannot see one question reach this client: bridge-approval-policy-mismatch when the probe ran without asking, bridge-preflight-void when no command ran at all (frames verbatim, never retried, never a pass), and bridge-auto-reviewer-active on an item/autoApprovalReview notification in either turn. The probe request is declined as an observation and never reaches the gate, so nothing is registered for it and no approver is asked. thread.confirmed widened from a boolean to its source so a reader can tell a server echo from an observation, and the claim it licenses is stated everywhere it appears: one question reached this client, which is not a proof that the auto-reviewer is off. AC3 points at APRV-378, where the doctor row moved. Verified by seven new cases in tests/codex-bridge.test.ts driving the real CLI against four stub preflight modes (40/40 pass, exit 0), build, typecheck and lint at exit 0, and a full npm test whose failing set is identical to the pre-change baseline.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -99,6 +99,40 @@
  * run against, and the report then claims only what happened: the pin was
  * requested and no frame confirmed it.
  *
+ * ## A probe turn runs first, and it can stop the session (APRV-364)
+ *
+ * Codex carries a server-side auto-reviewer that can resolve an approval with a
+ * model call before this client is asked, and tells the client afterwards
+ * through `item/autoApprovalReview` notifications. Whether it runs is a setting
+ * in the harness's own configuration, which this project does not attest, and
+ * there is no frame in the observed vocabulary where the server reports it. So
+ * it cannot be READ, and the only way to establish anything is to watch what
+ * happens to one command.
+ *
+ * Every start therefore runs a PREFLIGHT turn asking for one harmless command
+ * ({@link PROBE_COMMAND}) before the operator's own turn, with no flag to skip
+ * it. Three outcomes, told apart by the command-item notifications:
+ *
+ * - an approval request for it reaches this client: the run continues, and the
+ *   report records the pin as confirmed by OBSERVATION;
+ * - a command ran and no request arrived: `bridge-approval-policy-mismatch`,
+ *   because a policy under which one command did not ask is not `untrusted`
+ *   whatever the server says about itself;
+ * - no command ran at all: `bridge-preflight-void`, carrying the turn's frames
+ *   verbatim. It is never retried and never reported as a pass.
+ *
+ * An `item/autoApprovalReview` notification in either turn is
+ * `bridge-auto-reviewer-active` and ends the run.
+ *
+ * THE PROBE'S OWN REQUEST NEVER REACHES THE GATE. It is declined immediately,
+ * as an observation. Routing it through `decideHarnessCall` would register an
+ * action and could put `true` on a human's phone at every bridge start, and a
+ * preflight that spends a person's attention is not a harmless one.
+ *
+ * WHAT A PASS MEANS, exactly: one question reached this client unanswered by
+ * anything else. It is not a proof that the auto-reviewer is off for every
+ * question, and nothing here says that it is.
+ *
  * ## One at a time, on purpose
  *
  * The gate's wait is synchronous, so while one question is being decided this
@@ -290,9 +324,66 @@ export const BRIDGE_STOP_CODES = [
    * every question it was asked" would be true and would mean nothing.
    */
   "bridge-approval-policy-mismatch",
+  /**
+   * An `item/autoApprovalReview` notification arrived, in the preflight turn or
+   * in the real one (APRV-364).
+   *
+   * Codex carries a server-side auto-reviewer that can resolve an approval with
+   * a model call BEFORE the client path runs, and tells the client afterwards
+   * through these notifications (`docs/codex-app-server-bridge.md`, question
+   * 3). A session with a reviewer in front of the gate is a session whose
+   * silence means nothing: the questions this client was not asked are
+   * indistinguishable from questions nobody wanted to ask. So the run stops
+   * rather than gating whatever is left over.
+   *
+   * The log carries no trace of it yet. The audit RECORD for "something other
+   * than the gate answered a question the gate exists to ask" is APRV-378, and
+   * until that lands this fact lives in the exit code and the report alone.
+   * That cost is stated here rather than hidden, on the orchestrator's ruling
+   * of 2026-09-19 that split the two.
+   */
+  "bridge-auto-reviewer-active",
+  /**
+   * The preflight turn ran no command at all, so the probe established nothing
+   * (APRV-364).
+   *
+   * The preflight is a prompt, and a model is free to answer a prompt in prose.
+   * When that happens no approval request arrives AND no command executes, and
+   * the fact AC1 wants — that a command reached this client as a question —
+   * was not observed. Reporting it as a pass would be reporting a verdict
+   * nobody established, which is the APRV-359 lesson; reporting it as the
+   * policy mismatch would blame a healthy session for a model's choice of
+   * words. So it is its own code, the report carries the turn's frames
+   * verbatim, and nothing is retried: an operator runs the verb again.
+   */
+  "bridge-preflight-void",
 ] as const;
 
 export type BridgeStopCode = (typeof BRIDGE_STOP_CODES)[number];
+
+/**
+ * Where the report's claim about the approval policy COMES FROM (APRV-364).
+ *
+ * APRV-366 wrote this as a boolean, and a boolean could say only that some
+ * frame echoed the pin back. The preflight probe establishes the same thing a
+ * different way, by watching what happens to one command, and the two are not
+ * the same strength of evidence: an echo is the server describing itself, and
+ * an observation is a thing that happened. A reader who is told `true` cannot
+ * tell them apart, so the field names its source instead.
+ *
+ * - `unconfirmed` — nothing has confirmed the pin. Where every run starts, and
+ *   where a run that stopped before the probe finished stays.
+ * - `reported` — a server frame named the pinned policy as the effective one.
+ *   The observed 0.155.0 server names none, so this is rare in practice.
+ * - `observed` — a probe command produced an approval request that reached
+ *   this client. THE HONESTY LINE, and it is narrow on purpose: it proves that
+ *   ONE question reached this client unanswered by anything else. It is not a
+ *   proof that the auto-reviewer is off, and no code or document here may say
+ *   that it is.
+ */
+export const BRIDGE_PIN_SOURCES = ["unconfirmed", "reported", "observed"] as const;
+
+export type BridgePinSource = (typeof BRIDGE_PIN_SOURCES)[number];
 
 /**
  * The thread this verb started, as the report records it (APRV-366).
@@ -303,13 +394,86 @@ export type BridgeStopCode = (typeof BRIDGE_STOP_CODES)[number];
  * client able to claim only that it asked. That distinction is recorded rather
  * than smoothed over, because a report that said "untrusted" for both cases
  * would be asserting something no frame carried.
+ *
+ * `confirmed` widened from a boolean to a {@link BridgePinSource} in APRV-364,
+ * when the probe gave it a second and stronger way to be true.
  */
 export interface BridgeThreadRecord {
   id: string | null;
   cwd: string;
   requested: { approvalPolicy: string; sandbox: string };
   effective: { approvalPolicy: string | null };
-  confirmed: boolean;
+  confirmed: BridgePinSource;
+}
+
+/**
+ * The one command the preflight turn asks for (APRV-364).
+ *
+ * Chosen for having no effect: it writes nothing, reads nothing, prints
+ * nothing, and exits zero. The point of the probe is the QUESTION it raises,
+ * and a probe whose command mattered would be a probe an operator had to think
+ * about before running.
+ */
+export const PROBE_COMMAND = "true";
+
+/**
+ * The preflight prompt, written to leave a model as little room as a prompt can
+ * (APRV-364).
+ *
+ * It cannot leave none, which is why {@link BRIDGE_STOP_CODES} carries
+ * `bridge-preflight-void`: a model that answers in prose has run no command,
+ * and that outcome is reported rather than guessed at.
+ */
+export const PROBE_PROMPT = [
+  `Run exactly one shell command: ${PROBE_COMMAND}`,
+  "Run nothing else. Do not read or write any file, do not look around the workspace,",
+  "and do not explain. Running that one command is the whole task.",
+].join(" ");
+
+/** What the preflight turn established, once it ended. */
+export const BRIDGE_PROBE_OUTCOMES = ["pending", "asked", "executed", "void"] as const;
+
+export type BridgeProbeOutcome = (typeof BRIDGE_PROBE_OUTCOMES)[number];
+
+/**
+ * The preflight turn, as the report records it (APRV-364).
+ *
+ * `outcome` is the whole of what the probe established:
+ *
+ * - `asked` — an approval request for the probe arrived, so one question
+ *   reached this client. The session continues.
+ * - `executed` — a command ran and no request arrived. A policy under which
+ *   one command did not ask is not `untrusted`, whatever the server said about
+ *   itself, so the run stops under `bridge-approval-policy-mismatch`.
+ * - `void` — no command ran at all, so nothing was established. The run stops
+ *   under `bridge-preflight-void` and `frames` carries the turn verbatim.
+ * - `pending` — the turn has not ended. Only ever seen in a report that
+ *   stopped for some other reason first.
+ */
+export interface BridgePreflightRecord {
+  turnId: string | null;
+  /** The command the prompt named: {@link PROBE_COMMAND}. */
+  command: string;
+  outcome: BridgeProbeOutcome;
+  /**
+   * The word sent on the probe's own approval request, when one arrived.
+   *
+   * Always a decline. The probe is an observation, and a probe this client
+   * approved would be a probe that ran.
+   */
+  decision: BridgeDecisionWord | null;
+  /**
+   * Every frame the preflight turn produced, verbatim, present ONLY on the
+   * void stop.
+   *
+   * On a void there is nothing else to show: the stop says a fact could not be
+   * established, and the frames are the whole of the evidence for why. On any
+   * other outcome they are noise, and a report that always carried them would
+   * bury the line that matters.
+   */
+  frames?: unknown[];
+  /** The turn's own error, when `turn/failed` ended it. */
+  error?: unknown;
 }
 
 /**
@@ -529,6 +693,67 @@ function callIdOf(params: unknown): string | null {
     stringField(params, "callId") ??
     stringField(params, "approvalId")
   );
+}
+
+/**
+ * The turn a frame belongs to, where it names one (APRV-364).
+ *
+ * The preflight and the real turn are told apart by this value, and a frame
+ * that names no turn is decided by which turn is running instead. Both
+ * spellings are read because the protocol has used both casings elsewhere and
+ * neither reading can widen anything: a turn id is only ever used to decide
+ * which of two phases a frame belongs to.
+ */
+export function turnIdOf(params: unknown): string | null {
+  return stringField(params, "turnId") ?? stringField(params, "turn_id");
+}
+
+/**
+ * Is this method one of Codex's auto-approval-review notifications (APRV-364)?
+ *
+ * The recorded names are `item/autoApprovalReview/started` and
+ * `item/autoApprovalReview/completed`
+ * (`docs/codex-app-server-bridge.md`, question 3). The match is on the
+ * SUBSTRING rather than on those two exact names, case-folded, because a
+ * reviewer notification this runtime failed to recognise would be a session
+ * that ran with a reviewer in front of the gate: over-matching costs a stop
+ * that an operator can read and re-run, and under-matching costs the whole
+ * point of the check.
+ */
+export function isAutoReviewNotification(method: string): boolean {
+  return method.toLowerCase().includes("autoapprovalreview");
+}
+
+/**
+ * Does this notification say a COMMAND was executed (APRV-364)?
+ *
+ * The one reader in this file written against a shape nobody recorded in full.
+ * The 2026-09-18 vocabulary carries `item/started` and `item/completed`, and it
+ * does not record the item object they carry, so this looks for an item whose
+ * type reads as a command execution, or, failing that, for an item carrying a
+ * `command` string.
+ *
+ * That is a guess, and the reason it is an acceptable one is the direction it
+ * fails in. This value only ever chooses BETWEEN TWO STOPS: a preflight turn
+ * where a command ran without asking stops under
+ * `bridge-approval-policy-mismatch`, and one where nothing ran stops under
+ * `bridge-preflight-void`. A guess that misses turns the first into the
+ * second; it can never turn either into a pass, because a pass needs an
+ * approval request to have ARRIVED, which is a frame this client was handed
+ * rather than one it went looking for. The void report carries the frames
+ * verbatim, which is also how the real item shape gets recorded here at last.
+ */
+export function namesCommandExecution(params: unknown): boolean {
+  if (params === null || typeof params !== "object") return false;
+  const holder = (params as Record<string, unknown>)["item"];
+  const item = holder !== null && typeof holder === "object" ? (holder as Record<string, unknown>) : null;
+  if (item === null) return false;
+  for (const key of ["type", "itemType", "item_type"]) {
+    const named = item[key];
+    if (typeof named !== "string") continue;
+    if (named.toLowerCase().replace(/[^a-z]/gu, "").startsWith("commandexecution")) return true;
+  }
+  return typeof item["command"] === "string" && (item["command"] as string).length > 0;
 }
 
 /** A line-delimited and `Content-Length`-delimited frame reader. */
@@ -933,12 +1158,14 @@ export async function runCodexBridge(
 }
 
 /**
- * Run one turn, answering every approval question it raises.
+ * Run the preflight turn and then the real one, answering every approval
+ * question either of them raises.
  *
  * Resolves when the turn completes, the server exits, or a protocol step is
  * refused. Nothing here retries: a bridge that reconnected would be answering
  * questions a previous connection was asked, which is exactly the custody
- * problem APRV-365 exists to settle.
+ * problem APRV-365 exists to settle. A void preflight is not retried either,
+ * for the reason {@link BRIDGE_STOP_CODES} gives.
  */
 function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
   return new Promise<number>((done) => {
@@ -964,23 +1191,53 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       cwd: plan.workspace,
       requested: { approvalPolicy: APPROVAL_POLICY, sandbox: SANDBOX },
       effective: { approvalPolicy: null },
-      confirmed: false,
+      confirmed: "unconfirmed",
+    };
+
+    // The probe turn, before it has run (APRV-364). Recorded from the start for
+    // the reason the thread is: a run that stops early still says which proof
+    // it was reaching for.
+    const preflight: BridgePreflightRecord = {
+      turnId: null,
+      command: PROBE_COMMAND,
+      outcome: "pending",
+      decision: null,
+    };
+    /** Every frame the preflight turn produced, for the void report. */
+    const preflightFrames: unknown[] = [];
+    /** Which turn is running: the probe's, or the operator's. */
+    let phase: "preflight" | "live" = "preflight";
+
+    /** How the pin was confirmed, in words, for the human report. */
+    const pinLine = (): string => {
+      if (thread.confirmed === "observed") {
+        return `confirmed by observation of one probe command (${PROBE_COMMAND}); that one question reached this client, which is not a proof that the auto-reviewer is off`;
+      }
+      if (thread.confirmed === "reported") return "reported by the server, not observed";
+      return `requested; the server reported ${thread.effective.approvalPolicy ?? "none"}`;
     };
 
     const finish = (code: number, reason: string, stop: BridgeStopCode | null = null): void => {
       if (settled) return;
       settled = true;
       child.kill("SIGTERM");
+      // The frames ride only on the void stop, where they are the evidence for
+      // a fact that could not be established. See `BridgePreflightRecord`.
+      const preflightReport: BridgePreflightRecord =
+        stop === "bridge-preflight-void" ? { ...preflight, frames: preflightFrames } : preflight;
       if (plan.json) {
         streams.out(
-          `${JSON.stringify({ ok: code === EXIT_OK, reason, ...(stop === null ? {} : { code: stop }), thread, answers })}\n`,
+          `${JSON.stringify({ ok: code === EXIT_OK, reason, ...(stop === null ? {} : { code: stop }), thread, preflight: preflightReport, answers })}\n`,
         );
       } else {
         streams.out(`${stop === null ? reason : `${stop}: ${reason}`}\n`);
         streams.out(
           `  thread ${thread.id ?? "(none)"}  approvalPolicy ${thread.requested.approvalPolicy}` +
-            ` (${thread.confirmed ? "confirmed by the server" : `requested; the server reported ${thread.effective.approvalPolicy ?? "none"}`})` +
+            ` (${pinLine()})` +
             `  sandbox ${thread.requested.sandbox}\n`,
+        );
+        streams.out(
+          `  preflight ${preflight.turnId ?? "(none)"}  ${preflight.command}  ${preflight.outcome}\n`,
         );
         for (const answer of answers) {
           streams.out(
@@ -1006,7 +1263,9 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       if (named === null) return false;
       thread.effective.approvalPolicy = named;
       if (named === APPROVAL_POLICY) {
-        thread.confirmed = true;
+        // Never downgrades an observation: the probe is the stronger of the two
+        // proofs and a later echo says nothing it did not already say.
+        if (thread.confirmed !== "observed") thread.confirmed = "reported";
         return false;
       }
       finish(
@@ -1020,7 +1279,24 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     let threadId: string | null = null;
     let initializeId = -1;
     let threadStartId = -1;
-    let turnStartId = -1;
+    /** The `turn/start` this client sent for the probe, and for the real turn. */
+    let preflightStartId = -1;
+    let liveStartId = -1;
+
+    /**
+     * Does this frame belong to the PREFLIGHT turn (APRV-364)?
+     *
+     * By turn id where the frame names one, which is the answer that survives
+     * frames arriving out of order. A frame naming no turn is decided by which
+     * turn is running, which is the only reading available and is also the
+     * strict one: during the probe, an unlabelled approval request is treated
+     * as the probe's and is therefore DECLINED without reaching the gate.
+     */
+    const isPreflightFrame = (params: unknown): boolean => {
+      const named = turnIdOf(params);
+      if (named !== null && preflight.turnId !== null) return named === preflight.turnId;
+      return phase === "preflight";
+    };
 
     const answer = (id: unknown, method: string, outcome: BridgeOutcome, code: string | null, detail: string, params: unknown): void => {
       const chosen = chooseDecision(params, outcome);
@@ -1034,12 +1310,71 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       connection.respond(id, encoded);
     };
 
+    /**
+     * Answer the PROBE's own approval request, and never through the gate
+     * (APRV-364).
+     *
+     * A decline, immediately, recorded as an observation. Two reasons it does
+     * not take the gate's path. It would register an action and open a request,
+     * which means the probe command on a human's phone at every bridge start,
+     * and a preflight that spent a person's attention would be the opposite of
+     * harmless. And the fact wanted here is only that the question ARRIVED:
+     * what the policy would have said about `true` is beside the point.
+     */
+    const observeProbe = (id: unknown, params: unknown, aboutACommand: boolean): void => {
+      const chosen = chooseDecision(params, "decline");
+      const encoded = encodeDecision(chosen.decision) ?? { decision: DECLINE_WORDS[0] };
+      if (aboutACommand) {
+        preflight.outcome = "asked";
+        preflight.decision = encoded.decision;
+        // The one place this becomes `observed`, and the claim it licenses is
+        // written down beside it in `BRIDGE_PIN_SOURCES`: one question reached
+        // this client unanswered by anything else.
+        thread.confirmed = "observed";
+        streams.err(
+          `approval: the preflight probe (${PROBE_COMMAND}) was asked about, so one question reached this client; declining it and starting the turn\n`,
+        );
+      } else {
+        // The probe asks for one command and the prompt forbids everything
+        // else, so a file change here is a turn that went its own way. It is
+        // declined like the rest of the preflight and it proves nothing about
+        // a command, so the outcome is left for the turn's end to decide.
+        streams.err(
+          "approval: the preflight turn raised a file-change approval, which the probe never asks for; declining it\n",
+        );
+      }
+      connection.respond(id, encoded);
+    };
+
     const connection = new Connection(child, (frame) => {
       const method = typeof frame.method === "string" ? frame.method : null;
 
+      // Codex's own reviewer answered something before this client saw it. It
+      // ends the run wherever it appears, because from here a resolved question
+      // and a question nobody asked look the same (APRV-364).
+      if (method !== null && isAutoReviewNotification(method)) {
+        finish(
+          EXIT_IO,
+          `the server sent ${method}, so Codex's own auto-reviewer resolved an approval before this client was asked: ${JSON.stringify(frame.params ?? null)}. A session with a reviewer in front of the gate is one whose silence means nothing, so the run was stopped rather than gating what was left`,
+          "bridge-auto-reviewer-active",
+        );
+        return;
+      }
+      // Kept from the moment the probe turn is asked for, so a void report
+      // carries the turn and not the handshake before it.
+      if (phase === "preflight" && preflightStartId !== -1) preflightFrames.push(frame);
+
       // A server REQUEST: it carries both a method and an id, and it is waiting.
       if (method !== null && frame.id !== undefined) {
-        if ((EXEC_APPROVAL_METHODS as readonly string[]).includes(method)) {
+        // An approval question raised by the PROBE turn is observed and
+        // declined here, above every gate path below it (APRV-364).
+        const execApproval = (EXEC_APPROVAL_METHODS as readonly string[]).includes(method);
+        const fileApproval = (FILE_CHANGE_APPROVAL_METHODS as readonly string[]).includes(method);
+        if ((execApproval || fileApproval) && isPreflightFrame(frame.params)) {
+          observeProbe(frame.id, frame.params, execApproval);
+          return;
+        }
+        if (execApproval) {
           const decided = decideExecRequest(streams, plan, frame.params);
           if (decided.verdict.permission === "allow") {
             answer(frame.id, method, "accept", null, decided.verdict.reason, frame.params);
@@ -1114,13 +1449,32 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           return;
         }
         thread.id = threadId;
-        turnStartId = connection.request("turn/start", {
+        // The PROBE turn first, always, whatever the server said about its
+        // approval policy (APRV-364). The pin's echo and the auto-reviewer are
+        // two different questions, and only the probe answers the second.
+        streams.err(
+          `approval: running the preflight probe (${PROBE_COMMAND}) before the turn; it costs one turn and it is what makes this session's silence mean anything\n`,
+        );
+        preflightStartId = connection.request("turn/start", {
           threadId,
-          input: [{ type: "text", text: plan.prompt }],
+          input: [{ type: "text", text: PROBE_PROMPT }],
         });
         return;
       }
-      if (frame.id === turnStartId && turnStartId !== -1 && frame.error !== undefined) {
+      if (frame.id === preflightStartId && preflightStartId !== -1) {
+        if (frame.error !== undefined) {
+          preflight.error = frame.error;
+          finish(
+            EXIT_IO,
+            `the app-server refused the preflight turn/start: ${JSON.stringify(frame.error)}; no probe ran, so nothing was established about whether a question reaches this client`,
+            "bridge-preflight-void",
+          );
+          return;
+        }
+        preflight.turnId = turnIdOf(frame.result);
+        return;
+      }
+      if (frame.id === liveStartId && liveStartId !== -1 && frame.error !== undefined) {
         finish(EXIT_IO, `the app-server refused turn/start: ${JSON.stringify(frame.error)}`);
         return;
       }
@@ -1134,7 +1488,46 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       if (method === "thread/started" || method === "thread/status/changed") {
         if (pinnedOrStop(frame.params, method)) return;
       }
+      // A command item in the PROBE turn. It is read for one purpose: to tell a
+      // probe that ran without asking from a probe that never ran (APRV-364).
+      if (
+        phase === "preflight" &&
+        (method === "item/started" || method === "item/completed") &&
+        isPreflightFrame(frame.params) &&
+        namesCommandExecution(frame.params) &&
+        preflight.outcome === "pending"
+      ) {
+        preflight.outcome = "executed";
+      }
       if (method === "turn/completed" || method === "turn/failed") {
+        if (phase === "preflight" && isPreflightFrame(frame.params)) {
+          if (method === "turn/failed") preflight.error = frame.params ?? null;
+          if (preflight.outcome === "asked") {
+            // The only way past here. One question reached this client, so the
+            // operator's own turn runs.
+            phase = "live";
+            liveStartId = connection.request("turn/start", {
+              threadId,
+              input: [{ type: "text", text: plan.prompt }],
+            });
+            return;
+          }
+          if (preflight.outcome === "executed") {
+            finish(
+              EXIT_IO,
+              `the preflight probe (${PROBE_COMMAND}) ran and no approval request for it reached this client. A policy under which one command did not ask is not ${JSON.stringify(APPROVAL_POLICY)} whatever the server reports, so the session was stopped before the turn ran and nothing was answered`,
+              "bridge-approval-policy-mismatch",
+            );
+            return;
+          }
+          preflight.outcome = "void";
+          finish(
+            EXIT_IO,
+            `the preflight turn ended having run no command at all, so nothing was established: a question that never arose is not a question that reached this client. The turn's frames are in the report verbatim. Nothing is retried here; run the verb again`,
+            "bridge-preflight-void",
+          );
+          return;
+        }
         finish(
           EXIT_OK,
           `turn ${method === "turn/completed" ? "completed" : "failed"}: ${String(answers.length)} approval request(s) answered`,
@@ -1176,7 +1569,7 @@ export const CODEX_BRIDGE_HELP = [
   "  --dir/--policy/--log  where the policy and the log are, as the hook resolves them",
   "  --wait <duration>     the deadline (default: the policy's approval_ttl)",
   "  --interval <duration> how often the verified view is re-read (default: 2s)",
-  "  --json                one object: {ok, reason, code?, thread, answers[]}",
+  "  --json                one object: {ok, reason, code?, thread, preflight, answers[]}",
   "  -- <command...>       the app-server to start (default: codex app-server)",
   "",
   "It answers accept or decline only, never acceptForSession, cancel or abort.",
@@ -1189,5 +1582,14 @@ export const CODEX_BRIDGE_HELP = [
   "and one that reports another effective policy stops it too",
   "(bridge-approval-policy-mismatch). A server that reports no policy at all is",
   "run against, and the report says the pin was requested and not confirmed.",
+  "",
+  "Every start runs a preflight turn first, asking for one harmless command",
+  "(true), and there is no flag to skip it. An approval request for it means one",
+  "question reached this client and the real turn runs; a command that ran",
+  "without asking is bridge-approval-policy-mismatch; a turn that ran no command",
+  "is bridge-preflight-void, reported with the turn's frames and never retried.",
+  "An item/autoApprovalReview notification in either turn is",
+  "bridge-auto-reviewer-active. A pass means one question reached this client,",
+  "not that the auto-reviewer is off.",
   "See docs/codex-app-server-bridge.md.",
 ].join("\n");
