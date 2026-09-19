@@ -6474,8 +6474,19 @@ carries the turn id, the command, the outcome (`asked`, `executed`, `void` or
 
 **It is an advisory checkpoint and not a boundary**, for reasons
 docs/codex-app-server-bridge.md states in full: Codex's auto-reviewer can
-resolve a question before this client sees it, the approval policy and sandbox
-posture decide how many questions exist, and a pending question is replayed to
-whatever connects next. An open gate window is not honoured here either, which
-is the strict direction. The claim it supports is "this client decided every
-question it was asked", and nothing wider.
+resolve a question before this client sees it, and the approval policy and
+sandbox posture decide how many questions exist. An open gate window is not
+honoured here either, which is the strict direction. The claim it supports is
+"this client decided every question this app-server child asked in this
+session", and nothing wider.
+
+**Custody is the operating system's** (APRV-365). The server is started by this
+verb as its own child over stdio pipes: there is no socket, nothing binds a
+path, and no other process holds a descriptor to speak on, so the replay of a
+pending request to whatever connects next cannot arise inside one run. The
+scope of the claim is that child and that session; a Codex started outside this
+arrangement is a different process and nothing here observes it. The verb does
+not inspect the command after `--` for a shape that would attach to something
+already running instead: that would be a guess at another program's command
+line, and a check written against a guessed shape finds nothing while reporting
+that it looked.

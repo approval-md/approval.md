@@ -17,11 +17,41 @@
  * Read the recommendation before changing anything here: this is an ADVISORY
  * checkpoint for everyday Codex sessions this runtime starts, and it is not a
  * boundary. The auto-reviewer can resolve a question before this client sees
- * it, the approval policy and sandbox posture decide how many questions exist
- * at all, and a pending question is replayed to whatever connects next. Each of
- * those is governed by the harness's own configuration, which this project does
- * not attest. The claim this verb supports is "this client decided every
- * question it was asked", and nothing wider.
+ * it, and the approval policy and sandbox posture decide how many questions
+ * exist at all. Both are governed by the harness's own configuration, which
+ * this project does not attest. The claim this verb supports is "this client
+ * decided every question this app-server child asked in this session", and
+ * nothing wider. See the custody section below for which word in that sentence
+ * is load-bearing.
+ *
+ * ## Custody: the server is this process's own child (APRV-365)
+ *
+ * A pending approval request is replayed to whatever connects NEXT, so "who
+ * may connect" is a real question about any app-server, and it is the question
+ * the follow-up list filed. For this verb it is answered by construction: the
+ * server is started here, by {@link driveSession}, as a child process over
+ * stdio pipes. There is no socket, nothing binds a path, and no other process
+ * has a file descriptor to speak on. The custody rule is the operating
+ * system's rather than this runtime's, which is the strongest kind available
+ * and the only kind this project would not have to attest.
+ *
+ * Two consequences worth stating rather than leaving to be inferred. Within
+ * one run there is no replay hazard at all: a question this client is asked
+ * cannot reach another client, because there is no other client. And the claim
+ * is scoped to THIS CHILD and THIS SESSION: a Codex started outside this
+ * arrangement is a different process with a different connection, and nothing
+ * here observes it, exactly as `docs/codex-activation.md` says of a Codex
+ * started outside the confined session.
+ *
+ * What this verb deliberately does NOT do is inspect the server command for a
+ * shape that would attach to something already running instead of starting a
+ * child. That would be a guess at another program's command line, which this
+ * repository has no record of, and a check written against a guessed shape
+ * finds nothing while reporting that it looked (the trap APRV-379 names and
+ * APRV-364's item reader is careful about). The property is stated and true;
+ * an operator who passes `-- <something that attaches>` after the separator has
+ * left the arrangement this section describes, and the report's claim is then
+ * about a session this verb did not establish.
  *
  * ## It reuses the hook's flow; it does not fork it
  *
@@ -1631,6 +1661,10 @@ export const CODEX_BRIDGE_HELP = [
   "It answers accept or decline only, never acceptForSession, cancel or abort.",
   "A file-change request carries no content on the item-based API, so it is",
   "declined (bridge-file-change-unbound). An open gate window is not honoured.",
+  "",
+  "The server is this process's own child over stdio: no socket, nothing bound,",
+  "no other client to replay a pending question to. The claim is scoped to that",
+  "child and this session and says so.",
   "",
   "The thread is started with approvalPolicy untrusted, the only variant under",
   "which every command and every patch asks, and there is no flag for it. A",
