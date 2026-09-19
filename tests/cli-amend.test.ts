@@ -1343,13 +1343,16 @@ test("the branch flow reports its protection, branch, push and PR in JSON", () =
   assert.equal(gitPlan["pushed"], true);
   assert.equal(gitPlan["prUrl"], "https://github.test/o/r/pull/8");
   assert.equal(gitPlan["warning"], null);
-  // The printed HAND procedure starts at the remote, exactly where `--commit`
-  // starts (APRV-203): fetch, then branch off origin's default branch.
+  // The printed HAND procedure brings the checkout current first, exactly where
+  // `--commit` starts (APRV-203), and then creates the branch on the REMOTE by
+  // refspec rather than switching to it (APRV-360).
   const commands = gitPlan["commands"] as string[];
-  assert.match(commands[0] as string, /^git fetch origin$/u);
-  assert.match(commands[1] as string, /^git checkout -b policy-amend-2 origin\/main$/u);
-  assert.match(commands[4] as string, /^git push -u origin policy-amend-2$/u);
-  assert.match(commands[5] as string, /^gh pr create --title/u);
+  assert.match(commands[0] as string, /^approval log sync$/u);
+  assert.match(commands[3] as string, /^git push origin HEAD:refs\/heads\/policy-amend-2$/u);
+  assert.match(commands[4] as string, /^gh pr create --title/u);
+  assert.match(commands[4] as string, / --head policy-amend-2 --base main$/u);
+  assert.match(commands[5] as string, /^gh pr merge policy-amend-2 --auto --merge$/u);
+  for (const command of commands) assert.doesNotMatch(command, /git checkout/u);
 });
 
 test("--branch forces the branch flow even where nothing is protected", () => {
@@ -1631,9 +1634,13 @@ test("--dry-run on a protected main shows the whole branch ceremony and creates 
 
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /--dry-run: nothing was attested, nothing was written/u);
-  assert.match(run.stdout, /git checkout -b policy-amend-<seq>/u);
-  assert.match(run.stdout, /git push -u origin policy-amend-<seq>/u);
+  // APRV-360: the dry run shows the ceremony it would print, and that ceremony
+  // no longer switches branches.
+  assert.match(run.stdout, /approval log sync/u);
+  assert.match(run.stdout, /git push origin HEAD:refs\/heads\/policy-amend-<seq>/u);
   assert.match(run.stdout, /gh pr create --title/u);
+  assert.match(run.stdout, /gh pr merge policy-amend-<seq> --auto --merge/u);
+  assert.doesNotMatch(run.stdout, /git checkout/u);
   assert.match(run.stdout, /MERGE COMMIT/u);
   assert.equal(rawLog(dir), before);
   assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
@@ -3376,15 +3383,22 @@ test("APRV-341: --pr and --direct, and --pr and --no-publish, are usage errors",
  * the fixture's freshness rather than of the runbook's stability.
  */
 const BRANCH_RUNBOOK = [
-  "git fetch origin",
-  "git checkout -b policy-amend-2 origin/main",
+  // APRV-360. This list used to open `git fetch origin`, `git checkout -b
+  // policy-amend-2 origin/main`. A branch switch in the primary is the shape
+  // that forked the log on 2026-09-16, and on 2026-09-18 the switch refused
+  // outright because local main was fourteen commits behind and QUEUE.md, the
+  // working log and six payloads were in the way. What is printed now is what
+  // the recovery that day actually did: sync, commit where you stand, create
+  // the branch on the REMOTE by refspec, open the pull request for it, arm it.
+  "approval log sync",
   "git add APPROVAL.md .approval/log/events.jsonl",
   'git commit -m "Policy: ',
-  "git push -u origin policy-amend-2",
+  "git push origin HEAD:refs/heads/policy-amend-2",
   "gh pr create --title ",
+  "gh pr merge policy-amend-2 --auto --merge",
 ] as const;
 
-test("APRV-341: without --pr the printed runbook is exactly the six commands it was", () => {
+test("APRV-341: without --pr the printed runbook is exactly the six commands it is", () => {
   const { dir } = repoWithRemote();
   const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/346" });
   attest(dir);
@@ -3404,7 +3418,9 @@ test("APRV-341: without --pr the printed runbook is exactly the six commands it 
   const printed = run.stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.startsWith("git ") || line.startsWith("gh "));
+    .filter(
+      (line) => line.startsWith("git ") || line.startsWith("gh ") || line.startsWith("approval "),
+    );
   assert.equal(printed.length, BRANCH_RUNBOOK.length, `printed:\n${printed.join("\n")}`);
   for (const [index, expected] of BRANCH_RUNBOOK.entries()) {
     assert.ok(
@@ -3412,6 +3428,10 @@ test("APRV-341: without --pr the printed runbook is exactly the six commands it 
       `runbook line ${String(index + 1)} is ${JSON.stringify(printed[index])}, not ${JSON.stringify(expected)}…`,
     );
   }
+  // APRV-360 AC3, asserted against the WHOLE screen rather than against the
+  // command lines: no printed runbook may switch branches, and a checkout that
+  // reappeared in the surrounding prose would be a runbook an operator copies.
+  assert.doesNotMatch(run.stdout, /git checkout/u, "the printed runbook switches branches");
   // Nothing ran: the runbook is a runbook.
   assert.equal(git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(), "");
 });

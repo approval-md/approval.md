@@ -1047,11 +1047,19 @@ with the same HEAD, the same index and the same working tree, and the only file
 that moved is the log, which gained the attestation. A test compares all four
 before and after.
 
-Without `--pr` (and on a box with no `gh`) the printed runbook is exactly what it
-was: `git fetch origin`, `git checkout -b policy-amend-<seq> origin/main`, `git
-add`, `git commit`, `git push -u origin`, `gh pr create`. A fixture test pins the
-six commands, because a flag that quietly rewrote the fallback would leave the
-operator who does not pass it with a procedure nobody checks.
+Without `--pr` (and on a box with no `gh`) the printed runbook does the same
+thing by hand, and it does not switch branches either (APRV-360): `approval log
+sync`, `git add`, `git commit`, `git push origin HEAD:refs/heads/policy-amend-<seq>`,
+`gh pr create --head`, `gh pr merge --auto --merge`. A fixture test pins the six
+commands and asserts that no printed line contains a `git checkout`, because a
+fallback nobody checks is where the branch switch came back.
+
+The form printed before APRV-360 opened with `git checkout -b policy-amend-<seq>
+origin/main`. On 2026-09-18 the primary's main was fourteen commits behind, the
+switch refused rather than overwrite `QUEUE.md`, the working log and six
+payloads, and the ceremony stalled with an edited, attested, unpublished policy.
+`approval log sync` is the first line now for that reason: it brings the checkout
+current, and it refuses `log-diverged` rather than fast-forwarding over a fork.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the
@@ -1397,9 +1405,20 @@ appends covers the whole file's bytes either way (SPEC §5.2, §5.3).
    the sections in.
 4. Prints the replacements, each as its matched block and its replacement.
 5. Asks for confirmation (`--yes` skips it, `--dry-run` stops here).
-6. Writes the policy, then runs `approval policy amend` in this process — which
-   asks its OWN question about the semantic diff, because "are these the bytes"
-   and "is this the policy" are different questions. `--pr` passes through to it.
+6. Writes the policy, then runs `approval policy amend --pr` in this process —
+   which asks its OWN question about the semantic diff, because "are these the
+   bytes" and "is this the policy" are different questions.
+
+**It publishes by default (APRV-360).** The amendment runs with `--pr`, so the
+branch is created on the remote by refspec, the pull request is opened, the
+merge is armed, and the checkout ends where it started. Before this the amend
+ran with no flag: the policy was written and attested, and the operator was
+handed a procedure that began with a branch switch. On 2026-09-18 the primary
+refused that switch and the ceremony stalled with an edited, attested,
+unpublished policy, which is the one state in which every gated operation on the
+box refuses. `--no-publish` stops at the commit and is passed through to the
+amend; `--pr` is accepted and does nothing, because runbooks already say it, and
+`--pr` with `--no-publish` is a usage error.
 
 `--no-amend` writes and stops, and says loudly that the policy is now edited and
 unattested. A run where every pair resolves and no byte moves is a success and a

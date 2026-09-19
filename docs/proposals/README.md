@@ -5,14 +5,16 @@ policy holds that class human-only, so a policy change an agent proposes travels
 as a document in this directory and a human applies it:
 
 ```sh
-approval policy apply docs/proposals/<name>.md --pr
+approval policy apply docs/proposals/<name>.md
 ```
 
 The verb parses the pairs, refuses before touching anything if any quoted
 current text is absent or not unique, prints the replacements, asks, writes the
-file, and runs `approval policy amend` so the edit and its attestation land as
-one commit. `docs/cli-reference.md#policy-apply` is the full contract; this page
-is what a proposal author needs.
+file, and runs `approval policy amend --pr` so the edit and its attestation land
+as one commit, on a branch pushed by refspec with the merge armed and the
+checkout never moved (APRV-360). `--no-publish` stops at the commit.
+`docs/cli-reference.md#policy-apply` is the full contract; this page is what a
+proposal author needs.
 
 ## What the verb reads
 
