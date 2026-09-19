@@ -408,7 +408,7 @@ function usageError(streams: Streams, message: string): number {
 const primaryRoot = resolvePrimaryRoot;
 
 /** Where the hook reads policy from and appends to, resolved together. */
-interface HookScope {
+export interface HookScope {
   logPath: string;
   /** The directory `logPath` sits under, named in the unreachable-log detail. */
   root: string;
@@ -425,7 +425,7 @@ interface HookScope {
  * (`--policy` for the policy, `--log` for the log); otherwise both follow
  * `--dir`, and with no flags at all both follow the primary checkout.
  */
-function hookScope(flags: Record<string, string | boolean>, cwd: string): HookScope {
+export function hookScope(flags: Record<string, string | boolean>, cwd: string): HookScope {
   const policyFlag = stringFlag(flags, "--policy");
   const logFlag = stringFlag(flags, "--log");
   const dirFlag = stringFlag(flags, "--dir");
@@ -817,7 +817,7 @@ function contributorModelRefusal(model: string | null): string | null {
 // Hook input
 // ===========================================================================
 
-interface HookInput {
+export interface HookInput {
   sessionId: string;
   /** Whether the event supplied the session id, distinct from the strict unknown bucket. */
   sessionIdPresent: boolean;

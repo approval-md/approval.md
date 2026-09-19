@@ -69,6 +69,7 @@ import { readVerifiedRecords } from "../src/core/state.js";
 import { canonicalize, JcsError } from "../src/core/jcs.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
 import { resolve as resolveClass } from "../src/core/policy-match.js";
+import { BRIDGE_REFUSAL_CODES } from "../src/cli/codex-bridge.js";
 import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate, type ValidationMode } from "../src/core/validate.js";
@@ -332,6 +333,13 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   // `decide` cannot emit them and a second implementation reading them there
   // would be told its gate must.
   channel_decision_refusal_codes: CHANNEL_DECISION_REFUSAL_CODES,
+  // APRV-361. The refusals `approval codex bridge` reaches ON ITS OWN, before
+  // or instead of asking the gate: a question it cannot bind, one it has no
+  // reading for, and a file change whose content arrived on a frame it is not
+  // correlating yet. Its own union rather than more members of the hook's,
+  // because the hook cannot emit them and a second implementation reading them
+  // there would be told its hook must.
+  bridge_refusal_codes: BRIDGE_REFUSAL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {

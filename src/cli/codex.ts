@@ -309,6 +309,14 @@ export async function commandCodex(argv: string[], streams: Streams, cwd: string
     return recovered.state === "mixed" ? EXIT_INTEGRITY : EXIT_OK;
   }
 
+  // APRV-361. Loaded lazily, like `serve` below and for the same reason: the
+  // bridge pulls in the hook's whole decision path, and a `codex prepare` must
+  // not pay for a module it never reaches.
+  if (subcommand === "bridge") {
+    const { runCodexBridge } = await import("./codex-bridge.js");
+    return await runCodexBridge(rest, streams, cwd);
+  }
+
   if (subcommand === "serve") {
     const parsed = parseFlags(rest, {
       "--manifest": "string",

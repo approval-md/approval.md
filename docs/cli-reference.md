@@ -6240,3 +6240,61 @@ The disposable workspace is removed when the session ends, so a replay of the
 same shell work starts from an empty room. Only a brokered change survives it,
 which is the whole arrangement: the shell cannot reach the canonical workspace,
 and approval codex apply is how a change that a policy admitted does.
+
+### The app-server bridge (APRV-361)
+
+```
+approval codex bridge --prompt <text> [--workspace <dir>] [-- <server command>]
+```
+
+approval codex bridge starts `codex app-server` and answers every approval
+request it raises through the policy and the log. Each
+`item/commandExecution/requestApproval` carries `command` and `cwd` on the same
+frame, minted by the harness runtime, and those two fields are exactly the pair
+the native hook lacks: a Codex `Bash` pre-event names only the command, so
+`approval hook codex` refuses every shell call as
+`hook-unsupported-execution-context` rather than bind bytes whose directory it
+does not know. Here the directory arrives with the question.
+
+It reuses the hook's decision path rather than a copy of it. The request becomes
+the hook's own input (tool `Bash`, `tool_input.command` the string the server
+sent, `cwd` the directory it named) and goes through the same classifier, the
+same human-only refusal, the same sandbox requirement, the same loop floor and
+unattended guard, and the same register, request and wait against the verified
+view. What differs is where the answer goes: `{id, result: {decision}}` on the
+connection instead of a decision object on stdout.
+
+The deadline is the policy's `approval_ttl`, not a harness ceiling. Every hook
+adapter answers inside a timeout its harness sets, and the retry grace exists so
+a denial-by-deadline is recoverable; this transport has no timeout at all, so a
+human who answers in eleven minutes is answering rather than arriving too late.
+`--wait` overrides it.
+
+It answers accept or decline only, in the vocabulary the request advertised
+through `availableDecisions`, matched exactly and never by prefix, so
+`acceptWithExecpolicyAmendment` is not read as an accept. It never sends
+`acceptForSession` (standing authority for a whole session is a grant shape this
+project does not have), `cancel` or `abort` (those mean "stop the turn", and
+sending one would record an interruption as a denial). A request advertising
+nothing gets `accept` or `decline` and the report says the word was this
+runtime's own.
+
+Its own refusals, beside the gate's:
+
+```
+bridge-request-unbound       no command, no cwd, or no call identity on the request
+bridge-file-change-unbound   an item-based file change carries no content (APRV-363)
+bridge-unknown-request       a server request this client has no reading for
+```
+
+The thread is started with `approvalPolicy: untrusted` and `sandbox: read-only`.
+`untrusted` is the wire spelling of the source's `UnlessTrusted`, the only
+variant under which every command asks, and the server refuses the source name.
+
+**It is an advisory checkpoint and not a boundary**, for reasons
+docs/codex-app-server-bridge.md states in full: Codex's auto-reviewer can
+resolve a question before this client sees it, the approval policy and sandbox
+posture decide how many questions exist, and a pending question is replayed to
+whatever connects next. An open gate window is not honoured here either, which
+is the strict direction. The claim it supports is "this client decided every
+question it was asked", and nothing wider.

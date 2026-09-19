@@ -486,6 +486,57 @@ them failing overturns it:
 If the probe shows an effect on a refusal trial, this note is wrong and the
 answer is decline, recorded with the failing evidence exactly as APRV-325 did.
 
+## Using it (APRV-361)
+
+The bridge landed as `approval codex bridge`. It starts `codex app-server`,
+runs one turn, and answers every approval request that turn raises.
+
+```
+approval codex bridge --prompt "refactor the parser" --workspace ~/dev/scratch
+```
+
+Flags: `--workspace` is the thread's directory (default the cwd), `--as` the
+acting identity (default `agent:codex`), `--dir`/`--policy`/`--log` resolve the
+policy and the log exactly as the hook resolves them, `--wait` overrides the
+deadline (default the policy's `approval_ttl`), `--interval` is how often the
+verified view is re-read, and `--json` prints one object carrying every answer.
+A command after `--` replaces `codex app-server`, which is how the tests drive a
+stub that speaks the shape recorded above.
+
+What happens per request: the `command` and `cwd` on the frame become the hook's
+own input, and the decision comes from `cli/hook.ts`'s `decideHarnessCall` — the
+same classifier, the same human-only refusal, the same loop floor and unattended
+guard, the same register, request and wait against the verified view. The reply
+is `{id, result: {decision}}`, sent only once that sequence has an answer.
+
+The vocabulary comes from `availableDecisions` on the request, matched exactly
+and never by prefix, so `acceptWithExecpolicyAmendment` is not read as an
+accept. `acceptForSession`, `cancel` and `abort` are never sent, for the reasons
+under "The decision vocabulary" above. A request that advertises nothing gets
+`accept` or `decline`, and the report says the word was the client's own.
+
+Three refusals are the bridge's own rather than the gate's:
+`bridge-request-unbound` (no command, no `cwd`, or no call identity),
+`bridge-file-change-unbound` (an item-based file change carries no content, and
+approving an identifier is not approving a change), and
+`bridge-unknown-request` (a server request this client has no reading for). They
+are a conformance union, so a second implementation answers all three or has
+left a door open.
+
+**Two limits, stated rather than implied.** An open gate window is NOT honoured:
+the hook's bypass prints a hook verdict and appends a record shaped for the
+hook, and ignoring a window is the strict direction, so an operator who opens
+one will find this verb still asking. And questions are answered one at a time,
+because the gate's wait is synchronous: frames queue while a decision is being
+made, which is the fail-closed direction and matches the observed protocol,
+where a turn does not move past an unanswered question.
+
+Follow-ups 2 through 8 below are separate tasks and none of them is done here:
+in particular the command is bound as the string that arrived (APRV-362), the
+auto-reviewer is not proved off (APRV-364), the policy pin is requested rather
+than verified (APRV-366), and socket custody is unsettled (APRV-365). Until
+those land, the claim stays exactly what the recommendation says it is.
+
 ## The tasks an adopt would need
 
 Filed 2026-09-18 on the operator's decision, in this order: APRV-361 (the
