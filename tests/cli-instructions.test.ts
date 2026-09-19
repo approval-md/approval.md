@@ -445,6 +445,12 @@ const HUMAN_ONLY: readonly string[] = [
   "codex serve",
   "codex apply",
   "codex recover",
+  // APRV-361. The app-server bridge is an operator process for the same reason
+  // `codex serve` is: it launches a long-lived server, it holds the acting
+  // identity every answer is recorded under, and it decides questions on a
+  // connection this transport owns. An agent that could start one would gain a
+  // second writer against the log nobody supervises.
+  "codex bridge",
 ];
 
 const AGENT_FACING: readonly string[] = [
