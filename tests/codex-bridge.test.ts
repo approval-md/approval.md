@@ -21,6 +21,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -491,7 +492,110 @@ test("a file-change request is declined bridge-file-change-unbound: no content, 
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "decline");
   assert.equal(answer.code, "bridge-file-change-unbound");
-  assert.match(answer.detail, /APRV-363/u);
+  // The follow-up that would let it be approved, once the shape of the frame
+  // the content arrives on is recorded (APRV-363 landed the legacy half).
+  assert.match(answer.detail, /APRV-379/u);
+  assert.equal(rawLog(dir), before);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-363 — the legacy request carries its change inline, so it can be bound
+// ---------------------------------------------------------------------------
+
+/** The legacy `applyPatchApproval`, whose `fileChanges` ride on the request. */
+function legacyPatchRequest(
+  changes: Record<string, unknown>,
+  cwd: string | null,
+  key = "grantRoot",
+): ScriptEntry {
+  return {
+    method: "applyPatchApproval",
+    params: {
+      conversationId: "thread-1",
+      callId: "call-7",
+      fileChanges: changes,
+      reason: null,
+      ...(cwd === null ? {} : { [key]: cwd }),
+      availableDecisions: ["approved", "denied"],
+    },
+  };
+}
+
+test("APRV-363: a legacy patch approval is classified by its paths and binds the content it arrived with", () => {
+  // SPEC.md is protected in this policy and `policy.edit` is manual, so the
+  // change is REGISTERED and waits, which is what makes the bound payload
+  // readable. Nobody grants it, so the wait runs out and the answer is no.
+  const dir = ready(
+    POLICY.replace("classes:", "protected_paths:\n  - SPEC.md\nclasses:\n  policy.edit:\n    autonomy: manual"),
+  );
+  const before = rawLog(dir);
+  const changes = {
+    "SPEC.md": { update: { unified_diff: "@@ -1 +1 @@\n-one\n+two\n" } },
+  };
+  const { report } = bridge(dir, [legacyPatchRequest(changes, dir)]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-timeout", answer.detail);
+  // Nothing was re-rendered: the class comes from the PATH the server named.
+  const grown = rawLog(dir).slice(before.length);
+  assert.match(grown, /"event":"approval\.requested"/u);
+  assert.match(grown, /"class":"policy\.edit"/u);
+  assert.match(grown, /"execution":"harness"/u);
+
+  // AC1: the bound material names the paths and carries the digest of the
+  // change AS RECEIVED, so a grant binds the bytes the server sent.
+  const stored = readdirSync(join(dir, ".approval", "payloads"))
+    .map((entry) => readFileSync(join(dir, ".approval", "payloads", entry), "utf8"))
+    .join("\n");
+  assert.match(stored, /"paths":\["SPEC\.md"\]/u);
+  assert.match(stored, /"content_sha256":"[0-9a-f]{64}"/u);
+  assert.match(stored, /unified_diff/u);
+  assertVerifies(dir);
+});
+
+test("APRV-363: a legacy patch approval with an ordinary path is answered without a human", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    legacyPatchRequest({ "notes.md": { add: { content: "hello\n" } } }, dir, "cwd"),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "accept", answer.detail);
+  // `files.write.workspace` is autonomous here, so there is no approval
+  // lifecycle and the word came off the legacy vocabulary the request offered.
+  assert.equal(answer.decision, "approved");
+  const grown = rawLog(dir).slice(before.length);
+  assert.doesNotMatch(grown, /"event":"approval\.requested"/u);
+  assertVerifies(dir);
+});
+
+test("APRV-363: a change naming a path outside the directory the server gave is refused", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    legacyPatchRequest({ "../escape.md": { add: { content: "x\n" } } }, dir),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "hook-io", answer.detail);
+  assert.match(answer.detail, /resolves outside/u);
+  assert.equal(rawLog(dir), before, "a refused change appended something");
+});
+
+test("APRV-363: a legacy patch approval with no directory is declined bridge-request-unbound", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const { report } = bridge(dir, [
+    legacyPatchRequest({ "notes.md": { add: { content: "x\n" } } }, null),
+  ]);
+
+  const answer = report.answers[0] as BridgeAnswerRow;
+  assert.equal(answer.outcome, "decline");
+  assert.equal(answer.code, "bridge-request-unbound", answer.detail);
+  assert.match(answer.detail, /cwd or grantRoot/u);
   assert.equal(rawLog(dir), before);
 });
 

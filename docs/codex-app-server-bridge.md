@@ -579,7 +579,13 @@ bridge), then 362 to 368 depending on it.
 3. **Refuse a file-change approval whose content is unbound.** Correlate the
    `itemId` with the content from `item/started`, and refuse with a distinct
    machine-readable code when the correlation cannot be made. Approving an
-   identifier is not approving a change.
+   identifier is not approving a change. **Half landed (APRV-363):** the LEGACY
+   `applyPatchApproval`, whose `fileChanges` ride on the request, is now
+   classified by the paths it names and bound with the change as it arrived
+   plus its digest, with nothing correlated and nothing re-rendered. The
+   item-based request stays declined, and the correlation is APRV-379, which
+   waits on the shape of the `item/started` frame: it is recorded nowhere here,
+   and a correlation written against a guessed shape silently matches nothing.
 4. **Prove the auto-reviewer is off, and refuse when it is not.** A preflight
    and a doctor row. A session with an auto-reviewer in front of the gate is a
    session whose silence means nothing, and the bridge should say so rather than

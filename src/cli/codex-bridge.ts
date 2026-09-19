@@ -68,7 +68,17 @@
  * `threadId`, `turnId`, `itemId`, `startedAtMs`, `reason` and `grantRoot`, and
  * the bytes arrived on an earlier frame. Approving an identifier is not
  * approving a change, so this verb declines it with its own code and says so.
- * The correlation that would let it be approved is APRV-363.
+ * The correlation that would let it be approved is APRV-379, and it waits on a
+ * fact nobody has recorded: the shape of the frame the content arrives on.
+ *
+ * The LEGACY `applyPatchApproval` is different, and since APRV-363 it is
+ * decided rather than declined: its `fileChanges` map rides on the request
+ * itself, so there is nothing to correlate and nothing to re-render. It goes
+ * through the same `decideHarnessCall` the exec half uses, classified by the
+ * paths it names and bound with the change as it arrived plus its digest. A
+ * request carrying a map and no directory is refused exactly as an exec request
+ * with no `cwd` is: a relative path resolves somewhere, and a directory this
+ * client guessed would be a guess the grant is bound to.
  *
  * A server request this verb does not recognise is declined too, on the same
  * rule: a question nobody classified is not a question to answer yes to.
@@ -121,6 +131,7 @@ import {
 } from "./hook.js";
 import type { Streams } from "./main.js";
 import { HOOK_RETRY_GRACE_MS } from "../core/harness-wait.js";
+import { canonicalize } from "../core/jcs.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 
 /** The adapter every decision here is made under: Codex, through its own protocol. */
@@ -617,7 +628,7 @@ export function decideExecRequest(
   };
 }
 
-/** The answer a file-change request gets, and why it is always this one. */
+/** The answer a file-change request with no content gets, and why. */
 export function declineFileChange(params: unknown): BridgeAnswer {
   const chosen = chooseDecision(params, "decline");
   return {
@@ -627,7 +638,110 @@ export function declineFileChange(params: unknown): BridgeAnswer {
     ...chosen,
     code: "bridge-file-change-unbound",
     detail:
-      "the item-based file-change request carries an itemId and no content, and the bytes arrived on an earlier frame; approving an identifier is not approving a change, so it is declined. Correlating the two is APRV-363",
+      "the item-based file-change request carries an itemId and no content, and the bytes arrived on an earlier frame; approving an identifier is not approving a change, so it is declined. Correlating the two, once the notification's shape is recorded, is APRV-379",
+  };
+}
+
+/**
+ * The change map a file-change request carries INLINE, or `null` (APRV-363).
+ *
+ * The LEGACY `applyPatchApproval` carries `fileChanges`, a map of path to
+ * change, on the request itself. There is nothing to correlate and nothing
+ * arrives on another frame, so it is the one file-change shape this verb can
+ * bind: the bytes it decides about are the bytes it was sent.
+ */
+export function inlineFileChanges(params: unknown): Record<string, unknown> | null {
+  if (params === null || typeof params !== "object") return null;
+  const value = (params as Record<string, unknown>)["fileChanges"];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const map = value as Record<string, unknown>;
+  return Object.keys(map).length === 0 ? null : map;
+}
+
+/**
+ * Decide one file-change request that carries its own content (APRV-363).
+ *
+ * Through the SAME path an exec request takes: the hook's `decideHarnessCall`,
+ * so the human-only refusal, the loop floor, the unattended guard, the
+ * registration and the wait are one implementation. What differs is the tool
+ * name and the bound material, and the description of both is `cli/hook.ts`'s,
+ * never this module's.
+ *
+ * The DIRECTORY is the one the server named (`cwd`, or the `grantRoot` the
+ * legacy request carries for the same purpose), for the reason the exec half
+ * gives: a relative path in the change resolves somewhere, and a directory this
+ * client guessed would be a guess a grant is then bound to. Without one the
+ * answer is the same refusal an exec request with no `cwd` gets.
+ */
+export function decideFileChangeRequest(
+  streams: Streams,
+  plan: BridgePlan,
+  params: unknown,
+): { verdict: HarnessVerdict; threadId: string | null } {
+  const changes = inlineFileChanges(params);
+  const cwd = stringField(params, "cwd") ?? stringField(params, "grantRoot");
+  const callId = callIdOf(params);
+  const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
+  if (changes === null || cwd === null || callId === null) {
+    const missing = [
+      changes === null ? "an inline fileChanges map" : null,
+      cwd === null ? "a directory (cwd or grantRoot)" : null,
+      callId === null ? "a call identity (itemId, callId or approvalId)" : null,
+    ]
+      .filter((entry): entry is string => entry !== null)
+      .join(", ");
+    return {
+      threadId,
+      verdict: {
+        permission: "deny",
+        code: changes === null ? "bridge-file-change-unbound" : "bridge-request-unbound",
+        detail: `the file-change request carries no ${missing}; a decision here would authorize bytes this client cannot name, so it is declined and nothing was appended`,
+      },
+    };
+  }
+
+  const input: HookInput = {
+    sessionId: threadId ?? "codex-bridge",
+    sessionIdPresent: threadId !== null,
+    cwd,
+    toolName: "apply_patch",
+    // The map VERBATIM, under the key the hook's describer reads. Nothing is
+    // re-rendered into an `apply_patch` envelope: the classifier is given the
+    // paths the server named, and the grant binds the change as it arrived.
+    //
+    // `command` beside it is the change's CANONICAL JSON, and it is identity
+    // rather than content: the Codex adapter derives one task id per tool call
+    // from the call's own bytes (`hook-codex.ts`'s `codexBinding`), and a call
+    // with no such string could not be identified at all. Canonical so the same
+    // change is the same call, whatever key order the server used. Nothing
+    // classifies it and nothing executes it: the description above is built
+    // from the map, and the payload a human sees is the map.
+    toolInput: { file_changes: changes, command: canonicalize(changes) },
+    toolUseId: callId,
+    hookEventName: null,
+    model: null,
+    toolResponse: null,
+    toolResponseRaw: undefined,
+    interrupted: false,
+    harnessVersion: null,
+  };
+
+  return {
+    threadId,
+    verdict: decideHarnessCall({
+      streams,
+      input,
+      adapter: ADAPTER,
+      cwd,
+      logPath: plan.logPath,
+      root: plan.root,
+      options: plan.options,
+      actor: plan.actor,
+      timeoutMs: plan.waitMs,
+      intervalMs: plan.intervalMs,
+      graceMs: HOOK_RETRY_GRACE_MS,
+      windowRecords: null,
+    }),
   };
 }
 
@@ -838,8 +952,20 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           return;
         }
         if ((FILE_CHANGE_APPROVAL_METHODS as readonly string[]).includes(method)) {
-          const refusal = declineFileChange(frame.params);
-          answer(frame.id, method, "decline", refusal.code, refusal.detail, frame.params);
+          // A change carried INLINE is decided like any other call (APRV-363);
+          // one that is an identifier and nothing else is declined, as it has
+          // been since APRV-361.
+          if (inlineFileChanges(frame.params) === null) {
+            const refusal = declineFileChange(frame.params);
+            answer(frame.id, method, "decline", refusal.code, refusal.detail, frame.params);
+            return;
+          }
+          const decided = decideFileChangeRequest(streams, plan, frame.params);
+          if (decided.verdict.permission === "allow") {
+            answer(frame.id, method, "accept", null, decided.verdict.reason, frame.params);
+          } else {
+            answer(frame.id, method, "decline", decided.verdict.code, decided.verdict.detail, frame.params);
+          }
           return;
         }
         // A question with no reading. Declining it is the same rule the file

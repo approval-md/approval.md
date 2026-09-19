@@ -1897,6 +1897,82 @@ function tierOf(target: string, cwd: string): FileTier {
  */
 const WORKSPACE_WRITE_CLASS = "files.write.workspace";
 
+/**
+ * The Codex app-server's inline change map, when a call carries one (APRV-363).
+ *
+ * `null` for every other `apply_patch` call, which keeps the envelope path
+ * exactly as it was: the native hook's `apply_patch` tool sends a command
+ * string and reaches this function's `null` on the first test.
+ */
+function codexFileChanges(toolInput: Record<string, unknown>): Record<string, unknown> | null {
+  const value = toolInput["file_changes"] ?? toolInput["fileChanges"];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const map = value as Record<string, unknown>;
+  return Object.keys(map).length === 0 ? null : map;
+}
+
+/**
+ * What a change MAP asks for: one class per path it names, and the change bound
+ * whole (APRV-363).
+ *
+ * The class rule is the file tools' rule and not a second one: a protected
+ * target takes its derived protected class, every other target is
+ * `files.write.workspace`, and the policy decides the autonomy of either. The
+ * payload is the change rather than the touch, for the reason
+ * {@link fileToolGate} states at length, plus `content_sha256` over the map as
+ * it ARRIVED, so a human's grant binds the bytes the server sent and a later
+ * reader can check that it did.
+ *
+ * Fails closed on a path this runtime cannot place: an absolute path, one that
+ * climbs out of the directory the server named, or one carrying a NUL. A change
+ * whose target cannot be resolved cannot be classified, and a classification
+ * against the wrong tree is the failure this whole file exists to avoid.
+ */
+function describeCodexFileChanges(
+  changes: Record<string, unknown>,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+): ToolDescription {
+  const classes: string[] = [];
+  const notes: string[] = [];
+  const paths: string[] = [];
+  for (const declared of Object.keys(changes).sort()) {
+    if (declared.length === 0 || declared.includes("\0") || isAbsolute(declared)) {
+      return {
+        kind: "deny",
+        code: "hook-io",
+        detail: `the file change names ${JSON.stringify(declared)}, which is not a relative path inside the directory the server named; a change whose target cannot be placed cannot be classified`,
+      };
+    }
+    const resolved = resolvePathSegments(cwd, declared);
+    if (resolved !== cwd && !resolved.startsWith(`${cwd}${sep}`)) {
+      return {
+        kind: "deny",
+        code: "hook-io",
+        detail: `the file change names ${JSON.stringify(declared)}, which resolves outside ${cwd}`,
+      };
+    }
+    paths.push(declared);
+    const cls = protectedPathClass(resolved, protectedPaths) ?? WORKSPACE_WRITE_CLASS;
+    if (!classes.includes(cls)) classes.push(cls);
+    notes.push(`change ${declared} (${cls})`);
+  }
+  return {
+    kind: "gated",
+    classes,
+    payload: {
+      tool: "apply_patch",
+      rule: "codex app-server file change",
+      cwd,
+      paths,
+      content_sha256: payloadHash(changes),
+      changes,
+    },
+    headline: `apply_patch ${String(paths.length)} file change(s)`,
+    notes,
+  };
+}
+
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
   cls: string;
@@ -3557,6 +3633,21 @@ function describeToolCall(
   readRoots: readonly string[] = [],
 ): ToolDescription {
   if (adapter.kind === "codex" && input.toolName === "apply_patch") {
+    // APRV-363. The app-server's LEGACY `applyPatchApproval` carries its change
+    // as a MAP of path to change, inline on the request, and never as an
+    // `apply_patch` envelope. Rendering the map into an envelope so the parser
+    // below could read it would classify bytes this runtime wrote rather than
+    // bytes the server sent, which is the hazard APRV-362 exists for on the
+    // command side, so the map is classified as a map: by the paths it names,
+    // through the same protected-path rules every other file tool uses, with
+    // the change itself bound verbatim. It is described HERE rather than by the
+    // caller because one describer answers "what is this call", and a caller
+    // that could hand this module its own classes would be the party under
+    // oversight choosing its own scrutiny (SPEC §11.1 invariant 4).
+    const changes = codexFileChanges(input.toolInput);
+    if (changes !== null) {
+      return describeCodexFileChanges(changes, protectedPaths, cwd);
+    }
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
       return { kind: "deny", code: "hook-io", detail: "apply_patch tool_input carries no command string" };
