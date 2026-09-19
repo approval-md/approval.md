@@ -364,7 +364,11 @@ const unionVectors = [
   ],
   [
     "bridge_refusal_codes",
-    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a file change whose content arrived on a frame it is not correlating, and a server request it has no reading for",
+    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, a file change whose content arrived on a frame it is not correlating, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
+  ],
+  [
+    "bridge_stop_codes",
+    "every way `approval codex bridge` STOPS a session rather than declining one request: a refused `thread/start`, a server reporting an effective approval policy that is not the pinned one, a preflight turn that ran no command so nothing was established, and a harness auto-reviewer notification saying something else answered a question before this client was asked. Separate from `bridge_refusal_codes` because the two boundaries differ: a decline answers one approval request and the turn carries on, a stop ends the run. A second implementation answers BOTH unions or has left a door open",
   ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
@@ -1776,7 +1780,24 @@ const SUITES = [
     // that API delivers the argv already joined, so un-joining it is not
     // optional, and a client that skipped the step would be classifying its own
     // re-parse with nothing recording that it had.
-    vectors_version: "15.0.0",
+    // 16.0.0 (APRV-368): a TWELFTH union, `bridge_stop_codes`, for the four
+    // ways `approval codex bridge` ends a session rather than declining one
+    // request. MAJOR for the reason 14.0.0 was, and the reason is this suite's
+    // own rule rather than a judgement call: it pins WHICH unions exist, so a
+    // twelfth is a changed expectation for every implementation that enumerated
+    // eleven. (The minor shape used elsewhere today, in `schema-validation`
+    // 2.4.0 and `command-class` 1.3.0, is for a suite that gains VECTORS; this
+    // one gains a member of its own subject matter.)
+    //
+    // A second union rather than four more members of `bridge_refusal_codes`,
+    // which was the open question APRV-366 left and APRV-368 closes. The two
+    // describe different boundaries: a decline answers one approval request and
+    // the turn carries on, a stop ends the run before or instead of a turn. An
+    // implementation that emitted `bridge-preflight-void` in answer to one
+    // request would be saying something false about what it did. Each union's
+    // description now names the other, so a checker that reads one knows it has
+    // read half.
+    vectors_version: "16.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

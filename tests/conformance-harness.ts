@@ -71,6 +71,7 @@ import { loadPolicyText } from "../src/core/policy-load.js";
 import { resolve as resolveClass } from "../src/core/policy-match.js";
 import {
   BRIDGE_REFUSAL_CODES,
+  BRIDGE_STOP_CODES,
   chooseDecision,
   encodeDecision,
   type BridgeOutcome,
@@ -345,6 +346,12 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   // because the hook cannot emit them and a second implementation reading them
   // there would be told its hook must.
   bridge_refusal_codes: BRIDGE_REFUSAL_CODES,
+  // APRV-368. The second bridge vocabulary, and a separate union for the
+  // reason the first one is separate from the hook's: these END a session
+  // rather than answer one request, so an implementation that read only the
+  // declines would think it had the whole vocabulary and would have left a
+  // door open. Each union's own description says the other exists.
+  bridge_stop_codes: BRIDGE_STOP_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {
