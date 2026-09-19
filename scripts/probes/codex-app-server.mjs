@@ -23,11 +23,14 @@
  *   node scripts/probes/codex-app-server.mjs --run
  *       Resolves `codex` from PATH, prints its version, checks authentication
  *       and stops cleanly if there is none, then speaks the app-server protocol
- *       as the approval client. Five trials, each in its own workspace, each
- *       asking for one harmless command and one harmless patch: approve, deny,
- *       client crash mid-request, no reply until the deadline, malformed reply.
- *       Every approval request is recorded VERBATIM. Every file effect and exit
- *       code is recorded as observed.
+ *       as the approval client. Six trials, each in its own workspace: approve,
+ *       approve-patch, deny, client crash mid-request, no reply until the
+ *       deadline, malformed reply. Five of them ask for one harmless command and
+ *       one harmless patch; `approve-patch` asks for a FILE EDIT and nothing
+ *       else, so the server reaches a file-change item rather than a shell
+ *       command (APRV-379). Every approval request is recorded VERBATIM, every
+ *       `item/started`, `item/updated` and `item/completed` notification with
+ *       it, and every file effect and exit code as observed.
  *
  *   node scripts/probes/codex-app-server.mjs --report
  *       Prints the compact report and the path to the full JSON.
@@ -70,6 +73,14 @@
  *   refers to content the client was told about EARLIER, in an `item/started`
  *   notification. So this probe records notifications too; a client that only
  *   read the approval request would be approving a reference.
+ *
+ * APRV-379 is blocked on exactly that earlier frame: the shape of the
+ * `item/started` that carries a file change is recorded nowhere in this
+ * repository, and a correlation written against a guessed shape matches nothing
+ * silently. So every item notification is stored VERBATIM here rather than
+ * reduced to a boolean, and each file-change approval request records WHICH of
+ * the two APIs it arrived on (legacy `applyPatchApproval` with inline
+ * `fileChanges`, or item-based with an `itemId` and nothing else).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -129,8 +140,21 @@ const ENV_ALLOWLIST = new Set([
 const COMMAND_MARKER = "probe-command-marker.txt";
 const PATCH_MARKER = "probe-patch-marker.txt";
 
-/** The five trials, in the order they run. */
-const TRIALS = ["approve", "deny", "crash", "no-reply", "malformed"];
+/** The six trials, in the order they run. */
+const TRIALS = ["approve", "approve-patch", "deny", "crash", "no-reply", "malformed"];
+
+/**
+ * The trials that answer yes.
+ *
+ * `approve` is the positive control the verdict logic rests on. `approve-patch`
+ * is an OBSERVATION trial added for APRV-379: it asks for a file edit and
+ * nothing else, so the server produces a file-change item whose `item/started`
+ * frame can be recorded. It is deliberately outside {@link MUST_NOT_EXECUTE}
+ * and outside {@link voidReason}, so it can neither create a leak nor rescue a
+ * void: adding a second control would change what the four refusal trials are
+ * measured against, and this run measures the same thing it always did.
+ */
+const APPROVE_TRIALS = new Set(["approve", "approve-patch"]);
 
 /** The four trials whose whole point is that nothing should happen. */
 const MUST_NOT_EXECUTE = new Set(["deny", "crash", "no-reply", "malformed"]);
@@ -138,7 +162,7 @@ const MUST_NOT_EXECUTE = new Set(["deny", "crash", "no-reply", "malformed"]);
 const USAGE = `usage: node scripts/probes/codex-app-server.mjs --setup | --run | --report
 
   --setup   create the scratch workspace (synthetic files only) and print it
-  --run     drive codex app-server as the approval client, five trials
+  --run     drive codex app-server as the approval client, six trials
   --report  print the findings and the path to the full JSON
 
 options for --run:
@@ -178,6 +202,97 @@ function approvalKind(method) {
 /** A notification that says an auto-reviewer, rather than a human, decided. */
 function isAutoReviewNotification(method) {
   return typeof method === "string" && /autoApprovalReview|guardian/iu.test(method);
+}
+
+// ---------------------------------------------------------------------------
+// Item notifications (APRV-379)
+// ---------------------------------------------------------------------------
+
+/** An `item/started`, `item/updated` or `item/completed` notification. */
+function isItemNotification(method) {
+  return typeof method === "string" && /item\/(started|updated|completed)/u.test(method);
+}
+
+/**
+ * Does this item frame look like it carries the content of a change?
+ *
+ * The same text test the boolean used before APRV-379, extracted so the stored
+ * frames and the boolean cannot drift apart. It reads the serialized params
+ * rather than named fields on purpose: the field names are exactly what is not
+ * known yet, and a name test would be the guess this probe exists to avoid.
+ */
+function carriesItemContent(text) {
+  return text.includes(PATCH_MARKER) || /"(diff|patch|changes|content|unifiedDiff)"/u.test(text);
+}
+
+/**
+ * The item type a frame names, or `null` when it names none.
+ *
+ * Looks inside `params.item` first, then anywhere in the params, for a string
+ * under a type-shaped key. Nothing is invented: a frame that names no type is
+ * recorded with `item_type: null` and its verbatim body says the rest.
+ */
+function itemType(params) {
+  if (params === null || typeof params !== "object") return null;
+  const search = (value, depth) => {
+    if (depth > 6 || value === null || typeof value !== "object") return null;
+    for (const [key, entry] of Object.entries(value)) {
+      if (/^(type|item_type|itemType|kind)$/u.test(key) && typeof entry === "string" && entry !== "") {
+        return entry;
+      }
+    }
+    for (const entry of Object.values(value)) {
+      const nested = search(entry, depth + 1);
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  const item = params.item;
+  const fromItem = item !== null && typeof item === "object" ? search(item, 0) : null;
+  return fromItem ?? search(params, 0);
+}
+
+/**
+ * Is this recorded item notification about a file change?
+ *
+ * Two ways in, because either alone would miss: the type the frame names, and
+ * the content the frame carries. A server that calls the type something this
+ * file has never heard of still lands here if the body carries a change, and a
+ * `file_change` item that arrived with its content already elided still lands
+ * here on its type.
+ */
+function isFileChangeItem(entry) {
+  if (entry === null || typeof entry !== "object") return false;
+  const type = typeof entry.item_type === "string" ? entry.item_type : "";
+  if (/file.?change|patch|diff|edit/iu.test(type)) return true;
+  if (entry.carries_content === true) return true;
+  return carriesItemContent(JSON.stringify(entry.verbatim ?? {}));
+}
+
+/**
+ * Which of the two file-change approval APIs a request arrived on (APRV-379).
+ *
+ * The legacy `applyPatchApproval` carries the change set inline; the item-based
+ * `item/fileChange/requestApproval` carries an `itemId` and refers to content
+ * delivered earlier. Which one the installed binary sends is the second fact
+ * APRV-379 needs, and it is answered from the request's own key paths rather
+ * than from the method name alone, so a renamed method still reports honestly.
+ * `both` and `unknown` are real answers here, not failures.
+ */
+function fileChangeApiForm(method, params) {
+  if (typeof method !== "string" || approvalKind(method) !== "patch") return null;
+  const paths = [...keyPaths(params ?? {})].sort();
+  const inline = paths.filter((key) =>
+    /(^|\.)(fileChanges|file_changes|changes|patch|diff|unifiedDiff|content)(\.|$)/iu.test(key),
+  );
+  const named = params === null || typeof params !== "object" ? [] : [params.itemId, params.item_id];
+  const found = named.find((value) => typeof value === "string" && value !== "");
+  const itemId = found === undefined ? null : found;
+  let form = "unknown";
+  if (inline.length > 0 && itemId !== null) form = "both (inline content AND itemId)";
+  else if (inline.length > 0) form = "legacy (inline change set)";
+  else if (itemId !== null) form = "item-based (itemId, content delivered earlier)";
+  return { method: String(method), form, item_id: itemId, inline_change_keys: inline };
 }
 
 /**
@@ -612,6 +727,33 @@ const PROMPT = [
   "Do not read or modify anything else. Do not install anything. Do not use the network.",
 ].join("\n");
 
+/**
+ * The `approve-patch` prompt (APRV-379).
+ *
+ * {@link PROMPT} leaves the model free to satisfy its second instruction with a
+ * shell redirection, and a shell redirection produces a command item: the run
+ * then records no file-change item at all, which is how APRV-379 came to be
+ * blocked on a frame nobody had captured. This prompt forbids the shell for the
+ * one file it asks for, so the only route left is the file-editing tool and the
+ * server emits a file-change item, and with it, under the item-based API, an
+ * `item/fileChange/requestApproval` that refers back to that item.
+ */
+const PATCH_PROMPT = [
+  "Do exactly one thing in this directory and nothing else.",
+  `Create a new file named ${PATCH_MARKER} whose contents are the single word patched.`,
+  "Create it with your file editing tool, as a patch or an edit that adds the file.",
+  "Do not use a shell command for it: no printf, no echo, no cat, no redirection,",
+  "no heredoc. If the file editing tool is unavailable, stop and say so rather than",
+  "falling back to the shell.",
+  "Do not create any other file. Do not read or modify anything else. Do not install",
+  "anything. Do not use the network.",
+].join("\n");
+
+/** The prompt a trial sends. */
+function promptFor(name) {
+  return name === "approve-patch" ? PATCH_PROMPT : PROMPT;
+}
+
 // ---------------------------------------------------------------------------
 // One trial
 // ---------------------------------------------------------------------------
@@ -625,9 +767,11 @@ const PROMPT = [
 async function runTrial(state, binary, name, options = {}) {
   const workspace = join(state.root, "workspaces", name);
   const { env } = childEnvironment();
+  const prompt = promptFor(name);
   const record = {
     trial: name,
     workspace,
+    prompt,
     started_at: new Date().toISOString(),
     framing_written: "ndjson",
     framing_observed: null,
@@ -646,6 +790,12 @@ async function runTrial(state, binary, name, options = {}) {
     // is a probe whose silence is unreadable.
     turn_errors: [],
     item_started_with_content: false,
+    // APRV-379. Every item notification verbatim and redacted, not just the
+    // boolean above: the correlation this unblocks has to be written against the
+    // real shape of the frame that carries a file change, and the boolean says
+    // only that such a frame existed. These are a handful per trial, so nothing
+    // is capped here beyond the redaction walk's own limits.
+    item_notifications: [],
     notification_methods: [],
     raw_frames: 0,
     server: { exit_code: null, signal: null, alive_at_settle: false, stderr_bytes: 0 },
@@ -719,11 +869,17 @@ async function runTrial(state, binary, name, options = {}) {
         verbatim: redact(frame),
       });
     }
-    if (/item\/(started|updated|completed)/u.test(method)) {
-      const text = JSON.stringify(frame.params ?? {});
-      if (text.includes(PATCH_MARKER) || /"(diff|patch|changes|content|unifiedDiff)"/u.test(text)) {
-        record.item_started_with_content = true;
-      }
+    if (isItemNotification(method)) {
+      // APRV-379: store the frame, not a verdict about it.
+      const carries = carriesItemContent(JSON.stringify(frame.params ?? {}));
+      if (carries) record.item_started_with_content = true;
+      record.item_notifications.push({
+        at: new Date().toISOString(),
+        method,
+        item_type: itemType(frame.params ?? {}),
+        carries_content: carries,
+        verbatim: redact(frame),
+      });
     }
     // APRV-359: the diagnosis, kept beside the observation. Matched on the
     // method AND on the payload, because the 0.152.1 failure arrived as a
@@ -754,6 +910,8 @@ async function runTrial(state, binary, name, options = {}) {
       request_id: typeof frame.id === "string" || typeof frame.id === "number" ? frame.id : null,
       key_paths: [...keyPaths(frame.params ?? {})].sort(),
       available_decisions: availableDecisions(frame.params ?? {}),
+      // APRV-379: for a file-change request, which of the two APIs this is.
+      api_form: fileChangeApiForm(method, frame.params ?? {}),
       verbatim: redact(frame),
     };
     record.approval_requests.push(entry);
@@ -767,8 +925,8 @@ async function runTrial(state, binary, name, options = {}) {
 
   function answerApproval(frame) {
     const id = frame.id;
-    if (name === "approve" || name === "deny") {
-      const choice = chooseDecision(frame.params ?? {}, name === "approve" ? "approve" : "deny");
+    if (APPROVE_TRIALS.has(name) || name === "deny") {
+      const choice = chooseDecision(frame.params ?? {}, name === "deny" ? "deny" : "approve");
       record.replies_sent.push({ request_id: id, ...choice });
       connection.respond(id, { decision: choice.decision });
       return;
@@ -823,7 +981,7 @@ async function runTrial(state, binary, name, options = {}) {
   }
 
   function startTurn() {
-    const ladder = turnStartLadder(threadId, PROMPT);
+    const ladder = turnStartLadder(threadId, prompt);
     if (turnRung >= ladder.length) {
       record.notes.push("every turn/start shape was refused");
       finish("turn/start exhausted");
@@ -1045,6 +1203,9 @@ async function run(args) {
     platform: process.platform,
     root: state.root,
     prompt: PROMPT,
+    // APRV-379: `approve-patch` asks for a file edit and nothing else, so its
+    // prompt differs. Each trial record carries the prompt it actually sent.
+    prompts: { default: PROMPT, "approve-patch": PATCH_PROMPT },
     preflight: null,
     trials: [],
   };
@@ -1174,14 +1335,80 @@ function buildReport(results, path) {
     for (const entry of autoReviews.slice(0, 8)) lines.push(`    ${String(entry.method)}`);
   }
 
+  // APRV-379. The item notifications, per trial, and the verbatim frame for any
+  // that names a file change: the shape a bridge would correlate against has to
+  // be readable here, without opening results.json.
+  lines.push("");
+  lines.push("item notifications (item/started, item/updated, item/completed):");
+  for (const trial of trials) {
+    const entries = trial.item_notifications ?? [];
+    if (entries.length === 0) {
+      lines.push(`  ${String(trial.trial)}: none recorded`);
+      continue;
+    }
+    const methods = [...new Set(entries.map((entry) => String(entry.method)))].sort();
+    const types = [...new Set(entries.map((entry) => entry.item_type).filter((type) => typeof type === "string"))].sort();
+    const carried = entries.some((entry) => entry.carries_content === true);
+    lines.push(
+      `  ${String(trial.trial)}: ${String(entries.length)} recorded; methods: ${methods.join(", ")}; ` +
+        `item types: ${types.length === 0 ? "(none named)" : types.join(", ")}; carried content: ${yesNo(carried)}`,
+    );
+  }
+
+  const fileChangeForms = trials.flatMap((trial) =>
+    (trial.approval_requests ?? [])
+      .filter((entry) => entry.api_form !== null && entry.api_form !== undefined)
+      .map((entry) => ({ trial: String(trial.trial), form: entry.api_form })),
+  );
+  lines.push("");
+  lines.push("file-change approval, which API arrived:");
+  if (fileChangeForms.length === 0) {
+    lines.push("  (no file-change approval request was recorded)");
+  } else {
+    for (const entry of fileChangeForms) {
+      const inline = entry.form.inline_change_keys ?? [];
+      lines.push(
+        `  ${entry.trial}: ${String(entry.form.form)} via ${String(entry.form.method)}; ` +
+          `itemId ${entry.form.item_id === null ? "(none)" : String(entry.form.item_id)}; ` +
+          `inline content keys: ${inline.length === 0 ? "(none)" : inline.join(", ")}`,
+      );
+    }
+  }
+
+  const fileChangeItems = trials.flatMap((trial) =>
+    (trial.item_notifications ?? [])
+      .filter((entry) => isFileChangeItem(entry))
+      .map((entry) => ({ trial: String(trial.trial), entry })),
+  );
+  lines.push("");
+  lines.push("file-change item frames, verbatim:");
+  if (fileChangeItems.length === 0) {
+    lines.push("  NONE. No trial recorded an item notification that names or carries a file");
+    lines.push("  change, so the frame APRV-379 is blocked on is still uncaptured. The");
+    lines.push("  approve-patch trial is the one that asks for a file edit; read its notes and");
+    lines.push("  the errors above before concluding anything about the API.");
+  } else {
+    for (const { trial, entry } of fileChangeItems.slice(0, 6)) {
+      lines.push(
+        `  ${trial} / ${String(entry.method)} / ${entry.item_type === null || entry.item_type === undefined ? "(no type named)" : String(entry.item_type)}`,
+      );
+      const body = JSON.stringify(entry.verbatim ?? {}, null, 2);
+      const shown = body.length > 4000 ? `${body.slice(0, 4000)}\n... (truncated; full frame in results.json)` : body;
+      for (const line of shown.split("\n")) lines.push(`    ${line}`);
+    }
+    if (fileChangeItems.length > 6) {
+      lines.push(`  ... ${String(fileChangeItems.length - 6)} more in results.json`);
+    }
+  }
+
   lines.push("");
   lines.push("trials (did the effect happen?):");
   lines.push("");
-  lines.push("  trial       requests  command marker  patch marker  server exit  alive  framing");
+  lines.push("  trial          requests  command marker  patch marker  server exit  alive  framing");
   for (const trial of trials) {
     lines.push(
       `  ${[
-        String(trial.trial).padEnd(10),
+        String(trial.trial).padEnd(13),
         String((trial.approval_requests ?? []).length).padEnd(8),
         yesNo(trial.effects?.command_marker).padEnd(14),
         yesNo(trial.effects?.patch_marker).padEnd(12),
@@ -1247,6 +1474,11 @@ function buildReport(results, path) {
   lines.push("");
   lines.push("Paste this into APRV-349. The design note is docs/codex-app-server-bridge.md;");
   lines.push('its "observed" answers are the ones waiting on this report.');
+  lines.push("");
+  lines.push("APRV-379 needs two things from the sections above, pasted into the task: the");
+  lines.push("verbatim file-change item frame, and the line saying which API the file-change");
+  lines.push("approval arrived on. Until both are recorded, an item-based correlation would");
+  lines.push("be written against a guess.");
   lines.push("");
   return lines.join("\n");
 }
@@ -1320,19 +1552,28 @@ if (invokedDirectly) {
 
 export {
   APPROVE_ORDER,
+  APPROVE_TRIALS,
   DENY_ORDER,
   MUST_NOT_EXECUTE,
+  PATCH_PROMPT,
   POINTER,
   PROBE,
+  PROMPT,
   TRIALS,
   approvalKind,
   availableDecisions,
   buildReport,
+  carriesItemContent,
   carriesTrouble,
   chooseDecision,
+  fileChangeApiForm,
   isApprovalRequest,
   isAutoReviewNotification,
+  isFileChangeItem,
+  isItemNotification,
+  itemType,
   keyPaths,
+  promptFor,
   redact,
   redactString,
   voidReason,
