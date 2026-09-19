@@ -1,0 +1,21 @@
+{
+  "seq": 75,
+  "ts": "2026-09-17T19:04:38Z",
+  "event": "audit.gesture_refused",
+  "actor": "system:gate",
+  "channel": "telegram",
+  "payload": {
+    "actor": "human:carter",
+    "gesture": "review-note",
+    "code": "policy-not-attested",
+    "sender": {
+      "channel": "telegram",
+      "id": "5559876543"
+    },
+    "sender_source": "policy",
+    "message": "the policy file has changed since it was attested at seq 44607; the sender mapping it declares is not in force, so nothing was recorded"
+  },
+  "alg": "sha256/jcs",
+  "prev": "2e9b7c1a4d6f08213b5c7e9a0d2f416385a7c9e1b3d5f70921a3c5e7092b4d6f",
+  "hash": "8b40e27c5f1a936d04e8b2c6a1d3f5079e2b4c6d8a0f2e4160a8c2e406283bda"
+}
