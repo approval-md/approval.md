@@ -540,9 +540,54 @@ because the gate's wait is synchronous: frames queue while a decision is being
 made, which is the fail-closed direction and matches the observed protocol,
 where a turn does not move past an unanswered question.
 
-Follow-ups 4 and 5 below are separate tasks: the auto-reviewer is not proved off
-(APRV-364) and socket custody is unsettled (APRV-365). Until those land, the
-claim stays exactly what the recommendation says it is.
+Follow-up 5 below is a separate task: socket custody is unsettled (APRV-365).
+Until it lands, the claim stays exactly what the recommendation says it is.
+
+**A preflight probe runs before every turn (APRV-364, landed).** The
+auto-reviewer question could not be answered by reading anything. Whether the
+reviewer runs is config-gated in the Codex source, no frame in the observed
+vocabulary reports it, and the client is told only afterwards through an
+`item/autoApprovalReview` notification. So the bridge establishes what it can by
+watching one command instead: every start runs a PREFLIGHT turn asking for
+`true` and nothing else, before the operator's own turn, with no flag to skip
+it. It costs one turn per start.
+
+Three outcomes, told apart by the command-item notifications:
+
+```
+an approval request for it reached this client   the real turn runs, and the
+                                                 report records the pin as
+                                                 confirmed by observation
+a command ran and no request arrived             bridge-approval-policy-mismatch
+no command ran at all                            bridge-preflight-void
+```
+
+An `item/autoApprovalReview` notification in either turn is
+`bridge-auto-reviewer-active` and ends the run. Neither new code is a member of
+the declines union: they end a session rather than answer a request.
+
+The VOID case is the one worth knowing. A preflight is a prompt, and a model is
+free to answer a prompt in prose; then nothing ran and nothing asked, and the
+fact wanted here was not established. Calling that a pass would report a verdict
+nobody reached, which is the APRV-359 lesson; calling it the policy mismatch
+would blame a healthy session for a choice of words. So it is its own stop, the
+report carries the turn's frames verbatim, nothing is retried, and an operator
+runs the verb again. Those verbatim frames are also how the real shape of the
+`item/started` and `item/completed` payloads gets recorded here at last, which
+is the fact APRV-379 is still waiting on.
+
+**What a pass means, exactly.** One question about one command reached this
+client unanswered by anything else. It is NOT a proof that the auto-reviewer is
+off for every question, and `thread.confirmed` says `observed` rather than
+anything wider. The record of "something other than the gate answered a question
+the gate exists to ask" is APRV-378, and until it lands an
+`bridge-auto-reviewer-active` stop leaves no trace in the log: the fact lives in
+the exit code and the report.
+
+The probe's own approval request never reaches the gate. It is declined
+immediately, as an observation. Routing it through the decision path would
+register an action and could put `true` on a human's phone at every bridge
+start, and a preflight that spends a person's attention is not a harmless one.
 
 **The command is bound as words, not as a rendering (APRV-362, landed).** The
 item-based API delivers the command as one string joined from the argv Codex
@@ -612,7 +657,11 @@ bridge), then 362 to 368 depending on it.
 4. **Prove the auto-reviewer is off, and refuse when it is not.** A preflight
    and a doctor row. A session with an auto-reviewer in front of the gate is a
    session whose silence means nothing, and the bridge should say so rather than
-   run.
+   run. **Landed (APRV-364), narrower than the heading.** Nothing can be read
+   that proves the reviewer off, so the preflight probe establishes the
+   observable part instead: one command, one question, or a stop. The doctor row
+   moved to APRV-378 with the audit record, because the record is the only
+   durable fact a row could read; a row built here would always skip.
 5. **Custody of the socket.** Decide and enforce who may connect, given that a
    pending request is replayed to the next connection. Until that is settled,
    the bridge's claim is "this client decided every question it was asked",
