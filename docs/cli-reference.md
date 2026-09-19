@@ -6303,9 +6303,20 @@ Its own refusals, beside the gate's:
 
 ```
 bridge-request-unbound       no command, no cwd, or no call identity on the request
-bridge-file-change-unbound   an item-based file change carries no content (APRV-363)
+bridge-file-change-unbound   an item-based file change carries no content (APRV-379)
 bridge-unknown-request       a server request this client has no reading for
 ```
+
+A **legacy `applyPatchApproval` is decided rather than declined** (APRV-363).
+Its `fileChanges` map rides on the request, so there is nothing to correlate and
+nothing is re-rendered: the change is classified by the paths it names, through
+the same protected-path rules every other file tool uses, and the registered
+payload carries those paths, the change verbatim and `content_sha256` over the
+map as it arrived. A path that is absolute, or that resolves outside the
+directory the server named, is refused `hook-io`; a request with a map and no
+directory (`cwd` or `grantRoot`) is `bridge-request-unbound`. The item-based
+`item/fileChange/requestApproval`, which carries an identifier and no content,
+stays declined.
 
 The thread is started with `approvalPolicy: untrusted` and `sandbox: read-only`.
 `untrusted` is the wire spelling of the source's `UnlessTrusted`, the only
