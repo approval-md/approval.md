@@ -68,6 +68,7 @@ classes:
   harness.launch.muse:       { autonomy: human-only }   # Muse Code: a -contributor model trains on prompts and completions, and no adapter or read jail is in place yet (APRV-354)
   log.sync:                  { autonomy: autonomous }       # ff-pull with chain reconcile; APRV-125
   log.advance:               { autonomy: supervised-live, live_rate: 0.01 }       # records commit to a records branch; APRV-125
+  log.advance.daemon:        { autonomy: autonomous }       # the daemon's own cadence advance: publishes records the log already holds, appends nothing, decides nothing (APRV-382)
 
 budgets:
   global: { daily_actions: 20000 }
