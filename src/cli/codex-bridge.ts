@@ -721,7 +721,7 @@ export const CODEX_BRIDGE_HELP = [
   "the policy and the log: classify {command, cwd}, register, request, wait on the",
   "verified view, then reply accept or decline in the server's own vocabulary.",
   "",
-  "  --prompt <text>       the turn to run (a positional argument works too)",
+  "  --prompt <text>       the turn to run (required)",
   "  --workspace <dir>     the thread's working directory (default: cwd)",
   "  --as <agent:id>       the acting identity (default: agent:codex)",
   "  --dir/--policy/--log  where the policy and the log are, as the hook resolves them",
