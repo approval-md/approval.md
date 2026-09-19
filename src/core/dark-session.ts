@@ -635,12 +635,33 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
     // per-commit replays of that window finish in about 1.2 seconds, where the
     // single union replay reached its limit and gave up.
     //
-    // The per-commit INPUTS — the blobs at the commit and at its first parent,
-    // and the digest at the commit for the `attested` verdict's organ
-    // (APRV-272) and sign-off (APRV-338) halves — are built by
-    // `core/commit-guard.ts` (APRV-375), which is the same helper the CI guard
-    // uses. Two copies of this construction were two code paths to keep in
-    // step, and keeping them in step by hand is what APRV-369 was filed about.
+    // The per-commit INPUTS — the blobs at the commit and at its first parent —
+    // are built by `core/commit-guard.ts` (APRV-375), which is the same helper
+    // the CI guard uses. Two copies of this construction were two code paths to
+    // keep in step, and keeping them in step by hand is what APRV-369 was filed
+    // about.
+    //
+    // WHOLE-FILE evidence (a sign-off, APRV-338; an organ attestation,
+    // APRV-272) is matched at the head of the RANGE being judged, because it
+    // says a human read the file as it stood there. The CI guard's range is a
+    // pull request, so its head is the pull request's
+    // (`core/commit-guard.ts`'s `digestsAt`). ARM A HAS NO RANGE: it judges
+    // commits that are already merged, each of which passed its own pull
+    // request and was ratified, if at all, at that pull request's head. So the
+    // anchor here is the COMMIT, which is what APRV-369 shipped and what its
+    // fixture pins — the middle commit of three merged pull requests is
+    // evidenced by a sign-off over its own bytes, and anchoring the sweep at
+    // this checkout's HEAD would report it dark for a change CI passed, which
+    // is the disagreement APRV-369 exists to remove.
+    //
+    // The residual, stated rather than hidden: a MULTI-COMMIT pull request
+    // whose earlier commits were rescued by a sign-off at its head merges into
+    // main as several commits, and this sweep credits none of them, because no
+    // in-window commit's blob equals the ratified bytes. That is a false alarm
+    // in a health report and never a hole in the gate. Naming the right anchor
+    // for it means asking git which merge brought each commit in and reading
+    // that merge's second parent, which is APRV-374's neighbourhood and a
+    // design ruling rather than an implementation detail.
     const read: GitReader = (args) => {
       const run = git([...args], checkout.root);
       return run.ok ? run.stdout : null;

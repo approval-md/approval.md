@@ -49,6 +49,16 @@
  * stops asking about the combined diff because the combined diff is a change
  * nobody ever made and nobody could have approved.
  *
+ * ## One thing is NOT per commit: whole-file evidence
+ *
+ * A grant binds a hunk, so it is evidence about one commit. A sign-off
+ * (APRV-338), an organ attestation (APRV-272) and the policy attestation say a
+ * human read the file AS IT NOW STANDS, so they are evidence about the bytes
+ * the range INSTALLS: every commit is offered the digests at the RANGE HEAD.
+ * {@link digestsAt} carries the reasoning, and it matters because matching them
+ * per commit would have repealed the escape hatch for every edit before the
+ * last one.
+ *
  * ## What this does NOT do
  *
  * It does not re-judge work the branch absorbed by merging `origin/main`. Those
@@ -74,11 +84,7 @@ import type {
   GuardReport,
   LogWindow,
 } from "./protected-path-guard.js";
-import {
-  evaluateProtectedPaths,
-  isGuardedPath,
-  namesPolicyFile,
-} from "./protected-path-guard.js";
+import { evaluateProtectedPaths, isGuardedPath } from "./protected-path-guard.js";
 
 /** SHA-256 of a UTF-8 string, hex. */
 function sha256Hex(text: string): string {
@@ -237,10 +243,12 @@ function denseCombinedPaths(
 export interface CommitGuardParts {
   blobsFor: (path: string) => ChangeBlobs | null;
   /**
-   * SHA-256 of a path's bytes at THIS commit, for the `attested` verdict's
-   * organ (APRV-272) and sign-off (APRV-338) halves. One function, because the
-   * question is identical; the guard keeps the two INPUTS separate and both are
-   * fed from here.
+   * SHA-256 of a path's bytes at THIS commit.
+   *
+   * NOT what the `attested` verdict is fed. Whole-file evidence is matched at
+   * the RANGE head ({@link digestsAt}), for the reason stated there; this stays
+   * because a caller judging a single commit as its own range has the same
+   * head, and because it is the natural thing for a caller to want.
    */
   sha256At: (path: string) => string | null;
   /** This commit's own date pair, whatever path is asked about (APRV-339). */
@@ -298,6 +306,44 @@ export function commitGuardInputParts(
       base: baseRev === null ? "(root)" : `${commit.sha.slice(0, 12)}^1`,
       head: commit.sha.slice(0, 12),
     },
+  };
+}
+
+/**
+ * SHA-256 of any path's bytes AT ONE REVISION, cached.
+ *
+ * ## Why whole-file evidence is matched at the range head and not per commit
+ *
+ * The two kinds of evidence answer different questions, so they are anchored to
+ * different things:
+ *
+ * - A GRANT binds a hunk — a before-state, an after-state, a human who was
+ *   shown them — so it is evidence about ONE COMMIT and is matched per commit,
+ *   which is what APRV-375 is about.
+ * - A SIGN-OFF (`gate.path.signed_off`, APRV-338), an ORGAN attestation
+ *   (`gate.organ.attested`, APRV-272) and the POLICY attestation
+ *   (`policy.updated`) are whole-file records: a human read the file AS IT NOW
+ *   STANDS and ratified those exact bytes. What they are about is the bytes the
+ *   pull request INSTALLS, which is the blob at the range head.
+ *
+ * Matching them per commit would have quietly repealed the escape hatch. A
+ * two-commit branch whose first commit has no grant could no longer be rescued
+ * by a sign-off at head, because the intermediate blob is not the ratified one;
+ * a policy amendment split over two commits would fail on the first. So every
+ * commit in a range is offered the digests at the range head, whatever its own
+ * blob hashes to. The ordering APRV-338 asked for is untouched: the evaluator
+ * reaches the sign-off only after every grant search has failed, so hunk
+ * evidence still leads the reasons wherever it exists.
+ */
+export function digestsAt(read: GitReader, rev: string): (path: string) => string | null {
+  const cache = new Map<string, string | null>();
+  return (path) => {
+    const cached = cache.get(path);
+    if (cached !== undefined) return cached;
+    const blob = read(["show", `${rev}:${path}`]);
+    const value = blob === null ? null : sha256Hex(blob);
+    cache.set(path, value);
+    return value;
   };
 }
 
@@ -378,6 +424,11 @@ export function judgeCommits(options: {
   );
   if (!listed.ok) return { ...empty, unavailable: listed.message };
 
+  // Whole-file evidence is about the bytes this pull request INSTALLS, so it is
+  // matched at the RANGE head for every commit in the range. See {@link digestsAt}.
+  const atRangeHead = digestsAt(read, head);
+  const policySha256AtHead = atRangeHead(shared.policyPath);
+
   const commits: CommitVerdict[] = [];
   const findings: CommitFinding[] = [];
   const exempt = new Set<string>();
@@ -399,21 +450,13 @@ export function judgeCommits(options: {
       continue;
     }
     const parts = commitGuardInputParts(read, commit);
-    // The policy file's digest is this COMMIT's, not head's: the `attested`
-    // verdict asks whether a human attested the bytes the change under
-    // judgment left behind, and under per-commit judgment that is the commit's
-    // own tree. Computed only when the commit touched the policy file, since
-    // nothing else reads it.
-    const policyFile = commit.changedPaths.find((path) =>
-      namesPolicyFile(path, shared.policyPath),
-    );
     const report: GuardReport = evaluateProtectedPaths({
       ...shared,
-      policySha256AtHead: policyFile === undefined ? null : parts.sha256At(policyFile),
+      policySha256AtHead,
       changedPaths: [...commit.changedPaths].sort(),
       blobsFor: parts.blobsFor,
-      organSha256AtHead: parts.sha256At,
-      pathSha256AtHead: parts.sha256At,
+      organSha256AtHead: atRangeHead,
+      pathSha256AtHead: atRangeHead,
       changeTsFor: parts.changeTsFor,
       window: { ...shared.window, base: parts.window.base, head: parts.window.head },
     });

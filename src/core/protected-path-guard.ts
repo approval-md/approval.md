@@ -603,11 +603,10 @@ function endsWithSegments(candidate: string, want: string): boolean {
  *
  * The guard is handed a repository-relative path from git and a policy location
  * from its caller, and either may be the more qualified of the two, so the test
- * is run both ways. Exported because `core/commit-guard.ts` has to ask the same
- * question when it decides which commit's policy bytes to hash, and two
- * spellings of that test would be two chances to hash the wrong tree.
+ * is run both ways. One named predicate rather than the comparison written out
+ * at each of the two sites that ask it.
  */
-export function namesPolicyFile(path: string, policyPath: string): boolean {
+function namesPolicyFile(path: string, policyPath: string): boolean {
   return endsWithSegments(policyPath, path) || endsWithSegments(path, policyPath);
 }
 

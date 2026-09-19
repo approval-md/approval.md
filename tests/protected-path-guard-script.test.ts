@@ -28,7 +28,11 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
+import {
+  appendAttestation,
+  appendOrganAttestation,
+  appendPathSignOff,
+} from "../src/core/attest.js";
 import { decide, register, request, startHarnessExecution } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { verify } from "../src/core/verify.js";
@@ -988,10 +992,16 @@ test(
     assert.ok(spec.length >= 3, `SPEC.md was judged on ${String(spec.length)} commit(s)`);
     for (const finding of spec) {
       assert.equal(finding.ok, true, finding.detail);
-      // AC1: no sign-off record is doing the work. A sign-off is whole-file
-      // evidence and would mean the change passed because a human ratified the
-      // file after the fact, not because the commits were granted.
-      assert.notEqual(finding.evidence, "attested", finding.detail);
+      // AC1's "with no sign-off record present" reads as: the GRANTS carry this
+      // pull request. Asserted as the positive — every finding rests on
+      // hunk-level evidence, a grant or a policy-authorized execution — rather
+      // than as "not attested", because a sign-off at the range head is a
+      // legitimate pass for a pull request that needs one, which is what the
+      // three `signoff-*` cases above exercise. This one does not need it.
+      assert.ok(
+        finding.evidence === "granted-file" || finding.evidence === "policy-authorized-file",
+        `${finding.commit?.slice(0, 12) ?? "?"} passed on ${String(finding.evidence)}: ${finding.detail}`,
+      );
     }
     // Each judged commit is named with its own records.
     for (const commit of run.report.commits.filter((entry) => entry.judged)) {
@@ -1005,3 +1015,95 @@ test(
     for (const merge of merges) assert.equal(merge.judged, false, merge.sha);
   },
 );
+
+// ---------------------------------------------------------------------------
+// (f) whole-file evidence is anchored to the RANGE HEAD, not to a commit
+//
+// A grant binds a hunk and is evidence about one commit. A sign-off (APRV-338),
+// an organ attestation (APRV-272) and the policy attestation are whole-file
+// records: a human read the file AS IT NOW STANDS. What they are about is the
+// bytes the pull request installs, so every commit in the range is offered the
+// digests at the range head. Matched per commit instead, the escape hatch would
+// cover only the commit whose blob happened to equal the ratified bytes.
+// ---------------------------------------------------------------------------
+
+/** `approval policy attest --path <path>` on the working tree, through the real verb. */
+function signOffSpec(fixture: Fixture, minutes = 1): void {
+  const signed = appendPathSignOff(
+    fixture.unit.logPath,
+    { path: "SPEC.md", root: fixture.dir, protectedPaths: ["SPEC.md"] },
+    HUMAN,
+    { clock: fixedClock(minutesAgo(minutes)) },
+  );
+  assert.equal(signed.ok, true, JSON.stringify(signed));
+}
+
+/**
+ * A branch whose FIRST commit has no record of its own and whose second is
+ * granted. Returns both shas, with SPEC.md at "signed" on the working tree.
+ */
+function twoCommitBranch(label: string): { fixture: Fixture; first: string; second: string } {
+  const fixture = newFixture(label);
+  // No grant for this one: the edit the hook never saw.
+  writeFileSync(join(fixture.dir, "SPEC.md"), "ungranted\n", "utf8");
+  const first = commit(fixture.dir, "an edit nothing authorized");
+  grantChange(fixture, `${label}-two`, "SPEC.md", "ungranted", "signed");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "signed\n", "utf8");
+  const second = commit(fixture.dir, "a granted edit");
+  return { fixture, first, second };
+}
+
+test("APRV-375: a sign-off at the range head rescues an earlier commit that has no grant", () => {
+  const { fixture, first, second } = twoCommitBranch("signoff-head");
+  // The human reads the file as it now stands and ratifies those bytes, then
+  // the record is committed with the rest of the log.
+  signOffSpec(fixture);
+  commit(fixture.dir, "log advance carrying the sign-off");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  // The first commit is covered by the whole-file record, which is what the
+  // escape hatch is for: no grant exists for it and none can be made now.
+  const rescued = verdictOf(run, first);
+  assert.equal(rescued.ok, true, run.stdout);
+  assert.equal(rescued.findings[0]?.evidence, "attested");
+  assert.match(rescued.findings[0]?.detail ?? "", /gate\.path\.signed_off|signed off/u);
+
+  // The second commit has a grant of its own, and hunk evidence still leads:
+  // the evaluator reaches a sign-off only after every grant search has failed
+  // (APRV-338's ordering rule, unchanged).
+  assert.equal(verdictOf(run, second).findings[0]?.evidence, "granted-file");
+});
+
+test("APRV-375: without the sign-off, that same range fails and names the first commit", () => {
+  // The same fixture, and the only difference is that nobody ratified the
+  // bytes at head. The grant for the second commit was already committed with
+  // it, so there is nothing further to commit here.
+  const { fixture, first, second } = twoCommitBranch("signoff-absent");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, first).ok, false);
+  assert.equal(verdictOf(run, second).ok, true, run.stdout);
+  const failed = run.report.findings.find((finding) => finding.ok === false);
+  assert.equal(failed?.commit, first);
+  assert.match(run.stdout, new RegExp(`FAIL ${first.slice(0, 12)}`, "u"));
+});
+
+test("APRV-375: a sign-off over an INTERMEDIATE commit's bytes covers nothing", () => {
+  const fixture = newFixture("signoff-intermediate");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "intermediate\n", "utf8");
+  const first = commit(fixture.dir, "an edit nothing authorized");
+  // Ratified here, at the intermediate bytes — and then the file moves on with
+  // no record of its own. A sign-off is about the bytes a human read, and these
+  // are not the bytes this pull request installs.
+  signOffSpec(fixture, 2);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "moved on\n", "utf8");
+  const second = commit(fixture.dir, "another edit nothing authorized");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, first).ok, false, run.stdout);
+  assert.equal(verdictOf(run, second).ok, false, run.stdout);
+});

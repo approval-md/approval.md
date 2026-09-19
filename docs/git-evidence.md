@@ -253,6 +253,16 @@ is `git merge-base origin/main HEAD`. `approval doctor`'s dark-session sweep
 judges the same unit through the same helper (`src/core/commit-guard.ts`), so
 the health row and the CI verdict agree by construction.
 
+**Whole-file evidence is anchored to the range head, not to a commit.** A grant
+binds a hunk and is evidence about one commit, so it is matched per commit. A
+sign-off (`gate.path.signed_off`), an organ attestation
+(`gate.organ.attested`) and the policy attestation say a human read the file as
+it now stands, so they are matched against the digest at the range head and
+cover every commit in the range: a two-commit branch whose first edit the gate
+never saw is still rescued by a sign-off at head, which is what that escape
+hatch is for. Hunk evidence keeps the lead, because the evaluator reaches a
+sign-off only after every grant search has failed.
+
 ## Demonstrating both layers
 
 `tests/daemon-git-evidence.test.ts` runs the demonstration: commit a log,

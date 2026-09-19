@@ -949,16 +949,20 @@ function repoWithMergedGrantedEdits(options: { grantLast: boolean }): {
     assert.equal(git(["checkout", "-q", "-b", branch, "main"], root).code, 0);
     if (evidence === "grant") edit(before, after, key);
     writeFileSync(join(root, "SPEC.md"), `${after}\n`, "utf8");
-    assert.equal(git(["add", "SPEC.md"], root).code, 0);
-    assert.equal(git(["commit", "--no-verify", "-q", "-m", key], root).code, 0);
     if (evidence === "sign-off") {
-      // The working tree is at this commit's bytes, which is what the verb
-      // hashes, so the record covers exactly the file this commit carries.
+      // The working tree is already at this commit's bytes, which is what the
+      // verb hashes, so the record covers exactly the file this commit lands.
       assert.equal(
         runCli(["policy", "attest", "--path", "SPEC.md", "--as", HUMAN], root).code,
         0,
       );
     }
+    // The log rides along with the edit, as it does in this repository's own
+    // dogfood arrangement. APRV-375 needs it: the CI guard reads the log out of
+    // the tree at the head of the range it is judging, and a commit whose tree
+    // carries no log is one it can read no evidence for at all.
+    assert.equal(git(["add", "-A"], root).code, 0);
+    assert.equal(git(["commit", "--no-verify", "-q", "-m", key], root).code, 0);
     const sha = git(["rev-parse", "HEAD"], root).stdout.trim();
     assert.equal(git(["checkout", "-q", "main"], root).code, 0);
     assert.equal(git(["merge", "--no-ff", "-q", "-m", `merge ${key}`, branch], root).code, 0);
@@ -1033,20 +1037,47 @@ interface ScriptCommit {
 }
 
 /**
- * The REAL CI guard, over this fixture's whole history.
+ * Commit the fixture's log, so the CI guard can read it.
  *
  * The fixture keeps its log untracked, because that is what a live checkout
  * looks like while a session is running; the CI guard reads committed trees
- * only, so the log and its payload store are committed first, in a commit that
- * touches nothing but the daemon's own append surface.
+ * only, so the log and its payload store go in first, in a commit that touches
+ * nothing but the daemon's own append surface.
  */
-function runCiGuard(root: string): { code: number; stdout: string; commits: ScriptCommit[] } {
+function commitTheLog(root: string): void {
   assert.equal(git(["add", "-A"], root).code, 0);
+  // Nothing to commit is the ordinary case for a fixture whose commits already
+  // carry their own records; this is here for whatever the sweep appended after
+  // the last one.
+  const staged = git(["diff", "--cached", "--name-only"], root);
+  if (staged.stdout.trim().length === 0) return;
   assert.equal(git(["commit", "--no-verify", "-q", "-m", "log advance"], root).code, 0);
-  const seed = git(["rev-list", "--max-parents=0", "HEAD"], root).stdout.trim();
+}
+
+/** The REAL CI guard over one range of this fixture's history. */
+function runCiGuard(
+  root: string,
+  base: string,
+  head: string,
+): { code: number; stdout: string; commits: ScriptCommit[] } {
   const run = spawnSync(
     process.execPath,
-    [GUARD_SCRIPT, "--repo", root, "--base", seed, "--head", "HEAD", "--json"],
+    [
+      GUARD_SCRIPT,
+      "--repo",
+      root,
+      "--base",
+      base,
+      "--head",
+      head,
+      // A record appended after a commit reaches a committed log only later, so
+      // the guard is told where the later copy is (APRV-260). Here that is the
+      // fixture's HEAD, which stands for the records branch CI would find; the
+      // sign-off in the middle pull request is exactly such a record.
+      "--log-ref",
+      "HEAD",
+      "--json",
+    ],
     { encoding: "utf8" },
   );
   const parsed = JSON.parse(run.stdout) as { commits: ScriptCommit[] };
@@ -1071,19 +1102,34 @@ test("APRV-369: the doctor row reaches the CI guard's verdict on merged, evidenc
   assert.notEqual(row, undefined);
   assert.notEqual(row?.status, "fail", `dark-sessions disagreed with the guard: ${row?.detail ?? ""}`);
 
-  // APRV-375 AC5: the REAL CI guard, over the same repository, names the same
-  // unit and reaches the same verdict. It judges these three commits and no
-  // other; the merges that carried them into main resolved SPEC.md to one
-  // parent's bytes and are listed as skipped.
-  const ci = runCiGuard(root);
-  assert.equal(ci.code, 0, ci.stdout);
+  // APRV-375 AC5: the REAL CI guard names the same unit and reaches the same
+  // verdict. Each of these three commits was its own pull request, so each is
+  // replayed over its own range — which is also the unit arm A judges, and the
+  // point of the shared helper is that the two cannot drift apart.
+  //
+  // The range matters for the MIDDLE one, and it is the whole of APRV-375's
+  // whole-file rule: its evidence is a sign-off over its own bytes, made at the
+  // head of its own pull request. Replay these three as ONE range and that
+  // sign-off stops covering anything, correctly, because the bytes such a range
+  // would install are the third commit's.
+  commitTheLog(root);
   for (const sha of [first, middle, last]) {
+    const ci = runCiGuard(root, `${sha}^`, sha);
+    assert.equal(ci.code, 0, ci.stdout);
     const judged = ci.commits.find((commit) => commit.sha === sha);
     assert.ok(judged !== undefined, `the CI guard did not judge ${sha.slice(0, 12)}`);
     assert.equal(judged.judged, true);
     assert.equal(judged.ok, true);
   }
-  for (const merge of ci.commits.filter((commit) => commit.merge)) {
+
+  // The merges that carried them into main resolved SPEC.md to one parent's
+  // bytes, so the guard lists them and judges none of them for what their
+  // parents did.
+  const seed = git(["rev-list", "--max-parents=0", "HEAD"], root).stdout.trim();
+  const whole = runCiGuard(root, seed, "HEAD");
+  const merges = whole.commits.filter((commit) => commit.merge);
+  assert.ok(merges.length >= 3, whole.stdout);
+  for (const merge of merges) {
     assert.equal(merge.judged, false, `${merge.sha.slice(0, 12)} was judged for what its parents did`);
   }
 
@@ -1113,9 +1159,10 @@ test("APRV-369: an unevidenced edit that arrived by merge names its commit and i
   // AC3: it names the commit it judged.
   assert.match(row?.detail ?? "", new RegExp(second.slice(0, 12), "u"));
 
-  // APRV-375 AC5: the CI guard fails the SAME commit, and only that one. Same
+  // APRV-375 AC5: the CI guard fails the SAME commit, on its own range. Same
   // unit, same verdict, from the shared per-commit input construction.
-  const ci = runCiGuard(root);
+  commitTheLog(root);
+  const ci = runCiGuard(root, `${second}^`, second);
   assert.equal(ci.code, 1, ci.stdout);
   const failed = ci.commits.filter((commit) => !commit.ok);
   assert.deepEqual(
