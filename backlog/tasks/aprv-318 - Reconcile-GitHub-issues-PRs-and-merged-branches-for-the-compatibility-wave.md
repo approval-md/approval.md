@@ -1,16 +1,31 @@
 ---
 id: APRV-318
 title: Reconcile GitHub issues PRs and merged branches for the compatibility wave
-status: In Progress
+status: Done
 assignee:
   - '@codex-astra'
 created_date: '2026-09-08 22:40'
-updated_date: '2026-09-17 01:58'
+updated_date: '2026-09-19 18:00'
 labels: []
 dependencies: []
 priority: high
 type: chore
 ordinal: 235000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:claude-code'
+  route:
+    assignee: 'agent:claude-code'
+    rationale: 'APRV-318 AC2 and AC3, the third attempt at the 233-ref deletion, on 2026-09-19 after Carter unset the stray core.hooksPath: the agent runs the driver under a granted token, the human decides on the phone (vcs.ref.delete is manual since seq 44188)'
+  state: proposed
+  actions:
+    - class: vcs.ref.delete
+      summary: 'node scripts/reconcile-delete-merged-branches.mjs --execute from /Users/carter/dev/approval-md: delete 233 merged, unowned remote branches at their 2026-09-08 inventory tips in five atomic pushes (payload is the argv and cwd; run recomputes the hash before it spawns)'
+      reversible: false
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-318:delete-merged-refs:2026-09-19'
+      payload_hash: 'c200184b9ffd114755a25be098647c753b835bb9afa2281f77f08ae50ce4a117'
 ---
 
 ## Description
@@ -22,9 +37,9 @@ Carter requested a coordinated remaining-work wave including repository cleanup.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Every open PR and issue has a verified disposition or explicit remaining-work record; completed or superseded items are closed with evidence.
-- [ ] #2 Only branches whose current exact tips are demonstrably merged and unowned are removed; active worktrees, unique commits and records delivery refs needed by the gate are preserved.
-- [ ] #3 A durable inventory records kept and removed refs with commit IDs and reasons, and GitHub state is checked after changes.
-- [ ] #4 Task changes pass records checks and are committed with Codex co-author attribution, pushed and delivered through the merge queue.
+- [x] #2 Only branches whose current exact tips are demonstrably merged and unowned are removed; active worktrees, unique commits and records delivery refs needed by the gate are preserved.
+- [x] #3 A durable inventory records kept and removed refs with commit IDs and reasons, and GitHub state is checked after changes.
+- [x] #4 Task changes pass records checks and are committed with Codex co-author attribution, pushed and delivered through the merge queue.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -102,4 +117,12 @@ Policy observation for Carter, offered as a suggestion and not acted on. A bulk 
 AC status after this lane. AC1 checked: every open pull request and issue now has a verified disposition or an explicit remaining-work record, in the task notes and in the inventory's followups section, and the items the snapshot closed keep their gate outcome seqs. AC2 and AC3 NOT checked: no remote ref has been deleted, so there is nothing yet to record as removed and no post-change GitHub state to check. They close on the runbook above, on Carter's grant. AC4 NOT checked: this lane's changes are committed on lane/closeouts and delivered by its pull request, and the criterion closes when that merges through the queue. One honest note on AC4's wording, which asks for Codex co-author attribution: that was written when the task was Codex's. These commits carry this session's own co-author trailer instead, because attributing them to Codex would be a false credit; the original Codex-authored commits keep theirs. Task stays In Progress.
 
 Delivered in pull request #414 (lane/closeouts), auto-merge armed. One check is red and it is the records path rather than this work: the protected-path guard fails no-evidence on the two design documents delivered by APRV-323 and APRV-324 in the same pull request, because their writes classified policy.edit.design and proceeded, and the committed log stops at seq 37145 (2026-09-17T01:20:45Z) while the writes happened after that. The guard's policy-authorized tier accepts exactly those execution records once a log advance carries them. AC4 closes when this merges.
+
+Third attempt, 2026-09-19, succeeded. Step 0: Carter unset the stray core.hooksPath in the primary by hand (git config --unset core.hooksPath); --plan then reported core.hooksPath (unset), 233 candidates, 233 still at the recorded tip, 0 already gone, 0 drifted, no blockers. Gate cycle from the primary under class vcs.ref.delete (manual since seq 44188, APRV-352): task.registered seq 53073, approval.requested seq 53077 (payload c200184b9ffd114755a25be098647c753b835bb9afa2281f77f08ae50ce4a117, argv node scripts/reconcile-delete-merged-branches.mjs --execute --action-key aprv-318:delete-merged-refs:2026-09-19, cwd the primary), approval.granted seq 53082 by Carter from the phone, execution.started seq 53087, execution.completed seq 53088. Driver output: five atomic batches, every ref line [deleted], then "deleted 233 ref(s) on origin" and "post-check: none of the 233 deleted ref(s) are still on origin". The one hand-excluded branch, claude/approval-signals-human-values-f0cf71, was not touched. The envelope for this cycle is on this task file. AC4 attribution note stands from the 09-16 lane: these commits carry the session own trailer; the Codex-authored commits keep theirs.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every open PR and issue dispositioned (09-08 and 09-16 lanes), and the 233 merged, unowned remote branches from the 2026-09-08 inventory deleted on 2026-09-19 through the gate (vcs.ref.delete, granted seq 53082, executed seq 53087 to 53088) in five atomic pushes with a clean post-check; inventory in docs/repository-reconciliation-2026-09-08.json.
+<!-- SECTION:FINAL_SUMMARY:END -->
