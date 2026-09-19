@@ -1,0 +1,1 @@
+{"command":"ls conformance/ && ls conformance/vectors/ | head -40 && echo \"--- manifest ---\" && ls conformance/*.json 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4de5200797f700ce"}

@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='query { repository(owner:\"approval-md\", name:\"approval.md\") { mergeQueue(branch:\"main\") { entries(first:10) { nodes { position state enqueuedAt pullRequest { number } } } } } }' 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-acae5a8b0dfd86966"}

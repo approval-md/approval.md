@@ -1,0 +1,1 @@
+{"command":"sed -n '825,845p' README.md; echo '=== guard test ==='; /usr/bin/grep -rn \"DOCTOR_ROW_ORDER\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-acae5a8b0dfd86966"}

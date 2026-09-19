@@ -1,0 +1,1 @@
+{"command":"gh pr merge 469 2>&1 | tail -1; gh api graphql -f query='{ repository(owner:\"approval-md\", name:\"approval.md\") { pullRequest(number:469){ state mergeStateStatus isInMergeQueue autoMergeRequest{enabledAt} } } }'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
