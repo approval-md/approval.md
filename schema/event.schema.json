@@ -1505,9 +1505,10 @@
                 "type": "string",
                 "enum": [
                   "no-records",
-                  "no-evidence"
+                  "no-evidence",
+                  "no-evidence-merged"
                 ],
-                "description": "Which arm found it: `no-records` is git activity with no attributable hook record at all, `no-evidence` is a guarded path changed with no evidence a human decided it (the spelling APRV-151's CI guard already uses)."
+                "description": "Which arm found it: `no-records` is git activity with no attributable hook record at all, `no-evidence` is a guarded path changed with no evidence a human decided it (the spelling APRV-151's CI guard already uses), and `no-evidence-merged` (APRV-369) is that same finding where every failing commit reached the checkout through a merge rather than being authored on it — the same `dark` verdict, reported under its own code because the subject named it the checkout that SYNCED the change and the repair is in the branch the commit came from. A closed set, and `tests/dark-session.test.ts` pins it equal to the codes a `dark` verdict can carry, so a code the sweep can produce cannot be missing here: a record refused at the write boundary is an observation that never reaches a human."
               },
               "observation_key": {
                 "type": "string",

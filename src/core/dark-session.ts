@@ -100,6 +100,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -158,6 +159,16 @@ export const DARK_SESSION_CODES = [
   "no-records",
   /** Arm A: a guarded path changed and the log carries no evidence for it. */
   "no-evidence",
+  /**
+   * Arm A, and EVERY failing commit arrived here through a merge (APRV-369).
+   *
+   * The same failure as `no-evidence` and the same `dark` verdict — nothing is
+   * excused by it — reported under its own code because the checkout it names
+   * is the one that SYNCED the change rather than the one that made it. The
+   * repair is in whatever branch or worktree authored the commit, which the
+   * detail names.
+   */
+  "no-evidence-merged",
   /** Exempt: the commits touch only the daemon's own append surface. */
   "evidence-surface",
   /** Exempt: authored by the daemon's own git identity. */
@@ -176,6 +187,19 @@ export const DARK_SESSION_CODES = [
 
 export type DarkSessionCode = (typeof DARK_SESSION_CODES)[number];
 
+/**
+ * The codes a `dark` verdict can carry, and therefore the ones that reach the
+ * log on an `audit.dark_session` record (APRV-369).
+ *
+ * A separate, smaller list than {@link DARK_SESSION_CODES} because it is the
+ * one the event schema constrains: an exempt or undetermined subject is never
+ * recorded, so its code has no business in a write-boundary enum. Pinned equal
+ * to that enum by a test, for the reason APRV-358 gave: a code the sweep can
+ * produce and the schema refuses is an observation that never reaches a human,
+ * and nothing fails loudly when it happens.
+ */
+export const DARK_VERDICT_CODES = ["no-records", "no-evidence", "no-evidence-merged"] as const;
+
 /** One commit the observer saw, as git reported it. */
 export interface ObservedCommit {
   /** The full sha. */
@@ -190,6 +214,23 @@ export interface ObservedCommit {
   changedPaths: readonly string[];
   /** The branch or worktree this commit was observed on, for the message. */
   ref: string;
+  /**
+   * Did this commit reach the checkout through a merge rather than being made
+   * on it? (APRV-369.)
+   *
+   * True when the commit is reachable from the observed HEAD but is NOT on its
+   * first-parent history, which is what "somebody else's branch was merged in"
+   * looks like in git: a lane's commits, a contributor's, or anything that
+   * arrived by fast-forward from the trunk. A commit made in this checkout and
+   * committed on the branch it is standing on is on the first-parent path and
+   * is `false`.
+   *
+   * OPTIONAL, and absence means `false` — attributed to this checkout. That is
+   * the direction that keeps a caller written before this field existed
+   * honest: an observer that cannot say where a commit came from must not be
+   * read as saying it came from somewhere else.
+   */
+  arrivedByMerge?: boolean;
 }
 
 /** One checkout the observer saw: the primary, or a linked worktree. */
@@ -385,6 +426,18 @@ interface Attribution {
   unresolved: boolean;
 }
 
+/**
+ * One arm A failure, with the commit it was judged against (APRV-369).
+ *
+ * The commit travels with the finding because the finding alone cannot say
+ * WHERE the change was made, and that is half of what the row owes a reader:
+ * a commit that arrived by merge is somebody else's work this checkout synced.
+ */
+interface CommitFailure {
+  commit: ObservedCommit;
+  finding: GuardFinding;
+}
+
 function attribute(
   checkout: ObservedCheckout,
   windowed: readonly EventRecord[],
@@ -541,18 +594,8 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
   }
   const guardedPaths = [...guarded].sort();
 
-  const failures: GuardFinding[] = [];
+  const failures: CommitFailure[] = [];
   if (guardedPaths.length > 0) {
-    const changeTs = new Map<string, string | null>();
-    for (const commit of substantive) {
-      for (const path of commit.changedPaths) {
-        if (!guarded.has(path)) continue;
-        const seen = changeTs.get(path);
-        if (seen === undefined || (commit.ts !== null && seen !== null && commit.ts > seen)) {
-          changeTs.set(path, commit.ts);
-        }
-      }
-    }
     const logWindow: LogWindow = {
       firstSeq: records.length === 0 ? null : (records[0] as EventRecord).seq,
       lastSeq: records.length === 0 ? null : (records[records.length - 1] as EventRecord).seq,
@@ -562,21 +605,19 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
       head: `${checkout.name}@${(substantive[0] as ObservedCommit).sha.slice(0, 12)}`,
     };
     // APRV-202 made the guard ask whether THIS change was granted, so it needs
-    // the path's bytes on both sides of the change. Here the change is the span
-    // of substantive commits that touched the path: base is the parent of the
-    // oldest of them, head is the newest. A blob git cannot show, or one that
-    // is binary, answers null and the guard fails the path as
-    // change-unreadable rather than falling back to the path-level rule.
+    // the path's bytes on both sides of the change. The change is ONE COMMIT
+    // (APRV-369): base is that commit's parent, head is the commit. A blob git
+    // cannot show, or one that is binary, answers null and the guard fails the
+    // path as change-unreadable rather than falling back to the path-level rule.
     const blobCache = new Map<string, ChangeBlobs | null>();
-    const blobsFor = (path: string): ChangeBlobs | null => {
-      const cached = blobCache.get(path);
+    const blobsFor = (commit: ObservedCommit, path: string): ChangeBlobs | null => {
+      const key = `${commit.sha}:${path}`;
+      const cached = blobCache.get(key);
       if (cached !== undefined) return cached;
-      const touching = substantive.filter((commit) => commit.changedPaths.includes(path));
       let value: ChangeBlobs | null = null;
-      if (touching.length > 0) {
-        const byTime = [...touching].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""));
-        const baseRev = `${(byTime[0] as ObservedCommit).sha}^`;
-        const headRev = (byTime[byTime.length - 1] as ObservedCommit).sha;
+      {
+        const baseRev = `${commit.sha}^`;
+        const headRev = commit.sha;
         const inTree = (rev: string): boolean => {
           const listed = git(["ls-tree", "--name-only", rev, "--", path], checkout.root);
           return listed.ok && listed.stdout.trim().length > 0;
@@ -596,36 +637,106 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
           (headText !== null && headText.includes("\u0000"));
         if (!unreadable) value = { base: baseText, head: headText };
       }
-      blobCache.set(path, value);
+      blobCache.set(key, value);
       return value;
     };
-    const report = evaluateProtectedPaths({
-      changedPaths: guardedPaths,
-      blobsFor,
-      records,
-      logStatus: "ok",
-      policyProtectedPaths: input.policyProtectedPaths,
-      policySha256AtHead: input.policySha256,
-      policyPath: input.policyPath,
-      payloadFor: input.payloadFor,
-      changeTsFor: (path) => changeTs.get(path) ?? null,
-      ...(input.lookbackMs === undefined ? {} : { lookbackMs: input.lookbackMs }),
-      window: logWindow,
-    });
-    for (const finding of report.findings) if (!finding.ok) failures.push(finding);
+    // The digest of a path's bytes at the commit under judgment (APRV-369).
+    //
+    // Arm A passed NEITHER `organSha256AtHead` nor `pathSha256AtHead`, so a
+    // path a human had ratified with `gate.path.signed_off` (APRV-338) was
+    // evidence the CI guard could read and the doctor could not. Supplying them
+    // is not a loosening: it is the same record, read by the same evaluator,
+    // that the enforcement path already accepts. Withholding it was the second
+    // way this row could be stricter than the gate it reports on.
+    const digestCache = new Map<string, string | null>();
+    const sha256At = (commit: ObservedCommit, path: string): string | null => {
+      const key = `${commit.sha}:${path}`;
+      const cached = digestCache.get(key);
+      if (cached !== undefined) return cached;
+      const shown = git(["show", `${commit.sha}:${path}`], checkout.root);
+      const value = shown.ok ? createHash("sha256").update(shown.stdout, "utf8").digest("hex") : null;
+      digestCache.set(key, value);
+      return value;
+    };
+    // ONE COMMIT AT A TIME, and that is the whole of APRV-369's fix.
+    //
+    // This used to replay the UNION: base was the parent of the oldest
+    // in-window commit that touched the path and head was the newest, so a day
+    // in which four pull requests each edited SPEC.md arrived here as one
+    // change spanning all four. Replayed that way the union defeats the guard's
+    // own evidence rule — a grant binds a before-state that no longer occurs at
+    // the union's base, because an earlier commit in the span already moved
+    // those bytes — and on a 200 KB file it also exhausts the exact replay's
+    // byte budget. The CI guard never asks that question: it replays one pull
+    // request's range, and a grant binds one edit. So the doctor answered FAIL
+    // for a change CI had passed, at every session start, on `ea7427a`.
+    //
+    // Per commit the two sides ask the same question of the same bytes against
+    // the same records, and they agree. It is also cheaper: the sixteen
+    // per-commit replays of that window finish in about 1.2 seconds, where the
+    // single union replay reached its limit and gave up.
+    for (const commit of substantive) {
+      const changed = commit.changedPaths.filter((path) => guarded.has(path)).sort();
+      // A merge commit reports no paths at all under `--name-only`, so it drops
+      // out here rather than being judged for what its parents did.
+      if (changed.length === 0) continue;
+      const report = evaluateProtectedPaths({
+        changedPaths: changed,
+        blobsFor: (path) => blobsFor(commit, path),
+        records,
+        logStatus: "ok",
+        policyProtectedPaths: input.policyProtectedPaths,
+        policySha256AtHead: input.policySha256,
+        policyPath: input.policyPath,
+        organSha256AtHead: (path) => sha256At(commit, path),
+        pathSha256AtHead: (path) => sha256At(commit, path),
+        payloadFor: input.payloadFor,
+        changeTsFor: () => commit.ts,
+        ...(input.lookbackMs === undefined ? {} : { lookbackMs: input.lookbackMs }),
+        window: { ...logWindow, base: `${commit.sha.slice(0, 12)}^`, head: commit.sha.slice(0, 12) },
+      });
+      for (const finding of report.findings) {
+        if (!finding.ok) failures.push({ commit, finding });
+      }
+    }
   }
 
   const attribution = attribute(checkout, inWindow(records, input.window), input.payloadFor);
 
   if (failures.length > 0) {
+    // APRV-369's attribution half. A commit that is not on this checkout's own
+    // first-parent history arrived inside a merge: it was authored on a branch,
+    // in a worktree or by somebody else, and reached here by fast-forward.
+    // Saying "this checkout shows git activity the log carries no record of"
+    // about such a commit names the checkout that SYNCED it, which is the one
+    // place the work certainly did not happen.
+    //
+    // The verdict stays `dark` whether the failing commits were merged in or
+    // made here. This task removes a false alarm by asking the right question,
+    // and opening a hole while it was at it would be a second bug wearing the
+    // first one's clothes. What changes is the code and the sentence: the row
+    // names the commits it judged (AC3) and says where each of them came from.
+    const merged = failures.filter((failure) => failure.commit.arrivedByMerge === true);
+    const allMerged = merged.length === failures.length;
+    const judged = [...new Set(failures.map((failure) => failure.commit.sha.slice(0, 12)))];
+    const origin = allMerged
+      ? "Every one of them reached this checkout through a merge rather than being authored here, so the edit was made in whatever branch or worktree the commit came from and this checkout only synced it."
+      : merged.length > 0
+        ? `${String(merged.length)} of them reached this checkout through a merge rather than being authored here.`
+        : "They are on this checkout's own first-parent history, so they were made here.";
     return base(
       checkout,
       "dark",
-      "no-evidence",
+      allMerged ? "no-evidence-merged" : "no-evidence",
       guardedPaths,
       attribution.seqs,
-      `${where}: ${String(failures.length)} guarded path(s) changed here in ${input.window.from}..${input.window.to} with no evidence in the log that a human decided them — ${failures
-        .map((finding) => `${finding.path}: ${finding.detail}`)
+      `${where}: ${String(failures.length)} guarded-path change(s) in ${input.window.from}..${
+        input.window.to
+      } carry no evidence in the log that a human decided them. Judged commit(s): ${judged.join(", ")}. ${origin} — ${failures
+        .map(
+          (failure) =>
+            `${failure.commit.sha.slice(0, 12)} ${failure.finding.path}: ${failure.finding.detail}`,
+        )
         .join(" | ")}`,
     );
   }
@@ -884,8 +995,16 @@ function trunkOf(root: string): string | null {
   return null;
 }
 
-/** Parse `git log`'s record-separated output into commits. */
-function parseCommits(text: string, ref: string): ObservedCommit[] {
+/**
+ * Parse `git log`'s record-separated output into commits.
+ *
+ * `firstParent` is the set of shas on the checkout's own first-parent history
+ * (APRV-369). A commit outside it is reachable from HEAD only through a merge,
+ * so it was authored somewhere else and arrived here. An empty set — git would
+ * not answer — marks nothing, which attributes every commit to this checkout:
+ * the direction that claims less about where work happened.
+ */
+function parseCommits(text: string, ref: string, firstParent: ReadonlySet<string>): ObservedCommit[] {
   const commits: ObservedCommit[] = [];
   for (const chunk of text.split(RS)) {
     const lines = chunk.split("\n").filter((line) => line.length > 0);
@@ -900,6 +1019,7 @@ function parseCommits(text: string, ref: string): ObservedCommit[] {
       authorEmail: (email ?? "").toLowerCase(),
       changedPaths: lines,
       ref,
+      ...(firstParent.size > 0 && !firstParent.has(sha) ? { arrivedByMerge: true } : {}),
     });
   }
   return commits;
@@ -938,7 +1058,19 @@ function commitsOf(
       message: `\`git log\` failed in ${checkout.root}: ${run.stderr.trim() || "no output"}`,
     };
   }
-  return { ok: true, commits: parseCommits(run.stdout, checkout.branch ?? "HEAD") };
+  // The checkout's own first-parent history over the same window (APRV-369).
+  // Every commit this checkout MADE is on it; everything that arrived inside a
+  // merge — a lane's commits reaching the primary through a pull request, most
+  // of all — is not. A failure to answer leaves the set empty, which marks
+  // nothing and attributes everything here, the modest direction.
+  const spine = git(
+    ["rev-list", "--first-parent", ...range, `--since=${from}`, `--until=${to}`],
+    checkout.root,
+  );
+  const firstParent = new Set(
+    spine.ok ? spine.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0) : [],
+  );
+  return { ok: true, commits: parseCommits(run.stdout, checkout.branch ?? "HEAD", firstParent) };
 }
 
 /** Everything git could tell the sweep about a repository in one window. */
