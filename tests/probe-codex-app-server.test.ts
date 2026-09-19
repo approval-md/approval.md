@@ -12,8 +12,14 @@
  * The stub is not a model and does not pretend to be one. It answers the
  * handshake, hands out a thread, then asks the two approval questions the probe
  * exists to record, and executes the effect if and only if it was told
- * `accept`. That is enough to drive every branch: the five trials, the
- * parameter ladder, the verbatim recording, the redaction and the report.
+ * `accept`. That is enough to drive every branch: the six trials, the parameter
+ * ladder, the verbatim recording, the redaction and the report.
+ *
+ * It reads the prompt it was sent for one reason only (APRV-379): the
+ * `approve-patch` prompt asks for a file edit and nothing else, so on that
+ * prompt the stub goes straight to the file-change item, with its `item/started`
+ * carrying the content and its approval request carrying only an `itemId`. That
+ * is the case the new trial exists to produce against a real server.
  *
  * The second stub is the point of the file. `fail-open` is identical except
  * that it performs the effect BEFORE the answer comes back, which is what the
@@ -44,6 +50,13 @@ import * as probeModule from "../../scripts/probes/codex-app-server.mjs";
 
 const buildReport = probeModule.buildReport as (results: unknown, path: string) => string;
 const carriesTrouble = probeModule.carriesTrouble as (method: unknown, params: unknown) => boolean;
+const itemType = probeModule.itemType as (params: unknown) => string | null;
+const isFileChangeItem = probeModule.isFileChangeItem as (entry: unknown) => boolean;
+const fileChangeApiForm = probeModule.fileChangeApiForm as (
+  method: unknown,
+  params: unknown,
+) => { form: string; item_id: string | null; inline_change_keys: string[] } | null;
+const promptFor = probeModule.promptFor as (trial: string) => string;
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -199,7 +212,11 @@ function onFrame(frame) {
   }
   if (frame.method === "turn/start") {
     respond(frame.id, { turnId: "turn_stub" });
-    setTimeout(askCommand, 10);
+    // APRV-379: the approve-patch prompt asks for a file edit and nothing else,
+    // so this stub reaches the file-change item WITHOUT a command item first,
+    // which is the case the new trial exists to produce.
+    const patchOnly = JSON.stringify(frame.params || {}).indexOf("Do exactly one thing") !== -1;
+    setTimeout(patchOnly ? askPatch : askCommand, 10);
     return;
   }
   if (frame.method !== undefined) return;
@@ -314,7 +331,7 @@ test("the probe records both approval requests and blocks on every refusal", () 
     preflight: Record<string, any>;
   };
   assert.equal(results.preflight.auth_required, false);
-  assert.equal(results.trials.length, 5);
+  assert.equal(results.trials.length, 6);
 
   const byName = new Map(results.trials.map((trial) => [String(trial.trial), trial]));
 
@@ -349,6 +366,10 @@ test("the probe records both approval requests and blocks on every refusal", () 
     "the file-change approval request should carry no content of its own",
   );
   assert.equal(approve?.item_started_with_content, true);
+  assert.equal(patch.api_form.form, "item-based (itemId, content delivered earlier)");
+  assert.equal(patch.api_form.item_id, "item_patch");
+  assert.deepEqual(patch.api_form.inline_change_keys, []);
+  assert.equal(command.api_form, null, "a command approval has no file-change API form");
 
   // The ladder ran: the first thread/start shape was refused and recorded.
   assert.equal(approve?.thread_start_attempts.length >= 2, true);
@@ -376,12 +397,55 @@ test("the probe records both approval requests and blocks on every refusal", () 
   assert.equal(byName.get("crash")?.server.alive_at_settle, true);
   assert.equal(byName.get("no-reply")?.server.alive_at_settle, true);
 
+  // APRV-379. The item notifications are stored verbatim, not reduced to the
+  // boolean beside them, and the approve-patch trial reaches a file-change item
+  // without a command item in front of it.
+  const approvePatch = byName.get("approve-patch");
+  assert.equal(approvePatch?.effects.patch_marker, true, "approve-patch landed no file");
+  assert.equal(
+    approvePatch?.effects.command_marker,
+    false,
+    "approve-patch should not have run a shell command",
+  );
+  assert.match(String(approvePatch?.prompt), /Do exactly one thing/u);
+  assert.match(String(approvePatch?.prompt), /Do not use a shell command/u);
+  assert.equal(approvePatch?.approval_requests.length, 1);
+  assert.equal(approvePatch?.approval_requests[0].method, "item/fileChange/requestApproval");
+  assert.equal(
+    approvePatch?.approval_requests[0].api_form.form,
+    "item-based (itemId, content delivered earlier)",
+  );
+  const items = (approvePatch?.item_notifications ?? []) as Array<Record<string, any>>;
+  assert.equal(items.length, 1, JSON.stringify(items));
+  const started = items[0] as Record<string, any>;
+  assert.equal(started.method, "item/started");
+  assert.equal(started.item_type, "fileChange");
+  assert.equal(started.carries_content, true);
+  // The whole frame, so the shape can be read rather than guessed at.
+  assert.equal(started.verbatim.params.item.id, "item_patch");
+  assert.equal(started.verbatim.params.item.changes[PATCH_MARKER].add.content, "patched\n");
+
   const report = probe(env, "--report");
   assert.equal(report.status, 0, report.stderr);
-  // Eight, not ten, and the shortfall is the finding: approve, deny and
-  // malformed each reach both questions, while crash and no-reply never get
-  // past the first one. A client that stops answering stops the turn.
-  assert.match(report.stdout, /approval requests recorded: 8/u);
+  // Nine, not twelve, and the shortfall is the finding: approve, deny and
+  // malformed each reach both questions, crash and no-reply never get past the
+  // first one, and approve-patch asks only the second. A client that stops
+  // answering stops the turn.
+  assert.match(report.stdout, /approval requests recorded: 9/u);
+  // APRV-379: the report says the shape without anyone opening results.json.
+  assert.match(
+    report.stdout,
+    /approve-patch: 1 recorded; methods: item\/started; item types: fileChange; carried content: yes/u,
+  );
+  assert.match(report.stdout, /file-change approval, which API arrived:/u);
+  assert.match(
+    report.stdout,
+    /approve-patch: item-based \(itemId, content delivered earlier\) via item\/fileChange\/requestApproval; itemId item_patch/u,
+  );
+  assert.match(report.stdout, /file-change item frames, verbatim:/u);
+  assert.match(report.stdout, /"type": "fileChange"/u);
+  assert.match(report.stdout, new RegExp(`"${PATCH_MARKER.replace(/\./gu, "\\.")}"`, "u"));
+  assert.doesNotMatch(report.stdout, /file-change item frames, verbatim:\n {2}NONE/u);
   assert.match(report.stdout, /cwd present:\s+yes/u);
   assert.match(report.stdout, /patch content:\s+no/u);
   assert.match(report.stdout, /decisions offered:\s+accept, acceptForSession, cancel, decline/u);
@@ -542,6 +606,7 @@ function trialRecord(
     replies_sent: [],
     auto_review_notifications: [],
     turn_errors: [],
+    item_notifications: [],
     notification_methods: [],
     notes: [],
     server: { exit_code: 0, signal: null, alive_at_settle: false, stderr_bytes: 0 },
@@ -641,6 +706,152 @@ test("APRV-359: a leak still outranks a void, and reads exactly as it did", () =
   assert.match(leaked, /It is not enforcement and must not be written up/u);
   assert.doesNotMatch(leaked, /VOID/u);
   assert.doesNotMatch(leaked, /No effect landed on deny/u);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-379: the item frame, the API form, and the report that shows both
+// ---------------------------------------------------------------------------
+
+test("APRV-379: an item frame's type is read where the frame puts it, or not at all", () => {
+  assert.equal(itemType({ item: { id: "x", type: "fileChange" } }), "fileChange");
+  assert.equal(itemType({ item: { id: "x", item_type: "file_change" } }), "file_change");
+  // The item's own type wins over an outer one, so an envelope that names
+  // itself does not masquerade as the item.
+  assert.equal(itemType({ type: "notification", item: { type: "commandExecution" } }), "commandExecution");
+  // Nested a level deeper, still without this file guessing a field name.
+  assert.equal(itemType({ item: { details: { type: "fileChange" } } }), "fileChange");
+  // And a frame that names nothing is recorded as naming nothing.
+  assert.equal(itemType({ item: { id: "x" } }), null);
+  assert.equal(itemType(null), null);
+});
+
+test("APRV-379: the file-change API form is read from the request, not from its name", () => {
+  // Item-based: an id and nothing else.
+  const itemBased = fileChangeApiForm("item/fileChange/requestApproval", {
+    threadId: "th",
+    turnId: "turn",
+    itemId: "item_patch",
+    startedAtMs: 2,
+    reason: null,
+    grantRoot: null,
+  });
+  assert.equal(itemBased?.form, "item-based (itemId, content delivered earlier)");
+  assert.equal(itemBased?.item_id, "item_patch");
+  assert.deepEqual(itemBased?.inline_change_keys, []);
+
+  // Legacy: the change set arrives inline, and the keys that carry it are named.
+  const legacy = fileChangeApiForm("applyPatchApproval", {
+    callId: "call_1",
+    fileChanges: { "a.txt": { add: { content: "hello\n" } } },
+    reason: null,
+  });
+  assert.equal(legacy?.form, "legacy (inline change set)");
+  assert.equal(legacy?.item_id, null);
+  assert.equal(legacy?.inline_change_keys.includes("fileChanges"), true);
+
+  // A release that sends both is reported as both rather than forced into one.
+  const both = fileChangeApiForm("item/fileChange/requestApproval", {
+    itemId: "item_patch",
+    changes: { "a.txt": { add: { content: "hello\n" } } },
+  });
+  assert.equal(both?.form, "both (inline content AND itemId)");
+
+  // Neither is a real answer too: a bridge cannot bind what did not arrive.
+  assert.equal(fileChangeApiForm("item/fileChange/requestApproval", {})?.form, "unknown");
+  // And a command approval is not a file-change request at all.
+  assert.equal(fileChangeApiForm("item/commandExecution/requestApproval", { itemId: "i" }), null);
+  assert.equal(fileChangeApiForm(null, {}), null);
+});
+
+test("APRV-379: a file-change item is recognised by its type OR by its content", () => {
+  assert.equal(isFileChangeItem({ item_type: "fileChange", verbatim: {} }), true);
+  assert.equal(isFileChangeItem({ item_type: "file_change", verbatim: {} }), true);
+  // An unfamiliar type name still lands, on the content it carries.
+  assert.equal(
+    isFileChangeItem({ item_type: "somethingNew", carries_content: true, verbatim: {} }),
+    true,
+  );
+  assert.equal(
+    isFileChangeItem({
+      item_type: null,
+      verbatim: { params: { item: { changes: { "a.txt": {} } } } },
+    }),
+    true,
+  );
+  assert.equal(isFileChangeItem({ item_type: "commandExecution", verbatim: { params: {} } }), false);
+  assert.equal(isFileChangeItem(null), false);
+});
+
+test("APRV-379: the report prints the item frame, or says plainly that none was captured", () => {
+  const frame = {
+    method: "item/started",
+    params: { item: { id: "item_patch", type: "fileChange", changes: { "m.txt": { add: { content: "patched\n" } } } } },
+  };
+  const withFrame = buildReport(
+    {
+      trials: [
+        workingControl(),
+        trialRecord("approve-patch", {
+          approval_requests: [
+            {
+              at: "2026-09-19T00:00:00.000Z",
+              kind: "patch",
+              method: "item/fileChange/requestApproval",
+              key_paths: ["itemId"],
+              available_decisions: ["accept", "decline"],
+              api_form: {
+                method: "item/fileChange/requestApproval",
+                form: "item-based (itemId, content delivered earlier)",
+                item_id: "item_patch",
+                inline_change_keys: [],
+              },
+              verbatim: {},
+            },
+          ],
+          item_notifications: [
+            {
+              at: "2026-09-19T00:00:00.000Z",
+              method: "item/started",
+              item_type: "fileChange",
+              carries_content: true,
+              verbatim: frame,
+            },
+          ],
+          effects: { command_marker: false, patch_marker: true, other_new_files: [] },
+        }),
+      ],
+    },
+    "/tmp/results.json",
+  );
+  assert.match(
+    withFrame,
+    /approve-patch: 1 recorded; methods: item\/started; item types: fileChange; carried content: yes/u,
+  );
+  assert.match(
+    withFrame,
+    /approve-patch: item-based \(itemId, content delivered earlier\) via item\/fileChange\/requestApproval; itemId item_patch; inline content keys: \(none\)/u,
+  );
+  assert.match(withFrame, /approve-patch \/ item\/started \/ fileChange/u);
+  assert.match(withFrame, /"type": "fileChange"/u);
+  assert.match(withFrame, /"content": "patched\\n"/u);
+  // The verdict logic is untouched: approve-patch is neither a control nor a
+  // refusal trial, so the hold sentence still rests on `approve` alone.
+  assert.match(withFrame, /No effect landed on deny, crash, no-reply or malformed/u);
+
+  // And a run that captured nothing says so, rather than printing an empty
+  // heading a reader would mistake for an answer.
+  const without = buildReport({ trials: [workingControl()] }, "/tmp/results.json");
+  assert.match(without, /file-change item frames, verbatim:\n {2}NONE\./u);
+  assert.match(without, /\(no file-change approval request was recorded\)/u);
+  assert.match(without, /approve: none recorded/u);
+});
+
+test("APRV-379: only the patch trial gets the patch prompt", () => {
+  assert.match(promptFor("approve-patch"), /Do exactly one thing/u);
+  assert.match(promptFor("approve-patch"), /Do not use a shell command/u);
+  for (const name of ["approve", "deny", "crash", "no-reply", "malformed"]) {
+    assert.match(promptFor(name), /Do exactly two things/u);
+  }
 });
 
 test("APRV-359: trouble is recognised by the payload, not only by the method name", () => {

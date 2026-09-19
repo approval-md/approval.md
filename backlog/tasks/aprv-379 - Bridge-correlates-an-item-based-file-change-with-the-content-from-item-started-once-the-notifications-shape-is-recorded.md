@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-19 14:10'
-updated_date: '2026-09-19 15:03'
+updated_date: '2026-09-19 19:23'
 labels:
   - codex
   - bridge
@@ -41,4 +41,29 @@ UNDER (a) THERE IS A THIRD THING: decideHarnessCall derives its classes from des
 
 <!-- SECTION:NOTES:BEGIN -->
 CORRECTION (lane 4, 2026-09-19, orchestrator accepted): the description above says APRV-363 added a SEAM that lets a caller hand the hook a description it computed itself. It did not, and the difference matters. APRV-363 added a BRANCH inside describeToolCall in src/cli/hook.ts, for an apply_patch call carrying a change map instead of an envelope. There is deliberately no caller-supplied description: a caller that could hand the hook its own classes would be the party under oversight choosing its own scrutiny (SPEC section 11.1 invariant 4). This task extends that branch rather than using a seam that does not exist.
+
+PROBE CAPTURE ADDED (lane, 2026-09-19, branch lane/probe-item-frames-379). The probe now records the two facts this task is blocked on, so the next step is a human one and the task stays To Do.
+
+WHAT CHANGED in scripts/probes/codex-app-server.mjs:
+- Every item/started, item/updated and item/completed notification is stored VERBATIM (through the same redact walk) per trial in results.json under item_notifications, each entry { at, method, item_type, carries_content, verbatim }. The old item_started_with_content boolean is kept and unchanged.
+- A sixth trial, approve-patch, asks Codex to create the marker file with its file editing tool and forbids the shell for that file, so the server reaches a FILE-CHANGE item rather than a command item. It is outside the leak, hold and void verdict logic: approve is still the only positive control, and the four refusal trials are measured against exactly what they were before.
+- Each file-change approval request records api_form, one of: legacy (inline change set), item-based (itemId, content delivered earlier), both (inline content AND itemId), unknown. It is read from the request key paths rather than from the method name, so a renamed method still reports honestly.
+- --report prints, per trial, the item notification methods, the item types and whether any carried content; then the API form line; then the verbatim file-change frame itself.
+
+WHAT CARTER RUNS, in order, from the primary checkout (/Users/carter/dev/approval-md), once this is on main:
+
+  node scripts/probes/codex-app-server.mjs --setup
+  node scripts/probes/codex-app-server.mjs --run
+  node scripts/probes/codex-app-server.mjs --report
+
+No new flag is needed: --run does all six trials. To spend one billable turn instead of six, run node scripts/probes/codex-app-server.mjs --run --trial approve-patch instead of the plain --run. The report then prints VOID for the APRV-349 interception verdict, because the approve control did not run; that is correct and says nothing about the capture this task needs.
+
+The run uses the existing Codex login and is a billable model call. --setup prints the scratch root; results.json lands at <root>/results.json, and --report prints that same path near the end.
+
+WHAT TO PASTE INTO THIS TASK, from the report:
+1. The block under the heading "file-change item frames, verbatim" (the whole item/started frame). That is AC1, and it is the shape the correlation gets written against.
+2. The line under the heading "file-change approval, which API arrived". That is the second fact: legacy inline change set versus item-based itemId.
+If the report prints NONE under the frames heading, the model used the shell anyway or never reached a file change. The errors and warnings section printed above it says why, and nothing should be written against a guess.
+
+AC1 remains open after the run: the shape still has to be written into docs/codex-app-server-bridge.md before any bridge code.
 <!-- SECTION:NOTES:END -->

@@ -427,10 +427,17 @@ Could not bind:
 
 `scripts/probes/codex-app-server.mjs`, three modes: `--setup` builds a scratch
 workspace of synthetic files under a fresh `fs.mkdtemp` directory, `--run`
-drives `codex app-server` as the approval client through five trials, and
-`--report` prints the findings. The trials are `approve`, `deny`, `crash`,
-`no-reply` and `malformed`, each in its own workspace, each asking for one
-harmless command and one harmless patch.
+drives `codex app-server` as the approval client through six trials, and
+`--report` prints the findings. The trials are `approve`, `approve-patch`,
+`deny`, `crash`, `no-reply` and `malformed`, each in its own workspace. Five of
+them ask for one harmless command and one harmless patch. `approve-patch`
+(APRV-379) asks for a file edit and nothing else, and forbids the shell for it,
+so the run reaches a file-change item rather than a command item: every
+`item/started`, `item/updated` and `item/completed` notification is recorded
+verbatim, and each file-change approval request records which API it arrived on
+(legacy inline change set, or item-based `itemId`). The shape those frames
+carry is what APRV-379 is blocked on, and it stays unanswered here until the
+operator's run fills it in.
 
 It never reads a credential, never touches the Codex home, and redacts anything
 token-shaped before recording a frame. It uses the operator's existing login,
