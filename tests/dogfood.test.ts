@@ -392,6 +392,29 @@ test("the log.advance proposal applies to the live policy and passes the pins (A
   assert.equal(parsed.pairs.length, 1, "the page carries exactly one replacement");
 
   const live = readFileSync(APPROVAL_MD, "utf8");
+
+  // The ceremony runs this suite AGAINST THE AMENDED FILE, after `policy apply`
+  // has written the replacement and before anything is attested (the
+  // 2026-09-19 refusal: applying the page a second time duplicated the
+  // `log.advance.daemon` key and the YAML would not parse). The page's anchor
+  // is the `log.advance` line the pair keeps, so it still matches after the
+  // amendment. When the live policy already declares the daemon's class by
+  // rule, the page has been applied: check the live file as the amended one
+  // and do not apply it again.
+  const livePolicy = loadRepoPolicy();
+  if (resolve(livePolicy, ADVANCE_DAEMON_CLASS).provenance === "rule") {
+    const checkedLive = checkPolicyExpectations(livePolicy, REPO_POLICY_EXPECTATIONS);
+    assert.deepEqual(
+      checkedLive.failures.map(describeFailure),
+      [],
+      "the page is applied to the live policy and the live policy fails its pins",
+    );
+    assert.equal(resolve(livePolicy, ADVANCE_DAEMON_CLASS).autonomy, "autonomous");
+    assert.equal(resolve(livePolicy, ADVANCE_CLASS).provenance, "rule");
+    assert.notEqual(resolve(livePolicy, ADVANCE_CLASS).autonomy, "autonomous");
+    return;
+  }
+
   const plan = planApply(live, parsed.pairs);
   assert.equal(
     plan.ok,
