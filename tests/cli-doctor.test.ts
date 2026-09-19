@@ -456,6 +456,13 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // not adopted rather than a question with a clean answer, and it is what
       // every installation looked like before APRV-324 (APRV-324).
       "skip",
+      // codex-auto-reviewer passes: the fixture log carries no
+      // `audit.question_preempted`, so nothing other than this gate is
+      // recorded as having answered one of its questions. A pass and not a
+      // skip for the reason autonomy-alias is one: the question was asked and
+      // the answer is "none". It is not a claim that any harness reviewer is
+      // off, which nothing on this machine can establish (APRV-378).
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -497,7 +504,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 32);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 33);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -981,8 +988,10 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
   // sealed-delivery private key is tracked or unignored). 32: APRV-324
   // appended `sender-mapping` (which approvers a channel whose senders the
-  // policy maps can still recognize).
-  assert.equal(parsed.checks.length, 32);
+  // policy maps can still recognize). 33: APRV-378 appended
+  // `codex-auto-reviewer` (whether the log records something other than this
+  // gate answering a question this gate exists to ask).
+  assert.equal(parsed.checks.length, 33);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

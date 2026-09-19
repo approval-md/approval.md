@@ -2813,6 +2813,95 @@ function listGateOrgans(root: string): string[] {
  * configuration here, which is a state and not a fault, exactly as
  * `harness-hook-wiring` treats the same absence.
  */
+// ---------------------------------------------------------------------------
+// 30. codex-auto-reviewer (APRV-378)
+// ---------------------------------------------------------------------------
+
+/**
+ * How recent a pre-empted question has to be for this row to FAIL.
+ *
+ * The same twenty-four hours `dark-sessions` watches, and for the same reason:
+ * a row that failed forever over a fact an operator has already dealt with is a
+ * row nobody reads. An older record is not forgotten, it is reported in the
+ * detail of a passing row, which is where a durable fact belongs once the thing
+ * it asks for has been done.
+ */
+const AUTO_REVIEWER_WINDOW_MS = DEFAULT_DARK_WINDOW_MS;
+
+/**
+ * Has something other than this gate answered a question this gate exists to
+ * ask (APRV-378)?
+ *
+ * It reads `audit.question_preempted` and nothing else. There is no
+ * configuration here to inspect: whether Codex's auto-reviewer runs is gated in
+ * the harness's own configuration under a key this repository has no record of,
+ * and a config read written against a guessed key finds nothing and reports a
+ * GREEN row, which is the worst failure direction a health check has. So this
+ * row reports what was OBSERVED, and the only durable record of an observation
+ * is the one `approval codex bridge` appends when it stops.
+ *
+ * Reading this record is a diagnosis and not enforcement: the row authorizes
+ * nothing and refuses nothing, and `tests/question-preempted.test.ts` pins that
+ * no enforcement module reads the type.
+ *
+ * A row that says `pass` is saying the log holds no such record. It is NOT
+ * saying the auto-reviewer is off: nothing on this machine can say that, which
+ * is why the bridge probes rather than reads (APRV-364).
+ */
+function checkCodexAutoReviewer(
+  records: readonly EventRecord[],
+  verified: boolean,
+): DoctorCheck {
+  const check = "codex-auto-reviewer";
+  if (!verified) {
+    return {
+      check,
+      status: "skip",
+      detail:
+        "the chain did not verify, so the records this row reads cannot be trusted; see the log check above",
+    };
+  }
+
+  const seen = records.filter((record) => record.event === "audit.question_preempted");
+  if (seen.length === 0) {
+    return {
+      check,
+      status: "pass",
+      detail:
+        "no record of anything other than this gate answering a question it exists to ask. That is what the log holds, and it is not a claim that a harness auto-reviewer is off: only a bridge session's own probe can establish that, and only for the question it probed",
+    };
+  }
+
+  const newest = seen[seen.length - 1] as EventRecord;
+  const payload = (newest.payload ?? {}) as Record<string, unknown>;
+  const question = (payload["question"] ?? {}) as Record<string, unknown>;
+  const source = typeof payload["source"] === "string" ? payload["source"] : "an unnamed source";
+  const id = typeof question["id"] === "string" ? question["id"] : "(no id)";
+  const verdict = typeof payload["verdict"] === "string" ? payload["verdict"] : "none stated";
+  const recent = seen.filter(
+    (record) => Date.parse(record.ts) >= Date.now() - AUTO_REVIEWER_WINDOW_MS,
+  );
+  const where = `${source} answered question ${id} (verdict: ${verdict}) at seq ${String(newest.seq)}`;
+
+  if (recent.length === 0) {
+    return {
+      check,
+      status: "pass",
+      detail: `${String(seen.length)} record(s), none in the last ${String(
+        Math.round(AUTO_REVIEWER_WINDOW_MS / 3_600_000),
+      )}h. The most recent: ${where}`,
+    };
+  }
+  return {
+    check,
+    status: "fail",
+    detail: `${String(recent.length)} of ${String(seen.length)} record(s) in the last ${String(
+      Math.round(AUTO_REVIEWER_WINDOW_MS / 3_600_000),
+    )}h: ${where}. A session whose questions something else can answer is a session whose silence means nothing, and the bridge stopped on it`,
+    fix: "approval doctor --verbose, then turn the harness's own auto-reviewer off in its configuration before running `approval codex bridge` again; this runtime cannot turn it off and cannot read whether it is on",
+  };
+}
+
 function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCheck {
   const check = "gate-organs";
   const root = repoRoot(dir) ?? dir;
@@ -3414,6 +3503,11 @@ export function commandDoctor(
       // that whole channel, so an approver left out of it is a person the
       // policy still lists and the gate will no longer honour.
       checkSenderMapping(policyLoad),
+      // APRV-378: appended, twenty-third time, same reason. The terminal half
+      // of `audit.question_preempted`: the bridge stops the session that saw
+      // one, and this is where an operator finds out it happened without
+      // reading the log by hand.
+      checkCodexAutoReviewer(verified.records, verified.result.status === "clean"),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

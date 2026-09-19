@@ -148,6 +148,11 @@ export const DOCTOR_ROW_ORDER = [
   // whose own id it does not, because that is a person the file says may
   // decide and the gate will refuse.
   "sender-mapping",
+  // APRV-378: has anything other than this gate answered a question this gate
+  // exists to ask? It reads `audit.question_preempted` and nothing else, so a
+  // pass says the log holds no such record and never that a harness
+  // auto-reviewer is off, which nothing on this machine can establish.
+  "codex-auto-reviewer",
 ] as const;
 
 /**

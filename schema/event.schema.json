@@ -53,6 +53,7 @@
         "audit.dark_session",
         "audit.decision_refused",
         "audit.gesture_refused",
+        "audit.question_preempted",
         "reconciliation.required",
         "reconciliation.satisfied",
         "payload.pruned",
@@ -63,7 +64,7 @@
         "gate.path.signed_off",
         "log.checkpoint"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of thirty-three event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, `log.checkpoint` (APRV-220) the thirteenth, `audit.decision_refused` (APRV-235) the fourteenth, `gate.organ.attested` (APRV-272) the fifteenth, `gate.path.signed_off` (APRV-338) the sixteenth, and `audit.gesture_refused` (APRV-355) the seventeenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of thirty-four event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, `log.checkpoint` (APRV-220) the thirteenth, `audit.decision_refused` (APRV-235) the fourteenth, `gate.organ.attested` (APRV-272) the fifteenth, `gate.path.signed_off` (APRV-338) the sixteenth, `audit.gesture_refused` (APRV-355) the seventeenth, and `audit.question_preempted` (APRV-378) the eighteenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -1834,6 +1835,87 @@
             "required": [
               "actor"
             ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §8 (amended, APRV-378): something other than this gate answered a question this gate exists to ask. The first instance is Codex's server-side auto-reviewer (`docs/codex-app-server-bridge.md`, question 3): a model call can resolve an approval before `approval codex bridge` is asked, and the client is told afterwards through an `item/autoApprovalReview` notification. No existing type carries the fact. `audit.dark_session` is the sweep over activity with no records beside it; `audit.decision_refused` is a human gesture the gate would not take; `audit.gesture_refused` (APRV-355) is a gesture that is not a decision at all. This one is none of those: the question existed, the gate would have asked it, and somebody else answered first.\n\nThe NAME is general because the instance will not be the last. `source` is a closed enum whose first member names the Codex auto-reviewer, and a second party gains a member rather than a type.\n\nAUDIT TIER, on the strict terms `audit.decision_refused` and `audit.gesture_refused` set: it grants nothing, mints no token, settles no request, charges no budget, is not sampled, and NO ENFORCEMENT PATH READS IT. `approval doctor` reads it, which is a diagnosis rather than an enforcement: the row it feeds authorizes nothing and refuses nothing.\n\nThe actor MUST be `^system:`, for the reason `audit.dark_session`'s and `audit.gesture_refused`'s are: a record of an event authored by either party to it is a record neither party can be held to. Here both parties are machines, and neither the harness that pre-empted the question nor the agent whose action it was may author the note that says so.\n\n`verdict` is OPTIONAL and carries the other party's word verbatim when the notification stated one. It is not defaulted: a record that said `accept` because nothing said otherwise would be this runtime inventing another party's decision, which is the one thing a record about another party's decision may not do. Its absence is a fact about the notification.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "audit.question_preempted"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^system:",
+            "description": "The runtime. A `human:` or `agent:` actor is refused: the record states that something else answered a question, and neither party to that may author the statement."
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "source",
+              "question"
+            ],
+            "properties": {
+              "source": {
+                "enum": [
+                  "codex-auto-reviewer"
+                ],
+                "description": "Who answered instead of the gate. CLOSED, and additive-only like every other vocabulary here (§11.1 invariant 6). `codex-auto-reviewer` is Codex's server-side guardian reviewer, whose answer is a genuine model call (`codex-rs/core/src/guardian/decision.rs`) and which runs before the client path. A second party gains a member here rather than an event type of its own."
+              },
+              "question": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "description": "The question that was answered, as the OTHER PARTY identified it. Its own identifiers and nothing this runtime minted: a record about somebody else's decision names it in their terms, or a reader cannot go and find it on their side.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The other party's identifier for the question. Codex's `itemId` on the item-based API."
+                  },
+                  "method": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The notification that disclosed it, verbatim: `item/autoApprovalReview/started` or `item/autoApprovalReview/completed` at v0.1."
+                  },
+                  "thread": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The other party's session identifier, where the notification named one. Codex's `threadId`."
+                  },
+                  "turn": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The other party's turn identifier, where the notification named one. Codex's `turnId`."
+                  }
+                }
+              },
+              "verdict": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The verdict the other party reached, verbatim in their own vocabulary and never translated into this project's. Absent when the notification stated none, which is a fact about the notification rather than a default."
+              },
+              "detail": {
+                "type": "string",
+                "description": "The runtime's own one line about what it did next. A convenience for a reader; nothing branches on it."
+              }
+            }
           }
         }
       }

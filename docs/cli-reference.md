@@ -2970,6 +2970,17 @@ The checks, at length:
   re-attestation it costs. The row reads the policy and nothing else: no log,
   no network, no credential, and it prints nobody's account id — the mapping is
   in a file the operator can open, and a health row is read over shoulders.
+- **codex-auto-reviewer** — has anything other than this gate answered a
+  question this gate exists to ask (APRV-378)? It reads
+  `audit.question_preempted` and nothing else. A FAIL where one landed in the
+  last 24 hours, naming the source, the question in the other party's terms and
+  their verdict; a PASS where none did, mentioning any older ones; a SKIP where
+  the chain did not verify. A PASS says the log holds no such record and NOT
+  that a harness auto-reviewer is off: whether it runs is configuration this
+  runtime cannot read, and a row written against a guessed configuration key
+  would find nothing and report green, which is the worst direction a health
+  check can fail in. The `fix` points at the harness's own configuration,
+  because nothing here can turn another system's reviewer off.
 
 
 
@@ -3877,6 +3888,36 @@ no enforcement path reads it. `approval log tail` and `approval log export`
 show it like any other record. Nothing about the refusal itself changed — no
 signature is appended and no review is recorded — and a listener whose policy
 maps no senders never reaches this path at all.
+
+**A question answered by something other than the gate leaves a record
+(APRV-378).** Codex's app-server can resolve an approval with a model call
+before `approval codex bridge` is asked, and disclose it afterwards through an
+`item/autoApprovalReview` notification. The bridge stops the session on one
+(`bridge-auto-reviewer-active`), and it appends exactly one
+**`audit.question_preempted`** first, through the same append path as every
+other record:
+
+```
+{"event":"audit.question_preempted","actor":"system:gate",
+ "payload":{"source":"codex-auto-reviewer","verdict":"accept",
+ "question":{"id":"item_01H9","method":"item/autoApprovalReview/completed",
+ "thread":"thread_7f2","turn":"turn_3"}}}
+```
+
+`source` is a closed set naming who answered, so the next system that does this
+gains a member rather than a type. `question` is the other party's own
+identifiers, because a record about their decision has to name it in their terms
+or a reader cannot go and find it on their side. `verdict` is their word
+verbatim and is ABSENT when the disclosure stated none: a record that said
+`accept` by default would be this runtime inventing somebody else's decision.
+
+The record is audit tier in the strict sense: it authorizes nothing, settles no
+request, charges no budget, is not sampled, and no enforcement path reads it.
+`approval log tail` and `approval log export` show it like any other record, and
+`approval doctor`'s `codex-auto-reviewer` row reads it: fail when one landed in
+the last 24 hours, pass otherwise, and a pass says the log holds no such record
+rather than that any auto-reviewer is off. Nothing on this machine can say the
+latter, which is why the bridge probes (APRV-364) instead of reading a setting.
 
 **A settled request stops looking live.** Every terminal state the listener
 observes for a message it sent edits that message: the text becomes the outcome

@@ -146,6 +146,19 @@ export const GENESIS_PREV = null;
  * terms, `system:` actor for the same reason, and `core/gesture-refusal.ts`
  * states the asymmetry it inherits.
  *
+ * `audit.question_preempted` (APRV-378) is the eighteenth: something other than
+ * this gate answered a question this gate exists to ask. The first instance is
+ * Codex's server-side auto-reviewer, which can resolve an approval with a model
+ * call before `approval codex bridge` is asked and discloses it afterwards
+ * through an `item/autoApprovalReview` notification. None of the three audit
+ * records above it fits: the sweep is about activity with no records beside it,
+ * and both refusal records are about a human gesture. Here the question
+ * existed, the gate would have asked it, and somebody else answered first, so
+ * the log's silence about it would be indistinguishable from a turn that never
+ * wanted to act. Audit tier on the same strict terms, `system:` actor for the
+ * same reason, and a closed `source` enum so the next party to do this gains a
+ * member rather than a type. `core/question-preempted.ts` states the rest.
+ *
  * `gate.path.signed_off` (APRV-338) is the sixteenth: a human's sign-off on the
  * exact bytes of one PROTECTED PATH whose edits classify `policy.edit` or a
  * `policy.edit.*` sub-class (amended SPEC.md §5.2, §8, §10.1). `human:` actor,
@@ -187,6 +200,7 @@ export type EventType =
   | "audit.dark_session"
   | "audit.decision_refused"
   | "audit.gesture_refused"
+  | "audit.question_preempted"
   | "reconciliation.required"
   | "reconciliation.satisfied"
   | "payload.pruned"
