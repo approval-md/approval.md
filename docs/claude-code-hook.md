@@ -1553,6 +1553,29 @@ failed closed), 2 is usage, 4 is "the guard could not look". Every blob it reads
 comes from `git show <ref>:<path>`, never from the working tree: a guard that
 read the checkout could be told a different story than the pull request carries.
 
+### The unit of judgment is one commit (APRV-375)
+
+The range above is enumerated rather than diffed. For every commit in
+`base..head` the guard replays that commit alone: base is its first parent, head
+is the commit, the changed paths are the ones it touched, and the timestamps are
+its own pair. The pull request passes when every commit does, and the report
+lists each commit with its verdict and the records that covered it.
+
+A grant binds ONE edit, so that is the unit the guard asks about. The combined
+base-to-head diff, which it replayed until 2026-09-19, is a change nobody made
+and no record can cover: PR #427 failed it with fourteen uncovered lines while
+each of its three commits was separately granted. Nothing escapes the smaller
+question, because every byte that differs between the two trees was written by
+some commit of the range; a merge contributes only what it resolved, which is
+its dense combined diff (`--cc`), judged against its first parent, and a merge
+that took one parent's bytes verbatim is listed as skipped. Work the branch
+absorbed by merging `origin/main` is main's own and is excluded by two-dot
+semantics, since the base is `git merge-base origin/main HEAD`.
+
+`approval doctor`'s dark-session row judges the same unit through the same
+helper, `src/core/commit-guard.ts`, so it cannot answer FAIL for a change this
+guard passes.
+
 ### What counts as evidence
 
 Verdicts distinguish human attestation, human grants and policy-authorized file

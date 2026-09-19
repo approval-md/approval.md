@@ -3,11 +3,11 @@ id: APRV-357
 title: >-
   Protected-path guard: exact replay of a chain of small edits on a large file
   stays inside its byte budget
-status: To Do
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-17 20:09'
-updated_date: '2026-09-19 09:42'
+updated_date: '2026-09-19 10:21'
 labels:
   - guard
   - ci
@@ -47,4 +47,10 @@ OPTION A, the task as filed. Make the exact replay affordable for tens of edits 
 OPTION B, the unit of judgment. Judge the pull request PER COMMIT, base = commit parent, head = commit, which is what APRV-369 just did for the doctor arm A and for the same reason: a grant binds ONE edit. Under B, PR #427 stops being one 671-line replay and becomes each lane commit own small edit against its own grant, and the merged-in commits are judged on the commits that made them, which their own pull requests already passed. It would make CI and the doctor agree by construction rather than by two code paths kept in step, and it would likely close this task without a new replay engine. What it needs from a reviewer is the security argument: every changed byte is still in some commit, so nothing goes unjudged, but the guard would no longer ask a question about the combined diff, and whether that matters is a ruling rather than an implementation detail.
 
 This lane did not choose. APRV-357 stays To Do with the reproduction recorded.
+
+Superseded by APRV-375, which landed on 2026-09-19. Carter ruled option B (the unit of judgment) over option A (a second exact-replay engine) after this task reproduction in PR 452.
+
+Why it closes rather than being fixed: the byte budget this task asked to make affordable is reached only when the guard replays a whole branch as one change, and nothing does that any more. The CI guard now judges base..head one commit at a time, and per commit the exact replay finishes well inside EXACT_REPLAY_MAX_EXAMINED_BYTES in every case observed, including the PR 427 fixture this task was filed about. AC3 exactness is unchanged and is pinned by new tests (a commit with no record of its own fails uncovered-hunk naming that commit; a granted after-state that a later commit rewrites does not carry that later commit). AC4 measurement is recorded on APRV-375: 3.7 s for the whole script on the PR 427 fixture, about 0.5 s of which is node startup plus verifying the 42403-record log.
+
+What this task would still buy, if the budget is ever reached again: a replay engine that costs O(changed) per visit rather than O(file). Nobody needs it today. Refile against the case that reaches the limit rather than reopening this one.
 <!-- SECTION:NOTES:END -->

@@ -22,6 +22,17 @@
  * execution. A change with no evidence fails the pull request. Session wiring
  * is not an input.
  *
+ * ## The unit of judgment: one commit (APRV-375)
+ *
+ * This file answers about ONE PAIR OF BLOBS, whichever pair the caller hands
+ * it, so the caller's choice of pair is where the question is really settled.
+ * Both callers choose the same one: for every commit of the range, base is that
+ * commit's first parent and head is the commit, because a grant binds one edit
+ * and the combined diff of a branch is a change nobody made. `core/commit-guard.ts`
+ * enumerates the commits, builds the per-commit inputs, states the argument
+ * that nothing goes unjudged, and is shared by the CI script and by
+ * `approval doctor`'s dark-session arm A.
+ *
  * ## What counts as evidence
  *
  * Evidence is about the CHANGE, not about the path (APRV-202). The guard reads
@@ -584,6 +595,19 @@ function endsWithSegments(candidate: string, want: string): boolean {
   if (tail.length === 0 || tail.length > have.length) return false;
   const offset = have.length - tail.length;
   return tail.every((segment, index) => segment === have[offset + index]);
+}
+
+/**
+ * Is this changed path the POLICY FILE, whichever end carries the longer
+ * spelling?
+ *
+ * The guard is handed a repository-relative path from git and a policy location
+ * from its caller, and either may be the more qualified of the two, so the test
+ * is run both ways. One named predicate rather than the comparison written out
+ * at each of the two sites that ask it.
+ */
+function namesPolicyFile(path: string, policyPath: string): boolean {
+  return endsWithSegments(policyPath, path) || endsWithSegments(path, policyPath);
 }
 
 /**
@@ -1751,10 +1775,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
   const findings: GuardFinding[] = [];
   for (const path of guarded) {
     // 1. The policy file, by attestation.
-    if (
-      endsWithSegments(input.policyPath, path) ||
-      endsWithSegments(path, input.policyPath)
-    ) {
+    if (namesPolicyFile(path, input.policyPath)) {
       if (input.policySha256AtHead !== null) {
         const attested = attestations.get(input.policySha256AtHead);
         if (attested !== undefined) {
@@ -2246,10 +2267,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         `${unresolved.length} grant payload${unresolved.length === 1 ? "" : "s"} could not be resolved from the committed payload store (${unresolved.slice(0, 3).join(", ")}${unresolved.length > 3 ? ", …" : ""}), and a grant whose bytes cannot be read is not evidence for any path`,
       );
     }
-    if (
-      (endsWithSegments(input.policyPath, path) || endsWithSegments(path, input.policyPath)) &&
-      input.policySha256AtHead !== null
-    ) {
+    if (namesPolicyFile(path, input.policyPath) && input.policySha256AtHead !== null) {
       diagnosis.push(
         `no policy.updated record attests the bytes this pull request would install (${input.policySha256AtHead}); an amendment lands through \`approval policy amend --commit\`, whose attestation record is the evidence`,
       );

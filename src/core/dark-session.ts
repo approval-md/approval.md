@@ -100,12 +100,12 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { policyBytesHash } from "./attest.js";
 import { childEnvironment } from "./child-env.js";
+import { commitGuardInputParts, type GitReader } from "./commit-guard.js";
 import type { ProtectedPathEntry } from "./command-class.js";
 import { tick as readClock, type Clock } from "./clock.js";
 import { loadPayload, payloadStoreDirFor } from "./payload-store.js";
@@ -115,9 +115,9 @@ import {
   evaluateProtectedPaths,
   isExemptPath,
   isGuardedPath,
+  type ChangeTimestamps,
   type GuardFinding,
   type LogWindow,
-  type ChangeBlobs,
 } from "./protected-path-guard.js";
 import type { EventRecord } from "./log.js";
 
@@ -507,6 +507,19 @@ export function evaluateDarkSessions(input: DarkSessionInput): DarkSessionReport
   };
 }
 
+/**
+ * An observed commit's date, as the guard's APRV-339 pair.
+ *
+ * The sweep asks git for `%aI` alone, so both halves carry it: that is exactly
+ * what the core reads a bare date as, "this is all the caller has, and it
+ * answers both questions". A second date would only differ on an amended or
+ * rebased commit, and a commit the primary checkout has already made is not
+ * going to be amended under the sweep's feet.
+ */
+function datesOf(commit: ObservedCommit): ChangeTimestamps {
+  return { author: commit.ts, committer: commit.ts };
+}
+
 function base(
   checkout: ObservedCheckout,
   verdict: DarkSessionVerdict,
@@ -604,60 +617,6 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
       base: input.window.from,
       head: `${checkout.name}@${(substantive[0] as ObservedCommit).sha.slice(0, 12)}`,
     };
-    // APRV-202 made the guard ask whether THIS change was granted, so it needs
-    // the path's bytes on both sides of the change. The change is ONE COMMIT
-    // (APRV-369): base is that commit's parent, head is the commit. A blob git
-    // cannot show, or one that is binary, answers null and the guard fails the
-    // path as change-unreadable rather than falling back to the path-level rule.
-    const blobCache = new Map<string, ChangeBlobs | null>();
-    const blobsFor = (commit: ObservedCommit, path: string): ChangeBlobs | null => {
-      const key = `${commit.sha}:${path}`;
-      const cached = blobCache.get(key);
-      if (cached !== undefined) return cached;
-      let value: ChangeBlobs | null = null;
-      {
-        const baseRev = `${commit.sha}^`;
-        const headRev = commit.sha;
-        const inTree = (rev: string): boolean => {
-          const listed = git(["ls-tree", "--name-only", rev, "--", path], checkout.root);
-          return listed.ok && listed.stdout.trim().length > 0;
-        };
-        const show = (rev: string): string | null => {
-          const shown = git(["show", `${rev}:${path}`], checkout.root);
-          return shown.ok ? shown.stdout : null;
-        };
-        const baseHas = inTree(baseRev);
-        const headHas = inTree(headRev);
-        const baseText = baseHas ? show(baseRev) : null;
-        const headText = headHas ? show(headRev) : null;
-        const unreadable =
-          (baseHas && baseText === null) ||
-          (headHas && headText === null) ||
-          (baseText !== null && baseText.includes("\u0000")) ||
-          (headText !== null && headText.includes("\u0000"));
-        if (!unreadable) value = { base: baseText, head: headText };
-      }
-      blobCache.set(key, value);
-      return value;
-    };
-    // The digest of a path's bytes at the commit under judgment (APRV-369).
-    //
-    // Arm A passed NEITHER `organSha256AtHead` nor `pathSha256AtHead`, so a
-    // path a human had ratified with `gate.path.signed_off` (APRV-338) was
-    // evidence the CI guard could read and the doctor could not. Supplying them
-    // is not a loosening: it is the same record, read by the same evaluator,
-    // that the enforcement path already accepts. Withholding it was the second
-    // way this row could be stricter than the gate it reports on.
-    const digestCache = new Map<string, string | null>();
-    const sha256At = (commit: ObservedCommit, path: string): string | null => {
-      const key = `${commit.sha}:${path}`;
-      const cached = digestCache.get(key);
-      if (cached !== undefined) return cached;
-      const shown = git(["show", `${commit.sha}:${path}`], checkout.root);
-      const value = shown.ok ? createHash("sha256").update(shown.stdout, "utf8").digest("hex") : null;
-      digestCache.set(key, value);
-      return value;
-    };
     // ONE COMMIT AT A TIME, and that is the whole of APRV-369's fix.
     //
     // This used to replay the UNION: base was the parent of the oldest
@@ -667,33 +626,68 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
     // own evidence rule — a grant binds a before-state that no longer occurs at
     // the union's base, because an earlier commit in the span already moved
     // those bytes — and on a 200 KB file it also exhausts the exact replay's
-    // byte budget. The CI guard never asks that question: it replays one pull
-    // request's range, and a grant binds one edit. So the doctor answered FAIL
-    // for a change CI had passed, at every session start, on `ea7427a`.
+    // byte budget. The CI guard never asks that question, and since APRV-375 it
+    // does not ask it of a pull request either: both sides judge one commit,
+    // because a grant binds one edit.
     //
     // Per commit the two sides ask the same question of the same bytes against
     // the same records, and they agree. It is also cheaper: the sixteen
     // per-commit replays of that window finish in about 1.2 seconds, where the
     // single union replay reached its limit and gave up.
+    //
+    // The per-commit INPUTS — the blobs at the commit and at its first parent —
+    // are built by `core/commit-guard.ts` (APRV-375), which is the same helper
+    // the CI guard uses. Two copies of this construction were two code paths to
+    // keep in step, and keeping them in step by hand is what APRV-369 was filed
+    // about.
+    //
+    // WHOLE-FILE evidence (a sign-off, APRV-338; an organ attestation,
+    // APRV-272) is matched at the head of the RANGE being judged, because it
+    // says a human read the file as it stood there. The CI guard's range is a
+    // pull request, so its head is the pull request's
+    // (`core/commit-guard.ts`'s `digestsAt`). ARM A HAS NO RANGE: it judges
+    // commits that are already merged, each of which passed its own pull
+    // request and was ratified, if at all, at that pull request's head. So the
+    // anchor here is the COMMIT, which is what APRV-369 shipped and what its
+    // fixture pins — the middle commit of three merged pull requests is
+    // evidenced by a sign-off over its own bytes, and anchoring the sweep at
+    // this checkout's HEAD would report it dark for a change CI passed, which
+    // is the disagreement APRV-369 exists to remove.
+    //
+    // The residual, stated rather than hidden: a MULTI-COMMIT pull request
+    // whose earlier commits were rescued by a sign-off at its head merges into
+    // main as several commits, and this sweep credits none of them, because no
+    // in-window commit's blob equals the ratified bytes. That is a false alarm
+    // in a health report and never a hole in the gate. Naming the right anchor
+    // for it means asking git which merge brought each commit in and reading
+    // that merge's second parent, which is APRV-374's neighbourhood and a
+    // design ruling rather than an implementation detail.
+    const read: GitReader = (args) => {
+      const run = git([...args], checkout.root);
+      return run.ok ? run.stdout : null;
+    };
     for (const commit of substantive) {
       const changed = commit.changedPaths.filter((path) => guarded.has(path)).sort();
       // A merge commit reports no paths at all under `--name-only`, so it drops
-      // out here rather than being judged for what its parents did.
+      // out here rather than being judged for what its parents did. APRV-374
+      // asks whether it should instead be judged on its dense combined diff, as
+      // the CI guard now is; until that is decided the modest reading stands.
       if (changed.length === 0) continue;
+      const parts = commitGuardInputParts(read, { sha: commit.sha, ts: datesOf(commit) });
       const report = evaluateProtectedPaths({
         changedPaths: changed,
-        blobsFor: (path) => blobsFor(commit, path),
+        blobsFor: parts.blobsFor,
         records,
         logStatus: "ok",
         policyProtectedPaths: input.policyProtectedPaths,
         policySha256AtHead: input.policySha256,
         policyPath: input.policyPath,
-        organSha256AtHead: (path) => sha256At(commit, path),
-        pathSha256AtHead: (path) => sha256At(commit, path),
+        organSha256AtHead: parts.sha256At,
+        pathSha256AtHead: parts.sha256At,
         payloadFor: input.payloadFor,
-        changeTsFor: () => commit.ts,
+        changeTsFor: parts.changeTsFor,
         ...(input.lookbackMs === undefined ? {} : { lookbackMs: input.lookbackMs }),
-        window: { ...logWindow, base: `${commit.sha.slice(0, 12)}^`, head: commit.sha.slice(0, 12) },
+        window: { ...logWindow, base: parts.window.base, head: parts.window.head },
       });
       for (const finding of report.findings) {
         if (!finding.ok) failures.push({ commit, finding });

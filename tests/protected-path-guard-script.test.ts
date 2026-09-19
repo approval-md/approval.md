@@ -28,7 +28,11 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
+import {
+  appendAttestation,
+  appendOrganAttestation,
+  appendPathSignOff,
+} from "../src/core/attest.js";
 import { decide, register, request, startHarnessExecution } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { verify } from "../src/core/verify.js";
@@ -168,12 +172,30 @@ function editSpec(fixture: Fixture): string {
  * one line out, one line in, which is exactly the edit `editSpec` makes.
  */
 function grantSpecEdit(fixture: Fixture, key: string): void {
+  grantChange(fixture, key, "SPEC.md", "old", "new");
+}
+
+/**
+ * One `policy.edit` grant over an exact change to one path (APRV-375's
+ * generalization of {@link grantSpecEdit}, which now calls it).
+ *
+ * Same real path in every case: `register`, `request` with the material in the
+ * content-addressed store, then a human `decide`. Nothing writes a jsonl line
+ * by hand.
+ */
+function grantChange(
+  fixture: Fixture,
+  key: string,
+  path: string,
+  before: string,
+  after: string,
+): void {
   const material = {
     tool: "Edit",
     rule: "protected path",
-    file: join(fixture.dir, "SPEC.md"),
-    before: "old",
-    after: "new",
+    file: join(fixture.dir, path),
+    before,
+    after,
   };
   const hash = payloadHash(material);
   const task = `hook:${key}`;
@@ -190,7 +212,7 @@ function grantSpecEdit(fixture: Fixture, key: string): void {
         actions: [
           {
             class: "policy.edit",
-            summary: "Edit SPEC.md",
+            summary: `Edit ${path}`,
             reversible: true,
             est_cost_usd: "0",
             idempotency_key: actionKey,
@@ -211,7 +233,7 @@ function grantSpecEdit(fixture: Fixture, key: string): void {
       actionKey,
       cls: "policy.edit",
       est_cost_usd: "0",
-      summary: "Edit SPEC.md",
+      summary: `Edit ${path}`,
       payload_hash: hash,
       payload: { value: material },
       execution: "harness",
@@ -322,16 +344,32 @@ function onBranch(fixture: Fixture, name: string, message: string, work: () => v
   assert.equal(git(["checkout", "-q", from], fixture.dir).code, 0);
 }
 
+interface GuardFindingJson {
+  path: string;
+  ok: boolean;
+  detail: string;
+  code?: string;
+  evidence?: string;
+  /** The commit this finding was reached on (APRV-375). */
+  commit?: string;
+}
+
+interface GuardCommitJson {
+  sha: string;
+  base: string | null;
+  merge: boolean;
+  judged: boolean;
+  skipped: string | null;
+  ok: boolean;
+  findings: GuardFindingJson[];
+  covered: number[];
+}
+
 interface GuardRun extends Run {
   report: {
     ok: boolean;
-    findings: Array<{
-      path: string;
-      ok: boolean;
-      detail: string;
-      code?: string;
-      evidence?: string;
-    }>;
+    findings: GuardFindingJson[];
+    commits: GuardCommitJson[];
     log_source: {
       ref: string;
       lastSeq: number | null;
@@ -343,7 +381,12 @@ interface GuardRun extends Run {
 
 /** The script, run twice: once for the human output, once for `--json`. */
 function runGuard(fixture: Fixture, args: string[]): GuardRun {
-  const base = ["--repo", fixture.dir, "--base", fixture.base, ...args];
+  return runGuardIn(fixture.dir, ["--base", fixture.base, ...args]);
+}
+
+/** The same, for a range this test chooses both ends of. */
+function runGuardIn(dir: string, args: string[]): GuardRun {
+  const base = ["--repo", dir, ...args];
   const human = spawnSync(process.execPath, [GUARD, ...base], { encoding: "utf8" });
   const json = spawnSync(process.execPath, [GUARD, ...base, "--json"], { encoding: "utf8" });
   assert.equal(
@@ -357,6 +400,50 @@ function runGuard(fixture: Fixture, args: string[]): GuardRun {
     stderr: human.stderr,
     report: JSON.parse(json.stdout) as GuardRun["report"],
   };
+}
+
+/** The verdict the run reached for one commit, by full sha. */
+function verdictOf(run: GuardRun, sha: string): GuardCommitJson {
+  const found = run.report.commits.find((commit) => commit.sha === sha);
+  assert.ok(
+    found !== undefined,
+    `${sha.slice(0, 12)} is not in the judged range: ${JSON.stringify(
+      run.report.commits.map((commit) => commit.sha.slice(0, 12)),
+    )}`,
+  );
+  return found;
+}
+
+/**
+ * Every guarded path that differs between base and head is inside some commit
+ * the guard judged.
+ *
+ * This is APRV-375's security argument, asserted rather than asserted-in-prose:
+ * per-commit judgment asks a smaller question than the combined diff did, and
+ * what makes that safe is that the union of the units still covers every
+ * changed byte. Guarded paths only, because an unguarded one is not the
+ * guard's business at either granularity.
+ */
+function assertEveryChangedPathWasJudged(
+  run: GuardRun,
+  dir: string,
+  base: string,
+  head: string,
+  guarded: readonly string[],
+): void {
+  const diff = git(["diff", "--name-only", base, head], dir);
+  assert.equal(diff.code, 0, diff.stderr);
+  const changed = diff.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => guarded.includes(line));
+  const judgedPaths = new Set(run.report.findings.map((finding) => finding.path));
+  for (const path of changed) {
+    assert.ok(
+      judgedPaths.has(path),
+      `${path} differs between ${base} and ${head} and no judged commit reported it: ${run.stdout}`,
+    );
+  }
 }
 
 function candidate(run: GuardRun, ref: string): { ref: string; status: string; lastSeq: number | null } {
@@ -658,4 +745,365 @@ test("attesting an organ and then editing it again fails: the digest at head is 
   assert.ok(finding !== undefined, JSON.stringify(run.report.findings));
   assert.equal(finding.code, "no-evidence");
   assert.match(finding.detail, /no gate\.organ\.attested record attests/u);
+});
+
+// ---------------------------------------------------------------------------
+// (d) the unit of judgment is ONE COMMIT (APRV-375)
+//
+// Carter ruled option B on 2026-09-19 after APRV-357's reproduction (PR #452):
+// the guard judges a pull request one commit at a time, base is each commit's
+// first parent, and the combined base-to-head replay is retired. What these
+// cases pin is that the smaller question is not a weaker one.
+// ---------------------------------------------------------------------------
+
+/** A fixture whose SPEC.md starts as three lines, committed as the new base. */
+function threeLineFixture(label: string): Fixture {
+  const fixture = newFixture(label);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "alpha\nbeta\ngamma\n", "utf8");
+  const base = commit(fixture.dir, "seed three lines");
+  return { ...fixture, base };
+}
+
+test("APRV-375: each commit is judged against its own parent, and the verdict is the conjunction", () => {
+  const fixture = newFixture("per-commit-chain");
+  // Two chained edits, each with its own grant binding its own before-state.
+  // Under the retired combined replay the second grant's before-state ("new")
+  // does not occur in the blob at BASE, which is what defeated PR #427.
+  grantChange(fixture, "chain-one", "SPEC.md", "old", "new");
+  grantChange(fixture, "chain-two", "SPEC.md", "new", "newer");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "new\n", "utf8");
+  const first = commit(fixture.dir, "first edit");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "newer\n", "utf8");
+  const second = commit(fixture.dir, "second edit");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, first).ok, true);
+  assert.equal(verdictOf(run, second).ok, true);
+  // Each commit's base is its own parent, and each names the records that
+  // covered it, which is what the report is for.
+  assert.equal(verdictOf(run, first).base, `${first}^1`);
+  assert.equal(verdictOf(run, second).base, `${second}^1`);
+  assert.ok(verdictOf(run, second).covered.length > 0, run.stdout);
+  assert.match(run.stdout, /judged one commit at a time \(2 commit\(s\) in the range/u);
+  assertEveryChangedPathWasJudged(run, fixture.dir, fixture.base, "HEAD", ["SPEC.md"]);
+});
+
+test("APRV-375 AC2: a commit with no record of its own fails, and the failure names that commit", () => {
+  const fixture = newFixture("per-commit-uncovered");
+  grantChange(fixture, "covered-one", "SPEC.md", "old", "new");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "new\n", "utf8");
+  const granted = commit(fixture.dir, "the granted edit");
+  // A second line nobody approved, in its own commit.
+  writeFileSync(join(fixture.dir, "SPEC.md"), "new\nsmuggled\n", "utf8");
+  const smuggled = commit(fixture.dir, "one more line");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, granted).ok, true, run.stdout);
+  const failed = verdictOf(run, smuggled);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.findings[0]?.code, "uncovered-hunk");
+  // The flattened finding carries the commit, so a reader of the JSON does not
+  // have to join two lists to learn which edit is unevidenced.
+  const finding = run.report.findings.find((entry) => entry.ok === false);
+  assert.equal(finding?.commit, smuggled);
+  assert.match(run.stdout, new RegExp(`FAIL ${smuggled.slice(0, 12)}`, "u"));
+});
+
+test("APRV-375 AC2: a granted after-state altered by a later commit does not carry that commit", () => {
+  const fixture = newFixture("per-commit-altered");
+  grantChange(fixture, "altered-one", "SPEC.md", "old", "new");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "new\n", "utf8");
+  const granted = commit(fixture.dir, "the granted edit");
+  // The same bytes the human approved, rewritten with no record at all. The
+  // grant is still in the log and still names SPEC.md; exactness is what stops
+  // it counting, and per-commit judgment does not change that.
+  writeFileSync(join(fixture.dir, "SPEC.md"), "tampered\n", "utf8");
+  const altered = commit(fixture.dir, "rewrite the approved line");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, granted).ok, true, run.stdout);
+  assert.equal(verdictOf(run, altered).ok, false);
+  assert.equal(verdictOf(run, altered).findings[0]?.code, "uncovered-hunk");
+});
+
+test("APRV-375 AC3: work the branch absorbed by merging main is not judged again", () => {
+  const fixture = newFixture("absorbed");
+  // The lane's own commit, granted, on its own branch.
+  assert.equal(git(["checkout", "-q", "-b", "lane"], fixture.dir).code, 0);
+  grantSpecEdit(fixture, "absorbed");
+  const lane = editSpec(fixture);
+
+  // Main moves meanwhile, with an edit to ANOTHER protected file that nothing
+  // in this log authorizes. If the guard judged absorbed commits it would fail
+  // this pull request for a commit main already carries.
+  assert.equal(git(["checkout", "-q", "main"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "CLAUDE.md"), "someone else's edit\n", "utf8");
+  const absorbed = commit(fixture.dir, "main moves");
+
+  // The lane absorbs it, exactly as PR #427's branch did, twice.
+  assert.equal(git(["checkout", "-q", "lane"], fixture.dir).code, 0);
+  const merged = git(["merge", "--no-edit", "-q", "main"], fixture.dir);
+  assert.equal(merged.code, 0, merged.stderr);
+  const mergeSha = git(["rev-parse", "HEAD"], fixture.dir).stdout.trim();
+
+  // CI's own base: `git merge-base origin/main HEAD`, which after the absorb is
+  // main's tip. That is what makes two-dot `base..head` exclude it.
+  const mergeBase = git(["merge-base", "main", "HEAD"], fixture.dir).stdout.trim();
+  assert.equal(mergeBase, absorbed);
+
+  const run = runGuardIn(fixture.dir, ["--base", mergeBase, "--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const judged = run.report.commits.map((commit) => commit.sha);
+  assert.deepEqual(judged.sort(), [lane, mergeSha].sort());
+  assert.ok(!judged.includes(absorbed), `the absorbed commit was judged: ${run.stdout}`);
+  assert.ok(
+    !run.report.findings.some((finding) => finding.path === "CLAUDE.md"),
+    `the absorbed commit's path was judged: ${run.stdout}`,
+  );
+
+  // And the control: judged on its OWN range, that same commit fails. The
+  // exclusion is about which pull request owes the evidence, never about
+  // whether it is owed.
+  const control = runGuardIn(fixture.dir, ["--base", `${absorbed}^`, "--head", absorbed]);
+  assert.equal(control.code, 1, control.stdout);
+  assert.equal(control.report.findings[0]?.path, "CLAUDE.md");
+});
+
+test("APRV-375 AC4: a merge that invents a line on a guarded path is judged against its first parent", () => {
+  const fixture = threeLineFixture("evil-merge");
+  // Both grants are appended before either branch exists, and committed in a
+  // commit that touches only the daemon's append surface, so both branches and
+  // the merge carry the same log.
+  grantChange(fixture, "left", "SPEC.md", "beta", "LEFT");
+  grantChange(fixture, "right", "SPEC.md", "beta", "RIGHT");
+  const seeded = commit(fixture.dir, "log advance");
+
+  assert.equal(git(["checkout", "-q", "-b", "right"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "alpha\nRIGHT\ngamma\n", "utf8");
+  const right = commit(fixture.dir, "right edit");
+  assert.equal(git(["checkout", "-q", "main"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "alpha\nLEFT\ngamma\n", "utf8");
+  const left = commit(fixture.dir, "left edit");
+
+  // The merge conflicts, and the resolution invents a line that is in NEITHER
+  // parent and therefore in no commit's own diff. This is the one shape the
+  // per-commit unit could have missed, which is why merges are judged on their
+  // dense combined diff.
+  assert.notEqual(git(["merge", "--no-edit", "-q", "right"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "alpha\nMERGED\ngamma\n", "utf8");
+  const mergeSha = commit(fixture.dir, "resolve the conflict");
+
+  for (const sha of [left, right]) {
+    const own = git(["diff", `${sha}^`, sha, "--", "SPEC.md"], fixture.dir);
+    assert.ok(
+      !own.stdout.includes("+MERGED"),
+      `${sha.slice(0, 12)} contains the invented line, so the fixture proves nothing`,
+    );
+  }
+
+  const run = runGuardIn(fixture.dir, ["--base", seeded, "--head", mergeSha]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, left).ok, true, run.stdout);
+  assert.equal(verdictOf(run, right).ok, true, run.stdout);
+  const merge = verdictOf(run, mergeSha);
+  assert.equal(merge.merge, true);
+  assert.equal(merge.judged, true);
+  assert.equal(merge.ok, false);
+  assert.equal(merge.base, `${mergeSha}^1`);
+  assert.equal(merge.findings[0]?.path, "SPEC.md");
+  assert.match(run.stdout, /merge resolution/u);
+  assertEveryChangedPathWasJudged(run, fixture.dir, seeded, mergeSha, ["SPEC.md"]);
+});
+
+test("APRV-375 AC4: a merge that takes one parent's bytes verbatim is listed as skipped", () => {
+  const fixture = threeLineFixture("clean-merge");
+  grantChange(fixture, "clean-left", "SPEC.md", "beta", "LEFT");
+  const seeded = commit(fixture.dir, "log advance");
+
+  // The other side touches a different file, so the merge resolves both sides
+  // verbatim and invents nothing.
+  assert.equal(git(["checkout", "-q", "-b", "side"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "README.md"), "unprotected\n", "utf8");
+  commit(fixture.dir, "side edit");
+  assert.equal(git(["checkout", "-q", "main"], fixture.dir).code, 0);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "alpha\nLEFT\ngamma\n", "utf8");
+  const left = commit(fixture.dir, "left edit");
+  const merged = git(["merge", "--no-ff", "--no-edit", "-q", "side"], fixture.dir);
+  assert.equal(merged.code, 0, merged.stderr);
+  const mergeSha = git(["rev-parse", "HEAD"], fixture.dir).stdout.trim();
+
+  const run = runGuardIn(fixture.dir, ["--base", seeded, "--head", mergeSha]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, left).ok, true, run.stdout);
+  const merge = verdictOf(run, mergeSha);
+  assert.equal(merge.merge, true);
+  assert.equal(merge.judged, false);
+  assert.equal(merge.skipped, "clean-merge");
+  assert.match(run.stdout, new RegExp(`SKIP ${mergeSha.slice(0, 12)}`, "u"));
+  assertEveryChangedPathWasJudged(run, fixture.dir, seeded, mergeSha, ["SPEC.md"]);
+});
+
+// ---------------------------------------------------------------------------
+// (e) the PR #427 fixture itself, when this checkout carries it (AC1)
+// ---------------------------------------------------------------------------
+
+/**
+ * PR #427's own commits, replayed from the committed log in THIS repository.
+ *
+ * Skipped when the checkout cannot reach them, which is the ordinary case in
+ * CI: the sharded `full` job clones at depth 1, and only the guard job itself
+ * uses `fetch-depth: 0`. A test that failed on a shallow clone would be
+ * reporting the clone rather than the guard. Everything it asserts about the
+ * per-commit unit is also asserted above on fixtures built through the real
+ * append path, so nothing rests on this case alone.
+ */
+const PR_427 = { base: "6d1b2bbe1dde", head: "e66ba9e689a2" };
+const pr427Reachable =
+  spawnSync("git", ["cat-file", "-e", `${PR_427.head}^{commit}`], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).status === 0 &&
+  spawnSync("git", ["cat-file", "-e", `${PR_427.base}^{commit}`], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).status === 0;
+
+test(
+  "APRV-375 AC1: PR #427 passes per commit, on the log its head carries",
+  { skip: pr427Reachable ? false : "this checkout does not carry PR #427's commits" },
+  () => {
+    // `--log-ref <head>` pins the committed log to the 42403-record copy PR
+    // #427's head carries, which is what APRV-357's reproduction read. Without
+    // it the guard would widen to today's records branches and the case would
+    // drift as the log grows.
+    const run = runGuardIn(REPO_ROOT, [
+      "--base",
+      PR_427.base,
+      "--head",
+      PR_427.head,
+      "--log-ref",
+      PR_427.head,
+    ]);
+    assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+    const spec = run.report.findings.filter((finding) => finding.path === "SPEC.md");
+    assert.ok(spec.length >= 3, `SPEC.md was judged on ${String(spec.length)} commit(s)`);
+    for (const finding of spec) {
+      assert.equal(finding.ok, true, finding.detail);
+      // AC1's "with no sign-off record present" reads as: the GRANTS carry this
+      // pull request. Asserted as the positive — every finding rests on
+      // hunk-level evidence, a grant or a policy-authorized execution — rather
+      // than as "not attested", because a sign-off at the range head is a
+      // legitimate pass for a pull request that needs one, which is what the
+      // three `signoff-*` cases above exercise. This one does not need it.
+      assert.ok(
+        finding.evidence === "granted-file" || finding.evidence === "policy-authorized-file",
+        `${finding.commit?.slice(0, 12) ?? "?"} passed on ${String(finding.evidence)}: ${finding.detail}`,
+      );
+    }
+    // Each judged commit is named with its own records.
+    for (const commit of run.report.commits.filter((entry) => entry.judged)) {
+      assert.ok(commit.covered.length > 0, `${commit.sha.slice(0, 12)} named no records`);
+    }
+    // Both of the branch's merges of origin/main resolved every guarded path to
+    // one parent's bytes, so both are skipped rather than judged for what main
+    // did (AC4's clean case, on the real history that motivated the task).
+    const merges = run.report.commits.filter((entry) => entry.merge);
+    assert.equal(merges.length, 2, run.stdout);
+    for (const merge of merges) assert.equal(merge.judged, false, merge.sha);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// (f) whole-file evidence is anchored to the RANGE HEAD, not to a commit
+//
+// A grant binds a hunk and is evidence about one commit. A sign-off (APRV-338),
+// an organ attestation (APRV-272) and the policy attestation are whole-file
+// records: a human read the file AS IT NOW STANDS. What they are about is the
+// bytes the pull request installs, so every commit in the range is offered the
+// digests at the range head. Matched per commit instead, the escape hatch would
+// cover only the commit whose blob happened to equal the ratified bytes.
+// ---------------------------------------------------------------------------
+
+/** `approval policy attest --path <path>` on the working tree, through the real verb. */
+function signOffSpec(fixture: Fixture, minutes = 1): void {
+  const signed = appendPathSignOff(
+    fixture.unit.logPath,
+    { path: "SPEC.md", root: fixture.dir, protectedPaths: ["SPEC.md"] },
+    HUMAN,
+    { clock: fixedClock(minutesAgo(minutes)) },
+  );
+  assert.equal(signed.ok, true, JSON.stringify(signed));
+}
+
+/**
+ * A branch whose FIRST commit has no record of its own and whose second is
+ * granted. Returns both shas, with SPEC.md at "signed" on the working tree.
+ */
+function twoCommitBranch(label: string): { fixture: Fixture; first: string; second: string } {
+  const fixture = newFixture(label);
+  // No grant for this one: the edit the hook never saw.
+  writeFileSync(join(fixture.dir, "SPEC.md"), "ungranted\n", "utf8");
+  const first = commit(fixture.dir, "an edit nothing authorized");
+  grantChange(fixture, `${label}-two`, "SPEC.md", "ungranted", "signed");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "signed\n", "utf8");
+  const second = commit(fixture.dir, "a granted edit");
+  return { fixture, first, second };
+}
+
+test("APRV-375: a sign-off at the range head rescues an earlier commit that has no grant", () => {
+  const { fixture, first, second } = twoCommitBranch("signoff-head");
+  // The human reads the file as it now stands and ratifies those bytes, then
+  // the record is committed with the rest of the log.
+  signOffSpec(fixture);
+  commit(fixture.dir, "log advance carrying the sign-off");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  // The first commit is covered by the whole-file record, which is what the
+  // escape hatch is for: no grant exists for it and none can be made now.
+  const rescued = verdictOf(run, first);
+  assert.equal(rescued.ok, true, run.stdout);
+  assert.equal(rescued.findings[0]?.evidence, "attested");
+  assert.match(rescued.findings[0]?.detail ?? "", /gate\.path\.signed_off|signed off/u);
+
+  // The second commit has a grant of its own, and hunk evidence still leads:
+  // the evaluator reaches a sign-off only after every grant search has failed
+  // (APRV-338's ordering rule, unchanged).
+  assert.equal(verdictOf(run, second).findings[0]?.evidence, "granted-file");
+});
+
+test("APRV-375: without the sign-off, that same range fails and names the first commit", () => {
+  // The same fixture, and the only difference is that nobody ratified the
+  // bytes at head. The grant for the second commit was already committed with
+  // it, so there is nothing further to commit here.
+  const { fixture, first, second } = twoCommitBranch("signoff-absent");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, first).ok, false);
+  assert.equal(verdictOf(run, second).ok, true, run.stdout);
+  const failed = run.report.findings.find((finding) => finding.ok === false);
+  assert.equal(failed?.commit, first);
+  assert.match(run.stdout, new RegExp(`FAIL ${first.slice(0, 12)}`, "u"));
+});
+
+test("APRV-375: a sign-off over an INTERMEDIATE commit's bytes covers nothing", () => {
+  const fixture = newFixture("signoff-intermediate");
+  writeFileSync(join(fixture.dir, "SPEC.md"), "intermediate\n", "utf8");
+  const first = commit(fixture.dir, "an edit nothing authorized");
+  // Ratified here, at the intermediate bytes — and then the file moves on with
+  // no record of its own. A sign-off is about the bytes a human read, and these
+  // are not the bytes this pull request installs.
+  signOffSpec(fixture, 2);
+  writeFileSync(join(fixture.dir, "SPEC.md"), "moved on\n", "utf8");
+  const second = commit(fixture.dir, "another edit nothing authorized");
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(verdictOf(run, first).ok, false, run.stdout);
+  assert.equal(verdictOf(run, second).ok, false, run.stdout);
 });
