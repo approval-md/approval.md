@@ -1,0 +1,20 @@
+{
+  "seq": 91,
+  "ts": "2026-09-19T21:14:08Z",
+  "event": "approval.granted",
+  "task": "task-370",
+  "action_key": "task-370:chaser:2026-09-19",
+  "actor": "human:carter",
+  "channel": "telegram",
+  "payload": {
+    "sender": {
+      "channel": "telegram",
+      "id": "hmac-sha256:3f2a9c11b4d7e6085a1c2f9d8e7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a",
+      "hashed": true
+    },
+    "sender_source": "policy"
+  },
+  "alg": "sha256/jcs",
+  "prev": "4341a44ad46ed5c25a601f296530e5cbab7d3bfb6a3119f77a83c327ab5b54d5",
+  "hash": "bcd21fd125d9c85cc4b4eb1ff519448989c72c0fd70305cbb06b821d04926686"
+}

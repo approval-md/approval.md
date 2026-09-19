@@ -411,6 +411,13 @@ const HUMAN_ONLY: readonly string[] = [
   "setup identity",
   "setup vault",
   "setup sampling",
+  // APRV-370. It mints the key every sender mapping is then written against,
+  // so an agent that could run it could re-key the mapping and make every
+  // account the policy names unresolvable — a gate nobody can answer from the
+  // phone. Human-only in the registry, and it classifies `policy.core`. The
+  // `--id` half computes a value designed to be published and stores nothing,
+  // which is why it needs no terminal; it is not a second verb.
+  "setup sender-key",
   // APRV-257. It mints the key that makes a checkpoint mean anything, so an
   // agent that could run it could mint one, store it, and then vouch for a
   // chain it had just written. Human-only in the registry, and classified

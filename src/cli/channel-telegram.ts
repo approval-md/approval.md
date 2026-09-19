@@ -167,7 +167,10 @@ import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-con
 import { loadPolicy } from "../core/policy-load.js";
 import {
   actorForSender,
+  recordedSenderFor,
+  senderKeyFrom,
   type ChannelSender,
+  type RecordedSender,
   type SenderSource,
 } from "../core/sender-identity.js";
 import {
@@ -2295,8 +2298,8 @@ function policyLoadOptions(setup: ListenSetup): { file?: string; dir?: string } 
  * policy file is in. That is what keeps the repair path open.
  */
 type GestureIdentity =
-  | { ok: true; actor: string; sender?: ChannelSender; source?: SenderSource }
-  | { ok: false; code: string; message: string; sender: ChannelSender };
+  | { ok: true; actor: string; sender?: RecordedSender; source?: SenderSource }
+  | { ok: false; code: string; message: string; sender: RecordedSender };
 
 function senderIdentityFor(
   setup: ListenSetup,
@@ -2305,13 +2308,18 @@ function senderIdentityFor(
   const load = loadPolicy(policyLoadOptions(setup));
   if (sender === undefined) return { ok: true, actor: setup.actor };
 
+  // APRV-370. The operator's sender key, and with it the form the two refusals
+  // below record the account in. Those two never reach the in-force mapping,
+  // so they take `recordedSenderFor`'s rule: the form follows the FILE, the
+  // mapping follows the ATTESTATION.
+  const key = senderKeyFrom();
   if (load.ok) {
     const read = readVerifiedRecords(setup.logPath);
     if (!read.ok) {
       return {
         ok: false,
         code: "policy-not-attested",
-        sender,
+        sender: recordedSenderFor(load, sender, key),
         message: `the log could not be read to check whether ${load.source.filename} is attested (${read.code}): ${read.message}. Nothing was recorded; a decision made at a terminal carries no sender and is unaffected.`,
       };
     }
@@ -2323,13 +2331,13 @@ function senderIdentityFor(
       return {
         ok: false,
         code: refusal.code,
-        sender,
+        sender: recordedSenderFor(load, sender, key),
         message: `${refusal.message}. The sender mapping it declares is therefore not in force, so the account this gesture came from cannot be resolved against it and nothing was recorded. Re-attest the policy, or do this from a terminal, which authenticates no sender and is unaffected by the mapping.`,
       };
     }
   }
 
-  return actorForSender(load, setup.actor, sender);
+  return actorForSender(load, setup.actor, sender, key);
 }
 
 /**
@@ -2350,7 +2358,7 @@ function recordGestureRefusal(
   setup: ListenSetup,
   streams: Streams,
   gesture: RefusedGestureKind,
-  refused: { ok: false; code: string; message: string; sender: ChannelSender },
+  refused: { ok: false; code: string; message: string; sender: RecordedSender },
 ): void {
   const recorded = recordRefusedGesture(
     setup.logPath,

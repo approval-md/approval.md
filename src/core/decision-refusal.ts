@@ -106,7 +106,7 @@ import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import { appendEvent, type AppendError, type EventInput, type EventRecord, type LogHead } from "./log.js";
 import { readVerifiedRecords, requestState, type Decision } from "./state.js";
 import type { GateOptions } from "./gate.js";
-import type { ChannelSender, SenderSource } from "./sender-identity.js";
+import type { RecordedSender, SenderSource } from "./sender-identity.js";
 
 /**
  * The actor every record here carries. `system:`, and the same id the runtime's
@@ -154,10 +154,11 @@ export interface RefusedDecision {
   channel: string;
   /**
    * The authenticated sender the gesture arrived from (APRV-324), when the
-   * surface observed one. The transport's own attribution, never anything the
-   * message claimed about itself (§11.1 invariant 4).
+   * surface observed one, in the form the record carries it (APRV-370: raw, or
+   * the operator's keyed digest). The transport's own attribution, never
+   * anything the message claimed about itself (§11.1 invariant 4).
    */
-  sender?: ChannelSender;
+  sender?: RecordedSender;
   /** How the sender became the actor, when one did. */
   senderSource?: SenderSource;
 }
@@ -294,7 +295,12 @@ function appendAudit(
   // tapped; on any other refusal of a sender-resolved decision it says which
   // account spent the attention the record is accounting for.
   if (decided.sender !== undefined) {
-    payload["sender"] = { channel: decided.sender.channel, id: decided.sender.id };
+    payload["sender"] = {
+      channel: decided.sender.channel,
+      id: decided.sender.id,
+      // APRV-370: only when true, so a raw record does not change shape.
+      ...(decided.sender.hashed === true ? { hashed: true } : {}),
+    };
     if (decided.senderSource !== undefined) payload["sender_source"] = decided.senderSource;
   }
   if (refusal.drift !== undefined) {

@@ -165,13 +165,16 @@
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { readEnvFile, upsertEnvFileEntries, type EnvFileRefusal } from "../core/env-file.js";
+import { SENDER_KEY_ENV, hashedSenderId, senderKeyFrom } from "../core/sender-identity.js";
 import { passphraseEnvFor, vaultExists, vaultPathFor } from "../core/vault.js";
+import { parseFlags, stringFlag } from "./args.js";
 import { EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import {
   SETUP_CHANNEL_HELP,
   SETUP_HELP,
   SETUP_IDENTITY_HELP,
   SETUP_SAMPLING_HELP,
+  SETUP_SENDER_KEY_HELP,
   SETUP_VAULT_HELP,
 } from "./help.js";
 import { commandSetupAdapter } from "./setup-adapter.js";
@@ -180,6 +183,7 @@ import { RENAMED_NOTICE, commandSetupChannel } from "./setup-channel.js";
 import { commandSetupService } from "./setup-service.js";
 import {
   DEFAULT_SAMPLING_ENV,
+  FLAGS,
   emitRefusal,
   front,
   offerLiteral,
@@ -584,6 +588,121 @@ export function commandSetupSampling(
 }
 
 // ---------------------------------------------------------------------------
+// approval setup sender-key (APRV-370)
+// ---------------------------------------------------------------------------
+
+const SENDER_KEY_HINT = (where: HintContext): string =>
+  `  # 1. store the key (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, where.services.senderKey)}\n\n  # 2. record where it lives (the name carries this instance's id; see \`approval doctor\`):\n  printf '%s\\n' '${SENDER_KEY_ENV}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, where.services.senderKey) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. turn an account id into the line the policy carries:\n  eval "$(approval env)"\n  approval setup sender-key --id <account-id>`;
+
+/**
+ * Print the mapping line for one account id, and mint nothing (APRV-370).
+ *
+ * The half of this verb that runs after the key exists, and the reason the
+ * proposal page an operator applies does not have to carry a placeholder they
+ * fill by hand: the digest depends on a secret only their environment holds,
+ * so the exact bytes can only be produced here, on their machine.
+ *
+ * It stores nothing, prompts for nothing, and prints no secret — a digest is a
+ * value designed to be published in a policy — so it is exempt from the
+ * terminal requirement and from the human-identity check that guard the minting
+ * path. A verb that refused to compute a public value without a TTY would be
+ * ceremony charged for nothing.
+ */
+function senderKeyDigest(argv: string[], streams: Streams): number {
+  const json = argv.includes("--json");
+  const parsed = parseFlags(argv, { ...FLAGS, "--id": "string" });
+  if (!parsed.ok) return usageError(streams, json, parsed.message, SETUP_SENDER_KEY_HELP);
+  const id = stringFlag(parsed.flags, "--id") ?? "";
+  if (id.length === 0) {
+    return usageError(
+      streams,
+      json,
+      "--id expects the channel account id to hash, as the transport reports it (for telegram, the decimal callback_query.from.id)",
+      SETUP_SENDER_KEY_HELP,
+    );
+  }
+  const key = senderKeyFrom();
+  if (key === null) {
+    // Fail closed and say the whole repair. Printing a digest under a key this
+    // process invented would hand the operator a line no listener can ever
+    // match, and they would find that out at a refused tap.
+    const message = `${SENDER_KEY_ENV} is unset or empty in this process, so there is no key to hash ${JSON.stringify(id)} under and nothing was printed. Mint it with \`approval setup sender-key\` if it does not exist yet, then \`eval "$(approval env)"\` to establish it in this shell.`;
+    if (json) streams.err(`${JSON.stringify({ error: { code: "sender-key-unavailable", message } })}\n`);
+    else streams.err(`approval: ${message}\n`);
+    return EXIT_IO;
+  }
+  const digest = hashedSenderId(key, id);
+  if (json) {
+    streams.out(`${JSON.stringify({ id, mapping: digest, env: SENDER_KEY_ENV })}\n`);
+    return EXIT_OK;
+  }
+  streams.out(
+    `The mapping value for account ${id}, under the key in ${SENDER_KEY_ENV}:\n\n  ${digest}\n\nIn the approver's block:\n\n    senders:\n      telegram: "${digest}"\n\nAs a policy-proposal pair (docs/proposals/README.md), with the approver id and\nthe current line replaced by what your own APPROVAL.md says:\n\n  Current:\n\n  \`\`\`yaml\n  approvers:\n    <id>:\n      channels: [telegram, cli]\n      senders:\n        telegram: "${id}"\n  \`\`\`\n\n  Replace with:\n\n  \`\`\`yaml\n  approvers:\n    <id>:\n      channels: [telegram, cli]\n      senders:\n        telegram: "${digest}"\n  \`\`\`\n\nThe digest is not a secret: it is published in the policy and in every decision\nrecord. The key it was computed under is, and it was not printed.\n`,
+  );
+  return EXIT_OK;
+}
+
+/** `approval setup sender-key` — mint and store the sender key. HUMAN-ONLY. */
+export function commandSetupSenderKey(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  deps: SetupDeps = {},
+): number {
+  // The --id path first, because it mints nothing: no keystore, no prompter, no
+  // human identity, and no terminal. `front` would refuse it for want of a TTY.
+  if (argv.includes("--id")) return senderKeyDigest(argv, streams);
+
+  const outcome = front(
+    "sender-key",
+    argv,
+    streams,
+    cwd,
+    deps,
+    SETUP_SENDER_KEY_HELP,
+    SENDER_KEY_HINT,
+    { "--id": "string" },
+  );
+  if (outcome.kind === "handled") return outcome.code;
+  const context = outcome;
+
+  const human = requireHuman(context.flags, streams, SETUP_SENDER_KEY_HELP, "sender-key");
+  if (!human.ok) return human.code;
+
+  streams.out(
+    `approval setup sender-key — mints the operator-held key that turns a channel\naccount id into the value an \`approvers[id].senders\` block carries.\n\nA published policy and a published log disclose the account otherwise: once in\nthe file and then on every decision. A plain unkeyed digest would not fix that,\nbecause a Telegram id is a short decimal number and the whole space of them is\nenumerable on a laptop. This key is what makes the digest a digest of anything.\n\nIt is not an authenticator. Nothing in the gate's safety rests on its secrecy,\nand a listener that loses it can no longer RESOLVE accounts — it refuses every\ndecision on a keyed channel rather than falling back to the raw comparison.\n\n`,
+  );
+
+  const plan = planReplacements(streams, context.prompter, context.envPath, [SENDER_KEY_ENV]);
+  if (!plan.ok) return emitRefusal(streams, plan.refusal);
+  if (plan.write.length === 0) {
+    reportSkipped(streams, context.envPath, plan.skipped);
+    return EXIT_OK;
+  }
+
+  const stored = storeGeneratedSecret(streams, context, context.services.senderKey, "sender key");
+  if (stored === null) return EXIT_OK;
+  if ("failed" in stored) return stored.code;
+
+  const written = writeLines(
+    streams,
+    context.envPath,
+    [{ key: SENDER_KEY_ENV, value: stored.value, describe: stored.describe }],
+    plan.write,
+  );
+  if (!written.ok) return written.code;
+  reportSkipped(streams, context.envPath, plan.skipped);
+
+  // The value was not printed and there is no verb that prints it. What the
+  // operator needs next is the line the POLICY carries, which is a different
+  // value and is printed on demand by the `--id` path.
+  streams.out(
+    `\nThe key is in ${SENDER_KEY_ENV}, and its value was not printed here or anywhere\nelse. Establish it, then turn an account id into the line your policy carries:\n\n  eval "$(approval env)"\n  approval setup sender-key --id <account-id>\n\nNothing changes until an \`approvers[id].senders\` entry is written in the keyed\nform, through the amendment ceremony that attests it (\`approval policy amend\`,\nor \`approval policy apply <proposal>\`). Until then every mapping stays raw and\nevery record reads exactly as it did.\n\nWHEN IT IS KEYED, the listener needs this variable in its environment or it\nrefuses every decision on that channel (\`sender-key-unavailable\`). Restart the\nlistener after establishing it, and check it with \`approval doctor\`.\n`,
+  );
+  return EXIT_OK;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -608,6 +727,12 @@ export function commandSetup(
   if (sub === "identity") return commandSetupIdentity(rest, streams, cwd, deps);
   if (sub === "vault") return commandSetupVault(rest, streams, cwd, deps);
   if (sub === "sampling") return commandSetupSampling(rest, streams, cwd, deps);
+  // APRV-370. The second secret whose PUBLIC half belongs in APPROVAL.md: the
+  // key stays in `.approval/env`, and the digest of an account id under it is
+  // the value the `senders` mapping carries. Like every setup verb here it
+  // edits no policy file; unlike the rest it can be asked to compute that
+  // public half, which is what `--id` does.
+  if (sub === "sender-key") return commandSetupSenderKey(rest, streams, cwd, deps);
   // APRV-257. The fourth subcommand whose subject is a value this runtime
   // MINTS, and the first whose public half belongs in APPROVAL.md rather than
   // in `.approval/env`. It prints that half and the amendment ceremony and

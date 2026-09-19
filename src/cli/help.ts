@@ -2206,14 +2206,14 @@ ${why("env")}`;
 export const SETUP_HELP = `approval setup — interactive configuration (SPEC.md §5.2, §10.1)
 
 Usage:
-  approval setup identity|vault|sampling|checkpoint [--as human:<id>] …
+  approval setup identity|vault|sampling|sender-key|checkpoint [--as human:<id>] …
   approval setup channel|adapter <name> [--api-base <url>] [--as human:<id>] …
   approval setup service [--platform launchd|systemd] [--uninstall] …
-
 Subcommands:
   identity   declare who the human is (APPROVAL_HUMAN); not human-only
   vault      mint a vault passphrase, store it, and record where it lives
   sampling   mint the audit sampling secret and print the policy line for it
+  sender-key mint the key that hashes sender ids; --id prints one mapping line
   checkpoint mint the Ed25519 key you sign the log's head with (--rotate/--retire)
   channel    configure one CHANNEL's transport credential (OS keystore)
   adapter    fill the VAULT with one ADAPTER's credentials, from its manifest
@@ -2289,6 +2289,29 @@ does not edit an attested policy file: it prints the block to add and the
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("setup-sampling")}`;
+
+export const SETUP_SENDER_KEY_HELP = `approval setup sender-key — mint the key that hashes sender ids (HUMAN-ONLY)
+
+Usage:
+  approval setup sender-key [--as human:<id>] [--log <path>] [--dir <path>]
+  approval setup sender-key --id <account-id> [--log <path>] [--json]
+
+Bare, it mints the operator-held key that turns a channel account id into the
+value an approvers[id].senders block carries, stores it as approval-sender-key,
+and writes its source line. It edits no policy file (APRV-370).
+
+WITH --id it mints and stores nothing: it reads the key from the environment,
+prints the hmac-sha256:<hex> for that account, and prints the senders line and
+the paste-ready proposal pair around it. Run \`eval "$(approval env)"\` first.
+That is the one setup path that needs no terminal.
+
+A LISTENER THAT HOLDS NO KEY UNDER A KEYED MAPPING REFUSES EVERY DECISION on
+that channel (sender-key-unavailable), never falling back to a raw comparison.
+The key authenticates nothing; losing it costs the ability to resolve accounts.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("setup-sender-key")}`;
 
 export const SETUP_CHECKPOINT_HELP = `approval setup checkpoint — mint the log-checkpoint key (HUMAN-ONLY)
 

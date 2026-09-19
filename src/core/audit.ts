@@ -603,7 +603,7 @@ export interface ReviewOptions extends AuditOptions {
    * resolution that decides whether an account may review at all is the
    * surface's, against the attested policy; nothing here re-derives it.
    */
-  sender?: { channel: string; id: string };
+  sender?: { channel: string; id: string; hashed?: true };
   senderSource?: "policy";
 }
 
@@ -721,7 +721,12 @@ export function reviewSample(
   // transport authenticated an account, so its absence says the attribution
   // came from configuration.
   if (options.sender !== undefined) {
-    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    payload["sender"] = {
+      channel: options.sender.channel,
+      id: options.sender.id,
+      // APRV-370: only when true, so a raw record does not change shape.
+      ...(options.sender.hashed === true ? { hashed: true } : {}),
+    };
     if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
   }
 

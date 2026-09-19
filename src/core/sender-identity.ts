@@ -76,7 +76,86 @@
  * where a `policy.core` edit has to happen anyway.
  */
 
+import { createHmac } from "node:crypto";
+
 import type { PolicyLoadResult } from "./policy-load.js";
+
+/**
+ * The prefix a KEYED sender mapping wears, in the policy and in the log
+ * (APRV-370).
+ *
+ * ## Why keyed, and not a plain digest
+ *
+ * The operator raised this on 2026-09-18 while applying APRV-324: a Telegram
+ * account id is a short decimal number, and this repository publishes both its
+ * policy and its log. Writing the raw id discloses the account once in
+ * `APPROVAL.md` and then on every phone decision. It is an identifier rather
+ * than a credential and the gate does not depend on its secrecy, so this is a
+ * disclosure question rather than a security hole, and the fix has to actually
+ * fix it: a plain `sha256:<hex>` of a ten-digit number is not a fix, because
+ * the whole space of ten-digit numbers is ten billion digests and a laptop
+ * enumerates it in minutes. The operator ruled on 2026-09-19 for the keyed
+ * form, which has no such space to enumerate without the key.
+ *
+ * ## What the key is, and what it is not
+ *
+ * An operator-held secret in the launch environment, beside the sampling
+ * secret, minted by `approval setup sender-key` and named by
+ * {@link SENDER_KEY_ENV}. It is NOT an authenticator: nothing about the gate's
+ * safety rests on it, and an attacker who learns it learns only which account
+ * ids the policy names, which is what the raw form told everybody anyway. It
+ * exists so that a published policy and a published log carry a value nobody
+ * can walk backwards.
+ */
+export const SENDER_HASH_PREFIX = "hmac-sha256:";
+
+/** The shape a keyed mapping value and a keyed recorded id both take. */
+const HASHED_SENDER_PATTERN = /^hmac-sha256:[0-9a-f]{64}$/u;
+
+/**
+ * The environment variable the sender key is read from.
+ *
+ * A CONVENTIONAL name rather than one the policy declares, which is the one
+ * place this diverges from the sampling secret's shape, and the reason is that
+ * the two questions differ. The policy names `audit.sampling_secret_env`
+ * because the POLICY decides whether sampling happens at all: a policy naming
+ * no variable turns the sampler off, and that is a deliberate control. Here the
+ * mapping's own form decides — a value wearing {@link SENDER_HASH_PREFIX} is
+ * keyed and a decimal one is not — so the policy already says everything it
+ * needs to, and a second declaration would be a second place for one fact to be
+ * wrong. Per-instance isolation comes from the env FILE beside the log, which
+ * is where the sampling secret gets it too.
+ */
+export const SENDER_KEY_ENV = "APPROVAL_SENDER_KEY";
+
+/** Is this mapping value (or recorded id) the keyed form? */
+export function isHashedSenderId(value: string): boolean {
+  return HASHED_SENDER_PATTERN.test(value);
+}
+
+/**
+ * The keyed digest of one observed id: what a keyed policy carries and what a
+ * keyed record records.
+ *
+ * HMAC-SHA-256 under the operator's key, over the id as the transport reported
+ * it, hex, prefixed. Computed the way `core/sampler.ts` computes its selection
+ * value — `createHmac("sha256", key).update(value, "utf8")` — so this runtime
+ * has one keyed-digest idiom rather than two that could drift.
+ *
+ * The prefix is part of the value on purpose. It is what tells a reader of a
+ * policy or a log which form they are looking at without a second field to
+ * consult, and it is what makes a keyed entry and a raw entry unable to
+ * collide: a raw Telegram id is decimal digits and can never be this string.
+ */
+export function hashedSenderId(key: string, id: string): string {
+  return `${SENDER_HASH_PREFIX}${createHmac("sha256", key).update(id, "utf8").digest("hex")}`;
+}
+
+/** The sender key in this environment, or `null` when it is unset or empty. */
+export function senderKeyFrom(env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = env[SENDER_KEY_ENV];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
 
 /**
  * The channels whose transport attributes a gesture to an account the operator
@@ -145,6 +224,29 @@ export const CHANNEL_DECISION_REFUSAL_CODES = [
    */
   "sender-ambiguous",
   /**
+   * The policy maps this channel's senders in the KEYED form and no sender key
+   * resolves in this process (APRV-370).
+   *
+   * Its own code rather than a `sender-unmapped`, because the two say opposite
+   * things and want opposite repairs. Unmapped says the policy does not name
+   * this account: the operator looks at the account and decides whether to add
+   * it. This says the runtime could not evaluate the mapping AT ALL, for every
+   * account, and the repair is {@link SENDER_KEY_ENV} in the listener's
+   * environment. A caller that could not tell them apart would send an operator
+   * looking for an intruder when what happened is that a process started
+   * without its key.
+   *
+   * It refuses the WHOLE channel, not only the keyed entries, and that is the
+   * strict reading rather than an accident. Without the key the runtime cannot
+   * compute any digest, so it cannot check whether the observed account is also
+   * claimed by a keyed approver, which means it cannot run the ambiguity check
+   * the mapping's safety rests on. Matching a raw entry while half the roster
+   * is unreadable would be resolving an ambiguity by not looking at it
+   * (SPEC.md §11.1: ambiguity resolves to the stricter path, always). There is
+   * deliberately no fallback to the raw comparison.
+   */
+  "sender-key-unavailable",
+  /**
    * An attestation tap that would decide WHO MAY DECIDE, from a phone, under a
    * policy that cannot answer who is tapping.
    *
@@ -175,9 +277,44 @@ export type SenderResolution =
       /** Why: no sender was observed, or the policy maps none for this channel. */
       reason: "no-sender" | "channel-unmapped";
     }
-  | { kind: "mapped"; approver: string; actor: string; source: SenderSource }
-  | { kind: "unmapped"; sender: ChannelSender; message: string }
-  | { kind: "ambiguous"; sender: ChannelSender; approvers: string[]; message: string };
+  | {
+      kind: "mapped";
+      approver: string;
+      actor: string;
+      source: SenderSource;
+      /** The sender AS THE RECORD CARRIES IT: raw, or the keyed digest. */
+      recorded: RecordedSender;
+    }
+  | { kind: "unmapped"; sender: RecordedSender; message: string }
+  | { kind: "ambiguous"; sender: RecordedSender; approvers: string[]; message: string }
+  | { kind: "key-unavailable"; sender: ChannelSender; message: string };
+
+/**
+ * A sender as a RECORD carries it (APRV-370).
+ *
+ * Under a raw mapping this is `{channel, id}` and byte-identical to what every
+ * build since APRV-324 wrote. Under a keyed mapping `id` is the
+ * {@link hashedSenderId} form and `hashed` is `true`.
+ *
+ * `id` carries the WHOLE `hmac-sha256:<hex>` string rather than the bare hex,
+ * deliberately: that is exactly the string the policy carries, so an operator
+ * reading a refusal off the log has a line they can paste into `senders`
+ * without transforming it, and a reader correlating a log to a policy can grep
+ * one for the other. The `hashed` flag is not a second source of truth for the
+ * same fact — the schema pins `id` to the digest shape whenever it is present,
+ * so the two cannot disagree — it is the field anything machine-readable
+ * branches on without parsing a string.
+ *
+ * `hashed` is `true` or absent, never `false`. A raw record is the record this
+ * runtime already wrote, and adding a field to it that says "this is what it
+ * always was" would make every pre-APRV-370 record read as though it were
+ * missing something.
+ */
+export interface RecordedSender {
+  channel: string;
+  id: string;
+  hashed?: true;
+}
 
 /** The `human:` prefix every approver id wears once it is an actor. */
 const HUMAN_PREFIX = "human:";
@@ -232,6 +369,39 @@ export function mapsSendersFor(
   return false;
 }
 
+/** Which forms this policy's mapping for `channel` uses (APRV-370). */
+export interface SenderMappingForms {
+  /** At least one value is a decimal account id. */
+  raw: boolean;
+  /** At least one value is a {@link hashedSenderId} digest. */
+  keyed: boolean;
+}
+
+/**
+ * Which form, or forms, a policy maps `channel`'s senders in.
+ *
+ * Both flags can be true: nothing forbids a policy that names one approver
+ * raw and another keyed, and this runtime does not refuse one. What it does is
+ * refuse every tap on such a channel when the key is missing, because the half
+ * it cannot evaluate is still part of the roster it is checking for ambiguity.
+ * `approval doctor` reports the mixed state so an operator can finish the
+ * migration rather than discover it at a tap.
+ */
+export function senderMappingForms(
+  approvers: Record<string, { channels: string[]; senders?: Record<string, string> }> | undefined,
+  channel: string,
+): SenderMappingForms {
+  let raw = false;
+  let keyed = false;
+  for (const id of Object.keys(approvers ?? {})) {
+    const value = approvers?.[id]?.senders?.[channel];
+    if (value === undefined) continue;
+    if (isHashedSenderId(value)) keyed = true;
+    else raw = true;
+  }
+  return { raw, keyed };
+}
+
 /**
  * The load-time check of design §3.2 mode 4: one sender id, at most one person.
  *
@@ -255,26 +425,35 @@ export function checkSenderMappings(
 }
 
 /**
- * Resolve one observed sender against the policy in force (design §3.2).
+ * Resolve one observed sender against the policy in force (design §3.2,
+ * APRV-370).
  *
  * Total, pure, and the whole of the decision-time logic. It never reads a file,
- * never reads the log and never decides anything: the caller
- * (`channels/contract.ts`) turns a `mapped` into the actor it hands the gate,
- * and a refusal into an `audit.decision_refused` and a message to the chat.
+ * never reads the log, never reads the environment and never decides anything:
+ * the caller (`channels/contract.ts`) turns a `mapped` into the actor it hands
+ * the gate, and a refusal into an `audit.decision_refused` and a message to the
+ * chat.
  *
  * `sender` absent is mode 1 and the reason the CLI channel and every web post
  * are untouched by this: neither supplies one, so neither can claim anybody.
+ *
+ * `key` is the operator's sender key, or `null` for none, and it DEFAULTS TO
+ * NULL. That default is the fail-closed direction and it is load-bearing: a
+ * caller that has not been taught about the key refuses every keyed mapping
+ * rather than silently comparing raw ids against digests and finding nothing,
+ * which would read exactly like a stranger tapping.
  */
 export function resolveSender(
   load: PolicyLoadResult,
   sender: ChannelSender | undefined,
+  key: string | null = null,
 ): SenderResolution {
   if (sender === undefined) return { kind: "configured", reason: "no-sender" };
 
   if (!load.ok) {
     return {
       kind: "unmapped",
-      sender,
+      sender: { channel: sender.channel, id: sender.id },
       message: `the policy could not be loaded (${load.code}), so the ${sender.channel} sender this decision arrived from maps to nobody. A policy the runtime cannot read is not a policy with no mapping: an identity resolved from bytes that did not parse would be attribution the operator never attested. Nothing was decided. Repair the policy file and re-attest it; a decision made from a terminal carries no sender and is unaffected.`,
     };
   }
@@ -284,24 +463,113 @@ export function resolveSender(
     return { kind: "configured", reason: "channel-unmapped" };
   }
 
-  const claimed = senderIndex(approvers).get(indexKey(sender.channel, sender.id)) ?? [];
+  // APRV-370, and BEFORE any comparison. A keyed roster this process cannot
+  // compute digests for is a roster it cannot check for ambiguity, so it
+  // refuses the whole channel rather than matching the half it can read. There
+  // is no fallback to the raw comparison, by design.
+  const forms = senderMappingForms(approvers, sender.channel);
+  if (forms.keyed && key === null) {
+    return {
+      kind: "key-unavailable",
+      sender,
+      message: `the attested policy maps ${sender.channel} senders in the keyed form and ${SENDER_KEY_ENV} is unset or empty in this process, so no account on this channel can be resolved and nothing was decided. This is not a statement about the account that tapped: without the key the runtime can compute no digest at all, so it cannot tell a mapped account from an unmapped one and will not guess. Set ${SENDER_KEY_ENV} in the listener's environment (\`approval setup sender-key\` mints and stores it; \`eval "$(approval env)"\` establishes it) and restart the listener. A decision made from a terminal carries no sender and is unaffected.`,
+    };
+  }
+
+  const index = senderIndex(approvers);
+  // Both forms, asked separately. A raw entry and a keyed entry cannot collide
+  // — a keyed value wears `hmac-sha256:` and a raw Telegram id is decimal
+  // digits — so asking both questions widens nothing and lets one policy carry
+  // a migration in progress. They are kept apart rather than concatenated
+  // because WHICH one matched decides the form the record takes.
+  const rawClaimed = index.get(indexKey(sender.channel, sender.id)) ?? [];
+  const keyedClaimed =
+    key === null ? [] : (index.get(indexKey(sender.channel, hashedSenderId(key, sender.id))) ?? []);
+  const claimed = [...rawClaimed, ...keyedClaimed];
+  // THE FORM FOLLOWS THE ENTRY THAT MATCHED, so the id in the record is the
+  // string that approver's `senders` block carries and an operator can grep one
+  // for the other. A mixed policy therefore records a keyed approver as a
+  // digest and a raw one as an id, in the same policy and on the same channel.
+  //
+  // With nothing matched there is no entry to follow, so the CHANNEL decides
+  // and a keyed channel hashes: an account the policy does not name is exactly
+  // the one a keyed deployment least wants written down, and the digest is also
+  // the line an operator would paste to map it.
+  const recorded =
+    claimed.length === 1
+      ? recordedSender(sender, keyedClaimed.length === 1 ? key : null)
+      : recordedSender(sender, forms.keyed ? key : null);
   if (claimed.length === 1) {
     const approver = claimed[0] ?? "";
-    return { kind: "mapped", approver, actor: `${HUMAN_PREFIX}${approver}`, source: "policy" };
+    return {
+      kind: "mapped",
+      approver,
+      actor: `${HUMAN_PREFIX}${approver}`,
+      source: "policy",
+      recorded,
+    };
   }
   if (claimed.length > 1) {
     return {
       kind: "ambiguous",
-      sender,
+      sender: recorded,
       approvers: [...claimed],
       message: `the ${sender.channel} sender this decision arrived from is declared by ${String(claimed.length)} approvers in the policy in force. The runtime does not choose between them, and a policy carrying this is refused at load; nothing was decided.`,
     };
   }
   return {
     kind: "unmapped",
-    sender,
-    message: `the ${sender.channel} sender this decision arrived from is not mapped to an approver in the attested policy. This policy maps ${sender.channel} senders, so an unmapped one is refused rather than recorded under the identity the listener process was launched with — that would attribute a stranger's tap to the operator. Nothing was decided. The observed id is on the \`audit.decision_refused\` record this refusal wrote; an operator who recognizes it adds it to that approver's \`senders\` block and re-attests.`,
+    sender: recorded,
+    message: `the ${sender.channel} sender this decision arrived from is not mapped to an approver in the attested policy. This policy maps ${sender.channel} senders, so an unmapped one is refused rather than recorded under the identity the listener process was launched with — that would attribute a stranger's tap to the operator. Nothing was decided. The observed ${recorded.hashed === true ? "account, as the keyed digest the policy would carry," : "id"} is on the \`audit.decision_refused\` record this refusal wrote; an operator who recognizes it adds it to that approver's \`senders\` block and re-attests.`,
   };
+}
+
+/**
+ * The sender as a record should carry it (APRV-370).
+ *
+ * `key` is the key when this channel's mapping is KEYED, and `null` when it is
+ * raw. A raw mapping records what it always recorded, which is why a keyed
+ * channel is the only thing that changes any existing record's bytes.
+ *
+ * Note which id is hashed here: the OBSERVED one, from the transport. The
+ * digest of an id the policy did not name is exactly the value a refusal wants
+ * an operator to see, because it is the line they would paste to map that
+ * account, and it discloses the account to nobody who does not already hold the
+ * key.
+ */
+export function recordedSender(sender: ChannelSender, key: string | null): RecordedSender {
+  if (key === null) return { channel: sender.channel, id: sender.id };
+  return { channel: sender.channel, id: hashedSenderId(key, sender.id), hashed: true };
+}
+
+/**
+ * The recorded form for a sender on a refusal that never reached
+ * {@link resolveSender} (APRV-370).
+ *
+ * A gesture can be refused before the mapping is consulted at all: the log
+ * could not be read, or the policy on disk is not the attested one, so its
+ * mapping is not in force. Those records still say who tried, and the question
+ * is which FORM that says it in.
+ *
+ * THE RULE: the form follows the FILE; the mapping follows the ATTESTATION. The
+ * form is a disclosure preference the operator wrote down, and honouring it
+ * from an unattested file grants nobody anything — the refusal is a refusal
+ * either way, and the record names no approver. What must never follow an
+ * unattested file is who may decide, and that is decided by
+ * {@link resolveSender} against the policy in force, which these paths never
+ * reach.
+ *
+ * A load that failed, or a channel this file maps raw, or no key: the raw id,
+ * exactly as every build since APRV-324 recorded it.
+ */
+export function recordedSenderFor(
+  load: PolicyLoadResult,
+  sender: ChannelSender,
+  key: string | null,
+): RecordedSender {
+  if (!load.ok || key === null) return { channel: sender.channel, id: sender.id };
+  const forms = senderMappingForms(load.policy.approvers, sender.channel);
+  return recordedSender(sender, forms.keyed ? key : null);
 }
 
 /**
@@ -357,15 +625,18 @@ export type SenderActorResolution =
   | {
       ok: true;
       actor: string;
-      /** Present only where the actor was RESOLVED from the sender. */
-      sender?: ChannelSender;
+      /**
+       * Present only where the actor was RESOLVED from the sender, and in the
+       * form the record carries: raw, or the keyed digest (APRV-370).
+       */
+      sender?: RecordedSender;
       source?: SenderSource;
     }
   | {
       ok: false;
       code: ChannelDecisionRefusalCode;
       message: string;
-      sender: ChannelSender;
+      sender: RecordedSender;
     };
 
 /**
@@ -374,19 +645,38 @@ export type SenderActorResolution =
  * The `configured` actor is what the surface was launched as, and it survives
  * exactly the two modes {@link resolveSender} calls `configured`: no sender
  * observed, and no mapping declared for the channel that observed one.
+ *
+ * `key` defaults to `null` for the reason {@link resolveSender}'s does: a
+ * caller that does not supply one refuses a keyed mapping rather than reading
+ * past it.
  */
 export function actorForSender(
   load: PolicyLoadResult,
   configured: string,
   sender: ChannelSender | undefined,
+  key: string | null = null,
 ): SenderActorResolution {
-  const resolution = resolveSender(load, sender);
+  const resolution = resolveSender(load, sender, key);
   if (resolution.kind === "configured") return { ok: true, actor: configured };
   if (resolution.kind === "mapped") {
     return {
       ok: true,
       actor: resolution.actor,
-      ...(sender === undefined ? {} : { sender, source: resolution.source }),
+      ...(sender === undefined ? {} : { sender: resolution.recorded, source: resolution.source }),
+    };
+  }
+  if (resolution.kind === "key-unavailable") {
+    // The one refusal whose recorded sender is RAW while the mapping is keyed,
+    // and the reason is that there is no key to hash it with. Recording nothing
+    // would leave an operator with no way to tell which account was in front of
+    // a gate that had lost its key, and the disclosure this costs is the
+    // disclosure the raw form already made. It is also the one refusal that
+    // says nothing about the account: it is about this process.
+    return {
+      ok: false,
+      code: "sender-key-unavailable",
+      message: resolution.message,
+      sender: { channel: resolution.sender.channel, id: resolution.sender.id },
     };
   }
   return {
@@ -399,7 +689,7 @@ export function actorForSender(
 
 /**
  * What the person who tapped is told, in one line (APRV-235's rule, applied to
- * these two codes).
+ * these codes).
  *
  * It names the code and says nothing about the mapping: not who is mapped, not
  * how many are, and not the id it saw. The chat is shared, the id belongs in
@@ -412,6 +702,14 @@ export function senderRefusalLine(code: ChannelDecisionRefusalCode): string {
   }
   if (code === "attest-requires-terminal") {
     return "Not attested — this amendment decides who may decide, and the policy in force cannot say who is tapping. Attest it from a terminal.";
+  }
+  if (code === "sender-key-unavailable") {
+    // It names the missing variable, which every other line here would refuse
+    // to name, and the difference is who the line is about. The other refusals
+    // are about the person tapping and a detail would disclose the roster to a
+    // shared chat; this one is about the listener process, whose environment is
+    // the operator's own and whose repair is one line they can act on at once.
+    return `Not recorded — this gate's sender mapping is keyed and the listener has no ${SENDER_KEY_ENV}, so it can resolve no account at all. This says nothing about your account. The operator sets that variable and restarts the listener.`;
   }
   return "Not recorded — the policy maps this account to more than one approver, so the runtime cannot say who decided. Ask the operator to fix the policy.";
 }

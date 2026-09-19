@@ -2514,8 +2514,14 @@ export interface DecideOptions extends GateOptions {
    * `channels/contract.ts` resolves the sender against the attested policy
    * before calling this verb, and no check here reads this field. There is no
    * CLI flag that supplies it, so no agent-reachable surface mints one.
+   *
+   * `hashed` (APRV-370) says the `id` is the operator's keyed digest of the
+   * account rather than the account, which is what a policy mapping senders in
+   * the keyed form records. Present-and-`true` or absent, never `false`: a raw
+   * record is the record this runtime already wrote, and it is written
+   * unchanged.
    */
-  sender?: { channel: string; id: string };
+  sender?: { channel: string; id: string; hashed?: true };
   /**
    * How {@link DecideOptions.sender} became the actor (APRV-324), recorded as
    * `payload.sender_source`. `policy` is the attested `approvers[id].senders`
@@ -2876,7 +2882,13 @@ function attemptDecide(
   // surface against the attested policy, and re-deriving it here would be a
   // second answer to a question that already has one.
   if (options.sender !== undefined) {
-    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    payload["sender"] = {
+      channel: options.sender.channel,
+      id: options.sender.id,
+      // APRV-370. Only when it is true, so a raw record is byte-identical to
+      // the record every build since APRV-324 wrote.
+      ...(options.sender.hashed === true ? { hashed: true } : {}),
+    };
     if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
   }
 

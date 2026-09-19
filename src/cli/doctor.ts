@@ -106,7 +106,13 @@ import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { openObligations } from "../core/audit.js";
-import { SENDER_CHANNELS, mapsSendersFor } from "../core/sender-identity.js";
+import {
+  SENDER_CHANNELS,
+  SENDER_KEY_ENV,
+  mapsSendersFor,
+  senderKeyFrom,
+  senderMappingForms,
+} from "../core/sender-identity.js";
 import { classSampling, resolveSampler, type Sampler } from "../core/sampler.js";
 import {
   checkVault,
@@ -994,7 +1000,10 @@ function checkAutonomyAlias(policyLoad: PolicyLoadResult): DoctorCheck {
  * mapping is in a file the operator can open, and the row's job is to name who
  * is missing rather than to recite everyone who is not.
  */
-function checkSenderMapping(policyLoad: PolicyLoadResult): DoctorCheck {
+function checkSenderMapping(
+  policyLoad: PolicyLoadResult,
+  env: NodeJS.ProcessEnv = process.env,
+): DoctorCheck {
   if (!policyLoad.ok) {
     return {
       check: "sender-mapping",
@@ -1013,6 +1022,32 @@ function checkSenderMapping(policyLoad: PolicyLoadResult): DoctorCheck {
     };
   }
 
+  // APRV-370. Which FORM each mapped channel is written in, and for a keyed one
+  // whether the key this process would compare with resolves at all. The row
+  // reports the form because an operator reading it cannot otherwise tell a
+  // gate that publishes its accounts from one that does not, and it reports the
+  // key because a keyed channel without one refuses every tap on it.
+  const key = senderKeyFrom(env);
+  const keyed = mapped.filter((channel) => senderMappingForms(approvers, channel).keyed);
+  const mixed = keyed.filter((channel) => senderMappingForms(approvers, channel).raw);
+  const forms =
+    keyed.length === 0
+      ? "raw account ids"
+      : mixed.length > 0
+        ? `both forms (${mixed.join(", ")} carries raw ids beside keyed ones)`
+        : `the keyed form (${SENDER_KEY_ENV})`;
+
+  if (keyed.length > 0 && key === null) {
+    return {
+      check: "sender-mapping",
+      status: "fail",
+      detail: oneLine(
+        `${policyLoad.source.filename} maps ${keyed.join(", ")} senders in the keyed form and ${SENDER_KEY_ENV} is unset or empty in this process, so no account on those channels can be resolved at all and EVERY decision there is refused \`sender-key-unavailable\`. Without the key the runtime can compute no digest, so it cannot tell a mapped account from an unmapped one and will not guess; there is no fallback to a raw comparison, by design.`,
+      ),
+      fix: `approval setup sender-key mints and stores the key; \`eval "$(approval env)"\` establishes it in the shell that starts the listener, and the listener has to be restarted to pick it up. \`approval env --check\` says where the value lives and prints no values`,
+    };
+  }
+
   const gaps: string[] = [];
   for (const channel of mapped) {
     for (const id of Object.keys(approvers ?? {}).sort()) {
@@ -1028,7 +1063,7 @@ function checkSenderMapping(policyLoad: PolicyLoadResult): DoctorCheck {
       check: "sender-mapping",
       status: "fail",
       detail: oneLine(
-        `${policyLoad.source.filename} maps ${mapped.join(", ")} senders, and ${String(gaps.length)} approver(s) listed for a mapped channel carry no id there: ${gaps.join(", ")}. A decision from an account this file does not name is refused \`sender-unmapped\` and nothing is recorded, so the policy currently says those people may decide on a channel where their taps will not be honoured.`,
+        `${policyLoad.source.filename} maps ${mapped.join(", ")} senders in ${forms}, and ${String(gaps.length)} approver(s) listed for a mapped channel carry no id there: ${gaps.join(", ")}. A decision from an account this file does not name is refused \`sender-unmapped\` and nothing is recorded, so the policy currently says those people may decide on a channel where their taps will not be honoured.`,
       ),
       fix: "approval policy amend — give each approver above a `senders` entry for that channel, or drop the channel from their `channels` list if they are not meant to decide there; the mapping is attested policy, so the edit is inoperative until it is re-attested",
     };
@@ -1037,7 +1072,9 @@ function checkSenderMapping(policyLoad: PolicyLoadResult): DoctorCheck {
   return {
     check: "sender-mapping",
     status: "pass",
-    detail: `${policyLoad.source.filename} maps ${mapped.join(", ")} senders, and every approver listed for a mapped channel carries an id there. Each decision on those channels is recorded against the person the operator attested that account to; an account this file does not name is refused rather than attributed to the listener (SPEC.md §10.3, APRV-324).`,
+    detail: oneLine(
+      `${policyLoad.source.filename} maps ${mapped.join(", ")} senders in ${forms}, and every approver listed for a mapped channel carries an id there.${keyed.length === 0 ? "" : ` ${SENDER_KEY_ENV} resolves, so the keyed ids can be compared.`} Each decision on those channels is recorded against the person the operator attested that account to; an account this file does not name is refused rather than attributed to the listener (SPEC.md §10.3, APRV-324, APRV-370).`,
+    ),
   };
 }
 

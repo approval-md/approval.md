@@ -2276,6 +2276,22 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "setup",
+    subcommand: "sender-key",
+    purpose:
+      "Mint the operator-held key that turns a channel account id into the value an `approvers[id].senders` mapping carries (APRV-370), store it, and record where it lives. A published policy and a published log disclose the account otherwise, and a plain unkeyed digest would not fix that: a Telegram id is a short decimal number and the whole space is enumerable. It does not edit an attested policy. INTERACTIVE ONLY — except `--id <account-id>`, which mints and stores nothing and prints the `hmac-sha256:<hex>` mapping line for one account under the key already in the environment, so it runs anywhere.",
+    human_only: true,
+    human_only_note:
+      "Minting it is minting the value every sender mapping is then written against, and an agent that could mint one could re-key the mapping and make every account in the policy unresolvable. The verb classifies policy.core. `--id` is a computation over a key the caller already holds and prints a value designed to be published, so it is not the human-only half.",
+    input: input({
+      flags: { "--id": "string", ...AS_FLAG, ...LOG_FLAG, ...POLICY_FLAGS, ...HELP_FLAGS },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "setup",
     subcommand: "checkpoint",
     purpose:
       "Mint the Ed25519 keypair a human signs the log's head with (APRV-220). The PRIVATE half goes into the vault under approval.checkpoint.key and is never printed; the PUBLIC half is printed with the exact audit.checkpoint_keys block to paste. It does not edit an attested policy, so the key is INERT until a human adds that block and re-attests. --rotate mints a new key and ADDS it to the list; --retire prints the block that drops one, and REFUSES any key that signed a checkpoint, naming the seqs that would stop verifying. INTERACTIVE ONLY.",

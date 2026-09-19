@@ -700,7 +700,7 @@ export interface DecideAttestationOptions extends ProposalOptions {
    * (`channels/contract.ts`), against the policy in force rather than the one
    * being attested, and nothing here re-derives or second-guesses it.
    */
-  sender?: { channel: string; id: string };
+  sender?: { channel: string; id: string; hashed?: true };
   senderSource?: "policy";
 }
 
@@ -795,7 +795,12 @@ export function decideAttestation(
   // here: what this function records is which account the answer came from,
   // not which account is allowed to give one.
   if (options.sender !== undefined) {
-    payload["sender"] = { channel: options.sender.channel, id: options.sender.id };
+    payload["sender"] = {
+      channel: options.sender.channel,
+      id: options.sender.id,
+      // APRV-370: only when true, so a raw record does not change shape.
+      ...(options.sender.hashed === true ? { hashed: true } : {}),
+    };
     if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
   }
   if (options.note !== undefined) payload["note"] = options.note;

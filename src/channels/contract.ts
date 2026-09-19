@@ -62,6 +62,8 @@ import {
   actorForSender,
   isChannelDecisionRefusalCode,
   mapsSendersFor,
+  recordedSenderFor,
+  senderKeyFrom,
   senderRefusalLine,
   sendersDiffer,
   type ChannelDecisionRefusalCode,
@@ -868,6 +870,11 @@ export function recordChannelDecision(
     readGatePolicy(gateOptions),
     actorOptions.actor,
     decision.sender,
+    // APRV-370. The operator's sender key, where the policy's mapping is keyed.
+    // `null` when it is unset, which is a REFUSAL of the whole channel rather
+    // than a fallback to the raw comparison; `sender-key-unavailable` carries
+    // the reasoning.
+    senderKeyFrom(),
   );
   if (!resolution.ok) {
     const refusal: ChannelDecisionRefusal = {
@@ -922,10 +929,14 @@ export function recordChannelDecision(
       // afterwards as a class this gate resolves senders for. Every other
       // refusal names the account, because the attention it accounts for was
       // spent by whoever holds it.
-      result.code === "class-human-only" || decision.sender === undefined
+      // APRV-370: `resolution.sender`, never `decision.sender`. The resolution
+      // carries the sender in the form the record takes, which under a keyed
+      // mapping is the digest; writing the observed id here would put the raw
+      // account back in the log on exactly the refusals nobody looks at.
+      result.code === "class-human-only" || resolution.sender === undefined
         ? {}
         : {
-            sender: decision.sender,
+            sender: resolution.sender,
             ...(resolution.source === undefined ? {} : { senderSource: resolution.source }),
           },
     );
@@ -1083,6 +1094,13 @@ function resolveAttestationSender(
   const sender = decision.sender;
   if (sender === undefined) return { ok: true, actor: actorOptions.actor };
 
+  // APRV-370. Resolved ONCE for this whole ladder: the operator's sender key,
+  // and with it the form the refusals below record the account in. The form
+  // follows the FILE and the mapping follows the ATTESTATION
+  // (`recordedSenderFor` carries the reasoning), so a refusal that never
+  // reaches the in-force mapping still honours the disclosure preference the
+  // operator wrote down, and grants nobody anything by doing so.
+  const key = senderKeyFrom();
   const proposed = readGatePolicy(gateOptions);
   // The same store `proposeAttestation` wrote the policy text to, resolved the
   // same way, so the bytes a prompt displayed and the bytes this reads back are
@@ -1099,7 +1117,7 @@ function resolveAttestationSender(
     return {
       ok: false,
       code: "attest-requires-terminal",
-      sender,
+      sender: recordedSenderFor(proposed, sender, key),
       message: `the policy being attested maps ${sender.channel} senders and the policy IN FORCE cannot be read to check who may sign for that: ${inForce.reason}. Resolving this tap against the file it is attesting would let whoever wrote that file name the account that approves it, so nothing was attested. Attest from a terminal, which authenticates no sender and is where a policy.core edit happens anyway.`,
     };
   }
@@ -1114,11 +1132,11 @@ function resolveAttestationSender(
       return {
         ok: false,
         code: "attest-requires-terminal",
-        sender,
+        sender: recordedSenderFor(before, sender, key),
         message: `this amendment changes the sender mapping, and the policy in force maps no ${sender.channel} sender, so there is no account it could recognize as entitled to sign for that change. An amendment that introduces the identity system cannot be signed for by the identity system it introduces. Nothing was attested; attest from a terminal.`,
       };
     }
-    const resolution = actorForSender(before, actorOptions.actor, sender);
+    const resolution = actorForSender(before, actorOptions.actor, sender, key);
     if (!resolution.ok) return resolution;
     // A mapped account under the policy in force. Belt and braces on the mode
     // the ladder above already excluded: an amendment that changes the mapping
@@ -1127,14 +1145,14 @@ function resolveAttestationSender(
       return {
         ok: false,
         code: "attest-requires-terminal",
-        sender,
+        sender: recordedSenderFor(before, sender, key),
         message: `this amendment changes the sender mapping and this tap resolved to no account under the policy in force. Nothing was attested; attest from a terminal.`,
       };
     }
     return resolution;
   }
 
-  return actorForSender(before, actorOptions.actor, sender);
+  return actorForSender(before, actorOptions.actor, sender, key);
 }
 
 export function recordAttestationDecision(

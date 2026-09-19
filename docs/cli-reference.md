@@ -3885,9 +3885,11 @@ nobody for is refused before any verb runs, and since this change the attempt is
 recorded: one **`audit.gesture_refused`**, with a `system:gate` actor, the
 channel, and a payload carrying `gesture`
 (`checkpoint-signature`, `review`, `review-note`), `code`
-(`sender-unmapped`, `sender-ambiguous`, `policy-not-attested`), the refusal
+(`sender-unmapped`, `sender-ambiguous`, `sender-key-unavailable`,
+`policy-not-attested`), the refusal
 `message`, the observed `sender`, and `actor` only where the runtime could name
-a person.
+a person. Under a keyed mapping (APRV-370) the `sender.id` is the digest rather
+than the account, and `sender.hashed` is `true` beside it.
 
 ```
 {"event":"audit.gesture_refused","actor":"system:gate","channel":"telegram",
@@ -5871,6 +5873,51 @@ the conventional name `APPROVAL_SAMPLING_SECRET` and sampling stays off — §5.
 disables it whenever the policy names no variable, and this verb does not edit an
 attested policy file. It prints the block to add and the `approval policy amend`
 ceremony that attests it.
+
+## setup sender-key
+
+The operator-held key that turns a channel account id into the value an
+`approvers[id].senders` mapping carries (APRV-370). It exists for the deployment
+that PUBLISHES its policy and its log, where the raw account id is disclosed
+once in the file and then on every decision.
+
+A plain unkeyed digest would not fix that. A Telegram account id is a ten-digit
+decimal number, the whole space is enumerable on a laptop, and a digest anybody
+can reverse states a privacy property it does not have. So the mapping value is
+`hmac-sha256:<hex>`, computed under this key, which is in the environment and
+never in the policy file.
+
+Bare, the verb mints, stores and records the key, exactly as `setup sampling`
+does with its secret, and edits no policy file. The value is not printed and
+there is no verb that prints it.
+
+With `--id <account-id>` it mints nothing and stores nothing. It reads the key
+from the environment, prints the `hmac-sha256:<hex>` for that account, and
+prints the `senders` line and a paste-ready proposal pair around it. That is the
+one thing an agent writing a policy proposal cannot do — the digest depends on a
+secret only the operator's machine holds — so the proposal page says to run it
+rather than carrying a placeholder:
+
+```sh
+approval setup sender-key           # once, interactive, human-only
+eval "$(approval env)"
+approval setup sender-key --id 7345216485
+```
+
+Because it stores nothing and prints a value designed to be published, `--id` is
+the one `setup` path that runs without a terminal and accepts `--json`.
+
+**The key is not an authenticator.** Nothing about the gate's safety rests on
+its secrecy: somebody who learns it learns which account ids a policy names,
+which is what the raw form told everybody. What it buys is that the published
+policy and the published log stop carrying the account.
+
+**A listener that holds no key under a keyed mapping decides nothing** on that
+channel. Every tap is refused `sender-key-unavailable`, and there is no fallback
+to comparing the observed id against the raw entries: without the key the
+runtime cannot tell whether the account is also claimed by a keyed approver, so
+it cannot run the ambiguity check the mapping rests on. `approval doctor`'s
+`sender-mapping` row names the form in use and says whether the key resolves.
 
 ## setup checkpoint
 

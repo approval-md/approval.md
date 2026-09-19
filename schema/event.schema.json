@@ -189,6 +189,34 @@
     }
   },
   "$defs": {
+    "senderHashed": {
+      "const": true,
+      "description": "SPEC.md §5.2/§10.3 (amended, APRV-370): the sibling `id` is the operator's KEYED digest of the account, `hmac-sha256:<64 lowercase hex>` — HMAC-SHA-256 of the transport's own account id under a secret named by `APPROVAL_SENDER_KEY` — rather than the account id itself. It appears exactly when the attested `approvers[id].senders` mapping for that channel is written in the keyed form, which is what a deployment that PUBLISHES its policy and its log uses so that neither discloses the account.\n\n`true` or ABSENT, never `false`, and that asymmetry is deliberate: absent is the raw form, which is the record every build since APRV-324 has written, and a `false` here would make all of those read afterwards as though they were missing something. The digest is not a credential either — it is published in the policy — and it is not an authenticator: nothing in the gate's safety rests on the key's secrecy, and a process that loses the key loses the ability to RESOLVE accounts, never the ability to refuse.",
+      "examples": [true]
+    },
+    "senderHashedImpliesDigest": {
+      "$comment": "APRV-370. `hashed` and `id` describe the same fact in two shapes, and two shapes of one fact can disagree. They cannot here: whenever the flag is present the id must be the digest form, so a record claiming to be hashed while carrying a bare account id does not validate, and a reader may branch on the boolean without parsing the string. The converse is deliberately NOT required — an id that merely looks like a digest is not asserted to be one — because the assertion is the flag's to make.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "hashed": {
+            "const": true
+          }
+        },
+        "required": [
+          "hashed"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^hmac-sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
     "usd_amount_string": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
@@ -878,10 +906,25 @@
                   "id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The transport's own stable account id, as a string. Not a credential — a Telegram user id is visible to everyone in a chat — and recorded so an operator investigating a decision has the number rather than a name they cannot check."
+                    "description": "The transport's own account id, as a string, OR the operator's keyed digest of it when `hashed` is true. Raw, it is not a credential — a Telegram user id is visible to everyone in a chat — and it is recorded so an operator investigating a decision has the number rather than a name they cannot check."
+                  },
+                  "hashed": {
+                    "$ref": "#/$defs/senderHashed"
                   }
                 },
-                "examples": [{ "channel": "telegram", "id": "12345678" }]
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/senderHashedImpliesDigest"
+                  }
+                ],
+                "examples": [
+                  { "channel": "telegram", "id": "12345678" },
+                  {
+                    "channel": "telegram",
+                    "id": "hmac-sha256:3f2a9c11b4d7e6085a1c2f9d8e7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a",
+                    "hashed": true
+                  }
+                ]
               },
               "sender_source": {
                 "type": "string",
@@ -934,8 +977,16 @@
                   "id": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "hashed": {
+                    "$ref": "#/$defs/senderHashed"
                   }
-                }
+                },
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/senderHashedImpliesDigest"
+                  }
+                ]
               },
               "sender_source": {
                 "type": "string",
@@ -1604,7 +1655,7 @@
                   "channel",
                   "id"
                 ],
-                "description": "SPEC.md §10.3 (amended, APRV-324): the authenticated sender whose decision was refused. Carried on a `sender-unmapped` or `sender-ambiguous` refusal, where it is the only thing the runtime knows about who tapped and the reason the record exists — an operator investigating who tried needs the number — and on any other refusal of a decision whose actor WAS resolved from a sender, where it says which account spent the attention.",
+                "description": "SPEC.md §10.3 (amended, APRV-324): the authenticated sender whose decision was refused. Carried on a `sender-unmapped`, `sender-ambiguous` or `sender-key-unavailable` refusal, where it is the only thing the runtime knows about who tapped and the reason the record exists — an operator investigating who tried needs the account — and on any other refusal of a decision whose actor WAS resolved from a sender, where it says which account spent the attention.",
                 "properties": {
                   "channel": {
                     "type": "string",
@@ -1614,9 +1665,17 @@
                   "id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The transport's own stable account id, as a string. A Telegram user id is not a credential: it is visible to everyone in the chat the tap arrived from."
+                    "description": "The transport's own account id, as a string, OR the operator's keyed digest of it when `hashed` is true. Raw, a Telegram user id is not a credential: it is visible to everyone in the chat the tap arrived from. Under a keyed mapping the digest is what the operator can act on, because it is exactly the string their `senders` block would carry."
+                  },
+                  "hashed": {
+                    "$ref": "#/$defs/senderHashed"
                   }
                 },
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/senderHashedImpliesDigest"
+                  }
+                ],
                 "examples": [{ "channel": "telegram", "id": "12345678" }]
               },
               "sender_source": {
@@ -1751,9 +1810,10 @@
                 "enum": [
                   "sender-unmapped",
                   "sender-ambiguous",
+                  "sender-key-unavailable",
                   "policy-not-attested"
                 ],
-                "description": "Why the surface refused, verbatim from the resolution that refused. CLOSED, and exactly the refusals sender resolution can reach before a verb runs: the first two are `CHANNEL_DECISION_REFUSAL_CODES` (`core/sender-identity.ts`), and the third is `ATTESTATION_REFUSAL` (`core/attest.ts`), which fires when the policy declaring the mapping is not the attested one and is therefore not in force. `attest-requires-terminal` is not here: it belongs to an attestation tap, which is a decision."
+                "description": "Why the surface refused, verbatim from the resolution that refused. CLOSED, and exactly the refusals sender resolution can reach before a verb runs: the first three are `CHANNEL_DECISION_REFUSAL_CODES` (`core/sender-identity.ts`), and the last is `ATTESTATION_REFUSAL` (`core/attest.ts`), which fires when the policy declaring the mapping is not the attested one and is therefore not in force. `sender-key-unavailable` (APRV-370) is the policy mapping this channel's senders in the keyed form while the process holds no key: the runtime could resolve NO account, which is a statement about the listener rather than about the person who tapped. `attest-requires-terminal` is not here: it belongs to an attestation tap, which is a decision."
               },
               "actor": {
                 "type": "string",
@@ -1767,7 +1827,7 @@
                   "channel",
                   "id"
                 ],
-                "description": "SPEC.md §10.3: the authenticated sender the gesture arrived from. The transport's own attribution and nothing the message claimed about itself (§11.1 invariant 4). On `sender-unmapped` it is the whole of what is known about who tried, and the reason the record exists: an operator deciding whether to map an account needs the number.",
+                "description": "SPEC.md §10.3: the authenticated sender the gesture arrived from. The transport's own attribution and nothing the message claimed about itself (§11.1 invariant 4). On `sender-unmapped` it is the whole of what is known about who tried, and the reason the record exists: an operator deciding whether to map an account needs the account.",
                 "properties": {
                   "channel": {
                     "type": "string",
@@ -1777,9 +1837,17 @@
                   "id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The transport's stable account id, as a string."
+                    "description": "The transport's account id, as a string, OR the operator's keyed digest of it when `hashed` is true."
+                  },
+                  "hashed": {
+                    "$ref": "#/$defs/senderHashed"
                   }
-                }
+                },
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/senderHashedImpliesDigest"
+                  }
+                ]
               },
               "sender_source": {
                 "enum": [
