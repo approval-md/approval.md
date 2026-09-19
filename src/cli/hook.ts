@@ -2694,7 +2694,46 @@ function announceWait(
  * signal disposition for longer than the loop would be a side effect nobody
  * asked for.
  */
-function gateAndWait(
+/**
+ * What the gate decided about one harness tool call, before anything is printed
+ * (APRV-361).
+ *
+ * {@link gateHarnessCall} produces it and {@link gateAndWait} renders it in the
+ * harness's own dialect. The split exists because a second caller answers in a
+ * protocol rather than on stdout: `cli/codex-bridge.ts` replies
+ * `{id, result: {decision}}` over the app-server's JSON-RPC connection, and it
+ * has to reach that decision through the SAME classify, register, request and
+ * wait this function runs. Two implementations of that sequence would be two
+ * gates, and the second one would be the one nobody reviewed.
+ *
+ * `code` and `detail` are kept apart rather than pre-joined, because the bridge
+ * records the code as a code (§11.1 invariant 7) where the hook prints the pair
+ * as one reason string.
+ */
+export type HarnessVerdict =
+  | { permission: "allow"; reason: string }
+  | { permission: "deny"; code: string; detail: string };
+
+/**
+ * The hook's own rendering of a verdict: one decision object on stdout, in the
+ * dialect of the harness that asked.
+ *
+ * The one place a verdict becomes bytes, so the Codex guard inside
+ * {@link allow} — an allow that lost its exact bound `tool_input.command` is an
+ * I/O failure rather than a permission — still stands over every path.
+ */
+function renderVerdict(
+  streams: Streams,
+  adapter: HarnessAdapter,
+  codexCommand: string | undefined,
+  verdict: HarnessVerdict,
+): number {
+  return verdict.permission === "allow"
+    ? allow(streams, verdict.reason, adapter.kind, codexCommand)
+    : deny(streams, verdict.code, verdict.detail, adapter.kind);
+}
+
+export function gateHarnessCall(
   streams: Streams,
   run: HookRun,
   classes: string[],
@@ -2733,7 +2772,7 @@ function gateAndWait(
    * one, so a floor never puts a question about looking on a human's phone.
    */
   floor: HarnessLoopState | null = null,
-): number {
+): HarnessVerdict {
   /**
    * Does the floor route THIS class to a human? (APRV-297.)
    *
@@ -2750,25 +2789,23 @@ function gateAndWait(
   const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
-  const sayAllow = (reason: string): number =>
-    allow(streams, reason, run.harness, run.codexCommand);
+  const sayAllow = (reason: string): HarnessVerdict => ({ permission: "allow", reason });
   /**
-   * Every deny this function can print, with the floor's own sentence appended
+   * Every deny this function can reach, with the floor's own sentence appended
    * when a floor is what routed the command here (APRV-280). One wrapper rather
    * than a sentence bolted onto the timeout alone: a floored invocation that
    * ends in a rejection, a lapse or an I/O fault leaves the agent in exactly the
    * same place, and the operator reading the harness's error stream needs the
    * scope key either way.
    */
-  const sayDeny = (code: string, detail: string): number =>
-    deny(
-      streams,
-      code,
+  const sayDeny = (code: string, detail: string): HarnessVerdict => ({
+    permission: "deny",
+    code,
+    detail:
       floor === null
         ? detail
         : `${detail} This tool call was routed to a human by loop safety rather than by policy — loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls (amended SPEC.md §10.2). ${loopClearance(floor.scope, floor.key)}`,
-      run.harness,
-    );
+  });
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
@@ -4288,6 +4325,95 @@ function runHarnessHook(
     );
   }
 
+  return renderVerdict(
+    streams,
+    adapter,
+    codexCommand,
+    decideHarnessCall({
+      streams,
+      input,
+      adapter,
+      cwd,
+      logPath,
+      root,
+      options,
+      actor,
+      timeoutMs,
+      intervalMs,
+      graceMs,
+      codexCommand,
+      windowRecords: looked.records,
+    }),
+  );
+}
+
+/**
+ * What {@link decideHarnessCall} needs to reach a verdict (APRV-361).
+ *
+ * Everything here is established by the CALLER: which harness asked, where the
+ * policy and the log are, who is acting, and how long this decision may take.
+ * Nothing in it is authored by the party under oversight beyond `input`, which
+ * is the harness's own event and is treated as such throughout.
+ */
+export interface DecideInput {
+  streams: Streams;
+  input: HookInput;
+  adapter: HarnessAdapter;
+  /** The directory a relative path in the call resolves against. */
+  cwd: string;
+  logPath: string;
+  /** The scope root, named in the unreachable-log detail. */
+  root: string;
+  options: GateOptions;
+  actor: string;
+  timeoutMs: number;
+  intervalMs: number;
+  graceMs: number;
+  /** Exact native command bytes a Codex allow must carry back, where there are any. */
+  codexCommand?: string | undefined;
+  /**
+   * The verified records an open-window lookup already read, or `null`.
+   *
+   * Passed rather than re-read so the floor and the unattended guard are
+   * decided from the same read the window was. A caller that performed no
+   * lookup passes `null`, and both of them read the log themselves.
+   */
+  windowRecords: EventRecord[] | null;
+}
+
+/**
+ * Classify, resolve, gate and wait: one harness tool call, from the event to a
+ * verdict (APRV-361).
+ *
+ * Extracted from the hook's own verb so a SECOND caller can reach a decision
+ * through exactly this sequence. `cli/codex-bridge.ts` answers Codex's
+ * app-server approval requests over JSON-RPC rather than on stdout, and the
+ * thing it must not do is re-implement any of what is below: the human-only
+ * refusal, the unruled `harness.launch.*` refusal, the sandbox requirement, the
+ * loop floor, the unattended guard, the autonomous charge, and the register,
+ * request and wait that follow. Two implementations of that sequence would be
+ * two gates, and the second one would be the one nobody reviewed.
+ *
+ * It returns a verdict and prints none. `streams.err` still carries the
+ * progress and withdrawal lines, which are a report rather than a decision.
+ */
+export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
+  const {
+    streams,
+    input,
+    adapter,
+    cwd,
+    logPath,
+    root,
+    options,
+    actor,
+    timeoutMs,
+    intervalMs,
+    graceMs,
+    codexCommand,
+    windowRecords,
+  } = decide;
+
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
   // counts as a protected path is a policy question and the classifier cannot be
@@ -4302,12 +4428,11 @@ function runHarnessHook(
       : { file: options.policy.file },
   );
   if (!load.ok) {
-    return deny(
-      streams,
-      "hook-policy-unavailable",
-      `${load.code}: ${load.message}; every class resolves to manual and the hook cannot verify a decision`,
-      adapter.kind,
-    );
+    return {
+      permission: "deny",
+      code: "hook-policy-unavailable",
+      detail: `${load.code}: ${load.message}; every class resolves to manual and the hook cannot verify a decision`,
+    };
   }
   const protectedPaths = load.policy.protected_paths ?? [];
   // APRV-347. Resolved from the LOADED policy's own directory, so the scope is
@@ -4321,22 +4446,20 @@ function runHarnessHook(
   // be a second answer to "what is this command".
   const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots);
   if (described.kind === "deny") {
-    return deny(streams, described.code, described.detail, adapter.kind);
+    return { permission: "deny", code: described.code, detail: described.detail };
   }
   if (described.kind === "allow") {
-    return allow(streams, described.reason, adapter.kind, codexCommand);
+    return { permission: "allow", reason: described.reason };
   }
   const { classes, payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
   const notes: string[] = [...described.notes];
 
   if (classes.length === 0) {
-    return allow(
-      streams,
-      "the approval CLI is the gate itself and is not gated by it",
-      adapter.kind,
-      codexCommand,
-    );
+    return {
+      permission: "allow",
+      reason: "the approval CLI is the gate itself and is not gated by it",
+    };
   }
 
   // Every path from here needs the log, the fast paths included (APRV-139):
@@ -4346,12 +4469,11 @@ function runHarnessHook(
   // on-disk policy called autonomous; it now denies, which is the same answer
   // it already gave every other class.
   if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
-    return deny(
-      streams,
-      "hook-log-unreachable",
-      `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
-      adapter.kind,
-    );
+    return {
+      permission: "deny",
+      code: "hook-log-unreachable",
+      detail: `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
+    };
   }
 
   // Minted once, here, and carried into `gateAndWait`: the loop-escalation
@@ -4398,12 +4520,11 @@ function runHarnessHook(
     harnessLaunchNeedsRule(cls, resolutions[index] as Resolution),
   );
   if (unruled !== undefined) {
-    return deny(
-      streams,
-      "hook-harness-launch-unruled",
-      harnessLaunchUnruledRefusal(unruled, "this command may not run under an agent"),
-      adapter.kind,
-    );
+    return {
+      permission: "deny",
+      code: "hook-harness-launch-unruled",
+      detail: harnessLaunchUnruledRefusal(unruled, "this command may not run under an agent"),
+    };
   }
 
   // APRV-185, amended SPEC.md §5.2, and the first verdict this function reaches
@@ -4423,12 +4544,11 @@ function runHarnessHook(
     (_cls, index) => autonomies[index] === "human-only",
   );
   if (reserved !== undefined) {
-    return deny(
-      streams,
-      "hook-class-human-only",
-      `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
-      adapter.kind,
-    );
+    return {
+      permission: "deny",
+      code: "hook-class-human-only",
+      detail: `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
+    };
   }
 
   // APRV-193, and BELOW the human-only deny for the same reason that one sits
@@ -4437,7 +4557,7 @@ function runHarnessHook(
   // refused command leaves the log exactly as it found it.
   const unsandboxed = sandboxRequirement(described.segments, autonomies);
   if (unsandboxed !== null) {
-    return deny(streams, "hook-sandbox-required", unsandboxed, adapter.kind);
+    return { permission: "deny", code: "hook-sandbox-required", detail: unsandboxed };
   }
 
   // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
@@ -4453,8 +4573,8 @@ function runHarnessHook(
   // have proceeded is routed to the human gate for this invocation (APRV-297
   // narrowed it to those); a class that already resolves manual is untouched,
   // because it was already going there.
-  const floored = harnessFloor(logPath, task, actor, looked.records);
-  if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
+  const floored = harnessFloor(logPath, task, actor, windowRecords);
+  if (!floored.ok) return { permission: "deny", code: "hook-io", detail: floored.detail };
 
   /**
    * The streak the log shows, before the read carve-out (APRV-297).
@@ -4509,8 +4629,10 @@ function runHarnessHook(
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");
   if (unattended) {
-    const refused = unattendedGuard(logPath, load.source.path, task, looked.records);
-    if (refused !== null) return deny(streams, refused.code, refused.detail, adapter.kind);
+    const refused = unattendedGuard(logPath, load.source.path, task, windowRecords);
+    if (refused !== null) {
+      return { permission: "deny", code: refused.code, detail: refused.detail };
+    }
   }
 
   if (floor === null && autonomies.every((autonomy) => autonomy === "autonomous")) {
@@ -4521,14 +4643,13 @@ function runHarnessHook(
     // charge is not a budget. See `recordUnattended`.
     const charged = recordUnattended(run, task, classes, payloadHash(payload));
     if (charged !== null) {
-      return deny(streams, `hook-gate-refused:${charged.code}`, charged.message, adapter.kind);
+      return {
+        permission: "deny",
+        code: `hook-gate-refused:${charged.code}`,
+        detail: charged.message,
+      };
     }
-    return allow(
-      streams,
-      `autonomous: ${classes.join(", ")}${note}`,
-      adapter.kind,
-      codexCommand,
-    );
+    return { permission: "allow", reason: `autonomous: ${classes.join(", ")}${note}` };
   }
 
   // Past here the hook appends. It writes to a log that already exists and
@@ -4537,7 +4658,7 @@ function runHarnessHook(
   // do not survive a merge. An initialized-but-empty `.approval/log/` counts as
   // reachable — an audit trail that has recorded nothing is an empty log, not a
   // missing one (see `preflightLog`) — and `register` appends the first line.
-  return gateAndWait(
+  return gateHarnessCall(
     streams,
     run,
     classes,
