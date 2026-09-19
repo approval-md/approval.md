@@ -1523,6 +1523,86 @@ const gateVectors = [
 ];
 
 // ---------------------------------------------------------------------------
+// Suite 9 — the app-server bridge's reply vocabulary (APRV-367)
+// ---------------------------------------------------------------------------
+
+/**
+ * One vector: an advertised list and an outcome, and the word that goes on the
+ * wire.
+ *
+ * `advertised: null` is a request that advertised nothing, which is a shape the
+ * observed server does send, and is not the same input as an empty list.
+ */
+const bridgeDecisionVectors = [
+  {
+    id: "advertised-accept-is-sent-verbatim",
+    description:
+      "the full list the 2026-09-18 probe recorded, and an accept: the word sent is `accept`, taken from the advertisement",
+    input: {
+      advertised: ["accept", "acceptForSession", "acceptWithExecpolicyAmendment", "cancel", "decline"],
+      outcome: "accept",
+    },
+  },
+  {
+    id: "advertised-decline-is-sent-verbatim",
+    description: "the same list and a decline: the word sent is `decline`, never `cancel`",
+    input: {
+      advertised: ["accept", "acceptForSession", "acceptWithExecpolicyAmendment", "cancel", "decline"],
+      outcome: "decline",
+    },
+  },
+  {
+    id: "accept-for-session-is-never-sent",
+    description:
+      "a server offering ONLY the session-wide and amendment-carrying variants gets this client's own `accept`: standing authority for a whole session is a grant shape the design does not have, and an amendment carries terms nobody approved. A client matching by prefix would send `acceptForSession` here",
+    input: { advertised: ["acceptForSession", "acceptWithExecpolicyAmendment"], outcome: "accept" },
+  },
+  {
+    id: "cancel-and-abort-are-never-sent",
+    description:
+      "a server offering only `cancel` and `abort` gets `decline`: those mean stop the turn, which is a different act from no to this action, and sending one would record an interruption as a denial",
+    input: { advertised: ["cancel", "abort"], outcome: "decline" },
+  },
+  {
+    id: "legacy-approved-is-matched",
+    description:
+      "the legacy API's spellings are the same two words: `approved` for an accept, matched from the advertisement",
+    input: { advertised: ["approved", "denied"], outcome: "accept" },
+  },
+  {
+    id: "legacy-denied-is-matched",
+    description: "and `denied` for a decline",
+    input: { advertised: ["approved", "denied"], outcome: "decline" },
+  },
+  {
+    id: "case-is-not-the-vocabulary",
+    description:
+      "a server that spells it `Accept` is offering the word, so the match is case-insensitive; what goes on the wire is this runtime's own spelling of it, because the value's type is the closed vocabulary",
+    input: { advertised: ["Accept", "Decline"], outcome: "accept" },
+  },
+  {
+    id: "no-advertisement-falls-back",
+    description:
+      "a request that advertises nothing gets the client's first word and the source says `fallback`, so a reader can tell a choice the server offered from one the client made",
+    input: { advertised: null, outcome: "decline" },
+  },
+  {
+    id: "empty-advertisement-falls-back",
+    description:
+      "an EMPTY list is the same answer by a different route, and is a different input: the server said it has a vocabulary and named none of it",
+    input: { advertised: [], outcome: "accept" },
+  },
+  {
+    id: "acceptforsession-is-not-an-outcome",
+    description:
+      "a third outcome must be REFUSED rather than answered: this client means accept or decline, and a runner that resolved `acceptForSession` here would be describing a client that can mean more",
+    control: true,
+    input: { advertised: ["acceptForSession"], outcome: "acceptForSession" },
+    expect: { valid: false, failure_class: "unknown-outcome" },
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
 
@@ -1808,6 +1888,23 @@ const SUITES = [
     description:
       "One command string per vector, classified by the pure classifier: no gate root, no policy, no disk. The suite pins the SEGMENTATION as much as the classes, because that is where a second implementation goes wrong in both directions at once. Quoted argument text is data — a note naming a shell, a placeholder, a pipe or a semicolon is one word — while the two expansions the shell performs inside double quotes (`$(…)` and backticks) keep classifying as they do anywhere else, and quoting that does not balance is a refusal rather than a guess. On a refusal the CODE is pinned and the detail is not: the code is the machine's half (§11.1 invariant 6), the detail is prose a runtime may improve.",
     vectors: commandClassVectors,
+  },
+  {
+    file: "bridge-decisions.v1.json",
+    suite: "bridge-decisions",
+    // 1.0.0 (APRV-367): a new suite. It pins a BEHAVIOUR rather than an array,
+    // which is why it is not more entries in `refusal-unions`: what has to hold
+    // is that a server offering `acceptForSession` is answered `accept` and one
+    // offering `cancel` is answered `decline`, in any implementation of this
+    // client. The vocabulary itself is eight spellings of two words, and it is
+    // a TYPE in the reference implementation, so a vector here is the only
+    // place a second implementation can be told the rule.
+    vectors_version: "1.0.0",
+    algorithm:
+      "The Codex app-server reply vocabulary: `accept` and `decline` only, matched against `availableDecisions` case-insensitively and never by prefix",
+    description:
+      "Given what a request advertised and what the client decided, which word goes on the wire and whether it came from the advertisement. The rule a conforming client must not break is the negative one: `acceptForSession` converts one decision into standing authority for a whole session, `acceptWithExecpolicyAmendment` carries terms nobody approved, and `cancel`/`abort` mean stop the turn rather than no to this action. None of the three is ever sent, however loudly a server advertises it, and a client that matched by PREFIX would send the first two. The negative control names a third outcome, which must be refused rather than answered.",
+    vectors: bridgeDecisionVectors,
   },
 ];
 

@@ -6299,6 +6299,16 @@ sending one would record an interruption as a denial). A request advertising
 nothing gets `accept` or `decline` and the report says the word was this
 runtime's own.
 
+The vocabulary is eight spellings of those two words (`accept`, `approved`,
+`approve`, `allow`; `decline`, `denied`, `deny`, `reject`), and since APRV-367
+it is a type rather than a convention: the reply value cannot be constructed
+outside the list, one function turns a decision into bytes and re-checks
+membership there, and a word that somehow failed that check would be sent as a
+decline, since the only safe substitute for a word you cannot name is no. The
+match is case-insensitive, and what goes on the wire is this runtime's own
+spelling of the matched word. The `bridge-decisions` conformance suite pins the
+behaviour for a second implementation.
+
 Its own refusals, beside the gate's:
 
 ```
