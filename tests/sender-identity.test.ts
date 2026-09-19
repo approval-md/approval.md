@@ -54,8 +54,14 @@ import { resolve as resolveClass } from "../src/core/policy-match.js";
 import {
   CHANNEL_DECISION_REFUSAL_CODES,
   SENDER_CHANNELS,
+  SENDER_KEY_ENV,
+  actorForSender,
+  hashedSenderId,
+  isHashedSenderId,
+  recordedSenderFor,
   resolveSender,
   senderIndex,
+  senderMappingForms,
   senderRefusalLine,
   type ChannelSender,
 } from "../src/core/sender-identity.js";
@@ -939,7 +945,15 @@ test("the sender index inverts the policy's person-to-sender map and the refusal
   assert.deepEqual([...index.values()], [["carter"], ["dana"]]);
   assert.deepEqual(
     [...CHANNEL_DECISION_REFUSAL_CODES],
-    ["sender-unmapped", "sender-ambiguous", "attest-requires-terminal"],
+    [
+      "sender-unmapped",
+      "sender-ambiguous",
+      // APRV-370: a keyed mapping this process holds no key for. Its own code,
+      // because the runtime could resolve NO account rather than failing to
+      // recognize one, and the two want opposite repairs.
+      "sender-key-unavailable",
+      "attest-requires-terminal",
+    ],
   );
 
   // An update with no readable id is not a sender to guess at.
@@ -1386,6 +1400,252 @@ function verifiedRecords(logPath: string): EventRecord[] {
   assert.equal(read.ok, true, `log did not verify: ${JSON.stringify(read)}`);
   return read.ok ? read.records : [];
 }
+
+// ---------------------------------------------------------------------------
+// APRV-370 — the KEYED mapping, so a published policy and a published log
+// carry a value nobody can walk backwards
+// ---------------------------------------------------------------------------
+
+/** The operator's key, in these fixtures. Never in a policy and never in a log. */
+const SENDER_KEY = "aprv370-test-sender-key-not-a-real-one";
+/** A second one, for the case that proves the digest depends on the key. */
+const OTHER_KEY = "aprv370-a-different-key";
+
+/** Both people mapped in the keyed form, under {@link SENDER_KEY}. */
+const POLICY_KEYED = policyText({
+  senders: {
+    carter: hashedSenderId(SENDER_KEY, CARTER_ID),
+    dana: hashedSenderId(SENDER_KEY, DANA_ID),
+  },
+});
+/** A migration in progress: Carter keyed, Dana still raw. */
+const POLICY_MIXED = policyText({
+  senders: { carter: hashedSenderId(SENDER_KEY, CARTER_ID), dana: DANA_ID },
+});
+
+/**
+ * Run `body` with the sender key established, and restore the environment.
+ *
+ * `await body()` inside the try, not `return body()`: the channel's decision
+ * path is async, and returning the promise would restore the variable before
+ * the handler that reads it ever runs.
+ */
+async function withSenderKey<T>(key: string | null, body: () => Promise<T>): Promise<T> {
+  const before = process.env[SENDER_KEY_ENV];
+  if (key === null) delete process.env[SENDER_KEY_ENV];
+  else process.env[SENDER_KEY_ENV] = key;
+  try {
+    return await body();
+  } finally {
+    if (before === undefined) delete process.env[SENDER_KEY_ENV];
+    else process.env[SENDER_KEY_ENV] = before;
+  }
+}
+
+test("APRV-370: the digest is keyed, prefixed, and cannot be confused with a raw id", () => {
+  const digest = hashedSenderId(SENDER_KEY, CARTER_ID);
+  assert.match(digest, /^hmac-sha256:[0-9a-f]{64}$/u);
+  assert.equal(isHashedSenderId(digest), true);
+  // The property the whole task rests on: without the key the digest is not
+  // reproducible. A plain sha256 of "42" would be, by anybody, in no time.
+  assert.notEqual(hashedSenderId(OTHER_KEY, CARTER_ID), digest);
+  // Stable, so one account is one mapping value forever under one key.
+  assert.equal(hashedSenderId(SENDER_KEY, CARTER_ID), digest);
+  // A raw id is never mistaken for the keyed form, which is what lets one
+  // policy carry both during a migration.
+  assert.equal(isHashedSenderId(CARTER_ID), false);
+  assert.equal(isHashedSenderId("hmac-sha256:not-hex"), false);
+  assert.equal(isHashedSenderId(`hmac-sha256:${"a".repeat(63)}`), false);
+});
+
+test("APRV-370: senderMappingForms tells a raw roster from a keyed one and from a mixed one", () => {
+  const raw = loadPolicyText("APPROVAL.md", POLICY_MAPPED);
+  const keyed = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  const mixed = loadPolicyText("APPROVAL.md", POLICY_MIXED);
+  assert.equal(raw.ok && keyed.ok && mixed.ok, true);
+  const forms = (load: typeof raw): { raw: boolean; keyed: boolean } =>
+    senderMappingForms(load.ok ? load.policy.approvers : undefined, "telegram");
+  assert.deepEqual(forms(raw), { raw: true, keyed: false });
+  assert.deepEqual(forms(keyed), { raw: false, keyed: true });
+  assert.deepEqual(forms(mixed), { raw: true, keyed: true });
+});
+
+test("APRV-370: with the key, a keyed mapping resolves and records the digest", () => {
+  const load = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  const resolution = resolveSender(load, { channel: "telegram", id: CARTER_ID }, SENDER_KEY);
+  assert.equal(resolution.kind, "mapped");
+  if (resolution.kind !== "mapped") return;
+  assert.equal(resolution.actor, "human:carter");
+  // The recorded id is the value the POLICY carries, not the bare hex and not
+  // the account: an operator can grep one for the other.
+  assert.deepEqual(resolution.recorded, {
+    channel: "telegram",
+    id: hashedSenderId(SENDER_KEY, CARTER_ID),
+    hashed: true,
+  });
+});
+
+test("APRV-370: a keyed mapping with NO key refuses the whole channel and never falls back", () => {
+  const load = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  // Carter IS mapped. The refusal is not about him: without the key there is no
+  // digest to compare, so the runtime cannot tell a mapped account from an
+  // unmapped one and will not guess.
+  const resolution = resolveSender(load, { channel: "telegram", id: CARTER_ID }, null);
+  assert.equal(resolution.kind, "key-unavailable");
+  const actor = actorForSender(load, LISTENER, { channel: "telegram", id: CARTER_ID }, null);
+  assert.equal(actor.ok, false);
+  if (actor.ok) return;
+  assert.equal(actor.code, "sender-key-unavailable");
+  assert.match(actor.message, new RegExp(SENDER_KEY_ENV, "u"));
+  // The one refusal whose recorded sender is raw under a keyed mapping: there
+  // is no key to hash it with, and recording nothing would leave an operator
+  // unable to say which account was in front of a gate that lost its key.
+  assert.deepEqual(actor.sender, { channel: "telegram", id: CARTER_ID });
+  // And the line the person sees says it is about the listener, not about them.
+  assert.match(senderRefusalLine("sender-key-unavailable"), /says nothing about your account/u);
+});
+
+test("APRV-370: the default is no key, so a caller that forgets refuses rather than reads past", () => {
+  // The fail-closed default, stated as its own case. Three arguments used to be
+  // the whole signature, and every caller that still passes three gets a
+  // refusal on a keyed policy rather than a silent comparison of a raw id
+  // against a digest, which would read exactly like a stranger tapping.
+  const load = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  assert.equal(resolveSender(load, { channel: "telegram", id: CARTER_ID }).kind, "key-unavailable");
+});
+
+test("APRV-370: an unmapped account under a keyed policy is recorded as its digest", () => {
+  const load = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  const resolution = resolveSender(load, { channel: "telegram", id: STRANGER_ID }, SENDER_KEY);
+  assert.equal(resolution.kind, "unmapped");
+  if (resolution.kind !== "unmapped") return;
+  assert.deepEqual(resolution.sender, {
+    channel: "telegram",
+    id: hashedSenderId(SENDER_KEY, STRANGER_ID),
+    hashed: true,
+  });
+  // The refusal tells the operator what it handed them, which is a line they
+  // can paste into `senders` rather than a number they have to transform.
+  assert.match(resolution.message, /keyed digest the policy would carry/u);
+});
+
+test("APRV-370: a raw mapping is untouched — no key read, no flag written", () => {
+  const load = loadPolicyText("APPROVAL.md", POLICY_MAPPED);
+  // With a key in hand and a raw policy, the record is still the raw record:
+  // the FORM follows the policy, never the environment.
+  const resolution = resolveSender(load, { channel: "telegram", id: CARTER_ID }, SENDER_KEY);
+  assert.equal(resolution.kind, "mapped");
+  if (resolution.kind !== "mapped") return;
+  assert.deepEqual(resolution.recorded, { channel: "telegram", id: CARTER_ID });
+  assert.equal("hashed" in resolution.recorded, false);
+});
+
+test("APRV-370: a mixed policy resolves both halves with the key, and neither without it", () => {
+  const load = loadPolicyText("APPROVAL.md", POLICY_MIXED);
+  const keyed = resolveSender(load, { channel: "telegram", id: CARTER_ID }, SENDER_KEY);
+  const raw = resolveSender(load, { channel: "telegram", id: DANA_ID }, SENDER_KEY);
+  assert.equal(keyed.kind, "mapped");
+  assert.equal(raw.kind, "mapped");
+  if (keyed.kind === "mapped") assert.equal(keyed.recorded.hashed, true);
+  // Dana's entry is raw, so Dana's record is raw, in the same policy and the
+  // same tap. The form is per entry.
+  if (raw.kind === "mapped") assert.deepEqual(raw.recorded, { channel: "telegram", id: DANA_ID });
+
+  // Without the key, DANA is refused too, although her entry is one this
+  // process could have compared. Matching the half it can read would be
+  // resolving an ambiguity by not looking at it.
+  assert.equal(resolveSender(load, { channel: "telegram", id: DANA_ID }, null).kind, "key-unavailable");
+});
+
+test("APRV-370: recordedSenderFor follows the FILE, so a refusal before the mapping still hides the account", () => {
+  const keyed = loadPolicyText("APPROVAL.md", POLICY_KEYED);
+  const raw = loadPolicyText("APPROVAL.md", POLICY_MAPPED);
+  const sender = { channel: "telegram", id: STRANGER_ID };
+  assert.deepEqual(recordedSenderFor(keyed, sender, SENDER_KEY), {
+    channel: "telegram",
+    id: hashedSenderId(SENDER_KEY, STRANGER_ID),
+    hashed: true,
+  });
+  assert.deepEqual(recordedSenderFor(raw, sender, SENDER_KEY), sender);
+  // No key, or no policy: the raw id, exactly as every build since APRV-324.
+  assert.deepEqual(recordedSenderFor(keyed, sender, null), sender);
+  assert.deepEqual(
+    recordedSenderFor(loadPolicyText("APPROVAL.md", "not a policy"), sender, SENDER_KEY),
+    sender,
+  );
+});
+
+test("APRV-370: end to end, a keyed grant records the digest and the log holds no account id", async () => {
+  const w = world(1, POLICY_KEYED);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(w.unit));
+  await deliver(w, 0, channel);
+
+  const outcome = await withSenderKey(SENDER_KEY, () =>
+    press(channel, w.keys[0] as string, "grant", { fromId: CARTER_ID }),
+  );
+  assert.ok(outcome?.ok === true, JSON.stringify(outcome));
+  // The mapping did the attribution, exactly as it does raw.
+  assert.equal(outcome.record.actor, "human:carter");
+  assert.deepEqual(payloadOf(outcome.record)["sender"], {
+    channel: "telegram",
+    id: hashedSenderId(SENDER_KEY, CARTER_ID),
+    hashed: true,
+  });
+  assert.equal(payloadOf(outcome.record)["sender_source"], "policy");
+
+  // The whole point, asserted over the bytes on disk: the account id is
+  // nowhere in the log, and neither is the key.
+  const raw = readFileSync(w.unit.logPath, "utf8");
+  assert.doesNotMatch(raw, /"id":"42"/u);
+  assert.equal(raw.includes(SENDER_KEY), false);
+  assertClean(w.unit);
+});
+
+test("APRV-370: end to end, a stranger's tap is refused and the refusal carries the digest", async () => {
+  const w = world(1, POLICY_KEYED);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(w.unit));
+  await deliver(w, 0, channel);
+
+  const outcome = await withSenderKey(SENDER_KEY, () =>
+    press(channel, w.keys[0] as string, "grant", { fromId: STRANGER_ID }),
+  );
+  assert.equal(outcome?.ok, false);
+  const refused = refusals(w.unit);
+  assert.equal(refused.length, 1);
+  const payload = payloadOf(refused[0] as EventRecord);
+  assert.equal(payload["code"], "sender-unmapped");
+  assert.deepEqual(payload["sender"], {
+    channel: "telegram",
+    id: hashedSenderId(SENDER_KEY, STRANGER_ID),
+    hashed: true,
+  });
+  // Nothing was decided, and the stranger's account is not in the file.
+  assert.equal(decisionRecords(w.unit).length, 0);
+  assert.doesNotMatch(readFileSync(w.unit.logPath, "utf8"), /"id":"999"/u);
+  assertClean(w.unit);
+});
+
+test("APRV-370: end to end, a listener with no key decides nothing on a keyed channel", async () => {
+  const w = world(1, POLICY_KEYED);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(w.unit));
+  await deliver(w, 0, channel);
+
+  const outcome = await withSenderKey(null, () =>
+    press(channel, w.keys[0] as string, "grant", { fromId: CARTER_ID }),
+  );
+  assert.equal(outcome?.ok, false);
+  const refused = refusals(w.unit);
+  assert.equal(refused.length, 1);
+  const payload = payloadOf(refused[0] as EventRecord);
+  assert.equal(payload["code"], "sender-key-unavailable");
+  // Carter's own tap, on Carter's own gate, refused — which is the fail-closed
+  // direction and the one a runbook has to warn about.
+  assert.equal(decisionRecords(w.unit).length, 0);
+  assertClean(w.unit);
+});
 
 /**
  * The `callback_data` of the newest `Sign` button the mock received.

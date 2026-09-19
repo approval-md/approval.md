@@ -360,7 +360,7 @@ const unionVectors = [
   ],
   [
     "channel_decision_refusal_codes",
-    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the gesture is an attestation whose in-force policy cannot say who is tapping",
+    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the attested policy maps that channel's senders in the keyed form and the process holds no key to compute a digest with, or the gesture is an attestation whose in-force policy cannot say who is tapping",
   ],
   [
     "bridge_refusal_codes",
@@ -1797,7 +1797,26 @@ const SUITES = [
     // request would be saying something false about what it did. Each union's
     // description now names the other, so a checker that reads one knows it has
     // read half.
-    vectors_version: "16.0.0",
+    // 18.0.0 (APRV-370): `channel_decision_refusal_codes` gains
+    // `sender-key-unavailable`, the refusal a decision surface reaches when the
+    // attested policy maps that channel's senders in the KEYED form and the
+    // process holds no key. Major because the vector pins the whole array in
+    // definition order, so a longer union is a changed expectation.
+    //
+    // A fourth code rather than a `sender-unmapped`, because the two say
+    // opposite things and want opposite repairs: unmapped says the policy does
+    // not name this account, and this says the runtime could evaluate NO
+    // account, for anybody, and the fix is an environment variable rather than
+    // an amendment. A second implementation has to answer it, because the only
+    // alternative to refusing is comparing a raw id against a digest and
+    // finding nothing, which reads exactly like a stranger tapping.
+    //
+    // 17.0.0 IS DELIBERATELY SKIPPED. APRV-379's lane bumped `refusal-unions`
+    // to 17.0.0 on its own branch in the same session, and two branches naming
+    // one version for two different vector sets is the collision
+    // `conformance/README.md` warns about. The rule it gives is to take one
+    // above the highest version either side saw.
+    vectors_version: "18.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1916,7 +1935,18 @@ const SUITES = [
     // first version that NAMES them; an implementation holding itself to 2.3.0
     // has been required to know them since they were committed, which is the
     // drift a version number exists to prevent.
-    vectors_version: "2.4.0",
+    // 2.5.0 (APRV-370): a MINOR bump, the same shape 2.1.0, 2.3.0 and 2.4.0
+    // were, and for the same reason: no existing expectation moves. The
+    // `payload.sender` object gains an optional `hashed`, and six new fixtures
+    // exercise it — a grant and a gesture refusal carrying the keyed form, a
+    // policy mapping one approver keyed and another raw, and three refused: a
+    // record claiming `hashed` while carrying a bare account id, one spelling
+    // it `false` (the flag is `true` or absent, never `false`), and a policy
+    // whose mapping value is an UNKEYED `sha256:` digest, which this schema
+    // refuses because a plain digest of a ten-digit number is not a digest of
+    // anything. Every record and every policy written before this validates
+    // exactly as it did: the field is optional and absent is the raw form.
+    vectors_version: "2.5.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

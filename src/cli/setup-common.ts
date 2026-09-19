@@ -46,6 +46,7 @@ import {
 } from "../core/env-file.js";
 import {
   LEGACY_SERVICE_SAMPLING_SECRET,
+  SERVICE_SENDER_KEY,
   LEGACY_SERVICE_TELEGRAM_TOKEN,
   LEGACY_SERVICE_VAULT_PASSPHRASE,
   scopedService,
@@ -87,14 +88,17 @@ export interface ServiceNames {
   telegramToken: string;
   vaultPassphrase: string;
   samplingSecret: string;
+  /** The key that hashes channel sender ids (APRV-370). */
+  senderKey: string;
 }
 
-/** The three item names the instance owning `logPath` reads and writes. */
+/** The four item names the instance owning `logPath` reads and writes. */
 export function servicesFor(logPath: string): ServiceNames {
   return {
     telegramToken: scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, logPath),
     vaultPassphrase: scopedService(LEGACY_SERVICE_VAULT_PASSPHRASE, logPath),
     samplingSecret: scopedService(LEGACY_SERVICE_SAMPLING_SECRET, logPath),
+    senderKey: scopedService(SERVICE_SENDER_KEY, logPath),
   };
 }
 

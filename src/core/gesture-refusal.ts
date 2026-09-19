@@ -74,7 +74,7 @@ import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import { appendEvent, type AppendError, type EventRecord, type LogHead } from "./log.js";
 import { readVerifiedRecords } from "./state.js";
 import type { GateOptions } from "./gate.js";
-import type { ChannelSender, SenderSource } from "./sender-identity.js";
+import type { RecordedSender, SenderSource } from "./sender-identity.js";
 
 /** The actor every record here carries: the gate stating what the gate did. */
 export const GESTURE_REFUSAL_ACTOR = "system:gate";
@@ -97,10 +97,10 @@ export type RefusedGestureKind = (typeof REFUSED_GESTURES)[number];
 
 /**
  * The refusals a gesture can meet before any verb runs. **Closed**, and exactly
- * what sender resolution can answer: `sender-unmapped` and `sender-ambiguous`
- * from `core/sender-identity.ts`'s own union, and `policy-not-attested` from
- * `core/attest.ts`, which fires when the policy declaring the mapping is not
- * the attested one and is therefore not in force.
+ * what sender resolution can answer: `sender-unmapped`, `sender-ambiguous` and
+ * `sender-key-unavailable` from `core/sender-identity.ts`'s own union, and
+ * `policy-not-attested` from `core/attest.ts`, which fires when the policy
+ * declaring the mapping is not the attested one and is therefore not in force.
  *
  * `attest-requires-terminal` is deliberately absent: it belongs to an
  * attestation tap, which is a decision and is recorded as one.
@@ -108,6 +108,10 @@ export type RefusedGestureKind = (typeof REFUSED_GESTURES)[number];
 export const REFUSED_GESTURE_CODES = [
   "sender-unmapped",
   "sender-ambiguous",
+  // APRV-370. A keyed mapping this process holds no key for: the runtime could
+  // resolve no account at all, which is a different fact from "this account is
+  // not mapped" and wants a different repair.
+  "sender-key-unavailable",
   "policy-not-attested",
 ] as const;
 
@@ -133,8 +137,11 @@ export interface RefusedGesture {
   actor: string | null;
   /** The surface that collected the gesture: `telegram`, `web`, `cli`. */
   channel: string;
-  /** The authenticated sender it arrived from, when the surface observed one. */
-  sender?: ChannelSender;
+  /**
+   * The authenticated sender it arrived from, when the surface observed one,
+   * in the form the record carries it (APRV-370: raw, or the keyed digest).
+   */
+  sender?: RecordedSender;
   /** How the sender became the actor, when one did. */
   senderSource?: SenderSource;
 }
@@ -233,7 +240,12 @@ function appendAudit(
     message: refusal.message,
   };
   if (gesture.sender !== undefined) {
-    payload["sender"] = { channel: gesture.sender.channel, id: gesture.sender.id };
+    payload["sender"] = {
+      channel: gesture.sender.channel,
+      id: gesture.sender.id,
+      // APRV-370: only when true, so a raw record does not change shape.
+      ...(gesture.sender.hashed === true ? { hashed: true } : {}),
+    };
     if (gesture.senderSource !== undefined) payload["sender_source"] = gesture.senderSource;
   }
 

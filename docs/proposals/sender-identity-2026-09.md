@@ -1,5 +1,14 @@
 # Sender identity for this repository's own gate (APRV-324)
 
+> **APPLIED, and superseded for the mapping VALUE.** This page is on the
+> record: the raw id it asked for is in `APPROVAL.md` and in every Telegram
+> decision since. Applying it disclosed the account in a published policy and a
+> published log, which the operator raised on 2026-09-18 and ruled on a day
+> later. `docs/proposals/sender-identity-hashed-2026-09.md` is the follow-up
+> that rewrites that one value in the keyed form (APRV-370). Everything else on
+> this page still describes what is in force. The raw id stays in git history
+> and is not rewritten.
+
 This repository's `APPROVAL.md` names one approver and maps no Telegram
 account, so every tap on the phone is recorded against the actor
 `approval up` was launched with. That is correct and unchanged by APRV-324: a

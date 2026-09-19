@@ -69,12 +69,19 @@ import type { PolicyLoadResult } from "./policy-load.js";
 export const LEGACY_SERVICE_TELEGRAM_TOKEN = "approval-tg-token";
 export const LEGACY_SERVICE_VAULT_PASSPHRASE = "approval-vault-passphrase";
 export const LEGACY_SERVICE_SAMPLING_SECRET = "approval-sampling-secret";
+/**
+ * The sender key (APRV-370). Born scoped, so it has no legacy instance to be a
+ * fallback for; it sits in this list because the naming rule is the list's, and
+ * a name minted outside it is a name `approval env --check` reports as unknown.
+ */
+export const SERVICE_SENDER_KEY = "approval-sender-key";
 
 /** Every unscoped name, for the "is this the legacy one?" test. */
 export const LEGACY_SERVICES: readonly string[] = [
   LEGACY_SERVICE_TELEGRAM_TOKEN,
   LEGACY_SERVICE_VAULT_PASSPHRASE,
   LEGACY_SERVICE_SAMPLING_SECRET,
+  SERVICE_SENDER_KEY,
 ];
 
 /** How many hex digits of the digest a scoped name carries. */
