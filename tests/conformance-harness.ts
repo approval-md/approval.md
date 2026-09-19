@@ -69,7 +69,12 @@ import { readVerifiedRecords } from "../src/core/state.js";
 import { canonicalize, JcsError } from "../src/core/jcs.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
 import { resolve as resolveClass } from "../src/core/policy-match.js";
-import { BRIDGE_REFUSAL_CODES } from "../src/cli/codex-bridge.js";
+import {
+  BRIDGE_REFUSAL_CODES,
+  chooseDecision,
+  encodeDecision,
+  type BridgeOutcome,
+} from "../src/cli/codex-bridge.js";
 import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate, type ValidationMode } from "../src/core/validate.js";
@@ -840,9 +845,50 @@ function runCommandClass(input: Record<string, unknown>): Expectation {
   };
 }
 
+// --- bridge-decisions -------------------------------------------------------
+
+/**
+ * What word the app-server bridge puts on the wire, for one advertised list and
+ * one outcome (APRV-367).
+ *
+ * A BEHAVIOUR rather than an array, which is why it is its own suite and not
+ * another `refusal-unions` entry: the thing to pin is that a server offering
+ * `acceptForSession` gets `accept`, and a server offering `cancel` gets
+ * `decline`, whoever implements the client.
+ *
+ * An outcome this runtime does not have is REFUSED rather than answered. The
+ * bridge means two things and a suite that quietly answered a third would be
+ * describing a client that can mean more than this one.
+ */
+function runBridgeDecisions(input: Record<string, unknown>): Expectation {
+  const outcome = str(input, "outcome");
+  if (outcome !== "accept" && outcome !== "decline") {
+    return { valid: false, failure_class: "unknown-outcome" };
+  }
+  const advertised = input["advertised"];
+  const params =
+    advertised === undefined || advertised === null
+      ? {}
+      : { availableDecisions: advertised };
+  const chosen = chooseDecision(params, outcome satisfies BridgeOutcome);
+  const encoded = encodeDecision(chosen.decision);
+  if (encoded === null) {
+    // Unreachable while the implementation holds its own rule, and reported as
+    // a failure rather than swallowed: a runner that answered here would be
+    // saying the vocabulary is open.
+    return { valid: false, failure_class: "unencodable-decision" };
+  }
+  return {
+    valid: true,
+    decision: encoded.decision,
+    decision_source: chosen.decisionSource,
+  };
+}
+
 const EXECUTORS: Readonly<Record<string, Executor>> = {
   "jcs-canonicalization": runJcs,
   "refusal-unions": runUnion,
+  "bridge-decisions": runBridgeDecisions,
   "policy-resolution": runPolicyResolution,
   "chain-verification": runChainVerification,
   "schema-validation": runSchemaValidation,

@@ -56,6 +56,14 @@
  * `abort` mean "stop the turn", which is a different act from "no to this
  * action", and sending one would record an interruption as a denial.
  *
+ * That rule is carried by the TYPE since APRV-367, not by a reviewer's memory:
+ * every reply word is a {@link BridgeDecisionWord}, whose eight inhabitants are
+ * the four spellings of yes and the four of no, and {@link encodeDecision} is
+ * the one place a decision becomes bytes and re-asks the question at runtime. A
+ * word outside the vocabulary is unconstructible, and were one to arrive anyway
+ * the reply becomes a decline, since the only safe substitute for a word you
+ * cannot name is no.
+ *
  * A `item/fileChange/requestApproval` on the item-based API carries no content:
  * `threadId`, `turnId`, `itemId`, `startedAtMs`, `reason` and `grantRoot`, and
  * the bytes arrived on an earlier frame. Approving an identifier is not
@@ -146,8 +154,54 @@ const DEFAULT_INTERVAL_MS = 2000;
  * reasons in this module's header. A value this runtime does not name is never
  * sent, however loudly the server advertises it.
  */
-const ACCEPT_WORDS = ["accept", "approved", "approve", "allow"] as const;
-const DECLINE_WORDS = ["decline", "denied", "deny", "reject"] as const;
+export const ACCEPT_WORDS = ["accept", "approved", "approve", "allow"] as const;
+export const DECLINE_WORDS = ["decline", "denied", "deny", "reject"] as const;
+
+/** One of the four spellings of yes this verb will send. */
+export type BridgeAcceptWord = (typeof ACCEPT_WORDS)[number];
+/** One of the four spellings of no. */
+export type BridgeDeclineWord = (typeof DECLINE_WORDS)[number];
+/**
+ * Everything this verb can put in a `decision` field, as a type (APRV-367).
+ *
+ * The list is the whole vocabulary: eight spellings of two words. A value
+ * outside it is a TYPE ERROR at every point the reply is built, which is the
+ * half of the rule a reviewer cannot forget to check, and it is refused again
+ * at runtime by {@link encodeDecision}, which is the half that survives a
+ * caller with an `any` in it.
+ */
+export type BridgeDecisionWord = BridgeAcceptWord | BridgeDeclineWord;
+
+/** The two things this verb ever means, whatever the server calls them. */
+export type BridgeOutcome = "accept" | "decline";
+
+/** Is this one of the eight words? The runtime face of {@link BridgeDecisionWord}. */
+export function isBridgeDecisionWord(value: unknown): value is BridgeDecisionWord {
+  return (
+    typeof value === "string" &&
+    ((ACCEPT_WORDS as readonly string[]).includes(value) ||
+      (DECLINE_WORDS as readonly string[]).includes(value))
+  );
+}
+
+/**
+ * The reply payload for one word: the ONE place a decision becomes bytes.
+ *
+ * `null` for anything this runtime does not name. The types make such a value
+ * unconstructible, so this is the defence against the code changing out from
+ * under the types rather than against any input a server can send: no
+ * `availableDecisions` list can reach it, because {@link chooseDecision} only
+ * ever returns a member.
+ *
+ * The caller answers `null` by sending a DECLINE, and that is the whole
+ * reasoning: the only safe substitute for a word you cannot name is no. It gets
+ * no refusal code of its own, because a code in a closed union that no input
+ * can produce is a string a second implementation cannot exercise and would
+ * have to take on trust.
+ */
+export function encodeDecision(word: string): { decision: BridgeDecisionWord } | null {
+  return isBridgeDecisionWord(word) ? { decision: word } : null;
+}
 
 /** Server request methods this verb recognises as approval questions. */
 const EXEC_APPROVAL_METHODS = [
@@ -265,9 +319,13 @@ export interface BridgeAnswer {
   /** The server's own id for the request, echoed on the reply. */
   id: unknown;
   /** `accept` or `decline`, as this verb decided it. */
-  outcome: "accept" | "decline";
-  /** The word actually sent, which is the server's if it advertised one. */
-  decision: string;
+  outcome: BridgeOutcome;
+  /**
+   * The word actually sent: one of the eight this runtime names, chosen to
+   * match what the request advertised (APRV-367). Its TYPE is the vocabulary,
+   * so a row saying `acceptForSession` cannot be constructed here.
+   */
+  decision: BridgeDecisionWord;
   /** Where that word came from: the request's own list, or this verb's fallback. */
   decisionSource: "advertised" | "fallback";
   /** The gate's code, or a {@link BRIDGE_REFUSAL_CODES} entry. `null` on an accept. */
@@ -305,21 +363,28 @@ export function advertisedDecisions(params: unknown): string[] {
 /**
  * The word to send for this outcome, and where it came from (AC4).
  *
- * An advertised word wins, matched case-insensitively and then by prefix, so a
- * server that spells it `acceptWithExecpolicyAmendment` does not match `accept`
- * as a prefix — the exact match is tried for every candidate before any prefix
- * is. A request advertising nothing gets this verb's own first word, and the
- * report says `fallback` so the choice is visible rather than assumed.
+ * An advertised word wins, matched case-insensitively and NEVER by prefix, so a
+ * server that offers `acceptWithExecpolicyAmendment` is not read as offering
+ * `accept`: an amendment carries terms nobody approved. A request advertising
+ * nothing gets this verb's own first word, and the report says `fallback` so
+ * the choice is visible rather than assumed.
+ *
+ * What it returns is this runtime's own spelling of the matched word rather
+ * than the server's (APRV-367). That is the point of the type: a
+ * {@link BridgeDecisionWord} has eight inhabitants, all of them named here, so
+ * no path through this function can produce a word this project did not choose
+ * to be able to send. The two spellings differ only in letter case, since the
+ * match is case-insensitive equality with one of the eight.
  */
 export function chooseDecision(
   params: unknown,
-  outcome: "accept" | "decline",
-): { decision: string; decisionSource: "advertised" | "fallback" } {
+  outcome: BridgeOutcome,
+): { decision: BridgeDecisionWord; decisionSource: "advertised" | "fallback" } {
   const offered = advertisedDecisions(params);
   const order = outcome === "accept" ? ACCEPT_WORDS : DECLINE_WORDS;
   for (const candidate of order) {
     const match = offered.find((value) => value.toLowerCase() === candidate);
-    if (match !== undefined) return { decision: match, decisionSource: "advertised" };
+    if (match !== undefined) return { decision: candidate, decisionSource: "advertised" };
   }
   return { decision: order[0], decisionSource: "fallback" };
 }
@@ -746,10 +811,16 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     let threadStartId = -1;
     let turnStartId = -1;
 
-    const answer = (id: unknown, method: string, outcome: "accept" | "decline", code: string | null, detail: string, params: unknown): void => {
+    const answer = (id: unknown, method: string, outcome: BridgeOutcome, code: string | null, detail: string, params: unknown): void => {
       const chosen = chooseDecision(params, outcome);
-      answers.push({ method, id, outcome, ...chosen, code, detail });
-      connection.respond(id, { decision: chosen.decision });
+      // The send boundary re-asks what the type already answered (APRV-367). A
+      // word this runtime cannot name is never put on the wire; the reply
+      // becomes a decline, because the only safe substitute for a word you
+      // cannot name is no. Unreachable while the types hold, which is why it
+      // carries no code of its own.
+      const encoded = encodeDecision(chosen.decision) ?? { decision: DECLINE_WORDS[0] };
+      answers.push({ method, id, outcome, ...chosen, decision: encoded.decision, code, detail });
+      connection.respond(id, encoded);
     };
 
     const connection = new Connection(child, (frame) => {

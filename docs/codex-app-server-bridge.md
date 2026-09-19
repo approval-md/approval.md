@@ -515,6 +515,14 @@ accept. `acceptForSession`, `cancel` and `abort` are never sent, for the reasons
 under "The decision vocabulary" above. A request that advertises nothing gets
 `accept` or `decline`, and the report says the word was the client's own.
 
+**That rule is a type and a suite since APRV-367** (follow-up 7, landed). The
+reply word is a closed union of eight spellings of the two words, so a value
+outside it cannot be constructed; one function turns a decision into bytes and
+re-checks membership there; and a word that somehow failed the check is sent as
+a decline, since the only safe substitute for a word you cannot name is no. The
+`bridge-decisions` conformance suite states the same rule for a second
+implementation, including the two vectors a prefix matcher fails.
+
 Three refusals are the bridge's own rather than the gate's:
 `bridge-request-unbound` (no command, no `cwd`, or no call identity),
 `bridge-file-change-unbound` (an item-based file change carries no content, and
@@ -588,6 +596,9 @@ bridge), then 362 to 368 depending on it.
    reports none is run against and recorded as unconfirmed.
 7. **Refuse `acceptForSession`.** Standing authority for a whole session is a
    grant shape this project does not have, and a bridge must never emit it.
+   **Landed (APRV-367):** the reply vocabulary is a closed type, the encoder is
+   one function that re-checks it at runtime, and the `bridge-decisions`
+   conformance suite pins which word a given advertisement gets.
 8. **Conformance vectors** for the bridge's refusal union, and a SPEC §6.3 row,
    once the behaviour is settled enough to pin.
 

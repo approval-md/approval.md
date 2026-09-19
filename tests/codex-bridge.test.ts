@@ -32,11 +32,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import {
+  ACCEPT_WORDS,
   BRIDGE_REFUSAL_CODES,
   BRIDGE_STOP_CODES,
+  DECLINE_WORDS,
   advertisedDecisions,
   chooseDecision,
   effectiveApprovalPolicy,
+  encodeDecision,
+  isBridgeDecisionWord,
 } from "../src/cli/codex-bridge.js";
 
 /** dist/tests/codex-bridge.test.js -> dist/src/cli/main.js */
@@ -658,6 +662,55 @@ test("chooseDecision never matches a prefix, so acceptWithAmendment is not an ac
     decision: "accept",
     decisionSource: "fallback",
   });
+});
+
+test("APRV-367: cancel and abort are never sent as a denial", () => {
+  // The decline side of the prefix rule, and the one that matters most: both
+  // advertised words mean "stop the turn", which is a different act from "no to
+  // this action", so neither is a word this client will send. It falls back.
+  const offered = { availableDecisions: ["cancel", "abort"] };
+  assert.deepEqual(chooseDecision(offered, "decline"), {
+    decision: "decline",
+    decisionSource: "fallback",
+  });
+});
+
+test("APRV-367: the encoder produces the two words and nothing else", () => {
+  // Every word this runtime names round-trips.
+  for (const word of [...ACCEPT_WORDS, ...DECLINE_WORDS]) {
+    assert.deepEqual(encodeDecision(word), { decision: word });
+    assert.equal(isBridgeDecisionWord(word), true);
+  }
+  // And every word it does not name is refused rather than encoded. Each of
+  // these is a value the TYPE already makes unconstructible, so this is the
+  // half of the rule that survives a caller the types do not reach.
+  for (const word of [
+    "acceptForSession",
+    "acceptWithExecpolicyAmendment",
+    "cancel",
+    "abort",
+    "Accept",
+    "",
+  ]) {
+    assert.equal(encodeDecision(word), null, word);
+    assert.equal(isBridgeDecisionWord(word), false, word);
+  }
+  assert.equal(isBridgeDecisionWord(undefined), false);
+  assert.equal(isBridgeDecisionWord({ decision: "accept" }), false);
+});
+
+test("APRV-367: what goes on the wire is this runtime's own spelling of the word", () => {
+  const dir = ready();
+  // The server advertises a capitalised spelling. It is offering the word, so
+  // the match holds, and what is sent is the spelling whose type is the closed
+  // vocabulary rather than the string the server happened to use.
+  const { run, replies } = bridge(dir, [
+    execRequest("cat README.md", dir, ["Accept", "Decline", "acceptForSession"]),
+  ]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const reply = replies.find((entry) => entry["kind"] === "reply");
+  assert.ok(reply !== undefined, JSON.stringify(replies));
+  assert.deepEqual(reply["result"], { decision: "accept" });
 });
 
 test("the refusal codes are a closed, distinct vocabulary", () => {
