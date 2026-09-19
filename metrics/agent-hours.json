@@ -1,0 +1,124 @@
+{
+  "generated_at": "2026-09-19T08:26:50.738Z",
+  "repo": "approval-md/approval.md",
+  "method": {
+    "active_time": "sum of gaps between consecutive transcript events, each capped at gap_seconds, attributed to the most recent assistant model",
+    "gap_seconds": 300,
+    "sources": {
+      "claude": "~/.claude/projects/<repo>*/**/*.jsonl",
+      "codex": "~/.codex/sessions + archived_sessions, filtered by session cwd",
+      "cursor": "~/.cursor/projects/<repo>/agent-transcripts (user-turn timestamps only)"
+    },
+    "caveats": [
+      "Only sessions run on the maintainer's machine are counted; cloud-only sessions never land locally, so every figure is a floor.",
+      "cursor has no per-turn model or timestamps; its hours are approximate and its model is not known.",
+      "codex-review is the codex-auto-review guardian model, counted but not an authoring agent."
+    ]
+  },
+  "agents": {
+    "claude-fable": {
+      "hours": 193.3,
+      "sessions": 56,
+      "turns": 20038,
+      "output_tokens": 17863852,
+      "input_tokens": 5676601131
+    },
+    "claude-haiku": {
+      "hours": 0.8,
+      "sessions": 293,
+      "turns": 634,
+      "output_tokens": 381425,
+      "input_tokens": 17380930
+    },
+    "claude-opus": {
+      "hours": 207.7,
+      "sessions": 442,
+      "turns": 58280,
+      "output_tokens": 18779865,
+      "input_tokens": 10760459171
+    },
+    "claude-sonnet": {
+      "hours": 6.2,
+      "sessions": 57,
+      "turns": 2886,
+      "output_tokens": 647302,
+      "input_tokens": 247415717
+    },
+    "codex-astra": {
+      "hours": 26.5,
+      "sessions": 8,
+      "turns": 126,
+      "output_tokens": 984976,
+      "input_tokens": 434996429
+    },
+    "codex-review": {
+      "hours": 3.5,
+      "sessions": 25,
+      "turns": 325,
+      "output_tokens": 271795,
+      "input_tokens": 355908998
+    },
+    "codex-sol": {
+      "hours": 37.5,
+      "sessions": 10,
+      "turns": 218,
+      "output_tokens": 1725704,
+      "input_tokens": 636160232
+    },
+    "cursor": {
+      "hours": 1.7,
+      "sessions": 9,
+      "turns": 351,
+      "output_tokens": 0,
+      "input_tokens": 0,
+      "approx": true
+    }
+  },
+  "total_hours": 477.2,
+  "weeks": {
+    "2026-W32": {
+      "claude-fable": 15.8,
+      "claude-opus": 8.7
+    },
+    "2026-W33": {
+      "claude-fable": 0.5
+    },
+    "2026-W34": {
+      "claude-fable": 43.4,
+      "claude-opus": 22.8,
+      "claude-sonnet": 0.3,
+      "cursor": 1.7
+    },
+    "2026-W35": {
+      "claude-fable": 25.1,
+      "claude-haiku": 0.1,
+      "claude-opus": 38.4,
+      "claude-sonnet": 1.1
+    },
+    "2026-W36": {
+      "claude-fable": 79,
+      "claude-haiku": 0.4,
+      "claude-opus": 108.4,
+      "claude-sonnet": 3.1,
+      "codex-astra": 4.5,
+      "codex-review": 1.6,
+      "codex-sol": 2.5,
+      "cursor": 0
+    },
+    "2026-W37": {
+      "claude-fable": 14.1,
+      "claude-haiku": 0.3,
+      "claude-opus": 8.2,
+      "claude-sonnet": 0.9,
+      "codex-astra": 22,
+      "codex-review": 2,
+      "codex-sol": 35
+    },
+    "2026-W38": {
+      "claude-fable": 15.3,
+      "claude-haiku": 0,
+      "claude-opus": 21.2,
+      "claude-sonnet": 0.8
+    }
+  }
+}

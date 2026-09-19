@@ -39,6 +39,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "lint": "oxlint src tests",
+    "agent-hours": "node scripts/agent-hours.mjs",
     "ci:local": "node scripts/ci-local.mjs",
     "check:tier": "node scripts/classify-tier.mjs",
     "check:changed": "node scripts/classify-tier.mjs --working-tree --run",
