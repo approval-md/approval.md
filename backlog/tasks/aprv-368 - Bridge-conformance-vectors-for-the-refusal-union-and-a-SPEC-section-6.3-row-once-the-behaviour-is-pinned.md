@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-18 01:30'
+updated_date: '2026-09-19 13:48'
 labels:
   - codex
   - bridge
@@ -27,3 +28,9 @@ From docs/codex-app-server-bridge.md follow-up 8 (APRV-349). After the bridge (A
 - [ ] #1 conformance/ carries vectors for every bridge refusal code and node conformance/run.mjs passes
 - [ ] #2 SPEC.md section 6.3 gains one row for the Codex app-server surface, amended through the gate
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From APRV-366 (2026-09-19): the bridge grew a SECOND closed code array, BRIDGE_STOP_CODES (bridge-thread-start-refused, bridge-approval-policy-mismatch), for the ways it stops a session rather than declines a request. They were deliberately kept OUT of the bridge_refusal_codes union, because that union is documented as every way the bridge can decline an approval request, so conformance is unchanged. Whether the stops earn a union of their own is this task question, and the answer should be written down either way: a checker that saw only the declines union would think it had covered the whole vocabulary.
+<!-- SECTION:NOTES:END -->

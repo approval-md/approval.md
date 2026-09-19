@@ -33,8 +33,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRIDGE_REFUSAL_CODES,
+  BRIDGE_STOP_CODES,
   advertisedDecisions,
   chooseDecision,
+  effectiveApprovalPolicy,
 } from "../src/cli/codex-bridge.js";
 
 /** dist/tests/codex-bridge.test.js -> dist/src/cli/main.js */
@@ -125,17 +127,34 @@ interface BridgeAnswerRow {
   detail: string;
 }
 
+interface BridgeThreadRow {
+  id: string | null;
+  cwd: string;
+  requested: { approvalPolicy: string; sandbox: string };
+  effective: { approvalPolicy: string | null };
+  confirmed: boolean;
+}
+
 interface BridgeReport {
   ok: boolean;
   reason: string;
+  /** Present only when the run STOPPED on one of the stop codes (APRV-366). */
+  code?: string;
+  thread: BridgeThreadRow;
   answers: BridgeAnswerRow[];
 }
 
-/** Run the bridge against the stub, with `script` as the questions it asks. */
+/**
+ * Run the bridge against the stub, with `script` as the questions it asks.
+ *
+ * `env` reaches the stub, which is how the approval-policy cases make a server
+ * that refuses `thread/start` or reports a policy of its own (APRV-366).
+ */
 function bridge(
   dir: string,
   script: ScriptEntry[],
   extra: string[] = [],
+  env: Record<string, string> = {},
 ): { run: Run; report: BridgeReport; replies: Record<string, unknown>[] } {
   const repliesPath = join(dir, "stub-replies.jsonl");
   const run = runCli(
@@ -160,6 +179,7 @@ function bridge(
     {
       APPROVAL_STUB_SCRIPT: JSON.stringify(script),
       APPROVAL_STUB_REPLIES: repliesPath,
+      ...env,
     },
   );
   const line = run.stdout
@@ -495,6 +515,122 @@ test("thread/start pins approvalPolicy untrusted and a read-only sandbox", () =>
   assert.equal(params["approvalPolicy"], "untrusted");
   assert.equal(params["sandbox"], "read-only");
   assert.equal(params["cwd"], dir);
+});
+
+test("APRV-366: the accepted thread params are recorded, and an unechoed pin says so", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)]);
+
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  // AC1: what went on the wire is in the report, beside the thread it made.
+  assert.equal(report.thread.id, "thread-1");
+  assert.equal(report.thread.cwd, dir);
+  assert.deepEqual(report.thread.requested, {
+    approvalPolicy: "untrusted",
+    sandbox: "read-only",
+  });
+  // The stub echoes no policy, as the observed 0.155.0 server echoes none. That
+  // is NOT a stop: a client that demanded an echo could not run against the
+  // server this verb exists for. What it is, is a claim the report keeps
+  // narrow, and `confirmed: false` is the whole of the difference.
+  assert.equal(report.thread.effective.approvalPolicy, null);
+  assert.equal(report.thread.confirmed, false);
+  assert.equal(report.answers.length, 1);
+});
+
+test("APRV-366: a server that echoes the pin back is recorded as confirmed", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_THREAD_RESULT: JSON.stringify({ approvalPolicy: "untrusted" }),
+  });
+
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(report.thread.effective.approvalPolicy, "untrusted");
+  assert.equal(report.thread.confirmed, true);
+  assert.equal(report.answers.length, 1);
+});
+
+test("APRV-366: a refused thread/start stops the bridge, answers nothing, and appends nothing", () => {
+  const dir = ready();
+  // The error the real server gave the 2026-09-18 probe for a variant it does
+  // not know, which is how a refusal of the VALUE arrives.
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_THREAD_ERROR: JSON.stringify({
+      code: -32602,
+      message:
+        "unknown variant `unless-trusted`, expected one of `untrusted`, `on-request`, `granular`, `never`",
+    }),
+  });
+
+  // AC2: a distinct code, and the server's own words carried through.
+  assert.notEqual(run.code, 0);
+  assert.equal(report.ok, false);
+  assert.equal(report.code, "bridge-thread-start-refused");
+  assert.match(report.reason, /unknown variant/u);
+  assert.equal(report.answers.length, 0);
+  assert.equal(report.thread.id, null);
+  assert.equal(report.thread.confirmed, false);
+  // Nothing was asked of the gate, because no question was ever reached.
+  assert.equal(rawLog(dir).includes("approval.requested"), false);
+});
+
+test("APRV-366: a thread reporting another effective policy stops the bridge", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_THREAD_RESULT: JSON.stringify({ approvalPolicy: "on-request" }),
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.equal(report.code, "bridge-approval-policy-mismatch");
+  assert.equal(report.thread.effective.approvalPolicy, "on-request");
+  assert.equal(report.thread.confirmed, false);
+  assert.equal(report.answers.length, 0);
+  // Why it stops rather than gating what it can see: under `on-request` an
+  // unknown part of the session never produces a question, so a run that
+  // answered everything it was asked would prove nothing about the session.
+  assert.match(report.reason, /on-request/u);
+  assert.equal(rawLog(dir).includes("approval.requested"), false);
+});
+
+test("APRV-366: the same mismatch reported on a thread notification stops it too", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_THREAD_STARTED: JSON.stringify({
+      thread: { id: "thread-1", approvalPolicy: "never" },
+    }),
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.equal(report.code, "bridge-approval-policy-mismatch");
+  assert.equal(report.thread.effective.approvalPolicy, "never");
+  assert.equal(report.answers.length, 0);
+});
+
+test("APRV-366: the stop codes are their own closed vocabulary, disjoint from the declines", () => {
+  assert.deepEqual([...BRIDGE_STOP_CODES].sort(), [
+    "bridge-approval-policy-mismatch",
+    "bridge-thread-start-refused",
+  ]);
+  assert.equal(new Set(BRIDGE_STOP_CODES).size, BRIDGE_STOP_CODES.length);
+  // Disjoint on purpose: a decline is an answer to one approval request and the
+  // turn carries on, a stop ends the session. The conformance union
+  // `bridge_refusal_codes` is documented as the first of those.
+  for (const code of BRIDGE_STOP_CODES) {
+    assert.equal((BRIDGE_REFUSAL_CODES as readonly string[]).includes(code), false, code);
+  }
+});
+
+test("APRV-366: the effective policy is read from named places, never from a stray field", () => {
+  assert.equal(effectiveApprovalPolicy({ approvalPolicy: "untrusted" }), "untrusted");
+  assert.equal(effectiveApprovalPolicy({ thread: { approvalPolicy: "never" } }), "never");
+  assert.equal(effectiveApprovalPolicy({ config: { approval_policy: "granular" } }), "granular");
+  assert.equal(effectiveApprovalPolicy({ threadId: "thread-1" }), null);
+  // A value this deep is some other structure's business. It can stop a
+  // session, so it is read from places whose meaning is known and nowhere else.
+  assert.equal(
+    effectiveApprovalPolicy({ item: { detail: { settings: { approvalPolicy: "never" } } } }),
+    null,
+  );
 });
 
 // ---------------------------------------------------------------------------
