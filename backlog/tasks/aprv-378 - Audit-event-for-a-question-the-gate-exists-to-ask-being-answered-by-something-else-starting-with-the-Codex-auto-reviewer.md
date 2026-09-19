@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-19 14:06'
-updated_date: '2026-09-19 14:06'
+updated_date: '2026-09-19 15:09'
 labels:
   - audit
   - schema
@@ -36,4 +36,5 @@ SHAPE, from APRV-355 which did exactly this on 2026-09-19: one event type, the s
 - [ ] #2 approval codex bridge appends exactly one such record when an autoApprovalReview notification arrives, through the real append path, and appends none in a session where no such notification arrives; tests drive the real CLI against the stub server
 - [ ] #3 No enforcement path reads the record (a test or a module-graph assertion pins that), it is visible in approval log tail and approval log export, and docs/cli-reference.md describes it where the other audit records are described
 - [ ] #4 Conformance vectors cover the valid record and at least two invalid shapes; build, typecheck, lint, the schema, bridge and log suites pass, and the SPEC amendment is called out in the PR
+- [ ] #5 approval doctor gains a codex-auto-reviewer row that reads this record and reports pass, fail or skip with a fix (moved here from APRV-364 AC3 on the orchestrator ruling of 2026-09-19: the row's only durable input is the record this task creates, so a row built in 364 would always skip and would be rewritten the moment this landed)
 <!-- AC:END -->
