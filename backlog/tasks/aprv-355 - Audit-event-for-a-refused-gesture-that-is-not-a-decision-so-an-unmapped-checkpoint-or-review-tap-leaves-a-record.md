@@ -3,11 +3,11 @@ id: APRV-355
 title: >-
   Audit event for a refused gesture that is not a decision, so an unmapped
   checkpoint or review tap leaves a record
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-17 20:09'
-updated_date: '2026-09-19 10:56'
+updated_date: '2026-09-19 11:00'
 labels:
   - audit
   - schema
@@ -27,8 +27,8 @@ Found while landing APRV-324 (PR #427, 2026-09-17). When the policy maps Telegra
 <!-- AC:BEGIN -->
 - [x] #1 A new audit event type for a refused non-decision gesture is defined in schema/event.schema.json and SPEC 8, validated at the write boundary, with the gesture kind and refusal code closed enums, payload.sender optional, and actor required only when no sender is present
 - [x] #2 An unmapped, ambiguous or unattested-policy checkpoint tap and review tap each append exactly one such record and nothing else; a no-mapping policy appends none; tests run through the real append path and the mock Telegram server
-- [ ] #3 No enforcement path reads the record (a test or a module-graph assertion pins that), approval audit or approval status can list them, and docs/cli-reference.md describes the record
-- [x] #4 Conformance vectors cover the new event; build, typecheck, lint and the channel and schema suites pass; the SPEC amendment is called out
+- [x] #3 Conformance vectors cover the new event; build, typecheck, lint and the channel and schema suites pass; the SPEC amendment is called out
+- [x] #4 No enforcement path reads the record (a test or a module-graph assertion pins that), the record is visible where every record is (approval log tail, approval log export), and docs/cli-reference.md describes it. REWORDED 2026-09-19 on the orchestrator ruling: the original said approval audit or approval status can list them, which is a new surface neither verb offers for audit.decision_refused either; listing both refusal families on approval status is filed as APRV-376 so that neither is listed alone.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -71,3 +71,9 @@ SECTION 11 INVARIANTS TOUCHED: invariant 6 (refusals machine-readable and distin
 
 AC3 IS NOT TICKED, and the reason is scope rather than difficulty. Two of its three clauses are done: a module-graph test reads ten enforcement modules and asserts none of them names the type or imports the writer, and docs/cli-reference.md describes the record. The third, "approval audit or approval status can list them", is a NEW SURFACE: neither verb lists audit.decision_refused today either, so adding a listing for this type alone would be inconsistent with the record it is modelled on. approval log tail and approval log export show it now, like every other record. Two options for whoever rules: (a) add a refused-gesture count to approval status informational fields and list both refusal families there, which is the consistent version and is its own small task; (b) leave listing to log tail and reword the criterion. This lane did not choose.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+audit.gesture_refused: a refused checkpoint signature or review from an unmapped, ambiguous or unattested-policy sender now leaves exactly one audit-tier record where it left none. Schema change (closed event enum to thirty-three types, two allOf branches, five fixtures, conformance 374 to 379 with 3 new negative controls) and a one-bullet SPEC 8 amendment, both in one commit. New src/core/gesture-refusal.ts, wired into both Telegram gesture handlers; docs/cli-reference.md describes the record. Verified: tests/gesture-refusal.test.ts covers every gesture kind by every code through the real append path, the three cases that append nothing, the two vocabularies asserted equal to the schema enums, a module-graph assertion over ten enforcement modules, and a derivation taken across the record that does not move; the checkpoint and Telegram suites drive the real mock Bot API and assert the record shape where they used to assert a count, and both no-mapping cases assert that nothing is recorded. build, typecheck, lint clean; conformance 379/379; npm test 4681 / 4658 pass / 1 skip with the 22 pre-existing Node v26 SMTP failures untouched. AC4 was reworded on the orchestrator ruling of 2026-09-19; the status listing is APRV-376.
+<!-- SECTION:FINAL_SUMMARY:END -->
