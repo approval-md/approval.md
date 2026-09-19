@@ -1,0 +1,1 @@
+{"command":"S=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-emilia-protocol-comparison-af4ffb/e53d96c7-c42d-4ec8-a52f-708a14964f8e/scratchpad/aprv386 && rm -rf \"$S/guest\" && node examples/demo-provision.mjs --instance guest --path \"$S/guest\"; echo \"EXIT=$?\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a761c229b96b64adc"}

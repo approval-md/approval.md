@@ -1,0 +1,1 @@
+{"command":"gh pr merge 489 --merge 2>&1 | tail -3; gh pr view 489 --json mergeStateStatus,autoMergeRequest --jq '\"\\(.mergeStateStatus) auto=\\(.autoMergeRequest != null)\"'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

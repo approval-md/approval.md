@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"why(\\\"setup-sampling\\\")\\|\\\"setup-sampling\\\"\" src/cli/why.ts src/cli/*.ts 2>/dev/null | head -5 && /usr/bin/grep -rn \"setup-sampling\" src/ --exclude=*.js | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}

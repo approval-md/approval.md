@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"CANONICAL\" src/cli/init.ts src/core/*.ts 2>/dev/null | head -10; sed -n '1,60p' src/cli/init.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a761c229b96b64adc"}

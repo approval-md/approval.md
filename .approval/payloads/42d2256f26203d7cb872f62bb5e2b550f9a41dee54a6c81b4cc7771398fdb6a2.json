@@ -1,0 +1,1 @@
+{"command":"wc -l examples/web-agent-demo/*.md examples/grok-bot-connector/*.md examples/email-demo.md examples/telegram-demo.md && ls examples/web-agent-demo examples/grok-bot-connector","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a761c229b96b64adc"}

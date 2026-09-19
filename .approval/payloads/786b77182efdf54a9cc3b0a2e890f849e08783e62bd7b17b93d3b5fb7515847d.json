@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"SETUP_SAMPLING_HELP\" src/cli/*.ts | head -5 && /usr/bin/grep -n \"SETUP_SAMPLING_HELP\" -A 20 src/cli/help.ts | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n 'registeredClass' src/core/*.ts | head -5 && sed -n '/export function registeredClass/,/^}/p' src/core/state.ts | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a405df4ede8ad2657"}

@@ -1,0 +1,1 @@
+{"command":"S=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-emilia-protocol-comparison-af4ffb/e53d96c7-c42d-4ec8-a52f-708a14964f8e/scratchpad/lane478 && npm run conformance > $S/conformance.log 2>&1; echo \"conformance-exit=$?\"; tail -20 $S/conformance.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ab42d36792696ffe3"}

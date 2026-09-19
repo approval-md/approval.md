@@ -1,0 +1,1 @@
+{"command":"ls examples/backlog-md-project/ examples/*.md 2>&1 | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a761c229b96b64adc"}

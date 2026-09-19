@@ -1,0 +1,1 @@
+{"command":"sed -n '860,900p' schema/event.schema.json && echo \"=== policy schema senders ===\" && /usr/bin/grep -rn \"senders\" schema/*.json src/core/policy-load.ts | head -25","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}
