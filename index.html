@@ -547,12 +547,12 @@ leaves the machine is declared below.
 version: "0.1"
 defaults: { autonomy: manual, channel: telegram }
 approvers:
-  carter: { channels: [telegram, cli] }
+  alice: { channels: [telegram, cli] }
 classes:
   read.*:                    { autonomy: autonomous }
   files.write.workspace:     { autonomy: autonomous }
   vcs.push.main:             { autonomy: supervised-live, live_rate: 0.1 }
-  communicate.email.external: { autonomy: manual, approvers: [carter] }
+  communicate.email.external: { autonomy: manual, approvers: [alice] }
   financial.spend:           { autonomy: manual, limits: { per_action_usd: 25 } }
   account.credential:        { autonomy: human-only }
 ```
@@ -636,7 +636,7 @@ approval up</code></pre>
             </div>
           </div>
           <div class="logs" id="mail-logs">
-            <div id="log-1">{"event":"<span class="g">approval.granted</span>","actor":"human:carter","action_key":"aprv-842:chaser"}</div>
+            <div id="log-1">{"event":"<span class="g">approval.granted</span>","actor":"human:alice","action_key":"aprv-842:chaser"}</div>
             <div id="log-2">{"event":"execution.completed","adapter":"adapter-email"}</div>
           </div>
         </div>
@@ -1040,38 +1040,32 @@ approval up</code></pre>
 
     if (still) { reveal(text.length); return; }
 
+    /* The file is typed once, the first time the terminal is on screen, and
+       then stays put so the example can be read (APRV-388). Scrolling away
+       mid-pass pauses the typing; coming back resumes from the same character. */
     var MS_PER_CHAR = 12;
-    var startedAt = 0, raf = 0, running = false;
+    var startedAt = 0, raf = 0, running = false, typed = 0;
     function frame(now) {
-      var n = Math.floor((now - startedAt) / MS_PER_CHAR);
-      reveal(Math.min(n, text.length));
-      if (n < text.length && running) { raf = window.requestAnimationFrame(frame); }
-      else { raf = 0; }
+      typed = Math.min(Math.floor((now - startedAt) / MS_PER_CHAR), text.length);
+      reveal(typed);
+      if (typed < text.length && running) { raf = window.requestAnimationFrame(frame); }
+      else { raf = 0; running = false; }
     }
-    function pass() {
-      reveal(0);
+    function resume() {
+      if (typed >= text.length || running) { return; }
       running = true;
-      startedAt = window.performance ? performance.now() : Date.now();
+      startedAt = (window.performance ? performance.now() : Date.now()) - typed * MS_PER_CHAR;
       raf = window.requestAnimationFrame(frame);
     }
-    function stop() {
+    function pause() {
       running = false;
       if (raf) { window.cancelAnimationFrame(raf); raf = 0; }
     }
 
-    var timer = 0, onScreen = false;
-    function cycle() {
-      pass();
-      timer = window.setTimeout(function () {
-        if (!onScreen) { return; }
-        cycle();
-      }, text.length * MS_PER_CHAR + 2400);
-    }
     if (!window.IntersectionObserver) { reveal(text.length); return; }
     new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
-        if (e.isIntersecting && !onScreen) { onScreen = true; cycle(); }
-        else if (!e.isIntersecting && onScreen) { onScreen = false; stop(); window.clearTimeout(timer); }
+        if (e.isIntersecting) { resume(); } else { pause(); }
       });
     }, { threshold: 0.15 }).observe(host);
   })();
