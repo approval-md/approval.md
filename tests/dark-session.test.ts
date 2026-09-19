@@ -41,6 +41,7 @@ import {
   DARK_VERDICT_CODES,
   evaluateDarkSessions,
   observationKey,
+  observeGitActivity,
   renderDarkSessionReport,
   SESSION_EVENTS,
   taskIdFromBranch,
@@ -1171,4 +1172,246 @@ test("APRV-369: an unevidenced edit that arrived by merge names its commit and i
     ci.stdout,
   );
   assert.equal(failed[0]?.findings[0]?.path, "SPEC.md");
+});
+
+// ---------------------------------------------------------------------------
+// APRV-374: what a merge commit is judged on
+// ---------------------------------------------------------------------------
+
+/** SPEC.md as this fixture seeds it: long enough for two hunks to stay apart. */
+const SPEC_SEED = [
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+  "ten",
+  "eleven",
+];
+
+/**
+ * A real repository whose main carries all three shapes of merge, in order.
+ *
+ * 1. CLEAN: a branch edits SPEC.md, main stands still, `--no-ff` merges it. The
+ *    result is the branch's bytes verbatim.
+ * 2. AUTO: both sides edit SPEC.md, at opposite ends, and git merges them with
+ *    no human in the room. The result differs from BOTH parents as a blob,
+ *    which is why `--name-only` under `-c` or `--cc` lists it and why neither
+ *    can be the primitive, and every hunk of it came from one side.
+ * 3. EVIL: both sides edit the SAME line, git conflicts, and the resolution is
+ *    a third value neither side wrote. Those bytes are the merge's own work.
+ *
+ * Every branch-side and main-side edit is granted through the real gate, so the
+ * only thing in the repository that can lack evidence is the resolution, which
+ * `resolutionEvidence` decides. The log is committed only at the end: it would
+ * otherwise conflict inside the same merge, and a hand-resolved chain is not a
+ * chain.
+ */
+function repoWithMergeShapes(options: { resolutionEvidence: "grant" | "none" }): {
+  root: string;
+  cleanMerge: string;
+  autoMerge: string;
+  evilMerge: string;
+} {
+  counter += 1;
+  const root = realpathSync(mkdtempSync(join(scratch, `merge-shapes-${counter}-`)));
+  const specPath = join(root, "SPEC.md");
+  const writeSpec = (lines: readonly string[]): void =>
+    writeFileSync(specPath, `${lines.join("\n")}\n`, "utf8");
+  const readSpec = (): string[] => readFileSync(specPath, "utf8").replace(/\n$/u, "").split("\n");
+
+  writeFileSync(join(root, "APPROVAL.md"), LOADABLE_POLICY, "utf8");
+  writeSpec(SPEC_SEED);
+  assert.equal(git(["init", "--initial-branch=main"], root).code, 0);
+  assert.equal(git(["add", "-A"], root).code, 0);
+  const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  assert.equal(git(["commit", "--no-verify", "-q", "-m", "seed"], root, longAgo).code, 0);
+  assert.equal(runCli(["policy", "attest", "--as", HUMAN], root).code, 0);
+
+  const gate: World = {
+    unit: {
+      dir: root,
+      logPath: join(root, ".approval", "log", "events.jsonl"),
+      policyPath: join(root, "APPROVAL.md"),
+      options: { policy: { file: join(root, "APPROVAL.md") } },
+    },
+    store: new Map(),
+  };
+  // The grant first and the commit after it, as a live session does it: the
+  // guard measures ordering against the commit's own date, and a grant that
+  // arrives after the bytes were committed is post-hoc and is refused.
+  const grantLine = (before: string, after: string, key: string): void => {
+    grantOfClass(
+      gate,
+      key,
+      "policy.edit",
+      { tool: "Edit", rule: "protected path", file: specPath, before, after },
+      null,
+    );
+  };
+  /** Edit one line of SPEC.md with a grant behind it, and commit that alone. */
+  const editAndCommit = (index: number, next: string, key: string): string => {
+    const lines = readSpec();
+    grantLine(lines[index] as string, next, key);
+    lines[index] = next;
+    writeSpec(lines);
+    // SPEC.md alone: the log stays out of the tree until the end, so the merges
+    // below conflict over the protected file and over nothing else.
+    assert.equal(git(["add", "SPEC.md"], root).code, 0);
+    assert.equal(git(["commit", "--no-verify", "-q", "-m", key], root).code, 0);
+    return git(["rev-parse", "HEAD"], root).stdout.trim();
+  };
+  const onBranch = (branch: string): void => {
+    assert.equal(git(["checkout", "-q", "-b", branch, "main"], root).code, 0);
+  };
+  const onMain = (): void => {
+    assert.equal(git(["checkout", "-q", "main"], root).code, 0);
+  };
+
+  onBranch("pr-clean");
+  editAndCommit(0, "one, as pr-clean wrote it", "clean-branch-edit");
+  onMain();
+  assert.equal(git(["merge", "--no-ff", "-q", "-m", "merge pr-clean", "pr-clean"], root).code, 0);
+  const cleanMerge = git(["rev-parse", "HEAD"], root).stdout.trim();
+
+  onBranch("pr-auto");
+  editAndCommit(10, "eleven, as pr-auto wrote it", "auto-branch-edit");
+  onMain();
+  editAndCommit(0, "one, as main wrote it", "auto-main-edit");
+  assert.equal(git(["merge", "--no-ff", "-q", "-m", "merge pr-auto", "pr-auto"], root).code, 0);
+  const autoMerge = git(["rev-parse", "HEAD"], root).stdout.trim();
+
+  onBranch("pr-evil");
+  editAndCommit(5, "six, as pr-evil wrote it", "evil-branch-edit");
+  onMain();
+  editAndCommit(5, "six, as main wrote it", "evil-main-edit");
+  const firstParent = readSpec();
+  const conflicted = git(["merge", "--no-ff", "-q", "-m", "merge pr-evil", "pr-evil"], root);
+  assert.notEqual(conflicted.code, 0, "the fixture's evil merge did not conflict");
+  // The hand edit made while resolving: a value neither parent carries. Written
+  // from the first parent's bytes rather than from the conflicted working copy,
+  // so no marker survives into the commit.
+  const resolved = [...firstParent];
+  resolved[5] = "six, as nobody wrote it";
+  if (options.resolutionEvidence === "grant") {
+    grantLine(firstParent[5] as string, resolved[5] as string, "evil-resolution");
+  }
+  writeSpec(resolved);
+  assert.equal(git(["add", "SPEC.md"], root).code, 0);
+  assert.equal(git(["commit", "--no-verify", "-q", "-m", "merge pr-evil"], root).code, 0);
+  const evilMerge = git(["rev-parse", "HEAD"], root).stdout.trim();
+
+  return { root, cleanMerge, autoMerge, evilMerge };
+}
+
+/** The window the sweep would judge, wide enough for a fixture's own commits. */
+function sweepWindow(): { from: string; to: string } {
+  return {
+    from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    to: new Date(Date.now() + 60 * 1000).toISOString(),
+  };
+}
+
+test("APRV-374: the observer lists a merge's own resolution, and nothing its parents did", () => {
+  const { root, cleanMerge, autoMerge, evilMerge } = repoWithMergeShapes({
+    resolutionEvidence: "grant",
+  });
+  const window = sweepWindow();
+  const activity = observeGitActivity(root, window.from, window.to, ["SPEC.md"]);
+  assert.equal(activity.unavailable, null);
+  const seen = new Map(
+    (activity.checkouts[0]?.commits ?? []).map((observed) => [observed.sha, observed]),
+  );
+
+  // AC1. The evil merge is listed WITH the path it resolved.
+  assert.deepEqual(seen.get(evilMerge)?.changedPaths, ["SPEC.md"]);
+  assert.equal(seen.get(evilMerge)?.parents?.length, 2);
+  // A clean merge and an ordinary auto-merge invented nothing, so neither is
+  // listed with any path at all.
+  assert.deepEqual(seen.get(cleanMerge)?.changedPaths, []);
+  assert.deepEqual(seen.get(autoMerge)?.changedPaths, []);
+
+  // WHY the primitive is the dense PATCH and not `--cc --name-only`, measured
+  // here rather than asserted from memory: git lists SPEC.md under both
+  // `--name-only` forms for the AUTO-merge, whose every hunk came from one side
+  // verbatim. Taking that list would replay, as the merge's own change, a file
+  // two lanes happened to edit concurrently, which is the false alarm APRV-369
+  // and APRV-375 removed walked back in through the door.
+  for (const form of [["-c"], ["--cc"]]) {
+    const listed = git(["log", "-1", ...form, "--name-only", "--pretty=format:", autoMerge], root);
+    assert.match(listed.stdout, /SPEC\.md/u, `${form.join(" ")} did not list the auto-merge`);
+  }
+  const densePatch = git(["log", "-1", "--cc", "--pretty=format:", autoMerge, "--", "SPEC.md"], root);
+  assert.equal(densePatch.stdout.trim(), "", "the auto-merge's dense combined patch was not empty");
+  const evilPatch = git(["log", "-1", "--cc", "--pretty=format:", evilMerge, "--", "SPEC.md"], root);
+  assert.match(evilPatch.stdout, /six, as nobody wrote it/u);
+});
+
+test("APRV-374: an unevidenced evil merge is dark, named as the merge resolution it is", () => {
+  const { root, evilMerge } = repoWithMergeShapes({ resolutionEvidence: "none" });
+
+  const run = runCli(["doctor", "--json"], root);
+  const parsed = JSON.parse(run.stdout) as {
+    checks: { check: string; status: string; detail: string }[];
+  };
+  const row = parsed.checks.find((check) => check.check === "dark-sessions");
+  assert.equal(row?.status, "fail", row?.detail ?? "");
+  // AC2: the merge's own sha, and the row says what it was judged on.
+  assert.match(row?.detail ?? "", new RegExp(evilMerge.slice(0, 12), "u"));
+  assert.match(row?.detail ?? "", /merge resolution/u);
+  assert.match(row?.detail ?? "", /against the first parent/u);
+  assert.match(row?.detail ?? "", /SPEC\.md/u);
+
+  // The same commit, through the REAL CI guard, over the range that merge is:
+  // the branch's own commit passes on its grant and the resolution fails, so
+  // the two sides name one unit and reach one verdict. The range ends at the
+  // log commit rather than at the merge, because the guard reads the log out of
+  // the tree at its range head and this fixture keeps the log untracked while
+  // it works (a log committed on both sides of a conflicting merge would be a
+  // chain resolved by hand, which is no chain at all).
+  commitTheLog(root);
+  const ci = runCiGuard(root, `${evilMerge}^1`, "HEAD");
+  assert.equal(ci.code, 1, ci.stdout);
+  const failed = ci.commits.filter((commit) => !commit.ok);
+  assert.deepEqual(failed.map((commit) => commit.sha), [evilMerge], ci.stdout);
+  assert.equal(failed[0]?.merge, true);
+});
+
+test("APRV-374: a granted resolution clears, and the merges that invented nothing are never judged", () => {
+  const { root, cleanMerge, autoMerge, evilMerge } = repoWithMergeShapes({
+    resolutionEvidence: "grant",
+  });
+
+  const run = runCli(["doctor", "--json"], root);
+  const parsed = JSON.parse(run.stdout) as {
+    checks: { check: string; status: string; detail: string }[];
+  };
+  const row = parsed.checks.find((check) => check.check === "dark-sessions");
+  assert.notEqual(
+    row?.status,
+    "fail",
+    `dark-sessions failed an evidenced history: ${row?.detail ?? ""}`,
+  );
+
+  // The CI guard agrees about every one of the three merges: the resolution is
+  // judged and passes, and the other two are skipped as the clean merges they
+  // are rather than being judged for what their parents did.
+  commitTheLog(root);
+  const ci = runCiGuard(root, `${evilMerge}^1`, "HEAD");
+  assert.equal(ci.code, 0, ci.stdout);
+  const resolution = ci.commits.find((commit) => commit.sha === evilMerge);
+  assert.equal(resolution?.judged, true, ci.stdout);
+  assert.equal(resolution?.ok, true, ci.stdout);
+
+  const seed = git(["rev-list", "--max-parents=0", "HEAD"], root).stdout.trim();
+  const whole = runCiGuard(root, seed, "HEAD");
+  for (const sha of [cleanMerge, autoMerge]) {
+    const skipped = whole.commits.find((commit) => commit.sha === sha);
+    assert.equal(skipped?.merge, true, whole.stdout);
+    assert.equal(skipped?.judged, false, `${sha.slice(0, 12)} was judged for what its parents did`);
+  }
 });
