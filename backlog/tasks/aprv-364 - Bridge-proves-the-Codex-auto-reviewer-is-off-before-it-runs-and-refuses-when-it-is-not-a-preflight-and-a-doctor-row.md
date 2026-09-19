@@ -7,7 +7,7 @@ status: To Do
 assignee:
   - '@claude'
 created_date: '2026-09-18 01:30'
-updated_date: '2026-09-19 15:10'
+updated_date: '2026-09-19 15:14'
 labels:
   - codex
   - bridge
@@ -45,6 +45,11 @@ From docs/codex-app-server-bridge.md follow-up 4 (APRV-349). A server-side auto-
 4. STUB MODES for the three probe outcomes, beside the existing THREAD_ERROR, THREAD_RESULT and THREAD_STARTED knobs.
 
 5. Tests, docs, and the honesty line: the report says confirmed by observation of one probe command, never that the auto-reviewer is off.
+
+6. (Ruled 2026-09-19, supersedes the scoping in step 0.) The probe runs ALWAYS, no opt-out flag, one extra turn per bridge start.
+7. THREE PROBE OUTCOMES, told apart by the commandExecution item notifications: request arrived = observed, continue; executed with no request = stop bridge-approval-policy-mismatch; no command ran = stop bridge-preflight-void, reported as void with the turn error and notifications verbatim, never as a pass and never silently retried.
+8. The probe prompt names exactly one harmless command and forbids anything else, so void is rare; the doc says an operator reruns a void stop.
+9. Two new entries in BRIDGE_STOP_CODES (bridge-auto-reviewer-active, bridge-preflight-void), neither in the declines union, so conformance refusal-unions is unchanged by this task.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -98,4 +103,16 @@ THE OPTIONS.
 LANE 5 DID NOT CHOOSE, and did not write code for the preflight. What exists on the branch so far is the APRV-380 filing and these notes. The plan above stands under all three; only the VOID arm differs.
 
 A SECOND, SMALLER QUESTION in the same area: the ruling says run the probe WHEN THE SERVER REPORTS NO EFFECTIVE POLICY, but the auto-reviewer fact AC1 wants is independent of the policy echo and needs the probe even when the server did echo. Lane 5 planned to run the probe ALWAYS for that reason, which costs one extra turn on every bridge start. Confirm or narrow.
+
+RULED 2026-09-19 by the orchestrator, closing both questions above. Lane 5 recorded these and did NOT build them (out of runway); 364 and 378 hand to the next lane with these rulings binding.
+
+RULING 1, THE THREE OUTCOMES. The bridge reads the commandExecution item notifications to tell them apart, which is what makes the third outcome distinguishable at all.
+ - An approval request arrived for the probe: confirmed by observation of one probe command, and the session CONTINUES to the real turn.
+ - The probe EXECUTED and no request arrived: stop under bridge-approval-policy-mismatch.
+ - NO command ran at all: stop under a distinct new code, bridge-preflight-void, which goes into BRIDGE_STOP_CODES and NOT into the bridge_refusal_codes declines union (a stop ends the session; a decline answers one request). It is reported as VOID, carrying the turn error and its notifications VERBATIM, never as a pass, and it is never silently retried. That is APRV-359 rule applied here: a probe that reports a verdict it did not establish is worse than no probe.
+ - The probe PROMPT is to be made as deterministic as the API allows: an instruction to run exactly one named harmless command and nothing else, so void is rare. The doc says a void stop is rerun by the operator.
+
+RULING 2, WHEN. The probe runs ALWAYS, one extra turn per bridge start, with NO opt-out flag, because the auto-reviewer fact AC1 wants needs the probe whatever the server echoed about the approval policy. This supersedes the narrower scoping carried in from APRV-366 (which said to probe only when the server reports no effective policy): that scoping closes the policy question alone, and this task needs the reviewer question closed too.
+
+SO THE STOP CODES THIS TASK ADDS ARE TWO: bridge-auto-reviewer-active (an item/autoApprovalReview notification in either turn, covering AC1 and AC2) and bridge-preflight-void. Both into BRIDGE_STOP_CODES, neither into the declines union, so conformance refusal-unions is unchanged by this task. The audit RECORD for the first remains APRV-378.
 <!-- SECTION:NOTES:END -->
