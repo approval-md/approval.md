@@ -94,21 +94,37 @@
  * the reply becomes a decline, since the only safe substitute for a word you
  * cannot name is no.
  *
- * A `item/fileChange/requestApproval` on the item-based API carries no content:
- * `threadId`, `turnId`, `itemId`, `startedAtMs`, `reason` and `grantRoot`, and
- * the bytes arrived on an earlier frame. Approving an identifier is not
- * approving a change, so this verb declines it with its own code and says so.
- * The correlation that would let it be approved is APRV-379, and it waits on a
- * fact nobody has recorded: the shape of the frame the content arrives on.
+ * ## The two file-change APIs, and the correlation (APRV-363, APRV-379)
  *
- * The LEGACY `applyPatchApproval` is different, and since APRV-363 it is
- * decided rather than declined: its `fileChanges` map rides on the request
- * itself, so there is nothing to correlate and nothing to re-render. It goes
- * through the same `decideHarnessCall` the exec half uses, classified by the
- * paths it names and bound with the change as it arrived plus its digest. A
- * request carrying a map and no directory is refused exactly as an exec request
- * with no `cwd` is: a relative path resolves somewhere, and a directory this
- * client guessed would be a guess the grant is bound to.
+ * The LEGACY `applyPatchApproval` carries its `fileChanges` map on the request
+ * itself, so there is nothing to correlate and nothing to re-render. Since
+ * APRV-363 it goes through the same `decideHarnessCall` the exec half uses,
+ * classified by the paths it names and bound with the change as it arrived plus
+ * its digest. A request carrying a map and no directory is refused exactly as
+ * an exec request with no `cwd` is: a relative path resolves somewhere, and a
+ * directory this client guessed would be a guess the grant is bound to.
+ *
+ * An `item/fileChange/requestApproval` on the ITEM-BASED API carries no
+ * content: `threadId`, `turnId`, `itemId`, `startedAtMs`, `reason` and
+ * `grantRoot`, and nothing else. The bytes arrived EARLIER, on the
+ * `item/started` notification for that item, whose `item.changes` is an array
+ * of `{path, kind, diff}` (observed on 0.155.0; the frame is in
+ * `docs/codex-app-server-bridge.md`, question 1). Since APRV-379 this verb
+ * keeps every item the thread announces, by item id, and answers the request
+ * against the frame that id names. What reaches the classifier is the change
+ * set the server sent, in the shape it sent it: the paths take their classes
+ * and the payload binds the changes verbatim with a digest over them as
+ * received. Nothing is re-rendered into an `apply_patch` envelope and nothing
+ * parses `diff`.
+ *
+ * The correlation is where an approval could authorize bytes nobody classified,
+ * so every way the two frames could fail to be about one change is a refusal:
+ * an id no `item/started` announced, an id naming an item that is not a
+ * `fileChange`, a frame with no readable change set, and a request naming a
+ * thread or a turn the frame does not, are all `bridge-file-change-unbound`.
+ * An item whose `item/completed` arrived BEFORE the question is
+ * `bridge-file-change-already-completed`: a change that finished before it was
+ * asked about is not a change this client is in a position to decide.
  *
  * A server request this verb does not recognise is declined too, on the same
  * rule: a question nobody classified is not a question to answer yes to.
@@ -306,6 +322,26 @@ export const BRIDGE_REFUSAL_CODES = [
   "bridge-file-change-unbound",
   /** A server request this verb has no reading for. */
   "bridge-unknown-request",
+  /**
+   * A file-change request whose item had already COMPLETED when it arrived
+   * (APRV-379).
+   *
+   * Distinct from `bridge-file-change-unbound`, which says the content could
+   * not be produced. Here the content was produced: the `item/started` frame is
+   * held, the item id correlates, and the change set is right there. What is
+   * wrong is the ORDER. `item/completed` for that item arrived before the
+   * question about it did, and a change that finished before it was asked about
+   * is not a change this client is in a position to decide. Answering yes would
+   * put a grant in the log for an effect that had already happened, and
+   * answering the ordinary no would tell an operator to go and stop something
+   * that is over.
+   *
+   * The repairs differ, which is why the codes do: an unbound change is a
+   * correlation that did not happen and points at this client or at a protocol
+   * that changed shape, and this one points at a session whose approval policy
+   * is not the one it was pinned to, or at a server that reordered its frames.
+   */
+  "bridge-file-change-already-completed",
   /**
    * An exec request whose command string names no argv this client can bind
    * (APRV-362).
@@ -1010,18 +1046,179 @@ export function decideExecRequest(
   };
 }
 
-/** The answer a file-change request with no content gets, and why. */
-export function declineFileChange(params: unknown): BridgeAnswer {
-  const chosen = chooseDecision(params, "decline");
-  return {
-    method: "item/fileChange/requestApproval",
-    id: null,
-    outcome: "decline",
-    ...chosen,
-    code: "bridge-file-change-unbound",
-    detail:
-      "the item-based file-change request carries an itemId and no content, and the bytes arrived on an earlier frame; approving an identifier is not approving a change, so it is declined. Correlating the two, once the notification's shape is recorded, is APRV-379",
-  };
+/**
+ * One item this thread's server has told this client about (APRV-379).
+ *
+ * Every `item/started` is recorded, whatever its type, and not only the
+ * file-change ones. That is what lets "an id this client never saw" be told
+ * from "an id that names a `userMessage`": the first is a client that missed a
+ * frame and the second is a server request that points at the wrong thing, and
+ * an operator reading one refusal should not have to guess which happened.
+ */
+export interface RecordedItem {
+  id: string;
+  /** `item.type` as the server spelled it, or `null` where it named none. */
+  type: string | null;
+  /** The change set VERBATIM, for a `fileChange` item that carried one. */
+  changes: readonly unknown[] | null;
+  threadId: string | null;
+  turnId: string | null;
+  /** Has `item/completed` for this item already arrived? */
+  completed: boolean;
+}
+
+/**
+ * Every item this thread has announced, by item id.
+ *
+ * Kept for the LIFE OF THE THREAD rather than cleared at each turn's end,
+ * because the frame that carries the content and the request that asks about it
+ * are two frames and nothing in the protocol promises they share a turn. It
+ * grows with the number of items a session produces, which is the session's own
+ * size; a bridge that dropped entries to stay small would be a bridge that
+ * refuses a change it was told about, and the refusal would look exactly like a
+ * protocol it had not caught up with.
+ */
+export type ItemIndex = Map<string, RecordedItem>;
+
+/**
+ * The change set an `item/started` frame carries for a `fileChange` item, or
+ * `null` (APRV-379).
+ *
+ * The observed shape is an ARRAY of `{path, kind, diff}` under `item.changes`
+ * (`docs/codex-app-server-bridge.md`, question 1). It is read as an array and
+ * carried whole; nothing here looks inside an entry, because the classifier
+ * reads the paths and the payload binds the bytes, and a second reader of the
+ * same material in this module would be a second account of one change.
+ */
+export function itemChanges(item: Record<string, unknown>): readonly unknown[] | null {
+  const value = item["changes"];
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value as readonly unknown[];
+}
+
+/**
+ * Record what an `item/started` or `item/completed` notification says
+ * (APRV-379).
+ *
+ * `item/started` writes the entry, `item/completed` marks it completed and
+ * leaves the recorded content ALONE. Refreshing the change set from the
+ * completion frame would let a server hand this client one change set, be asked
+ * about it, and have a different one in the record afterwards; the frame this
+ * client decides against is the one it was holding when the question arrived.
+ */
+export function recordItemFrame(index: ItemIndex, method: string, params: unknown): void {
+  if (method !== "item/started" && method !== "item/completed") return;
+  if (params === null || typeof params !== "object") return;
+  const holder = (params as Record<string, unknown>)["item"];
+  if (holder === null || typeof holder !== "object" || Array.isArray(holder)) return;
+  const item = holder as Record<string, unknown>;
+  const id = typeof item["id"] === "string" ? (item["id"] as string) : null;
+  if (id === null || id.length === 0) return;
+  const existing = index.get(id);
+  if (method === "item/completed") {
+    if (existing !== undefined) index.set(id, { ...existing, completed: true });
+    return;
+  }
+  if (existing !== undefined) return;
+  index.set(id, {
+    id,
+    type: typeof item["type"] === "string" ? (item["type"] as string) : null,
+    changes: itemChanges(item),
+    threadId: stringField(params, "threadId"),
+    turnId: turnIdOf(params),
+    completed: false,
+  });
+}
+
+/** What the correlation produced, or why it produced nothing. */
+export type Correlation =
+  | { ok: true; item: RecordedItem; changes: readonly unknown[] }
+  | { ok: false; code: BridgeRefusalCode; detail: string };
+
+/**
+ * Find the `item/started` frame an item-based file-change request refers to
+ * (APRV-379).
+ *
+ * THE WHOLE RISK OF THIS TASK LIVES HERE. The request names an identifier, the
+ * bytes arrived on another frame, and a correlation that matched the wrong item
+ * would let a grant authorize bytes nobody classified. So every way the two
+ * frames could fail to be about the same change is a refusal, and none of them
+ * is resolved in favour of going ahead:
+ *
+ * - no `item/started` for that id was ever seen: `bridge-file-change-unbound`,
+ *   which is the refusal this verb has answered since APRV-361;
+ * - the id names an item that is not a `fileChange`: same code, its own detail.
+ *   An id that points at a `userMessage` is a request this client has no
+ *   content for, however much content that item has;
+ * - the item carried no readable change set: same code. A `fileChange` frame
+ *   with nothing in `changes` is an identifier again;
+ * - the request names a THREAD or a TURN the frame does not: same code.
+ *   Item ids are server-minted and observed unique, so this should never fire,
+ *   and that is exactly why it is checked rather than assumed. Two frames that
+ *   disagree about which conversation they belong to are not established to be
+ *   about one change, and "should never happen" is the reasoning that lets a
+ *   wrong match through. A frame or a request that names NEITHER field is not
+ *   held to it: absence is not disagreement, and the observed frames carry
+ *   both;
+ * - the item already COMPLETED: `bridge-file-change-already-completed`, for the
+ *   reasons that code carries.
+ */
+export function correlateFileChange(index: ItemIndex, params: unknown): Correlation {
+  const itemId = stringField(params, "itemId") ?? stringField(params, "callId");
+  if (itemId === null) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail:
+        "the file-change request names no item this client could look up, and the bytes arrived on an earlier frame; approving a request that refers to nothing is not approving a change, so it is declined and nothing was appended",
+    };
+  }
+  const item = index.get(itemId);
+  if (item === undefined) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `the file-change request names item ${JSON.stringify(itemId)} and no item/started for it reached this client, so the change it asks about is an identifier and nothing else; approving an identifier is not approving a change, so it is declined and nothing was appended`,
+    };
+  }
+  if (item.type !== "fileChange") {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `the file-change request names item ${JSON.stringify(itemId)}, which this client recorded as ${JSON.stringify(item.type)} and not a fileChange; a change set cannot be produced from it, so it is declined and nothing was appended`,
+    };
+  }
+  if (item.changes === null) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `the file-change request names item ${JSON.stringify(itemId)}, whose item/started carried no change set this client could read; there are no bytes to classify, so it is declined and nothing was appended`,
+    };
+  }
+  const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
+  if (threadId !== null && item.threadId !== null && threadId !== item.threadId) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `the file-change request names item ${JSON.stringify(itemId)} on thread ${JSON.stringify(threadId)} and the frame carrying that item's content named thread ${JSON.stringify(item.threadId)}; two frames that disagree about which conversation they belong to are not established to be about one change, so it is declined and nothing was appended`,
+    };
+  }
+  const turnId = turnIdOf(params);
+  if (turnId !== null && item.turnId !== null && turnId !== item.turnId) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `the file-change request names item ${JSON.stringify(itemId)} on turn ${JSON.stringify(turnId)} and the frame carrying that item's content named turn ${JSON.stringify(item.turnId)}; two frames that disagree about which turn they belong to are not established to be about one change, so it is declined and nothing was appended`,
+    };
+  }
+  if (item.completed) {
+    return {
+      ok: false,
+      code: "bridge-file-change-already-completed",
+      detail: `item/completed for ${JSON.stringify(itemId)} arrived BEFORE the approval request for it, so the change had already finished by the time this client was asked about it; a change applied before the question is not one this client can decide, and a grant appended for it would name an effect that had already happened. It is declined and nothing was appended`,
+    };
+  }
+  return { ok: true, item, changes: item.changes };
 }
 
 /**
@@ -1041,7 +1238,8 @@ export function inlineFileChanges(params: unknown): Record<string, unknown> | nu
 }
 
 /**
- * Decide one file-change request that carries its own content (APRV-363).
+ * Decide one file-change request, whichever API it arrived on (APRV-363,
+ * APRV-379).
  *
  * Through the SAME path an exec request takes: the hook's `decideHarnessCall`,
  * so the human-only refusal, the loop floor, the unattended guard, the
@@ -1049,37 +1247,74 @@ export function inlineFileChanges(params: unknown): Record<string, unknown> | nu
  * name and the bound material, and the description of both is `cli/hook.ts`'s,
  * never this module's.
  *
- * The DIRECTORY is the one the server named (`cwd`, or the `grantRoot` the
- * legacy request carries for the same purpose), for the reason the exec half
- * gives: a relative path in the change resolves somewhere, and a directory this
- * client guessed would be a guess a grant is then bound to. Without one the
- * answer is the same refusal an exec request with no `cwd` gets.
+ * TWO SOURCES FOR THE CHANGE SET, one decision path. The LEGACY
+ * `applyPatchApproval` carries it inline, so it is read off the request. The
+ * ITEM-BASED `item/fileChange/requestApproval` carries an identifier, so it is
+ * correlated to the `item/started` frame this client recorded, by
+ * {@link correlateFileChange}, which refuses rather than guessing. Either way
+ * what reaches the describer is the change set the server sent, in the shape it
+ * sent it.
+ *
+ * THE DIRECTORY, and the two halves differ here for a recorded reason. The
+ * legacy request carries one (`cwd`, or `grantRoot` for the same purpose) and
+ * is refused without it, exactly as APRV-363 left it. The item-based request
+ * carries neither: `grantRoot` was `null` in both captures and there is no
+ * `cwd` on that shape at all (`docs/codex-app-server-bridge.md`, question 1).
+ * So it falls back to the workspace THIS CLIENT named on `thread/start`, which
+ * is this client's own binding rather than a guess or a server claim, and the
+ * fallback widens nothing: the observed change paths are absolute, the
+ * describer resolves every path against that directory, and one landing
+ * outside it is refused `hook-io` whichever way it was spelled.
  */
 export function decideFileChangeRequest(
   streams: Streams,
   plan: BridgePlan,
   params: unknown,
+  items: ItemIndex,
 ): { verdict: HarnessVerdict; threadId: string | null } {
-  const changes = inlineFileChanges(params);
-  const cwd = stringField(params, "cwd") ?? stringField(params, "grantRoot");
+  const inline = inlineFileChanges(params);
   const callId = callIdOf(params);
   const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
-  if (changes === null || cwd === null || callId === null) {
-    const missing = [
-      changes === null ? "an inline fileChanges map" : null,
-      cwd === null ? "a directory (cwd or grantRoot)" : null,
-      callId === null ? "a call identity (itemId, callId or approvalId)" : null,
-    ]
-      .filter((entry): entry is string => entry !== null)
-      .join(", ");
-    return {
-      threadId,
-      verdict: {
-        permission: "deny",
-        code: changes === null ? "bridge-file-change-unbound" : "bridge-request-unbound",
-        detail: `the file-change request carries no ${missing}; a decision here would authorize bytes this client cannot name, so it is declined and nothing was appended`,
-      },
-    };
+  const named = stringField(params, "cwd") ?? stringField(params, "grantRoot");
+  let changes: Record<string, unknown> | readonly unknown[];
+  let cwd: string;
+  if (inline !== null) {
+    if (named === null || callId === null) {
+      const missing = [
+        named === null ? "a directory (cwd or grantRoot)" : null,
+        callId === null ? "a call identity (itemId, callId or approvalId)" : null,
+      ]
+        .filter((entry): entry is string => entry !== null)
+        .join(", ");
+      return {
+        threadId,
+        verdict: {
+          permission: "deny",
+          code: "bridge-request-unbound",
+          detail: `the file-change request carries no ${missing}; a decision here would authorize bytes this client cannot name, so it is declined and nothing was appended`,
+        },
+      };
+    }
+    changes = inline;
+    cwd = named;
+  } else {
+    const correlated = correlateFileChange(items, params);
+    if (!correlated.ok) {
+      return { threadId, verdict: { permission: "deny", ...correlated } };
+    }
+    if (callId === null) {
+      return {
+        threadId,
+        verdict: {
+          permission: "deny",
+          code: "bridge-request-unbound",
+          detail:
+            "the file-change request carries no call identity (itemId, callId or approvalId); a decision here could not be tied to the action it decides, so it is declined and nothing was appended",
+        },
+      };
+    }
+    changes = correlated.changes;
+    cwd = named ?? plan.workspace;
   }
 
   const input: HookInput = {
@@ -1087,9 +1322,10 @@ export function decideFileChangeRequest(
     sessionIdPresent: threadId !== null,
     cwd,
     toolName: "apply_patch",
-    // The map VERBATIM, under the key the hook's describer reads. Nothing is
-    // re-rendered into an `apply_patch` envelope: the classifier is given the
-    // paths the server named, and the grant binds the change as it arrived.
+    // The change set VERBATIM, under the key the hook's describer reads.
+    // Nothing is re-rendered into an `apply_patch` envelope: the classifier is
+    // given the paths the server named, and the grant binds the change as it
+    // arrived, map or array.
     //
     // `command` beside it is the change's CANONICAL JSON, and it is identity
     // rather than content: the Codex adapter derives one task id per tool call
@@ -1097,7 +1333,7 @@ export function decideFileChangeRequest(
     // with no such string could not be identified at all. Canonical so the same
     // change is the same call, whatever key order the server used. Nothing
     // classifies it and nothing executes it: the description above is built
-    // from the map, and the payload a human sees is the map.
+    // from the change set, and the payload a human sees is the change set.
     toolInput: { file_changes: changes, command: canonicalize(changes) },
     toolUseId: callId,
     hookEventName: null,
@@ -1344,6 +1580,18 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     let liveStartId = -1;
 
     /**
+     * Every item this thread has announced, for the thread's life (APRV-379).
+     *
+     * The content of a file change arrives on `item/started` and the question
+     * about it arrives later, by item id, so this is what makes an item-based
+     * file-change request answerable at all. It is written from the
+     * notification path below and read only by
+     * {@link correlateFileChange}, which refuses every way the two frames could
+     * fail to be about one change.
+     */
+    const items: ItemIndex = new Map();
+
+    /**
      * Does this frame belong to the PREFLIGHT turn (APRV-364)?
      *
      * By turn id where the frame names one, which is the answer that survives
@@ -1450,6 +1698,14 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       // carries the turn and not the handshake before it.
       if (phase === "preflight" && preflightStartId !== -1) preflightFrames.push(frame);
 
+      // Every item notification is recorded, here, ABOVE the request dispatch
+      // and above every phase test (APRV-379). A notification is a frame with a
+      // method and no id, so this never sees a question. It records rather than
+      // decides: what the index holds is what the server said, and every
+      // judgement about whether two frames are about one change is made at
+      // correlation time by `correlateFileChange`.
+      if (method !== null && frame.id === undefined) recordItemFrame(items, method, frame.params);
+
       // A server REQUEST: it carries both a method and an id, and it is waiting.
       if (method !== null && frame.id !== undefined) {
         // An approval question raised by the PROBE turn is observed and
@@ -1469,16 +1725,12 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           }
           return;
         }
-        if ((FILE_CHANGE_APPROVAL_METHODS as readonly string[]).includes(method)) {
+        if (fileApproval) {
           // A change carried INLINE is decided like any other call (APRV-363);
-          // one that is an identifier and nothing else is declined, as it has
-          // been since APRV-361.
-          if (inlineFileChanges(frame.params) === null) {
-            const refusal = declineFileChange(frame.params);
-            answer(frame.id, method, "decline", refusal.code, refusal.detail, frame.params);
-            return;
-          }
-          const decided = decideFileChangeRequest(streams, plan, frame.params);
+          // one that is an identifier is correlated to the `item/started` frame
+          // this client recorded and decided against THAT (APRV-379), or
+          // declined when the correlation cannot be established.
+          const decided = decideFileChangeRequest(streams, plan, frame.params, items);
           if (decided.verdict.permission === "allow") {
             answer(frame.id, method, "accept", null, decided.verdict.reason, frame.params);
           } else {
@@ -1659,8 +1911,12 @@ export const CODEX_BRIDGE_HELP = [
   "  -- <command...>       the app-server to start (default: codex app-server)",
   "",
   "It answers accept or decline only, never acceptForSession, cancel or abort.",
-  "A file-change request carries no content on the item-based API, so it is",
-  "declined (bridge-file-change-unbound). An open gate window is not honoured.",
+  "A file-change request on the item-based API carries an item id and no bytes;",
+  "the change set is taken from the item/started frame that id names, and the",
+  "request is declined (bridge-file-change-unbound) when that frame was never",
+  "seen, names another item, or belongs to another thread or turn, and",
+  "(bridge-file-change-already-completed) when the item finished before the",
+  "question arrived. An open gate window is not honoured.",
   "",
   "The server is this process's own child over stdio: no socket, nothing bound,",
   "no other client to replay a pending question to. The claim is scoped to that",

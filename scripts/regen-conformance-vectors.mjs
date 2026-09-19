@@ -364,7 +364,7 @@ const unionVectors = [
   ],
   [
     "bridge_refusal_codes",
-    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, a file change whose content arrived on a frame it is not correlating, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
+    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, an item-based file change whose content it cannot produce from the `item/started` frame that item id names, one whose item had already completed when the question arrived, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
   ],
   [
     "bridge_stop_codes",
@@ -1797,7 +1797,26 @@ const SUITES = [
     // request would be saying something false about what it did. Each union's
     // description now names the other, so a checker that reads one knows it has
     // read half.
-    vectors_version: "16.0.0",
+    // 17.0.0 (APRV-379): `bridge_refusal_codes` gains
+    // `bridge-file-change-already-completed`, the refusal an item-based
+    // file-change request takes when `item/completed` for its item arrived
+    // BEFORE the question about it. Major for the reason every union growth
+    // here is major: the vector pins each whole array in definition order, so a
+    // longer union is a changed expectation.
+    //
+    // A fifth code rather than a fifth reading of `bridge-file-change-unbound`,
+    // because the two say opposite things about the correlation. Unbound means
+    // the content could not be produced: no frame, the wrong item, an empty
+    // change set, or a frame belonging to another thread or turn. This one
+    // means the content WAS produced and the order was wrong, so the repairs
+    // differ: an unbound change points at a client that missed a frame or a
+    // protocol that changed shape, and this one points at a session whose
+    // approval policy is not the one it was pinned to. A second implementation
+    // on the item-based API has to answer it, because holding the content from
+    // an earlier frame is the only way to answer that API at all, and anything
+    // holding that state can be asked about an item it has already seen
+    // finished.
+    vectors_version: "17.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
