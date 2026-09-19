@@ -1,0 +1,1 @@
+{"command":"cd /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-emilia-protocol-comparison-af4ffb/e53d96c7-c42d-4ec8-a52f-708a14964f8e/scratchpad/aprv370 && /usr/bin/grep -a -m 1 -A 30 \"event-schema\\|✖ .*schema\" t1.log | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}

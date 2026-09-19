@@ -1,0 +1,1 @@
+{"command":"ls schema/fixtures | head -20 && echo \"---\" && ls schema/fixtures | wc -l && /usr/bin/grep -rn \"sender\" schema/fixtures/*.json | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}

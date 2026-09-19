@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"function resolvePathSegments\" -A 25 src/cli/hook.ts && echo \"=== payloadHash ===\" && /usr/bin/grep -rn \"function payloadHash\" -A 12 src/cli/hook.ts src/core/*.ts 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a245637f4c8aeffca"}

@@ -1,0 +1,1 @@
+{"command":"ls examples/ rsi/ 2>/dev/null | head -20; /usr/bin/grep -rn -i \"mktemp\\|/tmp/\\|\\$TMPDIR\\|demo-gate\\|throwaway\" examples/*/runbook.md rsi/*.md docs/email-demo.md 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

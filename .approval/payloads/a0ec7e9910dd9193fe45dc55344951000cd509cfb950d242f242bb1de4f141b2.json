@@ -1,0 +1,1 @@
+{"command":"sed -n '1140,1180p' src/daemon/advance.ts && echo ==== && /usr/bin/grep -rn 'advanceOnce\\|runOneAdvance\\|from \"../src/daemon/advance' tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a405df4ede8ad2657"}

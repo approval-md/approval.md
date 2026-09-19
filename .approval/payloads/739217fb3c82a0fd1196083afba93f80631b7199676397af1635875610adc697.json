@@ -1,0 +1,1 @@
+{"command":"ls -la /Users/carter/demo-gate /Users/carter/demo-guest /Users/carter/demo-gate-2 2>&1 | head -24","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

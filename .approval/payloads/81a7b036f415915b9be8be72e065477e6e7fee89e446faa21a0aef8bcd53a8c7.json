@@ -1,0 +1,1 @@
+{"command":"npm run typecheck 2>&1 | tail -3 && npm run lint 2>&1 | tail -3 && git push 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a761c229b96b64adc"}
