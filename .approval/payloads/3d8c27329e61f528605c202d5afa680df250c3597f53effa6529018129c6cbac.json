@@ -1,0 +1,1 @@
+{"command":"gh pr merge 439 --auto --merge 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

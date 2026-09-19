@@ -1,0 +1,1 @@
+{"command":"grep -n 'worktrees\\|slug\\|--repo\\|function main\\|REPO_ROOT' scripts/agent-hours.mjs | head -30; echo ---; cat scripts/launchd/com.carter.agent-hours.plist; echo ---; cat ~/.claude/projects/-Users-carter-dev-approval-md/memory/approval-md-session-practices.md | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

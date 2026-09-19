@@ -1,0 +1,1 @@
+{"command":"node --version && cd /Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8 && grep -n 'node-version' .github/workflows/*.yml | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

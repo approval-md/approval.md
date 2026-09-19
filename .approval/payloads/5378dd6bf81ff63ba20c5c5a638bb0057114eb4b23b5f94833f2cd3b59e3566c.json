@@ -1,0 +1,1 @@
+{"command":"grep -rn \"PROTECTED_PATHS\\|export function isProtectedPath\" src/core/*.ts | head && grep -n -B2 -A 30 \"const PROTECTED\" src/core/classify.ts 2>/dev/null | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}

@@ -1,0 +1,1 @@
+{"command":"gh pr view 437 --json state,mergedAt -q '.state + \" \" + (.mergedAt // \"pending\")' 2>&1; gh api graphql -f query='{ repository(owner:\"approval-md\",name:\"approval.md\"){ pullRequest(number:437){ isInMergeQueue mergeStateStatus } } }' 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a27452dfe58b83aa6"}

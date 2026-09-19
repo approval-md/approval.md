@@ -1,0 +1,1 @@
+{"command":"git push origin --delete aprv-324-live-check-reject 2>&1 | tail -3; echo \"exit $?\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

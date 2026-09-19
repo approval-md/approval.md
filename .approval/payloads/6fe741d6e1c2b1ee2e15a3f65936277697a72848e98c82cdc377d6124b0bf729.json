@@ -1,0 +1,1 @@
+{"command":"grep -rn 'policy apply.*--pr\\|apply docs/proposals' docs/ *.md 2>/dev/null | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

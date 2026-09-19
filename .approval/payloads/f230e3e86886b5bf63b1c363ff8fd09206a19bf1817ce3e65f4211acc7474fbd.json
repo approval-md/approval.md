@@ -1,0 +1,1 @@
+{"command":"gh pr merge 440 --auto --merge 2>&1 | tail -1; gh pr view 440 --json autoMergeRequest -q '(.autoMergeRequest.enabledAt//\"not-armed\")'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

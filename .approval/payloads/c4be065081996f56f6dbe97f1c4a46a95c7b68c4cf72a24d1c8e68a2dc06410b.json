@@ -1,0 +1,1 @@
+{"command":"grep -n 'No effect landed\\|FAILURE TO BLOCK\\|hold sentence' docs/*.md | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ac6ffcdd29ac995c8"}

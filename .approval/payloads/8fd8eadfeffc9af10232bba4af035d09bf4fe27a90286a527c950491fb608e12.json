@@ -1,0 +1,1 @@
+{"command":"sed -n '55,75p' src/channels/contract.ts && echo \"===\" && grep -rn \"isChannelDecisionRefusalCode\\|senderRefusalLine\\|SENDER_REFUSAL\" --include=\"*.ts\" src/channels/*.ts src/core/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a43e2325c9a3b50fe"}
