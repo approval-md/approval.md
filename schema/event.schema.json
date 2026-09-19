@@ -722,6 +722,11 @@
                 "type": "integer",
                 "minimum": 1,
                 "description": "The `policy.proposed` record this attestation answers."
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §5.2/§10.4 (APRV-356): the binding for the ATTESTED policy text, stored beside the log, so the policy in force is recoverable and not only nameable. A digest alone cannot produce the file it names, and the privileged-gesture rule of §10.3 has to be decided against the policy in force rather than the one being proposed. Optional and additive: records written before this existed still validate and verify, and a reader treats absence as the pre-amendment state, where the in-force bytes are unrecoverable and the fail-closed fallback applies. A reader that recovers the text MUST re-hash it against `sha256` from the verified log, so the store is checked rather than trusted."
               }
             }
           }
