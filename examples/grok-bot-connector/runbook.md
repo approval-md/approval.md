@@ -57,11 +57,24 @@ in `doctor`.
 
 **2. The demo instance exists, with one substitution.**
 
-Provision `~/demo-gate` exactly as
-[../web-agent-demo/provisioning.md](../web-agent-demo/provisioning.md) describes,
-with one change to its step 1: instead of `mkdir -p ~/demo-gate`, clone a
-throwaway private repository into that path, so the demo has a working tree and
-a log in one working directory.
+```sh
+cd /Users/carter/dev/approval-md
+node examples/demo-provision.mjs --instance grok-bot
+```
+
+That is [../web-agent-demo/provisioning.md](../web-agent-demo/provisioning.md)
+with this demo's substitutions already made: it stops first and prints the
+`git clone` line (`git clone` refuses a directory that already holds files, so
+nothing is scaffolded into the path until the clone is there), then on the next
+run it scaffolds, writes the demo policy, adds `.approval/` to the clone's
+`.gitignore`, seeds this demo's two payloads and their envelope, and prints the
+attestation and the four credential lines for you to run. `--check` runs the
+instance's doctor and this demo's preflight; `--reset` puts it back at its
+post-provision state between runs (section 5).
+
+The substitution itself, and why it is one: instead of `mkdir -p ~/demo-gate`,
+clone a throwaway private repository into that path, so the demo has a working
+tree and a log in one working directory.
 
 ```sh
 cd ~
@@ -78,10 +91,11 @@ Then, before `approval init`, add one line to `~/demo-gate/.gitignore`:
 ```
 
 `approval init` merges its own ignore lines into that file and never rewrites
-what is already there, so the order is safe either way. The extra line keeps the
-whole gate (log, payloads, queue) out of a repository the agent can read and
-push to. Carry on with provisioning.md from `approval init --dir ~/demo-gate`
-through its step 5.
+what is already there, so the order is safe either way, and the script adds the
+line itself for this instance. The extra line keeps the whole gate (log,
+payloads, queue) out of a repository the agent can read and push to. Carry on
+with provisioning.md from `approval init --dir ~/demo-gate` through its step 5,
+or let the script do it.
 
 **3. The AgentMail sending key is in the demo vault, and nowhere else.**
 
@@ -126,6 +140,14 @@ The agent runs in xAI's cloud and has no filesystem here, so the task envelope
 and the payload bytes are the operator's, written before the show. This is the
 same arrangement the web-agent demo uses, where the server fixes the exact bytes
 a human reads on the phone.
+
+The script seeds all three files (`tasks/grok-001.push.json`,
+`tasks/grok-001.mail.json` and the envelope `tasks/grok-001.md`), hashing each
+payload with the real `approval payload hash`. Export `APPROVAL_DEMO_EMAIL_TO`
+and `APPROVAL_DEMO_EMAIL_FROM` before running it, or edit the payload afterwards
+and run it again: both default to `demo@example.invalid`, your bytes are left
+alone once the file exists, and the rerun re-binds the envelope's `payload_hash`
+to them. What it writes, and what to check before the room fills, is this:
 
 Write the two payloads under `~/demo-gate/tasks/`:
 
@@ -555,11 +577,26 @@ in front of a room.** Finish on the explanation.
 
 ## 5. Reset between runs
 
-Provision a **fresh instance into a new directory** per provisioning.md, with
+```sh
+cd /Users/carter/dev/approval-md
+node examples/demo-provision.mjs --instance grok-bot --reset
+```
+
+That retires the instance's log, queue, payload store and seeded tasks into
+`~/demo-gate/retired/<stamp>/` and provisions it again behind them. Nothing is
+truncated and nothing is edited: the previous chain moves whole. The vault is
+not in the moved set, so the AgentMail key survives a reset — which is the wrong
+default for *this* demo, whose last bullet below is to rotate that key, so pass
+`--reset --vault` once you have rotated it and run `setup adapter agentmail`
+again. The attestation is a human step: the script prints it and stops.
+
+Or provision a **fresh instance into a new directory** per provisioning.md, with
 this runbook's step 2 substitution: clone a new throwaway repository into it,
 add `.approval/` to the clone's `.gitignore`, then `approval init`, the policy,
-the attestation, the four setup verbs and `approval setup adapter agentmail`.
-Point the audience page at it with `--dir` and restart both servers.
+the attestation, the four setup verbs and `approval setup adapter agentmail`
+(`node examples/demo-provision.mjs --instance grok-bot --path <the new clone>`
+does everything in that list a script may do). Point the audience page at it
+with `--dir` and restart both servers.
 
 **Never delete or truncate a log mid-session.** Not to clear a queue, not to fix
 a badge, not to hide a rehearsal. The log is append-only, and a demo that edits
