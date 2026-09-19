@@ -28,7 +28,7 @@ cd ~/dev/approval-md
 npm run build
 node examples/demo-provision.mjs --instance web-agent      # ~/demo-gate
 node examples/demo-provision.mjs --instance guest          # ~/demo-guest, the crowd track
-node examples/demo-provision.mjs --instance grok-bot       # the Grok Bot connector demo
+node examples/demo-provision.mjs --instance grok-bot       # ~/demo-grok-bot
 ```
 
 It is safe to run twice: an instance that already exists is detected and nothing

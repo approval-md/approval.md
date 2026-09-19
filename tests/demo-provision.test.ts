@@ -497,6 +497,28 @@ test("--check writes nothing", () => {
 // Usage
 // ---------------------------------------------------------------------------
 
+test("the three instances have three different default directories", () => {
+  const help = spawnSync(process.execPath, [SCRIPT, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  const listed = [...(help.stdout ?? "").matchAll(/^ {2}(web-agent|guest|grok-bot) +(\S+)/gmu)].map(
+    (match) => [match[1] ?? "", match[2] ?? ""] as const,
+  );
+  assert.deepEqual(
+    listed.map(([name]) => name),
+    ["web-agent", "guest", "grok-bot"],
+  );
+  const directories = listed.map(([, directory]) => directory);
+  // Two demos sharing a default directory is a footgun the marker can only
+  // report after the fact: by the time it refuses, the operator has already
+  // typed the wrong `--instance` at the wrong instance. The marker is the
+  // backstop; separate defaults are what keep anyone from needing it.
+  assert.equal(
+    new Set(directories).size,
+    3,
+    `two demo instances share a default directory: ${directories.join(", ")}`,
+  );
+});
+
 test("an unknown instance is a refusal that names the three", () => {
   const run = runScript(["--instance", "not-a-demo"]);
   assert.equal(run.code, 2);

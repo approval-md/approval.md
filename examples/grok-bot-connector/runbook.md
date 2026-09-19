@@ -23,9 +23,9 @@ Two gate instances are in play and they must not be confused:
 | Instance | Path | What it is for |
 | --- | --- | --- |
 | The repository's live gate | `/Users/carter/dev/approval-md` | The opening beat only: the tunnel launch is a real gated repo action and its grant becomes a permanent record in the project's chain. |
-| The demo gate | `~/demo-gate` | Everything the connected agent touches. Rehearsals append here and nowhere else. |
+| The demo gate | `~/demo-grok-bot` | Everything the connected agent touches. Rehearsals append here and nowhere else. |
 
-**Every demo verb runs with `~/demo-gate` as the working directory.** `--dir`
+**Every demo verb runs with `~/demo-grok-bot` as the working directory.** `--dir`
 scopes policy discovery only; the log, `.approval/env`, the vault and the payload
 store resolve against the current directory. `cd` first. See
 [../web-agent-demo/provisioning.md](../web-agent-demo/provisioning.md) for why,
@@ -72,19 +72,19 @@ attestation and the four credential lines for you to run. `--check` runs the
 instance's doctor and this demo's preflight; `--reset` puts it back at its
 post-provision state between runs (section 5).
 
-The substitution itself, and why it is one: instead of `mkdir -p ~/demo-gate`,
+The substitution itself, and why it is one: instead of `mkdir -p ~/demo-grok-bot`,
 clone a throwaway private repository into that path, so the demo has a working
 tree and a log in one working directory.
 
 ```sh
 cd ~
-git clone https://github.com/<you>/grok-bot-demo.git demo-gate
+git clone https://github.com/<you>/grok-bot-demo.git demo-grok-bot
 ```
 
 That command classifies `network.call`, so on a machine under a policy it is one
 a human runs or one that goes through the explicit flow of section 2.
 
-Then, before `approval init`, add one line to `~/demo-gate/.gitignore`:
+Then, before `approval init`, add one line to `~/demo-grok-bot/.gitignore`:
 
 ```
 .approval/
@@ -94,13 +94,13 @@ Then, before `approval init`, add one line to `~/demo-gate/.gitignore`:
 what is already there, so the order is safe either way, and the script adds the
 line itself for this instance. The extra line keeps the whole gate (log,
 payloads, queue) out of a repository the agent can read and push to. Carry on
-with provisioning.md from `approval init --dir ~/demo-gate` through its step 5,
+with provisioning.md from `approval init --dir ~/demo-grok-bot` through its step 5,
 or let the script do it.
 
 **3. The AgentMail sending key is in the demo vault, and nowhere else.**
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval setup adapter agentmail --as human:demo
 ```
 
@@ -118,14 +118,14 @@ full.
 Confirm the names without printing a value:
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval vault list --as human:demo
 ```
 
 **4. The demo instance is green.**
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 APPROVAL_HUMAN=human:demo approval doctor
 ```
 
@@ -149,10 +149,10 @@ and run it again: both default to `demo@example.invalid`, your bytes are left
 alone once the file exists, and the rerun re-binds the envelope's `payload_hash`
 to them. What it writes, and what to check before the room fills, is this:
 
-Write the two payloads under `~/demo-gate/tasks/`:
+Write the two payloads under `~/demo-grok-bot/tasks/`:
 
 ```json
-{ "argv": ["git", "push", "-u", "origin", "demo/gated"], "cwd": "/Users/you/demo-gate" }
+{ "argv": ["git", "push", "-u", "origin", "demo/gated"], "cwd": "/Users/you/demo-grok-bot" }
 ```
 
 ```json
@@ -168,12 +168,12 @@ Write the two payloads under `~/demo-gate/tasks/`:
 Hash each one and put the hashes in the envelope:
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval payload hash tasks/grok-001.push.json
 approval payload hash tasks/grok-001.mail.json
 ```
 
-Then write `~/demo-gate/tasks/grok-001.md` with one envelope carrying two
+Then write `~/demo-grok-bot/tasks/grok-001.md` with one envelope carrying two
 actions, `class: vcs.push.branch` and `class: communicate.email.external`, each
 with its own `idempotency_key` (`grok-001:push:<date>` and
 `grok-001:mail:<date>`) and its own `payload_hash`. The envelope shape is
@@ -186,7 +186,7 @@ anything the agent sends.
 **6. Start the MCP server, in guest mode.**
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval mcp serve --http --guest
 ```
 
@@ -195,14 +195,14 @@ prints on stderr are the proof that Grok Bot connected, and they name the actor
 each session runs as. It binds `127.0.0.1:4681` and stdout stays empty.
 
 Read the banner back before you tunnel anything. It should say GUEST mode, name
-`~/demo-gate` as the working directory, and give the two caps (20 concurrent
+`~/demo-grok-bot` as the working directory, and give the two caps (20 concurrent
 sessions, 200 for the life of the process).
 
 **7. Start the audience page, on localhost.**
 
 ```sh
 cd /Users/carter/dev/approval-md
-node examples/web-agent-demo/server.mjs --dir ~/demo-gate --port 4700
+node examples/web-agent-demo/server.mjs --dir ~/demo-grok-bot --port 4700
 ```
 
 This demo uses three of its four panels: the verify badge, **Awaiting a human**
@@ -295,7 +295,7 @@ and start the demo instance's own listener, so that exactly one process
 long-polls the Telegram bot:
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval channel telegram listen
 ```
 
@@ -360,10 +360,10 @@ granted executes anywhere.
 Give Grok Bot a prompt that names the paths from preflight step 5 and asks first:
 
 > There is an approval gate on your `approval.md demo gate` connector. A task
-> file at `~/demo-gate/tasks/grok-001.md` declares two actions you may not
+> file at `~/demo-grok-bot/tasks/grok-001.md` declares two actions you may not
 > change: a branch push (`grok-001:push:<date>`, payload
-> `~/demo-gate/tasks/grok-001.push.json`) and an email
-> (`grok-001:mail:<date>`, payload `~/demo-gate/tasks/grok-001.mail.json`).
+> `~/demo-grok-bot/tasks/grok-001.push.json`) and an email
+> (`grok-001:mail:<date>`, payload `~/demo-grok-bot/tasks/grok-001.mail.json`).
 > Register the task file, request both actions with their payloads, say plainly
 > what `proceed` came back as, then watch with `wait` and `status` until a human
 > decides. Do not look for another route.
@@ -377,7 +377,7 @@ Give Grok Bot a prompt that names the paths from preflight step 5 and asks first
   small, and tap **Approve** twice. Then execute at the terminal:
 
   ```sh
-  cd ~/demo-gate
+  cd ~/demo-grok-bot
   approval run "grok-001:push:<date>" --as agent:guest-<id> \
     -- git push -u origin demo/gated
   approval adapter agentmail "grok-001:mail:<date>" --as agent:guest-<id> \
@@ -415,7 +415,7 @@ Let that land in front of the room, and say so: the gate did not prevent this an
 was never going to. What it does is make the difference legible in seconds.
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 git fetch origin
 approval coverage --source git --base demo/gated --head origin/demo/ungated
 ```
@@ -439,7 +439,7 @@ git: 1 of 2 effects have evidence (50%)
   per-source line rather than the exit status.
 
 The flags in this beat come from APRV-245's stated interface (`--base`, `--head`,
-`--since`, `--source`, `--json`), and the verb runs with `~/demo-gate` as the
+`--since`, `--source`, `--json`), and the verb runs with `~/demo-grok-bot` as the
 working directory so that the git tree and the log are the same instance. Confirm
 both against `approval coverage --help` on the morning.
 
@@ -461,7 +461,7 @@ by hand, outside the gate, from AgentMail's own dashboard and the same inbox.
 in your shell history, so prefer the dashboard on stage.)
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval coverage --source agentmail --since 30m
 ```
 
@@ -483,7 +483,7 @@ agentmail: 1 of 2 effects have evidence (50%)
 ### Beat 5 — Read the log
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval log verify
 ```
 
@@ -496,7 +496,7 @@ verify badge green, **Awaiting a human** empty, and **The log** carrying the
 whole story in order. Finish with the full picture across every source:
 
 ```sh
-cd ~/demo-gate
+cd ~/demo-grok-bot
 approval coverage --since 1h
 ```
 
@@ -535,11 +535,11 @@ five seconds. What it is doing is polling. Tell it to call `status` instead, and
 say why the clamp exists: `wait` blocks the event loop and every HTTP session
 shares one invoke queue.
 
-**Telegram is dark.** Restart the listener from `~/demo-gate` and expect
+**Telegram is dark.** Restart the listener from `~/demo-grok-bot` and expect
 duplicates: the button-to-action mapping lives in the listener process, so a
 restart re-sends everything still pending with fresh buttons, and the pre-restart
 buttons stop resolving. Tap the newest message. If the Bot API is unreachable,
-decide at the CLI (`approval grant` / `approval reject` from `~/demo-gate`) and
+decide at the CLI (`approval grant` / `approval reject` from `~/demo-grok-bot`) and
 tell the room that the phone is one channel and the log is the truth. If neither
 channel answers, check that `approval up` in the repository checkout is stopped;
 two processes long-polling one bot compete for the same updates.
@@ -547,7 +547,7 @@ two processes long-polling one bot compete for the same updates.
 **The adapter comes back `credential-unavailable`.** The vault passphrase is not
 in the shell you ran the adapter from. `examples/agentmail-demo.md` records that
 nothing was appended and the grant is intact in this case, so `eval "$(approval
-env)"` in `~/demo-gate` and run the same command again. Rehearse this once
+env)"` in `~/demo-grok-bot` and run the same command again. Rehearse this once
 (preflight step 8) rather than discovering the answer on stage.
 
 **A `wait` timed out at the CLI.** Exit 6: nothing was appended, the request is
@@ -583,7 +583,7 @@ node examples/demo-provision.mjs --instance grok-bot --reset
 ```
 
 That retires the instance's log, queue, payload store and seeded tasks into
-`~/demo-gate/retired/<stamp>/` and provisions it again behind them. Nothing is
+`~/demo-grok-bot/retired/<stamp>/` and provisions it again behind them. Nothing is
 truncated and nothing is edited: the previous chain moves whole. The vault is
 not in the moved set, so the AgentMail key survives a reset — which is the wrong
 default for *this* demo, whose last bullet below is to rotate that key, so pass
@@ -644,10 +644,10 @@ audience is still watching.
 >   and holds decision authority; port 4700 is the audience page. Neither goes on
 >   the internet, in this demo or any other.
 > - **Do not confuse the two gates.** `/Users/carter/dev/approval-md` is the
->   repository's live gate and its log is permanent; `~/demo-gate` is where every
->   rehearsal appends. Every demo verb in this runbook runs with `~/demo-gate` as
+>   repository's live gate and its log is permanent; `~/demo-grok-bot` is where every
+>   rehearsal appends. Every demo verb in this runbook runs with `~/demo-grok-bot` as
 >   the working directory, and a verb run from the repository with `--dir
->   ~/demo-gate` reads the demo policy against the repository's log.
+>   ~/demo-grok-bot` reads the demo policy against the repository's log.
 > - **The agent holds no sending credential, in any run of this demo.** The first
 >   tier is custody, and a demo that handed the agent a key to make a beat easier
 >   would have nothing left to show in beat 4.

@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-19 20:22'
-updated_date: '2026-09-19 21:10'
+updated_date: '2026-09-19 21:35'
 labels:
   - demo
   - examples
@@ -105,6 +105,8 @@ npm run build, npm run typecheck and npm run lint all clean. node scripts/run-te
 ## Global invariants
 
 This task touches none of the SPEC section 11 global invariants. It appends nothing, mints no verb, reads no record for an enforcement decision, and the one place it comes near the log is --reset, which moves a log directory whole and never opens the file.
+
+Follow-up after PR 488 merged, on ruling from the orchestrator (2026-09-19): the grok-bot instance gets its own default directory, ~/demo-grok-bot, instead of sharing ~/demo-gate with the web-agent demo. A shared default is a footgun even with the marker, because the marker can only refuse after the operator has already typed the wrong instance at the wrong directory. The marker stays as the backstop for anyone who points two demos at one directory with --path. The connector runbook now names ~/demo-grok-bot throughout (all 33 references were that instance path, including the clone target and the payload working directory), and the README and provisioning lines match. New test: the three instances have three different default directories, read out of the help block, so a future shared default fails in CI rather than on a demo morning. Also confirmed by the same ruling: the crowd-track reading stands as written, so the guest instance keeps identity and the Telegram channel and never a vault or a mail adapter.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
