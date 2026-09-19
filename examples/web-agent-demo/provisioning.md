@@ -18,7 +18,36 @@ Prerequisites: Node 20 or newer, this repository built (`npm run build`), a
 Telegram bot from @BotFather, and an app-specific SMTP password for a mail
 account you control.
 
+## Run the script; read the sections once
+
+Every non-interactive step below is run for you by
+[`examples/demo-provision.mjs`](../demo-provision.mjs):
+
+```sh
+cd ~/dev/approval-md
+npm run build
+node examples/demo-provision.mjs --instance web-agent      # ~/demo-gate
+node examples/demo-provision.mjs --instance guest          # ~/demo-guest, the crowd track
+node examples/demo-provision.mjs --instance grok-bot       # the Grok Bot connector demo
+```
+
+It is safe to run twice: an instance that already exists is detected and nothing
+in it is overwritten. It **stops at every step a human must run** — the
+attestation, the three interactive credential verbs, the Grok demo's `git clone`
+— prints the exact line for each one, and picks up where you left off the next
+time you run it. `--check` runs the instance's `approval doctor` and this demo's
+own preflight and prints a pass/fail line each. `--reset` puts an instance back
+at its post-provision state between runs, keeping the vault unless you add
+`--vault`; it retires the previous log into `<instance>/retired/<stamp>/` rather
+than truncating anything, and it writes nothing outside the instance directory.
+
+The sections below are what the script does, and why. Read them once, then use
+the script: a sequence a human pastes is a sequence a human can skip a line of,
+and the step that gets skipped is never the one you would have noticed.
+
 ## 1. Scaffold the instance
+
+The script does this step. By hand it is:
 
 ```sh
 export APPROVAL_MD=~/dev/approval-md
@@ -56,11 +85,22 @@ Nothing is appended to the log here. The first attestation creates
 
 ## 2. Write the demo policy
 
-Replace the scaffolded policy. `init` never overwrites, so delete it first.
+The demo policy is a file in this repository:
+[`examples/policies/demo-gate.APPROVAL.md`](../policies/demo-gate.APPROVAL.md).
+All three demo instances are written from it, which is what makes a change to
+the demo's rules a diff somebody reviews rather than a paragraph somebody
+notices. `tests/demo-provision.test.ts` pins that file against the policy block
+printed below, so the document and the file cannot drift apart.
 
-````sh
-rm ~/demo-gate/APPROVAL.md
-cat > ~/demo-gate/APPROVAL.md <<'EOF'
+The script writes it over the scaffold, and **only** when the same run scaffolded
+it: an `APPROVAL.md` that was already there is somebody's attested policy, and
+overwriting one refuses every gate verb with `hash-mismatch` until a human
+attests again. By hand the step is `rm ~/demo-gate/APPROVAL.md` (`init` never
+overwrites, so the delete comes first) and then a copy of that file into place.
+
+What it contains:
+
+````md
 # Approval policy — web-agent demo gate
 
 This instance exists only to rehearse the web-agent demo. It is deliberately
@@ -114,11 +154,10 @@ channels:
 vault:
   passphrase_env: APPROVAL_DEMO_VAULT_PASSPHRASE
 ```
-EOF
 ````
 
-The heredoc wraps a fenced block, which is why the shell fence around it is four
-backticks.
+The policy file carries a fenced block, which is why the fence around it here is
+four backticks.
 
 What each part is doing:
 
@@ -173,7 +212,8 @@ numbers above and the runtime cannot drift apart.
 
 Confirm the file loads before signing it. If the policy were unparseable, every
 class would answer `manual` and this check would still print `manual` for the
-email class, so check a class the policy makes permissive:
+email class, so check a class the policy makes permissive. The script runs both
+of these and fails the step if either answer is the wrong one:
 
 ```sh
 cd ~/demo-gate
@@ -211,12 +251,19 @@ does not require them to parse, and it is what creates `events.jsonl` at seq 1.
 Edit `APPROVAL.md` afterwards and every gate operation refuses with
 `hash-mismatch` until you attest again.
 
+**The script stops here** and prints this line with the instance's own path in
+it. Signing for a policy is a human's act, so no script in this repository
+performs it, scriptable or not. Run it, then run the script again.
+
 ## 4. Credentials: three interactive verbs
 
 These prompt, and they are meant to. Each refuses with exit 2 when stdin is not a
 terminal, prints the exact by-hand commands instead, and writes nothing. Run them
 from `~/demo-gate`, after the policy, because each reads the variable *names* out
-of it and each writes into this directory's `.approval/env`.
+of it and each writes into this directory's `.approval/env`. The script prints
+all four lines and runs none of them; on the guest instance it refuses two of
+them outright (see the crowd track's MUST in
+[runbook.md §4](runbook.md#the-hard-requirement-before-anything-else)).
 
 ```sh
 cd ~/demo-gate
@@ -321,6 +368,13 @@ APPROVAL_HUMAN=human:demo approval doctor
 
 Green is **`0 failed` and exit 0**. Rows marked `–` are states, not faults, and a
 check that does not apply never fails the verb. Any `✗` exits 1.
+
+`node examples/demo-provision.mjs --instance <id> --check` runs this verb for the
+instance and adds the checks doctor cannot make for a demo: that the policy in
+the instance is still the packaged one, that the ports this demo is allowed to
+bind are free, that every seeded envelope's `payload_hash` still matches the
+bytes beside it, and that an unconfigured Telegram channel FAILS (doctor marks
+it `–`, which is a legitimate state for a gate and a dead demo for a room).
 
 The `identity` check reads `APPROVAL_HUMAN` from the shell, and `policy attest`
 took its identity from `--as`, so run doctor after `setup identity` and the

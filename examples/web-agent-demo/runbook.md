@@ -58,6 +58,17 @@ you can read it. It is the process that expires lapsed requests and regenerates
 **3. The demo instance is green.**
 
 ```sh
+cd /Users/carter/dev/approval-md
+node examples/demo-provision.mjs --instance web-agent --check
+```
+
+That runs the instance's own doctor plus this demo's preflight (the packaged
+policy, the ports, the seeded envelopes, the channel) and prints a pass/fail line
+each. To provision the instance in the first place, or after a `--reset`, run the
+same script without `--check`; it stops at every human-only step and prints the
+line. See [provisioning.md](provisioning.md). The doctor alone is:
+
+```sh
 cd ~/demo-gate
 APPROVAL_HUMAN=human:demo approval doctor
 ```
@@ -314,16 +325,26 @@ own context. What a guest drives is the approval flow itself.
 > no email adapter configured.**
 >
 > ```sh
+> cd /Users/carter/dev/approval-md
+> node examples/demo-provision.mjs --instance guest      # ~/demo-guest
+> ```
+>
+> That is [provisioning.md](provisioning.md) steps 1, 2 and 3 against
+> `~/demo-guest`, and it **stops there**: step 4's `setup vault` and `setup
+> adapter email` are the two verbs that must not be run against this instance,
+> and the script refuses them for it rather than printing them. (It still prints
+> `setup identity` and `setup channel telegram`, which are what put a guest's
+> request on your phone and hold no credential of this instance's own.)
+> `~/demo-guest/.approval/vault.enc` must not exist, and `approval doctor` must
+> report the `vault` row as `–` rather than `✓`;
+> `node examples/demo-provision.mjs --instance guest --check` FAILS if a vault
+> ever appears there. By hand the first three steps are:
+>
+> ```sh
 > mkdir -p ~/demo-guest
 > approval init --dir ~/demo-guest
 > cd ~/demo-guest
 > ```
->
-> Follow [provisioning.md](provisioning.md) steps 1, 2 and 3 and **stop there**.
-> Step 4's `setup vault` and `setup adapter email` are the two verbs that must
-> not be run against this instance. `~/demo-guest/.approval/vault.enc` must not
-> exist, and `approval doctor` must report the `vault` row as `–` rather than
-> `✓`.
 >
 > This is the belt to guest mode's braces. Guest mode withholds `run`, `token`
 > and every adapter, and refuses a crafted call to them at call time. The empty
@@ -338,7 +359,14 @@ own context. What a guest drives is the approval flow itself.
 
 ### Preflight for this track
 
-**1. Seed the envelopes.** A guest can register only what is already on disk:
+**1. Seed the envelopes.** The script does this: `--instance guest` writes three
+`exec.local` envelopes under `~/demo-guest/tasks/`, each with its own
+`idempotency_key` and its own `payload_hash`, hashed by `approval payload hash`
+rather than by a second implementation of it. `--check` re-hashes the bytes on
+disk and fails if an envelope and its payload have parted company. The rest of
+this step is why it matters.
+
+A guest can register only what is already on disk:
 `register` takes a path on the host, and a stranger over MCP has no way to write
 a file there. What the crowd can ask for is therefore whatever you seeded and
 nothing else, and the class comes from the envelope rather than from anything
@@ -591,10 +619,26 @@ no way to add it.
 
 ## 6. Reset between runs
 
-Provision a **fresh instance into a new directory** per
-[provisioning.md](provisioning.md): `mkdir -p ~/demo-gate-2`, `approval init
---dir ~/demo-gate-2`, `cd`, write the policy, attest, run the four setup verbs,
-`doctor` green. Point the server at it with `--dir` and restart.
+```sh
+cd /Users/carter/dev/approval-md
+node examples/demo-provision.mjs --instance web-agent --reset
+```
+
+That retires this instance's log, queue, payload store and seeded tasks into
+`~/demo-gate/retired/<stamp>/` and provisions the instance again behind them.
+Nothing is truncated and nothing is edited: the previous chain moves whole, which
+is this section's rule with the directory kept. The vault and `.approval/env`
+are not in the moved set, so the credentials survive a reset; add `--vault` to
+retire the vault as well, and expect to run `setup adapter email` again if you
+do. The attestation is a human step, so the script prints it and stops; run it,
+then run the script once more.
+
+The older answer still works and is what `--reset` is a shortcut for: provision a
+**fresh instance into a new directory** per [provisioning.md](provisioning.md)
+(`node examples/demo-provision.mjs --instance web-agent --path ~/demo-gate-2`,
+or by hand `mkdir -p ~/demo-gate-2`, `approval init --dir ~/demo-gate-2`, `cd`,
+write the policy, attest, run the four setup verbs, `doctor` green). Point the
+server at it with `--dir` and restart.
 
 **Never delete or truncate a log mid-session.** Not to clear a queue, not to fix
 a badge, not to hide a rehearsal. The log is append-only and a demo that edits
@@ -618,7 +662,8 @@ server with the new `--dir`.
 tunnel, stop `approval mcp serve`, and put `~/demo-guest` in the bin whole. It is
 a throwaway directory by construction and there is nothing in it worth keeping,
 which is exactly the property that made it safe to expose. The next run gets a
-new directory and a new hostname.
+new directory and a new hostname, and `node examples/demo-provision.mjs
+--instance guest` rebuilds it in one line.
 
 ---
 
