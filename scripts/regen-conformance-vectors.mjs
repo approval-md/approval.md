@@ -1882,7 +1882,20 @@ const SUITES = [
     // accepted, three refused: an agent actor, an absolute `path`, and a
     // missing one). No existing expectation moves, so an implementation that
     // passed 2.2.0 fails this only by not knowing a type the enum has gained.
-    vectors_version: "2.3.0",
+    // 2.4.0 (APRV-378): a MINOR bump, the same shape 2.1.0 and 2.3.0 were.
+    // `audit.question_preempted` is a new event type with five new fixtures
+    // (two accepted — one carrying a verdict, one where the disclosure stated
+    // none — and three refused: an agent actor, a source outside the closed
+    // set, and a question naming no id). No existing expectation moves, so an
+    // implementation that passed 2.3.0 fails this only by not knowing a type
+    // the enum has gained.
+    //
+    // It also carries APRV-355's five `audit.gesture_refused` fixtures, which
+    // reached this suite under 2.3.0 without a bump of their own. 2.4.0 is the
+    // first version that NAMES them; an implementation holding itself to 2.3.0
+    // has been required to know them since they were committed, which is the
+    // drift a version number exists to prevent.
+    vectors_version: "2.4.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

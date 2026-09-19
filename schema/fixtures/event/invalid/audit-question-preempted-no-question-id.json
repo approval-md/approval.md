@@ -1,0 +1,16 @@
+{
+  "seq": 91,
+  "ts": "2026-09-19T16:20:44Z",
+  "event": "audit.question_preempted",
+  "actor": "system:gate",
+  "payload": {
+    "source": "codex-auto-reviewer",
+    "question": {
+      "method": "item/autoApprovalReview/completed"
+    },
+    "verdict": "approve"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "2e9b7c1a4d6f08213b5c7e9a0d2f416385a7c9e1b3d5f70921a3c5e7092b4d6f"
+}

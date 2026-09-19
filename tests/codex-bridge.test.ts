@@ -1016,10 +1016,43 @@ test("APRV-364: an autoApprovalReview notification stops the run under its own c
   assert.equal(report.code, "bridge-auto-reviewer-active");
   assert.equal(report.answers.length, 0);
   assert.equal(rawLog(dir).includes("approval.requested"), false);
-  // The notification is carried verbatim, because until APRV-378 lands this
-  // report is the only record that something else answered.
+  // The notification is carried verbatim in the report as well as in the log.
   assert.match(report.reason, /autoApprovalReview/u);
   assert.match(report.reason, /item-preflight/u);
+
+  // APRV-378: exactly one record, appended through the real append path before
+  // the stop, naming the source, the question in Codex's own terms and the
+  // verdict the reviewer reached. A stop with nothing behind it is the shape of
+  // claim this project is built against.
+  const preempted = rawLog(dir)
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((record) => record["event"] === "audit.question_preempted");
+  assert.equal(preempted.length, 1, rawLog(dir));
+  const record = preempted[0] as Record<string, unknown>;
+  assert.equal(record["actor"], "system:gate");
+  const payload = record["payload"] as Record<string, unknown>;
+  assert.equal(payload["source"], "codex-auto-reviewer");
+  assert.equal(payload["verdict"], "accept");
+  assert.deepEqual(payload["question"], {
+    id: "item-preflight",
+    method: "item/autoApprovalReview/completed",
+    thread: "thread-1",
+    turn: "turn-preflight",
+  });
+  assertVerifies(dir);
+});
+
+test("APRV-378: a session that sees no auto-reviewer appends no such record", () => {
+  const dir = ready();
+  const { run } = bridge(dir, [execRequest("cat README.md", dir)]);
+
+  assert.equal(run.code, 0, "the healthy session should have run to the end");
+  // The absence is the other half of the claim: this record means something
+  // only if an ordinary session never writes one.
+  assert.equal(rawLog(dir).includes("audit.question_preempted"), false);
+  assertVerifies(dir);
 });
 
 test("APRV-364: the auto-review reader matches the recorded names, and only those", () => {

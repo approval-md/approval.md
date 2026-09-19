@@ -1,0 +1,1 @@
+{"command":"head -60 tests/conformance-harness.ts && echo \"...\" && grep -rn \"runAll\" tests/*.ts src/**/*.ts 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4de5200797f700ce"}

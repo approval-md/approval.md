@@ -1,0 +1,1 @@
+{"command":"grep -n -A 20 \"^grep ()\" /Users/carter/.claude/shell-snapshots/snapshot-zsh-1789803808457-q0qsan.sh 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4de5200797f700ce"}

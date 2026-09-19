@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='query { repository(owner:\"approval-md\", name:\"approval.md\") { pullRequest(number:463) { state isInMergeQueue mergeStateStatus autoMergeRequest { enabledAt mergeMethod } } } }' 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a8830fe0a6a8c02c6"}

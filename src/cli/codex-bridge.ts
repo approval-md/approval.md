@@ -122,7 +122,10 @@
  *   verbatim. It is never retried and never reported as a pass.
  *
  * An `item/autoApprovalReview` notification in either turn is
- * `bridge-auto-reviewer-active` and ends the run.
+ * `bridge-auto-reviewer-active` and ends the run, after one
+ * `audit.question_preempted` is appended for it (APRV-378): the moment
+ * something other than this gate answered a question this gate exists to ask is
+ * the moment this project most wants in the log.
  *
  * THE PROBE'S OWN REQUEST NEVER REACHES THE GATE. It is declined immediately,
  * as an observation. Routing it through `decideHarnessCall` would register an
@@ -167,6 +170,7 @@ import type { Streams } from "./main.js";
 import { HOOK_RETRY_GRACE_MS } from "../core/harness-wait.js";
 import { canonicalize } from "../core/jcs.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import { recordPreemptedQuestion } from "../core/question-preempted.js";
 import { shlexJoin, shlexRoundTrips, shlexSplit } from "../core/shlex.js";
 
 /** The adapter every decision here is made under: Codex, through its own protocol. */
@@ -336,11 +340,12 @@ export const BRIDGE_STOP_CODES = [
    * indistinguishable from questions nobody wanted to ask. So the run stops
    * rather than gating whatever is left over.
    *
-   * The log carries no trace of it yet. The audit RECORD for "something other
-   * than the gate answered a question the gate exists to ask" is APRV-378, and
-   * until that lands this fact lives in the exit code and the report alone.
-   * That cost is stated here rather than hidden, on the orchestrator's ruling
-   * of 2026-09-19 that split the two.
+   * It leaves a RECORD since APRV-378: one `audit.question_preempted`,
+   * appended through the real append path before the stop, naming the source,
+   * the question as Codex identified it, and the verdict the reviewer reached
+   * where the notification stated one. The write is best-effort and the stop
+   * does not depend on it; a failure to append is reported on stderr beside
+   * the stop rather than swallowed.
    */
   "bridge-auto-reviewer-active",
   /**
@@ -722,6 +727,31 @@ export function turnIdOf(params: unknown): string | null {
  */
 export function isAutoReviewNotification(method: string): boolean {
   return method.toLowerCase().includes("autoapprovalreview");
+}
+
+/**
+ * The verdict an auto-review notification states, or `null` (APRV-378).
+ *
+ * Read from a short list of named places rather than by a generic walk, for the
+ * reason {@link effectiveApprovalPolicy} is: this value goes into the log as
+ * another party's decision, and a string picked up from some unrelated
+ * structure would be this runtime putting words in their mouth. `null` is
+ * recorded as an ABSENT verdict, never as a default one.
+ */
+export function autoReviewVerdict(params: unknown): string | null {
+  if (params === null || typeof params !== "object") return null;
+  const top = params as Record<string, unknown>;
+  const holder = top["review"] ?? top["assessment"] ?? top["result"];
+  const nested =
+    holder !== null && typeof holder === "object" ? (holder as Record<string, unknown>) : null;
+  for (const source of [top, nested]) {
+    if (source === null) continue;
+    for (const key of ["decision", "verdict", "outcome"]) {
+      const named = source[key];
+      if (typeof named === "string" && named.length > 0) return named;
+    }
+  }
+  return null;
 }
 
 /**
@@ -1353,6 +1383,32 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       // ends the run wherever it appears, because from here a resolved question
       // and a question nobody asked look the same (APRV-364).
       if (method !== null && isAutoReviewNotification(method)) {
+        // The RECORD first, then the stop (APRV-378). A verdict with nothing
+        // behind it is the shape of claim this project is built against, and
+        // the write is best-effort: it never changes the stop, and a failure to
+        // write is reported beside it rather than swallowed.
+        const recorded = recordPreemptedQuestion(
+          plan.logPath,
+          {
+            source: "codex-auto-reviewer",
+            id: callIdOf(frame.params) ?? "",
+            method,
+            ...(stringField(frame.params, "threadId") === null
+              ? {}
+              : { thread: stringField(frame.params, "threadId") as string }),
+            ...(turnIdOf(frame.params) === null ? {} : { turn: turnIdOf(frame.params) as string }),
+            ...(autoReviewVerdict(frame.params) === null
+              ? {}
+              : { verdict: autoReviewVerdict(frame.params) as string }),
+            detail: "approval codex bridge stopped the session under bridge-auto-reviewer-active",
+          },
+          plan.options,
+        );
+        if (!recorded.ok) {
+          streams.err(
+            `approval: the auto-review record could not be appended (${recorded.code}: ${recorded.message}); the session is still stopped\n`,
+          );
+        }
         finish(
           EXIT_IO,
           `the server sent ${method}, so Codex's own auto-reviewer resolved an approval before this client was asked: ${JSON.stringify(frame.params ?? null)}. A session with a reviewer in front of the gate is one whose silence means nothing, so the run was stopped rather than gating what was left`,

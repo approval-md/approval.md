@@ -1,0 +1,1 @@
+{"command":"gh pr view 469 --json state,files -q '.state + \" files:\" + (.files|length|tostring)'; gh pr merge 469 --merge 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4de5200797f700ce"}

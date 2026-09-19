@@ -1,0 +1,1 @@
+{"command":"sed -n '880,935p' src/cli/hook.ts && echo \"=== adapters ===\" && grep -an \"HARNESS_ADAPTERS\\b\" src/cli/hook.ts | head -3 && grep -an \"interface HarnessAdapter\" -A 40 src/cli/hook-codex.ts src/cli/*.ts 2>/dev/null | head -50","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a337f6cf0d0bbcc80"}
