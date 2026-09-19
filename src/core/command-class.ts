@@ -1176,6 +1176,19 @@ export interface ClassifierContext {
    * which can only ever tighten the answer reached here.
    */
   readRoots?: readonly string[];
+  /**
+   * May a login-shell wrapper be classified by the script it runs (APRV-380)?
+   *
+   * `true` by default, and `false` for exactly one caller: the classifier
+   * itself, recursing into an unwrapped script. That is what keeps the unwrap
+   * ONE LEVEL deep — a shell nested inside the script is the shape the
+   * {@link OPAQUE_BINS} position still covers, and it stays opaque.
+   *
+   * A caller that passes `false` gets the pre-APRV-380 answer, which is the
+   * strictly stricter one: every wrapper refuses. As with every other field
+   * here, forgetting it cannot loosen anything.
+   */
+  unwrapShell?: boolean;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -2612,9 +2625,17 @@ function refineGh(ctx: RuleContext): Refinement {
  * Binaries whose effect lives in a string this classifier will not interpret.
  *
  * A second parser for the same text is a second answer waiting to disagree with
- * the shell's, so these refuse instead. `bash -c "…"`, `eval`, `xargs` and the
- * `-e` interpreters can express anything at all; `sudo` and `env` re-launch
+ * the shell's, so these refuse instead. `eval`, `xargs` and the `-e`
+ * interpreters can express anything at all; `sudo` and `env` re-launch
  * something else with different authority.
+ *
+ * ONE NARROW EXCEPTION since APRV-380, and it is a narrowing of this rule
+ * rather than a hole in it: a segment that is EXACTLY a known shell, one
+ * inline-script flag and one script word is classified by the script, through
+ * this same classifier. No second parser is written and the text is not read a
+ * second way. {@link loginShellScript} states the shape and the reasoning, and
+ * everything outside it — including the same shell with a script file, or a
+ * shell nested inside an unwrapped script — is refused here exactly as before.
  */
 const OPAQUE_BINS: Readonly<Record<string, string>> = {
   bash: "runs a shell script",
@@ -2636,6 +2657,88 @@ const OPAQUE_BINS: Readonly<Record<string, string>> = {
   timeout: "runs another command under a timer",
   time: "runs another command under a timer",
 };
+
+/**
+ * The shells {@link loginShellScript} will unwrap: the six in
+ * {@link OPAQUE_BINS} that run a script.
+ *
+ * The other opaque binaries stay opaque under every shape. `eval`, `xargs` and
+ * the `-e` interpreters build their text from somewhere this file cannot see;
+ * `sudo`, `doas`, `env`, `nohup`, `exec`, `source`, `.`, `watch`, `timeout` and
+ * `time` re-launch something else, with different authority or under a timer,
+ * and what they re-launch is an argv rather than a script.
+ */
+const UNWRAPPABLE_SHELLS: ReadonlySet<string> = new Set([
+  "bash",
+  "sh",
+  "zsh",
+  "dash",
+  "ksh",
+  "fish",
+]);
+
+/**
+ * The inline-script flags a wrapper may carry: `-c`, with any run of `l` and
+ * `i` before it (APRV-380).
+ *
+ * `-lc` is the shape the 2026-09-18 probe recorded on every Codex exec request.
+ * `c` must be LAST, because that is the letter that takes the next word as its
+ * argument, and a combination where it is not last is one whose reading depends
+ * on the shell's own option parser. That is a shape this rule declines to guess
+ * at, so it stays opaque.
+ */
+const INLINE_SCRIPT_FLAG = /^-[li]*c$/u;
+
+/**
+ * The script a LOGIN-SHELL WRAPPER runs, when the segment is exactly one
+ * (APRV-380), or `null`.
+ *
+ * ## Why this is not the second parser the table above refuses
+ *
+ * {@link OPAQUE_BINS} states the position this narrows: a second parser for the
+ * same text is a second answer waiting to disagree with the shell's. The hazard
+ * that names is reading shell text a SECOND WAY. This is not that. When the
+ * argv is exactly `[shell, -lc, script]` and nothing else, the script is the
+ * text a Claude Code `Bash` call hands this classifier directly, and what
+ * happens to it here is what happens to that: the same lexer, the same segment
+ * rules, the same table. No new parser is written, and the text is not read a
+ * second way — it is read the first way, by the only reader there is.
+ *
+ * ## The line, and it is exact
+ *
+ * Three words, no more: a known shell, one inline-script flag, one script. Any
+ * of these keeps the wrapper opaque, because each is a shape whose effect
+ * depends on something the argv alone does not say:
+ *
+ * - extra words (a script FILE, `--`, an option this rule does not model);
+ * - an assignment prefix, which changes the environment the script runs in;
+ * - a redirection on the wrapper, which is the outer shell's and not the
+ *   script's;
+ * - a substitution in any of the three words, whose effect happens before the
+ *   shell even starts;
+ * - a nested shell inside the script, refused by {@link ClassifierContext} when
+ *   the recursion runs (the inner classification unwraps nothing).
+ *
+ * The BINDING does not move. `cli/hook.ts` binds the outer command and argv
+ * exactly as APRV-362 built them; what this changes is only which text is
+ * classified, and the classes are additional evidence about bytes that are
+ * bound elsewhere and unchanged.
+ */
+export function loginShellScript(segment: LexSegment): string | null {
+  if (segment.opaque !== null) return null;
+  if (segment.redirects.length > 0) return null;
+  if (segment.words.length !== 3) return null;
+  const [shell, flag, script] = segment.words as [LexWord, LexWord, LexWord];
+  if (shell.substitutions.length > 0) return null;
+  if (flag.substitutions.length > 0) return null;
+  if (script.substitutions.length > 0) return null;
+  const base = pathSegments(shell.text).slice(-1)[0] ?? shell.text;
+  if (!UNWRAPPABLE_SHELLS.has(base)) return null;
+  if (!INLINE_SCRIPT_FLAG.test(flag.text)) return null;
+  // An empty script runs nothing, and `classifyCommand` answers `unclassified`
+  // for an empty command. Leaving it wrapped keeps that answer the wrapper's.
+  return script.text.trim().length === 0 ? null : script.text;
+}
 
 /** Interpreters that are opaque only when handed inline source. */
 const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
@@ -3220,6 +3323,29 @@ export function classifyCommand(
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
   for (const segment of lexed.segments) {
+    // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
+    // `loginShellScript` states the exact shape and why this is not the second
+    // parser `OPAQUE_BINS` refuses; the inner classification is run with
+    // `unwrapShell: false`, so a shell nested inside the script stays opaque
+    // and the recursion is one level deep by construction.
+    const script = context.unwrapShell === false ? null : loginShellScript(segment);
+    if (script !== null) {
+      const inner = classifyCommand(script, protectedPaths, { ...context, unwrapShell: false });
+      if (!inner.ok) {
+        // The refusal is the INNER one, reported against the inner segment: an
+        // operator told `hook-opaque` for `zsh` learns nothing, and one told
+        // which part of their script could not be read can rewrite it.
+        return inner;
+      }
+      // Spliced rather than collapsed into one segment: a script is a command
+      // line and its parts have their own classes, which is the thing a
+      // one-class answer would lose.
+      for (const found of inner.segments) {
+        segments.push(found);
+        if (!classes.includes(found.class)) classes.push(found.class);
+      }
+      continue;
+    }
     const outcome = classifySegment(segment, protectedPaths, context);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };

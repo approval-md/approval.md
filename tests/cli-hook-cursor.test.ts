@@ -170,7 +170,10 @@ test("Shell uses the same classifier as Bash, and Bash itself is not a gated Cur
   );
   const afterLs = rawLog(dir);
 
-  const opaque = runCli(["hook", "cursor"], dir, shellEvent("bash -c 'git push --force'"));
+  // `xargs` since APRV-380: a bare `bash -c '…'` is classified by its script
+  // now, on every adapter, so the opaque example has to be a construct whose
+  // effect the words genuinely do not state.
+  const opaque = runCli(["hook", "cursor"], dir, shellEvent("xargs git push --force"));
   assert.equal(verdictOf(opaque).permission, "deny");
   assert.match(verdictOf(opaque).reason, /^hook-opaque: /u);
 

@@ -892,9 +892,19 @@ test("arithmetic expansion is opaque", () => {
 });
 
 for (const opaque of [
-  "bash -c 'git push --force'",
+  // APRV-380 moved the three-word inline-script shape out of this list and into
+  // the unwrap below. What stays here is every wrapper whose effect the argv
+  // does not say: a script FILE, an extra word, a redirection, an assignment
+  // prefix, and a shell nested inside an unwrapped script.
   "sh script.sh",
-  "zsh -c ls",
+  "zsh -l script.sh",
+  "bash -lc 'git push --force' extra",
+  "bash -lc 'git push --force' > out.txt",
+  "FOO=1 bash -lc 'git push --force'",
+  "bash -lc \"bash -lc 'git push --force'\"",
+  // `c` is not last, so which word the shell takes as its script depends on its
+  // own option parser. This rule declines to guess.
+  "bash -cl 'git push --force'",
   "eval $PLAN",
   "source .env",
   ". ./setup.sh",
@@ -1402,12 +1412,72 @@ test("the non-secret runtime variables stay ordinary reads", () => {
 test("an opaque relauncher stays opaque even over credential material", () => {
   // `sudo cat .approval/env` must not be softened from a refusal into a
   // request: the credential check sits BELOW the opaque table on purpose.
-  for (const command of ["sudo cat .approval/env", "bash -c 'cat .approval/vault.enc'"]) {
+  for (const command of ["sudo cat .approval/env", "xargs cat .approval/vault.enc"]) {
     const result = classifyCommand(command);
     assert.equal(result.ok, false, command);
     if (result.ok) continue;
     assert.equal(result.code, "opaque");
   }
+  // And the unwrap does not soften it either (APRV-380): a login shell reading
+  // the vault is classified by what the script does, which is the credential
+  // class rather than a refusal, and the class is the stricter statement.
+  const unwrapped = classifyCommand("bash -lc 'cat .approval/vault.enc'");
+  assert.equal(unwrapped.ok, true);
+  if (!unwrapped.ok) return;
+  assert.deepEqual(unwrapped.classes, ["account.credential"]);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-380: the login-shell unwrap
+// ---------------------------------------------------------------------------
+
+test("APRV-380: a login-shell wrapper is classified by the script it runs", () => {
+  // The shape the 2026-09-18 Codex probe recorded on every exec request.
+  const pushed = classifyCommand("/bin/zsh -lc 'git push origin main'");
+  assert.ok(pushed.ok);
+  assert.deepEqual(pushed.classes, ["vcs.push.main"]);
+  // The SEGMENTS are the script's own, spliced in: a script is a command line,
+  // and a one-class answer would lose what its parts do.
+  assert.deepEqual(
+    pushed.segments.map((segment) => segment.text),
+    ["git push origin main"],
+  );
+  assert.equal(pushed.segments[0]?.rule, "git-push-main");
+
+  const compound = classifyCommand("bash -lc 'cat README.md && rm -rf build'");
+  assert.ok(compound.ok);
+  assert.deepEqual(compound.classes, ["read.shell", "files.write.workspace"]);
+  assert.equal(compound.segments.length, 2);
+});
+
+test("APRV-380: every unwrappable shell and every inline-script flag, and only those", () => {
+  for (const shell of ["bash", "sh", "zsh", "dash", "ksh", "fish", "/bin/zsh", "/usr/bin/env"]) {
+    for (const flag of ["-c", "-lc", "-ic", "-lic", "-ilc"]) {
+      const result = classifyCommand(`${shell} ${flag} 'git push origin main'`);
+      // `env` is on the opaque table for a different reason (it re-launches
+      // something else with a modified environment) and is not a shell here.
+      const unwrappable = shell !== "/usr/bin/env";
+      assert.equal(result.ok, unwrappable, `${shell} ${flag}`);
+    }
+  }
+});
+
+test("APRV-380: an unreadable script refuses with the INNER reason, not the wrapper's", () => {
+  const result = classifyCommand("bash -lc 'eval $PLAN'");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "opaque");
+  // An operator told `zsh runs a shell script` learns nothing; one told which
+  // part of their own script could not be read can rewrite it.
+  assert.equal(result.segment, "eval $PLAN");
+  assert.match(result.detail, /eval/u);
+});
+
+test("APRV-380: a caller may turn the unwrap off, and that answer is the stricter one", () => {
+  const off = classifyCommand("bash -lc 'git push origin main'", [], { unwrapShell: false });
+  assert.equal(off.ok, false);
+  if (off.ok) return;
+  assert.equal(off.code, "opaque");
 });
 
 test("classifyCommand routes the policy's paths to policy.edit", () => {

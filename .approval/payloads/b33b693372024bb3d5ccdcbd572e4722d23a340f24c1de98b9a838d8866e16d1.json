@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && gh pr view 472 --json state --jq .state && approval log advance --pr 2>&1 | tail -6","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

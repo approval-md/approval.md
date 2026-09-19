@@ -167,7 +167,9 @@ test("an allow round-trips onto the pinned SDK return shape", () => {
 
 test("a deny round-trips onto the pinned SDK return shape, reason included", () => {
   const dir = ready();
-  const run = runCli(["hook", "claude-code"], dir, stdinFor("bash -c 'git push --force'"));
+  // `xargs` since APRV-380: a bare `bash -c '…'` is classified by its script
+  // now, so the pinned deny needs a construct that is still unreadable.
+  const run = runCli(["hook", "claude-code"], dir, stdinFor("xargs git push --force"));
   assert.equal(run.code, 0, `a deny is a verdict, not an error exit: ${run.stderr}`);
   const printed = JSON.parse(run.stdout) as Record<string, unknown>;
   assert.deepEqual(printed, fixture("sdk-return-deny"));

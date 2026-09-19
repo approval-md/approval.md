@@ -1154,6 +1154,51 @@ const commandClassVectors = [
     input: { command: "mywrapper codex exec x" },
     control: true,
   },
+  // --- the login-shell unwrap (APRV-380) -------------------------------------
+  //
+  // The shape every Codex exec request arrives in. A classifier that refused it
+  // is fail-closed and useless against real traffic; one that unwraps more than
+  // this is the second parser the opaque position exists to prevent. The line
+  // is these six vectors.
+  {
+    id: "login-shell-inline-script-is-the-inner-command",
+    description:
+      "exactly a known shell, one inline-script flag and one script: the SCRIPT is classified, through the same classifier and the same segment rules, so a login shell around a push is a push",
+    input: { command: "bash -c 'git push origin main'" },
+  },
+  {
+    id: "login-shell-path-and-login-flags",
+    description:
+      "the shell may be named by path and the flag may carry login and interactive letters, as the observed Codex shape does",
+    input: { command: "/bin/zsh -lc 'git push origin main'" },
+  },
+  {
+    id: "login-shell-compound-script-splices-its-segments",
+    description:
+      "a script is a command line: its segments are spliced in, and the classes are their union rather than one class standing for all of them",
+    input: { command: "bash -lc 'cat README.md && rm -rf build'" },
+  },
+  {
+    id: "login-shell-extra-word-stays-opaque",
+    description:
+      "a fourth word is an option this rule does not model, so the wrapper stays opaque: what runs is no longer stated by the words",
+    input: { command: "bash -c 'git push origin main' extra" },
+    control: true,
+  },
+  {
+    id: "login-shell-script-file-stays-opaque",
+    description:
+      "a script FILE rather than an inline string stays opaque: the effect is in the file and the file is not in the words",
+    input: { command: "bash script.sh" },
+    control: true,
+  },
+  {
+    id: "login-shell-nested-shell-stays-opaque",
+    description:
+      "the unwrap is ONE level deep: a shell nested inside an unwrapped script is the shape the opaque position still covers, and the refusal names the inner segment",
+    input: { command: "bash -c \"sh -c 'git push origin main'\"" },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -1908,7 +1953,24 @@ const SUITES = [
     // `unclassified` and is now a class — a refusal becoming an answer, which
     // is the direction a taxonomy grows in. An implementation that passed
     // 1.1.0 fails 1.2.0 only by not knowing the family.
-    vectors_version: "1.2.0",
+    // 1.3.0 (APRV-380): a MINOR bump, and the reasoning is worth stating
+    // because the behaviour change behind it is larger than the diff. Six new
+    // `login-shell-*` vectors pin the narrow unwrap: a segment that is exactly
+    // a known shell, one inline-script flag and one script is classified by
+    // the SCRIPT, and everything outside that shape stays opaque.
+    //
+    // Why MINOR and not MAJOR, asked and answered. No existing expectation in
+    // this file moves: the suite was born with the quoting vectors, gained
+    // `git push` and the harness family, and has never carried a shell
+    // wrapper. The MAJOR precedent in this repository is
+    // `policy-resolution` 2.0.0, where the suite had STATED a general rule in
+    // its own `algorithm` line that a later task made wrong; nothing in this
+    // suite's algorithm or description says a shell refuses. So an
+    // implementation that passed 1.2.0 fails 1.3.0 only by not knowing a
+    // shape the classifier has gained, which is what a minor bump says. What
+    // DID move is outside this file, in the same direction 1.2.0's harness
+    // family moved: a refusal became an answer.
+    vectors_version: "1.3.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

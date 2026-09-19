@@ -1,0 +1,1 @@
+{"command":"gh secret list 2>&1 | head -5; echo ===workflows; ls .github/workflows/; echo ===307notes; backlog task view APRV-307 --plain | sed -n '/^Implementation Notes/,$p' | tail -12","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
