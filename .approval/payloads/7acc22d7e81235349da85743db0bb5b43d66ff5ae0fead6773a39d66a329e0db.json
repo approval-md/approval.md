@@ -1,0 +1,1 @@
+{"command":"grep -rn \"short-hashes\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a337f6cf0d0bbcc80"}

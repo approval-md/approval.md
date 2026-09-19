@@ -34,6 +34,7 @@ import { planPrune, prunePayloads } from "../src/daemon/prune.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { payloadStoreCensus } from "../src/core/payload-census.js";
+import { inForcePolicyText } from "../src/core/policy-proposal.js";
 import { payloadPath, payloadStoreDirFor, storePayload } from "../src/core/payload-store.js";
 import {
   decide,
@@ -471,14 +472,56 @@ test("the census counts pruned-by-log, orphans, and files awaiting removal", () 
   const orphan = storePayload(unit.storeDir, { residue: "head-moved" });
   assert.equal(orphan.ok, true);
 
+  // Three files since APRV-356: the request's bound payload, the orphan, and
+  // the ATTESTED POLICY TEXT the attestation now stores. The third is bound by
+  // a record that carries no action key, so the census counts it as a file and
+  // not as an orphan, and the pruner treats it as live forever.
   const before = payloadStoreCensus(eventsOf(unit), unit.storeDir);
-  assert.deepEqual(before, { files: 2, pruned: 0, orphans: 1, awaitingRemoval: 0 });
+  assert.deepEqual(before, { files: 3, pruned: 0, orphans: 1, awaitingRemoval: 0 });
 
   prune(unit, at(200));
   const after = payloadStoreCensus(eventsOf(unit), unit.storeDir);
-  assert.equal(after.files, 0);
+  assert.equal(after.files, 1, "the policy in force is still readable beside the log");
   assert.equal(after.pruned, 2, "the log keeps saying what the store no longer holds");
   assert.equal(after.orphans, 0);
+  assertClean(unit);
+});
+
+test("APRV-356: retention never removes the payload holding the policy in force", () => {
+  // The whole point of storing the attested text is that it stays recoverable,
+  // so the pruner must never take it. It does not, and not by a rule written
+  // for it: the binding is on a `policy.updated`, which carries no action key,
+  // and `planPrune` treats a binding it cannot attribute to an action as live
+  // forever. That is the fail-closed direction the pruner already had, and this
+  // case pins that it covers the policy text.
+  const unit = setup("1h");
+  settled(unit, "reject", at(2));
+
+  const records = eventsOf(unit);
+  const attestation = records.find(
+    (record) =>
+      record.event === "policy.updated" &&
+      typeof (record.payload ?? {})["payload_hash"] === "string",
+  );
+  assert.ok(attestation !== undefined, "the fixture's attestation bound no text");
+  const bound = String((attestation.payload ?? {})["payload_hash"]);
+  const held = join(unit.storeDir, `${bound}.json`);
+  assert.equal(existsSync(held), true);
+
+  // Far past any retention window, and with every other payload released.
+  prune(unit, "2099-01-01T00:00:00.000Z");
+  assert.equal(existsSync(held), true, "the policy in force was pruned");
+  assert.equal(
+    prunedEvents(unit).some(
+      (record) => ((record.payload ?? {}) as Record<string, unknown>)["sha256"] === bound,
+    ),
+    false,
+    "the log claims the policy text was pruned",
+  );
+
+  // And it is still recoverable, which is the property that matters.
+  const recovered = inForcePolicyText(eventsOf(unit), unit.storeDir);
+  assert.equal(recovered.ok, true, recovered.ok ? "" : recovered.reason);
   assertClean(unit);
 });
 

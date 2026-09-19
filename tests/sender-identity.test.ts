@@ -28,7 +28,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
+import { appendAttestation, policyFileHash } from "../src/core/attest.js";
 import {
   recordChannelDecision,
   type ChannelDecision,
@@ -59,7 +59,7 @@ import {
   senderRefusalLine,
   type ChannelSender,
 } from "../src/core/sender-identity.js";
-import type { EventRecord } from "../src/core/log.js";
+import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { register, request } from "./clock-adapters.js";
 import {
   assertClean,
@@ -1083,11 +1083,69 @@ test("25. with no mapping on either side, an attestation tap is byte-for-byte to
   assertClean(w.unit);
 });
 
-test("26. in-force bytes that cannot be recovered refuse a mapping-bearing amendment", () => {
-  // The COMMON path, and the reason the rule has a second half: a policy
-  // attested at a terminal stores nothing, so its bytes are gone and the
-  // runtime cannot tell whether this amendment touches the mapping.
+test("26. APRV-356: an amendment that REMOVES the mapping is decided against the in-force mapping", () => {
+  // The APRV-324 residual, and the exact shape the task named: with the
+  // in-force bytes unrecoverable, an amendment that removes a sender mapping is
+  // indistinguishable from a policy that never had one, so the phone tap fell
+  // back to refusing. A terminal attestation now binds its own bytes, so the
+  // in-force policy is RECOVERED and read — it maps Carter — and the tap from
+  // Carter's account is attributed to Carter, decided under the rules he is
+  // actually named by.
+  //
+  // This assertion fails on the old behaviour, which is the point of it: the
+  // whole chain here is attested at a terminal and never from a phone.
+  const w = attestedFromTerminal(POLICY_MAPPED, POLICY_UNMAPPED);
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.ok(result.outcome.ok, JSON.stringify(result.outcome));
+  assert.equal(result.outcome.record.actor, "human:carter");
+  assert.equal(payloadOf(result.outcome.record)["sender_source"], "policy");
+  assert.equal(attestations(w.unit).length, 2);
+  assertClean(w.unit);
+});
+
+test("26a. the bootstrap refusal still stands, and now says WHY rather than that it cannot tell", () => {
+  // The other direction, unchanged in verdict and changed in reason. An
+  // amendment that INTRODUCES the mapping cannot be signed for by the mapping
+  // it introduces, whatever the runtime can recover; before APRV-356 the
+  // refusal said the in-force bytes were unrecoverable, and now it says the
+  // policy in force maps nobody on this channel, which is a fact it read.
   const w = attestedFromTerminal(POLICY_UNMAPPED, POLICY_MAPPED);
+
+  const result = tapAttestation(w, CARTER_ID);
+  assert.equal(result.outcome.ok, false, JSON.stringify(result.outcome));
+  assert.equal(
+    result.outcome.ok === false ? result.outcome.code : "",
+    "attest-requires-terminal",
+  );
+  assert.match(
+    result.outcome.ok === false ? result.outcome.message : "",
+    /the policy in force maps no telegram sender/u,
+  );
+  assert.equal(attestations(w.unit).length, 1);
+  assertClean(w.unit);
+});
+
+test("26b. a chain attested BEFORE APRV-356 keeps the documented fail-closed fallback", () => {
+  // A `policy.updated` with no `payload_hash` is what every attestation looked
+  // like until this change, and logs full of them exist. It is written through
+  // the REAL append path, with the payload the old verb composed, so what is
+  // under test is a record the runtime actually wrote rather than a fabricated
+  // one. Its bytes are unrecoverable, and the rule falls back to refusing.
+  fixtureCounter += 1;
+  const unit = newScenario(scratch.root, POLICY_UNMAPPED);
+  const legacy = appendEvent(
+    unit.logPath,
+    {
+      ts: at(0),
+      event: "policy.updated",
+      actor: LISTENER,
+      payload: { policy_path: "APPROVAL.md", sha256: policyFileHash(unit.policyPath) },
+    },
+    unit.options,
+  );
+  assert.equal(legacy.ok, true, JSON.stringify(legacy));
+  const w = proposeAmendment(unit, POLICY_MAPPED);
 
   const result = tapAttestation(w, CARTER_ID);
   assert.equal(result.outcome.ok, false, JSON.stringify(result.outcome));
