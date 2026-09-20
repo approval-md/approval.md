@@ -1,0 +1,1 @@
+{"command":"gh release list --limit 3 2>&1 | head -4; /usr/bin/grep -n -i \"gh release\\|softprops\\|action-gh-release\\|releases\" .github/workflows/publish.yml .github/workflows/release-candidate.yml | head -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

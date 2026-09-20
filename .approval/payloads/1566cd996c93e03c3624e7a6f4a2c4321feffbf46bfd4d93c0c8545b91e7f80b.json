@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"APPROVAL\" /Users/carter/.zshrc /Users/carter/.zprofile /Users/carter/.zshenv 2>/dev/null | sed 's|=.*|=…|' | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

@@ -1,0 +1,1 @@
+{"command":"git fetch origin 2>&1 | tail -1; git log --oneline origin/main -1; gh pr merge 507 2>&1 | tail -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

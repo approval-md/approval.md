@@ -1,0 +1,1 @@
+{"command":"ls && echo \"--- HANDOVER ---\" && ls HANDOVER* 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa387c74a930e8b72"}

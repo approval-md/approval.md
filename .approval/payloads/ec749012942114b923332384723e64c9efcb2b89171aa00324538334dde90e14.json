@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'package.json' tests/*.ts | /usr/bin/grep -i 'version' | head -20; echo \"=== CHANGELOG guards ===\"; /usr/bin/grep -rln 'CHANGELOG' tests/*.ts scripts/*.mjs | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

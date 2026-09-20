@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"examples/\" tests/*.ts | /usr/bin/grep -i \"import(\" | head -20; echo \"=== provision check ===\"; /usr/bin/grep -n \"check\\|CHECKS\\|function \" examples/demo-provision.mjs | head -80","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a614fc85f4efb589b"}

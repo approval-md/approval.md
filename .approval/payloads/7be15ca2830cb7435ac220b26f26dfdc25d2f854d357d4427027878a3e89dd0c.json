@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'APPROVALD_VERSION\\|wordmark.*VERSION\\|VERSION.*package' tests/*.ts | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

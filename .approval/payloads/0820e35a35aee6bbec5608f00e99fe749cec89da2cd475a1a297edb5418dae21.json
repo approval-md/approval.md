@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && git fetch -q origin && git log --oneline -1 f4ebc90c698c7e8d410b184cda73de228d46ec43 && git status --short | /usr/bin/grep -v '^ M .approval\\|^?? .approval\\|backlog/tasks/aprv-199\\|backlog/tasks/aprv-306' | head -3; git tag -l 'v0.*'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

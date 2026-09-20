@@ -1,0 +1,1 @@
+{"command":"git push 2>&1 | tail -3 && echo \"=== PR ===\" && gh pr view 504 --json state,autoMergeRequest,mergeable,files --template 'state={{.state}} automerge={{.autoMergeRequest}} mergeable={{.mergeable}}{{\"\\n\"}}{{range .files}}{{.path}} +{{.additions}}/-{{.deletions}}{{\"\\n\"}}{{end}}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a72dfdbafe00c776f"}
