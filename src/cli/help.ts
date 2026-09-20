@@ -1611,11 +1611,11 @@ classifies policy.core there, as .cursor/hooks.json does in a repo):
   hooks_auto_accept: true
   hooks:
     pre_tool_call:
-      - command: "approval hook hermes --dir /path/to/repo"
+      - command: "approval hook hermes --dir /path/to/repo --timeout 4m"
         timeout: 300
         fail_closed: true
     post_tool_call:
-      - command: "approval hook hermes --dir /path/to/repo"
+      - command: "approval hook hermes --dir /path/to/repo --timeout 4m"
         timeout: 300
 
 THE EVENT IS A KEY, NOT AN "event:" FIELD, and each entry is a list item under

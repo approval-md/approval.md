@@ -155,6 +155,16 @@ write any of them could write itself out of the gate, and the allowlist is the
 sharpest of the four: an agent that could edit it could pre-consent itself to a
 hook command of its own.
 
+**The match is on the directory NAME, and that is a limit to know about.** The
+classifier is pure and reads no environment, so it cannot know what `HERMES_HOME`
+points at; it recognises the organ by a `.hermes` path segment. A home directed
+elsewhere (`--hermes-home /srv/tenant-7/home`, say) holds the same `config.yaml`
+and the same allowlist, and a write to it classifies as an ordinary workspace or
+out-of-scope write rather than `policy.core`. Keep the last segment of every
+`HERMES_HOME` spelled `.hermes` (`/srv/tenant-7/.hermes`) and the organ is
+recognised wherever it sits; name it anything else and this protection is not
+there. The probe runbook below follows that rule for the same reason.
+
 `$HERMES_HOME/.env` and `$HERMES_HOME/auth.json` are a different class again:
 `account.credential`, human-only, because what leaves the machine there is the
 secret rather than the rule. That is the same split `.approval/env` has.
@@ -311,8 +321,17 @@ Carter runs it; no agent runs `hermes`.
 **A live model is needed first**, because the probe measures TOOL CALLS and only a
 model makes them. If the install has no provider configured:
 
+The install of 2026-09-20 was directed at `/Users/carter/dev/hermes/home`, whose
+last segment is not `.hermes`, so the classifier would not recognise that home as
+a gate organ (see "Installing it"). `--skip-setup` left it all but empty, so
+rename it once before anything else:
+
 ```sh
-export HERMES_HOME=/Users/carter/dev/hermes/home
+mv /Users/carter/dev/hermes/home /Users/carter/dev/hermes/.hermes
+```
+
+```sh
+export HERMES_HOME=/Users/carter/dev/hermes/.hermes
 hermes setup            # the wizard: pick a provider and paste a key
 hermes setup --portal   # or Nous Portal specifically
 hermes model            # change the provider or model later
@@ -329,7 +348,7 @@ from `hermes model`'s list rather than from this page. Keys live in
 
 ```sh
 node scripts/probes/hermes-hook.mjs setup \
-  --home /Users/carter/dev/hermes/home \
+  --home /Users/carter/dev/hermes/.hermes \
   --captures /Users/carter/dev/hermes/probe
 ```
 
