@@ -43,14 +43,10 @@ email held at the gate, then delivered to the inbox after the tap, with
    ```
 
    Add human values to inform agent judgement across the gate. Specify what
-   you love, like, dislike, and how you give feedback. The `yaml
-   approval-policy` block is the only thing that changes what an agent may do.
-   The `yaml approval-values` block is guidance the agent reads; it widens
-   nothing and narrows nothing.
+   you love, like, dislike, and how you give feedback.
 4. **Sign it.** `approval setup identity`, then
    `approval policy attest --as human:<you>`. The gate only functions while the
-   latest policy has been attested. Edit the file and it is inert until you
-   attest again.
+   latest policy has been attested.
 5. **Turn it on.** `eval "$(approval env)"` then `approval up`. Run
    `approval setup channel telegram` first if you want the tap on your phone.
 6. **Harness-agnostic.** Put the gate in front of whichever agent you run. Each

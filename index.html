@@ -279,7 +279,6 @@
   .logs::-webkit-scrollbar-thumb,.cmd pre::-webkit-scrollbar-thumb{
     background:var(--border-strong);border-radius:4px;
   }
-  .cap-note{color:var(--muted);font-size:12px;margin:12px 0 0;max-width:70ch}
   .lbl{
     font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:var(--muted);
     font-family:var(--mono);line-height:1;
@@ -558,16 +557,15 @@ classes:
 ```
 
 ```yaml approval-values
-version: 1
-love:    [honest opinions on the work, small diffs with one idea]
+version: "0.2"
+love:    [honest thoughts on the work, small diffs with one idea]
+like:    [success reported first, say when you are stuck]
 dislike: [confident documentation that is stale]
-wants:   [say when you are stuck rather than guessing]
-responds: I read the journal after a session and react on the samples.
+communication: I read the journal after a session and react on the samples.
 ```</pre>
             </div>
           </div>
         </div>
-        <p class="cap-note">The <code>yaml approval-policy</code> block is the only thing that changes what an agent may do. The <code>yaml approval-values</code> block is guidance the agent reads; it widens nothing and narrows nothing.</p>
       </li>
 
       <li>
@@ -577,7 +575,7 @@ responds: I read the journal after a session and react on the samples.
 approval policy attest --as human:&lt;you&gt;</code></pre>
           <button class="copy" type="button" data-copy="cmd-step4" aria-label="Copy the identity and attest commands">Copy</button>
         </div>
-        <p>The gate only functions while the latest policy has been attested. Edit the file and it is inert until you attest again.</p>
+        <p>The gate only functions while the latest policy has been attested.</p>
       </li>
 
       <li>
