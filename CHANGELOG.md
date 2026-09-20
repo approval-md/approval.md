@@ -4,7 +4,28 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
+A released version's heading is exactly `## X.Y.Z — YYYY-MM-DD`: a canonical
+stable version, an em dash, an ISO date. That is an interface, not a habit.
+`publish.yml` reads the matching section and publishes it as the body of the
+GitHub Release for the tag (`scripts/release-notes.mjs`, APRV-396), so a tag
+whose section is missing, undated or duplicated fails the release run before
+anything reaches npm. `## Unreleased` carries no version, which is what keeps
+it from ever being published as a release body; dating it is the last edit
+before a tag.
+
 ## Unreleased
+
+- **The Releases page fills itself from the changelog (APRV-396).** After a
+  successful publish, `publish.yml` creates the GitHub Release for the tag with
+  the matching changelog section as its body, the title `approval-md X.Y.Z`, and
+  the CI tarball plus its `sha256` file attached, so the Releases page and the
+  registry can be compared by hand. `scripts/release-notes.mjs` extracts the
+  section and refuses when the heading is missing, undated, duplicated or empty;
+  that check also runs in the verify job, ahead of `npm publish`, so a tag with
+  no notes never reaches the registry. A rerun updates the one Release rather
+  than duplicating it. The published manifest now also carries
+  `gitHead` (the release commit), which was `null` for 0.2.0 and 0.3.0 because
+  the publish job publishes a downloaded tarball with no repository beside it.
 
 - **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398).**
   The sixth harness, and the first whose harness documents a **fail-closed** hook:

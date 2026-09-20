@@ -104,6 +104,34 @@ supplies `NPM_TOKEN` or `NODE_AUTH_TOKEN`, and retire the old bypass-2FA token.
 These are prerequisites, not changes made by this document or proof supplied by
 workflow files. Agents do not inspect or delete credentials.
 
+The GitHub Release is no longer a hand ceremony (APRV-396). After the publish
+job succeeds, a third job creates the Release for the tag: the body is the
+`CHANGELOG.md` section whose heading matches the version, the title is
+`approval-md X.Y.Z`, `--verify-tag` binds it to the existing remote tag, and the
+CI tarball is attached as `approval-md-X.Y.Z.tgz` beside a `sha256` file, so the
+Releases page and the registry can be compared by hand. That job holds
+`contents: write` and nothing else, and a rerun edits the one Release rather
+than duplicating it.
+
+The changelog is therefore part of the release contract. A released heading reads
+`## X.Y.Z — YYYY-MM-DD` exactly (canonical version, em dash, ISO date), and
+`scripts/release-notes.mjs` refuses with a named code when the section is
+missing (`no-section`), still undated (`undated-heading`), duplicated
+(`duplicate-section`) or empty (`empty-section`). The same check runs in the
+verify job ahead of the locked install, so a tag whose notes are not written
+fails the run while the registry is still untouched. `## Unreleased` carries no
+version and can never match a tag: dating that heading is the last edit before
+the tag. Run `node scripts/release-notes.mjs --check` before tagging to see what
+the workflow will see, and `node scripts/release-notes.mjs X.Y.Z` to read the
+body it will publish.
+
+The same verify job now also binds the release commit into the published
+manifest (`npm pkg set gitHead=$RELEASE_SHA` before `npm pack`, asserted again
+inside the tarball). Registry `gitHead` was `null` for 0.2.0 and 0.3.0 because
+the publish job publishes a downloaded tarball with no repository beside it;
+provenance already bound the commit, and now the ordinary metadata says it too.
+This changes the published bytes' metadata only, no source file in the package.
+
 Keep main fixed until the publish workflow's identity binding passes. Do not
 move or delete a failed immutable release tag. Read back the exact npm version,
 inspect provenance, install it in a clean directory, and verify its CLI and
