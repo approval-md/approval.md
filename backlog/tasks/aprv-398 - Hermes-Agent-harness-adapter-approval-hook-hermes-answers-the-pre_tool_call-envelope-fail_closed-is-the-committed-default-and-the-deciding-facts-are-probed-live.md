@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-hermes'
 created_date: '2026-09-20 07:52'
-updated_date: '2026-09-20 09:26'
+updated_date: '2026-09-20 09:28'
 labels:
   - hermes
   - hook
@@ -164,6 +164,8 @@ FILES. New: src additions are all in place rather than new files, so the new fil
 FOLLOW-UPS FILED: APRV-399 the Agent Village Hermes skill, APRV-400 the Python plugin form of the adapter, APRV-401 the script-digest payload finding. All three are referenced from the register entry Next steps, which was written after they existed rather than before.
 
 Orchestrator review (Fable, 2026-09-20), three fixes before the PR. (1) The verb registry entry said the deny was always at exit 0 while the code and every other doc say exit 2; the text and the exit_codes table now match the code. (2) The help text's own YAML block omitted the --timeout 4m its prose calls mandatory; added on both entries, matching docs/hermes-hook.md. (3) The classifier recognises the Hermes organ by a .hermes path segment and reads no environment, so a HERMES_HOME whose last segment is spelled otherwise (Carter's install at dev/hermes/home) is not protected as policy.core; documented as a limit in docs/hermes-hook.md under Installing it, and the probe runbook now begins by renaming that home to dev/hermes/.hermes and exporting HERMES_HOME accordingly. Verification after the fixes: build, typecheck and lint exit 0; the seventeen-suite targeted matrix passes except one pre-existing environmental failure in cli-instructions (better-sqlite3 in this worktree is compiled for an older Node ABI; unrelated to the diff, CI on Node 22 is the truth); approval hook hermes --help prints the timeout; classify answers harness.launch.hermes for hermes, read.file.out_of_scope for a read of the home config, and policy.core for a write to it.
+
+PR 510 opened 2026-09-20 with the merge armed (auto-merge enabled, merge queue). Filings APRV-399, 400 and 401 ride it.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
