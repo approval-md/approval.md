@@ -98,6 +98,7 @@ import {
 } from "../core/env-file.js";
 import { readTaskFile } from "../core/frontmatter.js";
 import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instance.js";
+import { describeOwners, otherOwnersOf, ownedBot } from "../core/channel-owner.js";
 import type { EventRecord } from "../core/log.js";
 import { checkLogAnchor } from "./log-anchor.js";
 import { checkLogCheckpoints, checkpointPolicyOf } from "../core/checkpoint.js";
@@ -437,7 +438,32 @@ function redact(text: string, token: string): string {
  * operator to set a variable their policy never mentions is the failure mode
  * this parameter removes.
  */
-async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<DoctorCheck> {
+/**
+ * Who owns the bot this row is about (APRV-390), as one clause.
+ *
+ * Read from the two ownership records and never from the network: doctor's
+ * `getMe` answers WHICH bot, and this answers WHOSE. An instance that has
+ * never started a listener has no record and gets no clause, because "nothing
+ * has claimed it yet" is a state and printing it on every row would make the
+ * real finding — two instances on one bot — harder to see.
+ */
+function ownershipClause(logPath: string, botId: string, apiBase: string): string {
+  const mine = ownedBot(logPath, "telegram");
+  const others = otherOwnersOf(logPath, botId, apiBase);
+  if (others.length > 0) {
+    return `; ALSO claimed on this machine by ${describeOwners(others)}, which is two gates on one bot`;
+  }
+  if (mine !== null && mine.botId === botId) {
+    return `; owned by this instance (${mine.instanceHome}, instance ${mine.instanceId})`;
+  }
+  return "";
+}
+
+async function checkTelegram(
+  apiBase: string,
+  load: PolicyLoadResult,
+  logPath: string,
+): Promise<DoctorCheck> {
   const tokenEnv = telegramTokenEnvFor(load);
   const chatEnv = telegramChatEnvFor(load);
   const token = process.env[tokenEnv] ?? "";
@@ -494,11 +520,23 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
 
     const result = (envelope["result"] ?? {}) as Record<string, unknown>;
     const username = typeof result["username"] === "string" ? `@${result["username"]}` : "unnamed";
-    const id = result["id"] === undefined ? "unknown id" : `id ${String(result["id"])}`;
+    const botId = result["id"] === undefined ? "" : String(result["id"]);
+    const id = botId.length === 0 ? "unknown id" : `id ${botId}`;
+    // APRV-390. Two gates on one bot is a FAIL, not a note: it is the state in
+    // which an approval tap is answered by whichever listener asked first.
+    const owners = botId.length === 0 ? [] : otherOwnersOf(logPath, botId, base);
+    if (owners.length > 0) {
+      return {
+        check: "telegram",
+        status: "fail",
+        detail: `token valid: ${username} (${id}) via ${base}, chat ${chat} — but this bot is also claimed on this machine by ${describeOwners(owners)}. Both gates long-poll it, their getUpdates offsets acknowledge each other's updates, and an approval tap is answered by whichever listener asked first`,
+        fix: "approval setup channel telegram — give this instance its own bot from @BotFather; `approval channel telegram health` names the current owner of each",
+      };
+    }
     return {
       check: "telegram",
       status: "pass",
-      detail: `token valid: ${username} (${id}) via ${base}, chat ${chat}; no message was sent and no update was consumed`,
+      detail: `token valid: ${username} (${id}) via ${base}, chat ${chat}${botId.length === 0 ? "" : ownershipClause(logPath, botId, base)}; no message was sent and no update was consumed`,
     };
   } catch (cause) {
     return {
@@ -3429,7 +3467,7 @@ export function commandDoctor(
       checkIdentity(),
       checkAttestationHealth(verified.records, policyPath),
       checkLog(logPath, verified.result),
-      await checkTelegram(apiBase, policyLoad),
+      await checkTelegram(apiBase, policyLoad, logPath),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
       // APRV-271: asks the running daemon for the one half of this answer that

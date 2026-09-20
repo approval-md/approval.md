@@ -4979,6 +4979,46 @@ Stop `up` before running Telegram setup or a standalone listener for its bot.
 One bot must have one polling runtime. After setup changes, reload the instance
 environment before starting `up` again.
 
+**Two refusals keep one bot to one instance (APRV-390).** Both are made before
+the daemon's first tick and before the first poll, and both exit 1 with a
+machine-readable code on stderr:
+
+| code | what it means |
+| --- | --- |
+| `cross-instance-credential` | A credential variable holds a value this instance did not configure: an `.approval/env` line naming another instance's keystore item, or an export whose value is not what this instance's file resolves to today. The message carries the `unset` line that fixes it. |
+| `bot-owned-elsewhere` | One `getMe`, before any `getUpdates`, named a bot another instance on this machine has already claimed. The message names that instance's directory. |
+
+`--allow-cross-instance` overrides both, starts, and prints on every run what it
+is overriding. Until APRV-390 the first of these was a warning printed on the
+way past a runtime that had already started, which is how a demo gate spent an
+evening polling the primary's bot.
+
+The first refusal COMPARES VALUES rather than only reading names, because it is
+the one check that is about to use the value. That closes the case names cannot
+see: `approval env` never overrides a variable this shell has already exported,
+so a token re-stored in the keystore does not reach a terminal holding the old
+one, and the daemon answers 401 while the same line read by hand passes `getMe`.
+It also removes a false positive — an export whose value IS what the file
+resolves to is correct however it got there, so the documented `eval "$(approval
+env)"` is not a finding. `approval doctor` keeps the name-only rule; a
+diagnostic may not block on a keystore-unlock dialog. No value is printed on any
+path.
+
+The `getMe` result is recorded against the instance in
+`.approval/channel-owner.json` (gitignored) and in a per-machine registry under
+the platform's user state directory, `approval/bots.json`. `APPROVAL_STATE_DIR`
+relocates that registry. A bot is identified by its id AND its Bot API base,
+because an id is unique within one deployment and nothing more: two gates
+pointed at two different `--api-base` values hold two different bots and neither
+refuses the other. Neither file is evidence, nothing reads them to widen a
+permission, and losing them costs one `getMe`. An unreachable Bot API is not a
+refusal: it says so and starts, because a captive portal is also a `getUpdates`
+that cannot conflict with anything.
+
+A 409 that still happens at runtime — another machine, or a poller started
+outside this runtime — is reported once, with the instances the registry knows
+about, and its repeats are counted rather than reprinted.
+
 **The ambient runtime: the daemon loop and every configured channel in one
 supervised foreground process.** `approval daemon run --with-channels` is the
 same verb spelled from the other side, and it reaches the same function before
@@ -6127,6 +6167,28 @@ and enforced: it stores a credential and writes `.approval/env`, so `--as` expec
 a `human:<id>` and an `agent:` or `system:` actor is refused at exit 2. Exit 1
 means the far end refused: an invalid token, a 409 from a running listener, or no
 message reaching the bot before the deadline.
+
+**One bot per instance (APRV-390), and both names are derived.** The keystore
+item this verb creates is `approval-tg-token-<instance id>`, where the instance
+id is the eight hex digits `approval doctor` prints in its `keychain-scope` row,
+so two gates on one machine store two items. An operator who prefers a readable
+suffix may write their own name into `.approval/env` instead; nothing is
+migrated and `approval env --check` reports which item each variable resolves
+through. The variable is whatever the policy's
+`channels.telegram.token_env` declares; a policy that declares nothing gets
+`APPROVAL_TG_TOKEN`, which every other silent policy on the machine also gets,
+so a second gate on one machine declares a pair of its own (the packaged demo
+policy declares `APPROVAL_DEMO_TG_TOKEN` and `APPROVAL_DEMO_TG_CHAT`).
+
+The `getMe` that proves the token also says which bot it is, and this verb
+records that against the instance in `.approval/channel-owner.json` (gitignored)
+and in a per-machine registry under the platform's user state directory,
+`approval/bots.json`. A bot another local instance has already claimed is
+refused before anything is written, naming that instance's directory; the values
+are open names and never a token. `--allow-cross-instance` records this instance
+as an owner anyway and says what it is doing. An instance set up before this
+existed keeps working: nothing is migrated, and the first `approval up` or
+listener start writes the record from its own `getMe`.
 
 ## setup service
 

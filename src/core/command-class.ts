@@ -647,6 +647,19 @@ export const NON_SECRET_ENV_NAMES: readonly string[] = [
   "APPROVAL_MD",
   "APPROVAL_HOME",
   "APPROVAL_DIR",
+  /**
+   * Where the per-machine bot-ownership registry lives (APRV-390).
+   *
+   * A DIRECTORY PATH, and the same kind of thing `APPROVAL_HOME` and
+   * `APPROVAL_DIR` already are. It holds no secret and opens nothing: the file
+   * it points at carries bot ids, usernames and instance directories, all of
+   * which `.approval/env` carries in the open, and nothing reads it to widen a
+   * permission. Passed through because a child `approval` verb must resolve the
+   * SAME registry as its parent — a child that silently fell back to the
+   * platform default would answer "which instance owns this bot?" from a
+   * different file than the process that asked it.
+   */
+  "APPROVAL_STATE_DIR",
 ];
 
 /**

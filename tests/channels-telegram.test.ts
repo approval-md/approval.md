@@ -2569,6 +2569,64 @@ test("the listener survives a malformed JSON response and resumes", async () => 
   await survives("malformed");
 });
 
+/**
+ * The 409 is said ONCE, with who else might be polling, and the repeats are
+ * counted (APRV-390).
+ *
+ * Every other poll failure in this file is transient, so retrying and saying
+ * so on each attempt is right. A 409 is not: the other poller is not going to
+ * stop because this one asked again, so the pre-APRV-390 loop printed an
+ * identical sentence every few seconds until somebody read the terminal. On
+ * 2026-09-19 that was two daemons on one machine, all evening.
+ *
+ * The retry itself is unchanged — a listener that stops listening is the
+ * failure this loop rules out — and only the complaining is collapsed. The
+ * advice is the CALLER's: the channel knows nothing about instances or files
+ * and prints whatever `conflictAdvice` returns, which is how
+ * `cli/channel-telegram.ts` gets the registry into the line without this class
+ * reading a directory.
+ */
+test("a runtime 409 is reported once, with the other instance, and its repeats counted", async () => {
+  const world = live(1);
+  const channel = channelFor({ pollTimeoutSeconds: 1, requestTimeoutMs: 300 });
+
+  const before = channel.stats().pollErrors;
+  const running = channel.listen({
+    conflictAdvice: () => "/gate-a (instance aaaaaaaa) and /gate-b (instance bbbbbbbb)",
+  });
+  try {
+    mock.fail("409");
+    // Four failures: enough that a per-attempt complaint would be four lines.
+    await until(() => channel.stats().pollErrors >= before + 4, "four 409 poll failures");
+  } finally {
+    mock.fail(null);
+  }
+  channel.stop();
+  await running;
+
+  const conflicts = complaints.filter((message) =>
+    /another process is polling this bot/u.test(message),
+  );
+  assert.equal(
+    conflicts.length,
+    1,
+    `the 409 was reported ${String(conflicts.length)} times; it must be said once:\n${conflicts.join("\n")}`,
+  );
+  // It names the fact rather than the status the reader was already staring at,
+  // and it carries the caller's answer about who else holds the bot.
+  assert.match(conflicts[0] ?? "", /\/gate-a \(instance aaaaaaaa\) and \/gate-b \(instance bbbbbbbb\)/u);
+  assert.doesNotMatch(conflicts[0] ?? "", /retrying in \d+ms/u);
+
+  // The repeats are accounted for rather than dropped: a listener that had
+  // quietly stopped saying anything would look the same as one that recovered.
+  assert.ok(
+    complaints.some((message) => /the previous line repeated \d+ more time\(s\)/u.test(message)) ||
+      channel.stats().pollErrors >= before + 4,
+    "the swallowed repeats were neither reported nor counted",
+  );
+  assertClean(world.unit);
+});
+
 test("the listener survives the server disappearing mid-poll and resumes", async () => {
   const world = live(1);
   const key = world.keys[0] as string;
@@ -2817,6 +2875,10 @@ test("--once: pending request → message → callback → grant → token on st
         // ~13s for it. The stub answers instantly and deterministically, which
         // also makes the assertion below a real check that the verb is wired.
         ...fakeClaudeEnv(world.unit.dir),
+        // APRV-390. This unit's own bot-ownership registry: one mock Bot API
+        // serves the whole file, so a registry shared with another case would
+        // have this listener refused for a bot that case had claimed.
+        APPROVAL_STATE_DIR: join(world.unit.dir, "state"),
       }),
       cwd: world.unit.dir,
     },
@@ -3009,6 +3071,10 @@ function setupFor(
     actor: HUMAN,
     json: false,
     once: false,
+    // APRV-390: nothing was overridden, so there is nothing to announce.
+    crossInstance: [],
+    allowCrossInstance: false,
+    apiBase: assertLocal(mock.url),
     delivery,
     gateOptions: world.unit.options,
     tagOptions: world.tagOptions,

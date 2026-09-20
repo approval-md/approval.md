@@ -72,7 +72,7 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import { instanceFindings } from "../core/instance.js";
+
 import { loadPolicy } from "../core/policy-load.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
@@ -89,6 +89,7 @@ import { drawServerFor } from "../daemon/draw.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
+  claimListenerBot,
   prepareListen,
   startListener,
   type ListenSetup,
@@ -293,6 +294,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--port": "string",
   "--no-telegram": "boolean",
   "--no-web": "boolean",
+  /** APRV-390: start on a channel credential this instance did not configure. */
+  "--allow-cross-instance": "boolean",
   "--gloss": "boolean",
   "--no-gloss": "boolean",
   "--gloss-provider": "string",
@@ -332,6 +335,26 @@ function ioError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "io", message } })}\n`);
   else streams.err(`approval: ${message}\n`);
   return EXIT_IO;
+}
+
+/**
+ * A refusal this verb makes rather than a part it declines to start (APRV-390).
+ *
+ * `code` is the channel's own refusal code and not the string `"integrity"`,
+ * because SPEC §11.1 invariant 6 asks a refusal to be machine-readable and
+ * DISTINCT: a supervisor restarting `approval up` in a loop needs to tell
+ * "this bot belongs to the other gate" from "the log would not verify", and
+ * both arriving as `integrity` would make that a substring match on prose.
+ */
+function integrityError(
+  streams: Streams,
+  json: boolean,
+  message: string,
+  code: string,
+): number {
+  if (json) streams.err(`${JSON.stringify({ error: { code, message } })}\n`);
+  else streams.err(`approval: ${message}\n`);
+  return EXIT_INTEGRITY;
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +563,8 @@ export function commandUp(
       pollTimeout: stringFlag(flags, "--poll-timeout"),
       once,
       json,
+      // APRV-390. Without it, a cross-instance credential is a refusal below.
+      allowCrossInstance: boolFlag(flags, "--allow-cross-instance"),
       log: (message: string) => streams.err(`${message}\n`),
       // APRV-197: on by default, `--no-gloss` to turn it off, exactly as on
       // `channel telegram listen` — this IS that listener, and a flag that
@@ -553,18 +578,31 @@ export function commandUp(
     if (prepared.ok) {
       telegram = prepared.setup;
       parts.push("telegram");
-      // APRV-178. The channel's credentials come from the launch environment
-      // and only from there, which is invariant 7 and stays true — but an
-      // exported value that this instance's own `.approval/env` disagrees with
-      // is how a demo gate spent an evening sending through the production bot.
-      // Said once, on stderr, before anything starts: a long-running process
-      // that is quietly holding another instance's bot token should say so at
-      // the moment it picks it up, not in a postmortem. It is a warning and not
-      // a refusal, because an operator who feeds the primary daemon from a
-      // shell profile is doing something deliberate and supported.
-      for (const finding of instanceFindings(logPath, load)) {
-        streams.err(`approval: cross-instance: ${finding.detail}\n`);
+      // APRV-178, tightened by APRV-390. The channel's credentials come from
+      // the launch environment and only from there, which is invariant 7 and
+      // stays true — but an exported value that this instance's own
+      // `.approval/env` disagrees with is how a demo gate spent an evening
+      // sending through the production bot. Until APRV-390 this was a warning
+      // printed on the way past a process that had already started, which is
+      // how it happened a second time on 2026-09-19. It is a refusal now,
+      // raised inside `prepareListen` so this verb and `approval channel
+      // telegram listen` cannot disagree about it; what is left here is the
+      // sentence a deliberate `--allow-cross-instance` still owes the
+      // operator, said once, on stderr, before anything starts.
+      for (const finding of prepared.setup.crossInstance) {
+        streams.err(`approval: --allow-cross-instance: starting anyway — ${finding.detail}\n`);
       }
+    } else if (
+      prepared.code === "cross-instance-credential" ||
+      prepared.code === "bot-owned-elsewhere"
+    ) {
+      // APRV-390. These two are REFUSALS and not missing parts. Everything
+      // else on this list degrades — an unconfigured channel is a legitimate
+      // gate — but a runtime that started here would be a runtime holding
+      // somebody else's bot, which is the incident rather than a reduced
+      // service. Reported with its code, so a caller reading `--json` branches
+      // on the fact and not on a sentence.
+      return integrityError(streams, json, prepared.message, prepared.code);
     } else if (prepared.code === "poll-timeout" || prepared.code === "payloads-unreadable") {
       // A mistyped command line, not an unconfigured machine. Refused here, the
       // way every verb refuses one, rather than degraded into a missing channel
@@ -733,9 +771,11 @@ export function commandUp(
     }
   }
 
-  emit({ event: "up_started", parts, log: logPath });
-  for (const event of unavailable) emit(event);
-
+  // APRV-390. `up_started` is announced inside `runParts` below, AFTER the
+  // ownership preflight, because the word has to mean what it says: a run that
+  // is about to be refused for holding another gate's bot has not started, and
+  // a supervisor that saw `up_started` and then a refusal would have to decide
+  // which of the two to believe.
   const daemon = new Daemon(options);
 
   // -------------------------------------------------------------------------
@@ -935,6 +975,33 @@ export function commandUp(
   };
 
   const onSignal = (signal: NodeJS.Signals): void => stopAll(signal);
+
+  /**
+   * The ownership preflight (APRV-390), before anything at all is started.
+   *
+   * ONE `getMe`, ahead of the daemon's first tick and the listener's first
+   * poll, and the only asynchronous thing this verb does before it commits to
+   * running. It sits here rather than inside `telegramPart` because a refusal
+   * has to be `approval up` declining to run: a runtime that had already
+   * started the daemon and then dropped the channel would be a gate that
+   * appends and never asks, which is worse than one that refused out loud.
+   *
+   * `--no-telegram` skips it, because there is no bot to own.
+   */
+  const claimed: Promise<{ ok: true } | { ok: false; code: string; message: string }> =
+    telegram === null
+      ? Promise.resolve({ ok: true })
+      : claimListenerBot(telegram, (message) => streams.err(`${message}\n`));
+
+  return claimed.then((owned) => {
+    if (!owned.ok) return integrityError(streams, json, owned.message, owned.code);
+    return runParts();
+  });
+
+  function runParts(): Promise<number> {
+  emit({ event: "up_started", parts, log: logPath });
+  for (const event of unavailable) emit(event);
+
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
 
@@ -973,4 +1040,5 @@ export function commandUp(
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
     });
+  }
 }

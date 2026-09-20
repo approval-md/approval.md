@@ -743,6 +743,10 @@ async function tapWorld(
     actor: HUMAN,
     json: false,
     once: true,
+    // APRV-390: nothing was overridden, so there is nothing to announce.
+    crossInstance: [],
+    allowCrossInstance: false,
+    apiBase: assertLocal(mock.url),
     delivery: "paced",
     gateOptions: { policy: { file: home.policyPath } },
     tagOptions: { policy: { file: home.policyPath } },

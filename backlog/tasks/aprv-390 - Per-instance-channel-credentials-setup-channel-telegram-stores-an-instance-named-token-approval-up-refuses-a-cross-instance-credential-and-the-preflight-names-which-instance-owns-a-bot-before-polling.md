@@ -4,9 +4,11 @@ title: >-
   Per-instance channel credentials: setup channel telegram stores an
   instance-named token, approval up refuses a cross-instance credential, and the
   preflight names which instance owns a bot before polling
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude-opus-lane'
 created_date: '2026-09-19 22:40'
+updated_date: '2026-09-19 22:48'
 labels:
   - daemon
   - telegram
@@ -30,3 +32,20 @@ Observed 2026-09-19 22:1xZ (and Carter says before): the primary daemon and the 
 - [ ] #3 approval up preflight records the bot id per instance and refuses a bot another local instance owns, naming it; telegram health prints bot username and owner; the runtime 409 is reported once with the two likely instances; tests with a stubbed Bot API
 - [ ] #4 docs: dogfood-cutover.md, cli-reference.md (setup channel telegram, up), the demo runbook step 4 and provisioning.md say one bot per instance and how the names are derived; build, typecheck, lint and the setup, up, telegram and demo-provision suites pass
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. New core module src/core/channel-owner.ts. Two records, both of them names and ids and never a value: (a) per-instance .approval/channel-owner.json, gitignored, holding the channel, the bot id, the username and when it was probed; (b) a per-machine registry mapping a bot id to the instance that claimed it (instance id plus its home directory).
+2. WHERE the per-machine registry lives, decided here rather than taken from the task. NOT the keystore: doctor and the up preflight may never block on an unlock dialog (NON_RESOLVING_RUNNER is the existing rule for exactly this), a machine with no keystore backend still needs the refusal, and the contents are open names rather than a secret. NOT a dot-approval directory under the home directory either, which was the other candidate: this repo hook classifies any path under such a directory as policy.core, human-only, so a file the runtime rewrites on every listener start would sit in the directory the policy reserves to human hands. It goes where setup-service.ts already puts per-user runtime state, by the same platform split as defaultLogsDir: Library/Application Support/approval/bots.json on darwin, .local/state/approval/bots.json on linux, with an APPROVAL_STATE_DIR override so the suite never writes the operators real registry.
+3. Refusal codes. Add cross-instance-credential and bot-owned-elsewhere to LISTEN_REFUSAL_CODES in src/cli/channel-telegram.ts so the listen verb and up branch on one closed union (invariant 6: refusals machine-readable and distinct).
+4. AC2. prepareListen gains allowCrossInstance and runs instanceFindings; a foreign-instance or ambient-bleed finding becomes cross-instance-credential with the fix line (unset the variable, or start from a fresh shell after evaluating approval env). up and channel telegram listen both grow --allow-cross-instance, which downgrades it to the current warning and says it is overriding. In up.ts the two new codes abort the verb instead of degrading telegram to part_unavailable.
+5. AC3. New async preflight in channel-telegram.ts run once before the first poll by both runListener and up: ONE getMe, then a claim. Another instance holding that bot id is bot-owned-elsewhere, naming the other instance home and the bot username, before any getUpdates. On success the identity is written to the per-instance file and the registry. setup channel telegram reuses its EXISTING getMe for the same claim, so no second network call is added anywhere.
+6. AC3 continued, the 409. TelegramChannel.listen dedupes repeated poll-error complaints and gives a 409 its own one-time sentence, built by the CLI from the registry so the channel keeps no filesystem knowledge: another process is polling this bot, naming this instance and the recorded owner. Repeats are counted, not reprinted.
+7. AC3 continued, health. approval channel telegram health (offline, no network) and doctors telegram row both print the recorded bot username and which instance owns it, read from the two files.
+8. AC1 plus Carters addendum of 2026-09-19. The keystore item is already scoped (APRV-178) and setup already reads token_env and chat_id_env from the live policy; both get a pinning test. The VARIABLE names are the policys declaration, so the packaged demo policy under examples/policies moves to APPROVAL_DEMO_TG_TOKEN and APPROVAL_DEMO_TG_CHAT beside the APPROVAL_DEMO_VAULT_PASSPHRASE it already names; the primary keeps APPROVAL_TG_TOKEN. No policy-rewriting verb is built. setup channel telegram prints the names it is writing and, when they are the defaults and the registry already knows another instance, suggests instance-specific ones. Test: two instances, two policies, two stubbed bots, no collision on either the item or the variable.
+9. examples/demo-provision.mjs reads the declared names out of the instance policy instead of hardcoding the defaults, and its adopt path (an APPROVAL.md kept because it differs from the packaged file) reports a policy still on the default names with the rename line rather than accepting it silently.
+10. The ignore file gains the per-instance channel-owner.json.
+11. AC4 docs: docs/dogfood-cutover.md, docs/cli-reference.md (setup channel telegram and up), examples/web-agent-demo/runbook.md step 4, examples/web-agent-demo/provisioning.md section 4. One bot per instance, how the item name and the variable name are each derived, and the two refusals with their codes.
+12. build, typecheck, lint, then the setup, up, telegram, instance, doctor and demo-provision suites, then the full suite.
+<!-- SECTION:PLAN:END -->

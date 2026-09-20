@@ -20,8 +20,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { envFileDigest } from "../src/core/env-file.js";
 import {
+  envFileDigest,
+  type SourceOutcome,
+  type SourceRunner,
+} from "../src/core/env-file.js";
+import {
+  valueFindings,
   ENV_PROVENANCE_VAR,
   INSTANCE_ID_LENGTH,
   LEGACY_SERVICE_TELEGRAM_TOKEN,
@@ -396,4 +401,134 @@ test("provenance carries names, an id and a digest, and never a value", () => {
   const parsed = parseEnvProvenance(claim);
   assert.equal(parsed?.instanceId, instanceIdFor(instance.logPath));
   assert.deepEqual([...(parsed?.names ?? [])], ["APPROVAL_TG_CHAT"]);
+});
+
+// ---------------------------------------------------------------------------
+// Comparing values, not only names (APRV-390)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `SourceRunner` over a fixed table of item names, so the comparisons below
+ * touch no real keystore and no real secret.
+ *
+ * `valueFindings` is the one rule in this module allowed to read a value, and
+ * the only property these tests assert about a value is "same or different".
+ */
+function fakeRunner(items: Record<string, string>): SourceRunner {
+  const lookup = (service: string): SourceOutcome =>
+    items[service] === undefined
+      ? { ok: false, code: "helper-item-missing", message: `no item ${service}` }
+      : { ok: true, value: items[service] as string };
+  return { keychain: lookup, secretService: lookup };
+}
+
+/**
+ * The stale export, which is what actually cost an evening on 2026-09-19.
+ *
+ * `approval env` never overrides a variable a shell has already exported —
+ * invariant 7 working as designed — so a token re-stored in the keystore does
+ * not reach that terminal. Every NAME here agrees with every other name: the
+ * file is this instance's, the item is this instance's, and the provenance
+ * claim is this instance's own `approval env`. Only the VALUE is wrong, and the
+ * daemon answered 401 with it while the same item read by hand passed getMe.
+ */
+test("a value the file no longer resolves to is reported as stale, and names no value", () => {
+  const instance = makeInstance();
+  const item = scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath);
+  writeEnv(instance, [`APPROVAL_TG_TOKEN=keychain:${item}`]);
+
+  // The keystore holds the NEW token; the shell still holds the old one, and
+  // it carries this instance's own honest provenance claim.
+  const ambientEnv = afterTheRitual(instance, ["APPROVAL_TG_TOKEN"], {
+    APPROVAL_TG_TOKEN: "old-token-value",
+  });
+
+  const findings = valueFindings(
+    instance.logPath,
+    loadPolicy({ dir: instance.dir }),
+    fakeRunner({ [item]: "new-token-value" }),
+    ambientEnv,
+  );
+  assert.equal(findings.length, 1, JSON.stringify(findings));
+  assert.equal(findings[0]?.kind, "stale-export");
+  assert.equal(findings[0]?.variable, "APPROVAL_TG_TOKEN");
+  assert.equal(
+    findings[0]?.detail.includes("old-token-value") ||
+      findings[0]?.detail.includes("new-token-value"),
+    false,
+    "the finding carried a value",
+  );
+});
+
+/**
+ * The false positive this closes: a value that IS the file's value.
+ *
+ * Reported as cross-instance before APRV-390 whenever the provenance claim did
+ * not match, which is what happens to `APPROVAL_HUMAN` after a second `eval
+ * "$(approval env)"` in one command line. A finding about a correct value is
+ * noise, and noise in a refusal is how a refusal gets overridden by habit.
+ */
+test("an export that matches the file is no finding at all, whatever its provenance", () => {
+  const instance = makeInstance();
+  const item = scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath);
+  writeEnv(instance, [`APPROVAL_TG_TOKEN=keychain:${item}`]);
+
+  // No provenance claim at all, which is what the name-only rule calls a bleed.
+  const ambientEnv = { APPROVAL_TG_TOKEN: "the-one-true-token" };
+  assert.equal(
+    instanceFindings(instance.logPath, loadPolicy({ dir: instance.dir }), ambientEnv).length,
+    1,
+    "the name-only rule should still report an unvouched export",
+  );
+
+  assert.deepEqual(
+    valueFindings(
+      instance.logPath,
+      loadPolicy({ dir: instance.dir }),
+      fakeRunner({ [item]: "the-one-true-token" }),
+      ambientEnv,
+    ),
+    [],
+    "a value equal to the file's own resolution was reported as a problem",
+  );
+});
+
+/**
+ * Fail soft, in the loud direction.
+ *
+ * A locked keychain, a `secret-tool` with no D-Bus, a helper that is not
+ * installed: the comparison cannot be made, so the name-only finding stands
+ * exactly as it did before this function existed. An unverifiable value keeps
+ * whatever scrutiny it already had.
+ */
+test("a file entry that will not resolve leaves the name-only finding untouched", () => {
+  const instance = makeInstance();
+  const item = scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath);
+  writeEnv(instance, [`APPROVAL_TG_TOKEN=keychain:${item}`]);
+
+  const findings = valueFindings(
+    instance.logPath,
+    loadPolicy({ dir: instance.dir }),
+    fakeRunner({}),
+    { APPROVAL_TG_TOKEN: "whatever-this-is" },
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.kind, "ambient-bleed");
+});
+
+/** A foreign item name is a name-only fact, and comparing values does not hide it. */
+test("a foreign instance's item is still reported when the values happen to match", () => {
+  const mine = makeInstance();
+  const other = makeInstance();
+  const theirs = scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, other.logPath);
+  writeEnv(mine, [`APPROVAL_TG_TOKEN=keychain:${theirs}`]);
+
+  const findings = valueFindings(
+    mine.logPath,
+    loadPolicy({ dir: mine.dir }),
+    fakeRunner({ [theirs]: "shared" }),
+    {},
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.kind, "foreign-instance");
 });

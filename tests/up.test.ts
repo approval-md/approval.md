@@ -51,6 +51,8 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { servicesFor } from "../src/cli/setup-common.js";
+import { instanceHomeFor } from "../src/core/instance.js";
+import { ownedBot } from "../src/core/channel-owner.js";
 import { envFileDigest } from "../src/core/env-file.js";
 import { formatEnvProvenance } from "../src/core/instance.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -228,6 +230,10 @@ function assertOffline(args: readonly string[], env: Record<string, string>): vo
   // there is nothing that could dial out.
   if (env["APPROVAL_TG_TOKEN"] === undefined) return;
   if (args.includes("--no-telegram")) return;
+  // `channel telegram health` makes NO network call on any path — that is the
+  // verb's whole design and `tests/channels-telegram.test.ts` asserts it — so
+  // it has no `--api-base` to pass and nothing this guard protects against.
+  if (args[0] === "channel" && args[1] === "telegram" && args[2] === "health") return;
   const base = args.indexOf("--api-base");
   assert.notEqual(
     base,
@@ -237,12 +243,31 @@ function assertOffline(args: readonly string[], env: Record<string, string>): vo
   assertLocal(args[base + 1] ?? "");
 }
 
+/**
+ * A case's own bot-ownership registry (APRV-390).
+ *
+ * One mock Bot API serves this whole file, so every case is handed the same
+ * bot id; a registry shared between cases would have case two refused for a
+ * bot case one claimed, which is the runtime working and the suite wrong. The
+ * directory is derived from the case's own working directory, so isolation is
+ * the default and a case that WANTS two instances to see each other's claims
+ * passes `APPROVAL_STATE_DIR` itself and wins.
+ */
+function stateEnv(dir: string, env: Record<string, string> = {}): Record<string, string> {
+  return { APPROVAL_STATE_DIR: join(dir, "state"), ...env };
+}
+
 function runCli(args: string[], cwd: string, env: Record<string, string> = {}): Run {
   assertOffline(args, env);
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
     cwd,
     encoding: "utf8",
-    env: cliEnv(env),
+    // APRV-390. The bot-ownership registry is per case, derived from the case
+    // directory: one mock Bot API serves this whole file, so a registry shared
+    // between cases would have case two refused for a bot case one claimed. A
+    // case that wants two instances to see each other's claims passes its own
+    // APPROVAL_STATE_DIR, which wins.
+    env: cliEnv(stateEnv(cwd, env)),
   });
   assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
@@ -380,7 +405,7 @@ class LiveUp {
     assertOffline(args, env);
     this.child = spawn(process.execPath, [CLI_ENTRY, "up", "--json", ...args], {
       cwd: dir,
-      env: cliEnv(env),
+      env: cliEnv(stateEnv(dir, env)),
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
@@ -535,7 +560,7 @@ test("the decision line and the token panel are the separate listener's, field f
   const listener = spawn(
     process.execPath,
     [CLI_ENTRY, "channel", "telegram", "listen", "--once", "--json", ...channelArgs()],
-    { cwd: listenDir, env: cliEnv(configured()) },
+    { cwd: listenDir, env: cliEnv(stateEnv(listenDir, configured())) },
   );
   let listenOut = "";
   listener.stdout.setEncoding("utf8");
@@ -876,18 +901,21 @@ function writeEnvFile(dir: string, lines: string[]): string {
 }
 
 /**
- * `up` names a foreign export and says nothing about the documented ritual.
+ * `up` REFUSES a foreign export, and says nothing about the documented ritual.
  *
- * The warning exists because a token exported in a shell profile wins over this
- * instance's own line (invariant 7, on purpose) and a long-running process that
- * quietly picked up another gate's bot should say so at the moment it does. It
- * fired on `eval "$(approval env)"` too, which is the ONE way the operator is
- * told to establish that environment: a check that reports the correct ritual
- * as an incident is a check people learn to skip past. Both halves are asserted
- * here rather than only the quiet one, because "no warning" proves nothing
- * unless the same fixture warns without the claim.
+ * APRV-178 made this a warning, because a token exported in a shell profile
+ * wins over this instance's own line (invariant 7, on purpose) and a
+ * long-running process that quietly picked up another gate's bot should say so
+ * at the moment it does. On 2026-09-19 it said so, above a runtime that had
+ * already started, and the demo gate spent the evening polling the primary's
+ * bot anyway. APRV-390 makes it a refusal with its own code: a warning nobody
+ * has to answer is a warning that gets read afterwards.
+ *
+ * Three halves, and the quiet one proves nothing without the loud one: the
+ * refusal, the override that starts and says it is overriding, and the
+ * documented `eval "$(approval env)"` ritual, which is not a finding at all.
  */
-test("up warns about a foreign export and stays quiet about the documented ritual", () => {
+test("up refuses a foreign export, overrides on request, and is quiet about the ritual", () => {
   const { dir } = ready();
   const text = writeEnvFile(dir, [
     `APPROVAL_TG_TOKEN=keychain:${servicesFor(logPath(dir)).telegramToken}`,
@@ -900,13 +928,50 @@ test("up warns about a foreign export and stays quiet about the documented ritua
   const startup = [...apiBase(), "--poll-timeout", "1", "--payloads", "payloads.json"];
 
   const foreign = runCli(["up", "--once", "--json", ...startup], dir, configured());
-  assert.equal(foreign.code, 0, foreign.stderr);
-  assert.match(foreign.stderr, /approval: cross-instance: APPROVAL_TG_TOKEN was exported/u);
-  assert.equal(foreign.stderr.includes(TOKEN), false, "the warning carried the value");
+  // EXIT_INTEGRITY: the configuration is not the one this instance stands
+  // behind, which is the same family as a log that does not verify.
+  assert.equal(foreign.code, 1, foreign.stderr);
+  const refusal = JSON.parse(foreign.stderr.trim().split("\n").at(-1) as string) as {
+    error: { code: string; message: string };
+  };
+  // Machine-readable and DISTINCT (SPEC §11.1 invariant 6): a supervisor has to
+  // tell this from a log that would not verify without matching on prose.
+  assert.equal(refusal.error.code, "cross-instance-credential");
+  assert.match(refusal.error.message, /APPROVAL_TG_TOKEN was exported/u);
+  // The fix line, which is the whole reason a refusal beats a warning here.
+  // Only the TOKEN is named: `APPROVAL_TG_CHAT` is a literal in this fixture's
+  // file, so the value comparison resolves it, finds the shell holding exactly
+  // that, and says nothing about it (APRV-390). A refusal that listed a
+  // variable which is in fact correct is the noise that gets refusals ignored.
+  assert.match(refusal.error.message, /unset APPROVAL_TG_TOKEN(?! )/u);
+  assert.doesNotMatch(refusal.error.message, /APPROVAL_TG_CHAT/u);
+  assert.match(refusal.error.message, /--allow-cross-instance/u);
+  assert.equal(foreign.stderr.includes(TOKEN), false, "the refusal carried the value");
+  // Nothing started: a refused runtime is a runtime that did not run.
+  assert.equal(
+    jsonLines(foreign.stdout).some((line) => line["event"] === "up_started"),
+    false,
+    "up started despite refusing the credential",
+  );
+
+  // The deliberate case. It starts, and it says what it is doing — an override
+  // that was silent would be the warning again, with an extra flag.
+  const allowed = runCli(
+    ["up", "--once", "--json", "--allow-cross-instance", ...startup],
+    dir,
+    configured(),
+  );
+  assert.equal(allowed.code, 0, allowed.stderr);
+  assert.match(allowed.stderr, /--allow-cross-instance: starting anyway/u);
+  assert.match(allowed.stderr, /APPROVAL_TG_TOKEN was exported/u);
+  assert.equal(allowed.stderr.includes(TOKEN), false, "the override line carried the value");
+  assert.ok(jsonLines(allowed.stdout).some((line) => line["event"] === "up_started"));
 
   // The same shell after `eval "$(approval env)"`: the values, plus the claim
   // the export block makes about itself. No value is in that claim, and the
-  // runtime reads none to act on it.
+  // runtime reads none to act on it. This is the ONE way the operator is told
+  // to establish the environment, so it must not be a finding at all — a check
+  // that reports the correct ritual as an incident is one people skip past.
   const ritual = runCli(["up", "--once", "--json", ...startup], dir, {
     ...configured(),
     APPROVAL_ENV_PROVENANCE: formatEnvProvenance(logPath(dir), envFileDigest(text), [
@@ -917,6 +982,123 @@ test("up warns about a foreign export and stays quiet about the documented ritua
   assert.equal(ritual.code, 0, ritual.stderr);
   assert.doesNotMatch(ritual.stderr, /cross-instance/u);
   assertClean(dir);
+});
+
+// ===========================================================================
+// 7. Which bot this instance owns (APRV-390)
+// ===========================================================================
+
+/**
+ * `up` claims the bot before it polls, and refuses one another gate holds.
+ *
+ * The 409 loop this replaces has no exit: the other poller is not going to
+ * stop, so the pre-APRV-390 runtime printed the same sentence every few seconds
+ * forever. One `getMe`, before the first `getUpdates`, turns that into a
+ * refusal that names the other instance's directory — and `getMe` is safe to
+ * ask precisely because it consumes no update, so a listener already running on
+ * that bot loses nothing by this process having looked.
+ *
+ * The two cases share one `APPROVAL_STATE_DIR` on purpose: that is what "on
+ * this machine" means, and `runCli` otherwise gives each case its own.
+ *
+ * Spawned asynchronously through {@link LiveUp} and NOT through `runCli`: the
+ * mock Bot API lives in this process, and `spawnSync` blocks this process's
+ * event loop, so a synchronous run can never be answered by it. The preflight
+ * is the first thing in this file that needs a real reply before the verb
+ * decides anything.
+ */
+test("up records the bot it owns, and refuses one another local instance owns", async () => {
+  const primary = ready();
+  const demo = ready();
+  const machine = join(primary.dir, "one-machine");
+  const onThisMachine = { ...configured(), APPROVAL_STATE_DIR: machine };
+
+  const first = new LiveUp(primary.dir, ["--once", ...channelArgs()], onThisMachine);
+  assert.equal(await first.wait(), 0, first.stderr);
+  // It says which bot, and that looking cost a running listener nothing.
+  assert.match(first.stderr, /@approval_md_test_bot \(bot id 424242\) is this instance's own/u);
+  assert.match(first.stderr, /no update was consumed by this check/u);
+
+  const claimed = ownedBot(logPath(primary.dir), "telegram");
+  assert.equal(claimed?.botId, "424242");
+  assert.equal(claimed?.instanceHome, instanceHomeFor(logPath(primary.dir)));
+
+  // The second gate, same machine, same bot.
+  const second = new LiveUp(demo.dir, ["--once", ...channelArgs()], onThisMachine);
+  assert.equal(await second.wait(), 1, second.stderr);
+  const refusal = JSON.parse(second.stderr.trim().split("\n").at(-1) as string) as {
+    error: { code: string; message: string };
+  };
+  assert.equal(refusal.error.code, "bot-owned-elsewhere");
+  assert.match(refusal.error.message, /@approval_md_test_bot \(bot id 424242\)/u);
+  assert.ok(
+    refusal.error.message.includes(instanceHomeFor(logPath(primary.dir))),
+    `the refusal did not name the owning instance: ${refusal.error.message}`,
+  );
+  assert.equal(second.stderr.includes(TOKEN), false, "the refusal carried the token");
+  // Refused BEFORE anything ran: no daemon tick, no poll.
+  assert.equal(
+    second.countOf("up_started"),
+    0,
+    "up started despite refusing the bot another instance owns",
+  );
+
+  // And the deliberate case starts anyway.
+  const allowed = new LiveUp(
+    demo.dir,
+    ["--once", "--allow-cross-instance", ...channelArgs()],
+    onThisMachine,
+  );
+  assert.equal(await allowed.wait(), 0, allowed.stderr);
+  assertClean(primary.dir);
+});
+
+/**
+ * `channel telegram health` names the bot and its owner, offline.
+ *
+ * Offline is the point: this verb makes no Bot API call on any path, and the
+ * last `getMe` a listener or a setup run made is already written down. An
+ * operator asking "which bot is this gate on?" gets an answer without a
+ * network round trip and without a keystore prompt.
+ */
+test("telegram health prints the bot this instance owns, with no network call", async () => {
+  const { dir } = ready();
+  const machine = join(dir, "one-machine");
+
+  // Before anything has reached getMe: a state, said as one.
+  const before = runCli(["channel", "telegram", "health"], dir, {
+    ...configured(),
+    APPROVAL_STATE_DIR: machine,
+  });
+  assert.equal(before.code, 0, before.stderr);
+  assert.match(before.stdout, /no bot recorded for this instance yet/u);
+
+  // Asynchronous, for the reason the case above is: the mock is in THIS
+  // process and `spawnSync` would block the loop that serves it.
+  const run = new LiveUp(dir, ["--once", ...channelArgs()], {
+    ...configured(),
+    APPROVAL_STATE_DIR: machine,
+  });
+  assert.equal(await run.wait(), 0, run.stderr);
+
+  const after = runCli(["channel", "telegram", "health"], dir, {
+    ...configured(),
+    APPROVAL_STATE_DIR: machine,
+  });
+  assert.equal(after.code, 0, after.stderr);
+  assert.match(after.stdout, /bot @approval_md_test_bot \(id 424242\) is owned by this instance/u);
+  assert.ok(after.stdout.includes(instanceHomeFor(logPath(dir))));
+  assert.equal(after.stdout.includes(TOKEN), false, "health printed the token");
+
+  const json = runCli(["channel", "telegram", "health", "--json"], dir, {
+    ...configured(),
+    APPROVAL_STATE_DIR: machine,
+  });
+  const report = JSON.parse(json.stdout) as Record<string, unknown>;
+  assert.equal(report["bot_username"], "@approval_md_test_bot");
+  assert.equal(report["bot_id"], "424242");
+  assert.deepEqual(report["other_owners"], []);
+  assert.equal(json.stdout.includes(TOKEN), false, "the JSON report carried the token");
 });
 
 test("up --help and an unexpected argument", () => {
