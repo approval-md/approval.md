@@ -14,7 +14,7 @@
 npm install -g approval-md
 ```
 
-v0.2.0. Use a source checkout to contribute or to run unreleased work:
+v0.3.0. Use a source checkout to contribute or to run unreleased work:
 
 ```
 git clone https://github.com/approval-md/approval.md && cd approval.md && npm ci && npm run build && npm link
@@ -72,7 +72,7 @@ approved through approval.md.
 
 # approval.md/features: the feature set and reference
 
-Feature index: approval-md 0.2.0. Everything below is the content of
+Feature index: approval-md 0.3.0. Everything below is the content of
 https://approval.md/features/.
 
 ## Try the loop
