@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-18 06:20'
-updated_date: '2026-09-19 21:16'
+updated_date: '2026-09-20 01:18'
 labels:
   - channel
   - telegram
@@ -119,6 +119,8 @@ Then check it:
 THE FAILURE MODE TO EXPECT, and it is the reason the doctor row is a FAIL rather than a warning: a listener started from a shell that never ran eval "$(approval env)" holds no key, and every tap is refused sender-key-unavailable. A decision typed at a terminal carries no sender and still works, which is the way out of it. Rolling back is replacing the keyed value with the raw id and re-attesting; no code change and no log repair.
 
 The proposal page carries all of the above plus what to do when the tap is refused sender-unmapped (the digest in the file is not the digest of that account under this key; the refusal record carries the digest that actually arrived, which is the value the file should have).
+
+Ceremony prep 2026-09-20 ~01:20Z: Carter minted the key (keychain:approval-sender-key-412328bf) and printed the digest for his account; the digest is pasted into docs/proposals/sender-identity-hashed-2026-09.md on a branch so the primary tree stays clean. Gap found: after setup sender-key wrote the APPROVAL_SENDER_KEY line, eval of approval env did NOT export it (the verb prints only the names it knows), so the --id helper refused until the key was exported by hand from the keychain item. Until fixed, the listener restart needs the same hand export before approval up. Fix in the follow-up: approval env exports every line of the env file it can resolve, or the sender key joins the known-names list; doctor sender-mapping should say when the file names a key the env verb would not export.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
