@@ -269,9 +269,6 @@ Trusted Publishing run are the remainder of APRV-371.
   The email finale's credential resolves inside the agent child, reproduced live
   on 2026-09-19 and traced to the macOS keychain search list rather than guessed.
   The demo page carries `brand/wordmark.svg` inlined byte for byte.
-- **`/judgy`, the judgy reviewer demo pages.** Static pages for CoreWeave Hacks
-  2026, copied from `bountify-ai/judgy`, which stays their source of truth. These
-  landed as a direct site addition and carry no task id.
 - **An agent-hours tracker (APRV-373).** `scripts/agent-hours.mjs` computes
   active hours, sessions, turns and tokens per model into
   `metrics/agent-hours.json`, README carries dynamic badges linking to
