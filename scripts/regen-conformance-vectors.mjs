@@ -1268,6 +1268,215 @@ const commandClassVectors = [
     input: { command: "bash -c \"sh -c 'git push origin main'\"" },
     control: true,
   },
+  // --- packaging and archives (APRV-397) -------------------------------------
+  //
+  // The tools a release verification runs, each pinned in BOTH directions: the
+  // spelling that reads, and the spelling that writes or is refused. The rule
+  // they share is that a destination the text can read decides the class, so the
+  // write vectors name the destination and the refused ones name a path outside
+  // the workspace.
+  //
+  // These vectors carry no scratch roots, because this suite carries no machine
+  // facts at all: an ABSOLUTE destination is therefore out of scope here even
+  // when it looks like a temp directory, which is exactly the answer a caller
+  // that resolved no roots must get. The loosening a resolved scratch root
+  // buys is a caller-supplied fact and is pinned in
+  // `tests/command-class.test.ts` instead.
+  {
+    id: "npm-pack-writes-the-working-directory",
+    description:
+      "npm pack writes a tarball where it stands, which is the workspace write it has always been in effect and was refused as unclassified until now",
+    input: { command: "npm pack" },
+  },
+  {
+    id: "npm-pack-destination-inside-is-a-workspace-write",
+    description: "a relative --pack-destination is a path inside the workspace, so the write is one",
+    input: { command: "npm pack --pack-destination build/tarballs" },
+  },
+  {
+    id: "npm-pack-destination-outside-is-refused",
+    description:
+      "an absolute destination is out of scope with the path BOUND: this classifier holds no workspace root, so the arithmetic is rm's and the class is the one rm already answers",
+    input: { command: "npm pack --pack-destination /usr/local/lib" },
+  },
+  {
+    id: "npm-pack-of-a-registry-spec-reaches-the-network",
+    description:
+      "npm pack of a package spec DOWNLOADS it first, so the network class outranks the tarball it then writes",
+    input: { command: "npm pack lodash" },
+  },
+  {
+    id: "npm-init-writes-package-json",
+    description: "npm init writes package.json into the working directory and no flag moves it",
+    input: { command: "npm init -y" },
+  },
+  {
+    id: "npm-init-with-an-initializer-runs-it",
+    description:
+      "npm init <pkg> downloads an initializer and runs it, which is npm exec wearing another name, so it takes its own rule id",
+    input: { command: "npm init vite" },
+  },
+  {
+    id: "npm-version-flag-is-a-read",
+    description:
+      "a bare version probe prints a string and starts nothing; the row matches ONLY an argv that is nothing but probe flags",
+    input: { command: "npm --version" },
+  },
+  {
+    id: "npm-subcommand-without-a-rule-still-refuses",
+    description:
+      "the control for the probe row: a subcommand this table does not name keeps the unclassified refusal it had, so the row widened one shape and not a binary",
+    input: { command: "npm doctor" },
+    control: true,
+  },
+  {
+    id: "tar-list-is-a-read",
+    description: "tar -t opens the archive and prints its table of contents",
+    input: { command: "tar -tzf dist/pkg.tgz" },
+  },
+  {
+    id: "tar-list-old-style-bundle-is-a-read",
+    description:
+      "the old-style bundle carries no dash and is the spelling most sessions write, so the mode is read out of the first word too",
+    input: { command: "tar tvf dist/pkg.tgz" },
+  },
+  {
+    id: "tar-extract-into-a-named-path-is-a-workspace-write",
+    description:
+      "an extraction writes where -C points, and a relative destination is inside the workspace",
+    input: { command: "tar -xzf dist/pkg.tgz -C build/unpack" },
+  },
+  {
+    id: "tar-extract-outside-the-workspace-is-refused",
+    description:
+      "an extraction unpacks over whatever it finds, so a destination the text puts outside the workspace takes the out-of-scope class with the path bound",
+    input: { command: "tar -xzf dist/pkg.tgz -C /usr/local/lib" },
+  },
+  {
+    id: "tar-extract-into-an-unreadable-path-is-refused",
+    description:
+      "a destination whose expansion is not in the text is out of scope: what $DEST holds is not something this classifier may vouch for",
+    input: { command: "tar -xzf dist/pkg.tgz -C $DEST" },
+  },
+  {
+    id: "tar-create-writes-the-archive-it-names",
+    description:
+      "a creation writes the file -f names, read out of the glued bundle where that is where it is written",
+    input: { command: "tar -czf dist/out.tgz src" },
+  },
+  {
+    id: "tar-without-a-mode-stays-opaque",
+    description:
+      "a tar whose mode is not in its words is a command whose effect is not in its words, which is a refusal rather than a guess",
+    input: { command: "tar -f dist/pkg.tgz" },
+    control: true,
+  },
+  {
+    id: "gunzip-to-stdout-is-a-read",
+    description: "-c leaves the disk alone, so the decompression is a read",
+    input: { command: "gunzip -c dist/pkg.gz" },
+  },
+  {
+    id: "gunzip-list-is-a-read",
+    description:
+      "-l prints the sizes, the ratio and the member name and touches nothing, which is the same act tar -t is and belongs in the same class",
+    input: { command: "gunzip -l dist/pkg.gz" },
+  },
+  {
+    id: "gunzip-in-place-is-a-workspace-write",
+    description:
+      "the DEFAULT form removes the file it names and leaves the decompressed one in its place, so the plain spelling is a write and only the stdout, test and list forms read",
+    input: { command: "gunzip dist/pkg.gz" },
+  },
+  {
+    id: "base64-is-a-read-of-what-it-names",
+    description: "base64 decodes to stdout unless a flag names a file to write",
+    input: { command: "base64 -d dist/blob.b64" },
+  },
+  {
+    id: "base64-with-an-output-file-writes",
+    description: "-o names a destination, so the segment is a write scoped to it",
+    input: { command: "base64 -i dist/pkg.tgz -o build/out.b64" },
+  },
+  {
+    id: "openssl-digest-is-a-read",
+    description:
+      "the digest subcommands read their named files; every other openssl subcommand is as unclassified as it was",
+    input: { command: "openssl dgst -sha256 dist/pkg.tgz" },
+  },
+  {
+    id: "openssl-digest-with-an-out-file-writes",
+    description: "-out names a destination, so the same subcommand writes",
+    input: { command: "openssl dgst -sha256 -out build/sums.txt dist/pkg.tgz" },
+  },
+  {
+    id: "openssl-encrypt-still-refuses",
+    description:
+      "the control for the digest row: openssl enc, genrsa and s_client name a binary this table still has nothing to say about",
+    input: { command: "openssl enc -d -in blob.enc" },
+    control: true,
+  },
+  {
+    id: "shasum-is-a-read",
+    description:
+      "the checksum tools were already reads before this task; the pair a verification reaches for is pinned here so a second implementation cannot pass the new rows and miss these",
+    input: { command: "shasum -a 256 dist/pkg.tgz" },
+  },
+  // --- git tag: the listing forms read (APRV-397) ----------------------------
+  {
+    id: "git-tag-list-is-a-read",
+    description:
+      "a tag LISTING reaches no registry, remote or consumer, so it takes the class every other reader of local repository metadata takes",
+    input: { command: "git tag -l" },
+  },
+  {
+    id: "git-tag-bare-is-a-read",
+    description: "a bare git tag lists, exactly as -l does",
+    input: { command: "git tag" },
+  },
+  {
+    id: "git-tag-annotation-lines-is-a-read",
+    description: "-n prints annotation lines beside the listing, and -n<num> is the same flag",
+    input: { command: "git tag -n5" },
+  },
+  {
+    id: "git-tag-contains-consumes-its-value",
+    description:
+      "a listing filter takes a value, and that value is not a tag name: reading it as one would have made the most ordinary state check a release",
+    input: { command: "git tag --contains HEAD" },
+  },
+  {
+    id: "git-tag-pattern-under-l-is-not-a-name",
+    description: "with -l a positional is a PATTERN, so the listing stays a read",
+    input: { command: "git tag -l 'v0.*'" },
+  },
+  {
+    id: "git-tag-bare-name-creates",
+    description:
+      "a positional with no -l is a tag NAME, and creating a tag is the act APRV-305 priced as a release",
+    input: { command: "git tag v0.1.0" },
+  },
+  {
+    id: "git-tag-annotated-still-publishes",
+    description: "-a, -d, -f, -s and -m are unmoved by this task",
+    input: { command: "git tag -a v0.1.0 -m release" },
+  },
+  {
+    id: "git-tag-delete-still-publishes",
+    description: "deleting a tag removes the name a release was published under",
+    input: { command: "git tag -d v0.1.0" },
+  },
+  {
+    id: "git-tag-sign-still-publishes",
+    description: "a signed tag is a published one",
+    input: { command: "git tag -s v0.1.0" },
+  },
+  {
+    id: "git-tag-unknown-flag-publishes",
+    description:
+      "the split is an ALLOWLIST of listing flags, so a flag this rule has never heard of is a creation and a future option cannot arrive as a read",
+    input: { command: "git tag --unknown-future-flag" },
+  },
 ];
 
 const gateVectors = [
@@ -2146,7 +2355,39 @@ const SUITES = [
     // shape the classifier has gained, which is what a minor bump says. What
     // DID move is outside this file, in the same direction 1.2.0's harness
     // family moved: a refusal became an answer.
-    vectors_version: "1.3.0",
+    // 1.4.0 (APRV-397): a MINOR bump, and the same shape a third time. The new
+    // vectors pin the packaging and archive tools (`npm pack`, `npm init`, a
+    // bare `npm --version`, `tar` in its list, extract and create modes,
+    // `gunzip`, `base64`, `openssl dgst`, `shasum`) and the `git tag` split.
+    //
+    // Why MINOR and not MAJOR, asked and answered, because one expectation in
+    // this file LOOKS like it moved and did not. This suite has never carried a
+    // `git tag` vector: it was born with the quoting cases and gained
+    // `git push` (1.1.0), the harness family (1.2.0) and the login shell
+    // (1.3.0), and `git push origin refs/tags/v1.2.3` — the tag vector it does
+    // carry — is unmoved, because pushing a tag is still `release.publish`.
+    // What moved is `git tag -l`, which no vector expected. Nothing in the
+    // algorithm or description line of this suite states a rule that the split
+    // makes wrong, which is the MAJOR precedent (`policy-resolution` 2.0.0).
+    //
+    // Two things a second implementation must know, and neither is a moved
+    // expectation. The out-of-scope packaging destination answers
+    // `files.delete.out_of_scope`, a class this taxonomy already has, rather
+    // than a `files.write.*` sibling that would resolve by `defaults.autonomy`
+    // wherever a policy is silent. And the vectors carry no scratch roots,
+    // because this suite carries no machine facts: an absolute destination is
+    // out of scope here even when it looks like a temp directory, which is the
+    // answer a caller that resolved no roots must get.
+    //
+    // 1.4.0 STAYS 1.4.0 after one correction inside it, and the reason is the
+    // rule that a version is claimed at merge rather than at branch. The first
+    // cut of the packaging rows read only `-c`/`--stdout` and `-t`/`--test` as
+    // `gunzip` reads, on the brief's enumeration; review agreed that `-l` and
+    // `--list` print sizes and names and touch nothing, so they read too, and
+    // `gunzip-list-is-a-read` joined the set. Nothing a second implementation
+    // has ever been held to moved: 1.3.0 carries no `gunzip` vector at all, and
+    // 1.4.0 has not been merged, so the number still names one set.
+    vectors_version: "1.4.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

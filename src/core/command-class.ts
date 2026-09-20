@@ -1314,6 +1314,18 @@ export interface CommandRule {
   emits?: readonly string[];
   /** Flag-sensitive answer; falls back to `class` when it returns `null`. */
   refine?: (ctx: RuleContext) => Refinement | null;
+  /**
+   * Match only an argv that is nothing but version or help flags (APRV-397).
+   *
+   * The row a binary needs when the thing being classified is the ABSENCE of a
+   * subcommand: `npm --version` carries no positional, so `subs` can never
+   * match it, and a row with no `subs` at all would have matched every
+   * subcommand this table does not name and turned a wall of `unclassified`
+   * denials into whatever class that row declared. A `probe` row matches the
+   * probe shape and nothing else, so everything it does not match keeps the
+   * answer it has today.
+   */
+  probe?: boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -1911,6 +1923,458 @@ function refineSed(ctx: RuleContext): Refinement {
     : { class: "read.shell", rule: "sed-read" };
 }
 
+// ===========================================================================
+// Packaging and archives (APRV-397)
+// ===========================================================================
+
+/**
+ * The read-only packaging and archive tools, and the one rule they share.
+ *
+ * ## What was wrong
+ *
+ * A release verification is mostly reading: pack a tarball, list what is in it,
+ * unpack it somewhere disposable, hash a file, decode a base64 blob, ask a
+ * binary its version. Every one of those commands was `unclassified` until this
+ * task, so every one of them was DENIED, and the verifier that met the wall on
+ * 2026-09-20 did the work anyway by fetching the tarball with `curl` and
+ * parsing it in a script: a chain of network and interpreter calls in place of
+ * six readers. A gate that refuses the legible spelling and leaves the
+ * illegible one open has made the session less inspectable rather than safer.
+ *
+ * ## The one rule
+ *
+ * Each of these commands either reads what it names or writes into a
+ * destination it names, and the destination is in the text. So they are decided
+ * by the arithmetic {@link refineRm} already uses, hoisted into
+ * {@link scopedWrite}: a destination strictly under a scratch root the CALLER
+ * resolved is the agent's own space, a relative destination is the workspace,
+ * and an absolute path anywhere else, a `..` segment, or a value the text cannot
+ * read is out of scope.
+ *
+ * ## Why the out-of-scope answer is a class that already exists
+ *
+ * {@link OUT_OF_SCOPE_WRITE_CLASS} is `files.delete.out_of_scope`, which is
+ * what `rm` and `find -delete` already answer for a destructive file operation
+ * the text places outside the workspace. Minting `files.write.out_of_scope`
+ * instead would have been the one change here capable of loosening something: a
+ * class no policy names resolves by `defaults.autonomy` (SPEC.md §7), so in
+ * every deployment whose defaults are permissive a brand-new name arrives
+ * autonomous, while the existing class is held at `manual` by the reference
+ * policy and by this repository's. An extraction is also honestly described by
+ * it: unpacking an archive over a directory overwrites whatever it finds there,
+ * which is the destruction the class is about.
+ *
+ * The strictness this inherits is `rm`'s, and it is deliberate. An ABSOLUTE
+ * destination is out of scope even when it happens to sit inside the checkout,
+ * because this file holds no workspace root, and the read roots it does hold
+ * are a read notion that must not become a write authorization.
+ */
+const OUT_OF_SCOPE_WRITE_CLASS = "files.delete.out_of_scope";
+
+/** The one rule id every out-of-scope packaging destination reports. */
+const OUT_OF_SCOPE_WRITE_RULE = "packaging-write-out-of-scope";
+
+/**
+ * A destination a flag names, as a list {@link scopedWrite} can read.
+ *
+ * Three answers, and the third is the one worth naming: `[]` when the flag is
+ * absent (the command writes where it stands, which is the working directory),
+ * `[value]` when the flag names something the text can read, and `[null]` when
+ * the flag is PRESENT and its value is not in the words. The last is a refusal
+ * rather than an absence, because a flag present with nothing readable after it
+ * would otherwise be answered as "no destination named" and take the looser
+ * branch.
+ */
+function namedDestination(
+  args: readonly string[],
+  names: readonly string[],
+): readonly (string | null)[] {
+  if (!hasFlag(args, names)) return [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    if (!names.includes(name)) continue;
+    if (equals !== -1) {
+      const value = arg.slice(equals + 1);
+      return [value.length === 0 ? null : value];
+    }
+    const value = args[index + 1];
+    return [value === undefined || isFlag(value) ? null : value];
+  }
+  return [null];
+}
+
+/**
+ * The class of a write into destinations the command names (APRV-397).
+ *
+ * The same fail-closed branches {@link refineRm} has, in the same order,
+ * against the same roots: all-scratch loosens, and an unreadable destination, an
+ * absolute one, or a `..` segment is out of scope with the destination BOUND so
+ * an approver is told which path earned the class. An empty destination list is
+ * the working directory, which this file cannot see and must not guess at, so it
+ * takes the row's own workspace answer exactly as `rm` with no target does.
+ */
+function scopedWrite(
+  ctx: RuleContext,
+  destinations: readonly (string | null)[],
+  rule: string,
+): Refinement {
+  const named = destinations.filter((entry): entry is string => entry !== null);
+  if (named.length < destinations.length) {
+    return { class: OUT_OF_SCOPE_WRITE_CLASS, rule: OUT_OF_SCOPE_WRITE_RULE };
+  }
+  if (allTargetsAreScratch(named, ctx.context.scratchRoots ?? [])) {
+    return { class: "files.write.workspace", rule };
+  }
+  for (const destination of named) {
+    if (
+      destination.startsWith("/") ||
+      pathSegments(destination).includes("..") ||
+      isUnknownValue(destination)
+    ) {
+      return { class: OUT_OF_SCOPE_WRITE_CLASS, rule: OUT_OF_SCOPE_WRITE_RULE, path: destination };
+    }
+  }
+  return { class: "files.write.workspace", rule };
+}
+
+/**
+ * An argv that asks a binary about itself: a version or a usage string.
+ *
+ * The harness table has its own copy of this idea ({@link HARNESS_PROBE_FLAGS})
+ * and keeps it, because a harness probe still EXECUTES a whole second agent's
+ * binary and is named in {@link CODE_EXECUTING_RULES} for that reason. This one
+ * is the package managers', where `npm --version` prints a string and starts
+ * nothing at all. `-v` is here and absent there: it is npm's version flag and
+ * nothing else's.
+ */
+const VERSION_PROBE_FLAGS: readonly string[] = ["--version", "-v", "-V", "--help", "-h"];
+
+/** Is this argv nothing but probe flags? One word at minimum, so a bare binary is not a probe. */
+function isVersionProbe(args: readonly string[]): boolean {
+  return args.length > 0 && args.every((arg) => VERSION_PROBE_FLAGS.includes(arg));
+}
+
+/** Positionals, with the values of value-taking flags left out of the count. */
+function positionalsBesideValues(args: readonly string[], valueFlags: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (isFlag(arg)) {
+      if (valueFlags.includes(arg)) index += 1;
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+/** `npm pack`'s flags whose value is a path or a workspace name, never a package spec. */
+const NPM_PACK_VALUE_FLAGS: readonly string[] = ["--pack-destination", "--workspace", "-w"];
+
+/**
+ * Does this `npm pack` argument name something on disk rather than a registry
+ * package?
+ *
+ * A path, in the spellings npm accepts for one. Everything else is a package
+ * spec, which `npm pack` resolves by FETCHING it, and a value the text cannot
+ * read is a spec too: the looser reading of an unreadable argument is the one
+ * that lets a download through as a local pack.
+ */
+function isLocalPackSpec(spec: string): boolean {
+  if (isUnknownValue(spec)) return false;
+  if (spec.startsWith(".") || spec.startsWith("/")) return true;
+  return spec.includes("/") && !spec.startsWith("@");
+}
+
+/**
+ * `npm pack` — a tarball into the working directory, or into
+ * `--pack-destination`.
+ *
+ * Two answers beside the scoped write. A positional naming a REGISTRY package
+ * is `network.call`, because that spelling downloads the package before it packs
+ * it and the tarball it then writes is beside the point. And the write itself
+ * runs the package's own `prepack` and `prepare` scripts, which is why the rule
+ * id is in {@link CODE_EXECUTING_RULES}.
+ */
+function refineNpmPack(ctx: RuleContext): Refinement {
+  const specs = positionalsBesideValues(ctx.args, NPM_PACK_VALUE_FLAGS).slice(1);
+  if (specs.some((spec) => !isLocalPackSpec(spec))) {
+    return { class: "network.call", rule: "npm-pack-remote" };
+  }
+  return scopedWrite(ctx, namedDestination(ctx.args, ["--pack-destination"]), "npm-pack");
+}
+
+/**
+ * `npm init` — `package.json` into the working directory.
+ *
+ * No flag moves it, so there is no destination to scope and the answer is the
+ * workspace write the row declares. `npm init <pkg>` is a different act, since
+ * it downloads an initializer and runs it, which is `npm exec` wearing another
+ * name; it takes its own rule id and its seat in {@link CODE_EXECUTING_RULES}
+ * beside `npm-script`.
+ */
+function refineNpmInit(ctx: RuleContext): Refinement {
+  const initializer = positionalsBesideValues(ctx.args, ["--workspace", "-w"]).slice(1);
+  return initializer.length === 0
+    ? { class: "files.write.workspace", rule: "npm-init" }
+    : { class: "files.write.workspace", rule: "npm-init-create" };
+}
+
+/** `tar`'s long spellings of each mode, beside the one-letter ones. */
+const TAR_LIST_FLAGS: readonly string[] = ["--list"];
+const TAR_EXTRACT_FLAGS: readonly string[] = ["--extract", "--get"];
+const TAR_CREATE_FLAGS: readonly string[] = [
+  "--create",
+  "--append",
+  "--update",
+  "--delete",
+  "--concatenate",
+  "--catenate",
+];
+
+/** The argv that ask `tar` about itself and open no archive at all. */
+const TAR_PROBE_FLAGS: readonly string[] = ["--version", "--help", "--usage"];
+
+/**
+ * The mode letters `tar` was given, from the short bundles and the old-style
+ * first word.
+ *
+ * `tar xzf a.tgz` carries no dash at all, and it is the spelling most sessions
+ * write, so a rule that read only `-x` would answer the common form with a
+ * refusal. Only the FIRST word can be an old-style bundle, and a word is read as
+ * a bundle only when it is letters and nothing else: `-fa.tgz` is a glued
+ * filename, and a letter taken out of a filename is a mode the command never
+ * named. Dropping such a word costs a refusal (the mode becomes unreadable) and
+ * can never invent a read.
+ */
+function tarModeLetters(args: readonly string[]): string {
+  let letters = "";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (/^-[A-Za-z]+$/u.test(arg)) letters += arg.slice(1);
+    else if (index === 0 && /^[A-Za-z]+$/u.test(arg)) letters += arg;
+  }
+  return letters;
+}
+
+/** The tar letters that consume the next word, which is what makes a bundle ambiguous. */
+const TAR_VALUE_LETTERS: readonly string[] = ["f", "C"];
+
+/** The option letters of a tar word, or `null` when it is not a bundle of them. */
+function tarBundle(arg: string, index: number): string | null {
+  if (/^-[A-Za-z]+$/u.test(arg)) return arg.slice(1);
+  if (index === 0 && /^[A-Za-z]+$/u.test(arg)) return arg;
+  return null;
+}
+
+/**
+ * The value a tar flag carries, in every spelling tar accepts for it.
+ *
+ * The glued bundle is the whole reason this exists rather than
+ * {@link namedDestination}: `tar -czf out.tgz src` names its archive with an
+ * `f` buried in `-czf`, which an exact-word flag match cannot see, and a rule
+ * that missed it would answer the commonest spelling of a create with the
+ * looser branch.
+ *
+ * One bundle carrying BOTH value-taking letters (`-xCf`) is `null`, which
+ * {@link scopedWrite} refuses: which of the following words feeds which letter
+ * depends on tar's own option order, so the destination is not in the text
+ * (SPEC.md §11.1, ambiguity resolves to the stricter class).
+ */
+function tarFlagValue(
+  args: readonly string[],
+  letter: string,
+  longNames: readonly string[],
+): readonly (string | null)[] {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    if (longNames.includes(name)) {
+      if (equals === -1) {
+        const next = args[index + 1];
+        return [next === undefined || isFlag(next) ? null : next];
+      }
+      const value = arg.slice(equals + 1);
+      return [value.length === 0 ? null : value];
+    }
+    const bundle = tarBundle(arg, index);
+    if (bundle === null || !bundle.includes(letter)) continue;
+    if (TAR_VALUE_LETTERS.filter((candidate) => bundle.includes(candidate)).length > 1) {
+      return [null];
+    }
+    const next = args[index + 1];
+    return [next === undefined || isFlag(next) ? null : next];
+  }
+  return [];
+}
+
+/**
+ * `tar` — a listing reads, an extraction writes where `-C` points, a creation
+ * writes the archive `-f` names.
+ *
+ * The write branch is checked FIRST and takes both destinations when one command
+ * names both modes, because `tar` resolves a contradictory mode by its own
+ * option order and the stricter reading is the one that assumes it writes.
+ *
+ * A mode the text does not carry is `opaque` rather than a guess, and that is
+ * the honest code for it: a `tar` whose mode is not in its words is a command
+ * whose effect is not in its words, which is what {@link OPAQUE_BINS} refuses
+ * for the same reason.
+ */
+function refineTar(ctx: RuleContext): Refinement {
+  const letters = tarModeLetters(ctx.args);
+  const extracting = letters.includes("x") || hasFlag(ctx.args, TAR_EXTRACT_FLAGS);
+  const creating =
+    ["c", "r", "u", "A"].some((letter) => letters.includes(letter)) ||
+    hasFlag(ctx.args, TAR_CREATE_FLAGS);
+  if (extracting || creating) {
+    const destinations = [
+      ...(extracting ? tarFlagValue(ctx.args, "C", ["--directory"]) : []),
+      ...(creating ? tarFlagValue(ctx.args, "f", ["--file"]) : []),
+    ];
+    return scopedWrite(ctx, destinations, extracting ? "tar-extract" : "tar-create");
+  }
+  if (letters.includes("t") || hasFlag(ctx.args, TAR_LIST_FLAGS)) {
+    return { class: "read.shell", rule: "tar-list" };
+  }
+  if (ctx.args.length > 0 && ctx.args.every((arg) => TAR_PROBE_FLAGS.includes(arg))) {
+    return { class: "read.shell", rule: "tar-probe" };
+  }
+  return { opaque: "tar names no mode this classifier can read" };
+}
+
+/**
+ * `gunzip` — the stdout, test and list forms read; every other form REPLACES a
+ * file.
+ *
+ * The default is the trap: `gunzip pkg.tgz` removes `pkg.tgz` and leaves
+ * `pkg.tar` in its place, so the plain spelling is a write of the path it names.
+ * Three flags leave the disk alone: `-c`/`--stdout` decompresses to standard
+ * output, `-t`/`--test` checks the integrity of the archive, and `-l`/`--list`
+ * prints the compressed and uncompressed sizes, the ratio and the member name.
+ * A listing is the same kind of act as `tar -t` beside it and belongs in the
+ * same class. `-k` (`--keep`) is deliberately not a read: it spares the input
+ * and still creates the output.
+ */
+function refineGunzip(ctx: RuleContext): Refinement {
+  const reading =
+    hasShortFlag(ctx.args, ["c", "t", "l"]) ||
+    hasFlag(ctx.args, ["--stdout", "--to-stdout", "--test", "--list"]);
+  return reading
+    ? { class: "read.shell", rule: "gunzip-read" }
+    : scopedWrite(ctx, ctx.positionals, "gunzip-write");
+}
+
+/** `base64` — a read of what it names, unless `-o` names a file to write. */
+function refineBase64(ctx: RuleContext): Refinement {
+  const destination = namedDestination(ctx.args, ["-o", "--output"]);
+  return destination.length === 0
+    ? { class: "read.shell", rule: "base64-read" }
+    : scopedWrite(ctx, destination, "base64-write");
+}
+
+/**
+ * `openssl`'s digest subcommands, and only those.
+ *
+ * The row names the digests rather than the binary, so `openssl enc`, `genrsa`,
+ * `req`, `rand` and `s_client` stay exactly as unclassified as they were. Each
+ * of those writes key material, encrypts, or opens a socket, and none of them is
+ * what a release verification runs; a row for the binary would have swept all of
+ * them into a read.
+ */
+const OPENSSL_DIGEST_SUBS: readonly string[] = [
+  "dgst",
+  "md5",
+  "sha1",
+  "sha256",
+  "sha384",
+  "sha512",
+];
+
+/** `openssl dgst …` — a read of its named files, unless `-out` names one to write. */
+function refineOpensslDigest(ctx: RuleContext): Refinement {
+  const destination = namedDestination(ctx.args, ["-out"]);
+  return destination.length === 0
+    ? { class: "read.shell", rule: "openssl-digest" }
+    : scopedWrite(ctx, destination, "openssl-digest-out");
+}
+
+/**
+ * `git tag` — the listing forms read (APRV-397).
+ *
+ * APRV-305 gave the whole verb `release.publish`, which is right for the half
+ * of it that creates, moves, signs and deletes tags: a tag is the name a
+ * release was published under. It is wrong for the other half. `git tag -l` is
+ * a listing of local refs, and on 2026-09-20 it put a nine-minute question on a
+ * phone during a state check. Nothing about a listing reaches a registry, a
+ * remote or a consumer, and the class it takes is `read.shell`, the class every
+ * other reader of local repository metadata takes (`git log`, `git branch`,
+ * `git status`).
+ *
+ * The split is an ALLOWLIST of the flags that list, and that direction is the
+ * whole safety argument: a flag this rule has never heard of is a creation, so a
+ * future `git tag` option cannot arrive as a read by default. A positional is a
+ * TAG NAME, which creates one, unless `-l` is present and makes it a pattern.
+ * The shape mirrors {@link refineGitBranch}, which splits read and write halves
+ * of one verb for the same reason.
+ */
+const GIT_TAG_READ_FLAGS: readonly string[] = [
+  "-l",
+  "--list",
+  "-n",
+  "-i",
+  "--ignore-case",
+  "--omit-empty",
+  "--column",
+  "--no-column",
+  "--color",
+  "--no-color",
+];
+
+/** Listing flags whose next word is a value rather than a tag name. */
+const GIT_TAG_READ_VALUE_FLAGS: readonly string[] = [
+  "--contains",
+  "--no-contains",
+  "--points-at",
+  "--merged",
+  "--no-merged",
+  "--sort",
+  "--format",
+];
+
+function refineGitTag(ctx: RuleContext): Refinement {
+  const publish: Refinement = { class: "release.publish", rule: "git-tag" };
+  const args = ctx.args.slice(1);
+  const names: string[] = [];
+  let listing = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (!isFlag(arg)) {
+      names.push(arg);
+      continue;
+    }
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    if (name === "-l" || name === "--list") {
+      listing = true;
+      continue;
+    }
+    if (GIT_TAG_READ_FLAGS.includes(name) || /^-n\d+$/u.test(arg)) continue;
+    if (GIT_TAG_READ_VALUE_FLAGS.includes(name)) {
+      if (equals === -1) index += 1;
+      continue;
+    }
+    // Everything the allowlist does not name: a creation, a deletion, a
+    // signature, a force-move, and also a flag that did not exist when this rule
+    // was written.
+    return publish;
+  }
+  return names.length > 0 && !listing ? publish : { class: "read.shell", rule: "git-tag-read" };
+}
+
 /**
  * The methods a fetch may name and still be a read: GET, and HEAD, which is a
  * GET that discards the body. Everything else, including a method the
@@ -2387,7 +2851,16 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   { id: "git-reset", bins: ["git"], subs: ["reset"], class: "vcs.commit.branch", emits: ["vcs.history.rewrite"], refine: refineGitReset },
   { id: "git-commit", bins: ["git"], subs: ["commit"], class: "vcs.commit.branch", emits: ["vcs.history.rewrite"], refine: refineGitCommit },
   { id: "git-branch", bins: ["git"], subs: ["branch"], class: "read.shell", emits: ["vcs.commit.branch"], refine: refineGitBranch },
-  { id: "git-tag", bins: ["git"], subs: ["tag"], class: "release.publish" },
+  // APRV-397 split the verb: the listing flags read, everything else publishes.
+  // See {@link refineGitTag} for why the split is an allowlist.
+  {
+    id: "git-tag",
+    bins: ["git"],
+    subs: ["tag"],
+    class: "release.publish",
+    emits: ["read.shell"],
+    refine: refineGitTag,
+  },
   { id: "git-clone", bins: ["git"], subs: ["clone"], class: "network.call" },
   {
     id: "git-write",
@@ -2471,7 +2944,30 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   },
 
   // -- package managers ----------------------------------------------------
+  // APRV-397. The probe row matches ONLY an argv that is nothing but version or
+  // help flags, which is what `probe` means and what keeps `npm doctor`,
+  // `npm cache clean` and every other subcommand this table does not name at the
+  // `unclassified` deny they have today. `npm version` is a different word and
+  // keeps its `release.publish` row below.
+  { id: "npm-version", bins: ["npm", "pnpm", "yarn", "bun"], class: "read.shell", probe: true },
   { id: "npm-publish", bins: ["npm", "pnpm", "yarn", "bun"], subs: ["publish", "version", "deprecate", "dist-tag", "unpublish"], class: "release.publish" },
+  // APRV-397: the two package-manager verbs that write into a directory they
+  // name rather than touching the registry or the lockfile.
+  {
+    id: "npm-pack",
+    bins: ["npm", "pnpm", "yarn", "bun"],
+    subs: ["pack"],
+    class: "files.write.workspace",
+    emits: [OUT_OF_SCOPE_WRITE_CLASS, "network.call"],
+    refine: refineNpmPack,
+  },
+  {
+    id: "npm-init",
+    bins: ["npm", "pnpm", "yarn", "bun"],
+    subs: ["init"],
+    class: "files.write.workspace",
+    refine: refineNpmInit,
+  },
   { id: "npm-install", bins: ["npm", "bun"], subs: ["install", "i", "add"], class: "deps.add", emits: ["deps.install"], refine: refineNpmInstall },
   { id: "yarn-add", bins: ["yarn", "pnpm"], subs: ["add"], class: "deps.add" },
   { id: "yarn-install", bins: ["yarn", "pnpm"], subs: ["install"], class: "deps.install" },
@@ -2570,6 +3066,41 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     class: "read.shell",
     emits: ["files.delete.out_of_scope", "files.write.workspace"],
     refine: refineFind,
+  },
+
+  // -- packaging and archives (APRV-397) -----------------------------------
+  // Four binaries a release verification cannot do without, each of which either
+  // reads what it names or writes into a destination it names. The section
+  // comment above {@link OUT_OF_SCOPE_WRITE_CLASS} holds the reasoning; these
+  // rows only say which binary reaches which refinement.
+  {
+    id: "tar",
+    bins: ["tar"],
+    class: "files.write.workspace",
+    emits: ["read.shell", OUT_OF_SCOPE_WRITE_CLASS],
+    refine: refineTar,
+  },
+  {
+    id: "gunzip",
+    bins: ["gunzip"],
+    class: "files.write.workspace",
+    emits: ["read.shell", OUT_OF_SCOPE_WRITE_CLASS],
+    refine: refineGunzip,
+  },
+  {
+    id: "base64",
+    bins: ["base64"],
+    class: "read.shell",
+    emits: ["files.write.workspace", OUT_OF_SCOPE_WRITE_CLASS],
+    refine: refineBase64,
+  },
+  {
+    id: "openssl-digest",
+    bins: ["openssl"],
+    subs: OPENSSL_DIGEST_SUBS,
+    class: "read.shell",
+    emits: ["files.write.workspace", OUT_OF_SCOPE_WRITE_CLASS],
+    refine: refineOpensslDigest,
   },
 
   // -- network -------------------------------------------------------------
@@ -2946,6 +3477,18 @@ export const CODE_EXECUTING_RULES: readonly string[] = [
   /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
   "workspace-tool",
   /**
+   * `npm pack` and `npm init <initializer>` (APRV-397).
+   *
+   * Both run code the runtime did not author, for different reasons. `npm pack`
+   * runs the package's own `prepack` and `prepare` scripts, which are files in
+   * the workspace an agent may have written a minute ago, exactly as `npm test`
+   * is. `npm init <pkg>` downloads an initializer and runs it, which is
+   * `npm exec` wearing another name. A bare `npm init` writes `package.json` and
+   * runs nothing, so it is absent.
+   */
+  "npm-pack",
+  "npm-init-create",
+  /**
    * Launching an agent harness, and probing one (APRV-354).
    *
    * Every spelling is here, the probe included. A launch hands control to a
@@ -3147,10 +3690,16 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
   return null;
 }
 
-/** Find the first table row matching this binary and subcommand. */
-function matchRule(bin: string, sub: string | null): CommandRule | null {
+/**
+ * Find the first table row matching this binary, subcommand and argv.
+ *
+ * The argv is read for one purpose only (APRV-397): a `probe` row matches an
+ * argv that is nothing but version or help flags, and no other row reads it.
+ */
+function matchRule(bin: string, sub: string | null, args: readonly string[]): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
+    if (rule.probe === true && !isVersionProbe(args)) continue;
     if (rule.subs !== undefined) {
       if (sub === null || !rule.subs.includes(sub)) continue;
     }
@@ -3289,7 +3838,7 @@ function classifySegment(
   const credential = credentialTouch(basename, args, positionals);
   if (credential !== null) return { ok: true, ...credential };
   const sub = positionals[0] ?? null;
-  const rule = matchRule(basename, sub);
+  const rule = matchRule(basename, sub, args);
   if (rule === null) {
     return {
       ok: false,

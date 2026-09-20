@@ -241,7 +241,7 @@ an addition).
 | `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
 | `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
 | `git-branch` | git | branch | read.shell, vcs.commit.branch |
-| `git-tag` | git | tag | release.publish |
+| `git-tag` | git | tag | read.shell for a LISTING (`-l`, `--list`, `-n`, `-n<num>`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, `--color`, `--ignore-case`, `--omit-empty`, or no argument at all, rule `git-tag-read`); release.publish for everything else, which is every creation, deletion, force-move and signature, a bare tag name, and any flag the listing allowlist does not name (APRV-397) |
 | `git-clone` | git | clone | network.call |
 | `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| pull \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
@@ -250,7 +250,10 @@ an addition).
 | `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
 | `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; vcs.remote.meta § for `pr update-branch` and `run rerun` on the checkout's own repository; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
+| `npm-version` | npm, pnpm, yarn, bun | (an argv that is nothing but `--version`, `-v`, `-V`, `--help` or `-h`) | read.shell (APRV-397: the row matches that argv and nothing else, so every subcommand this table does not name keeps its `unclassified` deny) |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
+| `npm-pack` | npm, pnpm, yarn, bun | pack | files.write.workspace for the tarball, scoped to `--pack-destination`; files.delete.out_of_scope ¶ when that destination is outside the workspace; network.call when a positional names a registry package, which `npm pack` downloads before it packs (APRV-397) |
+| `npm-init` | npm, pnpm, yarn, bun | init | files.write.workspace (`package.json` in the working directory); rule `npm-init-create` when a positional names an initializer package, which is downloaded and run (APRV-397) |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
 | `yarn-install` | yarn, pnpm | install | deps.install |
@@ -276,6 +279,10 @@ an addition).
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir`, which run a command this classifier does not read (APRV-283) |
+| `tar` | tar | (any) | read.shell for a listing (`-t`, `--list`, and the old-style `tvf` bundle) and for `--version`/`--help`; files.write.workspace for an extraction into `-C` or the working directory and for a creation of the archive `-f` names; files.delete.out_of_scope ¶ when that destination is outside the workspace; OPAQUE when the mode is not in the words (APRV-397) |
+| `gunzip` | gunzip | (any) | read.shell for `-c`/`--stdout`, `-t`/`--test` and `-l`/`--list`; files.write.workspace otherwise, because the default form REPLACES the file it names (`-k` keeps the input and still creates the output); files.delete.out_of_scope ¶ when the named path is outside the workspace (APRV-397) |
+| `base64` | base64 | (any) | read.shell for a decode or encode to stdout; files.write.workspace when `-o`/`--output` names a file; files.delete.out_of_scope ¶ when that file is outside the workspace (APRV-397) |
+| `openssl-digest` | openssl | dgst \| md5 \| sha1 \| sha256 \| sha384 \| sha512 | read.shell for the digest of its named files; files.write.workspace when `-out` names a file; files.delete.out_of_scope ¶ when that file is outside the workspace. Every other `openssl` subcommand (`enc`, `genrsa`, `req`, `rand`, `s_client`) stays `unclassified` (APRV-397) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
@@ -291,6 +298,11 @@ cannot make from text: see [Deleting scratch](#deleting-scratch).
 
 § `vcs.remote.meta` is reserved for the checkout's OWN repository: see
 [GitHub metadata on your own remote](#github-metadata-on-your-own-remote).
+
+¶ A packaging write whose destination the text puts outside the workspace takes
+`files.delete.out_of_scope`, rule `packaging-write-out-of-scope`, with the
+destination bound: see
+[Packing, unpacking and hashing](#packing-unpacking-and-hashing).
 
 Five overrides sit on top of the table:
 
@@ -681,6 +693,62 @@ stays `vcs.push.main`; `gh release`, `gh gist`, `gh secret`, `gh auth`,
 `gh workflow`, a `gh api` with a method or a body, a graphql document carrying a
 `mutation`, and every `curl` that is not a plain GET stay where they were.
 
+### Packing, unpacking and hashing
+
+A release verification is mostly reading: pack a tarball, list what is in it,
+unpack it somewhere disposable, hash a file, decode a base64 blob, ask a binary
+its version. Every one of those commands was `unclassified` until APRV-397, so
+every one of them was denied, and the verifier that met that wall on 2026-09-20
+did the work anyway by fetching the tarball with `curl` and parsing it in a
+script. A gate that refuses the legible spelling and leaves the illegible one
+open has made the session less inspectable rather than safer.
+
+The rows above are the repair, and they share one rule: each command either
+reads what it names or writes into a destination it names, and the destination is
+in the text.
+
+| the command names | class |
+|---|---|
+| a relative destination, or none at all (the working directory) | `files.write.workspace`, the row's own rule |
+| a destination strictly under a scratch root the caller resolved | `files.write.workspace`, the row's own rule |
+| an ABSOLUTE destination anywhere else | `files.delete.out_of_scope`, rule `packaging-write-out-of-scope`, destination bound |
+| a destination holding `..`, or one whose expansion is not in the text (`$DEST`, a glob, `~`) | `files.delete.out_of_scope`, rule `packaging-write-out-of-scope` |
+| a destination flag present with nothing readable after it | `files.delete.out_of_scope`, rule `packaging-write-out-of-scope`, nothing bound |
+
+That is the arithmetic the delete rule below already uses, against the same
+roots, and it is reused rather than reinvented on purpose. Three consequences are
+worth stating plainly.
+
+**The class is a `files.delete.*` one, and that is deliberate.** Minting
+`files.write.out_of_scope` would have been the one change here capable of
+loosening something: a class no policy names resolves by `defaults.autonomy`
+(SPEC.md §7), so in a deployment whose defaults are permissive a brand-new name
+arrives autonomous, while `files.delete.out_of_scope` is held at `manual` by the
+reference policy and by this repository's. The name also describes the act:
+unpacking an archive over a directory overwrites whatever it finds there.
+
+**An absolute destination is out of scope even inside the checkout.** The
+classifier holds no workspace root, and the read roots it does hold are a read
+notion that must not become a write authorization. `tar -xzf pkg.tgz -C build`
+is a workspace write; `tar -xzf pkg.tgz -C /Users/you/project/build` is a
+question. This is exactly the strictness `rm` has had since APRV-267.
+
+**There is no disk pass for a write destination, and that is a limit rather than
+a claim.** The delete rule below and the read rule after it each resolve their
+targets against the filesystem and tighten; a write destination is answered from
+the text alone, here and in the `workspace-write` row above it, so a relative or
+scratch-rooted destination that reaches outside the roots through a SYMLINK
+classifies as the workspace write the text describes. That is the same answer
+`cp x build/y` and `tee build/y` have always had, and APRV-402 is the task for
+the pass that would close it.
+
+`tar` has one more answer of its own: a `tar` whose MODE is not in its words
+(`tar -f pkg.tgz`, with no `-t`, `-x` or `-c` anywhere) is `hook-opaque`. The
+old-style bundle is read, so `tar tvf pkg.tgz` and `tar xzf pkg.tgz -C build`
+classify as the listing and the extraction they are; a bundle carrying both
+value-taking letters (`-xzCf`) is refused, because which following word feeds
+which letter is tar's own option order rather than anything in the text.
+
 ### Deleting scratch
 
 `files.delete.out_of_scope` exists to hold a delete that leaves the workspace.
@@ -758,7 +826,8 @@ gate root, so every sibling under `~/dev` is out of scope with no grammar at all
 
 **Text (pure, in the classifier).** For a reader the table knows — `cat`, `head`,
 `tail`, `grep`, `rg`, `ls`, `find`, `sed`, `wc`, `stat`, `file`, `diff`, `du`,
-`sort`, `uniq`, `cut`, `jq`, `tree`, and the checksum tools — the classifier
+`sort`, `uniq`, `cut`, `jq`, `tree`, the checksum tools, and (since APRV-397)
+`tar`, `gunzip`, `base64` and `openssl` in their READ forms — the classifier
 works out which words are paths (all positionals for most; everything after the
 pattern for `grep`, `rg`, `sed` and `jq`, unless the pattern came in through
 `-e` or `-f`, in which case all of them; everything before the first primary for

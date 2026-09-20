@@ -103,7 +103,7 @@ an addition).
 | `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
 | `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
 | `git-branch` | git | branch | read.shell, vcs.commit.branch |
-| `git-tag` | git | tag | release.publish |
+| `git-tag` | git | tag | read.shell for a listing (`-l`, `--list`, `-n`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, or no argument), rule `git-tag-read`; release.publish for every creation, deletion, force-move and signature, for a bare tag name, and for any flag the listing allowlist does not name (APRV-397) |
 | `git-clone` | git | clone | network.call |
 | `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| pull \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
@@ -112,7 +112,10 @@ an addition).
 | `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
 | `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; vcs.remote.meta § for `pr update-branch` and `run rerun` on the checkout's own repository; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
+| `npm-version` | npm, pnpm, yarn, bun | (an argv that is nothing but `--version`, `-v`, `-V`, `--help` or `-h`) | read.shell (APRV-397) |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
+| `npm-pack` | npm, pnpm, yarn, bun | pack | files.write.workspace scoped to `--pack-destination`; files.delete.out_of_scope ¶ for a destination outside the workspace; network.call for a registry package spec (APRV-397) |
+| `npm-init` | npm, pnpm, yarn, bun | init | files.write.workspace; rule `npm-init-create` when a positional names an initializer package (APRV-397) |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
 | `yarn-install` | yarn, pnpm | install | deps.install |
@@ -138,6 +141,10 @@ an addition).
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir` (APRV-283) |
+| `tar` | tar | (any) | read.shell for a listing (`-t`, `--list`, the old-style `tvf` bundle) and for `--version`/`--help`; files.write.workspace for an extraction into `-C` or a creation of the archive `-f` names; files.delete.out_of_scope ¶ for a destination outside the workspace; OPAQUE when the mode is not in the words (APRV-397) |
+| `gunzip` | gunzip | (any) | read.shell for `-c`/`--stdout`, `-t`/`--test` and `-l`/`--list`; files.write.workspace otherwise, since the default form replaces the file it names; files.delete.out_of_scope ¶ outside the workspace (APRV-397) |
+| `base64` | base64 | (any) | read.shell; files.write.workspace when `-o` names a file; files.delete.out_of_scope ¶ outside the workspace (APRV-397) |
+| `openssl-digest` | openssl | dgst \| md5 \| sha1 \| sha256 \| sha384 \| sha512 | read.shell; files.write.workspace when `-out` names a file; files.delete.out_of_scope ¶ outside the workspace. Every other `openssl` subcommand stays `unclassified` (APRV-397) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
@@ -153,6 +160,14 @@ cannot make from text: see [Deleting scratch](#deleting-scratch).
 
 § `vcs.remote.meta` is reserved for the checkout's OWN repository: see
 [GitHub metadata on your own remote](#github-metadata-on-your-own-remote).
+
+¶ A packaging write whose destination the text puts outside the workspace takes
+`files.delete.out_of_scope`, rule `packaging-write-out-of-scope`, with the
+destination bound. Same arithmetic and same roots as the delete rule, and the
+class is an existing one rather than a new `files.write.*` sibling, because a
+class no policy names resolves by `defaults.autonomy`:
+[Packing, unpacking and hashing](./claude-code-hook.md#packing-unpacking-and-hashing)
+in the Claude Code document holds the table and the reasoning.
 
 Five overrides sit on top of the table:
 
