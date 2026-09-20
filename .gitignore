@@ -42,3 +42,8 @@ private/*
 .approval/channel-owner.json
 .approval/channel-owner.json.*.tmp
 brand/out/
+
+# Session handovers (APRV-406): planning notes for the next session, never
+# tracked. Pages serves the repo root, so a tracked handover is a public URL.
+# They live in the primary checkout under private/handover/.
+/HANDOVER*.md
