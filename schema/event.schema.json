@@ -118,9 +118,10 @@
             "cursor",
             "codex",
             "grok",
-            "muse"
+            "muse",
+            "hermes"
           ],
-          "description": "SPEC.md §10.1 (amended, APRV-227): which harness hook wrote this record. A closed set, extended only by a task that adds the case, because it is the discriminator a reader scopes `harness_version` by: one log holds the records of every harness that ever wrote to it, and a version with no binary named beside it is a string nobody can compare against anything. OPTIONAL and additive — every record written before the field existed still validates and still verifies, and the two fields travel together or not at all. APRV-358 added `grok`, which APRV-243 shipped an adapter for and never added here: a Grok session's manual-class registration failed validation at the write boundary, so the request never reached a human. Closed does not mean hand-maintained any more. This list is pinned set-equal to `HARNESS_KINDS` in `src/core/harness-version.ts` by `tests/harness-enum.test.ts`, along with every other place a harness name is enumerated, so the next adapter cannot land with the enum left behind."
+          "description": "SPEC.md §10.1 (amended, APRV-227): which harness hook wrote this record. A closed set, extended only by a task that adds the case, because it is the discriminator a reader scopes `harness_version` by: one log holds the records of every harness that ever wrote to it, and a version with no binary named beside it is a string nobody can compare against anything. OPTIONAL and additive — every record written before the field existed still validates and still verifies, and the two fields travel together or not at all. APRV-358 added `grok`, which APRV-243 shipped an adapter for and never added here: a Grok session's manual-class registration failed validation at the write boundary, so the request never reached a human. Closed does not mean hand-maintained any more. This list is pinned set-equal to `HARNESS_KINDS` in `src/core/harness-version.ts` by `tests/harness-enum.test.ts`, along with every other place a harness name is enumerated, so the next adapter cannot land with the enum left behind. APRV-398 added `hermes`, the Hermes Agent adapter, through that pinning rather than after it."
         },
         "harness_version": {
           "type": "string",

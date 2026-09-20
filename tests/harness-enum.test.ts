@@ -37,6 +37,12 @@ import { fileURLToPath } from "node:url";
 
 import { classifyCommand } from "../src/core/command-class.js";
 import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
+import {
+  HARNESS_SETTINGS,
+  ORGAN_SEARCH,
+  hookCommandPattern,
+  registeredHarnesses,
+} from "../src/cli/doctor.js";
 import { HARNESS_ADAPTERS } from "../src/cli/hook.js";
 import { HOOK_HELP } from "../src/cli/help.js";
 import { VERB_REGISTRY } from "../src/cli/verb-registry.js";
@@ -155,6 +161,10 @@ test("every harness kind's binary carries a launch class, under the launch vocab
     codex: "codex",
     grok: "grok",
     muse: "muse",
+    // APRV-398: the binary and the protocol share one spelling here, so there
+    // is no mapping to get wrong — which is the answer this map exists to make
+    // a new harness state out loud rather than inherit.
+    hermes: "hermes",
   };
   for (const kind of HARNESS_KINDS) {
     const result = classifyCommand(`${HARNESS_BINARY[kind]} do the thing`);
@@ -162,6 +172,143 @@ test("every harness kind's binary carries a launch class, under the launch vocab
     if (!result.ok) throw new Error("unreachable");
     assert.equal(result.segments.length, 1);
     assert.equal(result.segments[0]?.class, `harness.launch.${launchName[kind]}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC4 (APRV-398) — the doctor's own harness lists join the pinning
+// ---------------------------------------------------------------------------
+
+test("doctor's harness settings table is keyed by harness kind", () => {
+  // The miss this pins is the one APRV-358 did not reach. `HARNESS_SETTINGS`
+  // was a flat array of three paths and `HOOK_COMMAND` a regex naming three
+  // kinds, so `grok` and `muse` shipped adapters the harness-version row could
+  // not see: a checkout with a `.muse/hooks.json` full of `approval hook muse`
+  // entries reported "registers no `approval hook` command", and no test noticed.
+  assert.deepEqual(Object.keys(HARNESS_SETTINGS).sort(), KINDS);
+  for (const kind of HARNESS_KINDS) {
+    const locations = HARNESS_SETTINGS[kind];
+    assert.ok(Array.isArray(locations), `${kind} has no settings locations array`);
+    for (const location of locations) {
+      assert.ok(
+        typeof location.file === "string" || typeof location.dir === "string",
+        `a ${kind} settings location names neither a file nor a directory`,
+      );
+    }
+  }
+  // `codex` is deliberately the one kind with no ORGAN_SEARCH entry, and the
+  // assertion says so rather than leaving a reader to wonder: its organ files
+  // are reported by the Codex-specific rows, and moving them into this row is
+  // its own task. Every OTHER kind must name somewhere to look, because an
+  // empty list there is a harness whose hand-edited organ nobody reports.
+  assert.deepEqual(Object.keys(ORGAN_SEARCH).sort(), KINDS);
+  for (const kind of HARNESS_KINDS) {
+    if (kind === "codex") {
+      assert.deepEqual(ORGAN_SEARCH[kind], [], "the codex exception is documented as empty");
+      continue;
+    }
+    assert.ok(
+      ORGAN_SEARCH[kind].length > 0,
+      `no organ search directory for \`${kind}\`, so a hand-edited ${kind} organ is never reported`,
+    );
+  }
+});
+
+test("doctor's hook-command pattern recognises every harness kind", () => {
+  // Derived from HARNESS_KINDS since APRV-398 rather than spelled, so this test
+  // pins the BEHAVIOUR the derivation buys instead of a literal that would have
+  // to be edited beside it.
+  for (const kind of HARNESS_KINDS) {
+    const command = `approval hook ${kind} --dir /repo`;
+    const match = hookCommandPattern().exec(command);
+    assert.ok(match !== null, `the pattern does not match ${JSON.stringify(command)}`);
+    assert.equal(
+      match[1],
+      kind,
+      `the pattern captured ${JSON.stringify(match[1])} from ${JSON.stringify(command)}; a kind that is a prefix of another must not win`,
+    );
+  }
+  assert.equal(
+    hookCommandPattern().exec("approval hook gemini --dir /repo"),
+    null,
+    "a harness this runtime does not speak must not match",
+  );
+});
+
+test("a grok and a muse registration are seen by doctor, which they were not before", () => {
+  // The end-to-end half of the pinning above. Before APRV-398 both of these
+  // returned an empty list.
+  const grokDir = join(scratch, "registered-grok");
+  mkdirSync(join(grokDir, ".grok", "hooks"), { recursive: true });
+  writeFileSync(
+    join(grokDir, ".grok", "hooks", "pre-tool-use.json"),
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "*", hooks: [{ type: "command", command: "approval hook grok --dir /repo" }] },
+        ],
+      },
+    }),
+    "utf8",
+  );
+  assert.deepEqual(registeredHarnesses(grokDir), ["grok"]);
+
+  const museDir = join(scratch, "registered-muse");
+  mkdirSync(join(museDir, ".muse"), { recursive: true });
+  writeFileSync(
+    join(museDir, ".muse", "hooks.json"),
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [{ hooks: [{ type: "command", command: "approval hook muse --dir /repo" }] }],
+      },
+    }),
+    "utf8",
+  );
+  assert.deepEqual(registeredHarnesses(museDir), ["muse"]);
+
+  // And a checkout with neither still reports neither, which is the half that
+  // makes the two above mean anything.
+  const emptyDir = join(scratch, "registered-nothing");
+  mkdirSync(emptyDir, { recursive: true });
+  assert.deepEqual(registeredHarnesses(emptyDir), []);
+});
+
+test("a hermes registration is read out of HERMES_HOME, which is not in the checkout", () => {
+  // Hermes documents no project-local configuration directory, so a
+  // repository-relative search would be empty on every machine and the row could
+  // never say anything true. `HERMES_HOME` is read to know where to LOOK; the
+  // row it feeds can only add a line, never remove a red one.
+  const home = join(scratch, "hermes-home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(home, "config.yaml"),
+    [
+      "plugins:",
+      "  hook_callback_timeout: 600",
+      "hooks:",
+      "  - event: pre_tool_call",
+      '    command: "approval hook hermes --dir /repo"',
+      "    fail_closed: true",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const checkout = join(scratch, "hermes-checkout");
+  mkdirSync(checkout, { recursive: true });
+
+  const previous = process.env["HERMES_HOME"];
+  process.env["HERMES_HOME"] = home;
+  try {
+    assert.deepEqual(registeredHarnesses(checkout), ["hermes"]);
+    // A YAML file is searched as TEXT, because it has no JSON leaves to walk.
+    // That is why the entry declares `text: true` rather than relying on the
+    // JSON walk the other five use.
+    process.env["HERMES_HOME"] = join(scratch, "hermes-home-empty");
+    mkdirSync(process.env["HERMES_HOME"], { recursive: true });
+    assert.deepEqual(registeredHarnesses(checkout), []);
+  } finally {
+    if (previous === undefined) delete process.env["HERMES_HOME"];
+    else process.env["HERMES_HOME"] = previous;
   }
 });
 
@@ -334,6 +481,23 @@ function manualEvent(kind: HarnessKind, dir: string): string {
         tool_input: { command, workdir: dir, description: "self-reported, never read" },
         version: STATED_VERSION,
       });
+    case "hermes":
+      // APRV-398. snake_case like Muse, but the EVENT NAME is its own —
+      // `pre_tool_call`, not `PreToolUse` — and the shell tool is `terminal`.
+      // Sending this one Claude Code's event name would take the post-execution
+      // arm on no harness at all and the pre-execution arm by the "unknown name
+      // is a command about to run" rule, so it would register and prove nothing
+      // about the dispatch.
+      return JSON.stringify({
+        hook_event_name: "pre_tool_call",
+        session_id: "enum-sess",
+        tool_use_id: "enum-tool",
+        cwd: dir,
+        profile: "default",
+        tool_name: "terminal",
+        tool_input: { command, workdir: dir, description: "self-reported, never read" },
+        version: STATED_VERSION,
+      });
   }
 }
 
@@ -345,9 +509,12 @@ for (const kind of HARNESS_KINDS) {
       dir,
       manualEvent(kind, dir),
     );
-    // Grok reads the EXIT CODE: a deny is exit 2 there and exit 0 everywhere
-    // else. Either way the verdict is a deny, because no human answered.
-    assert.equal(run.code, kind === "grok" ? 2 : 0, `${kind}: ${run.stderr}`);
+    // Grok and Hermes both answer a deny at EXIT 2 and everything else answers
+    // it at 0, for different reasons: Grok reads the exit code as the whole
+    // verdict, while Hermes treats 2 as an unconditional block whose message
+    // comes from the stdout directive. Either way the verdict is a deny, because
+    // no human answered.
+    assert.equal(run.code, kind === "grok" || kind === "hermes" ? 2 : 0, `${kind}: ${run.stderr}`);
     assert.match(run.stdout, /hook-timeout/u, `${kind} did not wait on a decision: ${run.stdout}`);
 
     const written = records(dir);

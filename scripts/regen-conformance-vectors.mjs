@@ -945,6 +945,65 @@ const readScopeVectors = [
     input: { harness: "muse", tool: "read_file", target: "inside", malformed: true },
     control: true,
   },
+
+  // --- Hermes Agent (APRV-398) -----------------------------------------------
+  // snake_case like Muse, but the EVENT NAMES are its own (`pre_tool_call`), its
+  // shell tool is `terminal`, and its verdict is a third dialect answered at a
+  // third exit code: `{action:"block",message}` at EXIT 2 for a deny and `{}` at
+  // 0 for an allow, because Hermes has no allow directive. The vectors below pin
+  // the exit code for the same reason the `grok-*` ones do: a runner that
+  // answered a Hermes deny at exit 0 would still be blocking, but one that
+  // answered an ALLOW at exit 2 would be blocking a call it meant to permit, and
+  // neither is visible from the body alone.
+  {
+    id: "hermes-read-inside-allows",
+    description: "a read_file inside the gate root keeps the pass-through allow",
+    input: { harness: "hermes", tool: "read_file", target: "inside" },
+  },
+  {
+    id: "hermes-read-inside-relative-allows",
+    description: "a relative read_file is resolved against the hook's own directory",
+    input: { harness: "hermes", tool: "read_file", target: "inside-relative" },
+  },
+  {
+    id: "hermes-read-outside-denies",
+    description: "a read_file outside every read root is answered under read.file.out_of_scope",
+    input: { harness: "hermes", tool: "read_file", target: "outside" },
+  },
+  {
+    id: "hermes-read-unresolvable-denies",
+    description: "a read_file whose path resolves nowhere is out of scope: fail closed",
+    input: { harness: "hermes", tool: "read_file", target: "unresolvable" },
+  },
+  {
+    id: "hermes-search-files-outside-denies",
+    description:
+      "search_files is both of this harness's readers behind one target enum, and the ONE path it names is what scopes it",
+    input: { harness: "hermes", tool: "search_files", target: "outside" },
+  },
+  {
+    id: "hermes-search-files-no-path-allows",
+    description: "a search_files carrying no path names no file, so it stays not-a-gated-tool",
+    input: { harness: "hermes", tool: "search_files", target: "absent" },
+  },
+  {
+    id: "hermes-shell-read-outside-denies",
+    description:
+      "the shell reader takes the same class as the read tool, through terminal's per-call workdir",
+    input: { harness: "hermes", tool: "terminal", target: "outside" },
+  },
+  {
+    id: "hermes-execute-code-denies-with-its-own-code",
+    description:
+      "execute_code is refused before anything else looks at it, with a code of its own: the call carries a program and no path, no argv and no workdir, so no verdict could bind it and no policy or open window can authorize it",
+    input: { harness: "hermes", tool: "execute_code", target: "inside" },
+  },
+  {
+    id: "hermes-malformed-input-denies",
+    description: "unparseable input on the Hermes envelope is a deny in the one supported dialect",
+    input: { harness: "hermes", tool: "read_file", target: "inside", malformed: true },
+    control: true,
+  },
 ];
 
 /**
@@ -1839,7 +1898,22 @@ const SUITES = [
     // gives is one minor — here one major — above the highest version either
     // side saw. 379 merged first, so this is 19.0.0 and no published suite ever
     // carried an 18.
-    vectors_version: "19.0.0",
+    // 20.0.0 (APRV-398): `hook_deny_codes` gains
+    // `hook-hermes-execute-code-unbound`, the refusal a Hermes Agent
+    // `execute_code` call takes before anything else looks at it. Major for the
+    // reason 13.0.0 was: this suite pins each union's whole array in definition
+    // order, so a longer union is a changed expectation.
+    //
+    // It earns its own code rather than borrowing one, and the two it is closest
+    // to are the two it must not be confused with. `hook-opaque` says a command
+    // line carried a construct the classifier could not read, and its repair is
+    // to write the command differently — there is no rewriting of an
+    // `execute_code` call. `hook-unsupported-execution-context` says the harness
+    // did not say WHERE a call would run, and its repair is a harness contract
+    // that exposes the directory — here the call carries no path, no argv and no
+    // directory at all, so there is nothing for a contract to expose. A caller
+    // that could not tell the three apart would chase the wrong fix.
+    vectors_version: "20.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1969,7 +2043,14 @@ const SUITES = [
     // refuses because a plain digest of a ten-digit number is not a digest of
     // anything. Every record and every policy written before this validates
     // exactly as it did: the field is optional and absent is the raw form.
-    vectors_version: "2.5.0",
+    // 2.6.0 (APRV-398): a MINOR bump, the same shape. One new fixture, a
+    // `task.registered` whose `payload.harness` is `hermes`, and no existing
+    // expectation moves: the enum is a closed set documented as extended by the
+    // task that adds the case, and every record written before this validates
+    // exactly as it did. `tests/harness-enum.test.ts` is what makes the pair
+    // unbreakable in future — it asserts one accepted record per harness kind, so
+    // the adapter and the fixture land together or the suite fails.
+    vectors_version: "2.6.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
@@ -2003,7 +2084,15 @@ const SUITES = [
     // 1.2.0 (APRV-350): a MINOR bump for the same reason 1.1.0 was one. The
     // nine `muse-*` vectors are new, no existing expectation moved, and the
     // Muse dialect did not exist when 1.1.0 was written.
-    vectors_version: "1.2.0",
+    // 1.3.0 (APRV-398): a MINOR bump, the same shape again. The nine `hermes-*`
+    // vectors are new, no existing expectation moves, and the Hermes dialect did
+    // not exist when 1.2.0 was written. One of them pins something none of its
+    // predecessors could: `hermes-execute-code-denies-with-its-own-code` sends a
+    // tool that carries a PROGRAM and no path, no argv and no workdir, and
+    // expects a deny under a code of its own — an implementation that classified
+    // it, or that answered it under `hook-opaque`, fails the vector, because the
+    // repairs those codes imply do not exist for this call.
+    vectors_version: "1.3.0",
     algorithm:
       "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
     description:

@@ -1498,7 +1498,7 @@ ${why("quickstart")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor|codex|grok|muse [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex|grok|muse|hermes [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
@@ -1507,6 +1507,7 @@ Commands:
   codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   grok         Grok Build camelCase Pre/PostToolUse JSON in; {decision,reason} out, DENY IS EXIT 2. \`approval hook grok --help\` prints the config
   muse         Muse Code snake_case Pre/PostToolUse; ONE dialect out or it fails open. \`approval hook muse --help\` prints the config
+  hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true is the point, and its default is false. \`approval hook hermes --help\` prints the YAML
   classify     print what the classifier makes of a command line and exit
   --as <id>        proposing identity (default agent:<harness>)
   --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
@@ -1516,7 +1517,7 @@ Commands:
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-hermes-execute-code-unbound, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
@@ -1571,6 +1572,77 @@ The file the human commits, .muse/hooks.json (no "matcher"; policy.core):
 That "timeout" MUST EXCEED --timeout (9m), or Muse abandons the call mid-wait
 and, failing open, runs it while a human is still deciding.
 ${EXIT_CODES_POINTER} (0 for every verdict; deny is the body, not the code)
+${why("hook")}`;
+
+export const HOOK_HERMES_HELP = `approval hook hermes — the gate in front of Hermes Agent (APRV-398)
+
+Usage:
+  approval hook hermes [--as agent:<id>] [--timeout <d>] [--interval <d>]
+                       [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+
+snake_case in (hook_event_name, tool_name, tool_input, session_id, cwd, profile,
+extra). ONE dialect out: {"action":"block","message":"…"} AT EXIT 2 for a deny,
+{} at exit 0 for an allow, never "ask". Hermes has no allow directive — no
+directive IS the allow — so an allow's reason goes to stderr.
+Tools: terminal (command + per-call workdir), write_file (path, content), patch
+(path, old_string, new_string), read_file (path), search_files (path; its target
+enum is grep or find, and it is the only reader besides read_file).
+execute_code is REFUSED outright (hook-hermes-execute-code-unbound): it carries
+a program and no path, no argv and no workdir, so no verdict can bind it — and
+its kernel can call Hermes's other tools in-process, where this hook may not see
+them at all.
+
+fail_closed IS THE POINT OF THIS ADAPTER, AND ITS DEFAULT IS false. Set it on
+EVERY entry. It turns three hook failures into a BLOCK: a spawn error, a
+timeout, and stdout that is non-empty and not a JSON object. That would make
+this the first harness since Claude Code whose hook is a gate rather than a
+backstop (Grok Build and Muse Code fail OPEN with no setting to change it).
+TWO LIMITS: it does NOT cover a hook that exits non-zero printing nothing (this
+adapter's deny exits 2, which blocks unconditionally, so that gap is covered
+here and not by the key); and all of it is read from the source, UNVERIFIED
+against a running session until the probe runs. Read docs/hermes-hook.md first.
+
+The file the human commits, $HERMES_HOME/config.yaml (default ~/.hermes;
+Hermes has no project-local config, so this lives in the user home and
+classifies policy.core there, as .cursor/hooks.json does in a repo):
+
+  plugins:
+    hook_callback_timeout: 600
+  hooks_auto_accept: true
+  hooks:
+    pre_tool_call:
+      - command: "approval hook hermes --dir /path/to/repo"
+        timeout: 300
+        fail_closed: true
+    post_tool_call:
+      - command: "approval hook hermes --dir /path/to/repo"
+        timeout: 300
+
+THE EVENT IS A KEY, NOT AN "event:" FIELD, and each entry is a list item under
+it. "matcher" is optional here and omitting it matches every tool, which is
+what a gate wants.
+
+TWO TIMEOUTS BOUND THE WAIT, AND THE SHORTER ONE WINS.
+  - the per-entry "timeout" defaults to 60s and is CAPPED AT 300s;
+  - plugins.hook_callback_timeout is an OUTER timeout over the whole dispatch,
+    defaults to 30s, maximum 600s, and on pre_tool_call it FAILS CLOSED.
+So leaving the outer one at its default blocks every manual-class call at 30s,
+and --timeout MUST BE UNDER 300s (--timeout 4m) because no entry may wait
+longer. The 9m default wait does not fit this harness; set it down.
+
+hooks_auto_accept: true (or HERMES_ACCEPT_HOOKS=1, or --accept-hooks) is the
+HEADLESS consent, and leaving it out is worse than an error. The first use of a
+hook prompts on a TTY and is remembered in
+$HERMES_HOME/shell-hooks-allowlist.json; with no TTY and no consent setting
+Hermes SILENTLY SKIPS REGISTERING THE HOOK. A sandboxed tenant then runs with no
+gate and nothing says so.
+
+Register BOTH events: the pre half answers the verdict, the post half closes the
+execution.started records the pre half wrote. Only pre_tool_call can block.
+Per-tenant deployment notes (one HERMES_HOME per resident, hosted daemon reach)
+are in docs/hermes-hook.md.
+
+${EXIT_CODES_POINTER} (0 allow, 2 deny; post_tool_call always 0; never "ask")
 ${why("hook")}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy

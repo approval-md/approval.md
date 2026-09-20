@@ -53,7 +53,7 @@ const STUB_BIN_DIR = join(REPO_ROOT, "dist", "test-bin");
 export const STUB_HARNESS_VERSION = "0.0.0-approval-md-test-stub";
 
 /** The harness binaries this runtime knows how to spawn (`core/harness-version.ts`). */
-const STUBBED_BINARIES = ["claude", "cursor-agent", "codex", "grok", "muse"];
+const STUBBED_BINARIES = ["claude", "cursor-agent", "codex", "grok", "muse", "hermes"];
 
 /**
  * Put a stub in front of every harness binary the runtime can spawn, for the

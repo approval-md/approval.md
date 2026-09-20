@@ -292,6 +292,7 @@ test("mcp: the exclusions are agent-facing verbs, each with a stated reason", ()
     // `tests/harness-enum.test.ts` now pins one exclusion per harness kind, so
     // the next adapter cannot be published here by omission.
     "hook grok",
+    "hook hermes",
     "hook muse",
     "log follow",
   ]);

@@ -1,0 +1,23 @@
+{
+  "seq": 56,
+  "ts": "2026-09-20T09:41:12Z",
+  "event": "task.registered",
+  "task": "hook:hermes-sess-1:toolu-16",
+  "actor": "agent:hermes",
+  "payload": {
+    "state": "proposed",
+    "actions": [
+      {
+        "class": "deps.add",
+        "summary": "npm install --save-dev oxlint",
+        "idempotency_key": "hook:hermes-sess-1:toolu-16:deps.add",
+        "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f"
+      }
+    ],
+    "harness": "hermes",
+    "harness_version": "hermes 0.21.3"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7d925ec380b14fa6c05e971b3d4287ac6fb015e93c2a480df6b1e7c05a83942f",
+  "hash": "e1f6a30c4d7b92815ac0fe43b6d258907cb14fe2839a5d07f4cb62e1a9350b7d"
+}

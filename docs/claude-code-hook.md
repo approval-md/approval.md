@@ -268,6 +268,7 @@ an addition).
 | `harness-launch-grok` | grok | (any) | harness.launch.grok, read.shell (APRV-354) |
 | `harness-launch-claude` | claude | (any) | harness.launch.claude, read.shell (APRV-354) |
 | `harness-launch-cursor` | cursor-agent | (any) | harness.launch.cursor, read.shell (APRV-354) |
+| `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace (plus the `harness.launch.*` family, for `npx` naming a harness package exactly — APRV-354) |
@@ -489,6 +490,7 @@ argv bound to the segment's `path`:
 | Grok | `grok` | `harness.launch.grok` | `harness-launch-grok` |
 | Claude Code | `claude` | `harness.launch.claude` | `harness-launch-claude` |
 | Cursor | `cursor-agent` | `harness.launch.cursor` | `harness-launch-cursor` |
+| Hermes Agent | `hermes` | `harness.launch.hermes` | `harness-launch-hermes` |
 
 Five spellings reach the same class, because the classifier matches on the
 BASENAME of the first word: bare (`codex exec …`), absolute
@@ -959,6 +961,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Claude Code's events carry the directory. It is the refusal native Codex Bash takes on every event, because Codex 0.152.1 honours a per-call working directory that appears in no field of the event (`docs/codex-hook.md`) |
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter, which is Anthropic's; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
+| `hook-hermes-execute-code-unbound` | a Hermes Agent `execute_code` call, refused before anything else looks at it: it carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Never produced on this adapter; it is Hermes Agent's (`docs/hermes-hook.md`). Distinct from `hook-opaque`, whose repair is to write the command differently — there is no spelling of an `execute_code` call this hook could answer, so the repair is to do the work through the shell tool or through `approval run` with a granted token |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
@@ -1806,3 +1809,15 @@ and not the diff — correct as far as it goes, but it would fail the shell-gran
 `CLAUDE.md` edits this repository actually makes, so the classifier-checked
 `granted-command` verdict above is used instead. Its per-session census of hook
 task ids is what established the root cause recorded in APRV-151.
+
+## Related
+
+- [docs/cursor-hook.md](cursor-hook.md) — the second adapter, and the one that
+  first needed a per-harness verdict dialect.
+- [docs/codex-hook.md](codex-hook.md) — the native hook whose contract withholds
+  the per-call working directory, which is why its shell tool is refused outright.
+- [docs/grok-hook.md](grok-hook.md) and [docs/muse-hook.md](muse-hook.md) — the
+  two harnesses that fail OPEN, and the SPEC precedent that follows from it.
+- [docs/hermes-hook.md](hermes-hook.md) — Hermes Agent, the first adapter since
+  this one whose harness documents a fail-CLOSED hook, and the only one whose gate
+  organ lives in the user home rather than in the repository.

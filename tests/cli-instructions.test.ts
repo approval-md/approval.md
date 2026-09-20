@@ -544,6 +544,9 @@ const AGENT_FACING: readonly string[] = [
   // APRV-350. Agent-facing by construction, like every other harness hook:
   // Muse invokes it around the agent's own tool calls.
   "hook muse",
+  // APRV-398. Agent-facing by construction, like every other harness hook:
+  // Hermes invokes it around the agent's own tool calls.
+  "hook hermes",
   "hook classify",
   // APRV-214. Reporting the window establishes no authority and changes
   // nothing; an agent that can see a bypass window is standing is better placed
@@ -600,6 +603,7 @@ test("registry: a human_only decision that needed an argument carries its note",
     "hook cursor",
     "hook codex",
     "hook grok",
+    "hook hermes",
     "consume",
   ]) {
     const spec = findVerb(label);
