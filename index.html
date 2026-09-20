@@ -244,7 +244,7 @@
     padding:11px 14px;overflow-x:auto;font-size:12px;line-height:1.7;
     color:var(--fg);white-space:pre;
   }
-  .snippet .c{color:var(--muted)}
+  .snippet .c{color:var(--muted);display:inline-block;vertical-align:top;white-space:pre-wrap;max-width:calc(100% - 2ch);padding-left:2ch;text-indent:-2ch}
 
   .harness{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:9px}
   .harness li{
@@ -407,6 +407,7 @@
   @media (max-width:560px){
     .mail-row{flex-direction:column;gap:34px}
     .phoneC{white-space:normal;text-align:center;border-radius:16px}
+    .snippet{padding:10px 10px;font-size:11.5px}
   }
 
   footer{
@@ -525,11 +526,16 @@
       <li>
         <p class="hd"><b>Configure your APPROVAL.md.</b></p>
         <p>Specify agent autonomy across classes of actions.</p>
-        <div class="snippet">{ autonomy: autonomous }                        <span class="c"># actions flow freely through the gate</span>
-{ autonomy: supervised-retro }                  <span class="c"># actions flow, a sample is reviewed afterwards</span>
-{ autonomy: supervised-live, live_rate: 0.01 }  <span class="c"># a declared fraction pauses at the gate for approval</span>
-{ autonomy: manual }                            <span class="c"># every action pauses at the gate for approval</span>
-{ autonomy: human-only }                        <span class="c"># the human performs the action; agents cannot request it</span></div>
+        <div class="snippet">{ autonomy: autonomous }
+  <span class="c"># actions flow freely through the gate</span>
+{ autonomy: supervised-retro }
+  <span class="c"># actions flow, a sample is reviewed afterwards</span>
+{ autonomy: supervised-live, live_rate: 0.01 }
+  <span class="c"># a declared fraction pauses at the gate for approval</span>
+{ autonomy: manual }
+  <span class="c"># every action pauses at the gate for approval</span>
+{ autonomy: human-only }
+  <span class="c"># the human performs the action; agents cannot request it</span></div>
         <p>Add human values to inform agent judgement across the gate. Specify what you love, like, dislike, and how you give feedback.</p>
 
         <p class="vh">An APPROVAL.md file being typed into a terminal: a yaml approval-policy block giving each class of action an autonomy level, and a yaml approval-values block stating what the operator loves, dislikes and wants.</p>
