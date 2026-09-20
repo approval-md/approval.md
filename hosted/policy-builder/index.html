@@ -4,47 +4,102 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>approval.md policy builder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; --bg:#fff; --fg:#14161a; --muted:#5d636e; --line:#d8dce2; --panel:#f6f7f9; --accent:#2a6df4; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#14161a; --fg:#e8eaee; --muted:#9aa2ae; --line:#2c313a; --panel:#1b1e24; --accent:#6c9bff; }
+  :root{
+    color-scheme: dark light;
+    --wall:#050608;
+    --page:#050608;
+    --surface:#0b0d10;
+    --raised:#101318;
+    --fg:#f7f8f8;
+    --muted:#8a8a88;
+    --border:rgba(247,248,248,.10);
+    --border-strong:rgba(247,248,248,.20);
+    --hover:rgba(247,248,248,.045);
+    --green:#17A15E;
+    --btn-fg:#050608;
+    --btn-bg:#f7f8f8;
+    --btn-inset:inset 0 1px 0 rgba(255,255,255,.35);
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
   }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
-  header { padding:20px 24px 8px; border-bottom:1px solid var(--line); }
-  h1 { margin:0 0 4px; font-size:18px; font-weight:600; }
-  header p { margin:0; color:var(--muted); font-size:13px; }
-  main { display:grid; grid-template-columns: minmax(340px,1fr) minmax(340px,1fr); gap:24px; padding:20px 24px 40px; }
-  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
-  label { display:block; margin:12px 0 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
-  input, select, button { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
-  input, select { width:100%; }
-  button { cursor:pointer; background:var(--panel); }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  table { width:100%; border-collapse:collapse; margin-top:6px; }
-  th { text-align:left; font-size:12px; color:var(--muted); font-weight:500; padding:4px 6px 4px 0; }
-  td { padding:3px 6px 3px 0; vertical-align:middle; }
-  td.act { width:32px; }
-  pre { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; overflow:auto; max-height:70vh; font:12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre; }
-  .row { display:flex; gap:8px; align-items:center; margin:10px 0; }
-  .fixed { color:var(--muted); font-size:13px; padding:6px 0; }
-  .hint { color:var(--muted); font-size:12px; margin:6px 0 0; }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --wall:#f3f3f2; --page:#ececeb; --surface:#f7f7f6; --raised:#ffffff;
+      --fg:#121211; --muted:#5c5c5a;
+      --border:rgba(28,28,26,.07); --border-strong:rgba(28,28,26,.16); --hover:rgba(28,28,26,.045);
+      --btn-fg:#f7f7f6; --btn-bg:#121211; --btn-inset:inset 0 1px 0 rgba(255,255,255,.18);
+    }
+  }
+  :root[data-theme="light"]{
+    --wall:#f3f3f2; --page:#ececeb; --surface:#f7f7f6; --raised:#ffffff;
+    --fg:#121211; --muted:#5c5c5a;
+    --border:rgba(28,28,26,.07); --border-strong:rgba(28,28,26,.16); --hover:rgba(28,28,26,.045);
+    --btn-fg:#f7f7f6; --btn-bg:#121211; --btn-inset:inset 0 1px 0 rgba(255,255,255,.18);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--wall);color:var(--fg)}
+  body{font:14px/1.6 var(--mono);-webkit-font-smoothing:antialiased;padding:0 16px}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 0 64px}
+  header{padding-bottom:22px;border-bottom:1px solid var(--border);margin-bottom:28px}
+  .mark{display:inline-flex;align-items:center;font-weight:700;letter-spacing:-.5px}
+  .mark .md{color:var(--muted)}
+  h1{font-size:26px;font-weight:400;letter-spacing:-.75px;line-height:1.3;margin:0 0 10px;display:flex;align-items:center;flex-wrap:wrap}
+  h1 .claim{margin-left:.7em;color:var(--fg)}
+  header p{margin:0;color:var(--muted);max-width:64ch}
+  header code{color:var(--fg)}
+  main{display:grid;grid-template-columns:minmax(320px,5fr) minmax(320px,6fr);gap:28px}
+  @media (max-width:860px){main{grid-template-columns:1fr}}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px 20px 22px}
+  .eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  label{display:block;margin:14px 0 6px;font-size:12px;color:var(--muted)}
+  label:first-of-type{margin-top:0}
+  input,select,button{font:inherit;color:var(--fg);background:var(--raised);border:1px solid var(--border-strong);border-radius:6px;padding:7px 10px;outline:none}
+  input,select{width:100%}
+  input:focus,select:focus{border-color:var(--green);box-shadow:0 0 0 3px rgba(23,161,94,.18)}
+  select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 55%,calc(100% - 11px) 55%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
+  button{cursor:pointer}
+  button:hover{background:var(--hover)}
+  button.primary{background:var(--btn-bg);color:var(--btn-fg);border-color:transparent;box-shadow:var(--btn-inset);font-weight:500}
+  button.primary:hover{opacity:.92;background:var(--btn-bg)}
+  .fixed{color:var(--muted);padding:7px 0}
+  .fixed b{color:var(--fg);font-weight:500}
+  table{width:100%;border-collapse:collapse;margin-top:4px}
+  th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 8px 8px 0}
+  td{padding:3px 8px 3px 0;vertical-align:middle}
+  td.act{width:36px;padding-right:0}
+  td.act button{padding:5px 0;width:32px;color:var(--muted);background:transparent;border-color:transparent;font-size:16px;line-height:1}
+  td.act button:hover{color:var(--fg);border-color:var(--border-strong)}
+  .row{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+  .hint{color:var(--muted);font-size:12px;margin:16px 0 0;line-height:1.55}
+  .hint code{color:var(--fg)}
+  .out-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .out-head .eyebrow{margin:0}
+  .out-head .row{margin:0}
+  pre{margin:0;background:var(--page);border:1px solid var(--border);border-radius:8px;padding:16px 18px;overflow:auto;max-height:72vh;font:12.5px/1.6 var(--mono);white-space:pre;color:var(--fg)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:8px;vertical-align:middle}
+  footer{margin-top:28px;color:var(--muted);font-size:12px;border-top:1px solid var(--border);padding-top:16px}
+  footer code{color:var(--fg)}
 </style>
 </head>
 <body>
+<div class="wrap">
 <header>
-  <h1>approval.md policy builder</h1>
-  <p>Build an APPROVAL.md for one tenant. Download it into the tenant directory, then run the tenant daemon.</p>
+  <h1><span class="mark">approval<span class="md">.md</span></span><span class="claim">policy builder</span></h1>
+  <p>One <code>APPROVAL.md</code> for one tenant. Fill in the approver and the classes, download the file into the tenant directory, then run <code>node hosted/tenant.mjs &lt;dir&gt;</code>.</p>
 </header>
 <main>
-  <section>
+  <section class="panel">
+    <p class="eyebrow">Policy</p>
     <label for="approver">Human approver id</label>
-    <input id="approver" value="carter">
+    <input id="approver" value="carter" spellcheck="false">
 
     <label for="sender">Telegram numeric sender id</label>
-    <input id="sender" placeholder="7345216485">
+    <input id="sender" placeholder="7345216485" spellcheck="false">
 
-    <label for="defaultAutonomy">Default autonomy (classes you did not name)</label>
+    <label for="defaultAutonomy">Default autonomy, for any class not named below</label>
     <select id="defaultAutonomy">
       <option value="manual" selected>manual</option>
       <option value="supervised-retro">supervised-retro</option>
@@ -53,28 +108,33 @@
     </select>
 
     <label for="ttl">Approval TTL</label>
-    <input id="ttl" value="2h">
+    <input id="ttl" value="2h" spellcheck="false">
 
     <label>Channel</label>
-    <div class="fixed">telegram (fixed in this build)</div>
+    <div class="fixed"><span class="dot"></span><b>telegram</b>, the tenant's own bot</div>
 
     <label>Classes</label>
     <table>
       <thead><tr><th>Class</th><th>Autonomy</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
-    <div class="row"><button id="add">Add row</button></div>
-    <p class="hint">Autonomy, strictest first: human-only, manual, supervised-retro, autonomous. supervised-live is left out here because it needs a live_rate this form does not collect.</p>
+    <div class="row"><button id="add">+ Add class</button></div>
+    <p class="hint">Strictest first: <code>human-only</code>, <code>manual</code>, <code>supervised-retro</code>, <code>autonomous</code>. <code>supervised-live</code> is left out because it needs a <code>live_rate</code> this form does not collect.</p>
   </section>
 
-  <section>
-    <div class="row">
-      <button id="copy" class="primary">Copy</button>
-      <button id="download">Download APPROVAL.md</button>
+  <section class="panel">
+    <div class="out-head">
+      <p class="eyebrow">APPROVAL.md</p>
+      <div class="row">
+        <button id="copy">Copy</button>
+        <button id="download" class="primary">Download APPROVAL.md</button>
+      </div>
     </div>
     <pre id="out"></pre>
   </section>
 </main>
+<footer>The runtime reads only the fenced <code>yaml approval-policy</code> block. Secrets never appear here: the policy names the environment variables, and <code>approval setup</code> fills them.</footer>
+</div>
 <script>
 "use strict";
 var LEVELS = ["human-only", "manual", "supervised-retro", "autonomous"];
