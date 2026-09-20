@@ -62,7 +62,12 @@ import {
   type Decision,
 } from "../src/core/gate.js";
 import { classifyCommand } from "../src/core/command-class.js";
-import { HOOK_DENY_CODES, POST_TOOL_CODES, commandHook } from "../src/cli/hook.js";
+import {
+  HERMES_POST_TOOL_EVENT,
+  HOOK_DENY_CODES,
+  POST_TOOL_CODES,
+  commandHook,
+} from "../src/cli/hook.js";
 import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { CHECKPOINT_REFUSAL_CODES } from "../src/core/checkpoint.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -748,7 +753,21 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
           ...(harness === "hermes" ? { profile: "default", extra: { turn_id: "conformance-turn" } } : {}),
         }),
   };
-  const stdin = input["malformed"] === true ? "{not json at all" : JSON.stringify(body);
+  // APRV-398. A POST-execution event, which is a different question from every
+  // other vector in this suite: not "what is the verdict" but "is there one at
+  // all". The post half of a harness hook answers a call that has ALREADY RUN, so
+  // a verdict on stdout would be a permission decision about something nobody can
+  // still permit. An implementation that printed one would pass every other
+  // vector here and fail this one.
+  const postEvent = input["post_event"] === true;
+  const stdin =
+    input["malformed"] === true
+      ? "{not json at all"
+      : JSON.stringify(
+          postEvent
+            ? { ...body, hook_event_name: HERMES_POST_TOOL_EVENT, tool_response: { exit_code: 0 } }
+            : body,
+        );
 
   const out: string[] = [];
   const err: string[] = [];
@@ -766,6 +785,23 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
   const exitIsVerdict = camelCase || harness === "hermes";
   if (code !== 0 && !(exitIsVerdict && code === 2)) {
     throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
+  }
+  if (postEvent) {
+    const printed = out.join("");
+    if (printed !== "") {
+      throw new ConformanceError(
+        `the post-execution event printed ${JSON.stringify(printed)} on stdout; the tool has already run, so a verdict there is a permission decision about something nobody can still permit`,
+      );
+    }
+    // Exit 2 is Hermes's BLOCKING code, so a visibility exit on this half would
+    // be a block aimed at a finished call. The machine-readable line goes to
+    // stderr at exit 0 instead.
+    if (code !== 0) {
+      throw new ConformanceError(
+        `the post-execution event exited ${String(code)}; on a harness whose non-zero exit blocks, the post half must exit 0`,
+      );
+    }
+    return { valid: true, permission: "none", gated: false };
   }
   const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
   const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;

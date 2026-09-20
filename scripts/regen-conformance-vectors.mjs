@@ -999,6 +999,12 @@ const readScopeVectors = [
     input: { harness: "hermes", tool: "execute_code", target: "inside" },
   },
   {
+    id: "hermes-post-event-prints-no-verdict",
+    description:
+      "the post-execution event prints NOTHING on stdout and exits 0: the tool has already run, so a verdict there would be a permission decision about something nobody can still permit, and on a harness whose non-zero exit blocks, a visibility exit would be a block aimed at a finished call",
+    input: { harness: "hermes", tool: "read_file", target: "outside", post_event: true },
+  },
+  {
     id: "hermes-malformed-input-denies",
     description: "unparseable input on the Hermes envelope is a deny in the one supported dialect",
     input: { harness: "hermes", tool: "read_file", target: "inside", malformed: true },
@@ -2084,14 +2090,21 @@ const SUITES = [
     // 1.2.0 (APRV-350): a MINOR bump for the same reason 1.1.0 was one. The
     // nine `muse-*` vectors are new, no existing expectation moved, and the
     // Muse dialect did not exist when 1.1.0 was written.
-    // 1.3.0 (APRV-398): a MINOR bump, the same shape again. The nine `hermes-*`
+    // 1.3.0 (APRV-398): a MINOR bump, the same shape again. The ten `hermes-*`
     // vectors are new, no existing expectation moves, and the Hermes dialect did
-    // not exist when 1.2.0 was written. One of them pins something none of its
-    // predecessors could: `hermes-execute-code-denies-with-its-own-code` sends a
+    // not exist when 1.2.0 was written. Two of them pin something none of their
+    // predecessors could. `hermes-execute-code-denies-with-its-own-code` sends a
     // tool that carries a PROGRAM and no path, no argv and no workdir, and
     // expects a deny under a code of its own — an implementation that classified
     // it, or that answered it under `hook-opaque`, fails the vector, because the
-    // repairs those codes imply do not exist for this call.
+    // repairs those codes imply do not exist for this call. And
+    // `hermes-post-event-prints-no-verdict` asks a different question from every
+    // other vector in the suite: not what the verdict is but whether there is one
+    // at all. It sends a POST-execution event over a target the pre event would
+    // have refused, and expects an empty stdout at exit 0 — an implementation that
+    // answered it with a verdict would pass every other vector here and fail this
+    // one, because a permission decision about a call that has already run is a
+    // decision nobody can act on.
     vectors_version: "1.3.0",
     algorithm:
       "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
