@@ -48,6 +48,9 @@
   .mark .md{color:var(--muted)}
   h1{font-size:26px;font-weight:400;letter-spacing:-.75px;line-height:1.3;margin:0 0 10px;display:flex;align-items:center;flex-wrap:wrap}
   h1 .claim{margin-left:.7em;color:var(--fg)}
+  .hosted{display:inline-flex;align-items:center;margin-left:.55em;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;line-height:1;color:#a78bfa;background:rgba(124,58,237,.16);border:1px solid #7c3aed}
+  @media (prefers-color-scheme: light){ :root:not([data-theme="dark"]) .hosted{color:#6d28d9;background:rgba(124,58,237,.10)} }
+  :root[data-theme="light"] .hosted{color:#6d28d9;background:rgba(124,58,237,.10)}
   header p{margin:0;color:var(--muted);max-width:64ch}
   header code{color:var(--fg)}
   main{display:grid;grid-template-columns:minmax(320px,5fr) minmax(320px,6fr);gap:28px}
@@ -87,7 +90,7 @@
 <body>
 <div class="wrap">
 <header>
-  <h1><span class="mark">approval<span class="md">.md</span></span><span class="claim">policy builder</span></h1>
+  <h1><span class="mark">approval<span class="md">.md</span></span><span class="hosted" aria-label="approval.md hosted">hosted</span><span class="claim">policy builder</span></h1>
   <p>One <code>APPROVAL.md</code> for one tenant. Fill in the approver and the classes, download the file into the tenant directory, then run <code>node hosted/tenant.mjs &lt;dir&gt;</code>.</p>
 </header>
 <main>

@@ -77,6 +77,23 @@
       */
       h1 { --mark: clamp(56px, 9vw, 88px); margin: 0; line-height: 0; }
       h1 svg { height: var(--mark); width: auto; display: block; margin-left: calc(var(--mark) * -0.225); }
+      /* ---- hosted badge: the approval.md hosted offering's brand ---- */
+      .hosted {
+        display: inline-flex;
+        align-items: center;
+        align-self: center;
+        border-radius: 999px;
+        padding: 6px 14px;
+        font-size: clamp(12px, 1.3vw, 15px);
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #6d28d9;
+        background: rgba(124, 58, 237, 0.12);
+        border: 2px solid #7c3aed;
+        line-height: 1;
+        margin-left: calc(var(--mark) * -0.15);
+      }
       h2 {
         font-size: 15px;
         margin: 0 0 12px;
@@ -295,6 +312,7 @@
   <text x="1096" y="222" class="mut">.md</text>
 </svg>
       </h1>
+      <span class="hosted" aria-label="approval.md hosted">hosted</span>
       <div class="sub" id="meta">connecting…</div>
     </header>
 
