@@ -61,14 +61,22 @@
         line-height: 1.65;
         padding: 40px clamp(16px, 4vw, 48px) 80px;
       }
-      header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; margin-bottom: 8px; }
-      h1 {
-        font-size: clamp(30px, 5vw, 48px);
-        margin: 0;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-      }
-      h1 span { color: var(--mut); font-weight: 700; }
+      header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 8px; }
+      /*
+        The header is brand/wordmark.svg itself (see the note in <header>), so
+        the geometry below is the asset's rather than this page's. The asset
+        draws 176-unit type inside a 1560x320 box and carries its own paper
+        margin on all four sides, so --mark sizes that BOX: 88px of box puts
+        the letters at the 48px the old <h1> used, and the clamp tracks the
+        one it replaced. The box is filled with #F6F3EC, which is this page's
+        --paper to the byte, so three of those margins are invisible. The
+        fourth is not: 72/1560 of the width sits to the left of the "a", and
+        the negative margin (72/320 of the box height) pulls it back so the
+        mark starts on the same left edge as the badge and the panels under
+        it.
+      */
+      h1 { --mark: clamp(56px, 9vw, 88px); margin: 0; line-height: 0; }
+      h1 svg { height: var(--mark); width: auto; display: block; margin-left: calc(var(--mark) * -0.225); }
       h2 {
         font-size: 15px;
         margin: 0 0 12px;
@@ -252,7 +260,41 @@
   </head>
   <body>
     <header>
-      <h1>approval<span>.md</span></h1>
+      <!--
+        brand/wordmark.svg, inlined byte for byte rather than linked. This page
+        is projected at demos, often behind a tunnel, sometimes on a room's
+        network and sometimes on none at all, so a header that costs a second
+        request is a header that can be missing in front of an audience. It is
+        the same reason the contract at the top of server.mjs forbids a CDN and
+        an external font, and it keeps the server's one file route as it was.
+        tests/demo-wordmark.test.ts pins these bytes against brand/, so the
+        mark here cannot drift from the mark on approval.md.
+      -->
+      <h1>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 320" role="img" aria-label="approval.md">
+  <!-- approval.md wordmark: the o is a checked markdown box -->
+  <rect width="1560" height="320" fill="#F6F3EC"/>
+
+  <style>
+    .ink { font: 700 176px "JetBrains Mono","SFMono-Regular","DejaVu Sans Mono",monospace; fill:#17191D; letter-spacing: 2px; }
+    .mut { font: 700 176px "JetBrains Mono","SFMono-Regular","DejaVu Sans Mono",monospace; fill:#8A857B; }
+  </style>
+
+  <text x="72" y="222" class="ink">appr</text>
+
+  <!-- bracket-tick glyph in place of "o" (advance ~200) -->
+  <g transform="translate(516,0)">
+    <path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/>
+    <path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/>
+    <path d="M 74 176 L 116 220 L 232 80"
+          fill="none" stroke="#17A15E" stroke-width="30"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="772" y="222" class="ink">val</text>
+  <text x="1096" y="222" class="mut">.md</text>
+</svg>
+      </h1>
       <div class="sub" id="meta">connecting…</div>
     </header>
 
