@@ -2255,6 +2255,33 @@ export function isMessageNotModified(cause: unknown): boolean {
   );
 }
 
+/**
+ * Telegram's wording for "somebody else is already long-polling this bot".
+ *
+ * Matched on the description as well as the status, for the same reason
+ * {@link TELEGRAM_NOT_MODIFIED} is: 409 is a conflict, and the conflict this
+ * project cares about is specifically the terminated-by-other-getUpdates one.
+ */
+const TELEGRAM_POLL_CONFLICT = /terminated by other getupdates|make sure that only one bot/iu;
+
+/**
+ * Whether a failed poll is the Bot API saying another process holds this bot
+ * (APRV-390).
+ *
+ * It is the one poll failure that is not transient and not the network's
+ * fault: retrying it forever produces an identical line every few seconds and
+ * never recovers, because the other poller is not going to stop. {@link
+ * TelegramChannel.listen} reports it once, with whatever the caller knows
+ * about who the other process is, and then stops repeating itself.
+ */
+export function isPollConflict(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.method === "getUpdates" &&
+    (cause.status === 409 || (cause.description !== null && TELEGRAM_POLL_CONFLICT.test(cause.description)))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The channel
 // ---------------------------------------------------------------------------
@@ -2296,6 +2323,17 @@ export interface TelegramListenOptions {
    * failure mode this loop exists to rule out.
    */
   beforePoll?: () => Promise<void>;
+  /**
+   * What the caller knows about who else might be polling this bot (APRV-390).
+   *
+   * Consulted only when a poll fails with the Bot API's 409, and appended to
+   * the one line that failure produces. The CLI builds it from the per-machine
+   * ownership registry (`core/channel-owner.ts`), so this class keeps no
+   * knowledge of instances, directories or files — it asks the question and
+   * prints the caller's answer, the same arrangement {@link
+   * TelegramConfig.describeAction} uses for the log.
+   */
+  conflictAdvice?: () => string | null;
 }
 
 /** One delivered request, as this process remembers it. Never a decision. */
@@ -3168,6 +3206,34 @@ export class TelegramChannel implements TestableChannel {
   }
 
   // -------------------------------------------------------------------------
+  // Identity
+  // -------------------------------------------------------------------------
+
+  /**
+   * Which bot this token is, from one `getMe` (APRV-390).
+   *
+   * `getMe` is the only Bot API call that answers it, and it is the call
+   * `approval doctor` and `approval setup channel telegram` already make for
+   * the same reason: it mutates nothing, sends nothing, and acknowledges
+   * nothing. In particular it is NOT `getUpdates`, so asking who this bot is
+   * consumes no update and steals no pending tap from a listener that is
+   * already running — which matters here above all, because the answer is
+   * what decides whether this process is allowed to poll at all.
+   *
+   * Throws {@link TelegramApiError} like every other call; the caller decides
+   * whether an unreachable Bot API is a refusal or a shrug.
+   */
+  async identify(): Promise<{ id: string; username: string }> {
+    const result = await this.call<Record<string, unknown>>("getMe", {});
+    const id = result["id"];
+    const username = result["username"];
+    return {
+      id: typeof id === "number" || typeof id === "string" ? String(id) : "",
+      username: typeof username === "string" ? `@${username}` : "the bot",
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Long polling
   // -------------------------------------------------------------------------
 
@@ -3191,6 +3257,16 @@ export class TelegramChannel implements TestableChannel {
   async listen(options: TelegramListenOptions = {}): Promise<void> {
     this.stopped = false;
     let backoff = this.backoffMs;
+    /**
+     * APRV-390. The last failure reported, and how many identical ones have
+     * been swallowed since. A 409 does not recover: the other poller is not
+     * going to stop because this one asked again, so the pre-APRV-390 loop
+     * printed the same sentence every few seconds until somebody read the
+     * terminal. The retry itself stays — a listener that stops listening is
+     * the failure this loop rules out — and only the COMPLAINING is collapsed.
+     */
+    let lastComplaint: string | null = null;
+    let repeats = 0;
 
     while (!this.stopped) {
       try {
@@ -3200,13 +3276,38 @@ export class TelegramChannel implements TestableChannel {
         }
         await this.pollOnce();
         backoff = this.backoffMs;
+        if (repeats > 0) {
+          this.complain(
+            `approval: telegram getUpdates recovered after ${String(repeats)} further identical failure(s)`,
+          );
+        }
+        lastComplaint = null;
+        repeats = 0;
         if (options.once === true) return;
       } catch (cause) {
         if (this.stopped) return;
         this.counters.pollErrors += 1;
-        this.complain(
-          `approval: telegram getUpdates failed (${this.describe(cause)}); retrying in ${backoff}ms — the listener is still up`,
-        );
+        const conflict = isPollConflict(cause);
+        // The 409's own sentence, said once. It names the fact ("another
+        // process is polling this bot") rather than the HTTP status, because
+        // the status is what a reader was already staring at, and it carries
+        // whatever the caller knows about which two gates are involved.
+        const advice = conflict ? (options.conflictAdvice?.() ?? null) : null;
+        const message = conflict
+          ? `approval: telegram getUpdates: another process is polling this bot${advice === null ? "" : ` — ${advice}`}; this listener keeps retrying and will not receive a tap until the other one stops`
+          : `approval: telegram getUpdates failed (${this.describe(cause)}); retrying in ${backoff}ms — the listener is still up`;
+        if (message === lastComplaint) {
+          repeats += 1;
+        } else {
+          if (repeats > 0) {
+            this.complain(
+              `approval: telegram getUpdates: the previous line repeated ${String(repeats)} more time(s)`,
+            );
+          }
+          this.complain(message);
+          lastComplaint = message;
+          repeats = 0;
+        }
         await sleep(backoff);
         backoff = Math.min(backoff * 2, this.maxBackoffMs);
       }

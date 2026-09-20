@@ -56,6 +56,7 @@ import {
   envFilePathFor,
   resolveEnvironment,
   type ResolvedVariable,
+  type SourceRunner,
 } from "./env-file.js";
 import type { PolicyLoadResult } from "./policy-load.js";
 
@@ -281,8 +282,20 @@ export function parseEnvProvenance(raw: string | undefined): EnvProvenance | nul
  *   half of the incident that survived fixing the file: the operator's rc
  *   exported the production token, so every fresh terminal kept using the
  *   production bot.
+ * - `stale-export` — the value in this shell is NOT what this instance's file
+ *   resolves to today (APRV-390). The name-only rules above cannot see this at
+ *   all, and it is the case that actually cost an evening: a token re-stored in
+ *   the keychain does not reach a shell that exported the old one, because
+ *   `approval env` never overrides a variable that is already set. The daemon
+ *   then answered 401 while the keychain item behind the same line passed
+ *   `getMe` by hand. Only {@link valueFindings} produces it, because only that
+ *   function is allowed to read a value.
  */
-export type InstanceFindingKind = "foreign-instance" | "legacy-shared" | "ambient-bleed";
+export type InstanceFindingKind =
+  | "foreign-instance"
+  | "legacy-shared"
+  | "ambient-bleed"
+  | "stale-export";
 
 export interface InstanceFinding {
   kind: InstanceFindingKind;
@@ -391,6 +404,128 @@ export function ownEnvExports(
 ): ReadonlySet<string> {
   const view = provenanceView(logPath, context);
   return view.claimsThisFile ? view.names : new Set<string>();
+}
+
+/**
+ * The same question, answered by COMPARING VALUES (APRV-390).
+ *
+ * ## Why a second function, and why only start-up may call it
+ *
+ * Everything above answers from names, so that a diagnostic never blocks on a
+ * keystore-unlock dialog ({@link NON_RESOLVING_RUNNER}). That constraint is
+ * right for `approval doctor` and wrong for the thing `approval up` is about to
+ * do, which is USE the value. Two cases observed on 2026-09-19 are invisible to
+ * every name-only rule:
+ *
+ * 1. **A stale export.** `approval env` never overrides a variable already set
+ *    in the shell — that is invariant 7 working as designed — so a token
+ *    re-stored in the keychain never reaches a terminal that exported the old
+ *    one. The names agree, the file is this instance's, the provenance claim is
+ *    this instance's own, and the value is wrong. The daemon got 401 from a
+ *    token that passed `getMe` when read from the keychain by hand.
+ * 2. **A false positive on the correct ritual.** `APPROVAL_HUMAN` was reported
+ *    cross-instance when the export came from this instance's own `eval
+ *    "$(approval env)"` seconds earlier, because the provenance claim did not
+ *    match. A finding about a value that IS the file's value is noise, and
+ *    noise in a refusal is how a refusal gets overridden by habit.
+ *
+ * Comparing answers both: a value equal to what the file resolves to is
+ * correct however it got there, and a value that differs is wrong however
+ * honest its provenance looks.
+ *
+ * ## What it does with the values
+ *
+ * It compares them and drops them. Nothing is printed, returned, logged or put
+ * in a message on any path — every finding this produces carries a variable
+ * name, a file path and a line number, exactly like the name-only ones. The
+ * only new capability is answering "same or different".
+ *
+ * ## Where it fails soft, and in which direction
+ *
+ * A file entry that cannot be resolved (a locked keychain, a helper that is not
+ * installed, a `secret-tool` with no D-Bus) yields no comparison, and the
+ * name-only finding for that variable stands unchanged. That is the safe
+ * direction: an unverifiable value keeps whatever scrutiny it already had, and
+ * a caller that cannot resolve anything gets exactly the pre-APRV-390 report.
+ */
+export function valueFindings(
+  logPath: string,
+  load: PolicyLoadResult,
+  runner: SourceRunner,
+  ambientEnv: NodeJS.ProcessEnv = process.env,
+): InstanceFinding[] {
+  const envPath = envFilePathFor(logPath);
+  const named = instanceFindings(logPath, load, ambientEnv);
+
+  // EVERY variable whose value came from the shell and whose file has a line
+  // for it — not only the ones the name-only rule complained about.
+  //
+  // This is the correction that matters, and the reason the set is not taken
+  // from `named`. The provenance claim (APRV-278) vouches for an export by
+  // naming this instance, this file's DIGEST and this variable, and all three
+  // stay true when the file is untouched and the KEYSTORE ITEM behind one of
+  // its lines is re-stored. The claim is honest and the value is stale, so the
+  // vouched variables are exactly the ones this check must still look at.
+  const nameOnly = resolveEnvironment(load, envPath, NON_RESOLVING_RUNNER, ambientEnv);
+  if (!nameOnly.ok) return named;
+  const ambientNames = new Set(
+    nameOnly.variables
+      .filter(
+        (variable) => variable.status === "set-in-environment" && variable.fileSource !== undefined,
+      )
+      .map((variable) => variable.name),
+  );
+  if (ambientNames.size === 0) return named;
+
+  // Resolve the FILE, by hiding exactly those names from the resolution: the
+  // ambient environment wins otherwise, and the answer would be the value we
+  // are trying to check. Nothing here is exported — this process's own
+  // environment is untouched, so invariant 7 is as true after this call as
+  // before it. The file cannot SET anything; it can only fail to match.
+  const hidden: NodeJS.ProcessEnv = { ...ambientEnv };
+  for (const name of ambientNames) delete hidden[name];
+  const fromFile = resolveEnvironment(load, envPath, runner, hidden);
+  if (!fromFile.ok) return named;
+
+  const fileValues = new Map<string, string>();
+  for (const variable of fromFile.variables) {
+    if (variable.value !== undefined && variable.status !== "set-in-environment") {
+      fileValues.set(variable.name, variable.value);
+    }
+  }
+
+  // Everything the name-only rule found that is NOT about an ambient value: a
+  // foreign item name and a legacy shared one are facts about names, and no
+  // comparison of values can make either of them go away.
+  const findings: InstanceFinding[] = named.filter(
+    (finding) => finding.kind !== "ambient-bleed",
+  );
+
+  for (const name of ambientNames) {
+    const fileValue = fileValues.get(name);
+    const ambientValue = ambientEnv[name];
+
+    // Unresolvable (a locked keychain, a missing helper, a missing item): no
+    // comparison was made, so whatever the name-only rule said still stands.
+    if (fileValue === undefined) {
+      const bleed = named.find(
+        (finding) => finding.kind === "ambient-bleed" && finding.variable === name,
+      );
+      if (bleed !== undefined) findings.push(bleed);
+      continue;
+    }
+
+    // The shell holds exactly what the file configures. Correct, however it got
+    // there, and whatever the provenance claim did or did not say.
+    if (ambientValue === fileValue) continue;
+
+    findings.push({
+      kind: "stale-export",
+      variable: name,
+      detail: `${name} is exported in this shell with a value that is NOT what ${envPath} resolves to today, and an export always wins over the file, so this process would use the stale one`,
+    });
+  }
+  return findings;
 }
 
 /** The name-only rules, over an already-resolved variable set. */

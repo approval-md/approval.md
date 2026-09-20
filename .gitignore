@@ -33,4 +33,12 @@ private/*
 .approval/daemon/
 .approval/keys/
 .approval/env
+
+# Which bot this instance claimed (APRV-390): the last `getMe` this gate made,
+# written so `approval channel telegram health` and `approval doctor` can name
+# the owner without a network call. Local, derived, rebuilt by one `getMe`, and
+# never evidence — a clone inheriting one machine's bot ownership would be a
+# claim about a machine it has never run on.
+.approval/channel-owner.json
+.approval/channel-owner.json.*.tmp
 brand/out/

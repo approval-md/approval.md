@@ -43,7 +43,16 @@ export type MockFailure =
   /** Answer 500. */
   | "500"
   /** Answer 200 with something that is not JSON. */
-  | "malformed";
+  | "malformed"
+  /**
+   * Answer 409 with the Bot API's own wording for "somebody else is polling
+   * this bot" (APRV-390).
+   *
+   * The only poll failure that does not recover: the other poller is not going
+   * to stop because this one asked again, which is why the listener reports it
+   * once instead of printing an identical line every few seconds forever.
+   */
+  | "409";
 
 /** One request the mock received, recorded verbatim. */
 export interface MockRequest {
@@ -193,7 +202,25 @@ export function assertLocal(apiBase: string): string {
   return apiBase;
 }
 
-export async function startMockBotApi(token: string): Promise<MockBotApi> {
+/**
+ * Which bot this mock claims to be (APRV-390).
+ *
+ * Defaulted, so every existing caller is byte-identical. It is a parameter
+ * because bot IDENTITY became load-bearing: `approval up` refuses a bot another
+ * local instance has claimed, and a test for "two instances, two bots, no
+ * collision" cannot be written against one mock that is always bot 424242.
+ */
+export interface MockBotIdentity {
+  botId?: number;
+  username?: string;
+}
+
+export async function startMockBotApi(
+  token: string,
+  identity: MockBotIdentity = {},
+): Promise<MockBotApi> {
+  const botId = identity.botId ?? 424_242;
+  const botUsername = identity.username ?? "approval_md_test_bot";
   const requests: MockRequest[] = [];
   const queued: { update_id: number; update: Record<string, unknown> }[] = [];
   const waiters = new Set<Waiter>();
@@ -256,6 +283,20 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       response.end('{"ok":true,"result":[  <- not JSON');
       return;
     }
+    if (failure === "409") {
+      // The Bot API's own text, verbatim, because the runtime matches on it as
+      // well as on the status (`isPollConflict`).
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          ok: false,
+          error_code: 409,
+          description:
+            "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+        }),
+      );
+      return;
+    }
     if (failure === "timeout") {
       // Accepted and never answered: the client's own transport timeout is the
       // only thing that ends this, which is the point of the mode.
@@ -275,7 +316,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     if (method === "getMe") {
       send(response, {
         ok: true,
-        result: { id: 424_242, is_bot: true, username: "approval_md_test_bot" },
+        result: { id: botId, is_bot: true, username: botUsername },
       });
       return;
     }

@@ -54,6 +54,7 @@
  */
 
 import type { CredentialSpec } from "../core/credential-spec.js";
+import { claimBot } from "../core/channel-owner.js";
 import { LEGACY_SERVICE_TELEGRAM_TOKEN, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import type { PolicyLoadResult } from "../core/policy-load.js";
 import {
@@ -62,6 +63,7 @@ import {
   telegramTokenEnvFor,
 } from "../core/telegram-config.js";
 import type { TelegramFetch } from "../channels/telegram.js";
+import { boolFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import { SETUP_CHANNEL_HELP, SETUP_CHANNEL_TELEGRAM_HELP } from "./help.js";
 import type { Streams } from "./main.js";
@@ -150,6 +152,14 @@ export interface ChannelSetupEntry {
   nextSteps: readonly string[];
   /** The per-channel help, for `--help` and for every refusal. */
   help: string;
+  /**
+   * Flags this channel accepts beyond the shared table (APRV-390).
+   *
+   * Per-channel rather than shared for the reason `front`'s own `extraFlags`
+   * parameter is: a flag every subcommand silently accepts is a flag an
+   * operator will eventually pass to the one that ignores it.
+   */
+  flags?: Record<string, FlagKind>;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +392,31 @@ function telegramHooks(
     const result = (identity.envelope["result"] ?? {}) as Record<string, unknown>;
     username = typeof result["username"] === "string" ? `@${result["username"]}` : "the bot";
     streams.out(`\ntoken valid: ${username} via ${apiBase}\n`);
+
+    // APRV-390. The same `getMe` that proves the token also says WHICH bot it
+    // is, so the ownership claim costs no extra call. Refusing here is the
+    // cheapest place to catch the incident: the operator is at the machine,
+    // nothing has been written to `.approval/env` yet, and the repair is one
+    // new bot from @BotFather rather than two daemons discovering each other
+    // through an HTTP 409 at three in the morning.
+    const botId = result["id"] === undefined ? "" : String(result["id"]);
+    if (botId.length > 0) {
+      const claim = claimBot(context.logPath, { channel: "telegram", botId, username, apiBase });
+      if (!claim.ok && boolFlag(context.flags, "--allow-cross-instance")) {
+        streams.out(
+          `\n--allow-cross-instance: ${claim.message}\n  recording this instance as an owner anyway; both gates will long-poll ${username}\n`,
+        );
+      } else if (!claim.ok) {
+        streams.err(`approval: ${claim.message}\n`);
+        streams.err(`  nothing was written to ${context.envPath}\n`);
+        streams.err(
+          `  pass --allow-cross-instance to record this instance as an owner anyway\n`,
+        );
+        return { ok: false, code: EXIT_INTEGRITY };
+      } else {
+        streams.out(`  recorded ${username} as this instance's own bot\n`);
+      }
+    }
     return { ok: true };
   }
 
@@ -726,6 +761,9 @@ export const CHANNEL_SETUPS: Record<string, ChannelSetupEntry> = {
       `  approval channel telegram health`,
     ],
     help: SETUP_CHANNEL_TELEGRAM_HELP,
+    // APRV-390. The deliberate case: two instances the operator has decided
+    // should share one bot, knowing both will long-poll it.
+    flags: { "--allow-cross-instance": "boolean" },
   },
 };
 
@@ -793,6 +831,7 @@ export async function commandSetupChannel(
     deps,
     helpText,
     (context: HintContext) => entry.hint(context),
+    entry.flags ?? {},
   );
   if (outcome.kind === "handled") return outcome.code;
   const context = outcome;

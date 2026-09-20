@@ -26,10 +26,11 @@
  * without spawning the suite it is part of.
  */
 
-import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
+import { tmpdir } from "node:os";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const TEST_DIR = join(REPO_ROOT, "dist", "tests");
@@ -285,11 +286,21 @@ function main(argv) {
   const files = selectFiles(options, discovered);
   if (files === null) return 1;
 
+  // APRV-390: no test run through this runner writes the machine's own bot
+  // ownership registry. `core/channel-owner.ts` defaults that file to a
+  // platform state directory, which is the operator's; a suite that recorded
+  // its mock bot there would be the mistake the Muse probe's suite made when
+  // it overwrote a live pointer mid-session. Individual suites still give each
+  // case its own directory under this one — the guard here is that forgetting
+  // to costs a test failure inside a temporary tree rather than a row in
+  // somebody's real registry.
+  const stateDir = mkdtempSync(join(tmpdir(), "approval-md-state-"));
+
   const result = spawnSync(process.execPath, ["--test", ...files], {
     cwd: REPO_ROOT,
     stdio: "inherit",
     // APRV-227: no test run through this runner reaches a real harness binary.
-    env: { ...process.env, PATH: stubHarnessBinaries() },
+    env: { ...process.env, PATH: stubHarnessBinaries(), APPROVAL_STATE_DIR: stateDir },
   });
 
   return result.status ?? 1;

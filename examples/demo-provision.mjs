@@ -98,6 +98,47 @@ const MARKER_FILE = "demo-instance.json";
 /** Where `--reset` moves the previous state. Inside the instance, always. */
 const RETIRED_DIR = "retired";
 
+/**
+ * The runtime's DEFAULT Telegram variable names (APRV-390).
+ *
+ * A demo instance must not be on these. They are what a policy that declares
+ * no `channels.telegram.token_env` falls back to, so two gates on one machine
+ * that both say nothing both read the same two variables out of the same
+ * shell — which is how the demo gate spent an evening on the primary's bot.
+ * The packaged policy names `APPROVAL_DEMO_TG_*` instead, and this script
+ * reports a policy still on the defaults rather than accepting it.
+ */
+const DEFAULT_TELEGRAM_ENV = { token: "APPROVAL_TG_TOKEN", chat: "APPROVAL_TG_CHAT" };
+
+/**
+ * The two variable NAMES a policy file declares for Telegram.
+ *
+ * Read out of the policy text rather than assumed, because `approval setup
+ * channel telegram` writes whatever the policy declares and this script's job
+ * is to report the instance as it actually is. A policy that declares neither
+ * gets the runtime's own defaults, which is the case worth reporting.
+ */
+function telegramEnvNames(policyText) {
+  const declared = (key, fallback) => {
+    const found = new RegExp(`^\\s*${key}:\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*$`, "mu").exec(
+      policyText ?? "",
+    );
+    return found === null ? fallback : found[1];
+  };
+  return {
+    token: declared("token_env", DEFAULT_TELEGRAM_ENV.token),
+    chat: declared("chat_id_env", DEFAULT_TELEGRAM_ENV.chat),
+  };
+}
+
+/** Is this instance's policy still reading the machine-wide default names? */
+function onDefaultTelegramEnv(names) {
+  return names.token === DEFAULT_TELEGRAM_ENV.token || names.chat === DEFAULT_TELEGRAM_ENV.chat;
+}
+
+/** The line an operator runs to move a policy onto instance-specific names. */
+const RENAME_LINE = `edit APPROVAL.md: channels.telegram.token_env: APPROVAL_DEMO_TG_TOKEN and chat_id_env: APPROVAL_DEMO_TG_CHAT, re-attest it, then re-run \`approval setup channel telegram\` so .approval/env carries the new names`;
+
 const EXIT_OK = 0;
 const EXIT_FAILED = 1;
 const EXIT_USAGE = 2;
@@ -683,14 +724,27 @@ function inspect(instance, dir) {
   }
 
   if (instance.channel) {
-    if (isSet("APPROVAL_TG_TOKEN") && isSet("APPROVAL_TG_CHAT")) {
-      steps.push(step("channel", "ok", "APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT both resolve"));
+    // APRV-390. The names are the instance policy's, not this script's: setup
+    // writes what the policy declares, so a report that assumed the defaults
+    // would be green about variables the gate never reads.
+    const names = telegramEnvNames(readIfPresent(join(dir, "APPROVAL.md")));
+    if (onDefaultTelegramEnv(names)) {
+      steps.push(
+        step(
+          "channel",
+          "waiting",
+          `this instance's policy names ${names.token} and ${names.chat}, the runtime defaults every gate on this machine falls back to: a shell holding the primary gate's token feeds this instance too, and both then long-poll one bot`,
+          RENAME_LINE,
+        ),
+      );
+    } else if (isSet(names.token) && isSet(names.chat)) {
+      steps.push(step("channel", "ok", `${names.token} and ${names.chat} both resolve`));
     } else {
       steps.push(
         step(
           "channel",
           "waiting",
-          "the Telegram channel is not configured, so no decision reaches a phone",
+          `the Telegram channel is not configured (${names.token} / ${names.chat}), so no decision reaches a phone`,
           line(dir, `setup channel telegram --as ${DEMO_HUMAN}`),
         ),
       );
@@ -893,15 +947,29 @@ async function check(instance, dir) {
     resolves("APPROVAL_HUMAN") ? null : line(dir, "setup identity"),
   );
   if (instance.channel) {
-    const configured = resolves("APPROVAL_TG_TOKEN") && resolves("APPROVAL_TG_CHAT");
-    add(
-      "channel",
-      configured,
-      configured
-        ? "APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT both resolve, so a request can reach the phone"
-        : "the Telegram channel is not configured: nothing this instance asks will reach a phone",
-      configured ? null : line(dir, `setup channel telegram --as ${DEMO_HUMAN}`),
-    );
+    // APRV-390. One bot per instance, and the first half of that is one pair
+    // of variable names per instance: a policy still on the runtime defaults
+    // is reported as a FAILED check here, because it is the configuration in
+    // which an inherited shell silently points this gate at another's bot.
+    const names = telegramEnvNames(onDisk);
+    if (onDefaultTelegramEnv(names)) {
+      add(
+        "channel",
+        false,
+        `this instance's policy names ${names.token} and ${names.chat}, which are the runtime's defaults and therefore shared with every other gate on this machine. One bot per instance starts with one pair of names per instance`,
+        RENAME_LINE,
+      );
+    } else {
+      const configured = resolves(names.token) && resolves(names.chat);
+      add(
+        "channel",
+        configured,
+        configured
+          ? `${names.token} and ${names.chat} both resolve, so a request can reach the phone`
+          : `the Telegram channel is not configured (${names.token} / ${names.chat}): nothing this instance asks will reach a phone`,
+        configured ? null : line(dir, `setup channel telegram --as ${DEMO_HUMAN}`),
+      );
+    }
   }
 
   const vaultPath = join(dir, ".approval", "vault.enc");

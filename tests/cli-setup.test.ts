@@ -52,6 +52,7 @@ import {
   instanceHomeFor,
   instanceIdFor,
 } from "../src/core/instance.js";
+import { otherOwnersOf, ownedBot } from "../src/core/channel-owner.js";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -191,6 +192,12 @@ interface Home {
 function makeHome(options: { policy?: string; env?: string } = {}): Home {
   counter += 1;
   const dir = join(scratch, `home-${String(counter)}`);
+  // APRV-390. Every case gets its own bot-ownership registry, because the mock
+  // Bot API serves one bot id to the whole file: without this, case two claims
+  // the bot case one already took and is refused. The cases that WANT that
+  // collision (two instances, one bot) point two homes at one state directory
+  // on purpose. These verbs run in-process, so the variable is the seam.
+  process.env["APPROVAL_STATE_DIR"] = join(dir, "state");
   mkdirSync(join(dir, ".approval", "log"), { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), options.policy ?? FULL_POLICY, "utf8");
   const logPath = join(dir, ".approval", "log", "events.jsonl");
@@ -2264,6 +2271,141 @@ test("setup adapter email: a vault that will not open refuses BEFORE a password 
   assert.match(result.err, /vault-unreadable/u);
   assert.match(result.err, /nothing was collected and nothing was written/u);
   assert.deepEqual(prompter.asked, [], "a wrong passphrase still asked for a credential");
+});
+
+// ---------------------------------------------------------------------------
+// APRV-390: one bot per instance, and two names per instance
+// ---------------------------------------------------------------------------
+
+/**
+ * A policy whose Telegram variables are this instance's own, the way the
+ * packaged demo policy declares `APPROVAL_DEMO_TG_*`.
+ *
+ * A second gate on one machine that declares nothing reads the runtime's
+ * defaults, which is what every other silent policy on the machine reads too,
+ * so one `eval` in the wrong terminal feeds it the first gate's token.
+ */
+const SECOND_INSTANCE_POLICY = FULL_POLICY.replace(
+  "    chat_id_env: APPROVAL_TG_CHAT\n    token_env: APPROVAL_TG_TOKEN\n",
+  "    chat_id_env: APPROVAL_DEMO_TG_CHAT\n    token_env: APPROVAL_DEMO_TG_TOKEN\n",
+);
+
+/** One complete `setup channel telegram` run against `mock`, with no test message. */
+async function setUpTelegram(
+  home: Home,
+  mock: Awaited<ReturnType<typeof startMockBotApi>>,
+  token: string,
+  argv: string[] = [],
+): Promise<{ code: number; out: string; err: string }> {
+  const keystore = fakeKeystore("keychain", { prompted: token });
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, type: "group", title: "Approvals" }));
+  return run(["channel", "telegram", "--as", HUMAN, ...argv], home, {
+    prompter: scriptedPrompter([true, false]),
+    keystore,
+    fetch: mockFetch(),
+    apiBase: assertLocal(mock.url),
+    pollTimeoutSeconds: 1,
+  });
+}
+
+/**
+ * Two instances, two bots, one machine: nothing collides.
+ *
+ * Both halves of the name are checked, because the incident needed both to go
+ * wrong. The KEYSTORE ITEM carries the instance id (APRV-178), so the two runs
+ * store two items; the VARIABLE is the policy's declaration, so the two runs
+ * write two different lines into two different files. They share one ownership
+ * registry on purpose — that is what "one machine" means here — and neither
+ * refuses, because they are two different bots.
+ */
+test("two instances on one machine configure two bots with no name collision", async () => {
+  const first = await startMockBotApi(TOKEN, { botId: 111, username: "gate_one_bot" });
+  const second = await startMockBotApi(`${TOKEN}-two`, { botId: 222, username: "gate_two_bot" });
+  const previousState = process.env["APPROVAL_STATE_DIR"];
+  try {
+    const primary = makeHome();
+    const demo = makeHome({ policy: SECOND_INSTANCE_POLICY });
+    // One machine, one registry: `makeHome` gives each case its own, so this
+    // case has to put them back together to be about anything.
+    const shared = join(demo.dir, "shared-state");
+    process.env["APPROVAL_STATE_DIR"] = shared;
+
+    const one = await setUpTelegram(primary, first, TOKEN);
+    assert.equal(one.code, EXIT_OK, one.err);
+    const two = await setUpTelegram(demo, second, `${TOKEN}-two`);
+    assert.equal(two.code, EXIT_OK, two.err);
+
+    // Different keystore items: the instance id is in the name.
+    const itemOne = servicesFor(primary.logPath).telegramToken;
+    const itemTwo = servicesFor(demo.logPath).telegramToken;
+    assert.notEqual(itemOne, itemTwo, "two instances resolved to ONE keystore item");
+
+    // Different variables: the policy declared them.
+    assert.deepEqual(readEnvLines(primary), [
+      `APPROVAL_TG_TOKEN=keychain:${itemOne}`,
+      `APPROVAL_TG_CHAT=${CHAT}`,
+    ]);
+    assert.deepEqual(readEnvLines(demo), [
+      `APPROVAL_DEMO_TG_TOKEN=keychain:${itemTwo}`,
+      `APPROVAL_DEMO_TG_CHAT=${CHAT}`,
+    ]);
+
+    // And each instance owns its own bot, by id.
+    assert.equal(ownedBot(primary.logPath, "telegram")?.botId, "111");
+    assert.equal(ownedBot(demo.logPath, "telegram")?.botId, "222");
+    assert.equal(otherOwnersOf(primary.logPath, "111", first.url).length, 0);
+  } finally {
+    if (previousState === undefined) delete process.env["APPROVAL_STATE_DIR"];
+    else process.env["APPROVAL_STATE_DIR"] = previousState;
+    await first.close();
+    await second.close();
+  }
+});
+
+/**
+ * The second instance pointed at the FIRST one's bot is refused, by name.
+ *
+ * Caught here rather than at the first HTTP 409, because here the operator is
+ * at the machine, `.approval/env` has not been written, and the repair is one
+ * new bot from @BotFather. `--allow-cross-instance` is the deliberate case and
+ * has to say what it is doing on the way past.
+ */
+test("a bot another instance on this machine owns is refused at setup, and named", async () => {
+  const mock = await startMockBotApi(TOKEN, { botId: 999, username: "the_one_bot" });
+  const previousState = process.env["APPROVAL_STATE_DIR"];
+  try {
+    const primary = makeHome();
+    const demo = makeHome();
+    const shared = join(demo.dir, "shared-state");
+    process.env["APPROVAL_STATE_DIR"] = shared;
+
+    assert.equal((await setUpTelegram(primary, mock, TOKEN)).code, EXIT_OK);
+
+    const refused = await setUpTelegram(demo, mock, TOKEN);
+    assert.equal(refused.code, EXIT_INTEGRITY, refused.out);
+    assert.match(refused.err, /@the_one_bot \(bot id 999\) is already recorded on this machine/u);
+    // Named, not merely refused: "this bot is taken" without saying by what
+    // sends an operator looking through `ps`.
+    assert.ok(
+      refused.err.includes(instanceHomeFor(primary.logPath)),
+      `the refusal did not name the owning instance: ${refused.err}`,
+    );
+    assert.deepEqual(readEnvLines(demo), [], "a refused setup wrote the env file anyway");
+    assert.equal(refused.err.includes(TOKEN), false, "the refusal carried the token");
+
+    // The deliberate case starts, records, and says so.
+    const allowed = await setUpTelegram(demo, mock, TOKEN, ["--allow-cross-instance"]);
+    assert.equal(allowed.code, EXIT_OK, allowed.err);
+    assert.match(allowed.out, /--allow-cross-instance/u);
+    assert.deepEqual(readEnvLines(demo), [
+      `APPROVAL_TG_TOKEN=keychain:${servicesFor(demo.logPath).telegramToken}`,
+      `APPROVAL_TG_CHAT=${CHAT}`,
+    ]);
+  } finally {
+    if (previousState === undefined) delete process.env["APPROVAL_STATE_DIR"];
+    else process.env["APPROVAL_STATE_DIR"] = previousState;
+    await mock.close();
+  }
 });
 
 // ---------------------------------------------------------------------------

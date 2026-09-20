@@ -339,7 +339,13 @@ test("Telegram preflight uses the selected local API and only the fresh instance
     token: process.env.APPROVAL_TG_TOKEN,
     chat: process.env.APPROVAL_TG_CHAT,
     agentmail: process.env.AGENTMAIL_API_KEY,
+    state: process.env.APPROVAL_STATE_DIR,
   };
+  // APRV-390. This case's own bot-ownership registry. `startMockBotApi` gives
+  // every mock in the suite one bot id, so a registry shared with another case
+  // would have this quickstart refused for a bot that case had claimed — the
+  // runtime working and the suite wrong.
+  process.env.APPROVAL_STATE_DIR = join(scratch, "telegram-local-doctor-state");
   process.env.APPROVAL_TG_TOKEN = "9999999:ambient-token-must-not-be-used";
   process.env.APPROVAL_TG_CHAT = "ambient-chat-must-not-be-used";
   process.env.AGENTMAIL_API_KEY = "ambient-agentmail-key-must-not-be-used";
@@ -364,6 +370,8 @@ test("Telegram preflight uses the selected local API and only the fresh instance
     else process.env.APPROVAL_TG_CHAT = previous.chat;
     if (previous.agentmail === undefined) delete process.env.AGENTMAIL_API_KEY;
     else process.env.AGENTMAIL_API_KEY = previous.agentmail;
+    if (previous.state === undefined) delete process.env.APPROVAL_STATE_DIR;
+    else process.env.APPROVAL_STATE_DIR = previous.state;
     await mock.close();
   }
 });

@@ -87,11 +87,27 @@ cd ~/demo-gate
 approval channel telegram health
 ```
 
-This checks configuration and makes no network call, by design. The live proof
-that the phone buzzes is the opening beat itself, which is one of the reasons
-the opening beat exists. If you want a buzz before the room fills, stop the
-demo instance's listener first: two processes long-polling one bot compete for
-the same updates.
+This checks configuration and makes no network call, by design. It prints the
+two variable names the policy declares — for this instance `APPROVAL_DEMO_TG_TOKEN`
+and `APPROVAL_DEMO_TG_CHAT`, not the machine-wide `APPROVAL_TG_*` the primary
+gate uses — and, since APRV-390, the bot this instance owns and the instance
+that owns it. The live proof that the phone buzzes is the opening beat itself,
+which is one of the reasons the opening beat exists.
+
+**The demo gate needs a bot of its own, not the primary's.** Two gates on one
+bot both long-poll it, answer each other's `getUpdates` with HTTP 409, and
+neither phone channel works — observed on 2026-09-19 between this instance and
+the primary. Both halves of the separation are now enforced rather than
+remembered: `approval up` refuses to start on a credential this instance did
+not configure (`cross-instance-credential`, with the `unset` line in the
+refusal), and it refuses a bot another local instance has claimed
+(`bot-owned-elsewhere`, naming that instance's directory) before its first
+poll. `--allow-cross-instance` overrides either one and says on every run that
+it is doing so.
+
+If you want a buzz before the room fills, stop this instance's own listener
+first: two processes in one instance compete for the same updates just as two
+instances do.
 
 **5. Mint the agent child's token.**
 

@@ -107,6 +107,15 @@ This instance exists only to rehearse the web-agent demo. It is deliberately
 separate from any repository: the log under `.approval/log/` here is the demo's
 log, and nothing a rehearsal does reaches a project's own gate.
 
+**One bot per instance** (APRV-390). The three `_env` keys below name variables
+nothing else on the machine uses, so a shell that has exported the primary
+gate's `APPROVAL_TG_TOKEN` does not silently feed this one. The token itself
+lives in the OS keystore under `approval-tg-token-<instance id>`, the id
+`approval doctor` prints in its `keychain-scope` row, and the bot behind it is
+this instance's alone: `approval up` refuses to start on a bot another local
+instance has claimed, so the demo and the primary cannot end up long-polling
+one bot and trading HTTP 409s.
+
 ```yaml approval-policy
 version: "0.1"
 
@@ -148,8 +157,8 @@ budgets:
 
 channels:
   telegram:
-    token_env: APPROVAL_TG_TOKEN
-    chat_id_env: APPROVAL_TG_CHAT
+    token_env: APPROVAL_DEMO_TG_TOKEN
+    chat_id_env: APPROVAL_DEMO_TG_CHAT
 
 vault:
   passphrase_env: APPROVAL_DEMO_VAULT_PASSPHRASE
@@ -279,7 +288,7 @@ recorded as `human:demo`; an `agent:` or `system:` answer is refused in one line
 and the question comes back.
 
 **`setup vault`** generates 32 random bytes, stores them in the OS keystore as
-`approval-vault-passphrase`, and writes the source line for the variable the
+`approval-vault-passphrase-<instance id>`, and writes the source line for the variable the
 policy names — here `APPROVAL_DEMO_VAULT_PASSPHRASE`. The passphrase is never
 printed. If `.approval/vault.enc` already exists it warns and defaults to no.
 
@@ -293,6 +302,26 @@ Linux `secret-tool` plays the same part; with neither helper it is offered as a
 plaintext literal in `.approval/env` on a typed `yes`. Stop any running
 `approval channel telegram listen` first: this verb's `getUpdates` calls carry no
 offset, but a running listener competes for the same updates.
+
+**One bot per instance, and the two names that make it hold** (APRV-390). Give
+this gate a bot of its own from @BotFather. Both names are derived rather than
+chosen:
+
+- the **keystore item** is `approval-tg-token-<instance id>`, where the instance
+  id is the eight hex digits `approval doctor` prints in its `keychain-scope`
+  row. Two gates on one machine therefore store two items, never one;
+- the **variable** is whatever the policy's `channels.telegram.token_env`
+  declares, and the demo policy declares `APPROVAL_DEMO_TG_TOKEN` and
+  `APPROVAL_DEMO_TG_CHAT`. The runtime's fallback, `APPROVAL_TG_TOKEN`, is what
+  every policy that declares nothing reads, so a shell holding the primary
+  gate's token would feed this instance too.
+
+The verb's `getMe` records which bot this instance owns, and it refuses a bot
+another local instance has already claimed, naming that instance's directory.
+`approval up` makes the same check before its first poll. That refusal is the
+one this replaced: two gates long-polling one bot answer each other's
+`getUpdates` with HTTP 409 and neither phone channel works.
+`--allow-cross-instance` is the deliberate override and says so on every run.
 
 **`setup adapter email`** fills the **vault**, not the keystore and not
 `.approval/env`. It asks for five values, declared by the adapter itself:
@@ -325,8 +354,8 @@ approval env --check
 NAME                            STATUS          SOURCE
 APPROVAL_HUMAN                  UNSET           unset
                                                 fix: run `approval setup identity` …
-APPROVAL_TG_TOKEN               UNSET           unset
-APPROVAL_TG_CHAT                UNSET           unset
+APPROVAL_DEMO_TG_TOKEN          UNSET           unset
+APPROVAL_DEMO_TG_CHAT           UNSET           unset
 APPROVAL_DEMO_VAULT_PASSPHRASE  UNSET           unset
 ```
 
@@ -338,11 +367,18 @@ row reads `SET` or names its keystore item.
 The setup verbs print these themselves when stdin is not a terminal. On macOS:
 
 ```sh
-security add-generic-password -a "$USER" -s approval-vault-passphrase -U -w
-security add-generic-password -a "$USER" -s approval-tg-token -U -w
-printf '%s\n' 'APPROVAL_HUMAN=human:demo' 'APPROVAL_TG_TOKEN=keychain:approval-tg-token' 'APPROVAL_TG_CHAT=<id>' 'APPROVAL_DEMO_VAULT_PASSPHRASE=keychain:approval-vault-passphrase' >> ~/demo-gate/.approval/env
+ID=$(approval doctor --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).checks.find(c=>c.check==="keychain-scope");console.log(/instance ([0-9a-f]{8})/.exec(r.detail)[1])})')
+security add-generic-password -a "$USER" -s "approval-vault-passphrase-$ID" -U -w
+security add-generic-password -a "$USER" -s "approval-tg-token-$ID" -U -w
+printf '%s\n' 'APPROVAL_HUMAN=human:demo' "APPROVAL_DEMO_TG_TOKEN=keychain:approval-tg-token-$ID" 'APPROVAL_DEMO_TG_CHAT=<id>' "APPROVAL_DEMO_VAULT_PASSPHRASE=keychain:approval-vault-passphrase-$ID" >> ~/demo-gate/.approval/env
 chmod 600 ~/demo-gate/.approval/env
 ```
+
+`$ID` is this instance's own eight hex digits, the ones `approval doctor` prints
+in its `keychain-scope` row. Every item name on this machine carries it, so a
+second gate provisioned by hand stores its own items beside these and reads
+neither of them. The setup verbs generate these lines with the id already
+substituted, which is the reason to run them rather than paste this.
 
 Then, with the passphrase in this shell, the five vault values. The value is
 never a command-line argument: `--value-env` names a variable set for that one
@@ -393,7 +429,7 @@ credentials yet, it reads:
 ✓ identity               APPROVAL_HUMAN=human:demo (config-declared: the trust boundary is this machine, not cryptography)
 ✓ attestation            /Users/you/demo-gate/APPROVAL.md is attested at seq 1 (sha256 97b814341e3c…)
 ✓ log                    …/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 ae8b6cdf8d27…
-– telegram               APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT are unset …
+– telegram               APPROVAL_DEMO_TG_TOKEN and APPROVAL_DEMO_TG_CHAT are unset …
 ✓ web-port               127.0.0.1:4680 is free (bound and released; nothing was left listening)
 ✓ payload-store          …/.approval/payloads is not created until the first request --payload …
 – audit-sampling         disabled (rate-absent) …

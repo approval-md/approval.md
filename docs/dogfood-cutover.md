@@ -129,6 +129,47 @@ channel whose credential is unset is not started, is reported the way `approval
 doctor` reports it, and the daemon runs anyway; a channel that falls over is
 restarted with a doubling backoff while the loop keeps ticking.
 
+### One bot per instance (APRV-390)
+
+`eval "$(approval env)"` establishes the primary's credentials in the shell it
+is run in, and that shell can outlive the intention. On 2026-09-19 a second
+gate in `~/demo-gate` inherited the primary's `APPROVAL_TG_TOKEN`, both daemons
+long-polled one bot, both printed `getUpdates` HTTP 409 Conflict on every poll,
+and neither phone channel worked for the evening. `approval up` had warned and
+started anyway.
+
+It refuses now, twice, before it polls anything:
+
+- **`cross-instance-credential`** — a credential variable holds a value this
+  instance did not configure: an `.approval/env` line naming another instance's
+  keystore item, or an export whose value is not what this instance's file
+  resolves to today. The refusal carries the `unset` line. It compares values,
+  which is the only way to see a STALE export: `approval env` never overrides a
+  variable this shell has already exported, so a token re-stored in the keychain
+  never reaches a terminal holding the old one, and the daemon answers 401 while
+  the same line read by hand passes `getMe` (observed 2026-09-19). The same
+  comparison is what stops the correct `eval "$(approval env)"` being reported
+  as a finding at all.
+- **`bot-owned-elsewhere`** — one `getMe`, before the first `getUpdates`, says
+  which bot the token is, and another instance on this machine has already
+  claimed it. The refusal names that instance's directory.
+
+`--allow-cross-instance` overrides both and prints what it is overriding on
+every run. Where the names come from: the keystore item is
+`approval-tg-token-<instance id>`, the eight hex digits `approval doctor`
+prints in its `keychain-scope` row, and the variable is whatever the policy's
+`channels.telegram.token_env` declares. A policy that declares nothing gets
+`APPROVAL_TG_TOKEN`, which every other silent policy on the machine also gets,
+so a second gate declares its own pair (the packaged demo policy declares
+`APPROVAL_DEMO_TG_TOKEN` and `APPROVAL_DEMO_TG_CHAT`). The claim is recorded in
+`.approval/channel-owner.json` (gitignored) and in a per-machine registry under
+the platform's user state directory, `approval/bots.json`; `approval channel
+telegram health` reads both offline and names the owner.
+
+A 409 that still happens at runtime — another machine, or a poller started
+outside this runtime — is reported once with the instances it knows about, and
+the repeats are counted rather than reprinted.
+
 The two separate processes still work and behave identically, which is what the
 composed test suite asserts. Reach for them when you want to restart one half
 without the other:

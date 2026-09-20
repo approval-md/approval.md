@@ -1835,11 +1835,12 @@ Usage:
                                    [--policy <path>] [--dir <path>]
                                    [--log <path>] [--api-base <url>]
                                    [--poll-timeout <seconds>] [--json]
-  approval channel telegram health [--json]
+  approval channel telegram health [--dir <path>] [--log <path>] [--json]
 
 Configuration is ENVIRONMENT-ONLY: APPROVAL_TG_TOKEN holds the bot token and
-APPROVAL_TG_CHAT the approver chat id. APPROVAL.md carries only those variable
-NAMES, and there is no flag that would put a bot token into a shell history.
+APPROVAL_TG_CHAT the approver chat id by default. APPROVAL.md carries only those
+variable NAMES — a second gate on one machine declares a pair of its own — and
+there is no flag that would put a bot token into a shell history.
 
 Anyone in the configured chat can approve as the actor this process was started
 with, so the chat's membership is part of your trust boundary. Use a private
@@ -1865,7 +1866,7 @@ Flags:
   --as human:<id>  the approver every decision is recorded against. REQUIRED
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
   --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
-  --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds (25)
+  --api-base <url> / --poll-timeout <s> / --allow-cross-instance   Bot API base / long-poll seconds (25) / start on another instance's bot
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
@@ -1960,7 +1961,7 @@ Flags (every "daemon run" flag, unchanged, plus):
   --payloads <f> / --payload-dir <d>  payload overrides: telegram / web
   --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds
   --port <n>       queue-page port. Precedence: --port, channels.web.port
-  --no-telegram / --no-web   leave that channel out of this process
+  --no-telegram / --no-web / --allow-cross-instance   leave that channel out / start on another instance's bot
   --no-gloss / --restart-backoff <d>   drop gloss / first retry wait
   --gloss-provider <p> / --gloss-model <id>   choose claude|codex (default claude); Codex requires model; no fallback
   -h, --help       this text

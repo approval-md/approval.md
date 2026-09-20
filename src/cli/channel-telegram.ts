@@ -147,6 +147,7 @@ import {
   TELEGRAM_NOT_RECORDED,
   TELEGRAM_REVIEW_DENIED,
   TELEGRAM_REVIEW_RECORDED,
+  TELEGRAM_DEFAULT_API_BASE,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
   type CheckpointTapResponse,
@@ -165,6 +166,14 @@ import {
 } from "../core/harness-wait.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { valueFindings, type InstanceFinding } from "../core/instance.js";
+import { defaultSourceRunner } from "../core/env-file.js";
+import {
+  claimBot,
+  describeOwners,
+  otherOwnersOf,
+  ownedBot,
+} from "../core/channel-owner.js";
 import {
   actorForSender,
   recordedSenderFor,
@@ -215,6 +224,8 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--api-base": "string",
   "--poll-timeout": "string",
   "--once": "boolean",
+  /** APRV-390: start on a credential this instance did not configure. */
+  "--allow-cross-instance": "boolean",
   "--gloss": "boolean",
   "--no-gloss": "boolean",
   "--gloss-provider": "string",
@@ -313,6 +324,32 @@ export interface ListenSetup {
    */
   delivery: TelegramDelivery;
   /**
+   * Cross-instance findings `--allow-cross-instance` let through (APRV-390).
+   *
+   * Empty on every ordinary start, because a finding without the flag is a
+   * refusal. Carried on the setup rather than printed inside `prepareListen`
+   * for the reason that function prints nothing at all: `approval up` and
+   * `approval channel telegram listen` choose their own stream, and this is
+   * the one thing an overridden refusal still owes the operator.
+   */
+  crossInstance: readonly InstanceFinding[];
+  /**
+   * `--allow-cross-instance` as passed (APRV-390).
+   *
+   * Carried as well as applied, because the flag overrides TWO refusals and
+   * only one of them can be decided synchronously. The credential check is
+   * `prepareListen`'s; the bot-ownership claim needs a `getMe`, so it happens
+   * later and has to be able to ask whether the operator already said yes.
+   */
+  allowCrossInstance: boolean;
+  /**
+   * The Bot API base this listener talks to (APRV-390).
+   *
+   * Part of the bot's identity in the ownership registry, because a bot id is
+   * unique within one Bot API deployment and nothing more.
+   */
+  apiBase: string;
+  /**
    * How the one-sentence model gloss is obtained (APRV-144).
    *
    * OPT-IN, and absent by default. The verb wires in the production runner
@@ -338,6 +375,89 @@ export interface ListenSetup {
    * load per cycle and nothing else.
    */
   checkpoint: CheckpointTap;
+}
+
+/**
+ * Claim this listener's bot before it polls (APRV-390).
+ *
+ * ONE `getMe`, once per process, before the first `getUpdates`. Two things
+ * come out of it: the bot's identity, which is the only thing that can tell
+ * two instances holding two differently-named copies of one token apart; and
+ * a claim in the per-machine registry, which is what makes the SECOND such
+ * listener refuse instead of joining a 409 loop.
+ *
+ * ## Why an unreachable Bot API is not a refusal
+ *
+ * A `getMe` that fails says nothing about ownership. The machine may be behind
+ * a captive portal, the API may be rate-limiting, the network may be down for
+ * four seconds. Refusing to start on that would mean a transient network fault
+ * took the phone channel down until somebody noticed, in exchange for no
+ * safety: an unreachable Bot API is also a `getUpdates` that cannot conflict
+ * with anything. So the preflight says what happened and lets the listener
+ * start, where the existing retry loop is already the right behaviour. The
+ * refusal is reserved for the case this task is about, which is a bot that is
+ * demonstrably somebody else's.
+ */
+export async function claimListenerBot(
+  setup: ListenSetup,
+  report: (message: string) => void,
+): Promise<{ ok: true } | { ok: false; code: ListenRefusalCode; message: string }> {
+  let identity: { id: string; username: string };
+  try {
+    identity = await setup.channel.identify();
+  } catch (cause) {
+    report(
+      `approval: telegram getMe could not be reached (${
+        cause instanceof Error ? cause.message : String(cause)
+      }), so which bot this token names is unknown and no ownership was recorded; starting anyway`,
+    );
+    return { ok: true };
+  }
+  if (identity.id.length === 0) {
+    report(
+      "approval: telegram getMe answered without a bot id, so no ownership was recorded; starting anyway",
+    );
+    return { ok: true };
+  }
+
+  const claim = claimBot(setup.logPath, {
+    channel: "telegram",
+    botId: identity.id,
+    username: identity.username,
+    apiBase: setup.apiBase,
+  });
+  if (!claim.ok) {
+    if (!setup.allowCrossInstance) {
+      return { ok: false, code: "bot-owned-elsewhere", message: claim.message };
+    }
+    // The deliberate case. It says what it is doing, and it does NOT record a
+    // second claim: the registry answers "who owns this bot", and two owners
+    // is the state it exists to report rather than a state to write down.
+    report(`approval: --allow-cross-instance: starting anyway — ${claim.message}`);
+    return { ok: true };
+  }
+  report(
+    `approval: telegram ${identity.username} (bot id ${identity.id}) is this instance's own; no update was consumed by this check`,
+  );
+  return { ok: true };
+}
+
+/**
+ * What to append to a runtime 409, naming the other instance if one is known.
+ *
+ * Read at the moment of the conflict rather than captured at start-up, because
+ * the other gate may have claimed the bot in between: the registry is the only
+ * thing that knows, and it is cheap to re-read.
+ */
+export function conflictAdviceFor(setup: ListenSetup): () => string | null {
+  return (): string | null => {
+    const mine = ownedBot(setup.logPath, "telegram");
+    if (mine === null) return null;
+    const others = otherOwnersOf(setup.logPath, mine.botId, mine.apiBase);
+    return others.length === 0
+      ? `this instance is ${mine.instanceHome} (instance ${mine.instanceId}) on ${mine.username}, and nothing else on this machine has claimed it — the other poller is on another machine, or was started outside this runtime`
+      : `${mine.instanceHome} (instance ${mine.instanceId}) and ${describeOwners(others)} have both claimed ${mine.username}; stop one of them`;
+  };
 }
 
 function payloadSource(
@@ -386,6 +506,21 @@ export const LISTEN_REFUSAL_CODES = [
   "log-unreadable",
   /** `--payloads` did not hold a JSON object of action key -> payload. */
   "payloads-unreadable",
+  /**
+   * A credential variable holds a value this instance did not configure
+   * (APRV-390): it was exported before the process started and is not this
+   * instance's own `approval env` export, or `.approval/env` names another
+   * instance's keystore item. Refused rather than warned since APRV-390 — the
+   * warning is what let a demo gate spend an evening on the production bot.
+   * `--allow-cross-instance` is the deliberate case.
+   */
+  "cross-instance-credential",
+  /**
+   * `getMe` named a bot another instance on this machine has already claimed
+   * (APRV-390). Refused BEFORE the first `getUpdates`, so the operator reads
+   * which two gates are involved instead of an HTTP 409 loop.
+   */
+  "bot-owned-elsewhere",
 ] as const;
 
 export type ListenRefusalCode = (typeof LISTEN_REFUSAL_CODES)[number];
@@ -406,6 +541,11 @@ export interface ListenRequest {
   pollTimeout: string | null;
   once: boolean;
   json: boolean;
+  /**
+   * `--allow-cross-instance` (APRV-390): start on a credential this instance
+   * did not configure, saying so, instead of refusing.
+   */
+  allowCrossInstance?: boolean;
   /** Where the channel's operational complaints go. Ordinarily stderr. */
   log(message: string): void;
   /** The gloss runner, if the caller wants one. See {@link ListenSetup.gloss}. */
@@ -450,6 +590,38 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
       ok: false,
       code: "not-configured",
       message: `telegram is not configured: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset or empty (both ${tokenEnv} and ${chatEnv} are required; APPROVAL.md carries only their names)`,
+    };
+  }
+
+  // APRV-390. WHOSE credentials are these? `instanceFindings` answers from
+  // names alone — no value is read, compared or printed — and until this task
+  // its answer was a warning `approval up` printed on the way past. It is a
+  // refusal now. The incident it is named after is a demo gate that started on
+  // the primary's exported token and long-polled the primary's bot: the
+  // warning was on the operator's terminal the whole time, above a process
+  // that had already started. An override exists because feeding a daemon from
+  // a shell profile is a deliberate, supported thing to do; what was missing
+  // is that it now has to be said out loud.
+  //
+  // `valueFindings` and not `instanceFindings`: this is the one caller that is
+  // about to USE the values, so it is allowed to resolve the file and compare
+  // (APRV-390, second round). Comparing is what tells a stale export — the
+  // shell holding a token the keychain has since replaced, which `approval env`
+  // will never override — from an honest one, and what stops the correct `eval
+  // "$(approval env)"` ritual being reported as a finding. `approval doctor`
+  // keeps the name-only rule, because a diagnostic may not block on an unlock
+  // dialog. No value is printed here or anywhere below.
+  const crossInstance = valueFindings(request.logPath, policyLoad, defaultSourceRunner);
+  if (crossInstance.length > 0 && request.allowCrossInstance !== true) {
+    const stale = crossInstance.some((finding) => finding.kind === "stale-export");
+    return {
+      ok: false,
+      code: "cross-instance-credential",
+      message: `${crossInstance.map((finding) => finding.detail).join("; ")}. ${
+        stale
+          ? "A stale export is why a token re-stored in the keystore can still answer 401: `approval env` never overrides a variable this shell has already exported."
+          : "Two gates on one bot token both long-poll it, their getUpdates offsets acknowledge each other's updates, and an approval tap is answered by whichever listener asked first."
+      } Fix it with one of: \`unset ${crossInstance.map((finding) => finding.variable).join(" ")}\` and then \`eval "$(approval env)"\` in this shell; a fresh shell that has never exported it; or \`approval setup channel telegram\` to give this instance its own bot. Pass --allow-cross-instance to start anyway`,
     };
   }
 
@@ -520,6 +692,11 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
       // asks of the policy file, and a policy that failed to load leaves the
       // default (paced) in force rather than a mode nobody chose.
       delivery: telegramDeliveryFor(policyLoad),
+      // APRV-390. Empty unless --allow-cross-instance let a finding through.
+      crossInstance,
+      allowCrossInstance: request.allowCrossInstance === true,
+      apiBase: request.apiBase ?? TELEGRAM_DEFAULT_API_BASE,
+
       gateOptions: { policy: request.policy },
       tagOptions: {
         policy: request.policy,
@@ -648,6 +825,8 @@ function setUp(
     pollTimeout: stringFlag(flags, "--poll-timeout"),
     once: boolFlag(flags, "--once"),
     json,
+    // APRV-390.
+    allowCrossInstance: boolFlag(flags, "--allow-cross-instance"),
     log: (message: string) => streams.err(`${message}\n`),
     // APRV-144, on by default, `--no-gloss` to turn it off (APRV-197).
     //
@@ -2841,7 +3020,14 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
       reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
     };
 
-    await channel.listen(setup.once ? { once: true, beforePoll } : { beforePoll });
+    // APRV-390. The 409's report reads the ownership registry at the moment
+    // the conflict happens; the channel prints what this returns and knows
+    // nothing about instances or files.
+    const conflictAdvice = conflictAdviceFor(setup);
+
+    await channel.listen(
+      setup.once ? { once: true, beforePoll, conflictAdvice } : { beforePoll, conflictAdvice },
+    );
 
     if (setup.json) {
       streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
@@ -2853,6 +3039,16 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
 }
 
 async function runListener(setup: ListenSetup, streams: Streams): Promise<number> {
+  // APRV-390. Before anything is delivered and before the first poll: whose
+  // bot is this? An override that got this far still owes the operator the
+  // sentence, because the whole point of `--allow-cross-instance` is that the
+  // deliberate case is deliberate out loud.
+  for (const finding of setup.crossInstance) {
+    streams.err(`approval: --allow-cross-instance: starting anyway — ${finding.detail}\n`);
+  }
+  const claimed = await claimListenerBot(setup, (message) => streams.err(`${message}\n`));
+  if (!claimed.ok) return integrityError(streams, setup.json, claimed.message);
+
   const running = startListener(setup, streams);
   const stop = (): void => running.stop();
   process.on("SIGINT", stop);
@@ -2913,6 +3109,10 @@ export function commandTelegramHealth(argv: string[], streams: Streams, cwd: str
   const parsed = parseFlags(argv, {
     "--policy": "string",
     "--dir": "string",
+    // APRV-390. Which instance's ownership record to read. Accepted here for
+    // the same reason `listen` accepts it: a gate may be configured with its
+    // log somewhere other than beside the policy.
+    "--log": "string",
     "--json": "boolean",
     "--help": "boolean",
     "-h": "boolean",
@@ -2941,6 +3141,25 @@ export function commandTelegramHealth(argv: string[], streams: Streams, cwd: str
   const chatId = env(chatEnv);
   const ok = token !== null && chatId !== null;
 
+  // APRV-390. Which bot, and whose. Read from the two ownership records and
+  // never from the network: this verb makes no Bot API call on any path, and
+  // the last `getMe` a listener or a setup run made is already written down.
+  // An instance that has never started a listener has no record, which is a
+  // state and not a fault — the row says so rather than guessing.
+  const logPath = resolvePath(
+    stringFlag(parsed.flags, "--log"),
+    DEFAULT_LOG_PATH,
+    dirFlag === null ? cwd : absolute(dirFlag, cwd),
+  );
+  const mine = ownedBot(logPath, "telegram");
+  const others = mine === null ? [] : otherOwnersOf(logPath, mine.botId, mine.apiBase);
+  const ownership =
+    mine === null
+      ? "no bot recorded for this instance yet: it is written by the first `approval up` or `approval channel telegram listen` that reaches getMe"
+      : others.length === 0
+        ? `bot ${mine.username} (id ${mine.botId}) is owned by this instance, ${mine.instanceHome} (instance ${mine.instanceId}), recorded ${mine.claimedAt}`
+        : `bot ${mine.username} (id ${mine.botId}) is claimed by this instance AND by ${describeOwners(others)}; one of them must be given its own bot`;
+
   if (json) {
     streams.out(
       `${JSON.stringify({
@@ -2951,10 +3170,20 @@ export function commandTelegramHealth(argv: string[], streams: Streams, cwd: str
         token_set: token !== null,
         chat_env: chatEnv,
         chat_id: chatId,
+        // APRV-390. Names and ids, never a value.
+        bot_username: mine?.username ?? null,
+        bot_id: mine?.botId ?? null,
+        owner_instance: mine?.instanceId ?? null,
+        owner_home: mine?.instanceHome ?? null,
+        other_owners: others.map((claim) => ({
+          instance_id: claim.instanceId,
+          instance_home: claim.instanceHome,
+        })),
       })}\n`,
     );
   } else if (ok) {
     streams.out(`telegram: configured (${tokenEnv} set, chat ${String(chatId)})\n`);
+    streams.out(`  ${ownership}\n`);
   } else {
     streams.err(
       `approval: telegram is not configured: ${[
