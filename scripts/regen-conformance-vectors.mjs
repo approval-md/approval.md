@@ -1377,9 +1377,15 @@ const commandClassVectors = [
     input: { command: "gunzip -c dist/pkg.gz" },
   },
   {
+    id: "gunzip-list-is-a-read",
+    description:
+      "-l prints the sizes, the ratio and the member name and touches nothing, which is the same act tar -t is and belongs in the same class",
+    input: { command: "gunzip -l dist/pkg.gz" },
+  },
+  {
     id: "gunzip-in-place-is-a-workspace-write",
     description:
-      "the DEFAULT form removes the file it names and leaves the decompressed one in its place, so the plain spelling is a write and only the stdout and test forms read",
+      "the DEFAULT form removes the file it names and leaves the decompressed one in its place, so the plain spelling is a write and only the stdout, test and list forms read",
     input: { command: "gunzip dist/pkg.gz" },
   },
   {
@@ -2372,6 +2378,15 @@ const SUITES = [
     // because this suite carries no machine facts: an absolute destination is
     // out of scope here even when it looks like a temp directory, which is the
     // answer a caller that resolved no roots must get.
+    //
+    // 1.4.0 STAYS 1.4.0 after one correction inside it, and the reason is the
+    // rule that a version is claimed at merge rather than at branch. The first
+    // cut of the packaging rows read only `-c`/`--stdout` and `-t`/`--test` as
+    // `gunzip` reads, on the brief's enumeration; review agreed that `-l` and
+    // `--list` print sizes and names and touch nothing, so they read too, and
+    // `gunzip-list-is-a-read` joined the set. Nothing a second implementation
+    // has ever been held to moved: 1.3.0 carries no `gunzip` vector at all, and
+    // 1.4.0 has not been merged, so the number still names one set.
     vectors_version: "1.4.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

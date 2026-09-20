@@ -4183,8 +4183,9 @@ workspace write of the tarball, scoped to `--pack-destination`, and
 `package.json`; a bare `npm --version`, `-v`, `-V`, `--help` or `-h` is a read,
 while every npm subcommand the table does not name keeps its `unclassified`
 deny; `tar -t` lists (a read) and `tar -x`/`-c` writes into `-C` or the archive
-`-f` names; `gunzip` reads only with `-c`/`--stdout` or `-t`/`--test` and
-otherwise replaces the file it names; `base64` reads unless `-o` names an output;
+`-f` names; `gunzip` reads only with `-c`/`--stdout`, `-t`/`--test` or
+`-l`/`--list` and otherwise replaces the file it names; `base64` reads unless
+`-o` names an output;
 `openssl dgst` (and the `md5`/`sha*` spellings) reads unless `-out` names one,
 while every other `openssl` subcommand stays unclassified. Each write is scoped
 by the arithmetic `rm` uses: a destination under a resolved scratch root or a

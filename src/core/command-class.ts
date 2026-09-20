@@ -2247,17 +2247,22 @@ function refineTar(ctx: RuleContext): Refinement {
 }
 
 /**
- * `gunzip` — the stdout and test forms read; every other form REPLACES a file.
+ * `gunzip` — the stdout, test and list forms read; every other form REPLACES a
+ * file.
  *
  * The default is the trap: `gunzip pkg.tgz` removes `pkg.tgz` and leaves
- * `pkg.tar` in its place, so the plain spelling is a write of the path it names
- * and only `-c`/`--stdout` and `-t`/`--test` leave the disk alone. `-k`
- * (`--keep`) is deliberately not a read: it spares the input and still creates
- * the output.
+ * `pkg.tar` in its place, so the plain spelling is a write of the path it names.
+ * Three flags leave the disk alone: `-c`/`--stdout` decompresses to standard
+ * output, `-t`/`--test` checks the integrity of the archive, and `-l`/`--list`
+ * prints the compressed and uncompressed sizes, the ratio and the member name.
+ * A listing is the same kind of act as `tar -t` beside it and belongs in the
+ * same class. `-k` (`--keep`) is deliberately not a read: it spares the input
+ * and still creates the output.
  */
 function refineGunzip(ctx: RuleContext): Refinement {
   const reading =
-    hasShortFlag(ctx.args, ["c", "t"]) || hasFlag(ctx.args, ["--stdout", "--to-stdout", "--test"]);
+    hasShortFlag(ctx.args, ["c", "t", "l"]) ||
+    hasFlag(ctx.args, ["--stdout", "--to-stdout", "--test", "--list"]);
   return reading
     ? { class: "read.shell", rule: "gunzip-read" }
     : scopedWrite(ctx, ctx.positionals, "gunzip-write");

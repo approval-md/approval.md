@@ -9,7 +9,7 @@ status: In Progress
 assignee:
   - '@opus-lane-397'
 created_date: '2026-09-20 04:41'
-updated_date: '2026-09-20 11:42'
+updated_date: '2026-09-20 11:48'
 labels:
   - classifier
   - hook
@@ -167,6 +167,14 @@ The 23 match the known baseline for this machine one for one, and none is in a s
 The twenty-third was MINE and is an artifact rather than a defect, stated in full because the honest reading of a red test matters more than the count. demo-provision's --check test asserts approval doctor passes, and doctor's build-freshness check compares the newest mtime under src against the mtime of dist/src/cli/main.js. The marker was emitted at 04:33:17 and I edited src/core/read-scope.ts (a comment rewording) at 04:33:59, mid-run, so a test that ran after that point correctly reported a stale build. After a rebuild the marker is newer than every source and the suite is 19 tests, 19 pass, 0 fail, exit 0. The lesson for the next lane in this worktree: do not edit anything under src while a full run is in flight, because doctor is inside the suite and it dates the build.
 
 No better-sqlite3 ABI failure appeared in cli-instructions on this run.
+
+REVIEW CHANGE, accepted on the orchestrator's ruling: the listing form of the decompressor reads.
+
+The first cut followed the brief's enumeration and treated only the stdout and test forms as reads, which left -l and --list on the write branch and is recorded a few notes above as the one place I followed the brief over my own reading. Review agreed with the reading: -l prints the compressed size, the uncompressed size, the ratio and the member name, and touches nothing, so it is the same act the archive listing beside it is and belongs in the same class. The refinement now reads the l letter in a short bundle and the long spelling, the doc comment says what the flag prints, two unit fixtures sit beside the stdout and test ones, and a vector named for the listing sits beside the stdout vector.
+
+The suite version STAYS at 1.4.0, on the rule that a number is claimed at merge rather than at branch. Nothing a second implementation has ever been held to moved: the released suite is 1.3.0 and carries no vector for this binary at all, and 1.4.0 has not merged, so the number still names one set. The argument is written into the script beside the number so a later reader does not mistake it for an expectation that moved after release.
+
+command-class is now 73 vectors with 10 negative controls, and the whole suite is 453 vectors, 453 passed, 0 failed, 174 controls, manifest ok, exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

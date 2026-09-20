@@ -559,6 +559,10 @@ const FIXTURES: readonly Fixture[] = [
   { command: "gunzip -c pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
   { command: "gunzip -t pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
   { command: "gunzip --stdout pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
+  // A listing prints the sizes, the ratio and the member name and touches
+  // nothing: the same act `tar -t` is, in the same class.
+  { command: "gunzip -l pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
+  { command: "gunzip --list pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
   // The default form replaces the file it names, and `-k` still creates one.
   { command: "gunzip pkg.gz", class: "files.write.workspace", rule: "gunzip-write", row: "gunzip" },
   { command: "gunzip -k pkg.gz", class: "files.write.workspace", rule: "gunzip-write", row: "gunzip" },
