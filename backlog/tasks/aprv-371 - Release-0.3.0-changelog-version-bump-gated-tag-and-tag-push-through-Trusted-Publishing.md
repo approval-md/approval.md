@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-18 06:34'
+updated_date: '2026-09-20 01:26'
 labels:
   - release
 dependencies:
@@ -26,3 +27,9 @@ Since v0.2.0 (published 2026-09-12, APRV-329) main carries 183 commits and 35 fe
 - [ ] #2 Annotated tag v0.3.0 created and pushed through the gate; publish.yml publishes approval-md@0.3.0 with npm provenance and no NPM_TOKEN
 - [ ] #3 Registry tarball matches the CI artifact, a clean install runs approval --version and approval doctor, provenance verified; results recorded in the notes and the changelog dated
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC1 draft only, for review. CHANGELOG.md gains an Unreleased 0.3.0 section on branch lane/changelog-0-3-0-371, grouped into gate and guard, harnesses and the Codex bridge, channels and identity, daemon and records, policy and setup, demos and docs, and breaking and behavior changes. Every line names its task id and, where a verb changed, the verb. package.json is NOT bumped and the section is NOT dated: both wait on Carter and on the tag. Sources of truth were the 185 non-merge commits since v0.2.0, the merged pull request titles since 2026-09-12, and the Done task list, with each claim checked against the diff. Two corrections to the brief's figures, taken from the files: schema-validation vectors are at 2.5.0 rather than 2.4.0, and hook-read-scope 1.2.0 is a third new suite alongside command-class and bridge-decisions. One user-visible change carries no task id, the judgy demo pages, and it is listed as such.
+<!-- SECTION:NOTES:END -->

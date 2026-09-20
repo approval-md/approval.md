@@ -4,6 +4,368 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
+## Unreleased 0.3.0
+
+185 commits since `v0.2.0`, all additive at the package boundary. The deprecated
+bare `supervised` alias still loads with a warning, so this is a minor bump. Not
+yet tagged or published: the version bump, the gated annotated tag and the
+Trusted Publishing run are the remainder of APRV-371.
+
+### Gate and guard
+
+- **Reads are scoped, for the first time at any layer (APRV-347).** A
+  `read.file.out_of_scope` class, an additive `read_scope: { roots }` policy key
+  that `approval policy check` shows on the read classes, harness gating of
+  Claude Code's `Read`, `Glob` and `Grep` (and Cursor's `Read`, documented as
+  unverified), and a Seatbelt profile that flips to deny-default file reads.
+  Fail closed throughout: an unresolvable target, an unreadable value and a
+  symlink escape are each out of scope, and the scope anchors on the directory
+  holding the policy the hook resolved rather than on the harness-supplied
+  `cwd`. Writes and deletes were path-scoped; reads were not, so a policy could
+  say a great deal about what an agent may write and nothing about what it may
+  see.
+- **A human sign-off is a record (APRV-338).** `approval policy attest --path
+  <p>` appends the human-only `gate.path.signed_off`, carrying a
+  repository-relative protected path and the SHA-256 of its bytes. The
+  protected-path guard reads it last, after its grant search, hunk coverage and
+  replay have all failed, and the finding it prints says the verdict rests on
+  whole-file evidence. The verb refuses a non-human actor, the policy file,
+  every `policy.core` surface and the log directory, each with its own code, and
+  it classifies `policy.core` so the harness hook denies it to an agent first.
+- **The protected-path guard credits the evidence a real edit leaves (APRV-337,
+  APRV-339, APRV-340).** The policy-authorized tier accepts the absolute path
+  the hook binds, so an unattended `Edit` can pass CI at all. The post-hoc check
+  anchors on the committer date, so an edit folded in by `git commit --amend` is
+  no longer refused as later than the change it made. A single fragment edit
+  inside a long line is credited by line-local exact replay, instead of reaching
+  the global replay's byte limit before it can find a proof.
+- **`vcs.ref.delete`, a class of its own (APRV-352).** Removing a remote ref
+  classified `vcs.push.main`, which reads as "this reaches the trunk" and is held
+  here at `supervised-retro`. A push adds commits somebody can still see, while a
+  deletion removes the only name an unmerged branch had. Every deletion spelling
+  now takes `vcs.ref.delete`, with the ref names bound to the segment so a prompt
+  can say what disappears.
+- **`harness.launch.NAME` (APRV-354).** A command whose first word was `codex`,
+  `muse`, `grok`, `claude` or `cursor-agent` was `hook-unclassified`: fail
+  closed, and also mute, leaving an approver nothing to read and a human no class
+  to grant through. Five spellings reach one class (bare, absolute,
+  home-relative, env-prefixed, package runner), version and help probes classify
+  as reads, and a launch resolves only under an explicit rule.
+- **Quoted argument text is data, as a stated contract (APRV-353).** The
+  behavior already held; what was missing was anything holding it there. The new
+  `command-class` conformance suite pins the segmentation as firmly as the
+  classes: a note naming a shell, a placeholder, a pipe or a semicolon is one
+  word, `$(…)` and backticks inside double quotes keep classifying as they do
+  anywhere else, and quoting that does not balance is a refusal rather than a
+  guess.
+- **`approval doctor` and the CI guard replay the same unit, and name it
+  (APRV-369, APRV-374).** `src/core/commit-guard.ts` is the one place either side
+  builds its inputs, so the health row and the CI verdict agree by construction
+  rather than by two code paths kept in step. The `audit.dark_session` code set
+  gains `no-evidence-merged`, the same `dark` verdict for a finding whose failing
+  commits all reached the checkout through a merge, reported under its own code
+  because the repair is in the branch the commit came from. Arm A now judges a
+  merge commit on its dense combined patch, so bytes born in a conflict
+  resolution are judged instead of dropped.
+- **`audit.question_preempted` (APRV-378).** When something else resolves an
+  approval the gate exists to ask about, starting with the Codex server-side
+  auto-reviewer, the log carries the fact. Until this, it lived in an exit code
+  and a terminal line, and a verdict with nothing behind it is the shape of claim
+  this project is built against.
+- **A hash-bound, grant-gated driver for bulk ref deletion (APRV-318).** Every
+  ref must still be at the tip the 2026-09-08 inventory recorded, proved before
+  the run and again before each batch, with a per-ref lease and no forced
+  refspec; any drift refuses the whole run instead of deleting the subset it
+  agrees with. 233 merged remote branches were deleted through it.
+- **Credential starvation proved under the egress sandbox (APRV-193).** An
+  ordinary `node` script, which is the class the hook allows and therefore the
+  whole laundering premise, is denied the vault, the `.approval/env` source map
+  and the sealing keys under a real `sandbox-exec`, with three controls that make
+  the denial evidence rather than coincidence.
+
+### Harnesses and the Codex bridge
+
+- **`approval hook grok`, the Grok Build adapter (APRV-243).** Grok Build's
+  `PreToolUse` hook is Claude Code's with camelCase keys, a `{decision, reason}`
+  verdict and a deny that is exit 2. It also reads `.claude/settings.json` for
+  compatibility, so this repository's committed Claude Code entry firing under a
+  Grok session would deny in the nested envelope at exit 0, which Grok reads as
+  an allow: every command would look gated and none would be. `docs/grok-hook.md`
+  states which cases the adapter cannot cover, including a fail-open on timeout,
+  crash and malformed output that has no setting to change it.
+- **`approval hook muse`, the Meta Muse Code adapter (APRV-350).** Every field is
+  observed, from a live run of `muse-bin-1.3.0-R3233.1`. Muse sends the two facts
+  Codex lacks, a per-call working directory and a real outcome, so commands are
+  classified against the directory they will run in and a non-zero exit closes
+  the start as a failure. Muse also fails open on a verdict that merely mixes
+  dialects, so the adapter emits exactly one, the nested `hookSpecificOutput`
+  form at exit 0, and a test asserts the verdict object has exactly one
+  top-level key.
+- **The Codex native hook says what it cannot do (APRV-311).** The refusal for a
+  `Bash` call whose per-call working directory Codex hides has its own code,
+  `hook-unsupported-execution-context`, separated from the malformed-event
+  `hook-io` it used to borrow, because the two repairs are opposite. A malformed
+  post-execution event reports `post-tool-io` rather than printing a permission
+  verdict about a call that has already run, and every post-phase line carries
+  the stable task id the pre half minted. `hook_deny_codes` and
+  `post_tool_codes` joined the `refusal-unions` suite.
+- **The Codex workspace broker and the confined session (APRV-325.2,
+  APRV-325.3).** `approval codex apply` is the one door into the canonical
+  workspace, and `approval codex start` closes the window beside it: a disposable
+  workspace is the only writable path, the canonical workspace is readable and
+  never writable, the gate's log, policy, vault and keys are neither, the
+  environment is an allow-list rather than a filtered copy of the operator's,
+  outbound network is denied with loopback, and descendants inherit all of it. A
+  confined session's reads are jailed to exactly those two workspaces.
+- **`approval codex bridge` (APRV-361).** The bridge starts `codex app-server`
+  and answers every approval request it raises through the hook's own decision
+  path: the same classifier, the same human-only refusal, the same sandbox
+  requirement, the same loop floor and unattended guard, and the same register,
+  request and wait against the verified view. Each
+  `item/commandExecution/requestApproval` carries `command` and `cwd` on one
+  frame, which is exactly the pair the native hook lacks. The deadline is the
+  policy's `approval_ttl` rather than a harness ceiling, overridable with
+  `--wait`.
+- **What the bridge binds, and what it will say (APRV-362, APRV-363, APRV-366,
+  APRV-367, APRV-368, APRV-379).** An exec request binds argv rather than a
+  rendering, and a string no join produces is `bridge-command-unbound`. A legacy
+  `applyPatchApproval` is decided by the paths it carries. An item-based file
+  change is correlated with the `item/started` frame its id names, with
+  `bridge-file-change-unbound` and `bridge-file-change-already-completed` of its
+  own. The answer to `thread/start` is read, so a server that refused the
+  `untrusted` approval policy or started the thread under another one stops the
+  run. The reply vocabulary is a closed type with one encoder, so
+  `acceptForSession`, `cancel` and `abort` are never sent. `bridge_stop_codes` is
+  published as a union beside `bridge_refusal_codes`, each naming the other, and
+  SPEC section 6.3 gains the app-server row.
+- **The bridge proves nothing else answered first (APRV-364, APRV-359).** Every
+  start runs a preflight probe turn, and a session whose server-side
+  auto-reviewer resolves a request before this client is asked stops rather than
+  carrying on. The separate probe harness reports `VOID` where its own control
+  raised no approval request and landed no effect, in place of a hold sentence
+  that claimed evidence it did not have.
+- **The app-server socket has no custodian because there is no socket
+  (APRV-365).** The bridge starts the app-server as its own child over stdio
+  pipes, so nothing binds a path, no other process holds a descriptor to speak
+  on, and the replay of a pending request to whatever connects next cannot arise
+  inside one run. The claim moved to what that makes true.
+- **`grok` joins the harness enum (APRV-358).** A Grok session could classify and
+  deny correctly and could not register: `harness: "grok"` on `task.registered`
+  was refused at the write boundary, so a manual-class request never reached a
+  human. The six places a harness name is written down are now pinned equal to
+  `HARNESS_KINDS`, so the next adapter cannot land with the enum left behind.
+
+### Channels and identity
+
+- **A channel sender becomes an attested human identity (APRV-324).** The
+  attested `approvers[id].senders` mapping turns an authenticated Telegram
+  account into the actor a record names, with `payload.sender` and
+  `sender_source: "policy"` on decisions, attestations and reviews, resolution on
+  every callback family rather than decisions alone, and an `approval doctor`
+  `sender-mapping` row that says what an unmapped policy means. Checkpoint and
+  review gestures resolve only against an attested policy.
+- **A keyed sender id, so a published policy and log stop carrying the account
+  (APRV-370).** `approvers[id].senders.telegram` accepts `hmac-sha256:<hex>`
+  beside the raw account id, computed under an operator secret in
+  `APPROVAL_SENDER_KEY` that the new human-only `approval setup sender-key` mints
+  and stores. A plain digest would not do: a Telegram id is a ten-digit decimal
+  number and the whole space is enumerable on a laptop. `--id <account-id>` mints
+  nothing and prints the mapping line and a paste-ready proposal pair for one
+  account, which is the one step no agent session can perform. A channel with any
+  keyed entry and no key in the process refuses every decision on it under
+  `sender-key-unavailable` and never falls back to the raw comparison.
+- **`audit.gesture_refused` (APRV-355).** A tap on a checkpoint signature or a
+  review, from an account the attested policy names nobody for, is refused before
+  any verb runs and used to record nothing at all, so a person's attention left
+  no trace. It now leaves a record with a `^system:` actor, the channel and the
+  gesture, and it carries the sender on the refusals where the account is the
+  only thing the runtime knows about who tapped.
+- **One bot per instance, refused before polling (APRV-390).** Two daemons on one
+  machine long-polled one Telegram bot and traded HTTP 409s all evening, while
+  `approval up` printed a cross-instance warning and started anyway. Scoped
+  keystore item names could not catch it, since two instances can hold one token
+  under two perfectly distinct names. The bot's own identity, as `getMe` reports
+  it, is now recorded and claimed, `approval setup channel telegram` stores an
+  instance-named token, and a second instance claiming a bot another local
+  instance holds is refused.
+
+### Daemon and records
+
+- **`approval up` reconciles a working log that extends the committed one
+  (APRV-346).** The preflight refused `up-preflight-log-diverged` whenever
+  `origin/main`'s log changed and the working copy had too, which is the state
+  every records advance leaves the primary checkout in. A prefix relation is now
+  delegated to `approval log sync`, whose APRV-215 ceremony stays the single
+  implementation, and the startup line says how many local records were kept. A
+  fork, an unverifiable chain, a held append lock and a dirty unrelated path keep
+  the refusal unchanged.
+- **`log.advance.daemon`, the daemon's own advance class (APRV-382).** Three
+  advances on 2026-09-19 each stopped on the one-in-a-hundred live draw while
+  nobody was at the phone, for an operation that publishes records the log
+  already holds, appends nothing and decides nothing. The class grammar has no
+  actor condition, so the rule is two classes. See the breaking notes below for
+  what an operator does about it.
+
+### Policy and setup
+
+- **`approval policy amend --pr` finishes its own ceremony (APRV-341).** The
+  amendment is committed in the APRV-203 scratch index, pushed to
+  `policy-amend-<seq>`, carried by a pull request that is opened or updated, and
+  armed with `gh pr merge --merge --auto`. Nothing is checked out, so the
+  checkout ends the verb on the same branch with the same HEAD, index and working
+  tree, which removes the cause of the 2026-09-16 fork. Two refusals are split
+  out and distinct by repair, both before the attestation: `staged-unrelated` and
+  `dirty-tree`.
+- **`attested-policy-on-main` (APRV-342).** Between a `policy amend` and its pull
+  request merging, a fresh checkout of main refuses every gate operation with
+  `policy-not-attested`, and nothing said so. A read-only, networkless
+  `approval doctor` row compares the attested hash against the `APPROVAL.md` blob
+  at the remote tip and names the command that lands it; `approval up`'s
+  preflight prints the same sentence and never refuses on it.
+- **`approval policy apply`, a proposal document in one human command (APRV-343,
+  APRV-360).** Agents may not write `APPROVAL.md`, so policy changes travel as
+  proposal documents and a human pastes, and a paste reverts what it did not know
+  about. The verb writes no byte that is not anchored to a byte it proved
+  present, reads fences by their backtick run, and resolves every
+  current/replacement pair against an in-memory copy in document order before
+  anything reaches disk, so a stale proposal writes nothing at all. It then runs
+  `approval policy amend` in the same process, passing `--pr` through. Human-only
+  twice over: it refuses an agent identity with `apply-agent-actor` and
+  classifies `policy.core`. Without `--pr` it publishes its branch by refspec
+  from a synced main, never by a branch switch in the primary.
+- **The bare `supervised` alias is deprecated (APRV-335).** The spelling still
+  loads and still means `supervised-retro`. Both schema enums keep it and both
+  descriptions call it a deprecated alias that a future schema version removes,
+  the load-time note leads with `deprecated: `, and an `approval doctor`
+  `autonomy-alias` row names every rule in the operator's own policy that still
+  uses it. The canonical example, the `approval init` scaffold and the fixtures
+  moved to `supervised-retro`.
+- **Values block "0.2" (APRV-336).** `wants` folds into `like`, since both are
+  graded by the same person in the same way and one list is easier to keep true
+  than two whose boundary has to be re-decided on every edit. `responds` becomes
+  `communication`, which no longer reads as a sibling of the `approval feedback`
+  verb. The format version moves from the integer `1` to the quoted string
+  `"0.2"`, spelled as the policy block's `"0.1"` is; the quotes are load-bearing,
+  since YAML reads a bare dotted identifier as a float.
+- **The APRV-335 and APRV-336 SPEC amendments are signed off (APRV-345).** The
+  pending markers are dropped under a human grant.
+
+### Demos and docs
+
+- **The landing page (APRV-331, APRV-332, APRV-333, APRV-387, APRV-388,
+  APRV-391).** The feature set and reference sections moved to `/features`, and
+  `index.html` drops to the wordmark, the lead line, the install block, Carter's
+  seven onboarding steps and three inline graphics, with no external scripts. The
+  hero dot field keeps its size when the source-install details opens. The
+  wordmark bracket is visible in dark mode; every page declares the
+  checked-bracket icon in the formats browsers and share crawlers need (SVG and
+  ICO favicons, an Apple touch icon, manifest PNGs, a 1200x630 share card); the
+  `APPROVAL.md` terminal types once, resumes from the same character after
+  leaving the viewport, and stays filled; and the values block on the page is in
+  the 0.2 format.
+- **The web-agent demo (APRV-386, APRV-168, APRV-392).**
+  `examples/demo-provision.mjs` provisions the three demo instances idempotently,
+  with reset and check, in place of a command sequence pasted out of a runbook.
+  The email finale's credential resolves inside the agent child, reproduced live
+  on 2026-09-19 and traced to the macOS keychain search list rather than guessed.
+  The demo page carries `brand/wordmark.svg` inlined byte for byte.
+- **`/judgy`, the judgy reviewer demo pages.** Static pages for CoreWeave Hacks
+  2026, copied from `bountify-ai/judgy`, which stays their source of truth. These
+  landed as a direct site addition and carry no task id.
+- **An agent-hours tracker (APRV-373).** `scripts/agent-hours.mjs` computes
+  active hours, sessions, turns and tokens per model into
+  `metrics/agent-hours.json`, README carries dynamic badges linking to
+  `docs/agent-hours.md`, which states the method and its caveats, and a weekly
+  script refreshes the file from a throwaway worktree and opens a self-merging
+  pull request.
+- **New runbooks and design notes.** `docs/grok-hook.md` (APRV-243),
+  `docs/muse-hook.md` (APRV-350), `docs/codex-activation.md` (APRV-315),
+  `docs/codex-workspace-broker.md` (APRV-325.2),
+  `docs/codex-app-server-bridge.md` (APRV-349),
+  `docs/upstream/codex-hook-payload.md` (APRV-348),
+  `design/channel-sender-identity.md` (APRV-324),
+  `design/multi-approver-semantics.md` (APRV-323, design only: quorum does not
+  exist in this runtime, and the document says so three times),
+  `design/constrained-model-egress.md` (APRV-351), and `docs/proposals/README.md`
+  with the proposal pages the policy changes above travelled as (APRV-343).
+
+### Breaking and behavior changes
+
+- **The three ceremony verbs commit the attestation payload (APRV-356).**
+  Terminal attestations store the attested policy text and bind its hash on the
+  record they append, so `approval policy amend --commit`, `approval policy
+  apply` and `approval log advance` now put that payload file in the commit they
+  build. A committed log carrying the binding without the bytes is a chain whose
+  in-force policy is unrecoverable to every reader of the committed copy.
+  *Migration:* an amend or apply commit carries one more file, beside
+  `APPROVAL.md`, the log and the pins; anything pinning the exact path set of a
+  ceremony commit has to move with it, and `--dry-run` names the file in the
+  `git add` it would run.
+- **Whole-file evidence is anchored at the range head, and the guard judges a
+  pull request per commit (APRV-375).** A grant binds one edit, and the combined
+  base-to-head diff of a branch is a change nobody made: PR #427 cost fourteen
+  lines tracing to no authorized material while each of its three commits was
+  separately granted. Every commit of `base..head` is now judged against its own
+  first parent, with its own paths and its own APRV-339 timestamps, and the pull
+  request's verdict is the conjunction; a merge is judged on its dense combined
+  diff. A grant stays per commit, while a sign-off, an organ attestation and the
+  policy attestation say a human read the file as it now stands, so every commit
+  in the range is offered the digests at the range head. *Migration:* a branch
+  that passed on the old combined replay can fail per commit, and each commit
+  needs its own hunk evidence or a `gate.path.signed_off` at the range head to
+  rescue it.
+- **The classifier unwraps a login shell around one inline script (APRV-380).**
+  Classifier-wide rather than a Codex change: the unwrap lives in
+  `classifyCommand`, so Claude Code, Cursor, the Agent SDK, Muse, Grok, the
+  native Codex adapter and the app-server bridge all reach it through one code
+  path. When the words are exactly a known shell, one inline-script flag and one
+  script, the script goes through the same lexer, segment rules and table a
+  `Bash` call would hand the classifier directly. Everything outside that line
+  stays opaque: a script file, a fourth word, a redirection on the wrapper, an
+  assignment prefix, a substitution in the wrapper words, a flag whose `c` is not
+  last, and a shell nested inside the script. *Migration:* a command such as
+  `zsh -lc 'git push'` that used to refuse `hook-opaque` now resolves under the
+  inner command's class, so a policy that leaned on the blanket refusal has to
+  declare that class. The binding does not move: the payload still carries the
+  outer command, and on the bridge path the outer argv.
+- **`log.advance.daemon` (APRV-382).** The daemon's advance is its own class and
+  `log.advance` is untouched, so a session in a worktree, an orchestrator and a
+  human terminal stay exactly where they were. A non-daemon actor under an
+  autonomous rule is refused `advance-actor-not-daemon` before anything is
+  appended, and the daemon's class is asked for only from inside the daemon
+  process. *Migration:* declare `log.advance.daemon` in `APPROVAL.md` to give the
+  cadence its own autonomy (`docs/proposals/log-advance-daemon-2026-09.md` is the
+  byte-anchored page); until the rule exists the daemon falls back to
+  `log.advance` and the cadence is unchanged.
+- **The keyed sender id form (APRV-370).** A record carries the digest as
+  `payload.sender.id` with `payload.sender.hashed: true`, in the form the matched
+  entry uses, so a policy mid-migration records a keyed approver as a digest and
+  a raw one as an id. The flag is `true` or absent, never `false`: absent is the
+  raw form every build since APRV-324 has written, and a `false` would make all
+  of those read afterwards as though they were missing something. *Migration:* a
+  raw mapping is byte-identical to before and needs nothing. A deployment moving
+  to the keyed form runs `approval setup sender-key`, exports
+  `APPROVAL_SENDER_KEY` into the process that answers decisions, and converts a
+  whole channel at once, since a keyed entry with no key in the process refuses
+  every decision on that channel.
+- **Conformance suite versions.** `refusal-unions` 8.0.0 to 19.0.0 and
+  `schema-validation` 2.2.0 to 2.5.0, plus three suites that did not exist at
+  `v0.2.0`: `command-class` 1.3.0 (APRV-353, and the rows APRV-352, APRV-354 and
+  APRV-380 added), `hook-read-scope` 1.2.0 (APRV-347, extended by APRV-243 and
+  APRV-350) and `bridge-decisions` 1.0.0 (APRV-367). *Migration:* a second
+  implementation pinned to the `v0.2.0` vector files re-runs all five, and the
+  refusal-union majors are added codes, which is a string a caller branching on
+  the union has not seen before.
+- **Schema enum additions.** The closed event enum grows to thirty-four types
+  with `gate.path.signed_off` (APRV-338), `audit.gesture_refused` (APRV-355) and
+  `audit.question_preempted` (APRV-378). `payload.harness` gains `grok`
+  (APRV-358) and `muse` (APRV-350). `audit.dark_session` gains the
+  `no-evidence-merged` code (APRV-369), `payload.sender` gains the optional
+  `hashed` (APRV-370), and `execution.indeterminate` gains
+  `workspace-commit-unknown` (APRV-325.2). *Migration:* the event enum fails shut
+  at the write boundary, so a verifier written against the `v0.2.0` set has to
+  accept all three new types before it can read a 0.3.0 log.
+
 ## 0.2.0 — 2026-09-12
 
 Published to npm as `approval-md@0.2.0`, tagged `v0.2.0` at commit
