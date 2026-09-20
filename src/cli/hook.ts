@@ -161,7 +161,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { HOOK_GROK_HELP, HOOK_HELP, HOOK_MUSE_HELP } from "./help.js";
+import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
@@ -362,6 +362,32 @@ export const HOOK_DENY_CODES = [
    * and it cannot recall a prompt the model has already been sent.
    */
   "hook-muse-contributor-model",
+  /**
+   * A Hermes Agent `execute_code` call, refused before anything else looks at
+   * it (APRV-398).
+   *
+   * The tool takes a `code` string and runs it in-process. There is no path, no
+   * argv and no working directory: nothing the classifier reads exists in the
+   * call, so no class can be resolved and no payload can bind what will happen.
+   * A verdict over `{code}` would authorize a program this runtime never
+   * parsed, which is the same hole `hook-opaque` closes for `bash -c` and the
+   * same one `hook-unsupported-execution-context` closes for a command whose
+   * directory is invisible. SPEC.md §11.1 says ambiguity resolves to the
+   * stricter path, and the strictest honest answer to "may I run this arbitrary
+   * program" is no.
+   *
+   * Distinct from `hook-opaque`, and the distinction is the repair. That one
+   * says a command line carried a construct the classifier could not read, and
+   * the fix is to write the command differently. This one says the TOOL has no
+   * readable surface at all on this harness, so there is no spelling of an
+   * `execute_code` call that would be answered differently: the repair is to do
+   * the work through the shell tool, where the words are visible and the
+   * classifier can price them, or through `approval run` with a granted token.
+   *
+   * Distinct from `hook-unclassified`, which says the classifier had nothing to
+   * say about bytes it could see. Here there are no bytes to see.
+   */
+  "hook-hermes-execute-code-unbound",
   /** Malformed hook input, or a log/filesystem fact that stopped the check. */
   "hook-io",
 ] as const;
@@ -674,6 +700,125 @@ const MUSE_ADAPTER: HarnessAdapter = {
 };
 
 /**
+ * Hermes Agent's event names, which are its own and not Claude Code's
+ * (APRV-398).
+ *
+ * snake_case, and the VERBS differ too: `pre_tool_call` where every other
+ * harness in this table says `PreToolUse`. That is why they are constants
+ * rather than two more entries in {@link POST_TOOL_EVENTS} — a harness whose
+ * post-event name appeared in that shared list would also accept
+ * `PostToolUse` from an event nobody sent, and the dispatch would answer a
+ * name this harness never uses.
+ */
+export const HERMES_PRE_TOOL_EVENT = "pre_tool_call";
+export const HERMES_POST_TOOL_EVENT = "post_tool_call";
+
+/**
+ * Hermes Agent's read tools, read off its own tool registrations (APRV-398).
+ *
+ * `read_file` names one `path` (with `offset` and `limit`). `search_files` is
+ * BOTH of the readers another harness would ship as two: its `target` enum
+ * selects `content` (a grep) or `files` (a name search), and either way the
+ * directory it works in is one `path`. So there is no `glob`, no `grep` and no
+ * `list_files` here — not because they were left out, but because this harness
+ * does not have them.
+ *
+ * NO TOOL ON THIS HARNESS TAKES A LIST OF PATHS, which is the one thing worth
+ * saying out loud: Muse's `search` names an ARRAY under `paths` and needed
+ * `firstOutOfScope` to answer a list, and `readToolGate`'s single-path arm
+ * answers everything here. A `paths` array arriving from a future release would
+ * fall to that same list handling with no change, because the gate reads both.
+ *
+ * Read off the published source rather than a vendor page, and still UNVERIFIED
+ * against a running session in the sense that matters (`docs/hermes-hook.md`
+ * says so): AC1's probe records the tool names an actual session sends. The
+ * failure direction is the one APRV-347 made safe — a listed tool Hermes never
+ * sends is INERT, an unlisted tool it does send would be an unscoped read — and
+ * a read arriving through `terminal` as `cat` is scoped by the classifier
+ * regardless, which is the floor under all of it.
+ */
+const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
+
+/**
+ * Hermes Agent by Nous Research (APRV-398).
+ *
+ * The harness Agent Village v2 runs every resident agent on, one per tenant in
+ * a Railway sandbox, which is why this adapter exists at all. Its hook is a
+ * shell hook like every other entry in this table, configured under `hooks:` in
+ * `$HERMES_HOME/config.yaml` rather than in the repository: Hermes documents no
+ * project-local configuration directory, so the organ lives in the user home
+ * and `core/command-class.ts` matches it there.
+ *
+ * ## The dialect: exactly one form, and the form is Hermes's own
+ *
+ * Hermes's shell-hook parser accepts two block dialects, checked in this order:
+ * its own `{action:"block", message}` and a Claude-compatible
+ * `{decision:"block", reason}`. This adapter emits the NATIVE one and never
+ * both. Muse is why (`docs/muse-hook.md`): there, a payload carrying several
+ * dialects at once was itself unparseable, an unparseable hook was a failed
+ * hook, and a failed hook failed OPEN, so being more explicit made the refusal
+ * weaker. The native form is preferred over the compatible one because it is
+ * the shape the parser tries first and the one least likely to be dropped by a
+ * release that tidies up a compatibility layer.
+ *
+ * THE ALLOW IS `{}`, and that is not a placeholder. Hermes has no
+ * `{"action":"allow"}`: its parser returns "no directive" for an empty stdout,
+ * for `{}`, and for any JSON object naming no directive key, and no directive
+ * means the call proceeds. `{}` is chosen over an empty stdout because the two
+ * are distinguishable to a human reading a log and only one of them says a hook
+ * ran and decided; it is chosen over an invented `{"action":"allow"}` because
+ * that spelling would be an allow only by falling through the parser's
+ * unrecognised-directive path, and a verdict that works by not being understood
+ * is a verdict one release could turn into a block. The reason text rides on
+ * stderr, where Hermes reads it only as a block message at the blocking exit
+ * code — which an allow never uses.
+ *
+ * ## Why this could be the first real gate since Claude Code
+ *
+ * A per-entry `fail_closed: true` turns three hook failures into a BLOCK: a
+ * spawn error, a timeout, and stdout that is non-empty and not a JSON object.
+ * Grok Build and Muse Code both fail open on all three with no setting to
+ * change it, so both adapters are enforcement only while healthy. Two limits
+ * ride with it, and `docs/hermes-hook.md` states both rather than selling the
+ * headline: the default is `false`, so an entry without the key fails open; and
+ * the key does not cover a hook that exits non-zero having printed NOTHING,
+ * which is left to {@link HERMES_DENY_EXIT}'s unconditional block.
+ *
+ * DOCUMENTED, UNVERIFIED AGAINST A RUNNING SESSION. Read from the published
+ * source, not from a vendor page, and `scripts/probes/hermes-hook.mjs` is what
+ * confirms or overturns it.
+ *
+ * ## `execute_code` has no readable surface, and may not even be hooked
+ *
+ * The tool takes a `code` string and no path, no argv and no directory, so
+ * nothing a verdict could bind exists in the call. It is refused before the
+ * event dispatch with {@link HERMES_EXECUTE_CODE_REFUSAL}.
+ *
+ * There is a second reason, and it is the stronger one. `execute_code` runs in
+ * a persistent kernel whose scripts can call Hermes's other tools IN-PROCESS.
+ * Whether those inner calls re-fire `pre_tool_call` is not established, and if
+ * they do not, then one `execute_code` call is an unbounded bypass of this
+ * entire adapter. Refusing the tool is the only answer available to a hook that
+ * cannot see inside it, and it is the fail-closed one.
+ */
+const HERMES_ADAPTER: HarnessAdapter = {
+  kind: "hermes",
+  originApp: "hermes-hook",
+  defaultActor: "agent:hermes",
+  // `terminal`, carrying `command` and a PER-CALL `workdir`. That second field
+  // is what makes this adapter enforcement rather than a refuse-early stub: it
+  // is the fact Codex's native contract withholds (APRV-310), and a verdict
+  // cannot bind bytes whose effective directory it cannot see.
+  shellTool: "terminal",
+  // `write_file` names `path` and `content`; `patch` names `path`,
+  // `old_string` and `new_string`. Both shapes are already what
+  // `fileToolGate` reads, so neither needed a new key.
+  fileTools: ["write_file", "patch"],
+  readTools: HERMES_READ_TOOLS,
+  shellCwdKey: "workdir",
+};
+
+/**
  * Every harness this runtime speaks a hook protocol for, by kind (APRV-358).
  *
  * The table is `Record<HarnessKind, HarnessAdapter>` rather than a list of
@@ -696,7 +841,24 @@ export const HARNESS_ADAPTERS: Readonly<Record<HarnessKind, HarnessAdapter>> = {
   codex: CODEX_ADAPTER,
   grok: GROK_ADAPTER,
   muse: MUSE_ADAPTER,
+  hermes: HERMES_ADAPTER,
 };
+
+/**
+ * Is `name` this adapter's post-execution event?
+ *
+ * One reading of the question, so the three places that used to spell it
+ * themselves cannot come apart (APRV-398). Codex names one event, Hermes names
+ * its own snake_case pair, and everything else uses Claude Code's two; a
+ * harness whose names appeared in another harness's list would answer an event
+ * nobody sent it.
+ */
+function isPostToolEvent(adapter: HarnessAdapter, name: string | null): boolean {
+  if (name === null) return false;
+  if (adapter.kind === "codex") return name === CODEX_POST_TOOL_EVENT;
+  if (adapter.kind === "hermes") return name === HERMES_POST_TOOL_EVENT;
+  return POST_TOOL_EVENTS.includes(name);
+}
 
 /**
  * The decision object the harness reads from stdout.
@@ -720,6 +882,30 @@ function decision(
   }
   if (harness === "grok") {
     return `${JSON.stringify({ decision: permission, reason })}\n`;
+  }
+  if (harness === "hermes") {
+    // APRV-398. Hermes's OWN block form and exactly one form:
+    // `{action:"block", message}`. It emits neither the Claude-compatible
+    // `{decision:"block", reason}` beside it nor any other key, and the test
+    // asserts the top-level keys precisely so a later edit cannot quietly add
+    // one — on Muse a verdict carrying an unsupported key was a FAILED hook and
+    // a failed hook failed open, which made the more explicit refusal the weaker
+    // one. Hermes is not Muse and may well tolerate a superset; one dialect
+    // costs nothing to be right about and the other bet costs a session.
+    //
+    // THE ALLOW IS `{}` AND CARRIES NO REASON, which is the harness's own
+    // vocabulary rather than a shrug: Hermes has no allow directive, and a
+    // parser that finds no directive lets the call proceed. `{}` over an empty
+    // stdout because a human reading a log can tell a hook that decided from a
+    // hook that printed nothing; `{}` over an invented `{"action":"allow"}`
+    // because that would be an allow only by falling through the parser's
+    // unrecognised path, and a verdict that works by not being understood is one
+    // release away from being a block. The reason reaches stderr instead (see
+    // {@link allow}), where it is read as a block message at the blocking exit
+    // code and nowhere else.
+    return permission === "deny"
+      ? `${JSON.stringify({ action: "block", message: reason })}\n`
+      : "{}\n";
   }
   const hookSpecificOutput: Record<string, unknown> = {
     hookEventName: "PreToolUse",
@@ -746,6 +932,13 @@ function allow(
       harness,
     );
   }
+  // APRV-398. Hermes's allow is `{}` and has nowhere to put a reason, so the
+  // reason goes to stderr rather than being dropped: it names the classes the
+  // verdict authorized and carries the loop floor's own words when one stood,
+  // which is the line an operator reads back off a session. Hermes reads stderr
+  // only as a block message at the blocking exit code, and an allow never uses
+  // that exit code, so this cannot become part of a verdict.
+  if (harness === "hermes") streams.err(`approval hook hermes: allow — ${reason}\n`);
   streams.out(decision("allow", reason, harness, codexCommand));
   return EXIT_OK;
 }
@@ -761,10 +954,45 @@ function allow(
  */
 const GROK_DENY_EXIT = 2;
 
+/**
+ * The exit code a HERMES deny carries, and why it IS 2 (APRV-398).
+ *
+ * This is the one place the Muse reasoning does not carry over, and the
+ * difference is in Hermes's own code rather than in a preference. Hermes defines
+ * a blocking exit code, applies it to `pre_tool_call` and to no other event, and
+ * treats it as UNCONDITIONAL: the call is blocked whatever stdout said, and the
+ * block message is taken from the stdout directive first, from stderr second,
+ * and from a default third. So the body and the exit code are not two accounts
+ * of one answer that the harness has to reconcile — the harness states the
+ * precedence itself, and the two agree by its own rule.
+ *
+ * That makes 2 strictly stronger than 0 here, and it closes the one gap
+ * `fail_closed` leaves open. `fail_closed: true` blocks on a spawn error, a
+ * timeout, and stdout that is non-empty and not a JSON object; it does NOT block
+ * a hook that exits non-zero having printed nothing, because its condition
+ * requires a non-empty stdout. Exiting 2 means every refusal this adapter
+ * reaches blocks on the exit code alone, including the ones where the body never
+ * made it out.
+ *
+ * Grok's 2 and this 2 are therefore the same number for opposite reasons, and it
+ * is worth not conflating them: there, exit 2 is the ONLY signal Grok reads and
+ * the body is decoration. Here the body is the message and the exit code is the
+ * floor under it.
+ */
+const HERMES_DENY_EXIT = 2;
+
 function deny(streams: Streams, code: string, detail: string, harness: HarnessKind): number {
   streams.out(decision("deny", `${code}: ${detail}`, harness));
-  return harness === "grok" ? GROK_DENY_EXIT : EXIT_OK;
+  if (harness === "grok") return GROK_DENY_EXIT;
+  if (harness === "hermes") return HERMES_DENY_EXIT;
+  return EXIT_OK;
 }
+
+/** The machine-readable code a Hermes `execute_code` call is refused with. */
+export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
+
+/** The tool that carries a program and no path, no argv and no directory. */
+const HERMES_EXECUTE_CODE_TOOL = "execute_code";
 
 /** The machine-readable code a Contributor-tier session is refused with. */
 export const MUSE_CONTRIBUTOR_REFUSAL = "hook-muse-contributor-model";
@@ -3499,8 +3727,69 @@ function readMuseReportedOutcome(input: HookInput): OutcomeReading {
   return { ok: true, outcome: "completed" };
 }
 
+/**
+ * Hermes's outcome, read off `post_tool_call` where the event carries one
+ * (APRV-398).
+ *
+ * The envelope's result field is read for its SHAPE only, exactly as the generic
+ * reader reads Claude Code's: an `exit_code` decides a shell call, an `error`
+ * string or an `error` flag decides anything, and a result this cannot read is
+ * UNREADABLE rather than assumed complete. Nothing of the tool's output text is
+ * read, and nothing from it reaches the log.
+ *
+ * Unreadable is the safe answer in both directions at once and the reasoning is
+ * the generic reader's own: a failure nobody observed trips an escalation on
+ * noise, and a completion nobody observed clears a streak on nothing. Appending
+ * neither leaves the path as vacuous as it was before this adapter existed, for
+ * that call.
+ *
+ * UNVERIFIED which key the result arrives under, and the fallback is written for
+ * that: an envelope with no readable result at all still closes the start on the
+ * strength of the EVENT NAME, which is Hermes saying its own `post_tool_call`
+ * code path ran. That is the same provenance the generic reader leans on and it
+ * is the best available here.
+ */
+function readHermesReportedOutcome(input: HookInput): OutcomeReading {
+  // A shell result arrives as an object on this harness (`tool_input` is an
+  // object throughout its contract), so the generic object reader is the right
+  // shape; a string result says nothing about success and the event name stands.
+  const response = input.toolResponse;
+  if (response === null) return { ok: true, outcome: "completed" };
+  if (response["interrupted"] === true || input.interrupted) {
+    return {
+      ok: false,
+      detail:
+        "the tool call was interrupted, so it neither completed nor failed on its own terms; an interruption is somebody stopping the session rather than a loop to escalate or a recovery to credit",
+    };
+  }
+  const exitCode = response["exit_code"] ?? response["exitCode"] ?? response["returncode"];
+  if (typeof exitCode === "number") {
+    return { ok: true, outcome: exitCode === 0 ? "completed" : "failed" };
+  }
+  const errorText = response["error"];
+  if (
+    response["error"] === true ||
+    response["status"] === "error" ||
+    (typeof errorText === "string" && errorText.length > 0)
+  ) {
+    return { ok: true, outcome: "failed" };
+  }
+  return { ok: true, outcome: "completed" };
+}
+
 function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): OutcomeReading {
   if (adapter.kind === "codex") return readCodexReportedOutcome(input);
+  if (adapter.kind === "hermes") {
+    if (input.hookEventName !== HERMES_POST_TOOL_EVENT) {
+      return {
+        ok: false,
+        detail: `hook_event_name is ${
+          input.hookEventName === null ? "absent" : JSON.stringify(input.hookEventName)
+        }, which is not the event this adapter reports an outcome for (${HERMES_POST_TOOL_EVENT})`,
+      };
+    }
+    return readHermesReportedOutcome(input);
+  }
   if (adapter.kind === "muse") {
     if (input.hookEventName !== "PostToolUse") {
       return {
@@ -4240,12 +4529,20 @@ function runHarnessHook(
     // Muse gets its own for the same reason and one more: its `.muse/hooks.json`
     // shape is not Claude's file under a different name, and an operator who
     // guessed would get "Hooks: 0 runnable" and a session that looks gated.
+    // Hermes gets its own for a third reason on top of those two (APRV-398):
+    // the file the human commits is YAML, it is not in the repository at all
+    // (`$HERMES_HOME/config.yaml`), and the entry carries the one key that
+    // decides whether this adapter is a gate or a backstop — `fail_closed`. A
+    // reader who copied a JSON block from another harness's help would install
+    // nothing.
     const harnessHelp =
       adapter.kind === "grok"
         ? HOOK_GROK_HELP
         : adapter.kind === "muse"
           ? HOOK_MUSE_HELP
-          : HOOK_HELP;
+          : adapter.kind === "hermes"
+            ? HOOK_HERMES_HELP
+            : HOOK_HELP;
     streams.out(`${harnessHelp}\n`);
     return EXIT_OK;
   }
@@ -4333,8 +4630,7 @@ function runHarnessHook(
   if (adapter.contributorModelGuard === true) {
     const refusal = contributorModelRefusal(input.model);
     if (refusal !== null) {
-      const postEvent =
-        input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+      const postEvent = isPostToolEvent(adapter, input.hookEventName);
       return postEvent
         ? report(streams, MUSE_CONTRIBUTOR_REFUSAL, `${refusal} Nothing was appended.`)
         : deny(streams, MUSE_CONTRIBUTOR_REFUSAL, refusal, adapter.kind);
@@ -4348,8 +4644,7 @@ function runHarnessHook(
   // fall through, so the verdict is one dialect and nothing else, which is the
   // only shape this harness parses.
   if (adapter.passThroughTools?.includes(input.toolName) === true) {
-    const passPostEvent =
-      input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+    const passPostEvent = isPostToolEvent(adapter, input.hookEventName);
     if (passPostEvent) {
       return report(
         streams,
@@ -4374,10 +4669,7 @@ function runHarnessHook(
   // harness whose event this runtime does not recognize is a harness about to
   // run a command, and treating an unknown name as a no-op would be an ungated
   // one.
-  const postToolEvent =
-    adapter.kind === "codex"
-      ? input.hookEventName === CODEX_POST_TOOL_EVENT
-      : input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+  const postToolEvent = isPostToolEvent(adapter, input.hookEventName);
   if (postToolEvent) {
     // APRV-303. `commandHarnessHook`'s catch turns a throw into a DENY, which is
     // the right answer for a call that has not run yet and exactly the wrong one
@@ -4392,7 +4684,16 @@ function runHarnessHook(
     // path therefore always exits 0. The machine-readable line still goes to
     // stderr; whether Grok shows it is Grok's business, and losing a debug line
     // is a smaller harm than emitting a verdict the protocol will act on.
-    const settle = (code: number): number => (adapter.kind === "grok" ? EXIT_OK : code);
+    //
+    // APRV-398. Hermes joins Grok on that rule, and for the same reason read off
+    // its own contract: Hermes documents exit 2 as BLOCKING, so a visibility
+    // exit here would be a block aimed at a tool call that has already run.
+    // This adapter's whole stance on this harness is that the exit status
+    // carries no verdict (see `HERMES_DENY_EXIT`), and that has to hold on both
+    // halves or it holds nowhere. The machine-readable line still goes to
+    // stderr, and whether Hermes shows it is Hermes's business.
+    const settle = (code: number): number =>
+      adapter.kind === "grok" || adapter.kind === "hermes" ? EXIT_OK : code;
     try {
       return settle(runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter));
     } catch (cause) {
@@ -4417,6 +4718,29 @@ function runHarnessHook(
       streams,
       "hook-unsupported-execution-context",
       "Codex Bash is disabled because the native hook contract does not expose the effective per-call working directory; no policy or open window can authorize bytes the hook cannot bind",
+      adapter.kind,
+    );
+  }
+
+  // APRV-398, and placed exactly where the Codex refusal above is placed, for
+  // exactly its reason: before the open window, the gate-self path, the carry
+  // and the registration, because none of those can supply a fact the call does
+  // not carry. Hermes's `execute_code` takes a `code` string and nothing else —
+  // no path, no argv, no working directory — so there is nothing for the
+  // classifier to read and nothing a payload could bind. A verdict over
+  // `{code}` would authorize a program this runtime never parsed.
+  //
+  // It is refused rather than classified `hook-opaque` because the repair
+  // differs: an opaque command line can be rewritten, and there is no spelling
+  // of an `execute_code` call that this hook could answer differently. Nothing
+  // appends on this path and no gate lifecycle opens. An OPEN WINDOW does not
+  // reach it either, which is the strict reading a window deserves here: a
+  // window suspends the policy, and this refusal is not a policy question.
+  if (adapter.kind === "hermes" && input.toolName === HERMES_EXECUTE_CODE_TOOL) {
+    return deny(
+      streams,
+      HERMES_EXECUTE_CODE_REFUSAL,
+      `Hermes ${HERMES_EXECUTE_CODE_TOOL} is refused because the call carries a program and nothing else: no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Run the work through the \`${adapter.shellTool}\` tool, where the words are visible to the classifier, or through \`approval run\` with a granted token. No policy or open window authorizes bytes the hook cannot read`,
       adapter.kind,
     );
   }

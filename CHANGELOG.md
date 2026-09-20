@@ -4,6 +4,38 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
+## Unreleased
+
+- **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398).**
+  The sixth harness, and the first whose harness documents a **fail-closed** hook:
+  a per-entry `fail_closed` turns a hook crash, a hook timeout and unparseable
+  hook output into a block, which would make this the first adapter since Claude
+  Code that is a gate rather than a backstop. Its default is `false`, it does not
+  cover a hook that exits non-zero printing nothing (which is why this adapter's
+  deny exits 2, blocking unconditionally), and the whole table is read from the
+  harness's published source rather than measured — `docs/hermes-hook.md` marks
+  every fact a live probe has not yet confirmed, and
+  `scripts/probes/hermes-hook.mjs` is the probe that settles them. Its event names
+  are its own (`pre_tool_call`, `post_tool_call`), its verdict is a third dialect
+  (`{action,message}` at exit 2 for a deny; **`{}`** at 0 for an allow, because
+  Hermes has no allow directive), and `execute_code` is refused outright with a
+  new code `hook-hermes-execute-code-unbound`: it carries a program and no path,
+  no argv and no working directory, and its kernel can call the other tools
+  in-process where the hook may not see them. It is also the first harness whose
+  gate organ lives in the USER HOME — `$HERMES_HOME/config.yaml`, with no
+  project-local directory anywhere — so `.hermes/config.yaml`,
+  `.hermes/agent-hooks/` and `.hermes/shell-hooks-allowlist.json` classify
+  `policy.core` at any path position, while `$HERMES_HOME/.env` and
+  `auth.json` classify `account.credential`.
+- **`approval doctor`'s harness rows cover every harness (APRV-398).** The
+  settings-path list, the hook-command pattern and the organ search are now
+  `Record<HarnessKind, …>` and pinned set-equal to the kind list by
+  `tests/harness-enum.test.ts`, so `grok` and `muse` get the rows they never had:
+  a checkout whose `.grok/hooks/` or `.muse/hooks.json` registered this CLI
+  reported "registers no `approval hook` command", and no test noticed. The
+  pattern is derived from the kind list rather than spelled, so the next adapter
+  cannot ship without it.
+
 ## 0.3.0 — 2026-09-20
 
 Written on 2026-09-20 against `main` at `36018dc`, 192 non-merge commits after

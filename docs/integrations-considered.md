@@ -23,6 +23,7 @@ entry here is the summary and the pointer.
 | Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
 | Muse Code (Meta coding agent) | [developer.meta.com](https://developer.meta.com/ai/products/muse-code/) | 2026-09-18 | harness | adopted, with caveats | APRV-350 |
 | Codex CLI (OpenAI coding-agent harness) | [learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks), [openai/codex](https://github.com/openai/codex) | 2026-09-17 | harness | adopted, native shell gating blocked upstream | [docs/codex-hook.md](codex-hook.md), APRV-310, APRV-311, APRV-348, APRV-349 |
+| Hermes Agent (Nous Research) | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), [hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs) | 2026-09-20 | harness | parked pending the probe (adapter shipped, unverified) | [docs/hermes-hook.md](hermes-hook.md), APRV-398 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
 **parked** (design verified, no code, activated on demand), **declined** (no
@@ -725,6 +726,175 @@ the hook at all.
   the bound directory.
 - APRV-349 asks whether the app-server approval protocol can bind what the hook
   cannot, independently of anything upstream chooses to do.
+
+## Hermes Agent (Nous Research)
+
+Assessed 2026-09-20. Verdict: **parked pending the probe**, with the adapter
+shipped (APRV-398). `approval hook hermes` exists and is tested; what has not
+happened is a single tool call from a running Hermes session through it. See
+[docs/hermes-hook.md](hermes-hook.md), which opens by saying so.
+
+This is a deliberately unusual verdict for this register, and it is worth naming
+why rather than rounding it to "adopted". Every fact the adapter is built on came
+from the harness's own published source — its tool registrations, its shell-hook
+dispatcher, its config parser — read on the assessment date. That is better
+provenance than the third-party material that parked Muse Code. It is still not a
+running session, and Muse is the precedent for why that gap matters: three of the
+facts that shaped *that* adapter were in no source at all, and of two third-party
+claims one turned out right and one wrong. The entry moves to adopted when
+`scripts/probes/hermes-hook.mjs` has run, and not before.
+
+### What it is
+
+Nous Research's open-source terminal agent, `hermes` on the command line, at
+`0.21.3` on the assessment date. Same shape as Claude Code, Cursor Agent, Codex
+CLI and Muse Code: a CLI run from a project directory, with its own tool set, its
+own consent system and a shell-hook mechanism. It is the harness **Agent Village
+v2** (Edge City Goa, October to November 2026) runs every resident agent on, one
+tenant per resident in a Railway sandbox, which is why it was assessed at all:
+that programme's design document names an optional approval.md Hermes skill as a
+Sprint 3 deliverable.
+
+Two differences from every harness already in this register:
+
+1. **Its configuration is not in the repository.** `HERMES_HOME` (default
+   `~/.hermes`) holds the config, the hook consent allowlist and the provider
+   secrets. There is no project-local `.hermes/` at all, confirmed against its
+   config module. So the first gate organ this project protects that lives in a
+   user's home rather than in a checkout.
+2. **It documents a fail-CLOSED hook.** A per-entry `fail_closed` turns a hook
+   crash, a hook timeout and unparseable hook output into a block. Grok Build and
+   Muse Code fail open on all three with no setting to change it, so if this holds
+   it is the first harness since Claude Code whose hook is a gate rather than a
+   backstop.
+
+The install is the vendor's own script
+(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`), which
+clones the repository and brings its own `uv`, Python, Node, ripgrep and ffmpeg.
+A `hermes-agent` package exists on PyPI at `0.19.0`, behind the git tree and not
+the documented path. The installer honours `--dir` and `--hermes-home`, so it can
+be confined; it also symlinks into `~/.local/bin` and appends a PATH export to
+every shell rc file it finds, and no documented flag turns that off.
+
+### What it exposes
+
+Read off the source on the assessment date. Tool names and argument keys:
+`terminal` (`command`, plus a **per-call `workdir`**), `write_file`
+(`path`, `content`), `patch` (`path`, `old_string`, `new_string`, `mode`,
+`replace_all`), `read_file` (`path`, `offset`, `limit`), `search_files`
+(`pattern`, `target` selecting a grep or a name search, `path`), and
+`execute_code` (`code`, and nothing else).
+
+Against the six questions this register asks of a harness:
+
+1. **Interception surface.** A shell-hook system with some forty events,
+   configured under `hooks:` in `$HERMES_HOME/config.yaml` as an event-keyed map of
+   entry lists. Two matter here: `pre_tool_call`, which can block, and
+   `post_tool_call`, which cannot. A Python plugin API exposes the same hooks in
+   process (filed as APRV-400).
+2. **Payload completeness.** Complete, and better than Codex's: the envelope is
+   snake_case (`hook_event_name`, `tool_name`, `tool_input`, `session_id`, `cwd`,
+   `profile`, `extra`) and `terminal` carries the per-call working directory that
+   APRV-310 found missing on Codex. So a verdict here can bind the action.
+3. **Failure mode.** Documented fail-closed, per entry, defaulting to **false**,
+   and with two gaps: it does not cover a hook that exits non-zero having printed
+   nothing, and it cannot cover a hook Hermes never registered — which is what
+   happens, **silently**, when there is no TTY and no `hooks_auto_accept`. This is
+   the half the probe settles.
+4. **Identity and session.** `session_id` on every event, `profile` beside it.
+   Nothing on a stable agent identity beyond that, so the adapter's default actor
+   is `agent:hermes` by convention like every other.
+5. **Side-effect classes.** Shell, file write, file edit, read, and arbitrary code
+   execution. Every one maps onto an existing §7 class except the last, which maps
+   onto none: `execute_code` carries no path, no argv and no directory, so it is
+   refused outright with its own code. Its kernel can also call the other tools
+   in-process, and whether those inner calls re-fire the hook is unverified —
+   which is the stronger reason for the refusal.
+6. **Demo shape.** The Agent Village deployment is the demo, and it is blocked on
+   APRV-383 rather than on anything here: a sandboxed tenant has no local log and
+   no local policy for the hook to reach.
+
+### Fit
+
+Strong. It needs no new event type, no new class, no schema amendment beyond the
+`payload.harness` enum a new harness always adds, and no new dependency. It fits
+the existing `HarnessAdapter` table with three entries the table already has words
+for (shell tool, file tools, read tools) and one it already had for Muse (the
+per-call working-directory key).
+
+`approval hook classify` on the commands a Hermes install and session would issue,
+quoted as this file requires:
+
+```text
+$ approval hook classify -- hermes
+class                  rule                   command
+harness.launch.hermes  harness-launch-hermes  hermes
+
+$ approval hook classify -- "hermes --version"
+class       rule           command
+read.shell  harness-probe  hermes --version
+
+$ approval hook classify -- "hermes setup"
+class                  rule                   command
+harness.launch.hermes  harness-launch-hermes  hermes setup
+
+$ approval hook classify -- "echo x > .hermes/config.yaml"
+class        rule                command
+policy.core  redirect-protected  echo x > .hermes/config.yaml
+
+$ approval hook classify -- "cat ~/.hermes/.env"
+class               rule             command
+account.credential  credential-path  cat ~/.hermes/.env
+```
+
+Four things those five lines establish. A launch is gated as its own class and is
+held at `manual` by this repository's proposal, so a grant covers the launch and
+nothing the launched session then does. A version probe is a read, so a lane can
+find out what is installed without a prompt. The hook config is `policy.core` in
+every spelling, repository-relative or under a home, because the classifier's
+segment walk was already position-agnostic. And the provider secret beside it is
+`account.credential`, human-only — a different class from the configuration for the
+reason `.approval/env` is: what leaves the machine there is the secret rather than
+the rule.
+
+One gap found by running these rather than reasoning about them, and recorded
+because it is a gap and not a feature: an EDIT of a home-relative organ through a
+tool the classifier has no rule for (`nano ~/.hermes/shell-hooks-allowlist.json`)
+is `unclassified`, which denies — fail closed, but undiagnostically. The same edit
+through a redirect or a known file tool classifies `policy.core` correctly. That is
+a pre-existing property of the editor-shaped commands rather than anything this
+assessment changed.
+
+On the §11.1 global invariants it touches: fail closed (the `execute_code`
+refusal, the unparseable-envelope deny, the unresolvable read path, the
+non-absolute `workdir` falling back rather than widening); self-reported fields
+never reduce scrutiny (`workdir`, and the `description` the adapter drops); and
+human-only classes inert to agents (`read.file.out_of_scope` and
+`account.credential` route to the human gate, and the adapter mints no verb for
+either).
+
+### Conclusion
+
+Parked pending the probe, adapter shipped. The three things a live run decides,
+in the order they matter: whether `fail_closed` blocks what it says it blocks;
+whether `{}` really is an allow, and whether an unrecognised directive value is a
+parse failure that would block instead; and whether `execute_code`'s in-process
+tool calls are visible to the hook at all. The third is the one that could change
+the verdict rather than the documentation: an `execute_code` that bypasses
+`pre_tool_call` is an unbounded hole, and the refusal this adapter ships is the
+only available answer to it.
+
+### Next steps
+
+- APRV-398 AC1: run `scripts/probes/hermes-hook.mjs` against the install
+  (docs/hermes-hook.md, "Running the probe"), then move this entry to adopted or
+  declined and delete or correct every UNVERIFIED mark in that page.
+- APRV-399: the Agent Village Hermes skill, which installs the hook per tenant
+  and points it at the hosted daemon. Blocked on APRV-383.
+- APRV-400: the Python plugin form of the adapter, which avoids a process spawn
+  per gated tool call and reaches hook events shell hooks cannot.
+- APRV-383: hosted daemon reach from a sandbox, without which none of this can be
+  deployed per tenant.
 
 ## How to add an entry
 

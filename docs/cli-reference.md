@@ -4097,6 +4097,37 @@ setting to change it, which the fail-closed invariant does not survive;
 `docs/grok-hook.md` states which cases the adapter cannot cover and is worth
 reading before the file is committed.
 
+**`hook muse` emits exactly ONE dialect and nothing else (APRV-350).** Muse Code
+treats output carrying any key it does not support as a failed hook, and a failed
+hook fails OPEN, so the belt-and-braces payload that satisfies several harnesses
+at once satisfies this one not at all. Its envelope is snake_case with its own
+tool names (`bash` carrying a per-call `workdir`, `write_file`, `read_file`, and
+`search` naming an ARRAY under `paths`), and a Contributor-tier model is refused
+for every tool call regardless of policy (`hook-muse-contributor-model`).
+`approval hook muse --help` prints the `.muse/hooks.json` the human commits;
+`docs/muse-hook.md` opens with the fail-open finding and the model warning.
+
+**`hook hermes` is the second exception to the exit codes above, and the one
+harness whose configuration is not in the repository (APRV-398).** Its event
+names are its own — `pre_tool_call` and `post_tool_call`, not `PreToolUse` — and
+its envelope is snake_case (`tool_name`, `tool_input`, `session_id`, `cwd`,
+`profile`, `extra`). A deny is `{"action":"block","message":…}` **at exit 2**,
+which Hermes treats as an unconditional block whose message it takes from the
+stdout directive first; an **allow is `{}`** at exit 0, because Hermes has no
+allow directive and no directive is the allow, so an allow's reason goes to
+stderr. `execute_code` is refused outright
+(`hook-hermes-execute-code-unbound`): it carries a program and no path, no argv
+and no working directory, so no verdict could bind it. The file a human commits
+is `$HERMES_HOME/config.yaml` (default `~/.hermes`), where the event is a mapping
+KEY rather than an `event:` field, `fail_closed: true` belongs on every entry
+because its default is false, and TWO timeouts bound the wait — the per-entry
+`timeout` caps at 300s and `plugins.hook_callback_timeout` defaults to 30s and
+fails closed by itself, so `--timeout` must come down under 300s. Without
+`hooks_auto_accept: true` (or `HERMES_ACCEPT_HOOKS=1`) and no TTY, Hermes
+**silently never registers the hook**. `approval hook hermes --help` prints the
+YAML; `docs/hermes-hook.md` marks every fact that a live probe has not yet
+confirmed.
+
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
 `PostToolUseFailure` run closes the delegated `execution.started` the

@@ -62,7 +62,12 @@ import {
   type Decision,
 } from "../src/core/gate.js";
 import { classifyCommand } from "../src/core/command-class.js";
-import { HOOK_DENY_CODES, POST_TOOL_CODES, commandHook } from "../src/cli/hook.js";
+import {
+  HERMES_POST_TOOL_EVENT,
+  HOOK_DENY_CODES,
+  POST_TOOL_CODES,
+  commandHook,
+} from "../src/cli/hook.js";
 import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { CHECKPOINT_REFUSAL_CODES } from "../src/core/checkpoint.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -732,13 +737,37 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
         }
       : {
           session_id: "conformance-read-scope",
-          hook_event_name: harness === "cursor" ? "preToolUse" : "PreToolUse",
+          // APRV-398. Hermes's event names are its OWN, not Claude Code's: an
+          // envelope naming `PreToolUse` would still take the pre-execution path
+          // (an unrecognised event name is a command about to run) and would
+          // therefore prove nothing about the dispatch it is here to pin.
+          hook_event_name:
+            harness === "cursor"
+              ? "preToolUse"
+              : harness === "hermes"
+                ? "pre_tool_call"
+                : "PreToolUse",
           tool_name: str(input, "tool"),
           tool_input: readScopeInput(input, dir),
           tool_use_id: "conformance-tu-1",
+          ...(harness === "hermes" ? { profile: "default", extra: { turn_id: "conformance-turn" } } : {}),
         }),
   };
-  const stdin = input["malformed"] === true ? "{not json at all" : JSON.stringify(body);
+  // APRV-398. A POST-execution event, which is a different question from every
+  // other vector in this suite: not "what is the verdict" but "is there one at
+  // all". The post half of a harness hook answers a call that has ALREADY RUN, so
+  // a verdict on stdout would be a permission decision about something nobody can
+  // still permit. An implementation that printed one would pass every other
+  // vector here and fail this one.
+  const postEvent = input["post_event"] === true;
+  const stdin =
+    input["malformed"] === true
+      ? "{not json at all"
+      : JSON.stringify(
+          postEvent
+            ? { ...body, hook_event_name: HERMES_POST_TOOL_EVENT, tool_response: { exit_code: 0 } }
+            : body,
+        );
 
   const out: string[] = [];
   const err: string[] = [];
@@ -751,31 +780,76 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
   // Every other harness answers both verdicts at exit 0 and treats anything
   // else as a broken hook. Grok Build reads EXIT 2 as the deny and exit 0 as
   // the allow, whatever stdout said, so 2 is a verdict there and not a failure.
-  if (code !== 0 && !(camelCase && code === 2)) {
+  // Hermes reads 2 as an unconditional block whose message comes from the stdout
+  // directive, so 2 is a verdict there too (APRV-398).
+  const exitIsVerdict = camelCase || harness === "hermes";
+  if (code !== 0 && !(exitIsVerdict && code === 2)) {
     throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
+  }
+  if (postEvent) {
+    const printed = out.join("");
+    if (printed !== "") {
+      throw new ConformanceError(
+        `the post-execution event printed ${JSON.stringify(printed)} on stdout; the tool has already run, so a verdict there is a permission decision about something nobody can still permit`,
+      );
+    }
+    // Exit 2 is Hermes's BLOCKING code, so a visibility exit on this half would
+    // be a block aimed at a finished call. The machine-readable line goes to
+    // stderr at exit 0 instead.
+    if (code !== 0) {
+      throw new ConformanceError(
+        `the post-execution event exited ${String(code)}; on a harness whose non-zero exit blocks, the post half must exit 0`,
+      );
+    }
+    return { valid: true, permission: "none", gated: false };
   }
   const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
   const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;
+  // APRV-398. Hermes has NO allow directive: an empty JSON object is the allow,
+  // and `{action:"block",message}` is the deny. So the permission is read off the
+  // PRESENCE of a directive rather than off a field's value, and the reason for
+  // an allow is not on stdout at all — it is on stderr, because the body has
+  // nowhere to put it.
+  const hermesBlocked = parsed["action"] === "block";
   const permission = String(
-    harness === "cursor"
-      ? parsed["permission"]
-      : camelCase
-        ? parsed["decision"]
-        : nested?.["permissionDecision"],
+    harness === "hermes"
+      ? hermesBlocked
+        ? "deny"
+        : "allow"
+      : harness === "cursor"
+        ? parsed["permission"]
+        : camelCase
+          ? parsed["decision"]
+          : nested?.["permissionDecision"],
   );
   const reason = String(
-    harness === "cursor"
-      ? parsed["agent_message"]
-      : camelCase
-        ? parsed["reason"]
-        : nested?.["permissionDecisionReason"],
+    harness === "hermes"
+      ? hermesBlocked
+        ? parsed["message"]
+        : err.join("")
+      : harness === "cursor"
+        ? parsed["agent_message"]
+        : camelCase
+          ? parsed["reason"]
+          : nested?.["permissionDecisionReason"],
   );
-  // The exit code is the third field of Grok's protocol, so the body and the
-  // exit must agree. A deny printed at exit 0 is the exact hazard the adapter
-  // exists to remove, and it would read as an ALLOW.
-  if (camelCase && code !== (permission === "deny" ? 2 : 0)) {
+  // The exit code is the third field of Grok's protocol and the floor under
+  // Hermes's, so on both the body and the exit must agree. A deny printed at exit
+  // 0 is the exact hazard the Grok adapter exists to remove, and it would read as
+  // an ALLOW there; an allow printed at exit 2 on Hermes would block a call the
+  // runtime meant to permit.
+  if (exitIsVerdict && code !== (permission === "deny" ? 2 : 0)) {
     throw new ConformanceError(
-      `the Grok verdict ${JSON.stringify(permission)} was answered at exit ${String(code)}; deny is 2 and allow is 0`,
+      `the ${harness} verdict ${JSON.stringify(permission)} was answered at exit ${String(code)}; deny is 2 and allow is 0`,
+    );
+  }
+  // APRV-398. A Hermes allow prints `{}`, which carries no text, so the
+  // not-a-gated-tool signal the expectation below reads has to come from the
+  // stream the reason actually went to. Asserted rather than assumed: an allow
+  // whose reason reached neither stream would silently look like a gated call.
+  if (harness === "hermes" && !hermesBlocked && Object.keys(parsed).length !== 0) {
+    throw new ConformanceError(
+      `a Hermes allow is an empty JSON object and this one carried ${Object.keys(parsed).join(", ")}; an unrecognised key is a parse the harness may decline, and a declined parse is a session that was never gated`,
     );
   }
   const colon = reason.indexOf(":");
@@ -793,15 +867,22 @@ function runHookReadScope(input: Record<string, unknown>): Expectation {
 function readScopeInput(input: Record<string, unknown>, dir: string): Record<string, unknown> {
   const tool = str(input, "tool");
   const target = readScopeTarget(str(input, "target"), dir);
-  if (tool === "Bash" || tool === "Shell" || tool === "bash") {
+  if (tool === "Bash" || tool === "Shell" || tool === "bash" || tool === "terminal") {
     // APRV-350: Muse's shell tool carries the PER-CALL working directory
     // beside the command, which is the directory the classifier must resolve
-    // relative paths against.
+    // relative paths against. APRV-398: Hermes's `terminal` carries the same
+    // fact under the same key.
     return {
       command: target === null ? "ls" : `cat ${target}`,
-      ...(tool === "bash" ? { workdir: dir } : {}),
+      ...(tool === "bash" || tool === "terminal" ? { workdir: dir } : {}),
     };
   }
+  // APRV-398: Hermes's `execute_code` carries a program and NOTHING else — no
+  // path, no argv, no workdir — which is the whole reason it is refused before
+  // anything else looks at it. The vector's `target` is ignored here on purpose:
+  // there is nowhere in this call to put a path, and inventing a key so the
+  // fixture looked symmetrical would describe a call this harness cannot make.
+  if (tool === "execute_code") return { code: "print(2 + 2)" };
   // APRV-350: Muse's own read tools. `read_file` names one path; `search`
   // names an ARRAY under `paths`, which is the shape a live session was
   // observed reaching outside the workspace with.
@@ -810,6 +891,13 @@ function readScopeInput(input: Record<string, unknown>, dir: string): Record<str
     return target === null
       ? { pattern: "needle", output_mode: "text" }
       : { pattern: "needle", output_mode: "text", paths: [target] };
+  }
+  // APRV-398: Hermes's `search_files` is BOTH readers behind one `target` enum,
+  // and names ONE `path`. No tool on this harness takes a list.
+  if (tool === "search_files") {
+    return target === null
+      ? { pattern: "needle", target: "content" }
+      : { pattern: "needle", target: "content", path: target };
   }
   if (tool === "write_file") {
     return { path: target ?? "probe.txt", content: "x\n" };

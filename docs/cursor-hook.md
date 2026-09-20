@@ -130,6 +130,7 @@ an addition).
 | `harness-launch-grok` | grok | (any) | harness.launch.grok, read.shell (APRV-354) |
 | `harness-launch-claude` | claude | (any) | harness.launch.claude, read.shell (APRV-354) |
 | `harness-launch-cursor` | cursor-agent | (any) | harness.launch.cursor, read.shell (APRV-354) |
+| `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
@@ -480,6 +481,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Cursor's events carry the directory. It is the refusal native Codex Bash takes on every event (`docs/codex-hook.md`) |
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
+| `hook-hermes-execute-code-unbound` | a Hermes Agent `execute_code` call, refused before anything else looks at it: it carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Never produced on this adapter; it is Hermes Agent's (`docs/hermes-hook.md`). Distinct from `hook-opaque`, whose repair is to rewrite the command: there is no spelling of an `execute_code` call this hook could answer |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
@@ -686,3 +688,15 @@ classify -- <command…>` says which class a command falls under.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
   the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly
   this loop.
+
+## Related
+
+- [docs/claude-code-hook.md](claude-code-hook.md) — the original adapter, and the
+  reference for the classifier tables both of these share.
+- [docs/codex-hook.md](codex-hook.md) — the native hook whose contract withholds
+  the per-call working directory.
+- [docs/grok-hook.md](grok-hook.md) and [docs/muse-hook.md](muse-hook.md) — the
+  two harnesses that fail OPEN, and the SPEC precedent that follows from it.
+- [docs/hermes-hook.md](hermes-hook.md) — Hermes Agent, the first adapter since
+  Claude Code whose harness documents a fail-CLOSED hook, and the only one whose
+  gate organ lives in the user home rather than the repository.

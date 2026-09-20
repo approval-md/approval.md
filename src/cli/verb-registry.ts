@@ -2748,6 +2748,33 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "hook",
+    subcommand: "hermes",
+    purpose:
+      "Read one Hermes Agent pre_tool_call or post_tool_call event on stdin (snake_case, and the event names are its own rather than Claude Code's), classify its terminal command or its write_file and patch paths and its read paths, resolve the class against APPROVAL.md, and answer allow or deny — waiting on a real decision when the class is manual. THE VERDICT IS NEVER 'ask'. It answers in ONE dialect and nothing else, Hermes's own {action, message} object: a deny is that object AT EXIT 2, which Hermes documents as an unconditional block whose message it reads from the stdout directive first (so body and code agree by the harness's own rule, and a refusal whose body never made it out still blocks); an allow is {} at exit 0, because Hermes has no allow directive and no directive is the allow, so the allow's reason goes to stderr. The Claude-compatible {decision, reason} form is never emitted beside it, because Muse established that a refusal hedged across dialects is read as a broken hook rather than as a stronger no. execute_code is refused outright (hook-hermes-execute-code-unbound): the call carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Hermes documents a per-entry fail_closed that makes a hook crash, timeout or unparseable output BLOCK, which would make this the first harness since Claude Code whose hook is a gate rather than a backstop; that is DOCUMENTED and UNVERIFIED until the live probe of APRV-398 runs, and docs/hermes-hook.md says so before it says anything else.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: Hermes invokes it around the agent's own tool calls. It proposes and waits; it never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        "--retry-grace": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "an allow ({} on stdout, the reason on stderr), and every post_tool_call report, which exits 0 whatever it found because Hermes reads exit 2 as a block and the call has already run" },
+      { code: 2, meaning: "a deny: the {action:'block', message} object on stdout is the message and the exit code is the unconditional block under it; also a usage error before any event was read, which prints no verdict" },
+    ],
+  },
+
+  {
+    name: "hook",
     subcommand: "classify",
     purpose:
       "Print what the classifier makes of a command line: the segments it split it into, the class it assigned each, and the rule that decided. Reads no log, resolves no policy, writes nothing. The classifier is best effort and is not scheming-robust; it reads the command text and never the agent's own description of it.",

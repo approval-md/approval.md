@@ -57,7 +57,14 @@ import { spawnSync } from "node:child_process";
 import { childEnvironment } from "./child-env.js";
 
 /** The harnesses this runtime speaks a hook protocol for. */
-export const HARNESS_KINDS = ["claude-code", "cursor", "codex", "grok", "muse"] as const;
+export const HARNESS_KINDS = [
+  "claude-code",
+  "cursor",
+  "codex",
+  "grok",
+  "muse",
+  "hermes",
+] as const;
 
 export type HarnessKind = (typeof HARNESS_KINDS)[number];
 
@@ -78,6 +85,7 @@ export const HARNESS_BINARY: Readonly<Record<HarnessKind, string>> = {
   codex: "codex",
   grok: "grok",
   muse: "muse",
+  hermes: "hermes",
 };
 
 /**

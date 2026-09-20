@@ -412,6 +412,49 @@ export function protectedPathClass(
         return "policy.core";
       }
     }
+    // Hermes Agent's equivalent (APRV-398), and the one whose organ lives in
+    // the USER HOME by design rather than in the repository. Hermes reads its
+    // configuration from `$HERMES_HOME` (default `~/.hermes`) and documents no
+    // project-local directory, so the paths below are the ones a real install
+    // carries: `config.yaml`, which is where the `hooks:` entries are written;
+    // `agent-hooks/`, which holds the scripts those entries run; and
+    // `shell-hooks-allowlist.json`, which records the operator's one-time TTY
+    // consent to a hook command and would let an agent pre-consent itself to a
+    // command of its own. Same property as `.cursor/hooks.json`: an agent that
+    // could write any of these could write itself out of the gate.
+    //
+    // NO NEW PATH GRAMMAR IS NEEDED FOR THE HOME CASE, and that is worth
+    // stating because it is the one thing about this entry that differs from
+    // the four above it. This loop walks EVERY segment of the candidate, so
+    // `.hermes/config.yaml`, `/Users/x/.hermes/config.yaml` and
+    // `~/.hermes/config.yaml` all match at whichever position `.hermes` sits
+    // in; the existing matchers were already position-agnostic and nothing was
+    // extended for this. What a home path does change is the CLASS a mere READ
+    // of one takes: `cat ~/.hermes/config.yaml` is a read of a path outside the
+    // gate root, so the read jail answers it as `read.file.out_of_scope`
+    // (human-only in this repository's policy) before this tier is consulted,
+    // while a WRITE to it is `policy.core` here. Both refuse under an agent;
+    // they refuse for different reasons, and `docs/hermes-hook.md` says so.
+    //
+    // The bare `.hermes` directory itself lands here, exactly as bare
+    // `.approval` and bare `.codex` do: `rm -rf ~/.hermes` removes the gate's
+    // own installation. Anything else under it is deliberately NOT listed —
+    // session state and transcripts are ordinary bookkeeping, and pricing those
+    // at a human's attention is the failure mode §11 asks to avoid, the same
+    // reasoning that keeps `.muse/worktrees/` out of the entry above.
+    if (segment === ".hermes") {
+      const next = segments[index + 1];
+      if (
+        next === undefined ||
+        next === "config.yaml" ||
+        next === "config.yml" ||
+        next === "agent-hooks" ||
+        next === "shell-hooks-allowlist.json" ||
+        next.startsWith("hooks")
+      ) {
+        return "policy.core";
+      }
+    }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
       const next = segments[index + 1];
@@ -565,7 +608,25 @@ function isCredentialPath(candidate: string): boolean {
   if (candidate.length === 0) return false;
   const segments = pathSegments(candidate);
   for (let index = 0; index < segments.length; index += 1) {
-    if (segments[index] !== ".approval") continue;
+    const segment = segments[index];
+    // APRV-398. Hermes Agent's own home holds two files of credential material
+    // beside its configuration: `.env`, which is where its secrets go, and
+    // `auth.json`, which holds an OAuth grant. `$HERMES_HOME/config.yaml` and
+    // the hook paths beside it are `policy.core` (see `protectedPathClass`);
+    // these two are a different class for the reason `.approval/env` is, which
+    // is that what leaves the machine is the secret rather than the rule.
+    //
+    // Added by the task that taught this runtime about Hermes at all. A harness
+    // whose organ this codebase now recognises, whose credential files it did
+    // not, would be a Never-list item the classifier does not enforce — which is
+    // exactly the hole APRV-194 was filed for, one harness along.
+    if (segment === ".hermes") {
+      const next = segments[index + 1];
+      if (next === ".env" || next?.startsWith(".env.") === true) return true;
+      if (next === "auth.json") return true;
+      continue;
+    }
+    if (segment !== ".approval") continue;
     const next = segments[index + 1];
     if (next === undefined) return false;
     if (next.startsWith("vault")) return true;
@@ -1495,6 +1556,11 @@ const HARNESS_BINS: Readonly<Record<string, string>> = {
   grok: "grok",
   claude: "claude",
   "cursor-agent": "cursor",
+  // APRV-398. `hermes` is the console script Hermes Agent installs, and the
+  // harness kind and the binary share one spelling, so the class reads
+  // `harness.launch.hermes` beside the `hermes` adapter and the `.hermes/`
+  // protected paths with no name mapping in between.
+  hermes: "hermes",
 };
 
 /**
@@ -1513,6 +1579,13 @@ const HARNESS_PACKAGES: Readonly<Record<string, string>> = {
   "cursor-agent": "cursor",
   muse: "muse",
   grok: "grok",
+  // APRV-398. Hermes Agent is a Python distribution, so a package runner is not
+  // how it is launched; the entries exist for the same reason the `muse` and
+  // `grok` ones do, which is that a spec this table does not know keeps
+  // whatever class the runner already had, and a spec it does know cannot be
+  // spelled around the direct row.
+  hermes: "hermes",
+  "hermes-agent": "hermes",
 };
 
 /**

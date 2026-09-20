@@ -64,6 +64,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 
 import { WEB_DEFAULT_PORT } from "../channels/web.js";
@@ -2539,11 +2540,169 @@ export function checkCodexHookWiring(dir: string): DoctorCheck {
 /** The Cursor counterpart of {@link CLAUDE_SETTINGS}. */
 const CURSOR_HOOKS = join(".cursor", "hooks.json");
 
-/** Where a harness hook registration can be written, one file per harness. */
-const HARNESS_SETTINGS: readonly string[] = [CLAUDE_SETTINGS, CURSOR_HOOKS, CODEX_HOOKS];
+/**
+ * The environment variable Hermes Agent resolves its own configuration root
+ * from, and the default it falls back to (APRV-398).
+ *
+ * Read here for ONE purpose: to know where to look for a registration this
+ * checkout cannot hold. Hermes documents no project-local configuration
+ * directory, so a repository-relative search for a Hermes hook would be empty on
+ * every machine and the row would never be able to say anything true.
+ *
+ * Reading an environment variable is acceptable here in the narrow way it is
+ * acceptable in `sandboxRequirement`: it moves where a DIAGNOSTIC looks, and the
+ * row it feeds can only SKIP when it finds nothing and only ADD a line when it
+ * finds something. Nothing an agent can set makes a red line go away, which is
+ * the only property §11.1 invariant 4 asks of a self-reported input.
+ */
+const HERMES_HOME_ENV = "HERMES_HOME";
+const HERMES_HOME_DEFAULT = ".hermes";
 
-/** `approval hook <kind>` inside a command string, whichever file shape holds it. */
-const HOOK_COMMAND = /\bapproval["']?\s+hook\s+(claude-code|cursor|codex)\b/u;
+/** One place a harness hook registration can be written. */
+interface HarnessSettingLocation {
+  /** An exact file, or the directory whose entries are scanned one level deep. */
+  file?: string;
+  dir?: string;
+  /** Only entries of `dir` starting with this, when given. */
+  prefix?: string;
+  /**
+   * Resolve under the harness's own configuration home rather than under the
+   * checkout (APRV-398). Hermes is the only harness whose organ lives there.
+   */
+  home?: "hermes";
+  /**
+   * Scan the file's RAW TEXT rather than its JSON string leaves.
+   *
+   * For a YAML file, which has no JSON leaves to walk. The existing three
+   * harnesses keep the JSON walk they have always had, byte for byte: a `.json`
+   * file that does not parse still registers nothing, which is what it did
+   * before, because a document this cannot read is a document whose command
+   * strings it cannot locate either.
+   */
+  text?: boolean;
+}
+
+/**
+ * Where each harness's `approval hook` registration can be written.
+ *
+ * A `Record<HarnessKind, …>` since APRV-398, and the type is the point, exactly
+ * as it is for `HARNESS_ADAPTERS`: a kind added to {@link HARNESS_KINDS} with no
+ * entry here fails to compile, and `tests/harness-enum.test.ts` pins the keys
+ * set-equal to that list. Before this it was a flat array of three paths and a
+ * regex naming three kinds, so `grok` and `muse` shipped adapters that this row
+ * could not see — the same class of miss APRV-358 was filed for, in the one
+ * place APRV-358 did not reach.
+ *
+ * An empty list is a statement rather than a gap, and `codex` has one on
+ * purpose: `.codex/hooks.json` is already read by the Codex-specific rows above
+ * ({@link CODEX_HOOKS}), and this list is consulted by `registeredHarnesses`,
+ * whose behaviour for the three harnesses that were already in it must not
+ * change by a byte in this task. Codex is therefore listed with the file it
+ * always had and nothing new.
+ */
+export const HARNESS_SETTINGS: Readonly<
+  Record<HarnessKind, readonly HarnessSettingLocation[]>
+> = {
+  "claude-code": [{ file: CLAUDE_SETTINGS }],
+  cursor: [{ file: CURSOR_HOOKS }],
+  codex: [{ file: CODEX_HOOKS }],
+  // APRV-243: Grok Build installs a PreToolUse entry per file under
+  // `.grok/hooks/`, so the directory is scanned rather than one name guessed.
+  // It also READS `.claude/settings.json` and `.cursor/hooks.json` for
+  // compatibility, and both of those are already scanned above; a Grok session
+  // hosted by this repository's claude-code entry is the hazard
+  // `docs/grok-hook.md` opens with, not a registration this row should claim.
+  grok: [{ dir: join(".grok", "hooks") }],
+  // APRV-350, observed: the installed build reads `.muse/hooks.json`.
+  // `.muse/settings.json` is listed for the reason the classifier lists it —
+  // Meta documents a user-level `settings.json` `hooks` block, so a
+  // project-level copy would be the same organ under a second name — and an
+  // entry for a file Muse does not read costs a miss rather than a false row.
+  muse: [{ file: join(".muse", "hooks.json") }, { file: join(".muse", "settings.json") }],
+  // APRV-398: not in the checkout at all. See {@link HERMES_HOME_ENV}.
+  hermes: [
+    { home: "hermes", file: "config.yaml", text: true },
+    { home: "hermes", file: "config.yml", text: true },
+  ],
+};
+
+/**
+ * `approval hook <kind>` inside a command string, whichever file shape holds it.
+ *
+ * DERIVED from {@link HARNESS_KINDS} since APRV-398 rather than spelled, so a
+ * new adapter cannot ship with the pattern left behind — which is what happened
+ * to `grok` and `muse`. Longest alternative first: the alternation is tried left
+ * to right, and a kind that is a prefix of another kind would otherwise match
+ * the shorter spelling and leave the rest of the name outside the capture.
+ */
+const HOOK_COMMAND = new RegExp(
+  `\\bapproval["']?\\s+hook\\s+(${[...HARNESS_KINDS]
+    .sort((left, right) => right.length - left.length)
+    .join("|")})\\b`,
+  "u",
+);
+
+/**
+ * The places {@link registeredHarnesses} looked, for the row that found nothing.
+ *
+ * Every location of every kind, in kind order, so the line a reader gets names
+ * the file they have to write rather than three of the six. A home-resolved
+ * location is printed with its `$HERMES_HOME/` prefix rather than expanded: the
+ * expansion is this machine's answer, and the instruction is the general one.
+ */
+function harnessSettingNames(): string {
+  return HARNESS_KINDS.flatMap((kind) =>
+    HARNESS_SETTINGS[kind].map((location) => {
+      const name = location.file ?? `${location.dir ?? "?"}/`;
+      return location.home === "hermes" ? `$HERMES_HOME/${name}` : name;
+    }),
+  ).join(" or ");
+}
+
+/**
+ * A fresh copy of {@link HOOK_COMMAND}, for the suite that pins it (APRV-398).
+ *
+ * A function rather than the constant, so a caller cannot carry state into this
+ * module's own matching: the pattern is not global today, and a test that shared
+ * the object would silently break on the day somebody adds a flag to it.
+ */
+export function hookCommandPattern(): RegExp {
+  return new RegExp(HOOK_COMMAND.source, HOOK_COMMAND.flags);
+}
+
+/** Hermes's configuration root, from the environment or its documented default. */
+function hermesHome(env: NodeJS.ProcessEnv = process.env): string {
+  const declared = env[HERMES_HOME_ENV];
+  if (typeof declared === "string" && declared.trim() !== "") return declared;
+  return join(homedir(), HERMES_HOME_DEFAULT);
+}
+
+/** Every file a location names that exists on disk, absolute. */
+function settingFiles(dir: string, location: HarnessSettingLocation): string[] {
+  const base = location.home === "hermes" ? hermesHome() : dir;
+  if (location.file !== undefined) {
+    const path = join(base, location.file);
+    return existsSync(path) ? [path] : [];
+  }
+  if (location.dir === undefined) return [];
+  let names: string[];
+  try {
+    names = readdirSync(join(base, location.dir));
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names.sort()) {
+    if (location.prefix !== undefined && !name.startsWith(location.prefix)) continue;
+    const path = join(base, location.dir, name);
+    try {
+      if (statSync(path).isFile()) found.push(path);
+    } catch {
+      continue;
+    }
+  }
+  return found;
+}
 
 /**
  * Every harness this checkout registers an `approval hook` command for.
@@ -2559,35 +2718,51 @@ const HOOK_COMMAND = /\bapproval["']?\s+hook\s+(claude-code|cursor|codex)\b/u;
  */
 export function registeredHarnesses(dir: string): HarnessKind[] {
   const found = new Set<HarnessKind>();
-  for (const relative of HARNESS_SETTINGS) {
-    const path = join(dir, relative);
-    if (!existsSync(path)) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    } catch {
-      continue;
-    }
-    const stack: unknown[] = [parsed];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      if (typeof node === "string") {
-        const match = HOOK_COMMAND.exec(node);
-        if (
-          match !== null &&
-          isHarnessKind(match[1]) &&
-          (match[1] !== "codex" || isDirectCodexHookCommand(node))
-        ) {
-          found.add(match[1]);
+  const locations = HARNESS_KINDS.flatMap((kind) => HARNESS_SETTINGS[kind]);
+  for (const location of locations) {
+    for (const path of settingFiles(dir, location)) {
+      let parsed: unknown;
+      if (location.text === true) {
+        // A YAML document has no JSON leaves to walk, so the whole text is the
+        // haystack. Only the hermes location asks for this; the three that were
+        // here before this task keep the JSON walk they have always had, which
+        // is what keeps their behaviour byte-identical.
+        let text: string;
+        try {
+          text = readFileSync(path, "utf8");
+        } catch {
+          continue;
         }
+        const match = HOOK_COMMAND.exec(text);
+        if (match !== null && isHarnessKind(match[1])) found.add(match[1]);
         continue;
       }
-      if (Array.isArray(node)) {
-        stack.push(...node);
+      try {
+        parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      } catch {
         continue;
       }
-      if (typeof node === "object" && node !== null) {
-        stack.push(...Object.values(node as Record<string, unknown>));
+      const stack: unknown[] = [parsed];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        if (typeof node === "string") {
+          const match = HOOK_COMMAND.exec(node);
+          if (
+            match !== null &&
+            isHarnessKind(match[1]) &&
+            (match[1] !== "codex" || isDirectCodexHookCommand(node))
+          ) {
+            found.add(match[1]);
+          }
+          continue;
+        }
+        if (Array.isArray(node)) {
+          stack.push(...node);
+          continue;
+        }
+        if (typeof node === "object" && node !== null) {
+          stack.push(...Object.values(node as Record<string, unknown>));
+        }
       }
     }
   }
@@ -2671,7 +2846,7 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     return {
       check,
       status: "skip",
-      detail: `${where} registers no \`approval hook\` command in ${HARNESS_SETTINGS.join(" or ")}, so no harness hosts the hook here and there is no installed version for the log to be behind`,
+      detail: `${where} registers no \`approval hook\` command in ${harnessSettingNames()}, so no harness hosts the hook here and there is no installed version for the log to be behind`,
     };
   }
 
@@ -2836,17 +3011,52 @@ function checkDarkSessions(
  * is reported); this list only says where to look, so a directory nobody uses
  * costs nothing and a file nobody named is not invented.
  */
-const ORGAN_SEARCH: readonly { dir: string; prefix?: string }[] = [
-  { dir: ".claude", prefix: "settings" },
-  { dir: ".cursor", prefix: "hooks.json" },
-  { dir: join(".cursor", "hooks") },
-  { dir: join(".cursor", "agents") },
-];
+export const ORGAN_SEARCH: Readonly<
+  Record<HarnessKind, readonly { dir: string; prefix?: string }[]>
+> = {
+  "claude-code": [{ dir: ".claude", prefix: "settings" }],
+  cursor: [
+    { dir: ".cursor", prefix: "hooks.json" },
+    { dir: join(".cursor", "hooks") },
+    { dir: join(".cursor", "agents") },
+  ],
+  // EMPTY ON PURPOSE, and this is the one entry in the record that is a decision
+  // rather than a list. `.codex/config.toml` and `.codex/hooks.json` are organs
+  // by `core/command-class.ts`'s own word, and adding them here would change
+  // what the `gate-organs` row reports in every Codex checkout — a change
+  // APRV-398 has no business making while adding a different harness. The row
+  // they belong in is their own task. What this record buys meanwhile is that
+  // the omission is now VISIBLE and typed rather than an absence nobody could
+  // see: a reader of this table can tell that codex was considered.
+  codex: [],
+  // APRV-243 and APRV-350: the organs the classifier has recognised since those
+  // tasks, which this list never learned about. `.grok/hooks/` and
+  // `.muse/hooks.json` are where each harness's hook is installed, so a
+  // hand-edited one nobody attested is exactly what this row exists to report.
+  grok: [
+    { dir: ".grok", prefix: "hooks.json" },
+    { dir: join(".grok", "hooks") },
+  ],
+  muse: [{ dir: ".muse", prefix: "hooks" }, { dir: ".muse", prefix: "settings" }],
+  // APRV-398. Hermes's real organ is `$HERMES_HOME/config.yaml` in the user
+  // home, and this row is about THIS CHECKOUT, so what is listed is the
+  // repository-relative directory the classifier would call an organ if a
+  // checkout carried one. A directory nobody uses costs nothing (see the header),
+  // and every candidate found here is put to the classifier before it is
+  // reported, so nothing is invented. The home file is reached by the
+  // harness-version row above, through {@link HARNESS_SETTINGS}.
+  hermes: [{ dir: ".hermes", prefix: "config" }, { dir: join(".hermes", "agent-hooks") }],
+};
+
+/** Every organ directory to look in, across harnesses, in kind order. */
+const ORGAN_SEARCH_ENTRIES: readonly { dir: string; prefix?: string }[] = HARNESS_KINDS.flatMap(
+  (kind) => ORGAN_SEARCH[kind],
+);
 
 /** The organ files this checkout actually carries, repository-relative, sorted. */
 function listGateOrgans(root: string): string[] {
   const found: string[] = [];
-  for (const entry of ORGAN_SEARCH) {
+  for (const entry of ORGAN_SEARCH_ENTRIES) {
     let names: string[];
     try {
       names = readdirSync(join(root, entry.dir));
@@ -2985,7 +3195,7 @@ function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCh
     return {
       check,
       status: "skip",
-      detail: `${root} carries no gate organ files (${ORGAN_SEARCH.map((entry) => entry.dir).join(", ")}), so there is nothing here for a human to have attested`,
+      detail: `${root} carries no gate organ files (${ORGAN_SEARCH_ENTRIES.map((entry) => entry.dir).join(", ")}), so there is nothing here for a human to have attested`,
     };
   }
 

@@ -256,6 +256,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "grok run", class: "harness.launch.grok", rule: "harness-launch-grok" },
   { command: "claude -p 'summarize this'", class: "harness.launch.claude", rule: "harness-launch-claude" },
   { command: "cursor-agent --resume", class: "harness.launch.cursor", rule: "harness-launch-cursor" },
+  // APRV-398. The binary and the harness kind share one spelling here, so the
+  // class reads `harness.launch.hermes` with no name mapping in between.
+  { command: "hermes chat", class: "harness.launch.hermes", rule: "harness-launch-hermes" },
   // A probe starts no session, so it reads.
   { command: "codex --help", class: "read.shell", rule: "harness-probe", row: "harness-launch-codex" },
   // The package-manager route to the same upgrade was `deps.add` before this
