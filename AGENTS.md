@@ -57,19 +57,27 @@ If the custom agent is unavailable in the current interface, call a general-purp
 
 ## Codex model orchestration
 
-Use **Astra** for architecture, decomposition, cross-cutting safety judgment, approval routing, orchestration, adversarial review, and final integration. Use **Sol** for substantive implementation from settled acceptance criteria, including feature work, fixtures, broad tests, mechanical refactors, and sustained research. Use **Spark** for quick browser/UI smoke checks and short fix-and-verify loops; fall back to Sol when diagnosis is novel or crosses contracts.
+Use **Astra** for design, architecture, material decisions, approval routing, integrated conformance and adversarial review, and final integration. Delegate substantive implementation and sustained research to **Sol** as bounded, coherent units that include tests and routine debugging. Keep small, context-bound edits in the parent when delegation would add more overhead than value. Prefer medium reasoning; reserve high reasoning for hard decisions and critical reviews. Cursor routing above is unchanged.
+
+Use **Spark** for bounded DOM/text browser checks, smoke tests, and small understood fix-retest loops. Use Sol if Spark is unavailable or lacks a required capability. Route screenshot-based visual judgment to Sol or Astra. After two unsuccessful small fix-retest cycles, or when diagnosis crosses contracts, hand the investigation to Sol. Never claim a model was used without runtime confirmation.
 
 ## Delegation, in either interface
 
-Every delegation prompt must be self-contained because subagents start with clean context. Include:
+Keep delegation prompts concise and self-contained: include the task ID, objective, acceptance criteria, current plan, binding spec sections, repository constraints, exact owned and forbidden paths, required checks, and expected evidence. Prefer a clean worker context with relevant excerpts over copying the full conversation. Use targeted searches and reads; reuse established evidence unless it may have changed. Required instruction and SPEC reads still apply.
 
-- the task ID, purpose, acceptance criteria, and current plan;
-- binding spec sections, relevant files, and repository constraints;
-- the exact implementation slice, the owned paths, and the forbidden paths;
-- required tests or checks;
-- the expected return: changed files, decisions, verification results, and remaining risks.
+Let workers finish their implementation-and-verification unit. Resume the parent for completion, a genuine blocker, a material decision, or required review; avoid routine progress polling and repeated inspection of unfinished work. Handoffs summarize changed files, decisions, checks with exit codes, and unresolved risks instead of dumping logs. Parallel editing requires disjoint paths or isolated worktrees; only one agent controls a browser session at a time.
 
 Keep work in the parent when requirements are ambiguous, the change is small and context-bound, or it touches architecture, security boundaries, the spec, policy, credentials, approvals, release decisions, or final integration. Use research or verification specialists for those roles when appropriate.
+
+## Review cadence and verification
+
+Astra reviews the complete integrated milestone diff against the task, SPEC.md, and global invariants before delivery. Preserve per-task authoring, review, notes, commits, and required checks from the execution checkpoint. Contract-bearing milestones need conformance and a fresh independent refutation pass before their first merge, release, or real-data exposure, including the combined diff when a milestone spans several PRs. Preserve the existing reviewer model: Astra retains Codex adversarial review and all consequential security, data-integrity, architecture, approval, and deployment judgments. Other harnesses retain their routing.
+
+Give an independent refuter the complete diff, binding spec, and explicitly accepted decisions, without implementation conversation or build prompts. It attacks and reports, lists attempted attacks even when no defect is found, and leaves fixes to the implementer. Avoid duplicate full adversarial passes on unchanged work. Recheck affected seams after fixes; material spec or contract changes reopen review. Unresolved findings block delivery, and no review-count cap waives a defect. Docs, copy, and CSS-only changes skip independent refutation when the actual diff stays within that scope; protected policy edits still require the gate and parent review.
+
+Run required tests, lint, conformance, the applicable local CI tier, and protected-path checks under existing repository rules. Inspect actual exit codes and failures, and verify rendered behavior for user-facing changes. Do not repeat broad suites once required checks pass unless changed code, failures, or unresolved concerns justify it. Cost savings never waive required checks or approval evidence.
+
+Treat lower token cost as an objective, not a measured result. Do not automatically downgrade models, redeem resets, buy credits, or resume after usage exhaustion without fresh user direction.
 
 Completing any user-authorized repository change includes delivery to GitHub. This applies to source changes, documentation-only changes, and Backlog task creation or refinement, including a task whose future design or implementation remains To Do. Unless the user explicitly requests local-only work or otherwise limits delivery, stage only reviewed, in-scope files, commit on a feature branch, push it, open or update a pull request, and run `gh pr merge <n> --merge` to arm the merge queue. These steps have standing authorization subject to APPROVAL.md; do not ask the user to repeat the original request to get a local change committed or pushed.
 
