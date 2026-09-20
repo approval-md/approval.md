@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-20 03:49'
-updated_date: '2026-09-20 03:52'
+updated_date: '2026-09-20 04:40'
 labels:
   - release
   - ci
@@ -48,4 +48,6 @@ Carter asked on 2026-09-20 where the 0.3.0 release notes are. They live in CHANG
 
 <!-- SECTION:NOTES:BEGIN -->
 AC1 done 2026-09-20 ~04:0xZ through the gate: task.registered seq 59788, approval.requested 59789, approval.granted 59793 from the phone, executed under the token; gh release create v0.3.0 --verify-tag with the 360-line 0.3.0 CHANGELOG section as the body; https://github.com/approval-md/approval.md/releases/tag/v0.3.0. AC2 and AC3 are the workflow work and stay open.
+
+Add to the workflow work: the publish job publishes a downloaded tarball with no .git, so the registry gitHead is null for 0.2.0 and 0.3.0; set it from RELEASE_SHA before npm publish (npm pkg set gitHead=<sha> on the extracted package, or the equivalent), so the registry metadata carries the commit the provenance already binds.
 <!-- SECTION:NOTES:END -->

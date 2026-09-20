@@ -3,11 +3,11 @@ id: APRV-371
 title: >-
   Release 0.3.0: changelog, version bump, gated tag and tag push through Trusted
   Publishing
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-18 06:34'
-updated_date: '2026-09-20 02:43'
+updated_date: '2026-09-20 04:40'
 labels:
   - release
 dependencies:
@@ -46,8 +46,8 @@ Since v0.2.0 (published 2026-09-12, APRV-329) main carries 183 commits and 35 fe
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 CHANGELOG.md has a 0.3.0 section that names every user-visible change since v0.2.0 with its task id, and package.json reads 0.3.0, merged to main in one PR
-- [ ] #2 Annotated tag v0.3.0 created and pushed through the gate; publish.yml publishes approval-md@0.3.0 with npm provenance and no NPM_TOKEN
-- [ ] #3 Registry tarball matches the CI artifact, a clean install runs approval --version and approval doctor, provenance verified; results recorded in the notes and the changelog dated
+- [x] #2 Annotated tag v0.3.0 created and pushed through the gate; publish.yml publishes approval-md@0.3.0 with npm provenance and no NPM_TOKEN
+- [x] #3 Registry tarball matches the CI artifact, a clean install runs approval --version and approval doctor, provenance verified; results recorded in the notes and the changelog dated
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -136,4 +136,12 @@ c. Registry metadata. npm view approval-md@0.3.0 version dist.integrity dist.sha
 d. Clean install. In a fresh scratch directory: npm install -g approval-md@0.3.0 under a scratch prefix so nothing on the machine is replaced, then approval --version must print 0.3.0 and approval doctor must run. Record both exit codes, and record whether better-sqlite3 arrived prebuilt or was built from source.
 e. Provenance. npm audit signatures in that consumer: exit 0, with the verified signature and attestation counts. Parse the signed SLSA provenance and confirm it binds this tarball digest, PR #507 merge commit, publish.yml on main, and that run id and attempt 1. If npm audit signatures cannot run there, read dist.attestations from the registry and fetch the attestation instead.
 f. Record. Paste the run ids, both SHA-256 values, dist.integrity, the install and doctor exit codes and the provenance result here, and give the CHANGELOG 0.3.0 section the published sentence the 0.2.0 section carries (published to npm as approval-md@0.3.0, tagged v0.3.0 at the merge commit), replacing the draft not-yet-tagged sentence. Then tick AC2 and AC3.
+
+Ceremony run 2026-09-20 from the primary by the orchestrator: task.registered seq 59713; tag requested 59714, granted 59720 from the phone, executed 59727 to 59728 (git tag -a v0.3.0 on f4ebc90c698c7e8d410b184cda73de228d46ec43); push requested 59734, granted 59739, executed 59744 to 59745. release-candidate run 35487183789 success; publish.yml run 35487190244 success (verify release candidate, publish to npm), attempt 1, RELEASE_SHA and tag bound. Verification (Sonnet pass): registry tarball sha256 f0afb9e9aaa9f89005ceb9916da6050507c115466132e86f5aa2523d724b4e50 equals the CI EXPECTED_SHA256; dist.integrity sha512 matches the tarball; npm audit signatures verified; SLSA provenance subject digest matches, workflow .github/workflows/publish.yml, gitCommit f4ebc90..., invocationId run 35487190244 attempt 1; clean install approval --version 0.3.0, approval doctor in an empty directory runs and reports 7 ok 23 n/a 3 failed (identity, attestation, audit-sampling, the expected fail-closed rows with no policy); tarball 794 entries with dist/src, schema, SPEC.md, docs/cli-reference.md, LICENSE and no judgy/. One literal miss: registry gitHead is null for 0.3.0 and for 0.2.0 alike, because the publish job publishes a downloaded tarball with no .git; the provenance carries the commit, so the release is bound; the gitHead fix is added to APRV-396. GitHub Release created through the gate (APRV-396 AC1, grant seq 59793). Side findings from the verification: the classifier has no rules for npm pack, npm init, tar, gunzip, base64, openssl dgst (filed); deps.add drew live samples on two scratch npm installs during the pass and timed out (noted on APRV-381 neighbourhood as a sampling cost, not filed).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval-md 0.3.0 released 2026-09-20: changelog with task ids (PR 504), bump and site strings (PR 507, f4ebc90), annotated tag and push through the gate (grants seq 59720 and 59739), Trusted Publishing run 35487190244 with provenance bound to the commit and workflow, registry tarball verified against the CI sha256, clean install and doctor verified, GitHub Release created through the gate.
+<!-- SECTION:FINAL_SUMMARY:END -->
