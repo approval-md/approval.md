@@ -193,6 +193,37 @@ test("a well formed heading with nothing under it refuses", () => {
   assert.equal(refused.code, "empty-section");
 });
 
+test("a `## ` line inside a fenced block neither ends a section nor becomes one", () => {
+  const text = [
+    "## 9.9.9 — 2026-01-01",
+    "",
+    "Quoting a changelog in release notes is ordinary:",
+    "",
+    "```markdown",
+    "## 9.9.8 — 2020-01-01",
+    "- what the old section said",
+    "```",
+    "",
+    "and the section continues past it.",
+    "",
+    "## 9.9.7 — 2019-01-01",
+    "",
+    "- the real previous section",
+    "",
+  ].join("\n");
+  const found = section(text, "9.9.9");
+  assert.ok(found.body.includes("## 9.9.8"), "the quoted heading was dropped from the body");
+  assert.ok(found.body.endsWith("and the section continues past it."), "the body was cut at the quoted heading");
+  assert.ok(!found.body.includes("the real previous section"), "the body ran into the next section");
+  assert.deepEqual(
+    (listSections(text) as ReadonlyArray<{ version: string }>).map((entry) => entry.version),
+    ["9.9.9", "9.9.7"],
+    "a heading inside a code fence was counted as a section",
+  );
+  const refused = refusal(text, "9.9.8");
+  assert.equal(refused.code, "no-section");
+});
+
 test("only canonical stable versions are releasable", () => {
   for (const input of ["0.3", "1.2.3.4", "01.2.3", "1.2.3-rc.1", "1.2.3+build", "", "v", "latest"]) {
     assert.equal(normalizeVersion(input), null, `${JSON.stringify(input)} was accepted as a version`);

@@ -102,6 +102,35 @@ export function parseHeading(line) {
 }
 
 /**
+ * The lines of `text`, each flagged for being inside a fenced code block.
+ *
+ * Release notes quote shell and YAML, and a quoted line can begin with `## `. A
+ * scanner that did not know about fences would end the section there and publish
+ * a body cut off mid-sentence, quietly, which is the worst of the failure modes
+ * available here. A fence that is never closed makes the rest of the file
+ * invisible instead, so the version after it refuses with `no-section` rather
+ * than returning half a body.
+ */
+function scan(text) {
+  const lines = text.split("\n");
+  const fenced = lines.map(() => false);
+  let open = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^ {0,3}(`{3,}|~{3,})/u.exec(lines[index]);
+    if (open === null) {
+      if (match !== null) {
+        open = { marker: match[1][0], length: match[1].length };
+        fenced[index] = true;
+      }
+      continue;
+    }
+    fenced[index] = true;
+    if (match !== null && match[1][0] === open.marker && match[1].length >= open.length) open = null;
+  }
+  return { lines, fenced };
+}
+
+/**
  * Every version-shaped heading in `text`, in file order, dated or not.
  *
  * The undated ones are carried rather than dropped: `--check` reports them, and
@@ -109,9 +138,10 @@ export function parseHeading(line) {
  * section.
  */
 export function listSections(text) {
-  const lines = text.split("\n");
+  const { lines, fenced } = scan(text);
   const found = [];
   for (let index = 0; index < lines.length; index += 1) {
+    if (fenced[index]) continue;
     const heading = parseHeading(lines[index]);
     if (heading === null || heading.version === null) continue;
     found.push({ ...heading, line: index + 1 });
@@ -120,10 +150,10 @@ export function listSections(text) {
 }
 
 /** The body between `startLine` (a heading, 1-based) and the next section boundary. */
-function bodyAfter(lines, startLine) {
+function bodyAfter(lines, fenced, startLine) {
   const body = [];
   for (let index = startLine; index < lines.length; index += 1) {
-    if (SECTION_BOUNDARY.test(lines[index])) break;
+    if (!fenced[index] && SECTION_BOUNDARY.test(lines[index])) break;
     body.push(lines[index]);
   }
   while (body.length > 0 && body[0].trim() === "") body.shift();
@@ -153,7 +183,7 @@ export function extractSection(text, version) {
       message: `${JSON.stringify(String(version))} is not a canonical stable version (X.Y.Z, optionally v-prefixed)`,
     };
   }
-  const lines = text.split("\n");
+  const { lines, fenced } = scan(text);
   const matches = listSections(text).filter((entry) => entry.version === wanted);
   if (matches.length === 0) {
     return {
@@ -178,7 +208,7 @@ export function extractSection(text, version) {
       message: `CHANGELOG heading "## ${heading.text}" (line ${heading.line}) carries no release date. It must read "${HEADING_FORM}" exactly, em dash and ISO date, before ${wanted} can be released.`,
     };
   }
-  const body = bodyAfter(lines, heading.line);
+  const body = bodyAfter(lines, fenced, heading.line);
   if (body === "") {
     return {
       ok: false,
