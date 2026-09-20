@@ -1,11 +1,11 @@
 ---
 id: APRV-412
 title: 'README split: short README plus docs/README-extended.md'
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-09-20 19:45'
-updated_date: '2026-09-20 20:03'
+updated_date: '2026-09-20 20:04'
 labels: []
 dependencies: []
 references:
@@ -52,3 +52,9 @@ docs-guard: the autonomy count phrase and the doctor row-count and tally literal
 
 Verification: build ok; docs-guard 17/17; lint and typecheck clean; anchor sweep of 53 references resolved with none missing; policy check of the README example resolves vcs.push.main and read.file.out_of_scope to manual with loadFailure null (no defaults.channel cross-check exists in the loader). AC5 unchecked: npm pack --dry-run was denied hook-unclassified by the primary build (this worktree classifies it npm-pack, so the enforcing build is stale relative to main); files list verified by reading package.json. AC8 unchecked: npm test has 41 pre-existing failures on this host (better-sqlite3 NODE_MODULE_VERSION 137 vs 147 under Node 26, and SMTP mock TLS handshake), none in touched files; CI is the verdict.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Split README.md into a short entry and docs/README-extended.md, restoring the three sections the drafts dropped, retargeting the docs guard and the site links, and shipping the guide in the npm package. Verified with build, docs-guard 17/17, lint, typecheck, a 53-reference anchor sweep, and approval policy check on the README example. PR #524 opened and merge armed; AC5 and AC8 wait on CI because npm pack is denied by the primary hook build and npm test has 41 pre-existing host failures.
+<!-- SECTION:FINAL_SUMMARY:END -->
