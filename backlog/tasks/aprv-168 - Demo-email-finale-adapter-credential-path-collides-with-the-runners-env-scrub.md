@@ -3,11 +3,11 @@ id: APRV-168
 title: >-
   Demo email finale: adapter credential path collides with the runner's env
   scrub
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-08-31 00:01'
-updated_date: '2026-09-20 00:23'
+updated_date: '2026-09-20 01:10'
 labels:
   - demo
   - design
@@ -24,7 +24,7 @@ Found during APRV-157 (runbook): the web-agent demo's email finale routes adapte
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A decided design (recorded here) for how a gated adapter reaches vault credentials when its parent process holds none
-- [ ] #2 The demo's send_the_email template completes end to end in rehearsal: phone approve, sealed wait, mail sent, execution.completed on the demo log
+- [x] #2 The demo's send_the_email template completes end to end in rehearsal: phone approve, sealed wait, mail sent, execution.completed on the demo log
 - [x] #3 Decision recorded on whether credential resolution should precede token consumption in the adapter contract, with a follow-up task if yes
 <!-- AC:END -->
 
@@ -78,4 +78,12 @@ TESTS, real verbs only. tests/demo-finale-credential.test.ts: attest, register, 
 VERIFICATION. build 0, typecheck 0, lint 0. npm test: 4845 tests, 4822 pass, 22 fail, exit 1, all 22 in adapter-email, cli-setup and smtp-probe and all the pre-existing local Node v26 TLS refusal (Setting the TLS ServerName to an IP address is not permitted) in files this branch does not touch. Re-run after merging origin/main: identical counts and identical three files.
 
 AC2 remains for Carter: it is the phone-in-the-loop rehearsal of beat 4 against real Telegram and a real mailbox, which no automated suite can stand in for. Sequence after this merges: approval log sync and npm run build in the primary, restart the demo server, then node examples/demo-provision.mjs --instance web-agent --check and read the child-credentials row before submitting the beat.
+
+Beat four completed live on 2026-09-20 ~00:50Z on ~/demo-gate after PR 498: fresh submission from the demo page, approve on the phone through @approval_md_demo_bot, sealed wait, the adapter opened the vault inside the token window (keychain reference resolved in the agent child, the demo-provision child-credentials row green), the message arrived in the getapprovalmd@gmail.com inbox. Beats one to three had passed earlier the same evening. Rehearsal setup facts recorded in APRV-386, 390 and 392 notes.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The finale sends: the agent child could not resolve the vault passphrase because macOS builds the keychain search list from HOME and the child runs with HOME under the instance; the resolver retries with the account home (PR 498), credentials resolve before the token is consumed (APRV-169), and the live rehearsal on 2026-09-20 delivered the email after a phone approval.
+<!-- SECTION:FINAL_SUMMARY:END -->

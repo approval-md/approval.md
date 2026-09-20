@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-19 20:22'
-updated_date: '2026-09-19 21:35'
+updated_date: '2026-09-20 01:10'
 labels:
   - demo
   - examples
@@ -107,6 +107,8 @@ npm run build, npm run typecheck and npm run lint all clean. node scripts/run-te
 This task touches none of the SPEC section 11 global invariants. It appends nothing, mints no verb, reads no record for an enforcement decision, and the one place it comes near the log is --reset, which moves a log directory whole and never opens the file.
 
 Follow-up after PR 488 merged, on ruling from the orchestrator (2026-09-19): the grok-bot instance gets its own default directory, ~/demo-grok-bot, instead of sharing ~/demo-gate with the web-agent demo. A shared default is a footgun even with the marker, because the marker can only refuse after the operator has already typed the wrong instance at the wrong directory. The marker stays as the backstop for anyone who points two demos at one directory with --path. The connector runbook now names ~/demo-grok-bot throughout (all 33 references were that instance path, including the clone target and the payload working directory), and the README and provisioning lines match. New test: the three instances have three different default directories, read out of the help block, so a future shared default fails in CI rather than on a demo morning. Also confirmed by the same ruling: the crowd-track reading stands as written, so the guest instance keeps identity and the Telegram channel and never a vault or a mail adapter.
+
+Two check glitches seen on the 2026-09-20 rehearsal, to fix with or after APRV-390: the port-4700 row reported the port free while server.mjs was listening, because the server binds 0.0.0.0 and the probe binds 127.0.0.1, which macOS allows side by side; probe the wildcard address or connect instead of bind. And the channel row reported not configured because it looked for APPROVAL_TG_TOKEN while the instance policy names APPROVAL_DEMO_TG_TOKEN; read the names from the policy (APRV-390 does this for the setup verb, the check must use the same source).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
