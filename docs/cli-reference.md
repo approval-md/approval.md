@@ -2400,6 +2400,33 @@ store is the normal state of a repo that has never made a request carrying
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
+**refusals** is the two refusal families, counted, with the newest five of each
+(APRV-376). `decision` counts `audit.decision_refused`: a human decided and the
+gate would not take it, which is APRV-235's record. `gesture` counts
+`audit.gesture_refused`: a human made a gesture that is not a decision (a
+checkpoint signature, a review, a review note) and the surface refused it before
+any verb ran, which is APRV-355's. Until this field existed neither was reported
+anywhere, and an operator could reach them only through `approval log tail` and
+`approval log export`. The question the field answers is small enough that the
+chain was a poor place to answer it: told that taps from an account they did not
+map are being refused, an operator wants to know how many and from which account.
+
+Each entry carries the `seq`, the surface's own refusal code verbatim, and the
+observed `sender` when the record carries one, in the form the record carries it
+(`hashed: true` marks APRV-370's keyed digest rather than a raw account id). The
+count is every record of that family in the log; the listing is the newest five,
+newest first, because a row that grew with the log would push the rest of the
+report off a terminal for a fact that decides nothing.
+
+It is informational, exactly as `coverage` and `anomalies` are: it moves neither
+`healthy` nor the exit code. A refusal is the gate having worked, and a report
+that went red because the gate turned away a stranger's tap would teach an
+operator to stop reading it. It reads only verified records (SPEC.md §11.1
+invariant 1), which is also why a log that does not verify reports no refusals
+rather than reporting some it cannot stand behind. A family with no records is
+absent rather than zero, and the whole field is absent when both families are, so
+a repository where nothing has been refused emits the object it always emitted.
+
 **coverage** is one line of `approval coverage` (APRV-245): the commits git
 recorded on THIS branch, counted against the verified log. The range is the
 merge base with `origin/main` to `HEAD`, so what it measures is what this branch
@@ -2443,6 +2470,10 @@ does not know the flag exists.
   how many the log records as pruned, and how many are unbound. Informational.
 - `anomalies` — additive and present only when non-empty: gate-typed events whose
   `ts` steps backwards by more than 2s. Informational.
+- `refusals` — additive and present only when the log carries a refused decision
+  or a refused gesture: `{count, recent}` per family, each recent entry naming the
+  `seq`, the refusal `code` and the observed `sender` where there was one.
+  Informational.
 
 **`--json`** (one object on stdout):
 
@@ -2460,7 +2491,10 @@ does not know the flag exists.
  "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
    "class":"records.write","obligation":"gated-revert","review_seq":17}],
  "payload_store":{"present":true,"files":2,"pruned":0,"orphans":0,
-   "note":"..."}}
+   "note":"..."},
+ "refusals":{"decision":{"count":2,"recent":[{"seq":21,"code":"policy-drift"}]},
+   "gesture":{"count":1,"recent":[{"seq":24,"code":"sender-unmapped",
+     "sender":{"channel":"telegram","id":"5551234567"}}]}}}
 ```
 
 `ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is

@@ -26,7 +26,15 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { Ajv2020 } from "ajv/dist/2020.js";
+import addFormatsModule from "ajv-formats";
+import type { FormatsPlugin } from "ajv-formats";
+
 import { runPayloadHash } from "../src/core/payload.js";
+import { recordRefusedGesture } from "../src/core/gesture-refusal.js";
+import { VERB_REGISTRY, verbLabel } from "../src/cli/verb-registry.js";
+
+const addFormats = (addFormatsModule as unknown as { default: FormatsPlugin }).default;
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -425,6 +433,268 @@ test("a lost payload store is reported without changing health or the exit code"
     String((body["payload_store"] as Record<string, unknown>)["note"]),
     /cannot be rebuilt from the log/u,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The two refusal families (APRV-376)
+// ---------------------------------------------------------------------------
+
+/**
+ * Refuse a human's DECISION through the real surface, and return the code.
+ *
+ * `--reaction loved` with no `--note` is refused `reaction-note-required` by
+ * `approval grant` itself, and the CLI's decision surface appends one
+ * `audit.decision_refused` for it (APRV-235): a person tapped, the gate would not
+ * take it, and the log says so. Nothing else is appended, and the request stays
+ * pending, which is what makes this the cheapest real producer of the record.
+ */
+function refuseDecision(dir: string): void {
+  const run = runCli(
+    ["grant", "task-042:chaser", "--reaction", "loved", "--as", "human:carter", "--json"],
+    dir,
+  );
+  // A gate refusal is exit 1, and with `--json` its object goes to stderr.
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(
+    (JSON.parse(run.stderr) as { error: { code: string } }).error.code,
+    "reaction-note-required",
+  );
+}
+
+/**
+ * Refuse a human's GESTURE, through the same function the only surface that can
+ * produce one calls.
+ *
+ * `audit.gesture_refused` has exactly one writer today, the Telegram listener's
+ * checkpoint and review handlers (`cli/channel-telegram.ts`), and reaching it
+ * needs a mock Bot API server: that surface is already proved in
+ * `tests/checkpoint-tap.test.ts` and `tests/channels-telegram.test.ts`. What is
+ * under test HERE is the report, so this calls `recordRefusedGesture` directly —
+ * the real append path, the real write boundary, the real chain. No line is
+ * written by hand anywhere in this file.
+ */
+function refuseGesture(dir: string, code = "sender-unmapped"): void {
+  const result = recordRefusedGesture(
+    logPath(dir),
+    {
+      gesture: "checkpoint-signature",
+      actor: null,
+      channel: "telegram",
+      sender: GESTURE_SENDER,
+    },
+    { code, message: `refused ${code}` },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.notEqual(
+    result.ok ? result.audit : null,
+    null,
+    "the refusal recorded nothing, so there is no record for status to count",
+  );
+}
+
+/** The account every refused gesture in this suite arrives from. */
+const GESTURE_SENDER = { channel: "telegram", id: "5551234567" };
+
+function refusals(body: Record<string, unknown>): Record<string, unknown> | undefined {
+  return body["refusals"] as Record<string, unknown> | undefined;
+}
+
+test("status lists both refusal families with the newest seqs and their codes", () => {
+  const dir = ready();
+  requestChaser(dir);
+  refuseDecision(dir);
+  refuseDecision(dir);
+  refuseGesture(dir);
+
+  // Spelled out so the seqs below are readable rather than magic: the
+  // attestation, the registration, the request, then the three refusals.
+  assert.deepEqual(
+    logRecords(dir).map((record) => record["event"]),
+    [
+      "policy.updated",
+      "task.registered",
+      "approval.requested",
+      "audit.decision_refused",
+      "audit.decision_refused",
+      "audit.gesture_refused",
+    ],
+  );
+
+  const { code, body } = statusJson(dir);
+  assert.deepEqual(refusals(body), {
+    decision: {
+      count: 2,
+      // Newest first: the reason to read the row is what just happened.
+      recent: [
+        { seq: 5, code: "reaction-note-required" },
+        { seq: 4, code: "reaction-note-required" },
+      ],
+    },
+    gesture: {
+      count: 1,
+      // The observed account, in the form the record carries it. A terminal
+      // decision authenticates no sender, which is why the two decision
+      // entries above carry none.
+      recent: [{ seq: 6, code: "sender-unmapped", sender: GESTURE_SENDER }],
+    },
+  });
+  // AC2: informational. Three refusals, and the repository is still healthy and
+  // still exit 0, because a refusal is the gate having worked.
+  assert.equal(body["healthy"], true);
+  assert.equal(code, 0);
+  assertClean(dir);
+});
+
+test("a refusal-bearing status object validates against the registry's own schema", () => {
+  // The both-directions pin of `tests/cli-instructions.test.ts` (APRV-85), for
+  // the one field its live world cannot reach: that world refuses nothing, so
+  // the shape it validates is the shape with no `refusals` key. A declared field
+  // no captured output ever carries is a declaration nothing checks.
+  const dir = ready();
+  requestChaser(dir);
+  refuseDecision(dir);
+  refuseGesture(dir);
+
+  const spec = VERB_REGISTRY.find((candidate) => verbLabel(candidate) === "status");
+  assert.ok(spec !== undefined, "the registry lost its status entry");
+  assert.ok(spec.output !== null, "the status entry declares no output shape");
+  const ajv = new Ajv2020({ strict: true, allErrors: true, validateFormats: true });
+  addFormats(ajv);
+  const validate = ajv.compile(spec.output);
+  const { body } = statusJson(dir);
+  assert.equal(
+    validate(body),
+    true,
+    (validate.errors ?? [])
+      .map((error) => `${error.instancePath || "/"} ${error.keyword}: ${error.message ?? ""}`)
+      .join("; "),
+  );
+});
+
+test("the human rendering names both families, their counts, and the account", () => {
+  const dir = ready();
+  requestChaser(dir);
+  refuseDecision(dir);
+  refuseGesture(dir);
+
+  const run = runCli(["status"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^refusals {2,}1 decision, 1 gesture \(reported; health unaffected\)$/mu);
+  assert.match(run.stdout, /^ +decision {2}seq 4 {2}reaction-note-required$/mu);
+  assert.match(run.stdout, /^ +gesture\s+seq 5 {2}sender-unmapped {2}telegram:5551234567$/mu);
+  assert.ok(!run.stdout.includes(""));
+});
+
+test("a keyed sender is reported as the digest the record carries, marked as one", () => {
+  const dir = ready();
+  // The form APRV-370 records a keyed mapping in: the whole `hmac-sha256:<hex>`
+  // string, which is what the write boundary's own pattern accepts.
+  const keyed = `hmac-sha256:${"a".repeat(64)}`;
+  const result = recordRefusedGesture(
+    logPath(dir),
+    {
+      gesture: "review",
+      actor: null,
+      channel: "telegram",
+      sender: { channel: "telegram", id: keyed, hashed: true },
+    },
+    { code: "sender-key-unavailable", message: "no key for the mapping this policy declares" },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+
+  const { body } = statusJson(dir);
+  assert.deepEqual((refusals(body) as { gesture: unknown }).gesture, {
+    count: 1,
+    recent: [
+      {
+        // The attestation, the registration, then this.
+        seq: 3,
+        code: "sender-key-unavailable",
+        sender: { channel: "telegram", id: keyed, hashed: true },
+      },
+    ],
+  });
+  const run = runCli(["status"], dir);
+  // The digest verbatim, and marked, so a reader knows to re-key rather than to
+  // go looking for the account in a chat client.
+  assert.match(run.stdout, /sender-key-unavailable {2}telegram:hmac-sha256:a{64} \(keyed\)$/mu);
+  assertClean(dir);
+});
+
+test("one family present reports that family alone, never a zero for the other", () => {
+  // Decisions only.
+  const decided = ready();
+  requestChaser(decided);
+  refuseDecision(decided);
+  const decidedBody = statusJson(decided).body;
+  assert.deepEqual(Object.keys(refusals(decidedBody) ?? {}), ["decision"]);
+  assert.equal("gesture" in (refusals(decidedBody) ?? {}), false);
+  const decidedText = runCli(["status"], decided);
+  assert.match(decidedText.stdout, /^refusals {2,}1 decision \(/mu);
+  assert.ok(!decidedText.stdout.includes("gesture"));
+
+  // Gestures only. No request is needed: a gesture is not a decision, and it
+  // answers for a chain head rather than for an action.
+  const gestured = ready();
+  refuseGesture(gestured);
+  const gesturedBody = statusJson(gestured).body;
+  assert.deepEqual(Object.keys(refusals(gesturedBody) ?? {}), ["gesture"]);
+  assert.equal("decision" in (refusals(gesturedBody) ?? {}), false);
+  const gesturedText = runCli(["status"], gestured);
+  assert.match(gesturedText.stdout, /^refusals {2,}1 gesture \(/mu);
+  assert.ok(!gesturedText.stdout.includes("decision"));
+  assertClean(gestured);
+});
+
+test("a log with neither family omits the field and the row entirely", () => {
+  const dir = ready();
+  requestChaser(dir);
+  const { code, body } = statusJson(dir);
+  assert.equal(code, 0);
+  // Not `{}`, not zeros: absent. The frozen-shape test above pins the whole
+  // object; this pins the reason it is still that object.
+  assert.equal("refusals" in body, false);
+  const run = runCli(["status"], dir);
+  assert.ok(!run.stdout.includes("refusals"));
+});
+
+test("the listing is capped at five while the count keeps counting", () => {
+  const dir = ready();
+  requestChaser(dir);
+  for (let index = 0; index < 6; index += 1) refuseDecision(dir);
+
+  const { code, body } = statusJson(dir);
+  assert.equal(code, 0);
+  const family = (refusals(body) as { decision: { count: number; recent: { seq: number }[] } })
+    .decision;
+  assert.equal(family.count, 6);
+  assert.equal(family.recent.length, 5);
+  // Seqs 4 through 9 were appended; the newest five, newest first.
+  assert.deepEqual(
+    family.recent.map((entry) => entry.seq),
+    [9, 8, 7, 6, 5],
+  );
+  assertClean(dir);
+});
+
+test("an unverifiable log reports no refusals rather than ones it cannot stand behind", () => {
+  const dir = ready();
+  requestChaser(dir);
+  refuseDecision(dir);
+  refuseGesture(dir);
+  assert.notEqual(refusals(statusJson(dir).body), undefined);
+
+  // A tampered line: the chain no longer verifies, so every projection over it
+  // is empty (SPEC.md §11.1 invariant 1). The refusal field goes with them.
+  const lines = rawLog(dir).split("\n").filter((line) => line.trim().length > 0);
+  lines[2] = (lines[2] as string).replace('"approval.requested"', '"task.registered"');
+  writeFileSync(logPath(dir), `${lines.join("\n")}\n`, "utf8");
+
+  const { code, body } = statusJson(dir);
+  assert.equal(code, 1, "a log that does not verify is not healthy");
+  assert.notEqual(body["verification"], undefined);
+  assert.notEqual((body["verification"] as { status: string }).status, "clean");
+  assert.equal("refusals" in body, false);
 });
 
 // ===========================================================================
