@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-18 06:20'
-updated_date: '2026-09-20 01:18'
+updated_date: '2026-09-20 01:58'
 labels:
   - channel
   - telegram
@@ -15,6 +15,21 @@ labels:
 dependencies: []
 priority: medium
 ordinal: 287000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:claude-code'
+  route:
+    assignee: 'agent:claude-code'
+    rationale: 'APRV-370 AC4 live check on 2026-09-20 after the keyed sender mapping was applied at seq 57505: one harmless manual-class request so a phone approve is recorded under the hashed mapping; the grant record is the evidence'
+  state: proposed
+  actions:
+    - class: network.call
+      summary: 'curl -sI https://approval.md from the primary: a HEAD request to the project site, no body, no send; exists only so one phone approve lands under the keyed mapping (payload is the argv and cwd; run recomputes the hash before it spawns)'
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-370:live-approve:2026-09-20'
+      payload_hash: '6655489027040c4a420d7b90cd55d75c898a5355dbff6b85143339c40a9e0903'
 ---
 
 ## Description
@@ -28,7 +43,7 @@ Raised by the operator on 2026-09-18 while applying the sender line (APRV-324): 
 - [x] #1 senders.<channel> accepts sha256:<hex> and the channel matches a hashed observed id against it; raw ids keep working
 - [x] #2 Decision and refusal records under a hashed mapping carry the digest and never the raw id; a schema change for the new field is its own task if one is needed
 - [x] #3 approval doctor sender-mapping reports which form is in use; docs updated
-- [ ] #4 This repository policy is re-amended to the hashed form by the operator and one live approve carries the digest
+- [x] #4 This repository policy is re-amended to the hashed form by the operator and one live approve carries the digest
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -121,10 +136,12 @@ THE FAILURE MODE TO EXPECT, and it is the reason the doctor row is a FAIL rather
 The proposal page carries all of the above plus what to do when the tap is refused sender-unmapped (the digest in the file is not the digest of that account under this key; the refusal record carries the digest that actually arrived, which is the value the file should have).
 
 Ceremony prep 2026-09-20 ~01:20Z: Carter minted the key (keychain:approval-sender-key-412328bf) and printed the digest for his account; the digest is pasted into docs/proposals/sender-identity-hashed-2026-09.md on a branch so the primary tree stays clean. Gap found: after setup sender-key wrote the APPROVAL_SENDER_KEY line, eval of approval env did NOT export it (the verb prints only the names it knows), so the --id helper refused until the key was exported by hand from the keychain item. Until fixed, the listener restart needs the same hand export before approval up. Fix in the follow-up: approval env exports every line of the env file it can resolve, or the sender key joins the known-names list; doctor sender-mapping should say when the file names a key the env verb would not export.
+
+AC4 live on 2026-09-20 ~02:0xZ: this repository policy re-amended to the keyed form by Carter (approval policy apply docs/proposals/sender-identity-hashed-2026-09.md, attested seq 57505, PR 505 opened by the verb); daemon restarted with the key exported by hand (the approval env gap noted above). Live check: task.registered seq 57559, approval.requested 57560 (network.call, curl -sI https://approval.md), approval.granted seq 57575 from the phone with actor human:carter and payload.sender {channel telegram, hashed true, id hmac-sha256:86f6206b...}, executed under the token; approval log verify clean at 57590; zero occurrences of the raw account id in records after seq 57505, one hashed. The envelope for the check rides on this task file.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-senders.<channel> now accepts a KEYED digest, hmac-sha256:<hex>, beside the raw account id, so a published policy and a published log stop carrying the account. Carter ruled for the keyed form over a plain sha256 on 2026-09-19: a Telegram id is a ten-digit number and an unsalted digest of one is brute-forced in minutes. The key is an operator secret in APPROVAL_SENDER_KEY, minted and stored by a new HUMAN-ONLY approval setup sender-key, whose --id mode mints nothing and prints the exact mapping line and proposal pair for one account, which is the one step no agent can do. Decision and refusal records carry the digest as payload.sender.id with payload.sender.hashed true, in the form the MATCHED entry uses, so a mixed policy records each approver the way their own senders block is written and a reader can grep one for the other; a raw mapping records exactly what it always did. A keyed channel with no key in the process refuses EVERY decision on it under a new sender-key-unavailable naming the variable, never falling back to the raw comparison, because without the key the roster ambiguity check cannot be run at all. Doctor sender-mapping names the form and says whether the key resolves. Schema: the policy senders pattern widens, event payload.sender gains an optional hashed pinned by a conditional to the digest shape, the gesture-refusal code enum grows, and six fixtures cover both; refusal-unions 18.0.0 (17.0.0 skipped to avoid a collision with the APRV-379 lane), schema-validation 2.5.0, conformance 408/408. SPEC 5.2, 6.3/10.3 and the 11.2 refusal table amended in their own commit. Verified by twelve new cases in tests/sender-identity.test.ts, three of them end to end through the real Telegram callback and the real append path, asserting the account id is nowhere in the log; that suite is 44/44 exit 0, build, typecheck and lint clean, full npm test 4788/4811 with 22 pre-existing local SMTP failures on Node 26. AC4 is left unticked: re-amending this repository and taking one live approve is Carter, and the runbook is in the notes and in docs/proposals/sender-identity-hashed-2026-09.md.
+senders.<channel> accepts hmac-sha256:<hex> under APPROVAL_SENDER_KEY (approval setup sender-key mints it, --id prints the line); a keyed channel with no key refuses every tap; records carry the digest with hashed:true; doctor names the form; this repository re-amended on 2026-09-20 (seq 57505) and a live approve (seq 57575) carries the digest and no raw id.
 <!-- SECTION:FINAL_SUMMARY:END -->
