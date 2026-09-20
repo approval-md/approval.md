@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-20 21:13'
+updated_date: '2026-09-20 21:45'
 labels:
   - hermes
   - hook
@@ -28,3 +29,9 @@ The live probe of APRV-398 ran on 2026-09-21 (report in APRV-398 notes; captures
 - [ ] #3 the probe gains a modify-workdir trial and a fail_closed-absent pass, and its setup banner describes the --home case correctly
 - [ ] #4 APRV-398 AC1 is checked with the report in its notes; build, typecheck, lint, hook, hermes and conformance suites pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Probe addenda from 2026-09-21 (see APRV-398 notes): the fail-open results came from Hermes v0.21.3, which does not know fail_closed; re-run on the fresh main clone is pending. Add to this task: a documented version floor for fail_closed and a harness-version doctor pin; the gateway session cwd is the user home, so the docs and help must say --dir is mandatory in gateway deployments; the headless first-use consent case is still unprobed.
+<!-- SECTION:NOTES:END -->
