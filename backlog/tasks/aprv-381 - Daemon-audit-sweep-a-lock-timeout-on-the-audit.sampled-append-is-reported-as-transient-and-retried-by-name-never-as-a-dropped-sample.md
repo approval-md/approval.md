@@ -3,11 +3,11 @@ id: APRV-381
 title: >-
   Daemon audit sweep: a lock-timeout on the audit.sampled append is reported as
   transient and retried by name, never as a dropped sample
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-381'
 created_date: '2026-09-19 16:09'
-updated_date: '2026-09-20 12:43'
+updated_date: '2026-09-20 12:44'
 labels:
   - daemon
   - audit
@@ -56,6 +56,8 @@ SPEC 11.1 INVARIANTS TOUCHED. Every check-then-append still passes through compa
 OBSERVED IN PASSING, NOT FIXED, AND WORTH A TASK A HUMAN OPENS. The daemon end-to-end case holds the lockfile for a whole tick, and the DRIFT scan hits it too: the tick prints append-refused with envelope.drift for task-042 was not appended (lock-timeout). That is the same ambiguity this task removed for the sample, in a different sweep, and the fix would be the same shape. The test asserts only that nothing about the SAMPLE reads as a refusal, and says in a comment why the other line is left standing. Not expanded into this diff, and no follow-up task created, because the finalization guide reserves that for the human.
 
 VERIFICATION. build, typecheck and lint each exit 0. Suites: audit 41 tests 41 pass exit 0; daemon 38 tests 38 pass exit 0; the two together 79 pass 0 fail; the neighbours (audit-index, daemon-advance, daemon-advance-sweep, daemon-projection, daemon-tick-cost, concurrency, head-retry, evidence-append, log, log-anchor) 166 tests 166 pass 0 fail. Full npm test: 4932 tests, 4909 pass, 22 fail, 1 skipped, exit 1; all 22 are the pre-existing SMTP and email failures of this environment (adapter-email, cli-setup email probe, smtp-probe), every one of them the TLS servername-on-an-IP error, which matches the stated baseline of about 22 and touches nothing in this diff. The two held-lock tests each pay the real 2000 ms wait rather than injecting a shorter one, so the elapsed time is itself the evidence for the AC3 decision: a longer wait would show up as a slower test.
+
+Orchestrator review (Fable, 2026-09-20): accepted as built, skip-and-retry at the existing 2000 ms. The drift scan follow-up the lane named is filed as the task created just before this note.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
