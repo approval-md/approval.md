@@ -1258,6 +1258,122 @@ function gitCoverageSummary(
   };
 }
 
+/**
+ * The two refusal records `status` counts, and the key each is reported under
+ * (APRV-376).
+ *
+ * The event NAMES are matched here rather than imported from
+ * `core/decision-refusal.ts` and `core/gesture-refusal.ts`, and that is
+ * deliberate: both modules are writers on the append path, and the whole safety
+ * argument for those records is that nothing reads them from anywhere that
+ * decides. A report that filters on a string pulls in no writer, and the two
+ * suites that pin the module graph stay true without an exemption for this file.
+ */
+const REFUSAL_FAMILIES = {
+  decision: "audit.decision_refused",
+  gesture: "audit.gesture_refused",
+} as const;
+
+type RefusalFamily = keyof typeof REFUSAL_FAMILIES;
+
+/**
+ * How many of the newest refusals each family lists.
+ *
+ * Small and fixed on purpose. The COUNT answers "is this happening", and the
+ * point of the listing beside it is to hand an operator a seq to paste into
+ * `approval log tail` and an account to recognize. A row that grew with the log
+ * would push the rest of the report off a terminal for a fact that is
+ * informational, and the whole history is `approval log export` away.
+ */
+const RECENT_REFUSALS = 5;
+
+/** One refused decision or gesture, as the row lists it. */
+interface RefusalEntry {
+  seq: number;
+  /** The surface's own code, verbatim from the record. */
+  code: string;
+  /** The account it arrived from, when the record carries one. */
+  sender?: { channel: string; id: string; hashed?: true };
+}
+
+/** One family's state: how many, and the newest few. */
+interface RefusalFamilySummary {
+  count: number;
+  recent: RefusalEntry[];
+}
+
+/** A family with no records is absent, and so is the whole object when both are. */
+type RefusalSummaries = Partial<Record<RefusalFamily, RefusalFamilySummary>>;
+
+/** One record, read the way `status` reports it: verbatim, and nothing derived. */
+function refusalEntry(record: EventRecord): RefusalEntry {
+  const payload = record.payload ?? {};
+  // The event schema requires `code` on both types, so the fallback is for a
+  // reader of a log written by something else: a report that threw on a record
+  // it could not read would take the whole health report down with it.
+  const code = typeof payload["code"] === "string" ? payload["code"] : "(no code)";
+  const sender = payload["sender"];
+  if (sender === null || typeof sender !== "object") return { seq: record.seq, code };
+  const observed = sender as Record<string, unknown>;
+  const channel = observed["channel"];
+  const id = observed["id"];
+  if (typeof channel !== "string" || typeof id !== "string") return { seq: record.seq, code };
+  return {
+    seq: record.seq,
+    code,
+    sender: {
+      channel,
+      id,
+      // APRV-370's marker, carried only when the record carries it: a keyed
+      // digest and a raw account id are different things to go looking for.
+      ...(observed["hashed"] === true ? { hashed: true as const } : {}),
+    },
+  };
+}
+
+/**
+ * The refused decisions and refused gestures in this log (APRV-376).
+ *
+ * Both families were visible only through `approval log tail` and `approval log
+ * export` until this row existed. The fact an operator needs is small and the
+ * log is the wrong place to read it from: told that taps from an account they
+ * did not map are being refused, they want to know how many and from which
+ * account, and the chain is a poor answer to a question that size.
+ *
+ * INFORMATIONAL, on the terms `harness outcomes` and `git coverage` set: it
+ * moves neither `healthy` nor the exit code. A refusal is the gate having
+ * worked, and a report that went red because the gate refused a stranger would
+ * teach an operator to stop reading it. It reads only verified records (SPEC.md
+ * §11.1 invariant 1) because its caller passes only those, and it reads them
+ * only to report: nothing here authorizes, settles, charges or samples
+ * anything.
+ *
+ * A family with no records is ABSENT rather than zero, and the object is empty
+ * when both are, so a log with no refusals emits the object it always emitted.
+ * A zero here would be a row an operator scrolls past on every healthy
+ * repository, which is how the rows that matter stop being read.
+ */
+function refusalSummaries(records: readonly EventRecord[]): RefusalSummaries {
+  const summaries: RefusalSummaries = {};
+  for (const family of Object.keys(REFUSAL_FAMILIES) as RefusalFamily[]) {
+    const seen = records.filter((record) => record.event === REFUSAL_FAMILIES[family]);
+    if (seen.length === 0) continue;
+    summaries[family] = {
+      count: seen.length,
+      // Newest first: the reason to read this row at all is what just happened.
+      recent: seen.slice(-RECENT_REFUSALS).reverse().map(refusalEntry),
+    };
+  }
+  return summaries;
+}
+
+/** How the human rendering spells one entry's account. */
+function refusalSenderText(entry: RefusalEntry): string {
+  if (entry.sender === undefined) return "";
+  const keyed = entry.sender.hashed === true ? " (keyed)" : "";
+  return `  ${entry.sender.channel}:${entry.sender.id}${keyed}`;
+}
+
 export function commandStatus(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
@@ -1388,6 +1504,12 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     records: verification.status === "corrupt" ? null : verification.records,
   };
 
+  // APRV-376, and informational for the reason stated where it is computed: the
+  // two refusal families, counted, with the newest few of each. Neither the
+  // health line below nor the exit code reads it.
+  const refusals = refusalSummaries(records);
+  const refusalFamilies = Object.keys(refusals) as RefusalFamily[];
+
   // APRV-40. Timestamp anomalies (SPEC.md §8) are informational and deliberately
   // outside `healthy`: they are a judgment, not an integrity verdict. `verify`
   // already declined to refuse on them, and `status` does not get to overrule it
@@ -1450,6 +1572,10 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
+      // APRV-376. Present only when the log carries a refusal of either family,
+      // and each family present only when that family has one, so a repository
+      // where nothing has been refused emits the object it always emitted.
+      ...(refusalFamilies.length === 0 ? {} : { refusals }),
       // Present only while a window stands, exactly as `anomalies` and
       // `indeterminate` are: a repository with no window emits the object it
       // has always emitted, byte for byte.
@@ -1597,6 +1723,32 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
             : (coverage.reason ?? "unavailable"),
         ),
       },
+      // APRV-376. Its own INFORMATIONAL row, and printed only when the log
+      // carries a refusal of either family: a repository where nothing has been
+      // refused reads exactly as it always did, and a row saying "none" on every
+      // healthy repository is a row an operator learns to skip. The counts say
+      // whether this is happening; the lines under them hand over a seq to paste
+      // into `approval log tail` and an account to recognize.
+      ...(refusalFamilies.length === 0
+        ? []
+        : [
+            {
+              left: "refusals",
+              right: st.muted(
+                `${refusalFamilies
+                  .map((family) => `${String(refusals[family]?.count ?? 0)} ${family}`)
+                  .join(", ")} (reported; health unaffected)`,
+              ),
+              under: refusalFamilies.flatMap((family) =>
+                (refusals[family]?.recent ?? []).map(
+                  (entry) =>
+                    // The family is padded to the longer of the two names, so the
+                    // seqs line up under each other when both are listed.
+                    `${family.padEnd("decision".length)}  seq ${String(entry.seq)}  ${entry.code}${refusalSenderText(entry)}`,
+                ),
+              ),
+            },
+          ]),
       {
         // APRV-214. Its own row and not a footnote: while this says OPEN, the
         // policy is deciding nothing for the harness, and the person reading

@@ -119,6 +119,38 @@ const OPEN_OBJECT: JsonSchema = { type: "object" };
 const arrayOf = (items: JsonSchema): JsonSchema => ({ type: "array", items });
 
 /**
+ * One refusal family in `approval status` (APRV-376): how many records the log
+ * carries, and the newest few of them, newest first.
+ *
+ * `code` is the surface's own refusal code, copied verbatim from the record, and
+ * it is spelled here as a plain string rather than an enum on purpose. The two
+ * closed vocabularies live at the write boundary (`schema/event.schema.json`) and
+ * in `core/decision-refusal.ts` and `core/gesture-refusal.ts`; a third copy in a
+ * REPORT schema would refuse to describe a log it was older than, which is the
+ * wrong failure direction for a field that authorizes nothing.
+ *
+ * `sender` is the account the gesture arrived from, when the record carries one,
+ * in the form the record carries it: `hashed` marks APRV-370's keyed digest, and
+ * it is present only when the record says so.
+ */
+const REFUSAL_FAMILY: JsonSchema = object(
+  {
+    count: INTEGER,
+    recent: arrayOf(
+      object(
+        {
+          seq: INTEGER,
+          code: STRING,
+          sender: object({ channel: STRING, id: STRING, hashed: BOOLEAN }, ["channel", "id"]),
+        },
+        ["seq", "code"],
+      ),
+    ),
+  },
+  ["count", "recent"],
+);
+
+/**
  * Positional arguments, named in order. `items: false` closes the tail: an
  * unexpected argument is a usage error in the CLI and is one here too.
  */
@@ -1613,7 +1645,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "status",
     purpose:
-      "System HEALTH, from the log: attestation state, the latest chain verdict, dangling executions, indeterminate executions, budget headroom from a zero-cost probe, loop escalations, and the payload store's size. Exit 1 when any of those needs attention. `dangling` is executions the runtime meant to watch and did not, and never harness executions, which are terminal by design and gain no outcome; `indeterminate` is side effects that were attempted and whose fate nobody has established, and it appears only when there are some. This is what an operator must fix; `queue` is what a human must answer, and neither carries the other's content. Writes nothing.",
+      "System HEALTH, from the log: attestation state, the latest chain verdict, dangling executions, indeterminate executions, budget headroom from a zero-cost probe, loop escalations, and the payload store's size. Exit 1 when any of those needs attention. `dangling` is executions the runtime meant to watch and did not, and never harness executions, which are terminal by design and gain no outcome; `indeterminate` is side effects that were attempted and whose fate nobody has established, and it appears only when there are some. `refusals` counts the decisions and the gestures a decision surface would not take, with the newest few of each, and it appears only when the log carries one: it is informational, like `coverage`, because a refusal is the gate having worked. This is what an operator must fix; `queue` is what a human must answer, and neither carries the other's content. Writes nothing.",
     human_only: false,
     input: input({ flags: { ...POLICY_FLAGS, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS } }),
     output: object(
@@ -1651,6 +1683,20 @@ const VERBS: VerbSpec[] = [
         reconciliation: arrayOf(OPEN_OBJECT),
         payload_store: OPEN_OBJECT,
         anomalies: arrayOf(OPEN_OBJECT),
+        // APRV-376: the two refusal families, counted, with the newest few of
+        // each. INFORMATIONAL and outside `healthy` and the exit code, exactly
+        // as `anomalies` and `coverage` are: a refusal is the gate having
+        // worked. Present only when the log carries one of either family, and
+        // each family present only when it has one, so a repository where
+        // nothing has been refused emits the object it always emitted. Neither
+        // is reported anywhere else short of `approval log tail`.
+        refusals: object(
+          {
+            decision: REFUSAL_FAMILY,
+            gesture: REFUSAL_FAMILY,
+          },
+          [],
+        ),
         // APRV-214: present only while a window stands, so a repository with
         // none emits the object it always emitted. It counts toward `healthy`,
         // which is why it is reported here rather than only by `gate status`.
