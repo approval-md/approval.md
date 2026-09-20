@@ -4,9 +4,9 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
-## Unreleased 0.3.0
+## 0.3.0 — 2026-09-20
 
-Written on 2026-09-20 against `main` at `027f2d2`, 186 non-merge commits after
+Written on 2026-09-20 against `main` at `36018dc`, 192 non-merge commits after
 `v0.2.0`, all additive at the package boundary. The deprecated bare `supervised`
 alias still loads with a warning, so this is a minor bump. Not yet tagged or
 published: the version bump, the gated annotated tag and the Trusted Publishing
