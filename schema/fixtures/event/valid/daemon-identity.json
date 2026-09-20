@@ -1,0 +1,15 @@
+{
+  "seq": 61,
+  "ts": "2026-09-20T11:04:19Z",
+  "event": "audit.sampled",
+  "task": "task-311",
+  "action_key": "task-311:digest:2026-09-20",
+  "actor": "system:auditor",
+  "daemon": "daemon-3f2a9c11",
+  "payload": {
+    "rate": 0.1
+  },
+  "alg": "sha256/jcs",
+  "prev": "07453feb30c2b0b1a2806398cdd17b38d98f9abf52b8a75ca42878c9101d8264",
+  "hash": "c0a1dd6b0f5a9b7fe7cf7d90cbb4aa4cf0a1eb2d5c7318cbbbd7a2b9efc33150"
+}

@@ -1,0 +1,15 @@
+{
+  "seq": 63,
+  "ts": "2026-09-20T11:06:02Z",
+  "event": "audit.sampled",
+  "task": "task-311",
+  "action_key": "task-311:digest:2026-09-20",
+  "actor": "system:auditor",
+  "daemon": "Village Goa 1\nrate: 1.0",
+  "payload": {
+    "rate": 0.1
+  },
+  "alg": "sha256/jcs",
+  "prev": "07453feb30c2b0b1a2806398cdd17b38d98f9abf52b8a75ca42878c9101d8264",
+  "hash": "9d4c0be1a7fb25308c6ef4a1d0b39724ce85f16a2b0d7c39e8145af62b0c73d8"
+}
