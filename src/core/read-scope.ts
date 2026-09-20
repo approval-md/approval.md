@@ -180,9 +180,9 @@ export function effectiveReadRoots(options: {
  * APRV-397 adds the packaging readers, so the reads the new classifier rows
  * answer are scoped by the same arithmetic every other reader's are: `tar`,
  * `gunzip` and `base64` are `all` (their operands are files, and a flag value
- * that lands among the positionals resolves against the working directory, which
- * costs nothing — see the note below), and `openssl` is `after-pattern` because
- * its first positional is the digest subcommand and the files follow it. Only
+ * that lands among the positionals resolves against the working directory,
+ * which costs nothing: see the note below), and `openssl` is `after-pattern`,
+ * because its first positional is the digest subcommand and the files follow it. Only
  * the READ forms of those binaries ever reach this table: `tar -x`, a plain
  * `gunzip` and `base64 -o` take write classes in the classifier, and this module
  * scopes `read.shell` alone.

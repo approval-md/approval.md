@@ -4164,7 +4164,37 @@ semantic-version-shaped tag, `tag <name>`, `--tags`, or `--follow-tags` is
 that DELETES a remote ref — `--delete`, `-d`, or a colon refspec such as
 `:refs/heads/x` — is `vcs.ref.delete` with the ref names bound (APRV-352), and a
 tag deletion keeps `release.publish`; ordinary branch pushes retain their branch
-or trunk class. Claude file tools
+or trunk class.
+
+`git tag` splits on its flags since APRV-397: a LISTING (`-l`, `--list`, `-n`,
+`-n<num>`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`,
+`--color`, `--ignore-case`, `--omit-empty`, or no argument at all) is
+`read.shell`, rule `git-tag-read`, the same class `git log`, `git status` and
+`git branch` take for reading local repository metadata. Everything else stays
+`release.publish`: `-a`, `-d`, `-f`, `-s`, `-m`, a bare tag name, and any flag
+the listing allowlist does not name, so a future `git tag` option cannot arrive
+as a read. A positional under `-l` is a pattern rather than a name.
+
+The packaging and archive tools are classified too, for the same reason and in
+the same release (APRV-397): they were `unclassified`, so a verification could
+not run them and reached for `curl` and a script instead. `npm pack` is a
+workspace write of the tarball, scoped to `--pack-destination`, and
+`network.call` when a positional names a registry package; `npm init` writes
+`package.json`; a bare `npm --version`, `-v`, `-V`, `--help` or `-h` is a read,
+while every npm subcommand the table does not name keeps its `unclassified`
+deny; `tar -t` lists (a read) and `tar -x`/`-c` writes into `-C` or the archive
+`-f` names; `gunzip` reads only with `-c`/`--stdout` or `-t`/`--test` and
+otherwise replaces the file it names; `base64` reads unless `-o` names an output;
+`openssl dgst` (and the `md5`/`sha*` spellings) reads unless `-out` names one,
+while every other `openssl` subcommand stays unclassified. Each write is scoped
+by the arithmetic `rm` uses: a destination under a resolved scratch root or a
+relative one is `files.write.workspace`, and an absolute destination elsewhere, a
+`..` segment, an unreadable value, or a destination flag with nothing readable
+after it is `files.delete.out_of_scope`, rule `packaging-write-out-of-scope`,
+with the destination bound. A `tar` whose mode is not in its words is
+`hook-opaque`. `docs/claude-code-hook.md` holds the table and the reasoning.
+
+Claude file tools
 (Edit, Write, MultiEdit, NotebookEdit) and
 Cursor Write/Delete are gated only when the file is policy-protected
 (`APPROVAL.md`, `.approval/`, `CLAUDE.md`, `AGENTS.md`, `.claude/settings*`,
