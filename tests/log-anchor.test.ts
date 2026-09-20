@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -538,6 +538,235 @@ test("daemon: outside a repository the started line says so and the daemon runs"
   assert.equal(started.anchor.rev, null);
   assert.match(started.anchor.reason ?? "", /not inside a git repository/u);
   assert.equal(lineOf(events, "tick").anchor?.status, "skip");
+});
+
+// ===========================================================================
+// APRV-389 — a view the file has moved past is a READ, not a fork
+//
+// Observed 2026-09-19 in the primary checkout: `approval up` stopped
+// "anchor-diverged" after 1489 ticks, saying in one message that
+// refs/approval/advance/records-log-2026-09-19 anchored seq 55084 and "the
+// working log carries no record at that seq", AND that the committed chain was
+// "a prefix of the working chain" 171 records back. A read-only check a minute
+// later found the record the anchor named sitting at line 55084 of the working
+// log. The two sentences came from two different reads: the byte comparison from
+// this module's own `readFileSync`, the missing-record claim from the records the
+// tick had read before `approval log sync` rewrote the file underneath it.
+// ===========================================================================
+
+/**
+ * Drop everything after `keep` records, keeping the bytes that remain.
+ *
+ * NOT a forgery and nothing is written by hand: these are the same record bytes
+ * the real append path produced, and the result is a strict byte prefix of the
+ * file. It is the shape `approval log sync` leaves the working log in while its
+ * ceremony runs — the baseline write, then the fast-forward — and the shape a
+ * reader that lands mid-ceremony sees.
+ */
+function keepFirst(repo: Repo, keep: number): void {
+  const lines = readFileSync(repo.logPath, "utf8").split("\n").filter((line) => line.length > 0);
+  writeFileSync(repo.logPath, `${lines.slice(0, keep).join("\n")}\n`, "utf8");
+  assert.equal(verify(repo.logPath).status, "clean", "a truncated prefix still walks clean");
+  forgetAnchorBlobs();
+}
+
+/**
+ * A repository whose committed copy is anchored by a records advance, with the
+ * working log carrying records the anchor does not.
+ *
+ * Returns the view a reader held BEFORE the advance's records were in the file,
+ * which is the stale view the observation turns on.
+ */
+function advancedRepo(): { repo: Repo; stale: ReturnType<typeof records>; anchorRef: string } {
+  const repo = newRepo(2);
+  // The view: two records, read and held. Everything below happens after it.
+  const stale = records(repo.logPath);
+
+  appendRecord(repo.dir, "the record the advance published");
+  assert.equal(git(["add", "-A"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "records advance"], repo.dir).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.dir).code, 0);
+  // The anchor an advance leaves behind (APRV-204), set the way the verb sets
+  // it, so the check resolves the same kind of witness the observation names.
+  const anchorRef = "refs/approval/advance/records-log-2026-09-19";
+  assert.equal(git(["update-ref", anchorRef, "HEAD"], repo.dir).code, 0);
+
+  // And what the checkout appended after that: the file is ahead of the anchor,
+  // exactly as a machine that has been granting approvals is.
+  appendRecord(repo.dir, "after the advance-1");
+  appendRecord(repo.dir, "after the advance-2");
+  forgetAnchorBlobs();
+  return { repo, stale, anchorRef };
+}
+
+test("anchor: a view the file has moved past is a re-read, not a divergence", () => {
+  const { repo, stale, anchorRef } = advancedRepo();
+  assert.equal(stale[stale.length - 1]?.seq, 2, "the premise: the view ends before the anchor");
+
+  const outcome = checkLogAnchor({ logPath: repo.logPath, records: stale });
+  // The record the anchor names IS in the file, so there is no fork here and
+  // nothing to stop a daemon for.
+  assert.equal(outcome.status, "pass", JSON.stringify(outcome));
+  if (outcome.status !== "pass") throw new Error("unreachable");
+  assert.equal(outcome.anchor.rev, anchorRef);
+  assert.equal(outcome.anchor.head.seq, 3);
+  assert.equal(outcome.ahead, 2);
+  // And the check says which two reads disagreed, which is the fact an operator
+  // acts on: something rewrote the log under the reader.
+  assert.notEqual(outcome.reread, undefined, "the re-read was not reported");
+  assert.equal(outcome.reread?.viewHead?.seq, 2);
+  assert.equal(outcome.reread?.fileHead?.seq, 5);
+  assert.match(outcome.reread?.detail ?? "", /moved underneath the anchor check/u);
+});
+
+test("anchor: a view older than the anchor never produces the two-fact message", () => {
+  const { repo, stale } = advancedRepo();
+  const outcome = checkLogAnchor({ logPath: repo.logPath, records: stale });
+  // The sentence pair the observation recorded. Neither half may be reachable
+  // from a file that carries the anchored prefix.
+  if (outcome.status === "diverged") {
+    assert.fail(`a stale view refused the log: ${outcome.message}`);
+  }
+  assert.equal(outcome.status, "pass");
+  if (outcome.status !== "pass") throw new Error("unreachable");
+  assert.doesNotMatch(outcome.detail, /carries no record at that seq/u);
+  assert.doesNotMatch(outcome.detail, /two chains, not one/u);
+});
+
+test("anchor: a working log BEHIND the anchor with a stale view is still behind", () => {
+  // The other direction of the same window: the file is a strict prefix of the
+  // committed copy (a checkout that has just pulled), and the view is older
+  // still. `behind` is the honest answer and the repair is `log sync`.
+  const { repo, stale } = advancedRepo();
+  keepFirst(repo, 3);
+  keepFirst(repo, 1);
+
+  const outcome = checkLogAnchor({ logPath: repo.logPath, records: stale });
+  assert.equal(outcome.status, "behind", JSON.stringify(outcome));
+  if (outcome.status !== "behind") throw new Error("unreachable");
+  assert.equal(outcome.anchor.head.seq, 3);
+});
+
+test("anchor: a real divergence still refuses, and its message asserts no prefix", () => {
+  const repo = newRepo(3);
+  forge(repo, 2, "the record the committed copy has never seen");
+
+  const outcome = check(repo);
+  assert.equal(outcome.status, "diverged", JSON.stringify(outcome));
+  if (outcome.status !== "diverged") throw new Error("unreachable");
+  // Named: the seq the chains parted at and both heads (the shared vocabulary).
+  assert.match(outcome.message, /DIVERGED at seq 3/u);
+  // Not asserted: that either chain is a prefix of the other. That claim and
+  // this verdict cannot both be true, and the daemon stop of 2026-09-19 carried
+  // them in one sentence.
+  assert.doesNotMatch(outcome.message, /is a prefix of/u);
+  assert.doesNotMatch(outcome.message, /ahead by/u);
+});
+
+test("anchor: a re-serialized prefix refuses on the bytes and says so, without a prefix claim", () => {
+  const repo = newRepo(2);
+  // Every record hash survives; the bytes around them do not. The chain
+  // comparison therefore says the two copies AGREE, and the digest says they do
+  // not, so the message has to carry the second fact without quoting the first
+  // as "equal" or "ahead by n".
+  const text = readFileSync(repo.logPath, "utf8");
+  writeFileSync(repo.logPath, text.replace(/^\{/u, "{ "), "utf8");
+  forgetAnchorBlobs();
+
+  const outcome = checkLogAnchor({ logPath: repo.logPath, records: records(repo.logPath) });
+  assert.equal(outcome.status, "diverged", JSON.stringify(outcome));
+  if (outcome.status !== "diverged") throw new Error("unreachable");
+  assert.match(outcome.message, /do not hash to the copy committed at/u);
+  assert.match(outcome.message, /re-serialized, not re-chained/u);
+  assert.doesNotMatch(outcome.message, /is a prefix of/u);
+  assert.doesNotMatch(outcome.message, /same chain \(/u);
+});
+
+/**
+ * The one interposition in this suite, and what it is for.
+ *
+ * The false stop needs the file to change BETWEEN the tick's opening read and
+ * the anchor check's own read of it, and a tick is synchronous: nothing in this
+ * process can run in that window. The only other process a plain tick starts is
+ * git, which the check runs to resolve the anchor — so the writer rides in there.
+ *
+ * This is a REAL git, wrapped: on the first call made after the tick's opening
+ * read (detectable because that read publishes the verified-head snapshot, and
+ * with the cadence advance off nothing before the first tick reads the log), the
+ * wrapper copies the post-sync file over the working log and then delegates every
+ * argument to the real binary. The bytes it copies came from the real append path
+ * in this same repository. What the daemon then sees is what the primary checkout
+ * saw on 2026-09-19: a view from before a sync, and a file from after one.
+ */
+function wrapGitForOneCall(repo: Repo, synced: string): { dir: string; marker: string } {
+  counter += 1;
+  const dir = join(scratch, `git-wrapper-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  const marker = join(dir, "fired");
+  const real = (process.env.PATH ?? "")
+    .split(":")
+    .map((entry) => join(entry, "git"))
+    .find((candidate) => {
+      try {
+        return statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    });
+  assert.ok(real !== undefined, "no git on PATH to wrap");
+  const script = `#!/usr/bin/env node
+"use strict";
+const { existsSync, copyFileSync, writeFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const snapshot = ${JSON.stringify(join(dirname(repo.logPath), "verified-head.json"))};
+const marker = ${JSON.stringify(marker)};
+const synced = ${JSON.stringify(synced)};
+const log = ${JSON.stringify(repo.logPath)};
+if (existsSync(snapshot) && !existsSync(marker)) {
+  writeFileSync(marker, "", "utf8");
+  copyFileSync(synced, log);
+}
+const result = spawnSync(${JSON.stringify(real)}, process.argv.slice(2), { stdio: "inherit" });
+process.exit(result.status === null ? 1 : result.status);
+`;
+  writeFileSync(join(dir, "git"), script, { mode: 0o755 });
+  return { dir, marker };
+}
+
+test("daemon: a sync landing inside the anchor check is one line, not a stop", async () => {
+  const { repo } = advancedRepo();
+  // The file as a sync leaves it: the committed chain plus this checkout's own
+  // records. Kept aside, then the working log is rewound to the shape a reader
+  // catches mid-ceremony (a strict prefix of what git has at HEAD).
+  counter += 1;
+  const synced = join(scratch, `synced-${counter}.jsonl`);
+  writeFileSync(synced, readFileSync(repo.logPath, "utf8"), "utf8");
+  keepFirst(repo, 2);
+
+  const wrapper = wrapGitForOneCall(repo, synced);
+  const path = process.env.PATH ?? "";
+  let outcome: { events: DaemonEvent[]; kind: string };
+  try {
+    process.env.PATH = `${wrapper.dir}:${path}`;
+    outcome = await tick(repo);
+  } finally {
+    process.env.PATH = path;
+  }
+
+  assert.equal(existsSync(wrapper.marker), true, "the sync never landed inside the check");
+  // The file the check read carries the anchored record; the view did not. Pre
+  // APRV-389 this tick stopped the daemon.
+  assert.notEqual(outcome.kind, "anchor-diverged", JSON.stringify(outcome.events));
+  assert.equal(outcome.kind, "stopped", JSON.stringify(outcome.events));
+  const ticked = lineOf(outcome.events, "tick");
+  assert.equal(ticked.anchor?.status, "pass", JSON.stringify(ticked));
+  assert.equal(ticked.anchor?.seq, 3);
+  // One line, so the operator learns a writer moved the file underneath the loop.
+  const warnings = outcome.events.filter((event) => event.event === "warning");
+  const rereads = warnings.filter(
+    (event) => event.event === "warning" && event.code === "anchor-reread",
+  );
+  assert.equal(rereads.length, 1, JSON.stringify(warnings));
 });
 
 // ===========================================================================

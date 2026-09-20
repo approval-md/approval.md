@@ -45,7 +45,8 @@ import { dirname } from "node:path";
 import type { EventRecord } from "../core/log.js";
 import type { LogHead } from "../core/verify.js";
 import { verifyText } from "../core/verify.js";
-import { compareChains, describeDrift } from "../core/log-reconcile.js";
+import { compareChains, describeDrift, describeHead } from "../core/log-reconcile.js";
+import { readVerifiedRecords } from "../core/state.js";
 import { git, readBlob, repoPath, repoRoot } from "./git-scope.js";
 
 /**
@@ -369,6 +370,7 @@ export type AnchorCheck =
       ahead: number;
       workingBytes: number;
       detail: string;
+      reread?: AnchorReread;
     }
   | {
       status: "behind";
@@ -377,15 +379,37 @@ export type AnchorCheck =
       behind: number;
       workingBytes: number;
       detail: string;
+      reread?: AnchorReread;
     }
-  | { status: "skip"; reason: string }
+  | { status: "skip"; reason: string; reread?: AnchorReread }
   | {
       status: "diverged";
       code: AnchorRefusalCode;
       anchor: Anchor;
       workingBytes: number;
       message: string;
+      reread?: AnchorReread;
     };
+
+/**
+ * The working file moved underneath this check, so the check read it again
+ * (APRV-389).
+ *
+ * Carried by exactly the verdicts reached from that SECOND read. The caller's
+ * `records` are a view of the log taken at some earlier instant; the bytes this
+ * module reads are the file as it stands now. A `log sync`, a records pull, or
+ * any other writer rewriting `events.jsonl` under a running daemon makes the two
+ * disagree, and the disagreement is a fact about READS rather than about chains:
+ * it is reported, and nothing is ever decided from it.
+ */
+export interface AnchorReread {
+  /** Where the view the caller handed in ended. */
+  viewHead: LogHead | null;
+  /** Where the file ended when this check read it for itself. */
+  fileHead: LogHead | null;
+  /** The one line a daemon logs for it. */
+  detail: string;
+}
 
 /** What {@link checkLogAnchor} is asked. `records` is the VERIFIED working log. */
 export interface AnchorCheckOptions extends AnchorWhere {
@@ -396,12 +420,41 @@ export interface AnchorCheckOptions extends AnchorWhere {
    * Required rather than re-derived, for SPEC.md §11.1 invariant 1: this check
    * reads only verified records, and a check that walked the chain itself would
    * be a second opinion about a question its caller has already answered.
+   *
+   * It is a VIEW, and APRV-389 is what a view costs: the caller read it at some
+   * earlier instant and this module reads the file's bytes now. Where the two
+   * could disagree, the bytes decide and the view is re-derived from the file
+   * through the same sanctioned verified read the caller made, rather than being
+   * trusted or contradicted. See {@link AnchorReread}.
    */
   records: readonly EventRecord[];
   /** An explicit rev, instead of the default resolution. */
   rev?: string;
   schemaDir?: string;
 }
+
+/**
+ * What one comparison of (anchored copy, working bytes, a view of them) says.
+ *
+ * Internal, and one answer wider than {@link AnchorCheck}: `moved` is the two
+ * pieces of evidence contradicting EACH OTHER, which is never a verdict about
+ * the log.
+ */
+type AnchorComparison =
+  | { kind: "pass"; ahead: number }
+  | { kind: "behind"; behind: number }
+  | { kind: "diverged"; message: string }
+  /**
+   * The bytes and the view cannot both describe one file (APRV-389).
+   *
+   * Two shapes, one meaning. The bytes carry the anchored prefix, so the
+   * anchored head record is inside them by construction, while the view has no
+   * record at that seq, or carries a different hash there; or the bytes are
+   * shorter than the anchored copy while the view claims the anchored head. Both
+   * say the file changed between the caller's read and this one, and the answer
+   * is to read it again, never to report a fork.
+   */
+  | { kind: "moved"; detail: string };
 
 /**
  * Compare the working log's prefix against the newest committed copy of it.
@@ -417,6 +470,32 @@ export interface AnchorCheckOptions extends AnchorWhere {
  *    the anchor's hash. Implied by (1) whenever (1) holds, and stated anyway,
  *    because it is the fact a human reads in the message and the one that names
  *    which record the two copies stopped agreeing at.
+ *
+ * ## Which read each fact comes from (APRV-389)
+ *
+ * Fact 1 is read from the file here. Fact 2 was read from the caller's `records`,
+ * and on 2026-09-19 the primary checkout's daemon stopped `anchor-diverged` on
+ * the gap between them: `approval log sync` rewrote `events.jsonl` (baseline,
+ * fast-forward, restore) after the tick's opening read and before this module's
+ * `readFileSync`, so fact 1 passed on the new bytes while fact 2 failed on the
+ * old view. The message then said both "carries no record at that seq" and
+ * "ahead by 171: the committed chain is a prefix of the working chain", and the
+ * record the anchor named was sitting in the file all along.
+ *
+ * Two rules come out of that, and they hold for every caller:
+ *
+ *  - **The bytes decide, the view does not.** Once the anchored prefix is
+ *    present byte for byte, the anchored head record is INSIDE those bytes; a
+ *    view that disagrees is stale, which is a fact about reads. So a disagreement
+ *    between the two is `moved`, never `diverged`, and it is answered by reading
+ *    the file again, once, through {@link readVerifiedRecords}, the same
+ *    sanctioned verified read the caller used. Fail-closed is unaffected: every
+ *    `diverged` verdict is reached from the BYTES and confirmed by that second
+ *    read, so a real fork still stops a daemon.
+ *  - **A message never asserts two contradictory facts.** The chain comparison
+ *    is quoted only where it agrees that the chains parted, and there it names
+ *    the seq and both heads. Where the chains agree and the bytes do not, the
+ *    message says that, which is the honest description of a re-serialized log.
  */
 export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
   const root = repoRoot(dirname(options.logPath));
@@ -438,20 +517,24 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
       reason: `${anchor.rev} stopped being readable while it was being compared; nothing was decided from it`,
     };
   }
+  const anchored = found.copy;
 
-  let working: Buffer;
-  try {
-    working = readFileSync(options.logPath);
-  } catch (cause) {
-    return {
-      status: "skip",
-      reason: `${options.logPath} could not be read as bytes (${
-        cause instanceof Error ? cause.message : String(cause)
-      }), so it could not be compared against ${anchor.rev}`,
-    };
-  }
-
-  const workingHead = options.records[options.records.length - 1] ?? null;
+  /** The working log's bytes, or the skip that says why they could not be read. */
+  const readWorking = (): { ok: true; bytes: Buffer } | { ok: false; skip: AnchorCheck } => {
+    try {
+      return { ok: true, bytes: readFileSync(options.logPath) };
+    } catch (cause) {
+      return {
+        ok: false,
+        skip: {
+          status: "skip",
+          reason: `${options.logPath} could not be read as bytes (${
+            cause instanceof Error ? cause.message : String(cause)
+          }), so it could not be compared against ${anchor.rev}`,
+        },
+      };
+    }
+  };
 
   /**
    * Where the two chains stop agreeing, in `core/log-reconcile.ts`'s words.
@@ -461,91 +544,219 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
    * which of two chains is the log, and the sentence they read has to name the
    * seq. Re-walking the committed copy costs a chain walk, which is the right
    * price on a path that is about to stop a daemon.
+   *
+   * It is quoted only when it AGREES that the chains parted (APRV-389). When the
+   * records match as far as both copies go while the bytes do not, "ahead by n"
+   * would assert the committed copy is a prefix of this file, which is exactly
+   * what the digest just disproved; the same sentence would then carry a claim
+   * and its contradiction, which is how the 2026-09-19 stop read.
    */
-  const divergence = (): string => {
+  const divergence = (working: Buffer): string => {
     const compared = compareChains(
       { label: `the working log ${options.logPath}`, text: working.toString("utf8") },
-      { label: anchor.rev, text: found.copy.bytes.toString("utf8") },
+      { label: anchor.rev, text: anchored.bytes.toString("utf8") },
       options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
     );
-    return compared.ok ? ` ${describeDrift(compared.drift)}.` : "";
+    if (!compared.ok) return "";
+    if (compared.drift.relation === "diverged") return ` ${describeDrift(compared.drift)}.`;
+    return ` The records themselves agree as far as both copies go (working ${describeHead(
+      compared.drift.workingHead,
+    )}, committed ${describeHead(
+      compared.drift.committedHead,
+    )}), so the anchored records are all here with different bytes around them: this file has been re-serialized, not re-chained.`;
   };
 
-  // The working log is shorter than the anchored copy. That is either the
-  // ordinary state of a checkout that has just pulled (a strict prefix), or the
-  // truncation this whole check exists for.
-  if (working.length < anchor.byteLength) {
-    if (found.copy.bytes.subarray(0, working.length).equals(working)) {
+  /**
+   * One comparison, from one set of bytes and one view of them.
+   *
+   * Pure apart from the chain walk a divergence message pays for. Every branch
+   * that could be the two reads disagreeing rather than the two COPIES
+   * disagreeing answers `moved`.
+   */
+  const compare = (working: Buffer, records: readonly EventRecord[]): AnchorComparison => {
+    const workingHead = records[records.length - 1] ?? null;
+    const at = records.find((record) => record.seq === anchor.head.seq);
+    const viewCarriesAnchor = at !== undefined && at.hash === anchor.head.hash;
+
+    // The working log is shorter than the anchored copy. That is either the
+    // ordinary state of a checkout that has just pulled (a strict prefix), or the
+    // truncation this whole check exists for.
+    if (working.length < anchor.byteLength) {
+      if (anchored.bytes.subarray(0, working.length).equals(working)) {
+        return { kind: "behind", behind: anchor.head.seq - (workingHead?.seq ?? 0) };
+      }
+      if (viewCarriesAnchor) {
+        return {
+          kind: "moved",
+          detail: `the view carries the anchored record at seq ${String(
+            anchor.head.seq,
+          )} while the file on disk is ${String(working.length)} bytes, shorter than the ${String(
+            anchor.byteLength,
+          )} bytes ${anchor.rev} anchors`,
+        };
+      }
       return {
-        status: "behind",
-        anchor,
-        behind: anchor.head.seq - (workingHead?.seq ?? 0),
-        workingBytes: working.length,
-        detail: `the working log is a prefix of ${anchor.rev}: the committed copy carries ${String(
-          anchor.head.seq - (workingHead?.seq ?? 0),
-        )} record(s) this file does not, through seq ${String(anchor.head.seq)}`,
+        kind: "diverged",
+        message: `the working log ${options.logPath} is ${String(
+          working.length,
+        )} bytes and ${anchor.rev} anchors ${String(
+          anchor.byteLength,
+        )} bytes through seq ${String(anchor.head.seq)}, and the shorter file is not a prefix of the longer one. A committed copy of the log is the one witness a process with write access to this file cannot rewrite; these two are not the same chain.${divergence(
+          working,
+        )}`,
       };
     }
-    return {
-      status: "diverged",
-      code: "anchor-diverged",
-      anchor,
-      workingBytes: working.length,
-      message: `the working log ${options.logPath} is ${String(
-        working.length,
-      )} bytes and ${anchor.rev} anchors ${String(
-        anchor.byteLength,
-      )} bytes through seq ${String(anchor.head.seq)}, and the shorter file is not a prefix of the longer one. A committed copy of the log is the one witness a process with write access to this file cannot rewrite; these two are not the same chain.${divergence()}`,
-    };
-  }
 
-  const prefix = working.subarray(0, anchor.byteLength);
-  if (sha256(prefix) !== anchor.digest) {
-    return {
-      status: "diverged",
-      code: "anchor-diverged",
-      anchor,
-      workingBytes: working.length,
-      message: `the first ${String(anchor.byteLength)} bytes of ${
-        options.logPath
-      } do not hash to the copy committed at ${anchor.rev} (anchored through seq ${String(
-        anchor.head.seq,
-      )} ${anchor.head.hash}). The anchored prefix has been rewritten in this working file; a chain that re-verifies from genesis proves only that whoever rewrote it recomputed the hashes.${divergence()}`,
-    };
-  }
+    const prefix = working.subarray(0, anchor.byteLength);
+    if (sha256(prefix) !== anchor.digest) {
+      // A claim about bytes, which no view can excuse and none is consulted for:
+      // a view agreeing with the anchor's head says nothing about the bytes
+      // around the records, and those bytes are what this branch is about.
+      return {
+        kind: "diverged",
+        message: `the first ${String(anchor.byteLength)} bytes of ${
+          options.logPath
+        } do not hash to the copy committed at ${anchor.rev} (anchored through seq ${String(
+          anchor.head.seq,
+        )} ${anchor.head.hash}). The anchored prefix has been rewritten in this working file; a chain that re-verifies from genesis proves only that whoever rewrote it recomputed the hashes.${divergence(
+          working,
+        )}`,
+      };
+    }
 
-  const at = options.records.find((record) => record.seq === anchor.head.seq);
-  if (at === undefined || at.hash !== anchor.head.hash) {
-    return {
-      status: "diverged",
-      code: "anchor-diverged",
-      anchor,
-      workingBytes: working.length,
-      message: `${anchor.rev} anchors seq ${String(anchor.head.seq)} at ${
-        anchor.head.hash
-      } and the working log ${
-        at === undefined
-          ? "carries no record at that seq"
-          : `carries ${at.hash} there`
-      }. These are two chains, not one.${divergence()}`,
-    };
-  }
+    // The anchored prefix is present byte for byte, so the file carries the
+    // anchored head record: it is one of the records inside those bytes. A view
+    // that says otherwise is older (or newer) than the bytes, never a fork.
+    if (!viewCarriesAnchor) {
+      return {
+        kind: "moved",
+        detail: `the file carries the copy committed at ${anchor.rev} byte for byte through seq ${String(
+          anchor.head.seq,
+        )}, and the view handed in ${
+          at === undefined
+            ? `has no record at that seq (it ends at ${describeHead(workingHead)})`
+            : `carries ${at.hash} there`
+        }`,
+      };
+    }
 
-  const ahead = (workingHead?.seq ?? 0) - anchor.head.seq;
-  return {
-    status: "pass",
-    anchor,
-    ahead,
-    workingBytes: working.length,
-    detail:
-      ahead === 0
-        ? `the working log is byte-identical to the copy committed at ${anchor.rev} (${describeAnchor(
-            anchor,
-          )})`
-        : `the working log carries the copy committed at ${anchor.rev} (${describeAnchor(
-            anchor,
-          )}) byte for byte and is ahead by ${String(ahead)} record(s)`,
+    return { kind: "pass", ahead: (workingHead?.seq ?? 0) - anchor.head.seq };
   };
+
+  /** A comparison, dressed as the verdict callers branch on. */
+  const verdict = (
+    comparison: AnchorComparison,
+    working: Buffer,
+    reread: AnchorReread | null,
+  ): AnchorCheck => {
+    const carry = reread === null ? {} : { reread };
+    switch (comparison.kind) {
+      case "pass":
+        return {
+          status: "pass",
+          anchor,
+          ahead: comparison.ahead,
+          workingBytes: working.length,
+          detail:
+            comparison.ahead === 0
+              ? `the working log is byte-identical to the copy committed at ${
+                  anchor.rev
+                } (${describeAnchor(anchor)})`
+              : `the working log carries the copy committed at ${anchor.rev} (${describeAnchor(
+                  anchor,
+                )}) byte for byte and is ahead by ${String(comparison.ahead)} record(s)`,
+          ...carry,
+        };
+      case "behind":
+        return {
+          status: "behind",
+          anchor,
+          behind: comparison.behind,
+          workingBytes: working.length,
+          detail: `the working log is a prefix of ${anchor.rev}: the committed copy carries ${String(
+            comparison.behind,
+          )} record(s) this file does not, through seq ${String(anchor.head.seq)}`,
+          ...carry,
+        };
+      case "diverged":
+        return {
+          status: "diverged",
+          code: "anchor-diverged",
+          anchor,
+          workingBytes: working.length,
+          message: comparison.message,
+          ...carry,
+        };
+      case "moved":
+        // Two reads in a row could not agree with each other. A check that could
+        // not look must not report a pass, and it must not report a fork either:
+        // nothing here has contradicted the anchor, so there is nothing to
+        // refuse, and the next tick asks again over bytes that have settled.
+        return {
+          status: "skip",
+          reason: `${options.logPath} changed underneath this check twice (${comparison.detail}), so nothing was decided from it. A writer is rewriting the log; \`approval log verify --anchor\` once it is quiet says whether the committed copy is still carried.`,
+          ...carry,
+        };
+    }
+  };
+
+  const first = readWorking();
+  if (!first.ok) return first.skip;
+  const opening = compare(first.bytes, options.records);
+  if (opening.kind === "pass" || opening.kind === "behind") {
+    return verdict(opening, first.bytes, null);
+  }
+
+  /**
+   * The second read (APRV-389), on the two paths that would otherwise end a run.
+   *
+   * `moved` means the view and the bytes disagreed; `diverged` means this check
+   * is about to stop a daemon or fail a verify. Both re-read the file, and the
+   * records come from {@link readVerifiedRecords} with the cache off: a cold walk
+   * from genesis, independent of whatever any process in this program has cached,
+   * which is the right price where the alternative is a false stop or a missed
+   * fork. The bytes are re-read too, so the pair belongs to one instant of the
+   * file as closely as two system calls can.
+   */
+  const again = readWorking();
+  if (!again.ok) return again.skip;
+  const fresh = readVerifiedRecords(options.logPath, {
+    ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
+    cache: null,
+  });
+  if (!fresh.ok) {
+    return {
+      status: "skip",
+      reason: `${options.logPath} did not verify when this check read it again (${fresh.code}): ${fresh.message} Nothing was decided from it, and the anchor comparison is not the verdict to reach for a log that does not verify.`,
+    };
+  }
+  const last = options.records[options.records.length - 1];
+  const viewHead: LogHead | null = last === undefined ? null : { seq: last.seq, hash: last.hash };
+  const fileHead = fresh.head;
+  /**
+   * Whether the re-read is worth reporting, which is not the same question as
+   * whether it happened.
+   *
+   * A confirmed divergence over bytes nobody touched re-read for confidence and
+   * has nothing to say about reads; the marker is for the case where the view and
+   * the file were genuinely two different things, because that is the fact an
+   * operator acts on (something is rewriting the log) and the one this check used
+   * to report as a fork.
+   */
+  const shifted =
+    opening.kind === "moved" ||
+    viewHead?.seq !== fileHead?.seq ||
+    viewHead?.hash !== fileHead?.hash;
+  const reread: AnchorReread = {
+    viewHead,
+    fileHead,
+    detail: `the working log moved underneath the anchor check: the view it was handed ends at ${describeHead(
+      viewHead,
+    )} and the file itself ends at ${describeHead(
+      fileHead,
+    )}; the comparison was made again from the file. A \`log sync\` or a records pull rewriting \`events.jsonl\` under a running daemon is the ordinary cause.`,
+  };
+  return verdict(compare(again.bytes, fresh.records), again.bytes, shifted ? reread : null);
 }
 
 /** One anchor, as messages and rows spell one. */
