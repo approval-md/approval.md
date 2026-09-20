@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-hermes'
 created_date: '2026-09-20 07:52'
-updated_date: '2026-09-20 09:28'
+updated_date: '2026-09-20 21:13'
 labels:
   - hermes
   - hook
@@ -166,6 +166,8 @@ FOLLOW-UPS FILED: APRV-399 the Agent Village Hermes skill, APRV-400 the Python p
 Orchestrator review (Fable, 2026-09-20), three fixes before the PR. (1) The verb registry entry said the deny was always at exit 0 while the code and every other doc say exit 2; the text and the exit_codes table now match the code. (2) The help text's own YAML block omitted the --timeout 4m its prose calls mandatory; added on both entries, matching docs/hermes-hook.md. (3) The classifier recognises the Hermes organ by a .hermes path segment and reads no environment, so a HERMES_HOME whose last segment is spelled otherwise (Carter's install at dev/hermes/home) is not protected as policy.core; documented as a limit in docs/hermes-hook.md under Installing it, and the probe runbook now begins by renaming that home to dev/hermes/.hermes and exporting HERMES_HOME accordingly. Verification after the fixes: build, typecheck and lint exit 0; the seventeen-suite targeted matrix passes except one pre-existing environmental failure in cli-instructions (better-sqlite3 in this worktree is compiled for an older Node ABI; unrelated to the diff, CI on Node 22 is the truth); approval hook hermes --help prints the timeout; classify answers harness.launch.hermes for hermes, read.file.out_of_scope for a read of the home config, and policy.core for a write to it.
 
 PR 510 opened 2026-09-20 with the merge armed (auto-merge enabled, merge queue). Filings APRV-399, 400 and 401 ride it.
+
+LIVE PROBE REPORT, 2026-09-21, Carter's hand, on the by-hand install at /Users/carter/dev/hermes/.hermes (renamed from home so the classifier recognises it). 38 envelopes captured to /Users/carter/dev/hermes/probe/envelopes.jsonl. Section 1: FAILS OPEN IN 3 OF 3 TRIALS DESPITE fail_closed true (crash, hang, garbage all wrote their file); the fail_closed-absent pass was not run. Envelope: snake_case, top-level keys cwd, extra, hook_event_name, profile, session_id, tool_input, tool_name; events pre_tool_call and post_tool_call both fired. Tools seen: terminal (tool_input keys: command ONLY, no workdir passed by the model), write_file (content, path), patch (new_string, old_string, path), read_file (limit, path), execute_code (code). execute_code was refused before it ran, twice (the model retried once). Dialects under fail_closed true: deny-action-exit2, deny-action, deny-decision, deny-exit2 and deny-mixed all BLOCKED; allow-empty-object, allow-empty and allow-action-allow all ALLOWED. So Hermes tolerates a superset (unlike Muse) and an unrecognised directive value falls through to allow. First envelope verbatim: hook_event_name pre_tool_call, tool_name terminal, tool_input command ls -la, session_id 20260920_132723_8ef6e3, cwd the scratch project, profile default, extra with task_id, tool_call_id, turn_id, api_request_id, middleware_trace, telemetry_schema_version hermes.observer.v1. Source checks the same morning: the payload cwd is Path.cwd() of the Hermes process; the terminal keeps a per-session recorded cwd that cd moves; all four file tools resolve relative paths against that recorded cwd. Consequence and the fail-closed remedy are filed as the follow-up task created just before this note. The Telegram gateway pass is still to run.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
