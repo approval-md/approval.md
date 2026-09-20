@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane-383'
 created_date: '2026-09-19 16:18'
-updated_date: '2026-09-20 14:01'
+updated_date: '2026-09-20 14:04'
 labels:
   - daemon
   - identity
@@ -84,6 +84,8 @@ SPEC HUNKS PROPOSED, NOT APPLIED, and both are in design/hosted-daemon-identity.
 VERIFICATION. build, typecheck and lint exit 0. Targeted: daemon-identity 15 pass 0 fail (new suite); daemon 42 pass 0 fail (five new end-to-end cases); log, event-schema, fixtures, policy-load, conformance, conformance-regen, cli-status, cli-doctor, cli-long-help, cli-instructions, docs-guard all pass. node conformance/run.mjs: 458 vectors, 458 passed, 0 failed, 176 controls, manifest ok. Full npm test: 5024 tests, 5001 pass, 22 fail, exit 1, and all 22 are the known SMTP baseline on Node 26 (adapter-email, smtp-probe and the four setup adapter email cases in cli-setup); nothing outside those three files fails.
 
 HOOK REFUSALS HIT. Two, both from my own tooling habits rather than from the task: node -e for a one-line JSON read was denied hook-opaque (used /usr/bin/grep and a scratch read instead), and a python3 heredoc was denied hook-unclassified. Neither was retried. Nothing was gated, nothing reached the phone, and no envelope was needed: every file this task touched is source, tests, fixtures, docs or design, and the design/ write classified policy.edit and was allowed.
+
+Orchestrator review (Fable, 2026-09-20): accepted as built. Checked that the stamp and the allowlist refusal apply only inside a daemon process (isDaemonProcess), so CLI and hook appends are untouched; the field rides the chain hash and reaches no payload hash or token; a caller-supplied daemon field on EventInput is ignored. SPEC hunks stay proposed in design/hosted-daemon-identity.md section 7 for the human.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
