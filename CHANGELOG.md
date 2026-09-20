@@ -6,10 +6,11 @@ markers.
 
 ## Unreleased 0.3.0
 
-185 commits since `v0.2.0`, all additive at the package boundary. The deprecated
-bare `supervised` alias still loads with a warning, so this is a minor bump. Not
-yet tagged or published: the version bump, the gated annotated tag and the
-Trusted Publishing run are the remainder of APRV-371.
+Written on 2026-09-20 against `main` at `027f2d2`, 186 non-merge commits after
+`v0.2.0`, all additive at the package boundary. The deprecated bare `supervised`
+alias still loads with a warning, so this is a minor bump. Not yet tagged or
+published: the version bump, the gated annotated tag and the Trusted Publishing
+run are the remainder of APRV-371.
 
 ### Gate and guard
 
