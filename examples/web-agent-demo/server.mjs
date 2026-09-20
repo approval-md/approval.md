@@ -102,6 +102,13 @@ import { createWriteStream, existsSync, mkdirSync, readFile, writeFileSync } fro
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  agentConfigDirFor,
+  agentCredentialNames,
+  agentEnv,
+  agentHomeFor,
+} from "./agent-env.mjs";
+
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_DIR = join(HERE, "public");
 /** examples/web-agent-demo/ -> <repo>/dist/src/cli/main.js */
@@ -193,27 +200,19 @@ const TASKS_DIR = join(DEMO_DIR, "tasks");
 const MCP_CONFIG_PATH = join(TASKS_DIR, "mcp-config.json");
 
 /**
- * The agent child's entire world outside the repository (APRV-177).
+ * The agent child's entire world outside the repository (APRV-177), defined in
+ * `./agent-env.mjs` — which holds the whole argument, and which the demo's own
+ * preflight and tests import so that there is one answer and not three.
  *
- * Before this existed the child was handed the operator's `HOME`, and a
- * `claude -p` given the operator's home directory is given the operator: their
- * installed plugins, their connected MCP servers, their user memory, their
- * slash commands and their hooks all loaded into a session an attendee is
- * typing prompts at. `--allowedTools mcp__approval__*` kept any of it from
- * being *used* silently, which is not the same as it not being there — a demo
- * that behaves differently on every laptop, and puts the operator's setup on a
- * projector, is a demo with an unowned dependency.
- *
- * So the child gets a home the demo owns, generated fresh at startup and thrown
- * away with the instance: `HOME` here, `CLAUDE_CONFIG_DIR` at `claude-config/`
- * inside it, and in that directory exactly two files this file writes — a
- * settings file with no hooks and no plugins, and a `CLAUDE.md` that says what
- * the session is. The approval MCP server is passed on the command line with
- * `--strict-mcp-config`, so it is not merely the first server on the list: it
- * is the only one that can be on it.
+ * The short form: the child gets a home the demo owns, generated fresh at
+ * startup and thrown away with the instance, holding exactly two files this
+ * file writes — a settings file with no hooks and no plugins, and a `CLAUDE.md`
+ * that says what the session is. The approval MCP server is passed on the
+ * command line with `--strict-mcp-config`, so it is not merely the first server
+ * on the list: it is the only one that can be on it.
  */
-const AGENT_HOME = join(DEMO_DIR, "agent-home");
-const AGENT_CONFIG_DIR = join(AGENT_HOME, "claude-config");
+const AGENT_HOME = agentHomeFor(DEMO_DIR);
+const AGENT_CONFIG_DIR = agentConfigDirFor(DEMO_DIR);
 const AGENT_SETTINGS_PATH = join(AGENT_CONFIG_DIR, "settings.json");
 const AGENT_MEMORY_PATH = join(AGENT_CONFIG_DIR, "CLAUDE.md");
 
@@ -658,78 +657,6 @@ const SYSTEM_CONTRACT = [
   "print an execution token.",
 ].join("\n");
 
-/**
- * The credential names that cross into the child, and the complete list of
- * them (APRV-177).
- *
- * This used to be the prefix test `ANTHROPIC_*` / `CLAUDE_*`, which is the
- * wrong shape for the job: it passes whatever the operator's shell happens to
- * hold under those prefixes, including `CLAUDE_CONFIG_DIR` itself, which would
- * hand the child straight back the personal configuration the rest of this
- * change exists to keep out of it. An allowlist can only pass what is on it.
- *
- * `CLAUDE_CODE_OAUTH_TOKEN` is the documented path: the child's `HOME` is the
- * demo's, so a keychain login in the operator's account is invisible to it and
- * a token from `claude setup-token` is what actually authenticates. The
- * `ANTHROPIC_*` three are the API-key alternative for a machine set up that
- * way.
- */
-const AGENT_CREDENTIAL_ENV = [
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_MODEL",
-];
-
-/**
- * The environment the agent child gets: PATH, a home the demo generated, and
- * exactly the credential this server was given. Nothing else.
- *
- * The read verbs run with PATH and nothing else, and the agent would too if it
- * did not need to authenticate. What it does NOT get is as deliberate:
- *
- *   - not the operator's `HOME`, and so not their plugins, their connected MCP
- *     servers, their memory, their slash commands or their hooks (APRV-177 —
- *     see {@link AGENT_HOME});
- *   - not the gate's own secrets. `APPROVAL_HUMAN` would let the child speak
- *     as a human, and the vault passphrase and the Telegram token are the
- *     approver's, not the agent's. This server should not be holding any of
- *     them in the first place (it warns at startup if it is), and it certainly
- *     does not hand them on;
- *   - not any other variable of the operator's shell, whatever it is named.
- *     The list is closed, so a name nobody thought about here does not travel.
- *
- * `XDG_*` are pinned under the demo home rather than left unset, because an
- * unset one falls back to `~/.config` and `~/.cache` — which, with `HOME`
- * already redirected, is harmless, and pinning them says so out loud instead of
- * relying on it.
- */
-function agentEnv() {
-  const env = {
-    PATH: process.env.PATH ?? "",
-    HOME: AGENT_HOME,
-    CLAUDE_CONFIG_DIR: AGENT_CONFIG_DIR,
-    XDG_CONFIG_HOME: join(AGENT_HOME, ".config"),
-    XDG_CACHE_HOME: join(AGENT_HOME, ".cache"),
-    XDG_DATA_HOME: join(AGENT_HOME, ".local", "share"),
-    NO_COLOR: "1",
-  };
-  for (const name of AGENT_CREDENTIAL_ENV) {
-    const value = process.env[name];
-    // Belt and braces: no gate credential can wear one of these names by
-    // accident either.
-    if (value === undefined || /APPROVAL|VAULT|TELEGRAM|TG_/u.test(name)) continue;
-    env[name] = value;
-  }
-  return env;
-}
-
-/** Which credential names actually made the crossing. For the banner. */
-function agentCredentialNames() {
-  return AGENT_CREDENTIAL_ENV.filter((name) => process.env[name] !== undefined);
-}
-
 /** The argv for one agent run. Arrays throughout: no shell, ever. */
 function agentArgv(promptText) {
   return [
@@ -1016,7 +943,7 @@ function finishTask(task, state, note) {
 function spawnAgent(task) {
   const child = spawn(CLAUDE_BIN, agentArgv(task.prompt), {
     cwd: DEMO_DIR,
-    env: agentEnv(),
+    env: agentEnv(DEMO_DIR),
     stdio: ["ignore", "pipe", "pipe"],
   });
   task.pid = child.pid ?? null;

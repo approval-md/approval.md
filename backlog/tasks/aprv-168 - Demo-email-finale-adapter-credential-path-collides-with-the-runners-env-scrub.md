@@ -7,38 +7,12 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-08-31 00:01'
-updated_date: '2026-09-02 08:00'
+updated_date: '2026-09-19 23:56'
 labels:
   - demo
   - design
 dependencies: []
 ordinal: 147000
-approval:
-  origin:
-    app: manual
-    created_by: 'agent:fable'
-  route:
-    assignee: 'agent:fable'
-    rationale: >-
-      Branch adapter-credentials carries the APRV-169 + APRV-168 commits,
-      including a SPEC.md 10.4 amendment authored in a spawned agent worktree
-      where protected-path prompts may not fire (APRV-151 gap). Publishing the
-      branch for PR review is routed through the gate explicitly, per the
-      APRV-159 precedent. Verified before request: 2415/2415 tests, lint
-      clean, conformance 106 controls clean.
-  state: executed
-  actions:
-    - class: policy.edit
-      summary: >-
-        git push origin adapter-credentials from /Users/carter/dev/approval-md:
-        publish APRV-169 (credentials resolve before token consumption) and
-        APRV-168 (scoped vault-passphrase self-resolution inside a consumed
-        token window) with their SPEC 10.4 amendment, pending sign-off, for PR
-        review. Base origin/main 64f9d0a; commits e2784a1, d733677.
-      reversible: true
-      est_cost_usd: '0'
-      idempotency_key: 'aprv-168:publish-adapter-credentials:2026-08-31'
-      payload_hash: '4db66385b232ab385e94371307a98d54441f98c8acd93bb7f6fb84bf6f180fa2'
 ---
 
 ## Description
@@ -57,10 +31,13 @@ Found during APRV-157 (runbook): the web-agent demo's email finale routes adapte
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. APRV-169 (C) lands first on the shared branch; B builds on its final contract shape.
-2. Add scoped credential self-resolution: vault passphrase lookup falls back, only inside token-holding adapter execution, to resolving the policy-named variable via .approval/env (keychain: refs included).
-3. SPEC 10.4 amendment sentence (gated edit).
-4. Tests: resolution works with a scrubbed env inside a token window; unreachable without a token; secret absent from argv/log; demo rehearsal AC left for the phone-in-the-loop pass.
+1. ROOT CAUSE (proven by probe, 2026-09-19): the scoped fallback (adapters/env-passphrase.ts, APRV-168) and the resolve-before-consume ordering (adapters/contract.ts resolveRequiredCredentials, APRV-169) are both live and both correct. What fails is the keychain lookup itself: defaultSourceRunner.keychain in src/core/env-file.ts spawns security find-generic-password with the ambient environment, and macOS resolves the keychain SEARCH LIST through HOME. The demo server runs the agent child with HOME under the instance (agent-home), so the login keychain is not in the search list and every keychain: reference in that child returns errSecItemNotFound. Probe evidence: security list-keychains under a redirected HOME returns only /Library/Keychains/System.keychain and default-keychain fails; the same call with HOME pinned to the passwd home returns the login keychain. os.userInfo().homedir comes from the passwd database and is unaffected by HOME; os.homedir() follows HOME and is the wrong source.
+2. FIX (one seam, the same resolver approval env uses): defaultSourceRunner.keychain retries the lookup once with HOME pinned to the passwd home when the first attempt failed and the ambient HOME differs. No new authority: the same uid can already spawn security with any HOME, and the keychain ACL and unlock state are the real controls. Refusal semantics unchanged (the first attempt wins when the retry also fails).
+3. The scoping is untouched: the adapter still reaches .approval/env only through passphraseUnderGrant, which needs an ExecutionGrant the contract mints. No secret enters argv, env, output or log on either path.
+4. Extract the demo server child environment into examples/web-agent-demo/agent-env.mjs (agentEnv, agentHomeFor, agentConfigDirFor, the credential allowlist and the scrub). server.mjs imports it with no behaviour change, so the scrub has one definition that the preflight and the tests can use verbatim.
+5. Preflight: demo-provision.mjs --check gains a child-credentials step that runs approval env --check --json in the child scrubbed shape and fails when the policy named vault passphrase variable does not resolve there. No token, no send, no value printed.
+6. Tests through the real verbs: a stub security on PATH keyed on HOME (reproduces the live failure and proves the repair) in tests/cli-env.test.ts; a new end-to-end test that runs approval adapter email in the servers own scrubbed child environment with a stubbed keystore and the mock SMTP, asserting execution.completed, a clean chain, the retry shape, and that the passphrase reaches no stream and no log byte; plus the no-token negative.
+7. Docs: runbook beat 4 (the pre-APRV-169 claim that the token is burned before the vault opens is stale and gets corrected; the stage recovery paragraph stays because credential-unavailable is still reachable for other reasons) and examples/email-demo.md.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

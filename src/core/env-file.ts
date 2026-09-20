@@ -24,6 +24,8 @@
  *
  * - `keychain:<service>` — macOS, `security find-generic-password -a "$USER"
  *   -s <service> -w`. The value comes back on stdout and is never in an argv.
+ *   A failed lookup is retried once with `HOME` pinned to the passwd home,
+ *   because macOS finds the login keychain through `HOME` (APRV-168).
  * - `secret-service:<label>` — Linux desktop, `secret-tool lookup approval
  *   <label>`. Same property.
  * - `env:` — inherited from the ambient environment. A documentation form: it
@@ -85,7 +87,7 @@
  * in a refusal, a message, or a `source` label on any path.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -690,6 +692,9 @@ function stripOneNewline(text: string): string {
  * empty output when the lookup matches nothing. Anything else is
  * {@link "helper-failed"}, which is the honest answer for a locked keyring or a
  * D-Bus that is not running: the repair is not "store the item".
+ *
+ * The keychain lookup also carries the `HOME` repair APRV-168 found: see the
+ * comment on the retry inside {@link defaultSourceRunner}.
  */
 /**
  * The prefix a deferred lookup carries. See {@link NON_RESOLVING_RUNNER}.
@@ -729,14 +734,74 @@ export const NON_RESOLVING_RUNNER: SourceRunner = {
   },
 };
 
+/**
+ * The account owner's home directory AS THE PASSWD DATABASE HAS IT, or `null`.
+ *
+ * Deliberately not `os.homedir()`, which returns `$HOME` when it is set and so
+ * answers with whatever a caller's parent put there. `os.userInfo()` reads the
+ * passwd entry for this uid, which is what macOS itself means by "this user's
+ * home". Wrapped because `userInfo()` throws for a uid with no passwd entry.
+ */
+function passwdHome(): string | null {
+  try {
+    const home = userInfo().homedir;
+    return typeof home === "string" && home.length > 0 ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One `security find-generic-password`, optionally with `HOME` pinned. */
+function findGenericPassword(
+  service: string,
+  account: string,
+  home: string | null,
+): SpawnSyncReturns<string> {
+  return spawnSync(
+    "security",
+    ["find-generic-password", "-a", account, "-s", service, "-w"],
+    home === null
+      ? { encoding: "utf8" }
+      : { encoding: "utf8", env: { ...process.env, HOME: home } },
+  );
+}
+
 export const defaultSourceRunner: SourceRunner = {
   keychain(service: string): SourceOutcome {
     const account = process.env["USER"] ?? userInfo().username;
-    const result = spawnSync(
-      "security",
-      ["find-generic-password", "-a", account, "-s", service, "-w"],
-      { encoding: "utf8" },
-    );
+    let result = findGenericPassword(service, account, null);
+
+    // APRV-168: `security` finds the LOGIN KEYCHAIN through `$HOME`.
+    //
+    // The keychain search list is a per-user preference, and the Security
+    // framework reads preferences from the home directory the environment
+    // names. A process whose `HOME` points somewhere else therefore searches a
+    // list holding only `/Library/Keychains/System.keychain` — no login
+    // keychain, no default keychain, and `errSecItemNotFound` (44) for an item
+    // that is plainly there in the operator's own terminal. Observed on
+    // 2026-09-19, live, in the web-agent demo's finale: the demo server gives
+    // the agent child a `HOME` under the instance so that no operator plugin,
+    // hook or memory file reaches an attendee's session, and the adapter in
+    // that child, holding a token a human had just approved, could not resolve
+    // the `keychain:` line the instance's own `.approval/env` names.
+    //
+    // So a failed lookup is retried once with `HOME` pinned to the passwd
+    // home. That grants nothing: any process running as this uid can spawn
+    // `security` with any `HOME` it likes, and what actually guards a keychain
+    // item is the keychain's lock state and the item's ACL, both untouched
+    // here. What it removes is an accidental dependency on an inherited
+    // variable that has nothing to do with credentials.
+    //
+    // The first attempt's answer is the one reported when the retry does not
+    // succeed, so every refusal below means exactly what it meant before.
+    if (result.error === undefined && result.status !== 0) {
+      const home = passwdHome();
+      if (home !== null && process.env["HOME"] !== home) {
+        const retried = findGenericPassword(service, account, home);
+        if (retried.error === undefined && retried.status === 0) result = retried;
+      }
+    }
+
     if (result.error !== undefined) {
       const code = (result.error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
