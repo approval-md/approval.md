@@ -74,13 +74,13 @@ classes:
 
 Class names describe actions; they do not install an integration for them. `supervised-live` needs a `live_rate` and sampling setup. The deprecated `supervised` spelling remains an alias of `supervised-retro`.
 
-After reviewing a changed policy, attest its exact bytes:
+An edit invalidates the previous attestation. To land a change, run the amendment ceremony: it shows the semantic diff, attests the exact bytes, and commits the policy and the log together. In a git repository, add `--pr` and it opens the pull request for you.
 
 ```sh
-approval policy attest --as human:you
+approval policy amend --require-load --as human:you
 ```
 
-An edit invalidates the previous attestation. Loosen some rules, tighten others, re-attest, keep going. [Policy details](docs/README-extended.md#define-what-needs-approval).
+`approval policy attest --as human:you` is the bare attestation for a policy you have already reviewed by other means. Loosen some rules, tighten others, amend, keep going. [Policy details](docs/README-extended.md#define-what-needs-approval).
 
 <a id="the-other-half-of-the-word"></a>
 

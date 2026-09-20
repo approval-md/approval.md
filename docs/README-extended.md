@@ -258,6 +258,8 @@ These are literal files or directory prefixes, not globs. Core gate configuratio
 
 For policy changes, use the `approval policy amend` workflow. It presents semantic changes to resolutions, approvers, defaults, and limits. `--require-load` refuses to attest a policy that does not load; `--dry-run` reports without applying. Read `approval policy amend --help` for the change-input and commit options rather than guessing their syntax.
 
+**Edited `APPROVAL.md` in a checkout that has fallen behind.** This is the ordinary state after a policy edit, and `approval log sync` or `approval up` will refuse to fast-forward over the uncommitted file. Do not stash, reset, or check the file out to get past that. Run `approval policy amend --pr --require-load --as human:<id>` instead: it fetches `origin/main` itself, bases the amendment commit on the remote rather than on your checkout, attests the edited bytes, commits the policy and the log together, pushes a `policy-amend-<seq>` branch, opens the pull request, and arms its merge. Rehearse with `--dry-run` first. Once that lands, the sync and the daemon start go through.
+
 Two related attestations are different evidence: `approval policy attest --organ <path>` records reviewed gate-configuration bytes, while `--path <path>` records whole-file sign-off for eligible protected documents. Neither is a substitute for attesting the operative policy. The [hook installation guide](claude-code-hook.md#installing-it) explains the CI evidence required for gate configuration.
 
 ### Why this verb exists: seq 2
