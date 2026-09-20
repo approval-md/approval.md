@@ -778,6 +778,54 @@ judged before any file is touched, as with the payloads above, and one path
 outside `backlog/tasks/` declines the whole set: the old refusal stands and
 nothing is cleared. Nothing under `.approval/` is ever in scope here.
 
+**And a sync no longer has to worry about the daemon reading mid-ceremony.** On
+2026-09-19 `approval up` stopped after 1489 ticks with `anchor-diverged`, saying
+in one message that `refs/approval/advance/records-log-2026-09-19` anchored seq
+55084 and "the working log carries no record at that seq", and also that the
+committed chain was a prefix of the working chain 171 records back. Both
+sentences came from the same run and only one of them could be true. A read-only
+check a minute later found the anchored record at line 55084 of the working log,
+where it had been all along.
+
+The stop was a race between two reads (APRV-389). The anchor check reads the log
+file itself for the byte comparison, and it was handed the tick's records for the
+"is the anchored record here" question. A sync rewrites `events.jsonl` three
+times (the baseline write, the fast-forward, the snapshot restore), so a tick
+whose opening read landed inside that window held a view the file had already
+moved past: the byte check passed on the new bytes, the record lookup failed on
+the old view, and the message carried one fact from each.
+
+The fix reads the file again rather than deciding from a view and bytes that
+disagree. Once the anchored prefix is present byte for byte, the anchored record
+is inside those bytes, so a view that lacks it is stale and never a fork; the
+check re-reads the log through the same verified read the tick uses, re-runs the
+comparison on that fresh pair, and reports one line:
+
+```
+warning  anchor-reread  the working log moved underneath the anchor check: the view
+it was handed ends at seq 55084 … and the file itself ends at seq 55255 …; the
+comparison was made again from the file.
+```
+
+A real divergence still stops the daemon, on byte evidence read twice, and its
+message names the seq the chains parted at and both heads without also claiming
+either chain is a prefix of the other.
+
+**The choice, written down, because the other one was live.** Sync could have
+been made to refuse while a daemon holds the log, on the "the daemon is the log's
+single writer" rule. The daemon re-reads instead, for four reasons. Sync is the
+repair for a dirty working log plus an upstream change (APRV-215) and the daemon
+is up in the primary checkout nearly always, so a refusal would mean stopping the
+daemon to sync, which is the hand ritual APRV-125 and APRV-292 each retired.
+Nothing tells a verb that a daemon holds the log: there is no lease, the append
+lockfile is taken per append and sync holds it itself for the whole ceremony, and
+a lease left behind by a crash would refuse the very sync that repairs the
+checkout, which fails stuck rather than closed. In this window the daemon is a
+READER and not a writer, because sync holds that lock, so nothing could
+interleave with an append and the only damage was the check's own stale view.
+And fixing the reader covers every other writer of that file, a records pull or a
+restore by hand included, where refusing one verb would cover only that verb.
+
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.
 

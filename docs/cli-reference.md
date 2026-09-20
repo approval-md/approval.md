@@ -4791,7 +4791,15 @@ says nothing about it.
   it, and neither is a log to append onto. A working log that is a strict prefix
   of the committed copy is an `anchor-behind` warning, not a stop. The `started`
   line names the rev and seq this run is held to (`"anchor"`), and the tick line
-  carries the comparison it made. Git is read, never fetched.
+  carries the comparison it made. Git is read, never fetched. When the log was
+  rewritten between the tick's opening read and the check's own read of the file
+  (a `log sync` or a records pull replacing `events.jsonl` under the loop), the
+  check reads the file again through the same verified read, reports one
+  `anchor-reread` warning naming both heads, and the verdict beside it is the
+  second read's (APRV-389). Every `anchor-diverged` stop is reached from the
+  file's bytes and confirmed by that second read, and its message names the seq
+  the chains parted at and both heads without also claiming either chain is a
+  prefix of the other.
 - ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
   `envelope.drift` event (actor `system:daemon`), once per claim.
 - TTL SWEEP — every live request whose TTL lapsed gets an `approval.expired`
@@ -4910,7 +4918,8 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
-`advance-refused`, `draw-unavailable`. A warning never stops the
+`advance-refused`, `dark-session-undetermined`, `anchor-behind`,
+`anchor-reread`, `checkpoint-due`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Dangling advance cycles (APRV-264): at startup and before every trigger, the
