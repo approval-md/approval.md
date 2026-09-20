@@ -1055,9 +1055,12 @@ function renderChecks(instance, dir, result) {
   const out = [];
   out.push(`approval.md demo preflight — ${instance.id} at ${dir}`);
   out.push("");
+  // Wide enough for the longest row name present, never narrower than the
+  // column this table has always had: a preflight is read in a hurry.
+  const width = Math.max(14, ...result.checks.map((entry) => entry.check.length));
   for (const entry of result.checks) {
-    out.push(`${GLYPH[entry.status] ?? "?"} ${entry.check.padEnd(14)} ${entry.detail}`);
-    if (entry.fix !== undefined) out.push(`${" ".repeat(17)}fix: ${entry.fix}`);
+    out.push(`${GLYPH[entry.status] ?? "?"} ${entry.check.padEnd(width)} ${entry.detail}`);
+    if (entry.fix !== undefined) out.push(`${" ".repeat(width + 3)}fix: ${entry.fix}`);
   }
   const failed = result.checks.filter((entry) => entry.status === "fail").length;
   out.push("");
