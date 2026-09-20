@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-396'
 created_date: '2026-09-20 03:49'
-updated_date: '2026-09-20 15:55'
+updated_date: '2026-09-20 16:05'
 labels:
   - release
   - ci
@@ -64,6 +64,8 @@ Also blocked by the same class: gh release view v0.3.0 classifies release.publis
 VERIFICATION. npm run build exit 0, npm run typecheck exit 0, npm run lint exit 0. node scripts/run-tests.mjs --only release-notes: 26 tests, 23 pass, 3 fail; the three failures are the assertions that read the two un-landed workflow hunks, and they are left failing on purpose (a green suite would mean the guard proves nothing). Full npm test: 5031 tests, 5004 pass, 26 fail, which is the known Node 26 SMTP and email baseline of 22 plus those 3, plus 1 email-adapter contract case in the same family. By hand against the real changelog: 0.3.0 prints its 357-line section and stops before the 0.2.0 heading, v0.2.0 prints its section, 0.4.0 exits 1 with no-section, Unreleased exits 1 with bad-version, --check prints the three dated versions and exits 0.
 
 FOR THE HUMAN. AC2 is half proven: the refusal path and the shape are tested, and the live half (the workflow actually creating a Release) cannot be proven until the next tag, which is the first real check of gh release create --verify-tag in this environment and of whether npm carries the manifest commit field to the registry. One tap on policy.edit.ci lands the two pending hunks from the candidate files; after that the three failing tests pass and the branch is coherent. Worth knowing before the next release: if npm ever stops carrying that field, the packed-manifest assertion fails the run and the tag is spent, so the first release after this change is worth watching rather than launching and leaving.
+
+Final numbers after a fourth commit (a fenced code block is no longer a section boundary, preventive: release notes quote shell and YAML, and a quoted line beginning with two hashes would have truncated a body silently; the 0.2.0 and 0.3.0 extractions are byte-identical before and after). Commits on claude/aprv-396-publish-creates-release: d5d961c the extractor and its tests, 92bdb2e the changelog convention and the docs, 4f64574 the plan and these notes, plus the fence commit. Verified at that head: build 0, typecheck 0, lint 0; run-tests --only release-notes 27 tests, 24 pass, 3 fail (the un-landed workflow assertions); full suite 5032 tests, 5006 pass, 25 fail, which is exactly the 22-failure Node 26 SMTP and email baseline plus those 3. The first full run of the session showed 26 failures; the extra one was a flaky SMTP timing case that did not recur.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
