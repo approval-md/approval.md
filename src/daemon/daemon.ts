@@ -626,6 +626,19 @@ export const DAEMON_WARNING_CODES = [
    */
   "anchor-behind",
   /**
+   * The working log changed between this tick's opening read and the anchor
+   * check's own read of the file, so the check read it again (APRV-389).
+   *
+   * A line rather than a stop, and rather than a silence. `approval log sync`
+   * and a records pull both rewrite `events.jsonl` under a running daemon
+   * (baseline, fast-forward, restore), and this loop reads without the append
+   * lock, so a tick can hold a view the file has already moved past. That is a
+   * fact about reads, never a fork: the anchor comparison is made again from the
+   * file and the verdict beside this line is the second read's. The line is the
+   * one an operator acts on when the writer was not a sync they ran.
+   */
+  "anchor-reread",
+  /**
    * `audit.checkpoint_every` says a human-signed checkpoint is due and the log
    * carries none that recent (APRV-220). A WARNING and never a stop, at every
    * layer: a human who has been away is not a forger, and a daemon that stopped
@@ -1330,6 +1343,16 @@ export class Daemon {
           if (anchor.status === "diverged") {
             return { kind: "anchor-diverged", message: anchor.message };
           }
+          // The log was rewritten between this tick's opening read and the
+          // check's own read of the file (APRV-389), so the check read it again
+          // and this verdict is the second read's. ONE line, and no stop: a
+          // `log sync` or a records pull replacing `events.jsonl` under this
+          // process is housekeeping on the container, the append lock keeps it
+          // from interleaving with any append, and the daemon's every other step
+          // re-reads the log for itself anyway. The line is here because a
+          // writer nobody expected is a thing to know, and because this is the
+          // read that used to be reported as a fork.
+          if (anchor.reread !== undefined) this.warn("anchor-reread", anchor.reread.detail);
           if (anchor.status === "behind") {
             this.warn(
               "anchor-behind",
