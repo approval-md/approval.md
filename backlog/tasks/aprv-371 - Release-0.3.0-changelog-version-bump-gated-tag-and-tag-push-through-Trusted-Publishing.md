@@ -14,6 +14,27 @@ dependencies:
   - APRV-307
 priority: medium
 ordinal: 288000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:claude-code'
+  route:
+    assignee: 'agent:claude-code'
+    rationale: 'the 0.3.0 release ceremony, 2026-09-20: the agent creates the annotated tag on the bump merge commit and pushes it under two grants; publish.yml publishes through Trusted Publishing on the pushed tag (APRV-307); the human decides each step on the phone (APRV-371 AC2)'
+  state: proposed
+  actions:
+    - class: release.publish
+      summary: 'git tag -a v0.3.0 -m "approval-md 0.3.0" f4ebc90c698c7e8d410b184cda73de228d46ec43 in /Users/carter/dev/approval-md: an annotated tag on the merge commit of PR 507, local only, nothing published (payload is the argv and cwd; run recomputes the hash before it spawns)'
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-371:tag:2026-09-20'
+      payload_hash: 'a0d66a0f5b438ba29304012cf50823ec1c40beb531aa0e7769620a78e95871ea'
+    - class: release.publish
+      summary: 'git push origin v0.3.0 from /Users/carter/dev/approval-md: pushes the tag, which triggers release-candidate.yml and then publish.yml, publishing approval-md@0.3.0 to npm with provenance; the v* ruleset is immutable, a mistake is repaired by a new patch version (payload is the argv and cwd)'
+      reversible: false
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-371:tag-push:2026-09-20'
+      payload_hash: '48e10af9c5de29de033c4aa25df002220072633fe1eef6c1c47e26d1013fb34a'
 ---
 
 ## Description
