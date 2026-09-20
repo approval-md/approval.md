@@ -1,0 +1,1 @@
+{"command":"sed -n 2195,2225p docs/cli-reference.md; sed -n 1965,1980p docs/cli-reference.md; grep -n \"sealed\\|unseal\" src/cli/adapter*.ts src/adapters/email*.ts 2>/dev/null | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

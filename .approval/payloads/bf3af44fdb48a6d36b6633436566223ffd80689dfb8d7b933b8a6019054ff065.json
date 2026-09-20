@@ -1,0 +1,1 @@
+{"command":"ls -la \"$HOME/Library/Application Support/approval/\" 2>&1 | head; echo \"---\"; cat \"$HOME/Library/Application Support/approval/bots.json\" 2>&1 | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae50a33d7d7094133"}

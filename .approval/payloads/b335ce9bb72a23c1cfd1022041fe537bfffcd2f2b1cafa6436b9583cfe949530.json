@@ -1,0 +1,1 @@
+{"command":"gh pr merge 497 --merge 2>&1 | tail -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa387c74a930e8b72"}

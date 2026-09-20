@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n '\"version\"' package.json | head -2; /usr/bin/grep -n '0\\.3\\.0' CHANGELOG.md | head -2; git push 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

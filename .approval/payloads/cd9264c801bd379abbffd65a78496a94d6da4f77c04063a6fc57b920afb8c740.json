@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='query{repository(owner:\"approval-md\",name:\"approval.md\"){p504:pullRequest(number:504){state mergeCommit{oid}} p505:pullRequest(number:505){state mergeCommit{oid}} mergeQueue(branch:\"main\"){entries(first:5){nodes{position state pullRequest{number}}}}}}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

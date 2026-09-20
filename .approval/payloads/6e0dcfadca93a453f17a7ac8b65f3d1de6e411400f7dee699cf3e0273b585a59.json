@@ -1,0 +1,1 @@
+{"command":"git tag -l 'v0.*' && git rev-list --no-merges --count v0.2.0..origin/main && git rev-parse --short origin/main","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

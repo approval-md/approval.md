@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"the packaged demo policy is the one provisioning.md publishes\" tests/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae50a33d7d7094133"}

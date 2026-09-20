@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"cover\\|\\.png\\|\\.svg\" README.md | head -5; grep -rn -i \"approval-values\\|wants:\\|responds:\" brand/ examples/web-agent-demo/public/index.html docs/*.md README.md 2>/dev/null | grep -v \"^docs/.*0.2\\|communication\" | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'idempotency_key' src/core/*.ts | head -15","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

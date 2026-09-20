@@ -1,0 +1,1 @@
+{"command":"S=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-gated-messages-approval-60aa72/175dda03-1fb4-498e-ab8b-04b1c90b1052/scratchpad; grep -n -A 18 'a granted send puts exactly the approved bytes on the wire over STARTTLS' $S/test.log | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

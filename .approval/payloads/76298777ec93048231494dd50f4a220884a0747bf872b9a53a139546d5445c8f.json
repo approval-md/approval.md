@@ -1,0 +1,1 @@
+{"command":"sed -n '1,70p' backlog/tasks/aprv-199*.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}
