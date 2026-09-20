@@ -27,7 +27,7 @@ approvers:
   carter:
     channels: [telegram, cli]
     senders:
-      telegram: "7345216485"   # numeric callback_query.from.id, NOT a @handle (APRV-324)
+      telegram: "hmac-sha256:86f6206b50381ab42def752accc83b1bf8afe94bf23a96ea8e0adb2ce23958fe"   # HMAC-SHA-256 of the account id under APPROVAL_SENDER_KEY (APRV-370)
 
 protected_paths:            # widens policy.edit; the built-ins hold regardless
   - { path: SPEC.md, class: policy.edit.spec }
