@@ -103,7 +103,7 @@ approvers:
   carter:
     channels: [telegram, cli]
     senders:
-      telegram: "<PASTE_THE_PRINTED_DIGEST>"   # HMAC-SHA-256 of the account id under APPROVAL_SENDER_KEY (APRV-370)
+      telegram: "hmac-sha256:86f6206b50381ab42def752accc83b1bf8afe94bf23a96ea8e0adb2ce23958fe"   # HMAC-SHA-256 of the account id under APPROVAL_SENDER_KEY (APRV-370)
 ```
 
 ## After applying
