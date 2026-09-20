@@ -7,38 +7,12 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-08-31 00:01'
-updated_date: '2026-09-02 08:00'
+updated_date: '2026-09-20 00:23'
 labels:
   - demo
   - design
 dependencies: []
 ordinal: 147000
-approval:
-  origin:
-    app: manual
-    created_by: 'agent:fable'
-  route:
-    assignee: 'agent:fable'
-    rationale: >-
-      Branch adapter-credentials carries the APRV-169 + APRV-168 commits,
-      including a SPEC.md 10.4 amendment authored in a spawned agent worktree
-      where protected-path prompts may not fire (APRV-151 gap). Publishing the
-      branch for PR review is routed through the gate explicitly, per the
-      APRV-159 precedent. Verified before request: 2415/2415 tests, lint
-      clean, conformance 106 controls clean.
-  state: executed
-  actions:
-    - class: policy.edit
-      summary: >-
-        git push origin adapter-credentials from /Users/carter/dev/approval-md:
-        publish APRV-169 (credentials resolve before token consumption) and
-        APRV-168 (scoped vault-passphrase self-resolution inside a consumed
-        token window) with their SPEC 10.4 amendment, pending sign-off, for PR
-        review. Base origin/main 64f9d0a; commits e2784a1, d733677.
-      reversible: true
-      est_cost_usd: '0'
-      idempotency_key: 'aprv-168:publish-adapter-credentials:2026-08-31'
-      payload_hash: '4db66385b232ab385e94371307a98d54441f98c8acd93bb7f6fb84bf6f180fa2'
 ---
 
 ## Description
@@ -57,10 +31,13 @@ Found during APRV-157 (runbook): the web-agent demo's email finale routes adapte
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. APRV-169 (C) lands first on the shared branch; B builds on its final contract shape.
-2. Add scoped credential self-resolution: vault passphrase lookup falls back, only inside token-holding adapter execution, to resolving the policy-named variable via .approval/env (keychain: refs included).
-3. SPEC 10.4 amendment sentence (gated edit).
-4. Tests: resolution works with a scrubbed env inside a token window; unreachable without a token; secret absent from argv/log; demo rehearsal AC left for the phone-in-the-loop pass.
+1. ROOT CAUSE (proven by probe, 2026-09-19): the scoped fallback (adapters/env-passphrase.ts, APRV-168) and the resolve-before-consume ordering (adapters/contract.ts resolveRequiredCredentials, APRV-169) are both live and both correct. What fails is the keychain lookup itself: defaultSourceRunner.keychain in src/core/env-file.ts spawns security find-generic-password with the ambient environment, and macOS resolves the keychain SEARCH LIST through HOME. The demo server runs the agent child with HOME under the instance (agent-home), so the login keychain is not in the search list and every keychain: reference in that child returns errSecItemNotFound. Probe evidence: security list-keychains under a redirected HOME returns only /Library/Keychains/System.keychain and default-keychain fails; the same call with HOME pinned to the passwd home returns the login keychain. os.userInfo().homedir comes from the passwd database and is unaffected by HOME; os.homedir() follows HOME and is the wrong source.
+2. FIX (one seam, the same resolver approval env uses): defaultSourceRunner.keychain retries the lookup once with HOME pinned to the passwd home when the first attempt failed and the ambient HOME differs. No new authority: the same uid can already spawn security with any HOME, and the keychain ACL and unlock state are the real controls. Refusal semantics unchanged (the first attempt wins when the retry also fails).
+3. The scoping is untouched: the adapter still reaches .approval/env only through passphraseUnderGrant, which needs an ExecutionGrant the contract mints. No secret enters argv, env, output or log on either path.
+4. Extract the demo server child environment into examples/web-agent-demo/agent-env.mjs (agentEnv, agentHomeFor, agentConfigDirFor, the credential allowlist and the scrub). server.mjs imports it with no behaviour change, so the scrub has one definition that the preflight and the tests can use verbatim.
+5. Preflight: demo-provision.mjs --check gains a child-credentials step that runs approval env --check --json in the child scrubbed shape and fails when the policy named vault passphrase variable does not resolve there. No token, no send, no value printed.
+6. Tests through the real verbs: a stub security on PATH keyed on HOME (reproduces the live failure and proves the repair) in tests/cli-env.test.ts; a new end-to-end test that runs approval adapter email in the servers own scrubbed child environment with a stubbed keystore and the mock SMTP, asserting execution.completed, a clean chain, the retry shape, and that the passphrase reaches no stream and no log byte; plus the no-token negative.
+7. Docs: runbook beat 4 (the pre-APRV-169 claim that the token is burned before the vault opens is stale and gets corrected; the stage recovery paragraph stays because credential-unavailable is still reachable for other reasons) and examples/email-demo.md.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -83,4 +60,22 @@ AC3 (decision on credential resolution vs. token consumption ordering, with foll
 AC2 (the demo's send_the_email template completes end to end in rehearsal: phone approve, sealed wait, mail sent, execution.completed on the demo log): NOT met by this lane -- this is explicitly the phone-in-the-loop rehearsal Carter has to run against real Telegram and a real mailbox (examples/email-demo.md's walkthrough, or the web-agent-demo runbook's Beat 4). The automated e2e test proves the runtime mechanically; it cannot prove the phone tap or the real mailbox. Leaving unticked, no change to Definition of Done.
 
 No source code changed by this lane. Task remains In Progress; AC2 is the only thing left for Carter's rehearsal pass.
+
+2026-09-19 lane (branch lane/demo-finale-credential-168, PR #498). The live reproduction on ~/demo-gate gave this task the fact it was missing.
+
+ROOT CAUSE, probed not guessed. macOS resolves the keychain SEARCH LIST through HOME. Probe on this machine: security list-keychains under a redirected HOME returns /Library/Keychains/System.keychain alone and security default-keychain fails (SecKeychainCopyDefault: A default keychain could not be found); the same call with HOME pinned to the passwd home returns the login keychain first. os.userInfo().homedir reads the passwd entry and is unaffected by HOME; os.homedir() follows HOME and is the wrong source. The demo server gives the agent child HOME=<instance>/agent-home on purpose (APRV-177), so every keychain: reference in that child answered errSecItemNotFound, including the vault passphrase line setup vault wrote.
+
+WHAT WAS ALREADY RIGHT. The scoped fallback from this task (adapters/env-passphrase.ts, wired at cli/adapter.ts:309) was live and was reached: the live refusal names the env file, which only the fallback path can do. The third candidate, credential resolution before token consumption, is on main as APRV-169: adapters/contract.ts resolveRequiredCredentials (line 978, refusal text at 1004) is called at 1373, ahead of startExecution at 1408. That is why the live refusal ends with nothing appended and no token spent, and why the grant Carter approved is still executable. AC3 needed no revisiting.
+
+THE FIX. core/env-file.ts defaultSourceRunner.keychain retries a failed lookup once with HOME pinned to the passwd home. One seam, the same resolver approval env uses, so the adapter and the human verb cannot disagree. It grants nothing: a process of this uid can already spawn security with any HOME, and the keychain lock state and the item ACL are the actual controls. The first attempt keeps its answer whenever the retry does not succeed, so helper-item-missing and helper-failed still mean what they meant. The grant scoping is untouched: the env file is still reachable only through passphraseUnderGrant and its unexported brand.
+
+SPEC section 11.1 invariant 3 (raw secrets never in the log) is adjacent and holds. The resolved value is returned to the vault provider, used to derive one key, and enters no argv (the service NAME is the argument, the value arrives on stdout), no environment, no message, no refusal and no event. The new suite sweeps every captured stream and every log byte of every instance it created for the passphrase.
+
+ALSO. examples/web-agent-demo/agent-env.mjs now holds the child environment contract, extracted from server.mjs unchanged, so the preflight and the tests use the servers own scrub rather than a copy. demo-provision.mjs --check gained a child-credentials row: the policy-named passphrase resolved in the child scrubbed shape, no token, no vault opened, no mail, no value printed. It may raise the keychain access prompt, which is the right morning for that. Docs: runbook beat 4 (its pre-APRV-169 claim that the token is burned before the vault opens is corrected; the stage recovery paragraph stays, because credential-unavailable is still reachable when the item or the vault is genuinely missing), preflight steps 3 and 7, provisioning.md section 5, examples/email-demo.md (a new paragraph on the one implicit read of the env file, and a troubleshooting row).
+
+TESTS, real verbs only. tests/demo-finale-credential.test.ts: attest, register, request, grant, vault set, adapter email, log verify, with the adapter run under agentEnv() imported from the server module, a stub security on PATH keyed on HOME, and the loopback SMTP mock. With the retry removed from the build it reproduces the live refusal verbatim (credential-unavailable on smtp.host, naming the env file); with it the mail goes out, the chain verifies, the lookups appear in pairs (child home, then passwd home, one pair per declared credential because the provider reads the passphrase per credential), and the no-token case resolves nothing and opens no socket. tests/cli-env.test.ts pins the repair, that the repair invents nothing, and that a correct HOME is looked up once. tests/demo-provision.test.ts pins the new row both ways. No real credential, no keychain read, no touch of ~/demo-gate anywhere.
+
+VERIFICATION. build 0, typecheck 0, lint 0. npm test: 4845 tests, 4822 pass, 22 fail, exit 1, all 22 in adapter-email, cli-setup and smtp-probe and all the pre-existing local Node v26 TLS refusal (Setting the TLS ServerName to an IP address is not permitted) in files this branch does not touch. Re-run after merging origin/main: identical counts and identical three files.
+
+AC2 remains for Carter: it is the phone-in-the-loop rehearsal of beat 4 against real Telegram and a real mailbox, which no automated suite can stand in for. Sequence after this merges: approval log sync and npm run build in the primary, restart the demo server, then node examples/demo-provision.mjs --instance web-agent --check and read the child-credentials row before submitting the beat.
 <!-- SECTION:NOTES:END -->

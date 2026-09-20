@@ -63,10 +63,11 @@ node examples/demo-provision.mjs --instance web-agent --check
 ```
 
 That runs the instance's own doctor plus this demo's preflight (the packaged
-policy, the ports, the seeded envelopes, the channel) and prints a pass/fail line
-each. To provision the instance in the first place, or after a `--reset`, run the
-same script without `--check`; it stops at every human-only step and prints the
-line. See [provisioning.md](provisioning.md). The doctor alone is:
+policy, the ports, the seeded envelopes, the channel, and the finale's
+credential as the agent child sees it) and prints a pass/fail line each. To
+provision the instance in the first place, or after a `--reset`, run the same
+script without `--check`; it stops at every human-only step and prints the line.
+See [provisioning.md](provisioning.md). The doctor alone is:
 
 ```sh
 cd ~/demo-gate
@@ -75,8 +76,9 @@ APPROVAL_HUMAN=human:demo approval doctor
 
 Green is `0 failed` and exit 0. Rows marked `–` are states rather than faults.
 After provisioning step 4 the `telegram`, `vault` and `environment` rows read
-`✓`. If `vault` or `environment` is anything else, the email finale will fail
-after its token is already spent (see the finale's own warning below).
+`✓`. Those rows answer for this shell; the finale's credential has to resolve in
+the agent child's environment instead, which is the `child-credentials` row of
+the script above and the subject of beat 4.
 
 **4. The phone is listening.**
 
@@ -139,8 +141,11 @@ project memory the child can see: move the instance somewhere without one, or
 remove them.
 
 **7. Rehearse the finale once**, on the real instance, before the audience
-arrives. It is the only beat with a credential in its path and the only beat
-whose failure burns a token. Details in beat 4.
+arrives. It is the only beat with a credential in its path, and the credential
+has to be reachable from the agent child rather than from this shell. Run
+`node examples/demo-provision.mjs --instance web-agent --check` first: its
+`child-credentials` row asks exactly that question, spending no token and
+sending no mail. Details in beat 4.
 
 ---
 
@@ -289,16 +294,35 @@ phone.
   `execution.started`, `execution.completed`. The credentials are opened inside
   the token window and appear in no event and no output.
 
-**Rehearse this beat before the room fills.** The adapter consumes the token and
-appends `execution.started` *before* it opens the vault, so a credential that
-cannot be read produces `execution.failed` with the token already burned, and a
-retry of the same request is refused `token-consumed`. Recovering on stage means
-a fresh submission and a second approval. If the agent's `adapter_email` comes
-back `credential-unavailable`, the vault passphrase did not reach the MCP child
-(the server scrubs `APPROVAL*` names out of the agent's environment, and no verb
-reads `.approval/env` implicitly). The honest stage recovery is to send the
-approved payload yourself from `~/demo-gate` per examples/email-demo.md, and to
-say why you are doing it.
+**Rehearse this beat before the room fills.** It is the only beat with a
+credential in its path, and the credential is not in the shell you started the
+server in: the adapter runs inside the agent child, whose environment holds no
+gate variable at all and whose `HOME` is `~/demo-gate/agent-home`. Inside the
+token window, and only there, the adapter resolves the policy's passphrase
+variable from the instance's own `.approval/env` (APRV-168), following the
+`keychain:` line it names. That lookup is why `--check` now asks the question in
+the child's shape:
+
+```sh
+cd /Users/carter/dev/approval-md
+node examples/demo-provision.mjs --instance web-agent --check
+```
+
+The `child-credentials` row is the finale's credential, resolved in the
+environment the finale actually has, with no token spent and no mail sent. A
+`pass` there is what a green rehearsal of this beat rests on; a `fail` names the
+child's `HOME` and the refusal, and is repaired before the doors open rather
+than in front of them. The first run may raise the keychain's own access prompt:
+answer it now, once, in your own time.
+
+A refusal here costs no authority. Credentials resolve *before* the token is
+consumed (APRV-169), so `credential-unavailable` appends nothing, spends
+nothing, and leaves the same grant executable the moment the credential is
+reachable — the agent's own `adapter_email` says so in as many words. If it
+happens on stage anyway (the item was deleted from the keychain, the vault was
+never filled), the honest recovery is to repair the credential and let the agent
+retry the grant it is still holding, or to send the approved payload yourself
+from `~/demo-gate` per examples/email-demo.md, saying why you are doing it.
 
 **Free text.** The fifth slot takes up to 500 characters of attendee text and
 runs read-only: no declared action, so nothing to register and nothing to

@@ -373,8 +373,13 @@ check that does not apply never fails the verb. Any `✗` exits 1.
 instance and adds the checks doctor cannot make for a demo: that the policy in
 the instance is still the packaged one, that the ports this demo is allowed to
 bind are free, that every seeded envelope's `payload_hash` still matches the
-bytes beside it, and that an unconfigured Telegram channel FAILS (doctor marks
-it `–`, which is a legitimate state for a gate and a dead demo for a room).
+bytes beside it, that an unconfigured Telegram channel FAILS (doctor marks it
+`–`, which is a legitimate state for a gate and a dead demo for a room), and —
+on an instance with a vault — that the finale's passphrase resolves in the AGENT
+CHILD's environment rather than in yours (`child-credentials`, APRV-168: the
+child holds no gate variable and its `HOME` is the demo's own, which is where
+the email beat failed live on 2026-09-19). That row spends no token and sends
+nothing.
 
 The `identity` check reads `APPROVAL_HUMAN` from the shell, and `policy attest`
 took its identity from `--as`, so run doctor after `setup identity` and the

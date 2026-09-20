@@ -46,7 +46,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -195,25 +195,46 @@ function makeHome(options: { policy?: string; env?: string; mode?: number } = {}
 }
 
 /**
+ * One stub helper's behaviour. `homeMustBe` and `journal` exist for APRV-168:
+ * the real `security` answers out of the keychain search list `$HOME` selects,
+ * so a stub that ignores `$HOME` cannot see the bug or the repair.
+ */
+interface StubSpec {
+  value?: string;
+  exit?: number;
+  /** Exit 44 (`errSecItemNotFound`) unless `$HOME` is exactly this. */
+  homeMustBe?: string;
+  /** Append each invocation's `$HOME` to this file. */
+  journal?: string;
+}
+
+/**
  * A directory holding stub `security` / `secret-tool` scripts, and a PATH that
  * finds them first. `behaviour` is baked into the script, so the runtime is
  * driven exactly as it would be in production: bare command name, PATH lookup,
  * value on stdout.
  */
 function stubHelpers(behaviour: {
-  keychain?: { value?: string; exit?: number };
-  secretService?: { value?: string; exit?: number };
+  keychain?: StubSpec;
+  secretService?: StubSpec;
 }): string {
   counter += 1;
   const dir = join(scratch, `bin-${String(counter)}`);
   mkdirSync(dir, { recursive: true });
 
-  const write = (name: string, spec: { value?: string; exit?: number } | undefined): void => {
+  const write = (name: string, spec: StubSpec | undefined): void => {
     if (spec === undefined) return;
+    // APRV-168: a stub that keys on `$HOME` stands in for the real `security`,
+    // which finds the login keychain through it. `journal` records the `$HOME`
+    // of every invocation, so a test can see the retry as well as its result.
+    const journal =
+      spec.journal === undefined ? "" : `printf '%s\\n' "\${HOME:-}" >> ${spec.journal}\n`;
+    const gate =
+      spec.homeMustBe === undefined ? "" : `if [ "\${HOME:-}" != "${spec.homeMustBe}" ]; then exit 44; fi\n`;
     const body =
       spec.value === undefined
-        ? `#!/bin/sh\nexit ${String(spec.exit ?? 1)}\n`
-        : `#!/bin/sh\ncat <<'APPROVAL_STUB_EOF'\n${spec.value}\nAPPROVAL_STUB_EOF\nexit ${String(spec.exit ?? 0)}\n`;
+        ? `#!/bin/sh\n${journal}${gate}exit ${String(spec.exit ?? 1)}\n`
+        : `#!/bin/sh\n${journal}${gate}cat <<'APPROVAL_STUB_EOF'\n${spec.value}\nAPPROVAL_STUB_EOF\nexit ${String(spec.exit ?? 0)}\n`;
     const path = join(dir, name);
     writeFileSync(path, body, "utf8");
     chmodSync(path, 0o755);
@@ -417,6 +438,95 @@ test("a missing helper binary and a missing item are DIFFERENT refusals", () => 
   for (const parsed of [absent.parsed, missing.parsed, failed.parsed]) {
     assert.equal(variable(parsed, "APPROVAL_TG_TOKEN").status, "unset");
   }
+});
+
+// ---------------------------------------------------------------------------
+// The redirected HOME (APRV-168)
+// ---------------------------------------------------------------------------
+
+/**
+ * macOS resolves the keychain SEARCH LIST through `$HOME`, so a process whose
+ * home was redirected searches a list with no login keychain in it and is told
+ * the item does not exist. Probed on 2026-09-19: `security list-keychains`
+ * under a redirected `HOME` returns `/Library/Keychains/System.keychain` alone
+ * and `security default-keychain` fails outright.
+ *
+ * That is not a hypothetical shape. The web-agent demo's server gives its agent
+ * child a `HOME` under the demo instance on purpose (APRV-177), and the finale's
+ * adapter — holding a token a human approved on their phone seconds earlier —
+ * runs in that child and could not read the `keychain:` line the instance's own
+ * `.approval/env` names. The runtime now retries the lookup once with `HOME`
+ * pinned to the passwd home, which grants nothing (any process of this uid can
+ * spawn `security` with any `HOME`) and removes a dependency on an inherited
+ * variable that has nothing to do with credentials.
+ */
+test("a keychain item is found although HOME points somewhere else (APRV-168)", () => {
+  const home = makeHome({ env: "APPROVAL_VAULT_PASSPHRASE=keychain:approval-vault-passphrase\n" });
+  counter += 1;
+  const elsewhere = join(scratch, `agent-home-${String(counter)}`);
+  mkdirSync(elsewhere, { recursive: true });
+  const journal = join(scratch, `security-homes-${String(counter)}.txt`);
+
+  // The stub answers only for the passwd home, exactly as the real `security`
+  // answers only where the login keychain is on the search list.
+  const bin = stubHelpers({
+    keychain: { value: KEYCHAIN_SECRET, homeMustBe: userInfo().homedir, journal },
+  });
+  const { parsed } = envJson(home, [], {
+    path: pathWith(bin),
+    env: { HOME: elsewhere },
+    emitsValues: true,
+  });
+
+  const pass = variable(parsed, "APPROVAL_VAULT_PASSPHRASE");
+  assert.equal(pass.status, "resolved-from-keychain");
+  assert.equal(pass.value, KEYCHAIN_SECRET);
+
+  // Two invocations, in this order: the ambient one that the environment broke,
+  // then the repair. The first is not skipped — a HOME the operator set on
+  // purpose keeps its answer whenever it has one.
+  assert.deepEqual(
+    readFileSync(journal, "utf8").split("\n").filter((entry) => entry.length > 0),
+    [elsewhere, userInfo().homedir],
+  );
+});
+
+test("the retry invents nothing: an absent item is still helper-item-missing under a redirected HOME", () => {
+  const home = makeHome({ env: "APPROVAL_TG_TOKEN=keychain:approval-tg\n" });
+  counter += 1;
+  const elsewhere = join(scratch, `agent-home-absent-${String(counter)}`);
+  mkdirSync(elsewhere, { recursive: true });
+  const journal = join(scratch, `security-homes-absent-${String(counter)}.txt`);
+
+  const { parsed } = envJson(home, ["--check"], {
+    path: pathWith(stubHelpers({ keychain: { exit: 44, journal } })),
+    env: { HOME: elsewhere },
+  });
+  const token = variable(parsed, "APPROVAL_TG_TOKEN");
+  assert.equal(token.status, "unset");
+  assert.equal(token.refusal?.code, "helper-item-missing");
+  assert.equal(
+    readFileSync(journal, "utf8").split("\n").filter((entry) => entry.length > 0).length,
+    2,
+    "the repair should be attempted exactly once, and then give up",
+  );
+});
+
+test("a HOME that already is the passwd home is looked up once, not twice", () => {
+  const home = makeHome({ env: "APPROVAL_TG_TOKEN=keychain:approval-tg\n" });
+  counter += 1;
+  const journal = join(scratch, `security-homes-native-${String(counter)}.txt`);
+
+  const { parsed } = envJson(home, ["--check"], {
+    path: pathWith(stubHelpers({ keychain: { exit: 44, journal } })),
+    env: { HOME: userInfo().homedir },
+  });
+  assert.equal(variable(parsed, "APPROVAL_TG_TOKEN").refusal?.code, "helper-item-missing");
+  assert.equal(
+    readFileSync(journal, "utf8").split("\n").filter((entry) => entry.length > 0).length,
+    1,
+    "nothing to repair, so nothing was retried",
+  );
 });
 
 test("secret-tool exiting 1, or 0 with no output, is a missing item", () => {

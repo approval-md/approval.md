@@ -33,6 +33,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -43,8 +44,8 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { delimiter, join, relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -74,8 +75,8 @@ interface ScriptRun {
  * leaked `APPROVAL_HUMAN` or a vault passphrase in from the developer's own
  * shell would be asserting about their machine rather than about this script.
  */
-function runScript(args: readonly string[]): ScriptRun {
-  const env = { ...process.env };
+function runScript(args: readonly string[], overrides: Record<string, string> = {}): ScriptRun {
+  const env = { ...process.env, ...overrides };
   for (const name of Object.keys(env)) {
     if (/^(APPROVAL|TG_)/u.test(name)) delete env[name];
   }
@@ -470,6 +471,75 @@ test("--check reports the instance's doctor and the demo's own preflight", () =>
   assert.equal(checkNamed(after_, "identity").status, "fail");
   assert.equal(checkNamed(after_, "channel").status, "fail");
   assert.equal(after_.code, 1);
+});
+
+/**
+ * A stub `security` on PATH that answers only for the passwd home, exactly as
+ * the real one answers only where the login keychain is on the search list.
+ * No keychain is read and no real credential exists anywhere in this file.
+ */
+function stubKeystore(label: string, options: { value?: string } = {}): string {
+  const dir = join(scratch, `bin-${label}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "security");
+  const body =
+    options.value === undefined
+      ? "#!/bin/sh\nexit 44\n"
+      : [
+          "#!/bin/sh",
+          `if [ "\${HOME:-}" != "${userInfo().homedir}" ]; then exit 44; fi`,
+          "cat <<'APPROVAL_STUB_EOF'",
+          options.value,
+          "APPROVAL_STUB_EOF",
+          "",
+        ].join("\n");
+  writeFileSync(path, body, "utf8");
+  chmodSync(path, 0o755);
+  return dir;
+}
+
+/** The instance's source map, as `approval setup vault` writes it on macOS. */
+function writeKeychainEnv(dir: string): void {
+  const path = join(dir, ".approval", "env");
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  writeFileSync(path, "APPROVAL_DEMO_VAULT_PASSPHRASE=keychain:approval-vault-passphrase-test\n");
+  chmodSync(path, 0o600);
+}
+
+/**
+ * APRV-168: the preflight asks the finale's credential question in the agent
+ * child's own environment, because that is the environment the answer has to
+ * hold for. A rehearsal that only proves the operator's shell can resolve the
+ * passphrase proves nothing about the child that will need it.
+ */
+test("--check resolves the vault passphrase in the agent child's environment", () => {
+  const { dir } = newHome("child-credentials");
+  assert.equal(runScript(["--instance", "web-agent", "--path", dir]).code, 0);
+  attest(dir);
+  writeKeychainEnv(dir);
+
+  const path = `${stubKeystore("resolves", { value: "a passphrase this test never uses" })}${delimiter}${process.env["PATH"] ?? ""}`;
+  const run = runScript(["--instance", "web-agent", "--path", dir, "--check"], { PATH: path });
+  const row = checkNamed(run, "child-credentials");
+  assert.equal(row.status, "pass", row.detail);
+  assert.match(row.detail, /APPROVAL_DEMO_VAULT_PASSPHRASE resolves/u);
+  assert.match(row.detail, /keychain/u);
+  assert.equal(row.detail.includes("a passphrase this test never uses"), false, "a value was printed");
+});
+
+test("--check FAILS when the child cannot reach the passphrase, and names the child's home", () => {
+  const { dir } = newHome("child-credentials-absent");
+  assert.equal(runScript(["--instance", "web-agent", "--path", dir]).code, 0);
+  attest(dir);
+  writeKeychainEnv(dir);
+
+  const path = `${stubKeystore("absent")}${delimiter}${process.env["PATH"] ?? ""}`;
+  const run = runScript(["--instance", "web-agent", "--path", dir, "--check"], { PATH: path });
+  const row = checkNamed(run, "child-credentials");
+  assert.equal(row.status, "fail");
+  assert.match(row.detail, /helper-item-missing/u);
+  assert.match(row.detail, new RegExp(`HOME=${join(dir, "agent-home").replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&")}`, "u"));
+  assert.equal(run.code, 1);
 });
 
 test("--check on a directory that was never provisioned says so", () => {

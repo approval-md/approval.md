@@ -81,6 +81,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { agentEnv } from "./web-agent-demo/agent-env.mjs";
+
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 /** examples/ -> <repo>/dist/src/cli/main.js, the one thing shelled out to. */
 const CLI_ENTRY = fileURLToPath(new URL("../dist/src/cli/main.js", import.meta.url));
@@ -240,9 +242,19 @@ const INSTANCES = {
 
 /** One CLI verb, as a child process. Returns its code, streams and JSON. */
 function runVerb(args, cwd, extraEnv = {}) {
+  return runVerbWithEnv(args, cwd, { ...process.env, ...extraEnv });
+}
+
+/**
+ * The same, with the child's environment REPLACED rather than extended.
+ *
+ * One caller: the child-credentials preflight, which has to run a verb in an
+ * environment this process does not have. Everything else wants to inherit.
+ */
+function runVerbWithEnv(args, cwd, env) {
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
     cwd,
-    env: { ...process.env, ...extraEnv },
+    env,
     encoding: "utf8",
     timeout: VERB_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
@@ -272,6 +284,19 @@ function readIfPresent(path) {
 /** The exact line an operator pastes. Absolute, so no shell function is owed. */
 function line(dir, verb) {
   return `cd ${dir} && node ${CLI_ENTRY} ${verb}`;
+}
+
+/** The runtime's default when a policy names no `vault.passphrase_env`. */
+const DEFAULT_PASSPHRASE_ENV = "APPROVAL_VAULT_PASSPHRASE";
+
+/**
+ * The variable this instance's policy names as the vault passphrase, read out
+ * of its own `APPROVAL.md`. A policy that names none is the runtime default.
+ */
+function passphraseVariable(dir) {
+  const policy = readIfPresent(join(dir, "APPROVAL.md")) ?? "";
+  const named = /^[ \t]*passphrase_env:[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/mu.exec(policy);
+  return named === null ? DEFAULT_PASSPHRASE_ENV : named[1];
 }
 
 /** Is `port` free on loopback? Bound and released; nothing is left listening. */
@@ -886,8 +911,39 @@ async function check(instance, dir) {
       existsSync(vaultPath),
       existsSync(vaultPath)
         ? `${vaultPath} exists; confirm its contents by name with \`approval vault list --as ${DEMO_HUMAN}\``
-        : `no vault: the finale's adapter refuses credential-unavailable after its token is already spent`,
+        : "no vault: the finale's adapter refuses credential-unavailable, and the grant it was holding goes unspent",
       existsSync(vaultPath) ? null : line(dir, `setup vault --as ${DEMO_HUMAN}`),
+    );
+
+    // APRV-168. The finale is the one beat with a credential in its path, and
+    // the adapter that needs it does not run in the operator's shell: it runs
+    // inside the agent child, whose environment `web-agent-demo/server.mjs`
+    // scrubs of every gate name and whose HOME is a directory the demo owns.
+    // On 2026-09-19 that shape, and nothing else, was the difference between a
+    // working rehearsal and a `credential-unavailable` in front of a room: the
+    // passphrase is a `keychain:` line, and macOS finds the login keychain
+    // through HOME.
+    //
+    // So this asks the question in the shape the answer has to hold for, using
+    // the server's own scrub (imported, not copied) and the instance's own
+    // `.approval/env`. It spends no token, opens no vault and sends no mail —
+    // `approval env --check` resolves and reports, and prints no value on any
+    // path — and it may raise the keychain's own access prompt, which is the
+    // right morning for that to happen.
+    const variable = passphraseVariable(dir);
+    const child = runVerbWithEnv(["env", "--check", "--json"], dir, agentEnv(dir));
+    const variables = Array.isArray(child.json?.variables) ? child.json["variables"] : [];
+    const entry = variables.find((candidate) => candidate["name"] === variable) ?? null;
+    const resolved = entry !== null && entry["status"] !== "unset";
+    add(
+      "child-credentials",
+      resolved,
+      resolved
+        ? `${variable} resolves (${String(entry["status"])}, ${String(entry["source"])}) in the agent child's own environment, so the finale's adapter can open the vault inside its token window`
+        : entry === null
+          ? `${variable} is not a variable this instance's \`approval env\` answers for; the finale's adapter has no passphrase to find`
+          : `${variable} does NOT resolve in the agent child's environment (${String(entry["refusal"]?.["code"] ?? "unset")}): the finale will refuse credential-unavailable with a human's approval already given. The operator's own shell is not the question here — the child runs with HOME=${String(agentEnv(dir).HOME)} and no gate variable at all`,
+      resolved ? null : line(dir, "env --check"),
     );
   } else {
     add(
@@ -999,9 +1055,12 @@ function renderChecks(instance, dir, result) {
   const out = [];
   out.push(`approval.md demo preflight — ${instance.id} at ${dir}`);
   out.push("");
+  // Wide enough for the longest row name present, never narrower than the
+  // column this table has always had: a preflight is read in a hurry.
+  const width = Math.max(14, ...result.checks.map((entry) => entry.check.length));
   for (const entry of result.checks) {
-    out.push(`${GLYPH[entry.status] ?? "?"} ${entry.check.padEnd(14)} ${entry.detail}`);
-    if (entry.fix !== undefined) out.push(`${" ".repeat(17)}fix: ${entry.fix}`);
+    out.push(`${GLYPH[entry.status] ?? "?"} ${entry.check.padEnd(width)} ${entry.detail}`);
+    if (entry.fix !== undefined) out.push(`${" ".repeat(width + 3)}fix: ${entry.fix}`);
   }
   const failed = result.checks.filter((entry) => entry.status === "fail").length;
   out.push("");

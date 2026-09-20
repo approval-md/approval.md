@@ -245,6 +245,19 @@ export APPROVAL_DEMO_VAULT_PASSPHRASE="$(security find-generic-password -a "$USE
 A variable already set in this shell wins over the file: `approval env` reports
 it as `set-in-environment` and does not consult the line.
 
+**One process reads that file without being asked, and only one** (APRV-168).
+An adapter executing inside a granted token window resolves the
+`vault.passphrase_env` variable, and only that variable, from `.approval/env`
+when the environment it was launched with does not carry it, following a
+`keychain:` or `secret-service:` line through the same helper `approval env`
+uses. The authority is the token: a human approved this action, on this
+payload, seconds earlier. Nothing else in this runtime resolves the file
+implicitly, and a lookup that follows a keychain line is retried once with
+`HOME` pinned to your account's home directory, because macOS finds the login
+keychain through `HOME` and the process spending the token may be a child whose
+home was deliberately redirected (`examples/web-agent-demo/server.mjs` runs one).
+No value is printed, logged, exported or put in an argv on any of those paths.
+
 The SMTP app password is deliberately absent from all of that. It is an
 **adapter credential**, and adapter credentials live in the vault
 (`.approval/vault.enc`), not in `.approval/env`. This is the one place the two
@@ -723,6 +736,7 @@ are the ones specific to the vault and the mail hop.
 | --- | --- |
 | `APPROVAL_DEMO_VAULT_PASSPHRASE is unset or empty` at exit 2 | The passphrase variable the policy names is not set in *this* shell. The policy names the variable; nothing carries the value. `approval env --check` says whether a source is recorded for it; `eval "$(approval env)"` puts it in the shell. |
 | `approval setup vault` wrote a variable the adapter does not read | The policy's `vault.passphrase_env` changed after the line was written. `setup vault` writes whatever the policy names at the moment it runs; re-run it, or rename the line in `.approval/env` by hand. |
+| `credential-unavailable` naming the passphrase, from an adapter run by an agent | The adapter is executing somewhere your shell is not: a child with a scrubbed environment, a service, a launchd job. It resolves the policy's passphrase variable from `.approval/env` itself inside the token window, so the repair is that file rather than that shell — `approval env --check` run *in that process's environment* says whether the line resolves there. Nothing is spent by this refusal: credentials resolve before the token is consumed, and the same grant executes once the credential is reachable. |
 | `vault-unreadable` at exit 1 | The ciphertext did not authenticate: the passphrase is wrong, or the file was altered. The two are deliberately not distinguished. There is no recovery path; re-create the vault and store the credentials again. |
 | `vault-absent` or `credential-absent` at exit 1 | No vault, or nothing under that name. `approval vault list` says which. |
 | `email-config-invalid` naming `smtp.security` | The stored value is not `implicit`, `starttls` or `none`. The adapter refuses to guess a transport security setting. |
