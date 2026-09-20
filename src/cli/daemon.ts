@@ -322,9 +322,15 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
       };
     case "sampled":
       return {
+        // APRV-381: a retry says so on the line itself. An operator who read a
+        // `sample-deferred` warning earlier in the run is owed the other half of
+        // the pair here, and reading "recorded at seq N" without it leaves them to
+        // match action keys by eye.
         text: `audit.sampled: ${event.action_key} drawn for review (execution.started at seq ${String(
           event.subject_seq,
-        )}) — recorded at seq ${String(event.seq)}`,
+        )}) — recorded at seq ${String(event.seq)}${
+          event.retry === true ? ", the retry of the sample this run deferred earlier" : ""
+        }`,
         stderr: false,
       };
     case "pruned":
