@@ -5,11 +5,11 @@ title: >-
   verification uses: npm pack, npm init, npm --version, tar (list and extract
   into a scratch dir), gunzip, base64, openssl dgst, shasum; and git tag -l is a
   read, never release.publish
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-397'
 created_date: '2026-09-20 04:41'
-updated_date: '2026-09-20 11:48'
+updated_date: '2026-09-20 11:52'
 labels:
   - classifier
   - hook
@@ -175,6 +175,8 @@ The first cut followed the brief's enumeration and treated only the stdout and t
 The suite version STAYS at 1.4.0, on the rule that a number is claimed at merge rather than at branch. Nothing a second implementation has ever been held to moved: the released suite is 1.3.0 and carries no vector for this binary at all, and 1.4.0 has not merged, so the number still names one set. The argument is written into the script beside the number so a later reader does not mistake it for an expectation that moved after release.
 
 command-class is now 73 vectors with 10 negative controls, and the whole suite is 453 vectors, 453 passed, 0 failed, 174 controls, manifest ok, exit 0.
+
+Orchestrator review (Fable, 2026-09-20): accepted with the gunzip listing change; the SPEC section 7 parenthetical on files.delete.out_of_scope is left for the human as proposed, and APRV-402 stands as filed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
