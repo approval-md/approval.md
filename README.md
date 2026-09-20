@@ -659,6 +659,7 @@ semantics: SPEC.md section 5.
 | `read_scope.roots` | The extra directories. Absolute, or relative to the gate root. No globs and no negation; each is resolved on disk before it is compared, so a symlink cannot smuggle a read out of one. Absent means no widening (§5.2, APRV-347). |
 | `approvers.<name>.channels` | The channels one approver can decide on. At least one: an approver reachable nowhere can never grant. No default (§5.1). |
 | `approvers.<name>.senders` | The transport account ids this person decides from, per channel: `senders.telegram: "12345678"`, the numeric `callback_query.from.id` and never a `@handle`, which is mutable and would transfer an identity. Optional and additive; absent everywhere means every decision is recorded against the identity the deciding process was launched with, exactly as before the key existed. Declaring the first entry for a channel turns enforcement on for that channel: a sender it authenticates and this block does not name is refused `sender-unmapped` and nothing is recorded. Two approvers claiming one id refuses the whole policy (`sender-ambiguous`), so every class resolves `manual`. Only channels whose transport authenticates a sender may appear, which today is `telegram` alone (§5.2, §10.3, APRV-324). |
+| `daemons` | The daemon instance ids permitted to append to this log, for the case where one party runs the daemon for another. Optional and additive; ABSENT means no restriction, exactly as before the key existed, and an empty list admits no daemon at all. Every record a daemon appends carries its id (`daemon` on the record), which is `APPROVAL_DAEMON_ID` from that process's launch environment or the derived `daemon-<instance id>` that `approval status` and `approval doctor` print. An id this list does not name is refused at the write boundary (`daemon-not-allowed`) with nothing written; an id it DOES name gains nothing else, since the id is self-reported and no verdict, budget, floor, draw or token reads it. Read from the attested policy only (§5.2, APRV-383, `design/hosted-daemon-identity.md`). |
 | `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and the DEPRECATED alias of `supervised-retro`: it still parses, `approval doctor`'s `autonomy-alias` row names every rule that writes it, and a future schema version removes it (§5.2, APRV-127, APRV-185, APRV-335). |
 | `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
 | `classes.<pattern>.retro_rate` | This class's retrospective sampling rate, in (0, 1], overriding `audit.supervised_sample_rate` for it alone. Optional on `supervised`, `supervised-retro` and `supervised-live`, refused on the rest. Absent means the global rate (§5.2, APRV-183). |
@@ -827,7 +828,7 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **33 rows** and a tally, in the order their failures
+`approval doctor` prints **34 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope
 integrity, the vault, the environment source map, then the rows that ask git
@@ -838,17 +839,17 @@ and the harness what happened (`log-drift`, `reconciliation`,
 `harness-version-unverified`, `live-draw`,
 `values-block`, `checkpoint`, `gate-organs`, `sealed-keys`,
 `codex-hook-wiring`, `autonomy-alias`, `pending-sign-off`,
-`codex-auto-reviewer`). Each failure
+`codex-auto-reviewer`, `daemon-identity`). Each failure
 carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
 and repairs nothing, and no credential value appears in its output. Three
-of the 33 lines from a fresh directory, plus the tally:
+of the 34 lines from a fresh directory, plus the tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-12 ok · 20 not applicable · 1 failed
+13 ok · 20 not applicable · 1 failed
 ```
 
 That one failure is expected on the scaffolded policy: it samples supervised
@@ -857,7 +858,7 @@ names, and a control that looks on while the party under oversight could steer
 it is worse than one that is visibly off. Name the secret when you want
 sampling, or delete the `audit` block if one person's gate has no use for it.
 
-**20 of the 33 report `not applicable` in a fresh directory**, and each names
+**20 of the 34 report `not applicable` in a fresh directory**, and each names
 the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 (no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
 `read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),
