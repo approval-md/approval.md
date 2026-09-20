@@ -1,0 +1,1 @@
+{"command":"grep -rn \"token_delivery\" docs/*.md examples/*.md | head -8; grep -n \"sealed\" src/cli/wait.ts 2>/dev/null | head -5; ls src/cli | grep -i wait","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

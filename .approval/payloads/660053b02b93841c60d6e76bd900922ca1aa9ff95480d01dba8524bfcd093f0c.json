@@ -1,0 +1,1 @@
+{"command":"cat /Users/carter/.claude/projects/-Users-carter-dev-approval-md/memory/rsi-demo-web-agent.md | sed -n 8,40p; echo ----; grep -n '^```sh' -A 6 examples/web-agent-demo/runbook.md | head -80","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

@@ -1,0 +1,1 @@
+{"command":"ls -lat ~/Downloads | head -5; grep -n \"download\\|Download\" /Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72/hosted/policy-builder/index.html | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

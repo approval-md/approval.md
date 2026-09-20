@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -l 'v0.2.0' .approval/payloads/*.json 2>/dev/null | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

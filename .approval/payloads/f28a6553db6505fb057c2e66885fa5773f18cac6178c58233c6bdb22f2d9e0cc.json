@@ -1,0 +1,1 @@
+{"command":"gh pr create --base main --head lane/release-0-3-0-371 --title \"release: 0.3.0 (APRV-371)\" --body \"The version bump and the changelog date, the second half of APRV-371 AC1. Full body with the local check matrix follows in a moment, once the local suite finishes.\" 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

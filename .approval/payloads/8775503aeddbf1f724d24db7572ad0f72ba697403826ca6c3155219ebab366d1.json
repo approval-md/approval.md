@@ -1,0 +1,1 @@
+{"command":"gh run view 35485936669 --json status,conclusion 2>/dev/null; gh api graphql -f query='query{repository(owner:\"approval-md\",name:\"approval.md\"){pullRequest(number:507){state mergeCommit{oid}}}}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

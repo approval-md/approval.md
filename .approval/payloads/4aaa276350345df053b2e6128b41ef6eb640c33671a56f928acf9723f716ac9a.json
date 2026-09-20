@@ -1,0 +1,1 @@
+{"command":"grep -n -A8 \"Configure your APPROVAL.md\" llms-full.txt; cat .claude/launch.json 2>/dev/null; grep -n \"llms-full\" package.json scripts/* 2>/dev/null | head -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'argv' src/cli/run.ts 2>/dev/null | head -20; echo \"---\"; /usr/bin/grep -rln 'canonical' src/core/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}

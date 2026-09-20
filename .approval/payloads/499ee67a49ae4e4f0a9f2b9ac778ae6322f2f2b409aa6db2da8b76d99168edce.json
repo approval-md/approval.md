@@ -1,0 +1,1 @@
+{"command":"sed -n 60,80p examples/web-agent-demo/public/index.html; sed -n 262,300p examples/web-agent-demo/public/index.html | cut -c1-160; grep -n \"badge\" examples/web-agent-demo/public/index.html | head -5; grep -n \"demo-wordmark\" -l tests/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

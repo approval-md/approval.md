@@ -1,0 +1,1 @@
+{"command":"git commit -m \"APRV-390: acceptance criteria, implementation notes, Done\n\nCo-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\" 2>&1 | tail -3 && git push 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae50a33d7d7094133"}

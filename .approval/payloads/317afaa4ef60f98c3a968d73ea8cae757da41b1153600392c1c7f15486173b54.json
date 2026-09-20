@@ -1,0 +1,1 @@
+{"command":"sed -n 44,60p examples/web-agent-demo/runbook.md; echo ----; grep -n \"approval up\\|telegram listen\\|cd ~/demo-gate\" examples/web-agent-demo/runbook.md | head -20; echo ----; cat ~/demo-gate/APPROVAL.md; cat ~/demo-gate/demo-instance.json","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

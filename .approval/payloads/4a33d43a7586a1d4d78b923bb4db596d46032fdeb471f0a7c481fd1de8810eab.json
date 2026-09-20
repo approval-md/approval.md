@@ -1,0 +1,1 @@
+{"command":"ls src/cli/ | head -100 && echo \"=== instance id ===\" && /usr/bin/grep -rn \"instance\" src/core/*.ts src/cli/*.ts --include='*.ts' -l | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae50a33d7d7094133"}

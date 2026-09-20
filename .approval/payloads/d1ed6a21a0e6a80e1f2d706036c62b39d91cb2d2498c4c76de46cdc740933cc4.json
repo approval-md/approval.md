@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"export function runCli\\|function runCli\" tests/*.ts | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae50a33d7d7094133"}

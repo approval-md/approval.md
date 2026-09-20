@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n -i 'payload_hash\\|payload-hash\\|hash-payload' docs/cli-reference.md | head -20; echo \"---\"; /usr/bin/grep -rn 'payload_hash' docs/*.md | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a40d1242056b8126c"}
