@@ -81,6 +81,7 @@ var LEVELS = ["human-only", "manual", "supervised-retro", "autonomous"];
 var SEED = [
   ["read.*", "autonomous"],
   ["files.write.workspace", "autonomous"],
+  ["communicate.email.external", "manual"],
   ["message.send", "manual"],
   ["spend.*", "manual"],
   ["files.delete.*", "manual"],
@@ -175,6 +176,14 @@ function build(cfg) {
       lines.push("  " + scalar(row[0]) + ": { autonomy: " + row[1] + " }");
     });
   }
+  lines.push("");
+  lines.push("channels:");
+  lines.push("  telegram:");
+  lines.push("    token_env: APPROVAL_TG_TOKEN");
+  lines.push("    chat_id_env: APPROVAL_TG_CHAT");
+  lines.push("");
+  lines.push("vault:");
+  lines.push("  passphrase_env: APPROVAL_VAULT_PASSPHRASE");
   lines.push("```");
   lines.push("");
   return lines.join("\n");
