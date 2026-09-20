@@ -333,6 +333,18 @@ export type DaemonEvent =
       seq: number;
       /** `seq` of the `execution.started` record the sample named. */
       subject_seq: number;
+      /**
+       * This append is the one an earlier tick of THIS run deferred (APRV-381).
+       * Present only when it is true, so the shape a supervisor already parses is
+       * unchanged for every other sample.
+       *
+       * It closes a `sample-deferred` warning: the pair is what tells an operator
+       * that the transient failure they read resolved, and which sample resolved
+       * it. Absent on a run that did not itself defer the sample, including a
+       * fresh process picking up a deferral the previous one printed, because this
+       * loop says only what it witnessed.
+       */
+      retry?: true;
     }
   | {
       /**
@@ -654,6 +666,20 @@ export const DAEMON_WARNING_CODES = [
    * month of taps.
    */
   "draw-unavailable",
+  /**
+   * An `audit.sampled` append met a held lock or a moved head, so the sample was
+   * postponed to the next tick (APRV-381). Appended to this union, so no existing
+   * entry changed meaning.
+   *
+   * Distinct from `append-refused` because the operator's next move is different:
+   * `append-refused` on a sample is a fact about the record or the file and wants
+   * a person, and this is contention between writers that the next sweep resolves
+   * by re-deriving the sample from the log. It is still a warning rather than a
+   * silence, because a tick that keeps deferring is a log under contention and
+   * that is a thing to know, and the `sampled` line that closes it carries
+   * `retry`.
+   */
+  "sample-deferred",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -1415,15 +1441,20 @@ export class Daemon {
           ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
           ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
           warn: (message) => this.warn("append-refused", message),
+          // APRV-381. Contention with another writer gets its own code, so the
+          // window an operator reads distinguishes "this sample is coming" from
+          // "an audit record was not written".
+          defer: (message) => this.warn("sample-deferred", message),
           // One line per sample appended (APRV-57). The sweep names no event; it
           // hands back what it wrote and the loop says it in the loop's own words.
-          sampled: (sample) =>
+          sampled: (sample, retry) =>
             this.emit({
               event: "sampled",
               action_key: sample.candidate.actionKey,
               task: sample.candidate.task,
               seq: sample.record.seq,
               subject_seq: sample.candidate.seq,
+              ...(retry ? { retry: true as const } : {}),
             }),
         }),
       );

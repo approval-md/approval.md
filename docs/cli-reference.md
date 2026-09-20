@@ -5015,8 +5015,9 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
 `advance-refused`, `dark-session-undetermined`, `anchor-behind`,
-`anchor-reread`, `checkpoint-due`, `draw-unavailable`. A warning never stops the
-loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
+`anchor-reread`, `checkpoint-due`, `draw-unavailable`, `sample-deferred`. A
+warning never stops the loop, and neither does
+`{"event":"git_evidence_failed","step":"commit",…}`.
 
 Dangling advance cycles (APRV-264): at startup and before every trigger, the
 daemon lists every advance execution nobody closed and closes each one this
@@ -5040,6 +5041,46 @@ the tick appended, so a supervised action drawn for retrospective review is name
 rather than inferred from the queue's backlog. `rendered` is emitted when the queue's summary
 CHANGES; the file itself is rewritten every tick, because TTL countdowns move even
 when the log does not.
+
+**A sample that met another writer is deferred, not dropped (APRV-381).** The
+audit sweep's append is a compare-and-append against the head it read, so it can
+meet a lock another writer holds (`lock-timeout`) or a record another writer
+landed in between (`head-moved`). Both are reported as `sample-deferred` on
+stderr, naming the action key and saying that the sweep retries on the next tick:
+
+```
+warning  sample-deferred  audit sampling deferred hook:6f2a:vcs.push.main
+  (lock-timeout): another writer holds .approval/log/events.jsonl.lock; gave up
+  after 2000ms The sample is NOT lost: it is still pending in the log's own terms
+  (eligible, drawn, no audit.sampled yet), and the sweep retries it on the next
+  tick.
+audit.sampled: hook:6f2a:vcs.push.main drawn for review (execution.started at
+  seq 51445) — recorded at seq 51447, the retry of the sample this run deferred
+  earlier
+```
+
+The second line is the same `sampled` event with `"retry":true` added, and it
+appears only when this run is the run that deferred the sample: a restarted
+daemon still makes the append, and says nothing about a promise it did not make.
+Nothing is remembered across processes because nothing needs to be: the sweep
+re-derives the pending set (eligible, drawn by the sampler, no `audit.sampled`
+yet) from the verified log on every tick, so a deferral is lost work only if the
+daemon never runs again.
+
+Every other append refusal on a sample keeps the `append-refused` form, because
+`validation`, `canonicalization`, `corrupt-tail` and `io` are facts about the
+record or the file that no amount of retrying repairs.
+
+**The sweep waits `2000ms` for the lock and no longer, by decision.** The daemon
+is the one writer that could afford a longer wait and deliberately takes the
+default. A tick is serial, so a blocking wait here delays the expiry lines, the
+`state:` write-back and `QUEUE.md`; the writers it contends with hold the lock
+across spans no polite wait covers (`approval log advance` across a whole
+verify-and-commit, `approval log sync` across a baseline move); and the appends it
+would be muscling in front of are the ones somebody is waiting on, a hook's gate
+verdict or a lane's execution record. Deferring costs one line and at most one
+tick interval, and it is provably lossless. Raise `--interval` only if you want
+the retry later; there is no flag for the lock wait, on purpose.
 
 ## up
 

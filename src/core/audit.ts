@@ -76,6 +76,7 @@ import { findDeclaration, indexDeclarations } from "./execute.js";
 import {
   appendEvent,
   type AppendError,
+  type AppendErrorCode,
   type EventRecord,
   type LogHead,
 } from "./log.js";
@@ -379,13 +380,66 @@ export interface SampleAppended {
   candidate: AuditCandidate;
 }
 
+/**
+ * The append errors a sampling sweep classifies as TRANSIENT (APRV-381).
+ *
+ * Both mean the same two things: the log was not written, and nothing about the
+ * candidate changed. `lock-timeout` is another writer holding the lockfile for
+ * longer than the wait; `head-moved` is another writer landing a record between
+ * this sweep's read and its append. Neither says anything about whether the
+ * sample should be taken, so the next sweep, which re-derives the whole question
+ * from the verified log, will ask again and get the same answer.
+ *
+ * Every other append error is a fact about the record or the file: `validation`
+ * and `canonicalization` say this event cannot be written as it stands,
+ * `corrupt-tail` says nothing may chain onto this log, `io` says the file could
+ * not be written. Retrying those on a cadence would print the same failure every
+ * tick and repair none of it, so they keep the refusal form an operator is meant
+ * to act on.
+ *
+ * A closed list rather than a "not fatal" default: a new append error code added
+ * later is non-transient until someone decides otherwise, which is the fail-closed
+ * reading (SPEC.md §11.1).
+ */
+export const TRANSIENT_APPEND_CODES: readonly AppendErrorCode[] = ["lock-timeout", "head-moved"];
+
+/** Whether `error` is one the sweep retries on its next pass rather than reports. */
+export function isTransientAppendError(error: AppendError): boolean {
+  return TRANSIENT_APPEND_CODES.includes(error.code);
+}
+
+/**
+ * One `audit.sampled` this sweep could not append YET (APRV-381).
+ *
+ * Distinct from a refusal on purpose. The pendency of a sample lives in the log
+ * (`pendingSamples` derives it), so a deferral loses nothing and needs no
+ * bookkeeping; what it needs is to be SAID, with the action key, so that an
+ * operator reading a daemon window is told "later" rather than left to read
+ * "was not appended" as "was lost". The candidate travels whole because the
+ * caller's line names it and, for a long-lived caller, matches the retry to it.
+ */
+export interface SampleDeferred {
+  candidate: AuditCandidate;
+  /** The transient append error: one of {@link TRANSIENT_APPEND_CODES}. */
+  append: AppendError;
+  /** The same fact in the shared refusal shape, for a caller that reports uniformly. */
+  refusal: AuditRefusal;
+}
+
 export interface SampleSweepResult {
   ok: true;
   /** The sampler in force. Carries the reason when sampling is off. */
   sampler: Sampler;
   appended: SampleAppended[];
-  /** Appends that were refused. Reported, never retried in place. */
+  /**
+   * Appends that were refused for a reason retrying cannot fix. Reported, never
+   * retried in place. Transient failures are NOT here (APRV-381): they are on
+   * {@link SampleSweepResult.deferred}, and a caller that reports only this list
+   * would turn a retried sample into a silent one.
+   */
   refusals: AuditRefusal[];
+  /** Appends a later sweep will make: see {@link SampleDeferred} (APRV-381). */
+  deferred: SampleDeferred[];
 }
 
 export type SampleResult = SampleSweepResult | AuditRefusal;
@@ -398,7 +452,11 @@ export type SampleResult = SampleSweepResult | AuditRefusal;
  * compare-and-append is made against is the head the decision was made from. A
  * `head-moved` refusal is collected and reported rather than retried: only the
  * next sweep, which re-derives the whole question from the log as it now is,
- * knows whether the candidate is still a candidate.
+ * knows whether the candidate is still a candidate. Since APRV-381 it is
+ * collected on `deferred` rather than on `refusals`, beside `lock-timeout`: the
+ * two are the same event to this function (nothing written, nothing decided) and
+ * the split is what lets a caller say "later" in one case and "look at this" in
+ * the other.
  *
  * Returns `ok` with an empty `appended` list when sampling is disabled; the
  * reason travels on `sampler`. A disabled sampler is not a refusal, because
@@ -412,10 +470,11 @@ export function sampleSupervised(
 ): SampleResult {
   const load = policyFor(options, cwd);
   const sampler = resolveSampler(load, options.env ?? process.env);
-  if (!sampler.enabled) return { ok: true, sampler, appended: [], refusals: [] };
+  if (!sampler.enabled) return { ok: true, sampler, appended: [], refusals: [], deferred: [] };
 
   const appended: SampleAppended[] = [];
   const refusals: AuditRefusal[] = [];
+  const deferred: SampleDeferred[] = [];
   const validate: ValidateOptions =
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
 
@@ -426,7 +485,13 @@ export function sampleSupervised(
       // in the log (each append is its own record) and nothing is rolled back.
       return appended.length === 0
         ? refuse(read.code, read.message)
-        : { ok: true, sampler, appended, refusals: [...refusals, refuse(read.code, read.message)] };
+        : {
+            ok: true,
+            sampler,
+            appended,
+            refusals: [...refusals, refuse(read.code, read.message)],
+            deferred,
+          };
     }
 
     const pending = pendingSamples(read.records, load, sampler);
@@ -437,13 +502,22 @@ export function sampleSupervised(
 
     const result = appendSample(logPath, next, sampler, read.head, options);
     if (!result.ok) {
-      refusals.push(result);
+      // One failure ends the sweep either way, transient or not. A held lock or a
+      // moved head means another writer is mid-transaction, and walking the rest
+      // of the candidates into the same contention would spend the tick losing
+      // the same race repeatedly; a real refusal is a fact about the file or the
+      // record that the next candidate would meet too.
+      if (result.append !== undefined && isTransientAppendError(result.append)) {
+        deferred.push({ candidate: next, append: result.append, refusal: result });
+      } else {
+        refusals.push(result);
+      }
       break;
     }
     appended.push({ record: result.record, candidate: next });
   }
 
-  return { ok: true, sampler, appended, refusals };
+  return { ok: true, sampler, appended, refusals, deferred };
 }
 
 function appendSample(

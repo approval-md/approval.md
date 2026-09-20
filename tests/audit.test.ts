@@ -18,15 +18,29 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { renderQueue } from "../src/channels/render-queue.js";
 import {
   AUDIT_ACTOR,
   AUDIT_REFUSAL_CODES,
+  TRANSIENT_APPEND_CODES,
+  isTransientAppendError,
   openSamples,
   parseSubjectRef,
   reviewSample,
@@ -37,7 +51,7 @@ import {
 import type { EventRecord } from "../src/core/log.js";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { verify } from "../src/core/verify.js";
-import { sweepAuditSampling } from "../src/daemon/audit.js";
+import { resetAuditSweepNotices, sweepAuditSampling } from "../src/daemon/audit.js";
 import { main } from "../src/cli/main.js";
 import {
   appendAttestation,
@@ -559,6 +573,209 @@ test("the daemon sweep reports a disabled sampler without warning and without wr
     "the notice quoted the secret",
   );
   assert.equal(records(unit).length, before);
+});
+
+// ===========================================================================
+// Contention: a deferred sample and a real refusal (APRV-381)
+// ===========================================================================
+
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const SCHEMA_DIR = join(REPO_ROOT, "schema");
+
+/**
+ * Run `body` while an outside party holds the append lock.
+ *
+ * The lockfile is what every writer in this repository contends for, so holding
+ * it here is the same contention the primary daemon met on 2026-09-19: no stub,
+ * no injected error, and the refusal comes from `core/log.ts`'s own acquisition.
+ */
+function underHeldLock<T>(unit: Case, body: () => T): T {
+  mkdirSync(dirname(unit.logPath), { recursive: true });
+  const lock = `${unit.logPath}.lock`;
+  closeSync(openSync(lock, "wx"));
+  try {
+    return body();
+  } finally {
+    unlinkSync(lock);
+  }
+}
+
+/**
+ * A copy of `schema/` with `audit.sampled` struck from `event.schema.json`'s
+ * enum, so the sample is refused at the real write boundary.
+ *
+ * The rest of the schema is copied byte for byte: the refusal under test is the
+ * write boundary's own `validation`, which is the shape a retry cannot repair.
+ */
+function schemaDirRejectingSamples(): string {
+  counter += 1;
+  const dir = join(scratch, `schema-${String(counter)}`);
+  mkdirSync(dir, { recursive: true });
+  for (const entry of readdirSync(SCHEMA_DIR)) {
+    if (!entry.endsWith(".json")) continue;
+    copyFileSync(join(SCHEMA_DIR, entry), join(dir, entry));
+  }
+  const path = join(dir, "event.schema.json");
+  const schema = JSON.parse(readFileSync(path, "utf8")) as {
+    properties: { event: { enum: string[] } };
+  };
+  const enumeration = schema.properties.event.enum;
+  const index = enumeration.indexOf("audit.sampled");
+  assert.notEqual(index, -1, "audit.sampled is not in the event enum");
+  enumeration.splice(index, 1);
+  writeFileSync(path, JSON.stringify(schema, null, 2), "utf8");
+  return dir;
+}
+
+/** The three sinks, collected, so a case can assert which channel spoke. */
+interface Heard {
+  warnings: string[];
+  deferrals: string[];
+  samples: { actionKey: string; retry: boolean }[];
+}
+
+function listening(): Heard {
+  return { warnings: [], deferrals: [], samples: [] };
+}
+
+function daemonSweep(
+  unit: Case,
+  minutes: number,
+  heard: Heard,
+  extra: { schemaDir?: string; withDeferSink?: boolean } = {},
+) {
+  return sweepAuditSampling({
+    logPath: unit.logPath,
+    policy: { file: unit.policyPath },
+    cwd: unit.dir,
+    clock: fixedClock(at(minutes)),
+    env: ENV,
+    ...(extra.schemaDir === undefined ? {} : { schemaDir: extra.schemaDir }),
+    warn: (message) => heard.warnings.push(message),
+    ...(extra.withDeferSink === false
+      ? {}
+      : { defer: (message: string) => heard.deferrals.push(message) }),
+    sampled: (sample, retry) =>
+      heard.samples.push({ actionKey: sample.candidate.actionKey, retry }),
+  });
+}
+
+test("the transient append codes are the two that decide nothing", () => {
+  // A closed list, and closed in the fail-closed direction: a code added to
+  // `core/log.ts` later is a refusal until someone decides it is a deferral.
+  assert.deepEqual([...TRANSIENT_APPEND_CODES], ["lock-timeout", "head-moved"]);
+  assert.equal(isTransientAppendError({ code: "lock-timeout", message: "" }), true);
+  assert.equal(isTransientAppendError({ code: "head-moved", message: "" }), true);
+  for (const code of ["validation", "canonicalization", "corrupt-tail", "io"] as const) {
+    assert.equal(isTransientAppendError({ code, message: "" }), false, code);
+  }
+});
+
+test("a held lock defers the sample by name, and the next sweep appends it as the retry", async () => {
+  resetAuditSweepNotices();
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  const before = records(unit).length;
+  const heard = listening();
+
+  const started = Date.now();
+  const blocked = underHeldLock(unit, () => daemonSweep(unit, 5, heard));
+  const waited = Date.now() - started;
+
+  assert.deepEqual(blocked, { sampled: 0, disabled: null });
+  assert.deepEqual(heard.warnings, [], "a deferral must not use the channel a real refusal uses");
+  assert.deepEqual(heard.samples, []);
+  assert.equal(heard.deferrals.length, 1);
+  const line = heard.deferrals[0] as string;
+  assert.match(line, /task-042:draft/u, "the line must name the action key");
+  assert.match(line, /lock-timeout/u);
+  assert.match(line, /retries it on the next tick/u);
+  assert.match(line, /NOT lost/u);
+  assert.equal(records(unit).length, before, "a deferred sample wrote to the log");
+  // The decision recorded in `daemon/audit.ts`: the sweep pays `core/log.ts`'s own
+  // wait and does not raise it for itself. A longer wait would show up here.
+  assert.ok(waited >= 1_000, `the sweep gave up after ${String(waited)}ms`);
+
+  // The lock is gone. Nothing was remembered about the sample being DUE: the
+  // sweep re-derives that from the log, which is why the deferral cost nothing.
+  const retried = daemonSweep(unit, 6, heard);
+  assert.deepEqual(retried, { sampled: 1, disabled: null });
+  assert.deepEqual(heard.warnings, []);
+  assert.equal(heard.deferrals.length, 1, "the deferral was said once, not once per sweep");
+  assert.deepEqual(heard.samples, [{ actionKey: "task-042:draft", retry: true }]);
+  assert.equal(records(unit).filter((record) => record.event === "audit.sampled").length, 1);
+
+  // Third sweep: nothing pending, nothing said, and no stale retry claim.
+  const idle = daemonSweep(unit, 7, heard);
+  assert.deepEqual(idle, { sampled: 0, disabled: null });
+  assert.equal(heard.samples.length, 1);
+  assertClean(unit);
+});
+
+test("a sweep that never deferred claims no retry", async () => {
+  resetAuditSweepNotices();
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  const heard = listening();
+
+  const summary = daemonSweep(unit, 5, heard);
+
+  assert.deepEqual(summary, { sampled: 1, disabled: null });
+  assert.deepEqual(heard.samples, [{ actionKey: "task-042:draft", retry: false }]);
+  assert.deepEqual(heard.deferrals, []);
+  assertClean(unit);
+});
+
+test("a caller with no defer sink is still told about the deferral", async () => {
+  resetAuditSweepNotices();
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  const before = records(unit).length;
+  const heard = listening();
+
+  const blocked = underHeldLock(unit, () =>
+    daemonSweep(unit, 5, heard, { withDeferSink: false }),
+  );
+
+  assert.deepEqual(blocked, { sampled: 0, disabled: null });
+  assert.deepEqual(heard.deferrals, []);
+  assert.equal(heard.warnings.length, 1, "a deferral nobody prints is a dropped sample");
+  assert.match(heard.warnings[0] as string, /task-042:draft/u);
+  assert.match(heard.warnings[0] as string, /retries it on the next tick/u);
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+});
+
+test("a refusal a retry cannot fix keeps the append-refused form", async () => {
+  resetAuditSweepNotices();
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  const before = records(unit).length;
+  const heard = listening();
+
+  const summary = daemonSweep(unit, 5, heard, { schemaDir: schemaDirRejectingSamples() });
+
+  assert.deepEqual(summary, { sampled: 0, disabled: null });
+  assert.deepEqual(heard.deferrals, [], "a schema refusal is not a deferral");
+  assert.deepEqual(heard.samples, []);
+  assert.equal(heard.warnings.length, 1);
+  const warning = heard.warnings[0] as string;
+  assert.match(
+    warning,
+    /^audit sampling: append-failed: audit\.sampled for task-042:draft was not appended \(validation\)/u,
+    "the pre-APRV-381 form is what a real refusal still reads as",
+  );
+  assert.doesNotMatch(warning, /retries it on the next tick/u);
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+
+  // And the sample is still owed: a refusal changed no eligibility. With the real
+  // schema the very next sweep appends it, with no retry claim, because this
+  // process deferred nothing.
+  const good = daemonSweep(unit, 6, heard);
+  assert.deepEqual(good, { sampled: 1, disabled: null });
+  assert.deepEqual(heard.samples, [{ actionKey: "task-042:draft", retry: false }]);
+  assertClean(unit);
 });
 
 // ===========================================================================

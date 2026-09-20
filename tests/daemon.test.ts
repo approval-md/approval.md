@@ -33,14 +33,17 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -304,6 +307,27 @@ function daemonOnce(
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   return { run, lines };
+}
+
+/**
+ * The `--json` warning lines of a run. Warnings go to stderr, so a case asserting
+ * on them reads the other stream; anything on stderr that is not one of our JSON
+ * lines (a runtime's own notice) is skipped rather than failing the parse.
+ */
+function warningsOf(run: Run): Record<string, unknown>[] {
+  const lines: Record<string, unknown>[] = [];
+  for (const raw of run.stderr.split("\n")) {
+    if (raw.trim().length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const line = parsed as Record<string, unknown>;
+    if (line["event"] === "warning") lines.push(line);
+  }
+  return lines;
 }
 
 async function until(predicate: () => boolean, label: string, ms = 20_000): Promise<void> {
@@ -1326,6 +1350,70 @@ test("sampling: a supervised execution drawn by the daemon is one `sampled` JSON
     0,
     again.run.stdout,
   );
+  assert.equal(eventsOf(dir, "audit.sampled").length, 1);
+  assertClean(dir);
+});
+test("sampling: a held lock is one `sample-deferred` warning, and the sample lands next tick", () => {
+  const dir = caseDir(POLICY_SAMPLING, "proposed");
+  assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
+  assert.equal(
+    runCli(["register", join("backlog", "tasks", "task-042.md"), "--as", "agent:claude"], dir).code,
+    0,
+  );
+  const ran = runCli(
+    ["run", "task-042:draft", "--as", "agent:claude", "--", ...CHILD],
+    dir,
+    { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET },
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+  const before = records(dir).length;
+
+  // Another writer, mid-transaction (APRV-381). The lockfile is what every writer
+  // in this repository contends for, so a tick that meets it here meets exactly
+  // what the primary daemon met on 2026-09-19.
+  const lock = `${logPath(dir)}.lock`;
+  closeSync(openSync(lock, "wx"));
+  let blocked;
+  try {
+    blocked = daemonOnce(dir, [], { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET });
+  } finally {
+    unlinkSync(lock);
+  }
+
+  assert.equal(blocked.run.code, 0, blocked.run.stderr);
+  const deferred = warningsOf(blocked.run).filter((line) => line["code"] === "sample-deferred");
+  assert.equal(deferred.length, 1, `one deferral line: ${blocked.run.stderr}`);
+  const message = String(deferred[0]?.["message"]);
+  assert.match(message, /task-042:draft/u, "the line must name the action key");
+  assert.match(message, /lock-timeout/u);
+  assert.match(message, /retries it on the next tick/u);
+  // Nothing about the SAMPLE reads as a refusal an operator has to act on. The
+  // drift scan's own append meets the same lock in this tick and still reports
+  // `append-refused`, which is APRV-381's scope line: the sweep was the one the
+  // primary daemon's window showed, and every other append is its own task.
+  assert.deepEqual(
+    warningsOf(blocked.run)
+      .filter((line) => line["code"] === "append-refused")
+      .map((line) => String(line["message"]))
+      .filter((message) => message.includes("audit.sampled") || message.includes("audit sampling")),
+    [],
+  );
+  assert.equal(
+    blocked.lines.filter((line) => line["event"] === "sampled").length,
+    0,
+    blocked.run.stdout,
+  );
+  assert.equal(records(dir).length, before, "a deferred sample wrote to the log");
+
+  // The lock is gone and the sample is still owed, because pendency lives in the
+  // log. This is a NEW process, so it makes the append and claims no retry: the
+  // loop says only what it witnessed.
+  const settled = daemonOnce(dir, [], { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET });
+  assert.equal(settled.run.code, 0, settled.run.stderr);
+  const sampled = settled.lines.filter((line) => line["event"] === "sampled");
+  assert.equal(sampled.length, 1, settled.run.stdout);
+  assert.equal(sampled[0]?.["action_key"], "task-042:draft");
+  assert.equal(sampled[0]?.["retry"], undefined, "a process cannot retry a promise it never made");
   assert.equal(eventsOf(dir, "audit.sampled").length, 1);
   assertClean(dir);
 });
