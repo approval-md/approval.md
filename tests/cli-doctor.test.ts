@@ -463,6 +463,13 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // the answer is "none". It is not a claim that any harness reviewer is
       // off, which nothing on this machine can establish (APRV-378).
       "pass",
+      // daemon-identity passes: the fixture's shell declares no
+      // APPROVAL_DAEMON_ID, so the id derives from the instance, and the fixture
+      // policy declares no `daemons` list, so any daemon may write. A pass and
+      // not a skip for the reason values-block is one — the question was asked
+      // and the answer is a usable id under no restriction, which is what every
+      // installation looks like before this key is adopted (APRV-383).
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -504,7 +511,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 33);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 34);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -990,8 +997,10 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   // appended `sender-mapping` (which approvers a channel whose senders the
   // policy maps can still recognize). 33: APRV-378 appended
   // `codex-auto-reviewer` (whether the log records something other than this
-  // gate answering a question this gate exists to ask).
-  assert.equal(parsed.checks.length, 33);
+  // gate answering a question this gate exists to ask). 34: APRV-383 appended
+  // `daemon-identity` (which daemon id a daemon run against this log would write
+  // onto every record, and whether the attested policy admits it).
+  assert.equal(parsed.checks.length, 34);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

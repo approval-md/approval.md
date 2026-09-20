@@ -53,6 +53,7 @@ import {
   parseDuration,
   type LoadPolicyOptions,
 } from "../core/policy-load.js";
+import { resolveDaemonId } from "../core/daemon-host.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -271,7 +272,11 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
         // (APRV-217): which proof the reads of this run pay is configuration,
         // and configuration nobody is told about is the failure mode this
         // project exists to prevent.
-        text: `daemon: watching ${event.tasks} and ${event.log}; queue ${event.queue}; tick every ${String(
+        // APRV-383: the id every record this run appends will carry, named on
+        // the same line and for the same reason. A tenant whose daemon is hosted
+        // by another party identifies the writing process by this string, and the
+        // operator running it should see it without asking anything.
+        text: `daemon: id ${event.daemon ?? "UNUSABLE (every append will be refused)"}; watching ${event.tasks} and ${event.log}; queue ${event.queue}; tick every ${String(
           event.interval_ms,
         )}ms; read proof ${event.read_proof}; anchor ${
           // APRV-219: named for the reason the prefix proof is. Which external
@@ -703,6 +708,26 @@ export function commandDaemonRun(
         `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this daemon's own environment.\n`,
       );
     }
+  }
+
+  // APRV-383. WHO this daemon is, resolved before it is constructed, because a
+  // daemon that cannot name itself would refuse every append at the write
+  // boundary and a process whose whole purpose is writing should not start to
+  // find that out. The happy path resolves silently: the `started` line names the
+  // id, and `approval status` and `approval doctor` name it without a daemon
+  // running at all.
+  const identity = resolveDaemonId(logPath);
+  if (!identity.ok) {
+    if (json) {
+      streams.err(
+        `${JSON.stringify({ error: { code: identity.code, message: identity.message } })}\n`,
+      );
+    } else {
+      streams.err(`approval: ${identity.message}\n`);
+    }
+    // Usage: the request does not match a valid deployment, and the repair is in
+    // this process's launch environment rather than in the machine around it.
+    return EXIT_USAGE;
   }
 
   const daemon = new Daemon(options);

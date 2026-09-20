@@ -98,6 +98,12 @@ import {
   type ResolvedVariable,
 } from "../core/env-file.js";
 import { readTaskFile } from "../core/frontmatter.js";
+import {
+  derivedDaemonId,
+  resolveDaemonAllowlist,
+  resolveDaemonId,
+} from "../core/daemon-host.js";
+import { DAEMON_ID_ENV } from "../core/daemon-identity.js";
 import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import { describeOwners, otherOwnersOf, ownedBot } from "../core/channel-owner.js";
 import type { EventRecord } from "../core/log.js";
@@ -1928,6 +1934,83 @@ function checkKeychainScope(logPath: string, load: PolicyLoadResult): DoctorChec
     check: "keychain-scope",
     status: "pass",
     detail: `${head}, and every source ${envFilePathFor(logPath)} names is this instance's own. No value is read or printed by this check on any path`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 32. daemon-identity (APRV-383)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which daemon would write here, and whether the attested policy admits it
+ * (APRV-383).
+ *
+ * The sibling of `keychain-scope` above, one layer along: that row answers
+ * "whose CREDENTIALS is this instance using", this one answers "whose NAME would
+ * this instance's daemon write onto every record it appends". Both derive from the
+ * same instance id, which is the point — an operator comparing `daemon-3f2a9c11`
+ * in a record against `approval-tg-token-3f2a9c11` in `.approval/env` is looking
+ * at one gate.
+ *
+ * ## The verdict rule
+ *
+ * - **FAIL** for an `APPROVAL_DAEMON_ID` in this shell that is not a usable id.
+ *   That is a broken launch environment wherever it is read from: a daemon started
+ *   from this shell would refuse every append, and the repair is one variable.
+ * - **SKIP**, named and loud, for an id the policy's `daemons` list does not
+ *   admit. Deliberately not a fail, and the reason is the one `keychain-scope`
+ *   states for the legacy item: under the deployment this key exists FOR, the
+ *   tenant's policy names a daemon id belonging to somebody else's machine, so a
+ *   red row here would be red on every tenant's laptop forever, and a red row on
+ *   every installation is a red row people learn to skip past. The line says
+ *   plainly that a daemon started HERE would write nothing.
+ * - **PASS** when the list names this id, and when there is no list at all, which
+ *   is every installation that never adopts the key.
+ *
+ * It reads a policy and an environment variable's SHAPE. No value is printed on
+ * any path, because the only value involved is an id, which the policy and the log
+ * both carry in the open.
+ */
+function checkDaemonIdentity(logPath: string, records: EventRecord[], load: PolicyLoadResult): DoctorCheck {
+  const resolved = resolveDaemonId(logPath);
+  if (!resolved.ok) {
+    return {
+      check: "daemon-identity",
+      status: "fail",
+      detail: `${resolved.message}. A daemon started from this shell would be refused \`daemon-id-invalid\` on every append, so it would read, render and report while writing nothing`,
+      fix: `unset ${DAEMON_ID_ENV} to use the derived id ${derivedDaemonId(logPath)}, or set it to a usable one: lowercase letters, digits, \`.\`, \`-\` and \`_\`, starting with a letter or digit`,
+    };
+  }
+
+  const head = `a daemon run against ${instanceHomeFor(logPath)} writes \`daemon: ${resolved.id}\` onto every record it appends (${resolved.source === "environment" ? `declared in ${DAEMON_ID_ENV}` : "derived from this instance, the same id the keychain-scope row names"})`;
+  const allowlist = resolveDaemonAllowlist(records, load);
+  if (!allowlist.ok) {
+    return {
+      check: "daemon-identity",
+      status: "pass",
+      detail: `${head}. No \`daemons\` allowlist is in force (${allowlist.detail}), so any daemon may write, exactly as before the key existed`,
+    };
+  }
+  const allowed = allowlist.allowed;
+  if (allowed === null) {
+    return {
+      check: "daemon-identity",
+      status: "pass",
+      detail: `${head}. The attested policy lists no allowed daemon ids, so any daemon may write — which is what every policy written before this key looked like`,
+    };
+  }
+  if (!allowed.includes(resolved.id)) {
+    return {
+      check: "daemon-identity",
+      status: "skip",
+      detail: `${head}. The attested policy's \`daemons\` list admits ${allowed.length === 0 ? "no daemon at all" : allowed.join(", ")}, so a daemon started HERE would be refused \`daemon-not-allowed\` on every append and would write nothing. Expected where the daemon for this log runs on another machine; wrong if that daemon is meant to be this one`,
+      fix: `add ${resolved.id} to \`daemons\` and re-attest the policy, or run the daemon whose id the list already names`,
+    };
+  }
+  return {
+    check: "daemon-identity",
+    status: "pass",
+    detail: `${head}, and the attested policy's \`daemons\` list admits it (${allowed.join(", ")}). Being listed grants nothing beyond the ability to write: no verdict, budget, floor, draw or token reads this id`,
   };
 }
 
@@ -3793,6 +3876,12 @@ export function commandDoctor(
       // one, and this is where an operator finds out it happened without
       // reading the log by hand.
       checkCodexAutoReviewer(verified.records, verified.result.status === "clean"),
+      // APRV-383: appended, twenty-fourth time, same reason. The sibling of
+      // `keychain-scope` one layer along — that row says whose credentials this
+      // instance uses, this one says whose name its daemon writes onto every
+      // record — and the row an operator wiring up a hosted daemon needs BEFORE
+      // anything is running.
+      checkDaemonIdentity(logPath, verified.records, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

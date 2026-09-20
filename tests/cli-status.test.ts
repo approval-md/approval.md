@@ -30,6 +30,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormatsModule from "ajv-formats";
 import type { FormatsPlugin } from "ajv-formats";
 
+import { derivedDaemonId } from "../src/core/daemon-host.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { recordRefusedGesture } from "../src/core/gesture-refusal.js";
 import { VERB_REGISTRY, verbLabel } from "../src/cli/verb-registry.js";
@@ -299,6 +300,14 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
     // Nothing here is dangling, and none of it moves `healthy` or the exit code
     // above.
     payload_store: { present: true, files: 1, pruned: 0, orphans: 0, note: PAYLOAD_STORE_NOTE },
+    // Additive (APRV-383): the daemon identity this instance resolves, which is
+    // what a daemon started HERE would write onto every record it appends.
+    // `status` is not the daemon, so this is a fact about the instance: the id
+    // derives from the instance home, nothing declared it in this shell, and the
+    // fixture policy carries no `daemons` list, so `allowed` is `null` — no
+    // restriction, which is not the same fact as an empty list. Informational: it
+    // moves neither `healthy` nor the exit code.
+    daemon: { id: derivedDaemonId(logPath(dir)), source: "derived", allowed: null },
   });
   assert.equal(rawLog(dir), rawLog(dir), "status must not write");
   assertClean(dir);
