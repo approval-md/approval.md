@@ -3,11 +3,11 @@ id: APRV-376
 title: >-
   approval status lists both refusal families, so a refused decision and a
   refused gesture are visible without reading the log
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-376'
 created_date: '2026-09-19 10:59'
-updated_date: '2026-09-20 10:54'
+updated_date: '2026-09-20 10:58'
 labels:
   - audit
   - cli
@@ -76,6 +76,8 @@ INVARIANTS TOUCHED, SPEC section 11.1. Invariant 1, enforcement paths read only 
 KEPT OUT OF SCOPE. `approval audit` still lists neither family; this task asks only for status, and the diff is status, its schema, its help, its tests and its docs.
 
 VERIFICATION. Build, typecheck and lint each exit 0. tests/cli-status.test.ts: 25 tests, 25 pass, 0 fail, exit 0, eight of them new. Targeted matrix across cli-status, cli-instructions, cli-help, cli-long-help, decision-refusal, gesture-refusal and event-schema: 119 tests, 119 pass, 0 fail, exit 0, and the better-sqlite3 ABI failure this machine sometimes shows in the registry check did not appear. Full run: 4866 tests, 4843 pass, 22 fail, 1 skipped; all 22 are this environment's pre-existing email and SMTP adapter failures (the TLS server name set to an IP address), matching the documented baseline, and none of them sits in a file this task touches.
+
+Orchestrator review (Fable, 2026-09-20): accepted as built; PR 512 opened with the merge armed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
