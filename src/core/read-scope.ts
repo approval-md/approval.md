@@ -176,11 +176,22 @@ export function effectiveReadRoots(options: {
  *   `read.shell` (this repository's policy: autonomous), which is a widening,
  *   and a task that exists to narrow reads has no business doing that in
  *   passing. They are named in the follow-up in `docs/sandboxed-exec.md`.
+ *
+ * APRV-397 adds the packaging readers, so the reads the new classifier rows
+ * answer are scoped by the same arithmetic every other reader's are: `tar`,
+ * `gunzip` and `base64` are `all` (their operands are files, and a flag value
+ * that lands among the positionals resolves against the working directory, which
+ * costs nothing — see the note below), and `openssl` is `after-pattern` because
+ * its first positional is the digest subcommand and the files follow it. Only
+ * the READ forms of those binaries ever reach this table: `tar -x`, a plain
+ * `gunzip` and `base64 -o` take write classes in the classifier, and this module
+ * scopes `read.shell` alone.
  */
 export type ReadTargetShape = "all" | "after-pattern" | "walk";
 
 /** Which readers take paths, and where. Keyed by the binary's basename. */
 export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
+  base64: "all",
   cat: "all",
   cksum: "all",
   cut: "all",
@@ -189,10 +200,12 @@ export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
   file: "all",
   find: "walk",
   grep: "after-pattern",
+  gunzip: "all",
   head: "all",
   jq: "after-pattern",
   ls: "all",
   md5sum: "all",
+  openssl: "after-pattern",
   rg: "after-pattern",
   sed: "after-pattern",
   sha256sum: "all",
@@ -200,6 +213,7 @@ export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
   sort: "all",
   stat: "all",
   tail: "all",
+  tar: "all",
   tree: "all",
   uniq: "all",
   wc: "all",

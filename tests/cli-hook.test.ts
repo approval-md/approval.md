@@ -529,6 +529,92 @@ test("hook classify moves gh pr update-branch but leaves gh pr view reading", ()
   }
 });
 
+test("hook classify reads a tag listing and still publishes a tag creation (APRV-397)", () => {
+  // The nine-minute question this task removes. `git tag -l` in a state check
+  // resolved `release.publish`, which this repository's policy holds at manual,
+  // so a listing of local refs went to a phone. The other half of the pair is
+  // what keeps the fix honest: every spelling that creates, moves, signs or
+  // removes a tag has to stay exactly where APRV-305 put it.
+  const dir = caseDir();
+  for (const [command, expected, rule] of [
+    ["git tag", "read.shell", "git-tag-read"],
+    ["git tag -l", "read.shell", "git-tag-read"],
+    ["git tag --list", "read.shell", "git-tag-read"],
+    ["git tag -l 'v0.*'", "read.shell", "git-tag-read"],
+    ["git tag -n", "read.shell", "git-tag-read"],
+    ["git tag -n5", "read.shell", "git-tag-read"],
+    ["git tag --contains HEAD", "read.shell", "git-tag-read"],
+    ["git tag --points-at HEAD", "read.shell", "git-tag-read"],
+    ["git tag --sort=-v:refname", "read.shell", "git-tag-read"],
+    ["git tag v0.1.0", "release.publish", "git-tag"],
+    ["git tag -a v0.1.0 -m release", "release.publish", "git-tag"],
+    ["git tag -d v0.1.0", "release.publish", "git-tag"],
+    ["git tag -f v0.1.0 HEAD", "release.publish", "git-tag"],
+    ["git tag -s v0.1.0", "release.publish", "git-tag"],
+    // A flag the listing allowlist does not name is a creation, which is what
+    // keeps a future `git tag` option from arriving as a read.
+    ["git tag --create-reflog v0.1.0", "release.publish", "git-tag"],
+  ] as const) {
+    const run = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(run.code, 0, run.stderr);
+    const parsed = JSON.parse(run.stdout) as {
+      classes: string[];
+      segments: { rule: string }[];
+    };
+    assert.deepEqual(parsed.classes, [expected], command);
+    assert.equal(parsed.segments[0]?.rule, rule, command);
+  }
+});
+
+test("hook classify answers the packaging tools a verification runs (APRV-397)", () => {
+  // The other half of APRV-397, end to end through the verb a session is told
+  // to run when in doubt. Each read was `unclassified` (a deny) before this, and
+  // each write is scoped by the destination the command names: the pairs below
+  // are the read spelling and the refused spelling of the same tool.
+  const dir = caseDir();
+  for (const [command, expected] of [
+    ["npm --version", "read.shell"],
+    ["npm pack", "files.write.workspace"],
+    ["npm pack --pack-destination build/tarballs", "files.write.workspace"],
+    ["npm pack --pack-destination /usr/local/lib", "files.delete.out_of_scope"],
+    ["npm pack lodash", "network.call"],
+    ["npm init -y", "files.write.workspace"],
+    ["tar -tzf dist/pkg.tgz", "read.shell"],
+    ["tar tvf dist/pkg.tgz", "read.shell"],
+    ["tar -xzf dist/pkg.tgz -C build/unpack", "files.write.workspace"],
+    ["tar -xzf dist/pkg.tgz -C /usr/local/lib", "files.delete.out_of_scope"],
+    ["tar -czf dist/out.tgz src", "files.write.workspace"],
+    ["gunzip -c dist/pkg.gz", "read.shell"],
+    ["gunzip dist/pkg.gz", "files.write.workspace"],
+    ["base64 -d dist/blob.b64", "read.shell"],
+    ["base64 -i dist/pkg.tgz -o build/out.b64", "files.write.workspace"],
+    ["openssl dgst -sha256 dist/pkg.tgz", "read.shell"],
+    ["openssl dgst -sha256 -out build/sums.txt dist/pkg.tgz", "files.write.workspace"],
+    ["shasum -a 256 dist/pkg.tgz", "read.shell"],
+  ] as const) {
+    const run = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(run.code, 0, run.stderr);
+    assert.deepEqual(
+      (JSON.parse(run.stdout) as Record<string, unknown>)["classes"],
+      [expected],
+      command,
+    );
+  }
+  // And the refusals the rows deliberately leave in place: a `tar` with no
+  // readable mode, and the openssl subcommands that are not digests.
+  for (const [command, code] of [
+    ["tar -f dist/pkg.tgz", "opaque"],
+    ["openssl enc -d -in blob.enc", "unclassified"],
+    ["npm doctor", "unclassified"],
+  ] as const) {
+    const run = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(run.code, 0, run.stderr);
+    const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+    assert.equal(parsed["ok"], false, command);
+    assert.equal(parsed["code"], code, command);
+  }
+});
+
 test("hook classify reports a refusal without failing", () => {
   const dir = caseDir();
   // `eval` builds the command it runs, which no parser here can read. A bare

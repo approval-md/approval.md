@@ -231,6 +231,20 @@ const FIXTURES: readonly Fixture[] = [
   { command: "npm ls --depth 0", class: "read.shell", rule: "npm-list" },
   { command: "npm test", class: "files.write.workspace", rule: "npm-script" },
   { command: "npm run build", class: "files.write.workspace", rule: "npm-script" },
+  // APRV-397. The packaging verbs and the version probe. `npm version` above
+  // keeps `release.publish`: it writes a version and a tag, and the probe row
+  // below is reached only by an argv that is nothing but probe flags.
+  { command: "npm --version", class: "read.shell", rule: "npm-version" },
+  { command: "npm -v", class: "read.shell", rule: "npm-version" },
+  { command: "npm --help", class: "read.shell", rule: "npm-version" },
+  { command: "pnpm -v", class: "read.shell", rule: "npm-version" },
+  { command: "npm pack", class: "files.write.workspace", rule: "npm-pack" },
+  { command: "npm pack --pack-destination build/tarballs", class: "files.write.workspace", rule: "npm-pack" },
+  { command: "npm pack ./packages/core", class: "files.write.workspace", rule: "npm-pack" },
+  { command: "npm pack lodash", class: "network.call", rule: "npm-pack-remote", row: "npm-pack" },
+  { command: "npm pack @scope/pkg@1.0.0", class: "network.call", rule: "npm-pack-remote", row: "npm-pack" },
+  { command: "npm init -y", class: "files.write.workspace", rule: "npm-init" },
+  { command: "npm init vite", class: "files.write.workspace", rule: "npm-init-create", row: "npm-init" },
 
   // -- harness self-update (APRV-228) -----------------------------------------
   // Every spelling the task names, one row each. The verbs resolve to the
@@ -464,9 +478,147 @@ const FIXTURES: readonly Fixture[] = [
     rule: "rm-absolute",
     row: "rm",
   },
+  // APRV-397 reads the same roots for a packaging DESTINATION: unpacking a
+  // tarball into the scratchpad, or writing one there, is the agent's own space
+  // and not a decision. Same roots, same arithmetic, same "absent yields the
+  // stricter answer" — the controls with no context are in the packaging block
+  // below.
+  {
+    command: "tar -xzf dist/pkg.tgz -C /private/tmp/claude-501/sess/scratchpad/unpack",
+    class: "files.write.workspace",
+    rule: "tar-extract",
+    row: "tar",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "npm pack --pack-destination /private/tmp/claude-501/sess/scratchpad",
+    class: "files.write.workspace",
+    rule: "npm-pack",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "tar -xzf dist/pkg.tgz -C /private/tmp/claude-501/sess/scratchpad/../../escape",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "tar -xzf dist/pkg.tgz -C /private/tmp/claude-501/sess/scratchpad/unpack",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
 
   { command: "sed -n '1,20p' README.md", class: "read.shell", rule: "sed-read", row: "sed" },
   { command: "sed -i.bak s/a/b/ src/x.ts", class: "files.write.workspace", rule: "sed-in-place", row: "sed" },
+
+  // -- packaging and archives (APRV-397) ------------------------------------
+  // Both directions for every row: the read spelling, the write spelling, and
+  // the destination the text puts outside the workspace. The scratch-root
+  // branch is below, with the other fixtures that carry a context.
+  { command: "tar -tzf dist/pkg.tgz", class: "read.shell", rule: "tar-list", row: "tar" },
+  { command: "tar tvf dist/pkg.tgz", class: "read.shell", rule: "tar-list", row: "tar" },
+  { command: "tar --list --file dist/pkg.tgz", class: "read.shell", rule: "tar-list", row: "tar" },
+  { command: "tar --version", class: "read.shell", rule: "tar-probe", row: "tar" },
+  { command: "tar -xzf dist/pkg.tgz", class: "files.write.workspace", rule: "tar-extract", row: "tar" },
+  { command: "tar -xzf dist/pkg.tgz -C build/unpack", class: "files.write.workspace", rule: "tar-extract", row: "tar" },
+  { command: "tar -czf dist/out.tgz src", class: "files.write.workspace", rule: "tar-create", row: "tar" },
+  {
+    command: "tar -xzf dist/pkg.tgz -C /usr/local/lib",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
+  {
+    command: "tar -xzf dist/pkg.tgz -C ../sibling",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
+  {
+    command: "tar -xzf dist/pkg.tgz -C $DEST",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
+  {
+    command: "tar -czf /usr/local/lib/out.tgz src",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
+  // One bundle carrying both value-taking letters: which word feeds which is
+  // tar's own option order, so the destination is not in the text.
+  {
+    command: "tar -xzCf build a.tgz",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "tar",
+  },
+  { command: "gunzip -c pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
+  { command: "gunzip -t pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
+  { command: "gunzip --stdout pkg.gz", class: "read.shell", rule: "gunzip-read", row: "gunzip" },
+  // The default form replaces the file it names, and `-k` still creates one.
+  { command: "gunzip pkg.gz", class: "files.write.workspace", rule: "gunzip-write", row: "gunzip" },
+  { command: "gunzip -k pkg.gz", class: "files.write.workspace", rule: "gunzip-write", row: "gunzip" },
+  {
+    command: "gunzip /usr/local/lib/pkg.gz",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "gunzip",
+  },
+  { command: "base64 -d blob.b64", class: "read.shell", rule: "base64-read", row: "base64" },
+  { command: "base64 dist/pkg.tgz", class: "read.shell", rule: "base64-read", row: "base64" },
+  { command: "base64 -i dist/pkg.tgz -o build/out.b64", class: "files.write.workspace", rule: "base64-write", row: "base64" },
+  {
+    command: "base64 -i dist/pkg.tgz -o /usr/local/lib/out.b64",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "base64",
+  },
+  { command: "openssl dgst -sha256 dist/pkg.tgz", class: "read.shell", rule: "openssl-digest" },
+  { command: "openssl sha256 dist/pkg.tgz", class: "read.shell", rule: "openssl-digest" },
+  {
+    command: "openssl dgst -sha256 -out build/sums.txt dist/pkg.tgz",
+    class: "files.write.workspace",
+    rule: "openssl-digest-out",
+    row: "openssl-digest",
+  },
+  {
+    command: "openssl dgst -sha256 -out /usr/local/lib/sums.txt dist/pkg.tgz",
+    class: "files.delete.out_of_scope",
+    rule: "packaging-write-out-of-scope",
+    row: "openssl-digest",
+  },
+  // Already in the read row before this task; here so the pair a verification
+  // reaches for is pinned in one place.
+  { command: "shasum -a 256 dist/pkg.tgz", class: "read.shell", rule: "read-shell" },
+  { command: "sha256sum dist/pkg.tgz", class: "read.shell", rule: "read-shell" },
+
+  // -- git tag: the listing forms read (APRV-397) ---------------------------
+  { command: "git tag", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag -l", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --list", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag -l 'v0.*'", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag -n", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag -n5", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --contains HEAD", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --points-at HEAD", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --sort=-v:refname", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --merged main", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  { command: "git tag --format '%(refname)'", class: "read.shell", rule: "git-tag-read", row: "git-tag" },
+  // Everything that creates, moves, signs or removes a tag, and the bare name
+  // that creates one. `git tag v0.1.0` is pinned in the git block above too.
+  { command: "git tag -a v0.1.0 -m release", class: "release.publish", rule: "git-tag" },
+  { command: "git tag -d v0.1.0", class: "release.publish", rule: "git-tag" },
+  { command: "git tag -f v0.1.0 HEAD", class: "release.publish", rule: "git-tag" },
+  { command: "git tag -s v0.1.0", class: "release.publish", rule: "git-tag" },
+  { command: "git tag -m note v0.1.0", class: "release.publish", rule: "git-tag" },
+  // A flag the allowlist does not name is a creation, which is what keeps a
+  // future `git tag` option from arriving as a read.
+  { command: "git tag --create-reflog v0.1.0", class: "release.publish", rule: "git-tag" },
+  { command: "git tag --unknown-future-flag", class: "release.publish", rule: "git-tag" },
 
   // -- web fetches: GET-shaped is read.web, everything else network.call -----
   { command: "curl https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
@@ -921,6 +1073,11 @@ for (const opaque of [
   "find . -name '*.ts' -exec grep -l foo {} +",
   "find . -execdir mv {} /tmp",
   "find . -okdir rm {}",
+  // APRV-397: `tar` whose MODE is not in its words. The row answers list,
+  // extract and create; a command that names none of them is a command whose
+  // effect the text does not carry, which is what this code means.
+  "tar -f pkg.tgz",
+  "tar -z",
   "node -e 'process.exit(0)'",
   "node --eval 'x'",
   "python3 -c 'import os'",
@@ -950,6 +1107,17 @@ for (const unknown of [
   "gemini",
   // The updater's state dumper is a different binary and is not named.
   "ucas --json",
+  // APRV-397 named the digest subcommands of `openssl` and nothing else, so
+  // every subcommand that encrypts, mints a key or opens a socket is as
+  // unclassified as it was. The probe row it added is the package managers'
+  // alone, and it matches only an argv that is nothing but probe flags: an npm
+  // subcommand this table does not name keeps the same refusal.
+  "openssl enc -d -in blob.enc",
+  "openssl genrsa -out key.pem",
+  "openssl s_client -connect example.com:443",
+  "npm doctor",
+  "npm cache clean --force",
+  "npm",
 ]) {
   test(`unclassified: ${unknown}`, () => {
     const result = classifyCommand(unknown);
