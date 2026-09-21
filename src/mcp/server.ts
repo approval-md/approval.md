@@ -282,6 +282,16 @@ export interface ServerPaths {
   log?: string;
   /** `--policy`, when the operator pinned one. */
   policy?: string;
+  /**
+   * `--dir`, when the operator pinned one (APRV-421).
+   *
+   * Unset by `approval mcp serve`, whose working directory IS the operator's
+   * and needs no restating on a pipe they handed the process. `approval serve`
+   * sets it on every call: over HTTP the caller is on another machine, so the
+   * store a verb resolves against has to come from the launch configuration
+   * rather than from whatever directory this process happens to sit in.
+   */
+  dir?: string;
 }
 
 export interface ServerOptions extends ServerPaths {
@@ -460,6 +470,7 @@ export function buildArgv(
   if (options.guest === true && verbLabel(spec) === "wait") {
     injected.push("--timeout", guestWaitTimeout(rawFlags));
   }
+  if (options.dir !== undefined && accepted.has("--dir")) injected.push("--dir", options.dir);
   if (options.log !== undefined && accepted.has("--log")) injected.push("--log", options.log);
   if (options.policy !== undefined && accepted.has("--policy")) {
     injected.push("--policy", options.policy);
@@ -482,8 +493,17 @@ export function buildArgv(
 // Invocation: the same function main.ts dispatches to
 // ---------------------------------------------------------------------------
 
-/** What one verb invocation produced. */
-interface Invocation {
+/**
+ * What one verb invocation produced.
+ *
+ * Exported alongside {@link invokeVerb} since APRV-421, because a SECOND
+ * transport dispatches through it: `approval serve` answers the same
+ * agent-facing verb surface over HTTP, and the one thing it must not do is
+ * build its own route from a call to a command function. Two routes would be
+ * two answers to "what does this verb do here" on the day one of the arms
+ * below changes.
+ */
+export interface Invocation {
   code: number;
   stdout: string;
   stderr: string;
@@ -517,7 +537,7 @@ function collector(): { streams: Streams; out: string[]; err: string[] } {
  * `channel telegram health` goes through `commandChannel` for the same reason:
  * its dispatch arm in `main()` is the promise-unwrapping one.
  */
-async function invoke(
+export async function invokeVerb(
   spec: VerbSpec,
   argv: string[],
   options: ServerOptions,
@@ -578,7 +598,16 @@ async function invoke(
 // Invocation -> CallToolResult
 // ---------------------------------------------------------------------------
 
-/** The last line of `text` that parses as a JSON object, or null. */
+/**
+ * The last line of `text` that parses as a JSON object, or null.
+ *
+ * Private again, and the round trip is worth a sentence. APRV-421 exported it
+ * so `approval serve` could answer a verb call with the same object; that
+ * server's review replaced the shape with the verb's raw streams and its exit
+ * code, because picking an object out of a stream is a judgment a transport
+ * should not be making on a caller's behalf. Only `toolResult` needs it now,
+ * where the MCP contract genuinely asks for `structuredContent`.
+ */
 function lastJsonObject(text: string): Record<string, unknown> | null {
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -753,7 +782,7 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
       throw new McpError(ErrorCode.InvalidParams, `${built.code}: ${built.message}`);
     }
 
-    return toolResult(await serialize(() => invoke(spec, built.argv, options)));
+    return toolResult(await serialize(() => invokeVerb(spec, built.argv, options)));
   });
 
   return server;

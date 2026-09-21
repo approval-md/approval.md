@@ -6515,6 +6515,271 @@ The guest instructions string says so, tells the caller to poll `status`, and
 states plainly that a granted request executes nowhere: the demo is the approval
 flow itself.
 
+## serve
+
+`approval serve` is the same agent-facing surface as `mcp serve`, over HTTP,
+for a harness that has no local log and no local policy: a sandboxed tenant
+whose daemon runs elsewhere, one process per tenant. It is a transport and not
+a second gate. Every verdict, every verb and every batch of records comes from
+the function the CLI dispatches to; nothing under `src/serve/` classifies a
+command, resolves a policy, mints a token or verifies a chain.
+
+STDOUT IS EMPTY. The bound address, the identity, the daemon id and the store
+root go to stderr on one started line. SIGINT and SIGTERM close the listener
+and exit 0.
+
+### The two credentials
+
+Two bearer values, both read from the launch environment (SPEC.md §11.1
+invariant 7: nothing is loaded out of the working tree), both required before
+the listener exists, and refused when they are equal or shorter than 24
+characters:
+
+| variable | opens |
+|---|---|
+| `APPROVAL_SERVE_AGENT_TOKEN` | `GET /verbs`, `POST /hook/<harness>`, and the allowlisted verbs below |
+| `APPROVAL_SERVE_TENANT_TOKEN` | `GET /verbs`, `GET /log/follow`, `GET /export`, `GET /status`, and every other published verb |
+
+**The agent credential never reads the log it is judged by.** That is the
+sentence the split exists for. An agent that could stream the verified log
+could read every decision made about it and the shape of the oversight it is
+under; an agent that could export the store could carry all of it away.
+
+Authorization is therefore per verb, and it is an ALLOWLIST. The party at the
+other end of this transport is a sandboxed harness on another machine, not the
+operator at their own laptop, so the agent credential opens only what a harness
+under oversight needs in order to ASK and to ACT ON a grant:
+
+> `instructions`, `hook_classify`, `request`, `wait`, `withdraw`
+
+Five verbs, and the shortness is the point: a harness under oversight asks and
+is answered, and everything else about the gate belongs to the party the gate
+is for.
+
+Neither payload builder is on it, under the rule that a builder is the agent's
+only if it builds from the request's own arguments and never reaches a host
+resource. `payload_hash` takes a FILE, and on this transport that file is on
+the daemon's machine while the caller is not: every path it could name is one
+the host put there, so answering would be a hash oracle that also files the
+bytes into the payload store. `payload_agentmail-draft` takes two ids rather
+than a path, but reads the draft over HTTPS with `AGENTMAIL_API_KEY` from this
+server's own environment, so a remote caller would be spending the host's
+credential on ids it chose: the same fault wearing a network instead of a
+filesystem.
+
+Everything else the catalog publishes is the tenant's. The ones easiest to wave
+through and most worth naming: `log_tail` and `log_export` return records,
+`log_verify` and `gate_status` return the log's length, its head hash and the
+live state of the gate, `queue` returns the tenant's pending decisions,
+`policy_check` and `policy_test` answer what the policy does with a class and
+name the absolute store path while doing it, and `status` is the tenant's view
+of the oversight the agent is under. So are the verbs that touch the host
+rather than the log: `run` and `sandbox` spawn argv on the daemon's machine,
+every `adapter_<name>` spends vault credentials, `log_advance` opens pull
+requests against the tenant's records. And so are `register` (its positional is
+a host path; the hook endpoint is a harness's way to register, and it
+synthesises the envelope itself), the two payload builders, `token`,
+`coverage`, `doctor`, `audit_list`, `audit_obligations`,
+`channel_telegram_health`, `journal_write`, `journal_read`, `feedback`,
+`values`, `import_agents-md`, `reindex` and `render`.
+
+**No caller names a path, and no positional wears a dash.** Four rules, and
+each closes a route around the others.
+
+1. The server appends `--dir`, `--log` and `--policy` to every verb call in
+   every scope from its own launch configuration, and a call supplying one of
+   them is refused `serve-path-pinned` even when the value is correct.
+2. A positional beginning with `-` is refused `serve-positional-flag`, in every
+   scope. Positionals are emitted first and verbatim, and the verb reads any
+   token starting with `-` as a flag — including the `--payload=/path`
+   spelling — so without this rule a refused flag could be sent as a value and
+   reach the parser through the front door. `trailing` needs no such rule: it
+   always follows a `--` separator, and the flag parser stops there, which is
+   what lets `hook classify -- git push -f` classify a command line that has
+   flags in it.
+3. The AGENT credential may not use a path-typed flag at all
+   (`serve-flag-not-permitted`), and may use only the flags on a short
+   per-verb list. A harness reached through this transport has no files on the
+   daemon's machine, so a path it names is either useless or somebody else's;
+   payload bytes arrive through the hook route, which builds the envelope from
+   the tool call.
+4. The TENANT credential's path-typed flags are confined to the store
+   (`serve-path-outside-store`), resolved through `realpath` on the deepest
+   existing ancestor so traversal and a symlinked directory both refuse.
+
+Which flags are path-typed comes from the registry rather than from a list
+kept beside the server: a flag declared `"path"` publishes as an ordinary
+`{"type":"string"}`, so the wire contract is unchanged, and it is confined on
+the day it appears. A test walks every published verb and fails on any flag
+that is neither declared `"path"` nor reviewed as something else.
+
+A verb added to the registry tomorrow is published on both surfaces the same
+day and is TENANT-scoped until somebody decides otherwise. The allowlist is
+what widens, and widening it is a diff in the server and a diff in a test.
+
+An agent-credential call to anything off that list is refused
+`serve-agent-forbidden`, and a tenant-credential call to an allowlisted verb
+(`request`, `wait`, `withdraw`, `hook_classify`, or `consume`, which this
+surface withholds entirely) is refused `serve-tenant-forbidden`. Both are scope refusals rather
+than not-founds: a caller that guessed a path learns that the door exists and
+is not theirs.
+
+Every path requires one of the two. There is no unauthenticated surface at all,
+not a health check and not a 404, so a caller with no credential learns nothing
+about what exists.
+
+### The endpoints
+
+`GET /verbs` is the published catalog: `approval mcp serve`'s tool list, name
+for name and schema for schema, because it is derived from the same registry
+filter by the same function. `--as` is absent from every published schema and
+the launch identity is appended last to every argv, so a caller can neither
+name an identity nor change one. `grant` is absent, as it is there and for the
+same reason: SPEC.md §11 makes the agent the untrusted policy, and a tool list
+is a statement about what a surface is for. Each entry carries the scope that
+opens it, so the catalog is honest about `status` being the tenant's.
+
+### The response contract
+
+`POST /verb/<tool_name>` and `POST /hook/<harness>` answer with ONE body:
+
+```json
+{"exit_code": 0, "stdout": "…", "stderr": "…",
+ "stdout_truncated": false, "stderr_truncated": false}
+```
+
+`stdout` and `stderr` are exactly what the CLI wrote to each stream, and
+`exit_code` is exactly what it exited. A client reproduces the invocation by
+writing `stdout`, writing `stderr`, and exiting `exit_code`. A client that
+wants the verb's machine-readable refusal parses `stderr`, which is the stream
+the CLI prints refusals on. Both streams are bounded at 256 KiB and clipped at
+a codepoint boundary, with a flag saying whether that happened.
+
+**Nothing about a verdict travels in a header.** It used to: the exit code rode
+on `x-approval-exit-code`, and server-authored refusals did not set it. A
+client following the documented rule then read a missing header as zero, and
+zero is ALLOW on Claude Code, Cursor, Codex and Muse — so a 1.1 MB hook
+envelope came back as a 413 that meant *proceed*. The exit code is now data in
+the body, it is present on every response including every refusal, and on a
+refusal it is always non-zero.
+
+**A client treats a missing, unparseable or truncated body as a BLOCK.** That
+rule is not a nicety: a transport failure this server never saw (a proxy, a
+dropped connection, a process killed mid-response) has no exit code to carry,
+and the only safe reading of "no answer" from a gate is no.
+
+`POST /hook/<harness>` takes the harness envelope the stdin form would read, for
+every harness this runtime speaks a hook protocol for. Its `stdout` is
+BYTE-FOR-BYTE what `approval hook <harness>` prints for that envelope, because
+it IS that stdout: the request body is handed to `commandHook` as its stdin and
+nothing reshapes the answer. The exit code must travel with it, because the
+dialects disagree about where a block lives — Claude Code, Cursor, Codex and
+Muse put it in the body at exit 0; Grok Build and Hermes use exit 2. Hermes's
+ALLOW is `{}` and carries its reason on stderr and nowhere else, which is why
+`stderr` is part of the contract rather than a diagnostic.
+
+A refusal the SERVER raises on the hook route — an oversized body, a credential
+at the wrong door, a method it does not answer — carries `{"error":{…}}` and
+`exit_code: 2` **and** a `stdout` holding the harness's own block directive,
+rendered by the same function that prints one. A client that writes `stdout`
+and exits `exit_code` therefore blocks on both halves of every dialect at once.
+That holds for the refusals that fire BEFORE the URL is parsed, too — a
+rotated credential, a malformed `Host` — because the harness is read off the
+raw request target for the purpose of the refusal body and nothing else. A
+credential rotation must not read as a permission, and on four of the six
+dialects a body with no block directive at exit 0 is exactly that.
+
+Where the harness is not known (an unroutable path, an unrecognised name)
+`stdout` is absent, and the client rule in the paragraph above is what covers
+it.
+
+A deny is a VERDICT, so its HTTP status is 200; only a refusal by the server
+is not.
+
+`GET /log/follow?from=<seq>&cursor_hash=<64hex>&limit=<n>` answers one page of
+verified records and the cursor to ask with next time. The cursor is EXCLUSIVE
+and the subscription is `core/log-subscribe.ts`'s, so SPEC.md §8 holds
+unchanged: the chain is verified from genesis before anything is emitted, and a
+`cursor_hash` that does not match the retained prefix is refused with the
+`integrity` code, `cursor-mismatch` as its reason, and NO RECORDS, not even the
+ones a partial drain had already produced. `caught_up` says whether the page
+exhausted the log or the limit. The server keeps no subscription state: a page
+is a function of the cursor in the request and the bytes on disk, so a host that
+sleeps and wakes serves the same next page it would have served before.
+
+**`from` greater than zero REQUIRES `cursor_hash`.** The subscription calls the
+sequence-only form a weaker bootstrap, weak in exactly one way: it cannot
+detect a fully recomputed replacement prefix on its first read. A streaming
+consumer pays that once and then retains the digest it verified. A paged one
+never does — every request is a first read — so the weakness would be
+permanent, and a caller who dropped the hash would be served a replaced prefix
+silently while an honest caller who kept it got the refusal. `from=0` is the
+only hashless form, because replaying from genesis binds nothing.
+
+`from` must be a sequence number this runtime can represent and `limit` must be
+between 1 and 1000. Both are refused `serve-invalid-cursor` when they are not,
+rather than clamped: a clamp answers a different question than the one asked
+and the caller cannot tell it happened.
+
+`GET /export` answers the store as a gzipped POSIX tar. Its contents are a
+positive allowlist (`APPROVAL.md`, `.approval/log/`, `.approval/payloads/`,
+`.approval/QUEUE.md`, `.approval/index.sqlite`), so `.approval/keys`,
+`.approval/env`, `.approval/daemon` and any `vault.enc` are out by not being
+named rather than by a denylist remembering them. `.approval/payloads/` is in,
+and it is the entry the reasoning turns on: the log records a `payload_hash`
+for every action a human was shown, and those bytes live there. An archive
+carrying the hashes without the bytes would hand a tenant a chain of references
+to evidence they no longer hold, which is a receipt for an exit rather than an
+exit.
+
+**No link is followed, of either kind, and a link refuses the whole export.**
+A name-based allowlist is no defence against one: `ln -s
+.approval/keys/sender.key .approval/log/note.jsonl` passes every check that
+reads the name and hands over the key, and a link out of the store hands over
+any file on the host.
+
+So every entry is `lstat`ed and a symbolic link refuses the export with
+`serve-export-symlink`; every file is then opened `O_NOFOLLOW` and `fstat`ed,
+so the checks are made against the descriptor that is actually read rather
+than against a name that could have been swapped in between; and a regular
+file whose link count is greater than one refuses with
+`serve-export-hardlink`. That last is the case with nothing to notice — a hard
+link is a second name for one inode, with no link to refuse to follow and no
+target to inspect — so the link count is the only thing that distinguishes it.
+Each refusal names the path and never its target.
+
+The whole export is refused rather than the offending file skipped, because an
+archive silently missing a file is one nobody can tell from a complete one.
+
+The only file the export drops on its own account is the append lockfile
+derived from the log path, which exists for exactly the span of the copy
+because the export holds that lock. It is matched as an exact path, not as a
+`*.lock` class: a tenant's own `.approval/payloads/x.lock` is the tenant's, and
+a name this runtime happens to use for bookkeeping is no reason to drop
+somebody else's file.
+
+`GET /status` is the `status` verb, answered to the tenant credential.
+
+### The bind, and where TLS is
+
+`--port <n>` picks the port (default 4682) and always binds `127.0.0.1`.
+`--listen <[host:]port>` is the only way to bind anything else, passing both is
+a usage error, and a non-loopback host ALSO requires `--allow-non-loopback`: two
+flags, because the credentials here are bearer values and a cleartext hop hands
+them to whoever is on it. A widened bind prints a banner on stderr saying
+exactly that. This process terminates no TLS and holds no certificate; the
+supported deployment is a loopback bind behind a proxy the operator owns.
+
+### What it never does
+
+It appends no record on its own account. Every event in the log under it was
+written by a verb a caller asked for, under the identity the operator fixed at
+launch, and the daemon id on the started line is the one those records carry.
+Verb and hook calls run serially in this process, for the reason the MCP
+transport gives (`wait` blocks the event loop, `run` spawns synchronously), and
+appends still go through the same lockfile and compare-and-append every
+`approval` process uses. It reads no `.approval/env`.
+
 ## Constrained Codex preparation
 
 approval codex prepare is an artifact generator. It writes one fresh review

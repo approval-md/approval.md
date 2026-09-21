@@ -189,6 +189,75 @@ test("src/mcp/ imports neither src/daemon/ nor a test helper (APRV-87)", () => {
   );
 });
 
+/**
+ * The HTTP transport's direction (APRV-421).
+ *
+ * `src/serve/` is a caller of the CLI, the MCP wrapper and the core, in exactly
+ * the relationship `src/mcp/` has: it imports their code paths so there is no
+ * second implementation of a verdict, a verb or a verified read, and they do
+ * not import it back. `cli/serve.ts` is the one CLI module whose subject is the
+ * server, and it reaches it through a DYNAMIC import for `cli/mcp.ts`'s reason.
+ *
+ * Note which edge is allowed and which is not. `src/serve/` reaching
+ * `src/mcp/server.ts` is two siblings sharing one published surface, which is
+ * the whole point of the task; a CLI verb reaching either directly would be the
+ * cycle.
+ */
+const SERVE_DIR = join(REPO_ROOT, "src", "serve");
+
+const SERVE_FILES = readdirSync(SERVE_DIR)
+  .filter((entry) => entry.endsWith(".ts"))
+  .sort();
+
+test("src/serve/ exists and holds modules to check (APRV-421)", () => {
+  assert.ok(SERVE_FILES.length > 0, `no *.ts files found in ${SERVE_DIR}`);
+});
+
+test("no CLI module statically imports src/serve/ (APRV-421)", () => {
+  const offenders: string[] = [];
+  for (const file of CLI_FILES) {
+    const source = readFileSync(join(CLI_DIR, file), "utf8");
+    for (const specifier of specifiersOf(source)) {
+      if (specifier.startsWith("../serve/")) {
+        offenders.push(`src/cli/${file} imports "${specifier}"`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `src/serve/ imports the CLI, so a static import back is a cycle. cli/serve.ts is the one file allowed to reach the server and it must do so with a dynamic import():\n${offenders.join("\n")}`,
+  );
+});
+
+test("cli/serve.ts is the only CLI module that reaches the HTTP server (APRV-421)", () => {
+  const reaching = CLI_FILES.filter((file) =>
+    readFileSync(join(CLI_DIR, file), "utf8").includes("../serve/"),
+  );
+  assert.deepEqual(
+    reaching,
+    ["serve.ts"],
+    "only src/cli/serve.ts may reach src/serve/; every other verb is reached BY it",
+  );
+});
+
+test("src/serve/ imports neither src/daemon/ nor a test helper (APRV-421)", () => {
+  const offenders: string[] = [];
+  for (const file of SERVE_FILES) {
+    const source = readFileSync(join(SERVE_DIR, file), "utf8");
+    for (const specifier of specifiersOf(source)) {
+      if (specifier.startsWith("../daemon/") || specifier.includes("../../tests/")) {
+        offenders.push(`src/serve/${file} imports "${specifier}"`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `src/serve/ may import src/cli/, src/mcp/ and src/core/ and nothing else in this repository:\n${offenders.join("\n")}`,
+  );
+});
+
 test("the exception list names only files that exist and do import the daemon", () => {
   for (const file of DAEMON_IMPORTERS_ALLOWED) {
     assert.ok(

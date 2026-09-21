@@ -127,6 +127,9 @@ Usage:
   approval codex      prepare|setup|doctor|start|serve (strict host workflow)
   approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
                       [--policy <path>]              (MCP over stdio; foreground)
+  approval serve      --as agent:<id> [--dir <path>] [--log <path>]
+                      [--policy <path>] [--port <n> | --listen <host:port>]
+                      [--allow-non-loopback]               (HTTP; foreground)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -251,6 +254,15 @@ Ask — an agent declares an action and acts on the answer:
             channels are not published, because an MCP client is an agent's
             harness and SPEC.md §11 makes the agent the untrusted policy. It
             runs as ONE agent identity, fixed at startup, that nothing changes
+  serve     the same agent-facing surface over HTTP, for a harness in a sandbox
+            with no local log and no local policy. It adds the three things MCP
+            withheld for transport reasons: hook <harness> taking the harness
+            envelope as the request body, log follow paged by an exclusive
+            (seq, hash) cursor, and the store as an archive. TWO CREDENTIALS
+            from the launch environment, and authorization is per verb: the
+            agent one opens the hook and an allowlist of what a harness under
+            oversight needs to ask and to act on a grant, the tenant one opens
+            everything else, so the agent never reads the log it is judged by
 
 Decide — a human answers, and only a human can:
   queue     the pending-decision INBOX: requests awaiting a human, inside their
@@ -2578,3 +2590,28 @@ SERIALLY, THIS SERVER READS NO .approval/env. POST-V1: tasks/elicitation.
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
 ${JSON_ERRORS}
 ${why("mcp-serve")}`;
+
+export const SERVE_HELP = `approval serve — the agent-facing surface over HTTP (FOREGROUND)
+
+Usage:
+  approval serve [--as agent:<id>] [--dir <p>] [--log <p>] [--policy <p>]
+                 [--port <n> | --listen <host:port> --allow-non-loopback]
+
+Flags:
+  --as agent:<id>  the identity EVERY call is recorded under, or APPROVAL_AGENT
+  --dir/--log/--policy <p>   the store root, and the log and policy pinned
+  --port <n>=4682  loopback. --listen <host:port> widens, and a non-loopback
+                   host ALSO needs --allow-non-loopback
+  --hook-timeout <d>   pinned on every hook call, as the stdin form's --timeout
+
+For a harness in a sandbox with no local log and no policy. THE VERBS ARE mcp
+serve's: the registry less human_only, --as absent from every schema, the
+identity appended last, no grant. It adds hook/<harness> (envelope in, the
+bytes stdin prints out), log/follow (paged, exclusive (seq, hash) cursor) and
+export (the store, minus keys, env and vault). AUTHORIZATION IS PER VERB:
+APPROVAL_SERVE_AGENT_TOKEN opens the hook and an allowlist (ask, and act on a
+grant); APPROVAL_SERVE_TENANT_TOKEN opens the rest, records included. NO TLS.
+
+${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
+${JSON_ERRORS}
+${why("serve")}`;

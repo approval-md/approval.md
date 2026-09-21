@@ -988,6 +988,36 @@ function deny(streams: Streams, code: string, detail: string, harness: HarnessKi
   return EXIT_OK;
 }
 
+/**
+ * The block directive a harness reads, as bytes, for a refusal raised OUTSIDE
+ * the hook (APRV-421).
+ *
+ * `approval serve` can refuse a hook request before `commandHook` is reached
+ * at all: an oversized body, a credential at the wrong door, a method it does
+ * not answer. Each of those is a refusal by the transport, and a transport
+ * refusal a harness reads as "no verdict" is a harness that runs the command.
+ * So the refusal has to be spoken in the harness's own dialect, and the only
+ * correct source of that dialect is the function that prints it here.
+ *
+ * It renders through {@link deny} for that reason: one construction site per
+ * harness, still never `ask`. The exit code returned is the one the verb would
+ * have carried; a caller may impose a stricter one, and the transport does.
+ */
+export function harnessBlockDirective(
+  code: string,
+  detail: string,
+  harness: HarnessKind,
+): { stdout: string; exitCode: number } {
+  const out: string[] = [];
+  const exitCode = deny(
+    { out: (text) => out.push(text), err: () => undefined },
+    code,
+    detail,
+    harness,
+  );
+  return { stdout: out.join(""), exitCode };
+}
+
 /** The machine-readable code a Hermes `execute_code` call is refused with. */
 export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
