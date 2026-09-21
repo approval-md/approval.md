@@ -601,11 +601,14 @@ export async function invokeVerb(
 /**
  * The last line of `text` that parses as a JSON object, or null.
  *
- * Exported since APRV-421: `approval serve` answers a verb call with the same
- * object this picks out of the same streams, so the two transports agree on
- * which line of a verb's output IS the answer.
+ * Private again, and the round trip is worth a sentence. APRV-421 exported it
+ * so `approval serve` could answer a verb call with the same object; that
+ * server's review replaced the shape with the verb's raw streams and its exit
+ * code, because picking an object out of a stream is a judgment a transport
+ * should not be making on a caller's behalf. Only `toolResult` needs it now,
+ * where the MCP contract genuinely asks for `structuredContent`.
  */
-export function lastJsonObject(text: string): Record<string, unknown> | null {
+function lastJsonObject(text: string): Record<string, unknown> | null {
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = (lines[index] ?? "").trim();

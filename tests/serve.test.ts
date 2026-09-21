@@ -53,6 +53,9 @@ import {
 } from "../src/serve/credentials.js";
 import {
   AGENT_VERBS,
+  clip,
+  MAX_STREAM_BYTES,
+  scopeOf,
   serveApproval,
   serveCatalog,
   type ServeHandle,
@@ -937,6 +940,65 @@ test("every refusal on every route carries a non-zero exit code in the body", as
     }
   } finally {
     await server.close();
+  }
+});
+
+/**
+ * Finding 2, the half an HTTP test cannot reach: the clip is by CODEPOINT.
+ *
+ * A byte slice through a multi-byte sequence produces a string that is not
+ * valid text, which in a JSON body is either a replacement character where a
+ * verdict had a word or a body a strict client refuses to parse — and a body a
+ * client cannot parse is, by the documented rule, a block. Getting this wrong
+ * turns a long allow into a refusal.
+ */
+test("a clipped stream ends on a whole character, and says it was clipped", () => {
+  const short = clip("ok");
+  assert.equal(short.text, "ok");
+  assert.equal(short.truncated, false);
+
+  // Three-byte characters, so the cap lands mid-sequence unless the clip is
+  // codepoint-aware: 256 KiB is not divisible by 3.
+  const long = "€".repeat(MAX_STREAM_BYTES);
+  const clipped = clip(long);
+  assert.equal(clipped.truncated, true);
+  assert.ok(Buffer.byteLength(clipped.text, "utf8") <= MAX_STREAM_BYTES);
+  assert.equal(clipped.text.includes("�"), false, "the clip cut a character in half");
+  assert.ok(long.startsWith(clipped.text), "the clip is a prefix of what was printed");
+  // And it round-trips through JSON, which is where it is actually going.
+  assert.equal(JSON.parse(JSON.stringify({ s: clipped.text })).s, clipped.text);
+
+  // A character ending exactly on the boundary is kept whole.
+  const exact = clip(`${"a".repeat(MAX_STREAM_BYTES - 3)}€x`);
+  assert.equal(exact.truncated, true);
+  assert.ok(exact.text.endsWith("€"), exact.text.slice(-4));
+});
+
+/**
+ * The three-arm scope rule, stated as a property.
+ *
+ * The third arm is the one that needed a decision the review did not cover: an
+ * UNPUBLISHED verb name is agent-scoped, so the tenant credential is refused
+ * rather than falling through to a not-found. `consume` is why — it is the
+ * token spend, an agent-side act this surface withholds for transport reasons,
+ * and AC5 requires the tenant to be refused it under any spelling.
+ */
+test("scope: allowlisted is the agent's, published is the tenant's, unpublished is neither", () => {
+  for (const name of ["request", "wait", "payload_hash"]) {
+    assert.equal(scopeOf({ kind: "verb", name }), "agent", name);
+  }
+  for (const name of ["status", "log_tail", "run", "adapter_email", "register", "log_verify"]) {
+    assert.equal(scopeOf({ kind: "verb", name }), "tenant", name);
+  }
+  // Not published, so not the tenant's to call: the scope answer comes before
+  // the routing one and the tenant gets `serve-tenant-forbidden`.
+  for (const name of ["consume", "frobnicate"]) {
+    assert.equal(scopeOf({ kind: "verb", name }), "agent", name);
+  }
+  assert.equal(scopeOf({ kind: "catalog" }), null, "the catalog answers either credential");
+  assert.equal(scopeOf({ kind: "hook", harness: "claude-code" }), "agent");
+  for (const kind of ["follow", "export", "status"] as const) {
+    assert.equal(scopeOf({ kind }), "tenant", kind);
   }
 });
 
