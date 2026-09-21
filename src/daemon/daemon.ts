@@ -112,6 +112,12 @@ import { validate } from "../core/validate.js";
 import { publishedState, type AutoMergeState } from "../cli/log-advance.js";
 import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
 import { markDaemonProcess } from "../core/daemon-actor.js";
+import {
+  declareDaemonIdentityFor,
+  refreshDaemonAllowlist,
+  type DaemonIdResolution,
+} from "../core/daemon-host.js";
+import { daemonIdentity } from "../core/daemon-identity.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
@@ -285,6 +291,18 @@ export type DaemonEvent =
        * a person.
        */
       dangling_advances?: string[];
+      /**
+       * Which daemon instance this run is (APRV-383), and `null` when the id it
+       * was launched with is unusable. Additive, like every other growth of this
+       * union.
+       *
+       * On the FIRST line for the reason `read_proof` and `draw` are: it is the
+       * name every record this run appends will carry, a tenant reading a hosted
+       * log identifies the process by it, and it is not something an operator
+       * should have to ask the process about. `null` is the state in which this
+       * run will refuse every append, which the warning beside it says in words.
+       */
+      daemon?: string | null;
     }
   | {
       event: "drift";
@@ -667,6 +685,19 @@ export const DAEMON_WARNING_CODES = [
    */
   "draw-unavailable",
   /**
+   * This daemon's own id is not one the attested policy's `daemons` list admits,
+   * or the id it was launched with is not a usable id at all (APRV-383).
+   *
+   * A warning rather than a stop, and the distinction matters: the refusal itself
+   * happens at the write boundary, one append at a time, so the loop keeps
+   * reading, keeps rendering the queue and keeps reporting, and writes nothing.
+   * The line exists because an operator should learn that from the first tick
+   * rather than from a day of `append-refused` messages. The repair is a line in
+   * a policy a human re-attests, or a launch environment fixed, and neither is
+   * something this process can do for itself.
+   */
+  "daemon-identity-refused",
+  /**
    * An `audit.sampled` append met a held lock or a moved head, so the sample was
    * postponed to the next tick (APRV-381). Appended to this union, so no existing
    * entry changed meaning.
@@ -973,6 +1004,16 @@ export class Daemon {
   private previousSelfWrites = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
+  /**
+   * What this process resolved as its own daemon id (APRV-383), kept so the
+   * `started` line can name it and the startup check can say what is wrong with
+   * it. The id in FORCE lives in `core/daemon-identity.ts`'s process state, which
+   * is what the write boundary reads; this field is the resolution that produced
+   * it, and nothing reads it to decide anything.
+   */
+  private readonly identity: DaemonIdResolution;
+  /** Has the unlisted-id warning already been said this run? */
+  private reportedIdentityRefusal = false;
   /** Whether {@link DaemonOptions.draw} actually bound (APRV-208). */
   private drawServing = false;
 
@@ -986,6 +1027,15 @@ export class Daemon {
     // `--once` tick and a test driving this object one tick at a time are all
     // the same actor as the loop.
     markDaemonProcess();
+    // APRV-383. WHICH daemon this process is, declared in the same breath and at
+    // the same moment for the same reason. The resolution is the launch
+    // environment's `APPROVAL_DAEMON_ID` or the id derived from this log's
+    // instance; an unusable declared id is declared as an identity with NO id,
+    // which refuses every append at the write boundary rather than leaving a
+    // daemon writing records nothing can attribute. The CLI verbs refuse to start
+    // on the same resolution, so this is the belt on that brace, and it is what
+    // covers a `Daemon` constructed directly by an embedder or a test.
+    this.identity = declareDaemonIdentityFor(this.options.logPath);
   }
 
   /** Run until stopped (or, with `once`, for exactly one tick). */
@@ -1040,7 +1090,23 @@ export class Daemon {
         // would be a write nobody asked for yet. Seeded into `reportedDangling`
         // so the tick that immediately follows does not repeat it.
         dangling_advances: this.listDanglingAdvancesAtStartup(),
+        // APRV-383. Resolved in the constructor, printed here, and `null` for an
+        // id this process could not use at all.
+        daemon: this.identity.ok ? this.identity.id : null,
       });
+
+      // APRV-383. Said once, before the first tick, when this run cannot write:
+      // a bad launch id is knowable without reading anything, and the allowlist
+      // is knowable from the attested policy the first tick resolves. An operator
+      // who reads it here does not have to infer it from a day of
+      // `append-refused` lines.
+      if (!this.identity.ok) {
+        this.reportedIdentityRefusal = true;
+        this.warn(
+          "daemon-identity-refused",
+          `${this.identity.message}. Every append this run makes will be refused \`daemon-id-invalid\` until that is fixed; nothing is written and nothing is retried`,
+        );
+      }
 
       const outcome = this.tick();
       if (outcome !== null) {
@@ -1357,6 +1423,15 @@ export class Daemon {
 
       const opening = this.read();
       if (!opening.ok) return this.fatal(opening);
+
+      // WHICH daemons this log's ATTESTED policy admits (APRV-383), put in force
+      // before anything below appends. Resolved every tick, from this tick's own
+      // verified read, so a `daemons` list a human adds and attests takes effect
+      // on the next tick rather than at the next restart; a resolution that FAILS
+      // (the policy will not load, or is not attested) leaves the previous one
+      // standing, so a policy that becomes unreadable is not a way out of the list
+      // it carried a moment ago.
+      this.refreshIdentity(opening.records);
 
       // The anchor check (APRV-219), on the full re-proof cadence and on the
       // first tick, which is always a cold walk. Placed immediately after the
@@ -2073,14 +2148,47 @@ export class Daemon {
     });
   }
 
-  /** The TTL in force right now, re-read every pass: policy files change. */
-  private ttlMs(): number | null {
+  /** Where this daemon's policy is, in `loadPolicy`'s own vocabulary. */
+  private policyWhere(): LoadPolicyOptions {
     const where: LoadPolicyOptions =
       this.options.policy.file !== undefined
         ? { file: this.options.policy.file }
         : { dir: this.options.policy.dir ?? this.options.cwd };
     if (this.options.schemaDir !== undefined) where.schemaDir = this.options.schemaDir;
-    const load = loadPolicy(where);
+    return where;
+  }
+
+  /**
+   * Put the attested policy's `daemons` allowlist in force for this tick
+   * (APRV-383).
+   *
+   * Called once per tick, immediately after the opening verified read and before
+   * any sweep that appends. It never widens: a resolution that fails sets nothing,
+   * so whatever was last resolved stays in force, and a run whose policy was never
+   * attested is unrestricted exactly as every run before this key existed was.
+   *
+   * The warning is said ONCE per run. A line every thirty seconds forever stops
+   * being read (the `reportedDangling` set above exists for the same reason), and
+   * the write boundary is where the refusal actually happens: every refused append
+   * carries its own `append-refused` line with the reason in it.
+   */
+  private refreshIdentity(records: readonly EventRecord[]): void {
+    refreshDaemonAllowlist(records, loadPolicy(this.policyWhere()));
+    if (this.reportedIdentityRefusal) return;
+    const state = daemonIdentity();
+    if (state === null || state.id === null) return;
+    const allowed = state.allowed;
+    if (allowed === null || allowed.includes(state.id)) return;
+    this.reportedIdentityRefusal = true;
+    this.warn(
+      "daemon-identity-refused",
+      `this daemon's id is ${state.id} and the attested policy's \`daemons\` list admits ${allowed.length === 0 ? "no daemon at all" : allowed.join(", ")}: every append this run makes is refused \`daemon-not-allowed\` and nothing is written. Add ${state.id} to \`daemons\` and re-attest the policy, or run the daemon whose id the list already names`,
+    );
+  }
+
+  /** The TTL in force right now, re-read every pass: policy files change. */
+  private ttlMs(): number | null {
+    const load = loadPolicy(this.policyWhere());
     // Fail closed exactly as the gate does: an unloadable policy declares no
     // TTL, so nothing lapses and nothing is expired on its behalf.
     return load.ok ? load.durations.approvalTtlMs : null;

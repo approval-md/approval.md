@@ -1,0 +1,1 @@
+{"command":"gh pr merge 519 --merge 2>&1 | tail -1; gh pr view 519 --json state,mergedAt,autoMergeRequest -q '\"519 \\(.state) merged=\\(.mergedAt) auto=\\(.autoMergeRequest.enabledAt)\"'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

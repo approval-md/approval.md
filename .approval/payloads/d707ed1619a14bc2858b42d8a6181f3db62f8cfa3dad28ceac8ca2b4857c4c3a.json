@@ -1,0 +1,1 @@
+{"command":"cat /Users/carter/.claude/projects/-Users-carter-dev-approval-md/memory/read-scope-and-lane-push-2026-09-16.md; echo ---; grep -n \"reads\\|read\\.\" APPROVAL.md | head -20; echo ---; sed -n 2250,2300p src/cli/doctor.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

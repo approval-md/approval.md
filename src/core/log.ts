@@ -43,9 +43,20 @@
  *    verifier strips `hash` and re-derives. Appended with a single `write(2)`
  *    on a handle opened `O_APPEND`.
  *
+ * 6. **The writing daemon names itself, or is refused (APRV-383).** A record
+ *    appended by a declaring daemon process carries `daemon`, the id of the
+ *    instance that wrote it, so a tenant reading a log hosted by somebody else can
+ *    tell which daemon acted on their behalf. The id comes from this process's own
+ *    state (`core/daemon-identity.ts`) and never from the caller, and where the
+ *    attested policy lists the ids that may write, an unlisted one is refused here
+ *    with nothing written. Every earlier record, carrying no such field, validates
+ *    and verifies unchanged.
+ *
  * Determinism: `ts` is supplied by the caller. This module never reads the
  * clock, because a hash-relevant field sourced from ambient state would make
- * the log irreproducible.
+ * the log irreproducible. `daemon` is ambient in the same sense and is not a
+ * counter-example: a log is reproducible per WRITER, the field says which writer,
+ * and a verifier re-derives the hash from the record's own bytes either way.
  */
 
 import { createHash } from "node:crypto";
@@ -60,6 +71,10 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
+import {
+  DAEMON_APPEND_REFUSAL_CODES,
+  daemonStampForAppend,
+} from "./daemon-identity.js";
 import { canonicalize, JcsError } from "./jcs.js";
 import { validate, type ValidateOptions, type ValidationError } from "./validate.js";
 
@@ -211,7 +226,15 @@ export type EventType =
   | "gate.path.signed_off"
   | "log.checkpoint";
 
-/** Caller-supplied content of an event. Chain fields are not accepted. */
+/**
+ * Caller-supplied content of an event. Chain fields are not accepted.
+ *
+ * Nor is `daemon` (APRV-383): which daemon wrote a record is a fact about the
+ * writing PROCESS, and a member here would be a field any caller could set. It is
+ * stamped by {@link buildRecord} from `core/daemon-identity.ts`'s process state,
+ * and a caller that puts the property on its input object anyway is ignored,
+ * because a record is composed field by field rather than spread.
+ */
 export interface EventInput {
   /** RFC 3339 timestamp. Supplied by the caller; never read from the clock. */
   ts: string;
@@ -230,6 +253,19 @@ export interface EventRecord extends EventInput {
   alg: typeof ALG;
   hash: string;
   prev: string | null;
+  /**
+   * WHICH daemon instance appended this record (APRV-383), present exactly on the
+   * records a declaring daemon process wrote.
+   *
+   * OPTIONAL and additive: every record written before the field existed
+   * validates and verifies unchanged, and its absence means what it has always
+   * meant — nothing about this record says a daemon wrote it. It is a top-level
+   * field, so the record's own chain hash covers it the way it covers `actor`; it
+   * never reaches a payload hash or a token, and nothing in the runtime reads it
+   * as an input to a verdict (SPEC.md §11.1 invariant 4, and
+   * `core/daemon-identity.ts` for the whole of that argument).
+   */
+  daemon?: string;
 }
 
 /** The hash input: a record with every field except `hash`. */
@@ -261,6 +297,15 @@ export const APPEND_ERROR_CODES = [
    * caller made is stale. Nothing was written.
    */
   "head-moved",
+  /**
+   * The two identity refusals of APRV-383, spread in from
+   * `core/daemon-identity.ts` where the logic that emits them lives: a daemon that
+   * declared an unusable id, and a daemon whose id the attested policy's `daemons`
+   * list does not admit. Both leave the file byte-identical, like every member
+   * above them, and both are additions to the closed union rather than renames of
+   * anything in it.
+   */
+  ...DAEMON_APPEND_REFUSAL_CODES,
 ] as const;
 
 export type AppendErrorCode = (typeof APPEND_ERROR_CODES)[number];
@@ -648,8 +693,18 @@ function headPrecondition(
  * Build a complete record from caller content plus chain state. Property
  * insertion order is irrelevant to the digest (JCS sorts keys) but is kept
  * readable here for anyone eyeballing the code.
+ *
+ * `daemon` comes from the writing process and never from `input`, which is why it
+ * is a parameter here rather than a member of {@link EventInput}: this function
+ * composes a record field by field, so there is no spelling of a caller's input
+ * that can put a `daemon` on a record.
  */
-function buildRecord(input: EventInput, seq: number, prev: string | null): EventRecord {
+function buildRecord(
+  input: EventInput,
+  seq: number,
+  prev: string | null,
+  daemon: string | null,
+): EventRecord {
   const record: EventRecord = {
     seq,
     ts: input.ts,
@@ -659,6 +714,9 @@ function buildRecord(input: EventInput, seq: number, prev: string | null): Event
     prev,
     hash: "",
   };
+  // Beside `actor`, because it answers the same question about a different layer:
+  // who caused the event, and which process wrote it down.
+  if (daemon !== null) record.daemon = daemon;
   if (input.task !== undefined) record.task = input.task;
   if (input.action_key !== undefined) record.action_key = input.action_key;
   if (input.channel !== undefined) record.channel = input.channel;
@@ -756,6 +814,17 @@ export function appendEvent(
   input: EventInput,
   options: AppendOptions = {},
 ): AppendResult {
+  // Which daemon is writing, and whether it may (APRV-383). Asked of this
+  // process's own state rather than of the caller, and asked BEFORE the lock
+  // because it reads no log state: taking a lock only to refuse would make every
+  // other writer wait for an answer that was never going to touch the file. It is
+  // the write boundary in the sense that matters — one code path, nothing written
+  // on the refused branch, and the record's own schema pins the field's shape so a
+  // malformed id could not land even if this check were absent.
+  const stamp = daemonStampForAppend();
+  if (stamp.kind === "refuse") return fail(stamp.code, stamp.message);
+  const daemon = stamp.kind === "stamp" ? stamp.id : null;
+
   const held = withAppendLock<AppendResult>(logPath, () => {
     const tail = readTail(logPath);
     if (!tail.ok) return { ok: false, error: tail.error };
@@ -771,7 +840,7 @@ export function appendEvent(
     let record: EventRecord;
     let line: string;
     try {
-      record = buildRecord(input, tail.tail.seq + 1, tail.tail.hash);
+      record = buildRecord(input, tail.tail.seq + 1, tail.tail.hash, daemon);
       // Stored line = JCS of the complete record; digest input excluded `hash`.
       line = serializeRecord(record);
     } catch (cause) {

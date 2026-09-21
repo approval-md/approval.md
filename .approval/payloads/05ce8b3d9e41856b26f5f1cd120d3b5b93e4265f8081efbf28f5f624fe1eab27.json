@@ -1,0 +1,1 @@
+{"command":"grep -rln 'reaction' src | head; echo ---; grep -n 'loved\\|disliked\\|👍\\|👎\\|❤' src/channels/telegram*.ts src/channels/*telegram* 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

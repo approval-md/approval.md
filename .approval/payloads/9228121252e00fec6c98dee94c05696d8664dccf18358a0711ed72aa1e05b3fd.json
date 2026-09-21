@@ -1,0 +1,1 @@
+{"command":"D=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/acd97477-1a12-4fc1-ade5-cd637812dfb1/scratchpad/dcase && rm -rf $D && mkdir -p $D/backlog/tasks && cp /dev/null $D/ready 2>/dev/null; echo $D","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-381-audit-lock-timeout"}

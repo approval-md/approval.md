@@ -1,0 +1,1 @@
+{"command":"S=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-gated-messages-approval-60aa72/7e4ea04b-2be8-4883-8ab7-af35b397d67a/scratchpad; npm test > $S/test.log 2>&1; echo \"npm test exit: $?\"; tail -15 $S/test.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

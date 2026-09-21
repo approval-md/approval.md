@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -rn \"payload_retention\" src/core/policy-diff.ts src/core/policy-expectations.ts src/cli/*.ts 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

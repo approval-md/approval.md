@@ -1,0 +1,17 @@
+{
+  "seq": 62,
+  "ts": "2026-09-20T11:05:44Z",
+  "event": "envelope.drift",
+  "task": "task-311",
+  "actor": "system:daemon",
+  "daemon": "village-goa-1",
+  "payload": {
+    "file": "backlog/tasks/task-311.md",
+    "declared_state": "requested",
+    "derived_state": "granted",
+    "reason": "state-mismatch"
+  },
+  "alg": "sha256/jcs",
+  "prev": "c0a1dd6b0f5a9b7fe7cf7d90cbb4aa4cf0a1eb2d5c7318cbbbd7a2b9efc33150",
+  "hash": "5b2f0c8419a7dd3e6f0b4a1c93de8027f5cbb1a40de92f7c3ab6051d8e4f29c7"
+}

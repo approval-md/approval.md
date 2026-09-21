@@ -1,0 +1,1 @@
+{"command":"sed -n '1,60p' tests/doctor-rows.ts && /usr/bin/grep -a -rn \"doctor-rows\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

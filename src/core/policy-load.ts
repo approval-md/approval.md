@@ -303,6 +303,21 @@ export interface Policy {
    * never what a decision may authorize.
    */
   approvers?: Record<string, { channels: string[]; senders?: Record<string, string> }>;
+  /**
+   * Amended SPEC.md §5.2 (APRV-383): the daemon instance ids permitted to append
+   * to this log. The counterpart of `approvers` one layer down — that key says
+   * which humans may decide, this one which daemon processes may write the
+   * records down — and the tenant's half of the hosted arrangement
+   * (`design/hosted-daemon-identity.md`).
+   *
+   * ABSENT means no restriction, exactly as every policy written before the key
+   * existed. It is read by `core/daemon-host.ts` from an ATTESTED policy only,
+   * and by nothing on a routing, budget, sampling or token path: it decides
+   * WHICH PROCESS may write a record, never what any record may authorize. An id
+   * it names gains nothing (SPEC.md §11.1 invariant 4); an id it omits is refused
+   * at the write boundary.
+   */
+  daemons?: string[];
   classes?: Record<string, PolicyClassRule>;
   /**
    * Named budget scopes (SPEC.md §5.1/§5.2). `max_pending` has been in

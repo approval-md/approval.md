@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes && ls tests/probe-* 2>/dev/null; sed -n '1,60p' tests/probe-hermes.test.ts 2>/dev/null || ls tests | /usr/bin/grep -a probe","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

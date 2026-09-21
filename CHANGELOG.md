@@ -6,6 +6,36 @@ markers.
 
 ## Unreleased
 
+- **Every record the daemon writes names the daemon that wrote it (APRV-383).**
+  A daemon-written record carries a new optional top-level `daemon` field holding
+  that daemon instance's id, so a tenant whose daemon is HOSTED by another party can
+  open their own log and tell which host process acted for them; before this they
+  all carried the same generic `system:daemon` actor. The id is
+  `APPROVAL_DAEMON_ID` from the daemon's launch environment where it is set, and
+  otherwise `daemon-` plus the instance id `approval doctor` already prints as its
+  `keychain-scope` suffix, so it is stable across restarts on one machine and
+  keystore with nothing stored anywhere. `approval up` and `approval daemon run`
+  name it on their `started` line, `approval status` reports it as `daemon`, and a
+  new `daemon-identity` doctor row reports it with the allowlist below. The field is
+  OPTIONAL and additive: every record written before it validates and verifies
+  unchanged, and its absence is absence rather than a claim that no daemon wrote the
+  record.
+- **`APPROVAL.md` may list which daemons may write (APRV-383).** A new top-level
+  `daemons` array names the daemon ids permitted to append to that log. ABSENT means
+  no restriction, exactly as every policy written before the key; an empty list
+  admits none. A daemon whose id an attested list does not name is refused at the
+  write boundary with a new `daemon-not-allowed`, and a daemon launched with an
+  `APPROVAL_DAEMON_ID` that is not a usable id is refused with a new
+  `daemon-id-invalid` (and `approval up` / `approval daemon run` decline to start at
+  all). Both join the frozen `append_error_codes` union, so the conformance vectors
+  take a major bump. The id is SELF-REPORTED, so it only ever costs a daemon the
+  ability to write: being listed grants nothing, and no verdict, autonomy, budget,
+  floor, sampling draw or token reads the field or the list (SPEC.md §11.1 invariant
+  4). The list is read only from the attested policy, and a policy that becomes
+  unreadable under a running daemon leaves the restriction it carried standing
+  rather than lapsing. `design/hosted-daemon-identity.md` states the whole hosting
+  model and what is deliberately out of scope: process isolation, token scoping and
+  billing.
 - **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398,
   corrected against a live probe in APRV-415).** The sixth harness, and the first
   since Claude Code whose hook is a **gate rather than a backstop** — measured, not

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -n \"appendEvent\" src/daemon/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

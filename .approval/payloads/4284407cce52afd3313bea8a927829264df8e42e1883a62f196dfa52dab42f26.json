@@ -1,0 +1,1 @@
+{"command":"ls tests | /usr/bin/grep -a -v \"\\.test\\.ts\" && echo --- && /usr/bin/grep -a -rn \"appendAttestation\" tests/*.ts | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

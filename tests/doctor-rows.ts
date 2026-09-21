@@ -153,6 +153,15 @@ export const DOCTOR_ROW_ORDER = [
   // pass says the log holds no such record and never that a harness
   // auto-reviewer is off, which nothing on this machine can establish.
   "codex-auto-reviewer",
+  // APRV-383: which daemon id would be written onto every record a daemon run
+  // against this log appends, and whether the attested policy's `daemons` list
+  // admits it. Appended for the same reason as every row above. It fails only for
+  // an `APPROVAL_DAEMON_ID` in this shell that is not a usable id, which is a
+  // broken launch environment wherever it is read; an id the list does not admit
+  // is a loud SKIP rather than a fail, because under the hosted deployment this
+  // key exists for, the tenant's policy names a daemon on somebody else's machine
+  // and a red row on every tenant's laptop is a red row people learn to skip.
+  "daemon-identity",
 ] as const;
 
 /**

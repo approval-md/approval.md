@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged && ls src/daemon/ && echo --- && wc -l src/daemon/*.ts && echo --- && /usr/bin/grep -rln \"anchor-diverged\" src/ tests/ docs/ conformance/ 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}
