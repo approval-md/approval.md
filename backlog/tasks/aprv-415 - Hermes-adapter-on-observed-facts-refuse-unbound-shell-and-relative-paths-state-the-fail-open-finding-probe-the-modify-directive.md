@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-lane-415'
 created_date: '2026-09-20 21:13'
-updated_date: '2026-09-21 03:00'
+updated_date: '2026-09-21 03:07'
 labels:
   - hermes
   - hook
@@ -28,7 +28,7 @@ The live probe of APRV-398 ran on 2026-09-21 (report in APRV-398 notes; captures
 - [x] #1 terminal calls without an absolute workdir, and write_file, patch, read_file and search_files calls with a relative path, are refused with hook-unsupported-execution-context and a reason naming the retry, pinned by tests and conformance vectors; absolute forms keep the existing path
 - [x] #2 docs/hermes-hook.md opens with the observed fail-open result (or the confound and its resolution), replaces every UNVERIFIED marker with the observed fact or its correction, and the register entry moves from parked to adopted with caveats; no SPEC row is proposed while the harness fails open
 - [x] #3 the probe gains a modify-workdir trial and a fail_closed-absent pass, and its setup banner describes the --home case correctly
-- [ ] #4 APRV-398 AC1 is checked with the report in its notes; build, typecheck, lint, hook, hermes and conformance suites pass
+- [x] #4 APRV-398 AC1 is checked with the report in its notes; build, typecheck, lint, hook, hermes and conformance suites pass
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -87,4 +87,12 @@ WHAT A REVIEWER SHOULD LOOK AT FIRST. hermesUnboundDirectory and its call site, 
 ONE ENVIRONMENTAL NOTE, reported rather than hidden: the better-sqlite3 ABI failure APRV-398 hit in cli-instructions did NOT appear in this worktree. cli-doctor, cli-long-help and cli-instructions ran together at 113 of 113, exit 0.
 
 AC2 IS CHECKED AGAINST ITS AMENDED TEXT, and the difference is worth naming because the criterion as first written is now false in two places. It says 'the observed fail-OPEN result' and 'no SPEC row is proposed while the harness fails open'; both belong to the confounded round on v0.21.3. This task's own notes amended it before any code moved: the doc opens with the observed fail-CLOSED result and the version floor, and the two SPEC hunks ARE proposed, because on a current Hermes this adapter is a gate. What was delivered against AC2: the doc opening, zero UNVERIFIED markers left in it, the register row and entry moved to adopted with caveats, and the SPEC status section rewritten to propose rather than defer.
+
+VERIFICATION, with numbers. Build, typecheck and lint exit 0, no warnings. cli-hook-hermes 38 of 38 (was 31; seven new cases and five existing ones rewritten to absolute paths). harness-version 28 of 28 (three new: the raw-versus-recordable split on the real version line, the parser and the floor comparison, and three doctor cases). probe-hermes-hook 23 of 23 (was 18). cli-doctor, cli-long-help and cli-instructions together 113 of 113, exit 0, and the better-sqlite3 ABI failure APRV-398 reported did NOT recur in this worktree. A ten-suite hook matrix (cli-hook, cli-hook-codex, cli-hook-muse, cli-hook-grok, cli-hook-cursor, cli-hook-read-scope, harness-enum, hook-module-graph, conformance, conformance-regen) 285 of 285. docs-guard 17 of 17 after the README-extended row was rewritten. node conformance/run.mjs: 456 vectors, 456 passed, 174 controls, manifest ok. FULL npm test: 5035 tests, 5012 pass, 22 FAIL, 1 skipped, 408 s, exit 1 — and the 22 are exactly the known Node 26 SMTP baseline (APRV-416, the options.servername refusal on an IP address), all of them in the email adapter, setup adapter email and smtp-probe suites, none in anything this task touched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The Hermes adapter now rests on the live probe rather than on its source. A terminal call with no absolute workdir, and a write_file, patch, read_file or search_files call whose path is relative or missing, are refused with hook-unsupported-execution-context and a reason naming the retry, because this harness reports the effective directory nowhere: the envelope cwd is the Hermes PROCESS directory, terminal keeps a recorded directory a cd moves, and the file tools resolve relative paths against that. A version floor pins fail_closed (main 118984d7 blocks a crash, garbage and a hang; v0.21.3 ignores the key silently; same semver, so the build date and upstream commit are compared, read from the binary), and the doctor row fails below it. A post event with no readable result is no longer a completion. The probe gained a modify-workdir trial, labelled passes, a retry caveat and an honest --home banner. The doc opens with the measured result, carries no UNVERIFIED marker, and proposes the two SPEC hunks with their evidence; the register entry is adopted with caveats. Verified: build, typecheck and lint exit 0; cli-hook-hermes 38/38, harness-version 28/28, probe-hermes-hook 23/23, hook matrix 285/285, cli-doctor and kin 113/113, conformance 456/456; full npm test 5035 tests, 22 failures, exactly the known SMTP baseline.
+<!-- SECTION:FINAL_SUMMARY:END -->
