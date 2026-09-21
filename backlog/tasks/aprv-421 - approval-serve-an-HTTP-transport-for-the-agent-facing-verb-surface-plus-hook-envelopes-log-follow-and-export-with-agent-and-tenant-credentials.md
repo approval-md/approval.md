@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:33'
+updated_date: '2026-09-21 07:35'
 labels:
   - hosting
   - daemon
@@ -206,10 +206,20 @@ It is on the agent allowlist as a payload builder, per the instruction, and the 
 ### The 22 SMTP failures
 
 Already tracked as **APRV-416**; not filed again. They are `tests/smtp-probe.test.ts`, `tests/adapter-email.test.ts`, `tests/adapters-contract.test.ts` and the `setup adapter email` cases in `tests/cli-setup.test.ts`, and they reproduce identically at the base commit `99cd51e` with none of this branch's code (control run: 182 tests, 160 pass, 22 fail). Cause: Node v26.8.2 refuses a TLS `servername` set to an IP address while the SMTP mock binds `127.0.0.1`.
+
+### Validation after the review fixes
+
+`npm run build`, `npm run typecheck`, `npm run lint`: clean (exit 0).
+
+Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and every cli-hook-<harness>, cli-hook-scope, cli-hook-read-scope, cli-hook-rewrite, cli-hook-scratch, log, log-subscribe, cli-log-follow, cli-log-verbs, channels-cli, channels-web, channels-telegram, channels-contract, serve, serve-hook, cli-help, cli-long-help, cli-instructions, docs-guard, layering, harness-enum): **785 tests, 785 pass, 0 fail, exit 0.**
+
+The partition was also checked directly against the coordinator's own list: 36 published verbs, 12 agent, 24 tenant, and the 24 are exactly the names the review enumerated with nothing left over in either direction.
+
+AC5 (both credential directions refuse with their own code) and AC6 (the export's contents) are the two the review touched. Both were re-verified after the fixes rather than left standing on the earlier run: AC5 by `every published verb off the allowlist refuses the agent credential`, `the agent allowlist is exactly the decided list`, `the verbs a harness needs ... DO answer the agent` and the unchanged tenant-direction test; AC6 by the archive test, which now asserts the payload bytes are present (both the fixture's and one the runtime itself wrote during attestation) alongside the four exclusions it already asserted by path and by byte scan.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added `approval serve`: a foreground HTTP transport publishing the same registry-derived agent-facing verb surface `approval mcp serve` publishes, plus the three things that transport withheld for transport reasons — `POST /hook/<harness>` answering the byte-for-byte verdict the stdin form prints for every adapter in HARNESS_ADAPTERS, `GET /log/follow` paged by an exclusive (seq, hash) cursor over subscribeVerifiedLog, and `GET /export`, the store as an archive without the keys, the environment source map or the vault. Two bearer credentials come from the launch environment and the agent one never reads the log it is judged by; both directions refuse with their own code. It is transport only: the catalog, the argv build, the verb dispatch, the hook verdict and the verified read are all the functions the CLI dispatches to, reached by import rather than by copy. Verified with 686 passing tests across the mcp, hook, log and channels suites plus two new suites (tests/serve.test.ts, tests/serve-hook.test.ts), a clean build, typecheck and lint, and a full `npm test` whose only 22 failures reproduce identically at the base commit and are a Node 26 TLS regression in the SMTP test harness. SPEC.md untouched; the section 10 hunk is proposed in the notes. PR #534.
+Added `approval serve`: a foreground HTTP transport publishing the same registry-derived verb catalog `approval mcp serve` publishes, plus the three things that transport withheld for transport reasons — `POST /hook/<harness>` answering the byte-for-byte verdict the stdin form prints for every adapter in HARNESS_ADAPTERS, `GET /log/follow` paged by an exclusive (seq, hash) cursor over subscribeVerifiedLog, and `GET /export`, the store as an archive carrying the policy, the log, the payload bytes behind every payload_hash and the projections, and never the keys, the environment source map or the vault. Publication is the MCP surface's; AUTHORIZATION is per verb and positive: the agent credential opens the hook and a twelve-verb allowlist of what a harness under oversight needs in order to ask and to act on a grant, the tenant credential opens everything else, and a verb added to the registry is the tenant's until somebody widens the list. It is transport only: the catalog, the argv build, the verb dispatch, the hook verdict and the verified read are all the functions the CLI dispatches to, reached by import rather than by copy. Verified with 785 passing tests across the mcp, hook, log, channels, help, docs and layering suites plus two new suites (tests/serve.test.ts, tests/serve-hook.test.ts), exit 0, on a clean build, typecheck and lint. The only failures in a full `npm test` are the 22 of APRV-416, which reproduce identically at the base commit. SPEC.md untouched; the section 10 hunk is proposed in the notes, along with the one design question the split surfaces: how a granted execution token is spent when the action runs in the sandbox rather than on the daemon host. PR #534.
 <!-- SECTION:FINAL_SUMMARY:END -->
