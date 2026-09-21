@@ -32,10 +32,17 @@
  *   - The scratch project deliberately contains NO `AGENTS.md` and NO
  *     `CLAUDE.md`. A coding harness reads those as instructions, and a test
  *     asserts their absence.
- *   - `HERMES_HOME` is REDIRECTED to a scratch directory this script creates,
- *     so the operator's own `~/.hermes` is never read and never written. The
- *     scratch home holds a `config.yaml` and nothing else: no credential, no
- *     token, no allowlist copied from anywhere.
+ *   - `HERMES_HOME` is REDIRECTED to a scratch directory this script creates
+ *     WHEN NO `--home` IS GIVEN, so the operator's own home is never read and
+ *     never written. The scratch home holds a `config.yaml` and nothing else: no
+ *     credential, no token, no allowlist copied from anywhere.
+ *
+ *     WITH `--home <dir>` the REAL home is used, which is the only way to
+ *     measure a real install: the block goes in between named markers, the
+ *     original `config.yaml` is backed up once, and a file that already
+ *     configures its own hooks is refused outright. The scratch PROJECT is still
+ *     the control there, and it is the whole control — say so out loud rather
+ *     than implying a redirection that did not happen (APRV-415).
  *   - This script invokes no model, opens no network connection, reads no
  *     credential, and writes nothing outside the scratch root it creates and
  *     one small pointer file.
@@ -156,6 +163,36 @@ export const FAIL_TRIALS = ["crash", "hang", "garbage"];
  * a BLOCK, so that one trial is the difference between a spelling that works and
  * a spelling that silently stops a session.
  */
+/**
+ * The MODIFY trial: does Hermes let a hook REWRITE the call it is answering?
+ *
+ * Hermes documents a third directive beside `block`: `{action:"modify", args}`,
+ * which replaces the tool's arguments. If it is honoured for a shell call's
+ * `workdir`, the adapter could PIN the directory it classified rather than
+ * refusing a call that names none, the way the Codex adapter pins the exact
+ * command bytes through `updatedInput`. That would turn APRV-415's refusal into a
+ * repair the session never has to see, so it is worth measuring before relying on
+ * it, and worth measuring in a way that cannot be misread.
+ *
+ * Single-variable by construction, and the construction is the point. The trial
+ * pins `workdir` to `<project>/modify-target/`, a directory the scratch project
+ * already contains, and the operator asks for the artifact through the SHELL with
+ * no directory named. So:
+ *
+ *   - the file appears in `modify-target/` -> the directive was HONOURED;
+ *   - the file appears in the project root -> it was IGNORED, and the command ran
+ *     in the session's own recorded directory;
+ *   - neither -> the call never ran, which is a third answer and not a failure of
+ *     the trial.
+ *
+ * Pinning the project root instead would have measured nothing: a session started
+ * in the project would put the file there either way.
+ */
+export const MODIFY_TRIAL = "modify-workdir";
+
+/** The directory inside the scratch project that {@link MODIFY_TRIAL} pins. */
+export const MODIFY_TARGET_DIR = "modify-target";
+
 export const DIALECT_TRIALS = [
   // The two the adapter ships. `deny-action-exit2` is the deny it emits, and
   // `allow-empty-object` is the allow; if either of these is the wrong answer
@@ -170,6 +207,9 @@ export const DIALECT_TRIALS = [
   "deny-mixed",
   "allow-empty",
   "allow-action-allow",
+  // The third directive, read separately from every line above because its
+  // reading is different: not blocked or allowed but WHERE it ran (APRV-415).
+  MODIFY_TRIAL,
 ];
 
 /** Every trial name `arm` accepts, plus the disarm. */
@@ -346,6 +386,17 @@ export const SYNTHETIC_FILES = {
   ].join("\n"),
   "notes.txt": [
     "Synthetic scratch notes. Generated, not copied. Nothing real lives here.",
+    "",
+  ].join("\n"),
+  // The directory the `modify-workdir` trial pins, with a file in it so it
+  // exists on disk before any trial runs: a `cd` into a directory that is not
+  // there would fail for a reason that has nothing to do with the directive.
+  [`${MODIFY_TARGET_DIR}/NOTE.md`]: [
+    "# Synthetic target directory",
+    "",
+    "The APRV-415 `modify-workdir` trial pins a hook-supplied workdir HERE. A file",
+    "that lands in this directory means Hermes honoured the modify directive; one",
+    "that lands in the project root means it ignored it.",
     "",
   ].join("\n"),
 };
@@ -593,11 +644,21 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
     [
       "===========================================================================",
       "NEVER RUN THIS PROBE INSIDE A REAL REPOSITORY. The scratch project below",
-      "holds only synthetic files this script just wrote, and HERMES_HOME is",
-      "redirected to a scratch directory, so your own ~/.hermes is never read or",
-      "written. Both of those are the control; the hook's own path jail is only a",
-      "backstop, because whether a refusal is honoured at all is what is under",
-      "test here.",
+      "holds only synthetic files this script just wrote, and it is the control.",
+      ...(ownHome
+        ? [
+            "HERMES_HOME is redirected to a scratch directory as well, so your own",
+            "home is never read or written.",
+          ]
+        : [
+            "YOUR OWN HERMES_HOME IS IN USE, because you named one with --home: this",
+            "run reads and writes that real home. Its config.yaml is backed up once",
+            "beside itself and only the region between the probe's markers is ever",
+            "rewritten, but nothing about it is redirected — the scratch project is",
+            "the whole of the control here.",
+          ]),
+      "The hook's own path jail is only a backstop, because whether a refusal is",
+      "honoured at all is what is under test.",
       "===========================================================================",
       "",
       "WHAT THIS PROBE IS FOR: Hermes documents a per-entry `fail_closed: true`",
@@ -709,8 +770,18 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
       ...DIALECT_TRIALS.flatMap((trial) => [
         `  node ${SCRIPT} arm ${trial}`,
         `    then in hermes, in ${project}:`,
-        `    create a file named ${trialArtifact(trial, true)} containing x`,
+        // The modify trial is asked for through the SHELL and with no directory
+        // named, because the answer is WHERE the file lands: the pinned
+        // `modify-target/` if the directive was honoured, the project root if it
+        // was ignored. Asking for a file "named x" would let a file tool answer
+        // it and measure nothing.
+        trial === MODIFY_TRIAL
+          ? `    run the shell command: touch ${trialArtifact(trial, true)}`
+          : `    create a file named ${trialArtifact(trial, true)} containing x`,
       ]),
+      `  The ${MODIFY_TRIAL} trial reads differently from the rest: the artifact in`,
+      `  ${MODIFY_TARGET_DIR}/ means Hermes HONOURED the hook's workdir, in the project`,
+      "  root means it IGNORED it, and in neither means the call never ran.",
       "",
       "---------------------------------------------------------------------------",
       "STEP 5. Report:",
@@ -841,8 +912,27 @@ export function mixedDenyPayload(reason) {
   };
 }
 
-/** The body and exit code one dialect trial answers with. */
-export function dialectAnswer(trial, reason) {
+/**
+ * The body and exit code one dialect trial answers with.
+ *
+ * `project` is needed by {@link MODIFY_TRIAL} alone, which names a directory
+ * inside the scratch project; every other trial ignores it. A trial that needs a
+ * path and is given none answers with the placeholder rather than with a guess at
+ * the operator's filesystem, so a report can say the trial was armed wrong.
+ */
+export function dialectAnswer(trial, reason, project = null) {
+  if (trial === MODIFY_TRIAL) {
+    return {
+      body: {
+        action: "modify",
+        args: {
+          workdir:
+            project === null ? "(no scratch project)" : join(project, MODIFY_TARGET_DIR),
+        },
+      },
+      code: 0,
+    };
+  }
   switch (trial) {
     // THE SHIPPED DENY: the native directive plus the blocking exit code. Not a
     // hedge — Hermes states the precedence itself (the exit code blocks
@@ -964,7 +1054,7 @@ export function record(argv, io = {}) {
     return 0;
   }
 
-  const dialect = dialectAnswer(armed, `aprv398-probe: armed trial \`${armed}\``);
+  const dialect = dialectAnswer(armed, `aprv398-probe: armed trial \`${armed}\``, project);
   if (dialect !== null) {
     if (dialect.body !== null) write(`${JSON.stringify(dialect.body)}\n`);
     return dialect.code;
@@ -1061,6 +1151,33 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
   const artifactPresent = (name) => project !== null && existsSync(join(project, name));
 
   /**
+   * A LATER call that named this artifact, or `null` (APRV-415).
+   *
+   * The file-existence heuristic has one hole, and the live run walked straight
+   * into it twice: when a refusal lands, the model RETRIES the same effect through
+   * another tool or another path, and one of those retries can create the very
+   * file whose absence was the measurement. On the 2026-09-21 run the armed crash
+   * write was refused and the model then wrote the file under
+   * `$HERMES_HOME/cache/scratch`, and the armed garbage write was refused and the
+   * model then created the file through `terminal`.
+   *
+   * So a PRESENT artifact is reported with this caveat attached whenever a call
+   * after the armed one named the same path. It does not decide the trial — a
+   * retry through `terminal` that the probe ALLOWED is exactly how the file can be
+   * present although the armed call was refused — and it tells the reader which
+   * envelope to go and look at instead of trusting the file.
+   */
+  const laterCallNaming = (name, armedIndex) => {
+    for (let index = armedIndex + 1; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (typeof row.raw === "string" && row.raw.includes(name)) {
+        return `${String(row.tool)} at ${String(row.at)}`;
+      }
+    }
+    return null;
+  };
+
+  /**
    * One trial's verdict, judged from whether its artifact reached the disk.
    *
    * `blockIsPass` is what the trial is asking. A `deny-*` or `fail_closed` trial
@@ -1072,17 +1189,60 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     const name = trialArtifact(trial, failClosed);
     const label = `  ${trial} (fail_closed ${failClosed ? "TRUE" : "absent"})`;
     if (project === null) return `${label}: (no scratch project recorded)`;
-    const ran = rows.some((row) => row.armed === trial && row.failClosed === failClosed);
-    if (!ran) return `${label}: NOT RUN (no captured call was armed this way)`;
+    const armedIndex = rows.findIndex(
+      (row) => row.armed === trial && row.failClosed === failClosed,
+    );
+    if (armedIndex === -1) return `${label}: NOT RUN (no captured call was armed this way)`;
     const present = artifactPresent(name);
+    const retry = present ? laterCallNaming(name, armedIndex) : null;
+    const caveat =
+      retry === null
+        ? ""
+        : `; CAUTION: a later call (${retry}) also named ${name}, so its presence may be a model RETRY rather than the armed call proceeding — read that envelope before concluding`;
     if (blockIsPass) {
       return present
-        ? `${label}: FAIL OPEN — ${name} exists, so the effect happened anyway`
+        ? `${label}: FAIL OPEN — ${name} exists, so the effect happened anyway${caveat}`
         : `${label}: FAIL CLOSED — ${name} absent, so Hermes withheld the effect`;
     }
     return present
-      ? `${label}: ACCEPTED — ${name} exists, so Hermes honoured this form of allow`
+      ? `${label}: ACCEPTED — ${name} exists, so Hermes honoured this form of allow${caveat}`
       : `${label}: REJECTED — ${name} absent, so this form of allow did not let the call run`;
+  };
+
+  /**
+   * The modify directive's answer, which is a PLACE rather than a yes or a no.
+   *
+   * Read from two paths rather than one, because that is what makes the trial
+   * single-variable: the pinned directory and the project root. See
+   * {@link MODIFY_TRIAL}.
+   */
+  const modifyLine = () => {
+    const name = trialArtifact(MODIFY_TRIAL, true);
+    if (project === null) return "  (no scratch project recorded)";
+    const ran = rows.some((row) => row.armed === MODIFY_TRIAL);
+    if (!ran) return `  NOT RUN — no captured call was armed \`${MODIFY_TRIAL}\`.`;
+    const inTarget = existsSync(join(project, MODIFY_TARGET_DIR, name));
+    const inRoot = existsSync(join(project, name));
+    if (inTarget && !inRoot) {
+      return [
+        `  HONOURED — ${name} landed in ${MODIFY_TARGET_DIR}/, the directory the hook named.`,
+        "  So a hook CAN pin a shell call's workdir, and APRV-415's refusal of a call",
+        "  that names none could become a repair the session never sees. Confirm on a",
+        "  second run before the adapter relies on it: one observation of a directive",
+        "  being honoured is not a contract.",
+      ].join("\n");
+    }
+    if (inRoot && !inTarget) {
+      return [
+        `  IGNORED — ${name} landed in the project root, not in ${MODIFY_TARGET_DIR}/.`,
+        "  The command ran in the session's own recorded directory, so the directive",
+        "  changed nothing and the refusal is the only available answer.",
+      ].join("\n");
+    }
+    if (inRoot && inTarget) {
+      return `  AMBIGUOUS — ${name} exists in BOTH places; a retry created one of them. Read the envelopes.`;
+    }
+    return `  NO EFFECT — ${name} is in neither place, so the call did not run at all (a blocked or abandoned call, which is a third answer rather than a failed trial).`;
   };
 
   /** The headline: did `fail_closed: true` change anything at all? */
@@ -1157,7 +1317,17 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     "=== 1. THE FAIL-CLOSED FINDING (the reason this probe exists) ===",
     failClosedVerdict(),
     "",
+    // The two passes are LABELLED (APRV-415). The finding is the PAIR, and a
+    // reader who sees three NOT RUN lines under an unlabelled list cannot tell a
+    // pass nobody ran from a trial that went wrong. Pass B is the control: it
+    // shows that the key is what caused Pass A's blocks rather than something
+    // else in the configuration.
+    "  PASS A — fail_closed: true on every entry:",
     ...FAIL_TRIALS.map((trial) => trialLine(trial, true, true)),
+    "",
+    "  PASS B — fail_closed ABSENT (the control; run `fail-closed off` first).",
+    "  NOT RUN here means this pass was not run, which leaves Pass A one-sided:",
+    "  it does not mean a trial failed.",
     ...FAIL_TRIALS.map((trial) => trialLine(trial, false, true)),
     "",
     "APRV-398 probe report.",
@@ -1185,21 +1355,37 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     "  THE PER-CALL WORKING DIRECTORY is the field the adapter cannot do without",
     "  (APRV-310 on Codex): without it a verdict binds different bytes from the",
     "  command the harness runs. Look for `workdir` in the SHELL call's",
-    "  tool_input keys above. Absent means the adapter must refuse the shell tool",
-    "  outright, exactly as the Codex one does.",
+    "  tool_input keys above. On the 2026-09-21 round it was ABSENT — the model",
+    "  sent `command` and nothing else — which is why the adapter now REFUSES a",
+    "  terminal call with no absolute workdir (APRV-415), and refuses a relative",
+    "  or missing path on the file and read tools for the same reason.",
     "",
     "=== 4. TOOL NAMES SEEN ===",
     tools.length === 0 ? "  (none)" : tools.map((tool) => `  ${tool}`).join("\n"),
-    "  The adapter's readTools list is a GUESS until this section contradicts or",
-    "  confirms it. A read tool Hermes sends that the adapter does not list is an",
-    "  unscoped read, which is the direction that matters.",
+    "  The 2026-09-21 round saw terminal, write_file, patch, read_file and",
+    "  execute_code; search_files is on the adapter's list from the registrations",
+    "  and was not exercised. A read tool Hermes sends that the adapter does not",
+    "  list is an unscoped read, which is the direction that matters, so a tool",
+    "  name here that is new to docs/hermes-hook.md is the line to read twice.",
     "",
     "=== 5. DIALECT TRIALS (which single form of answer does Hermes honour?) ===",
     "  Each printed exactly ONE dialect, except deny-mixed. A deny form that",
     "  FAILS CLOSED here is one the adapter may ship; one that FAILS OPEN must",
     "  never be shipped alone. An allow form that is REJECTED cannot be shipped",
     "  at all under fail_closed, because every allow would become a block.",
-    ...DIALECT_TRIALS.map((trial) => trialLine(trial, true, trial.startsWith("deny-"))),
+    "  A PRESENT artifact carries a CAUTION where a later call named the same path:",
+    "  the model's observed answer to a block is to retry the same effect through",
+    "  another tool, and a retry can create the file whose absence was the measurement.",
+    ...DIALECT_TRIALS.filter((trial) => trial !== MODIFY_TRIAL).map((trial) =>
+      trialLine(trial, true, trial.startsWith("deny-")),
+    ),
+    "",
+    "=== 5b. THE MODIFY DIRECTIVE (can a hook PIN the workdir?) ===",
+    "  Hermes documents {action:\"modify\", args}. If a hook can rewrite a shell",
+    "  call's workdir, the adapter could pin the directory it classified instead of",
+    `  refusing a call that names none. The trial pins ${MODIFY_TARGET_DIR}/ and the`,
+    "  answer is WHERE the artifact landed, not whether it exists.",
+    modifyLine(),
     "",
     "=== 6. THE PATH JAIL, AND WHAT IT CAUGHT ===",
     ...(() => {
@@ -1228,8 +1414,12 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
         : [`  ${unbound.raw}`];
     })(),
     "",
-    "Reminder: the scratch project held only synthetic files this script wrote,",
-    "and HERMES_HOME was a scratch directory. Nothing of yours was read.",
+    "Reminder: the scratch project held only synthetic files this script wrote.",
+    // APRV-415: with `--home` the operator's REAL home was used, so the report
+    // must not sign off with a safety property this round did not have.
+    setupState.ownHome === false
+      ? "Your OWN HERMES_HOME was in use (--home): the block sits between the markers and config.yaml.aprv398-backup holds what was there before."
+      : "HERMES_HOME was a scratch directory. Nothing of yours was read.",
     `Delete ${setupState.root ?? "the scratch root"} when this report is pasted.`,
     "",
   ];
