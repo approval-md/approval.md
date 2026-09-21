@@ -3,11 +3,11 @@ id: APRV-396
 title: >-
   publish.yml creates the GitHub Release for every tag from the changelog
   section, so the Releases page carries the notes without a hand ceremony
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-396'
 created_date: '2026-09-20 03:49'
-updated_date: '2026-09-20 16:05'
+updated_date: '2026-09-21 02:23'
 labels:
   - release
   - ci
@@ -26,7 +26,7 @@ Carter asked on 2026-09-20 where the 0.3.0 release notes are. They live in CHANG
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 The 0.3.0 Release exists on GitHub with the changelog section as its body, created through the gate, recorded in the notes with the grant and execution seqs
-- [ ] #2 publish.yml creates or updates the Release for a tag after a successful publish, from the matching changelog section, with --verify-tag, the tarball and its sha256 attached; a tag with no matching dated section fails that step with a clear message and does not touch npm
+- [x] #2 publish.yml creates or updates the Release for a tag after a successful publish, from the matching changelog section, with --verify-tag, the tarball and its sha256 attached; a tag with no matching dated section fails that step with a clear message and does not touch npm
 - [x] #3 A workflow-level test or a dry-run script under scripts/ exercises the section extraction against CHANGELOG.md for 0.2.0 and 0.3.0; docs updated
 <!-- AC:END -->
 
@@ -66,6 +66,8 @@ VERIFICATION. npm run build exit 0, npm run typecheck exit 0, npm run lint exit 
 FOR THE HUMAN. AC2 is half proven: the refusal path and the shape are tested, and the live half (the workflow actually creating a Release) cannot be proven until the next tag, which is the first real check of gh release create --verify-tag in this environment and of whether npm carries the manifest commit field to the registry. One tap on policy.edit.ci lands the two pending hunks from the candidate files; after that the three failing tests pass and the branch is coherent. Worth knowing before the next release: if npm ever stops carrying that field, the packed-manifest assertion fails the run and the tag is spent, so the first release after this change is worth watching rather than launching and leaving.
 
 Final numbers after a fourth commit (a fenced code block is no longer a section boundary, preventive: release notes quote shell and YAML, and a quoted line beginning with two hashes would have truncated a body silently; the 0.2.0 and 0.3.0 extractions are byte-identical before and after). Commits on claude/aprv-396-publish-creates-release: d5d961c the extractor and its tests, 92bdb2e the changelog convention and the docs, 4f64574 the plan and these notes, plus the fence commit. Verified at that head: build 0, typecheck 0, lint 0; run-tests --only release-notes 27 tests, 24 pass, 3 fail (the un-landed workflow assertions); full suite 5032 tests, 5006 pass, 25 fail, which is exactly the 22-failure Node 26 SMTP and email baseline plus those 3. The first full run of the session showed 26 failures; the extra one was a flaky SMTP timing case that did not recur.
+
+2026-09-21: Carter applied the two workflow hunks by hand from private/aprv-396 (the check script validated the candidate against every workflow assertion; release-notes 27 of 27), committed ac8e5fb, and PR 516 went from draft to ready and armed. AC2's live half, the workflow actually creating a Release, is proven by the next tag; the first release after this should be watched for the gitHead assertion in the tarball check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
