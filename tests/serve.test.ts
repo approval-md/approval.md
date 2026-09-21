@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -40,11 +41,14 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
+import { parseFlags } from "../src/cli/args.js";
 import { commandServe } from "../src/cli/serve.js";
+import { pathFlagsOf, VERB_REGISTRY, verbLabel } from "../src/cli/verb-registry.js";
 import { main } from "../src/cli/main.js";
 import { appendEvent, type EventInput, type EventRecord } from "../src/core/log.js";
-import { toolDefinitions } from "../src/mcp/server.js";
+import { buildArgv, publishedVerbs, toolDefinitions } from "../src/mcp/server.js";
 import { EXCLUDED_PREFIXES, readTarEntries } from "../src/serve/archive.js";
+import { PINNED_FLAGS } from "../src/serve/arguments.js";
 import {
   AGENT_TOKEN_ENV,
   MIN_TOKEN_LENGTH,
@@ -1072,10 +1076,12 @@ test("a caller may not name a path outside the store, by flag or by positional",
       "serve-path-outside-store",
     );
 
-    // And the same through a flag that is not one of the three pins.
-    const flagged = await post(server, "/verb/request", AGENT_TOKEN, {
-      positionals: ["task-1"],
-      flags: { "--payload": "/etc/hosts" },
+    // And the same through a flag that is not one of the three pins, on a
+    // tenant-scoped verb: `render --out` writes where it is told. The agent
+    // cannot reach a path flag at all now, and that stricter refusal has its
+    // own test in the second-pass block below.
+    const flagged = await post(server, "/verb/render", TENANT_TOKEN, {
+      flags: { "--out": "/etc/approval-queue.md" },
     });
     assert.equal(flagged.status, 403);
     assert.equal(
@@ -1094,6 +1100,270 @@ test("a caller may not name a path outside the store, by flag or by positional",
     assert.equal(allowed.status, 200);
     const body = (await allowed.json()) as { exit_code: number; stdout: string };
     assert.equal(body.exit_code, 0, body.stdout);
+  } finally {
+    await server.close();
+  }
+});
+
+// --- second review pass -----------------------------------------------------
+
+/**
+ * Pass 2, finding 1. A positional that begins with a dash IS a flag.
+ *
+ * `buildArgv` emits positionals first and verbatim, and `parseFlags` reads any
+ * token starting with `-` as a flag, splitting on `=`. So the flag guard could
+ * be walked around through the front door.
+ */
+test("a positional that looks like a flag is refused, in both spellings", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const attacks: Array<[string, unknown]> = [
+      ["separate value", { positionals: ["--payload", "/etc/hosts", "t1"] }],
+      ["inline value", { positionals: ["--payload=/etc/hosts", "t1"] }],
+      ["a pinned flag", { positionals: ["--log", "/etc/hosts", "t1"] }],
+      ["stdin", { positionals: ["-"] }],
+    ];
+    for (const [label, args] of attacks) {
+      const response = await post(server, "/verb/request", AGENT_TOKEN, args);
+      assert.equal(response.status, 403, label);
+      const parsed = (await response.json()) as { error: { code: string }; exit_code: number };
+      assert.equal(parsed.error.code, "serve-positional-flag", label);
+      assert.notEqual(parsed.exit_code, 0, label);
+    }
+    // The same through the tenant credential: positionals are values in every
+    // scope, because the verb parses them the same way whoever asked.
+    const tenant = await post(server, "/verb/log_tail", TENANT_TOKEN, {
+      positionals: ["--log", "/etc/hosts"],
+    });
+    assert.equal(
+      ((await tenant.json()) as { error: { code: string } }).error.code,
+      "serve-positional-flag",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * Pass 2, finding 1: `trailing` needs no such rule, and this is why.
+ *
+ * `buildArgv` always emits `--` before trailing and `parseFlags` STOPS there,
+ * so no trailing token is ever read as a flag. Refusing dash-leading trailing
+ * elements would instead break `hook classify -- git push -f`, which is the
+ * one agent verb whose argument is a command line.
+ */
+test("trailing cannot reach the flag parser, because the separator always precedes it", () => {
+  const spec = VERB_REGISTRY.find((entry) => verbLabel(entry) === "hook classify");
+  assert.ok(spec !== undefined);
+  const built = buildArgv(
+    spec,
+    { trailing: ["git", "push", "-f", "--force-with-lease"] },
+    { actor: "agent:x", cwd: "/tmp" },
+  );
+  assert.equal(built.ok, true);
+  if (!built.ok) throw new Error("unreachable");
+  const separator = built.argv.indexOf("--");
+  assert.ok(separator !== -1, `no -- separator in ${built.argv.join(" ")}`);
+  for (const flagLike of ["-f", "--force-with-lease"]) {
+    assert.ok(built.argv.indexOf(flagLike) > separator, `${flagLike} precedes the separator`);
+  }
+  // And the parser the CLI actually uses agrees: everything after `--` is a
+  // positional, never a flag.
+  const parsed = parseFlags(built.argv, { "--json": "boolean" });
+  assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.message);
+});
+
+/** Pass 2, finding 1(b). The agent names no path, and no flag off its list. */
+test("the agent credential may not use any path flag, or any flag off its verb's list", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    // A path flag inside the store is still refused for the agent: outright,
+    // not confined, because a sandboxed harness has no files here at all.
+    const inside = join(dir, "payload.json");
+    writeFileSync(inside, '{"command":"ls"}', "utf8");
+    const path = await post(server, "/verb/request", AGENT_TOKEN, {
+      positionals: ["t1"],
+      flags: { "--payload": inside },
+    });
+    assert.equal(path.status, 403);
+    assert.equal(
+      ((await path.json()) as { error: { code: string } }).error.code,
+      "serve-flag-not-permitted",
+    );
+
+    // And a flag that is merely not on the verb's agent list.
+    const off = await post(server, "/verb/wait", AGENT_TOKEN, {
+      positionals: ["t1"],
+      flags: { "--help": true },
+    });
+    assert.equal(off.status, 403);
+    assert.equal(
+      ((await off.json()) as { error: { code: string } }).error.code,
+      "serve-flag-not-permitted",
+    );
+
+    // What IS on the list still reaches the verb.
+    const permitted = await post(server, "/verb/wait", AGENT_TOKEN, {
+      positionals: ["t1"],
+      flags: { "--timeout": "1ms", "--json": true },
+    });
+    assert.equal(permitted.status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * Pass 2, finding 1(c). Every path-typed flag is pinned or confined, and the
+ * set is derived from the registry rather than kept here.
+ *
+ * `NON_PATH_FLAGS` is the reviewed remainder: a flag added to any published
+ * verb lands in neither list and fails this test until somebody classifies it,
+ * which is the point.
+ */
+const NON_PATH_FLAGS = new Set([
+  "--action", "--actor", "--all", "--allow-loopback", "--api-base", "--as", "--base",
+  "--branch", "--co-author", "--dry-run", "--force", "--head", "--help", "--interval",
+  "--json", "--limit", "--message", "--no-sandbox", "--note", "--payload-hash", "--pr",
+  "--reaction", "--read-jail", "--reason", "--remote", "--reversible", "--schemas",
+  "--session", "--since", "--source", "--task", "--tasks", "--timeout", "--token",
+  "--until", "--withdraw-on-timeout", "-h", "-n",
+]);
+
+test("every path-typed flag on every published verb is pinned or confined", () => {
+  const unclassified: string[] = [];
+  let pathTyped = 0;
+  for (const spec of publishedVerbs()) {
+    const declared = new Set(pathFlagsOf(spec));
+    const flags = (
+      spec.input as { properties?: { flags?: { properties?: Record<string, unknown> } } }
+    ).properties?.flags?.properties;
+    for (const flag of Object.keys(flags ?? {})) {
+      if (declared.has(flag)) {
+        pathTyped += 1;
+        continue;
+      }
+      if (NON_PATH_FLAGS.has(flag)) continue;
+      unclassified.push(`${verbLabel(spec)} ${flag}`);
+    }
+  }
+  assert.deepEqual(
+    unclassified,
+    [],
+    `these flags are neither declared "path" in the registry nor reviewed as non-path; classify them:\n${unclassified.join("\n")}`,
+  );
+  assert.ok(
+    pathTyped > 20,
+    `only ${String(pathTyped)} path-typed flags found; the registry marker is not being read`,
+  );
+
+  // Every path-typed flag is either pinned by the server or confined by the
+  // guard. The guard confines ALL of them for the tenant and refuses ALL of
+  // them for the agent, so the property holds by construction; this asserts
+  // the pinned three really are pinned.
+  for (const flag of PINNED_FLAGS) {
+    assert.ok(
+      publishedVerbs().some((spec) => pathFlagsOf(spec).includes(flag)),
+      `${flag} is pinned but no published verb declares it path-typed`,
+    );
+  }
+});
+
+/** Pass 2, finding 2. A hard link is a second name for one inode. */
+test("export: a hard link into the store refuses the whole export", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  mkdirSync(join(dir, ".approval", "keys"), { recursive: true });
+  const secret = join(dir, ".approval", "keys", "sender.key");
+  writeFileSync(secret, "SECRET-KEY", "utf8");
+  // The reviewer's input: no symlink, no target to notice — one inode, two
+  // names, and the admitted one is an ordinary regular file.
+  linkSync(secret, join(dir, ".approval", "log", "note.jsonl"));
+
+  const server = await listener(dir);
+  try {
+    const response = await get(server, "/export", TENANT_TOKEN);
+    assert.equal(response.status, 409);
+    const parsed = (await response.json()) as {
+      error: { code: string };
+      path: string;
+      links: number;
+    };
+    assert.equal(parsed.error.code, "serve-export-hardlink");
+    assert.equal(parsed.path, ".approval/log/note.jsonl");
+    assert.ok(parsed.links > 1);
+    assert.equal(JSON.stringify(parsed).includes("SECRET-KEY"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+/** Pass 2, finding 3. A rotated credential must not read as an allow. */
+test("hook: a 401 carries the harness's block directive, so a rotation cannot open the gate", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    for (const harness of ["claude-code", "cursor", "muse"] as const) {
+      const response = await fetch(url(server, `/hook/${harness}`), {
+        method: "POST",
+        headers: { authorization: "Bearer this-credential-was-rotated-away" },
+        body: "{}",
+      });
+      assert.equal(response.status, 401, harness);
+      const parsed = (await response.json()) as {
+        error: { code: string };
+        exit_code: number;
+        stdout: string;
+      };
+      assert.equal(parsed.error.code, "serve-unauthorized", harness);
+      assert.notEqual(parsed.exit_code, 0, harness);
+      assert.ok(parsed.stdout.length > 0, `${harness}: a 401 carried no block directive`);
+      const directive = JSON.parse(parsed.stdout) as Record<string, unknown>;
+      if (harness === "cursor") {
+        assert.equal(directive["permission"], "deny");
+      } else {
+        const nested = directive["hookSpecificOutput"] as Record<string, unknown>;
+        assert.equal(nested["permissionDecision"], "deny");
+      }
+    }
+    // A path that is not a harness keeps the generic body, and the documented
+    // client rule (a missing body is a block) is what covers it.
+    const generic = await fetch(url(server, "/hook/devin"), { method: "POST", body: "{}" });
+    assert.equal(generic.status, 401);
+    const parsed = (await generic.json()) as { stdout?: string; exit_code: number };
+    assert.equal(parsed.stdout, undefined);
+    assert.notEqual(parsed.exit_code, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+/** Pass 2, finding 4. Only the server's own lockfile is dropped. */
+test("export: a tenant's own .lock file survives; only the append lockfile is dropped", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  mkdirSync(join(dir, ".approval", "payloads"), { recursive: true });
+  writeFileSync(join(dir, ".approval", "payloads", "x.lock"), "TENANT-OWNED-LOCK", "utf8");
+
+  const server = await listener(dir);
+  try {
+    const response = await get(server, "/export", TENANT_TOKEN);
+    assert.equal(response.status, 200);
+    const archive = readTarEntries(gunzipSync(Buffer.from(await response.arrayBuffer())));
+    const paths = archive.map((entry) => entry.path);
+
+    const tenants = archive.find((entry) => entry.path === ".approval/payloads/x.lock");
+    assert.ok(tenants !== undefined, `the tenant's own lock file vanished: ${paths.join(", ")}`);
+    assert.equal(tenants.data.toString("utf8"), "TENANT-OWNED-LOCK");
+
+    // And the one this server creates while it walks is still absent.
+    assert.equal(
+      paths.includes(".approval/log/events.jsonl.lock"),
+      false,
+      `the append lockfile was archived: ${paths.join(", ")}`,
+    );
   } finally {
     await server.close();
   }

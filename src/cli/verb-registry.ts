@@ -181,15 +181,42 @@ const TRAILING: JsonSchema = {
   description: "everything after the first `--`, passed through untouched",
 };
 
-/** Flags are `string | boolean` (see `args.ts`); nothing else can be parsed. */
+/**
+ * Path-typed flags, by the input schema they belong to (APRV-421).
+ *
+ * A flag declared `"path"` PUBLISHES as an ordinary `{"type":"string"}` — the
+ * wire contract is unchanged and no consumer sees a new keyword — while the
+ * registry retains the fact that its value NAMES A FILE. `approval serve`
+ * reads that through {@link pathFlagsOf} to confine such a value to the store
+ * the server was started for, so a flag added to this file tomorrow is
+ * confined on the day it appears rather than on the day somebody remembers to
+ * add it to a list kept somewhere else.
+ *
+ * A WeakMap keyed by the schema object, rather than a field on {@link VerbSpec},
+ * because `input()` returns that schema and all hundred-odd call sites would
+ * otherwise have to change to carry a second value.
+ */
+const PATH_FLAGS_BY_INPUT = new WeakMap<JsonSchema, readonly string[]>();
+
+/** The flags of `spec` whose value names a filesystem path. */
+export function pathFlagsOf(spec: VerbSpec): readonly string[] {
+  return PATH_FLAGS_BY_INPUT.get(spec.input) ?? [];
+}
+
+/**
+ * Flags are `string | boolean` (see `args.ts`); nothing else can be parsed.
+ * `path` is a `string` the registry knows more about — see above.
+ */
 function input(parts: {
   positionals?: JsonSchema;
-  flags: Record<string, "string" | "boolean">;
+  flags: Record<string, "string" | "boolean" | "path">;
   trailing?: JsonSchema;
 }): JsonSchema {
   const flagProperties: Record<string, JsonSchema> = {};
+  const pathFlags: string[] = [];
   for (const [flag, kind] of Object.entries(parts.flags)) {
-    flagProperties[flag] = kind === "string" ? STRING : BOOLEAN;
+    if (kind === "path") pathFlags.push(flag);
+    flagProperties[flag] = kind === "boolean" ? BOOLEAN : STRING;
   }
   const properties: Record<string, JsonSchema> = {
     positionals: parts.positionals ?? NO_POSITIONALS,
@@ -201,19 +228,21 @@ function input(parts: {
     },
   };
   if (parts.trailing !== undefined) properties["trailing"] = parts.trailing;
-  return {
+  const schema: JsonSchema = {
     type: "object",
     properties,
     required: [],
     additionalProperties: false,
   };
+  PATH_FLAGS_BY_INPUT.set(schema, pathFlags);
+  return schema;
 }
 
 /** Flags every command accepts. */
 const HELP_FLAGS = { "--help": "boolean", "-h": "boolean" } as const;
 const JSON_FLAG = { "--json": "boolean" } as const;
-const LOG_FLAG = { "--log": "string" } as const;
-const POLICY_FLAGS = { "--policy": "string", "--dir": "string" } as const;
+const LOG_FLAG = { "--log": "path" } as const;
+const POLICY_FLAGS = { "--policy": "path", "--dir": "path" } as const;
 const AS_FLAG = { "--as": "string" } as const;
 
 /**
@@ -410,7 +439,7 @@ const VERBS: VerbSpec[] = [
     human_only: true,
     human_only_note:
       "It writes the policy file a human must then read and attest, in a directory a human chose. Nothing it writes is operative, but a scaffold an agent could drop into a tree is a policy file nobody decided to have.",
-    input: input({ flags: { "--dir": "string", ...JSON_FLAG, ...HELP_FLAGS } }),
+    input: input({ flags: { "--dir": "path", ...JSON_FLAG, ...HELP_FLAGS } }),
     output: object(
       {
         ok: { const: true },
@@ -432,7 +461,7 @@ const VERBS: VerbSpec[] = [
     human_only: true,
     human_only_note:
       "This command authors and attests APPROVAL.md and declares APPROVAL_HUMAN. It is reserved to a person at a terminal and is never exposed through MCP.",
-    input: input({ flags: { "--dir": "string", "--api-base": "string", ...HELP_FLAGS } }),
+    input: input({ flags: { "--dir": "path", "--api-base": "string", ...HELP_FLAGS } }),
     output: null,
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
@@ -851,7 +880,7 @@ const VERBS: VerbSpec[] = [
       flags: {
         "--action": "string",
         ...AS_FLAG,
-        "--payload": "string",
+        "--payload": "path",
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -1749,7 +1778,7 @@ const VERBS: VerbSpec[] = [
         "--since": "string",
         "--until": "string",
         "--source": "string",
-        "--vault": "string",
+        "--vault": "path",
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -1821,9 +1850,9 @@ const VERBS: VerbSpec[] = [
       flags: {
         ...LOG_FLAG,
         ...POLICY_FLAGS,
-        "--tasks": "string",
+        "--tasks": "path",
         "--api-base": "string",
-        "--root": "string",
+        "--root": "path",
         ...JSON_FLAG,
         ...HELP_FLAGS,
       },
@@ -1866,7 +1895,7 @@ const VERBS: VerbSpec[] = [
       flags: {
         ...LOG_FLAG,
         "--policy-dir": "string",
-        "--policy": "string",
+        "--policy": "path",
         "--payload-dir": "string",
         ...AS_FLAG,
         "--interactive": "boolean",
@@ -1971,8 +2000,8 @@ const VERBS: VerbSpec[] = [
     input: input({
       flags: {
         ...LOG_FLAG,
-        "--tasks": "string",
-        "--out": "string",
+        "--tasks": "path",
+        "--out": "path",
         ...POLICY_FLAGS,
         "--interval": "string",
         "--debounce": "string",
@@ -2001,8 +2030,8 @@ const VERBS: VerbSpec[] = [
     input: input({
       flags: {
         ...LOG_FLAG,
-        "--tasks": "string",
-        "--out": "string",
+        "--tasks": "path",
+        "--out": "path",
         ...POLICY_FLAGS,
         "--interval": "string",
         "--debounce": "string",
@@ -2107,7 +2136,7 @@ const VERBS: VerbSpec[] = [
         "--message": "string",
         "--task": "string",
         "--session": "string",
-        "--journal": "string",
+        "--journal": "path",
         ...AS_FLAG,
         ...JSON_FLAG,
         ...HELP_FLAGS,
@@ -2200,7 +2229,7 @@ const VERBS: VerbSpec[] = [
       flags: {
         "--limit": "string",
         "--since": "string",
-        "--journal": "string",
+        "--journal": "path",
         ...JSON_FLAG,
         ...HELP_FLAGS,
       },
@@ -2424,7 +2453,7 @@ const VERBS: VerbSpec[] = [
         "--logs": "string",
         "--env-file": "string",
         "--exec": "string",
-        "--out": "string",
+        "--out": "path",
         "--uninstall": "boolean",
         ...AS_FLAG,
         ...LOG_FLAG,
@@ -2447,7 +2476,7 @@ const VERBS: VerbSpec[] = [
       positionals: positionals([{ name: "name", description: "the credential name" }], 1),
       flags: {
         "--value-env": "string",
-        "--vault": "string",
+        "--vault": "path",
         ...LOG_FLAG,
         ...POLICY_FLAGS,
         ...AS_FLAG,
@@ -2473,7 +2502,7 @@ const VERBS: VerbSpec[] = [
       "Names are not values, but the name set is a map of the machine's reach, and all three vault verbs resolve identity exactly as `policy attest` does. Keeping the noun human-only is what stops an agent's tooling from touching the credential store in passing.",
     input: input({
       flags: {
-        "--vault": "string",
+        "--vault": "path",
         ...LOG_FLAG,
         ...POLICY_FLAGS,
         ...AS_FLAG,
@@ -2504,7 +2533,7 @@ const VERBS: VerbSpec[] = [
     input: input({
       positionals: positionals([{ name: "name", description: "the credential name" }], 1),
       flags: {
-        "--vault": "string",
+        "--vault": "path",
         ...LOG_FLAG,
         ...POLICY_FLAGS,
         ...AS_FLAG,
@@ -2534,9 +2563,9 @@ const VERBS: VerbSpec[] = [
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
         "--token": "string",
-        "--payload": "string",
+        "--payload": "path",
         ...AS_FLAG,
-        "--vault": "string",
+        "--vault": "path",
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         "--timeout": "string",
@@ -2597,9 +2626,9 @@ const VERBS: VerbSpec[] = [
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
         "--token": "string",
-        "--payload": "string",
+        "--payload": "path",
         ...AS_FLAG,
-        "--vault": "string",
+        "--vault": "path",
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         "--timeout": "string",
@@ -2659,7 +2688,7 @@ const VERBS: VerbSpec[] = [
     input: input({
       positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
       flags: {
-        "--token": "string", "--payload": "string", ...AS_FLAG, "--vault": "string",
+        "--token": "string", "--payload": "path", ...AS_FLAG, "--vault": "path",
         ...POLICY_FLAGS, ...LOG_FLAG, "--timeout": "string", ...JSON_FLAG, ...HELP_FLAGS,
       },
     }),
@@ -2865,7 +2894,7 @@ const VERBS: VerbSpec[] = [
     human_only: false,
     input: input({
       positionals: positionals([{ name: "file", description: "the markdown file to parse" }], 1),
-      flags: { "--out": "string", ...JSON_FLAG, ...HELP_FLAGS },
+      flags: { "--out": "path", ...JSON_FLAG, ...HELP_FLAGS },
     }),
     output: object(
       {
@@ -3119,7 +3148,7 @@ const VERBS: VerbSpec[] = [
     input: input({
       flags: {
         ...LOG_FLAG,
-        "--index": "string",
+        "--index": "path",
         "--force": "boolean",
         ...JSON_FLAG,
         ...HELP_FLAGS,
@@ -3139,7 +3168,7 @@ const VERBS: VerbSpec[] = [
       "Regenerate .approval/QUEUE.md, the read-only markdown queue projection of SPEC.md §9.1, whole, from the verified log. This is the screenshot and never the truth: editing the file authorizes nothing and the next render overwrites it. Writes exactly one file, atomically; a log that does not verify refuses and writes nothing.",
     human_only: false,
     input: input({
-      flags: { ...LOG_FLAG, "--out": "string", ...POLICY_FLAGS, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: { ...LOG_FLAG, "--out": "path", ...POLICY_FLAGS, ...JSON_FLAG, ...HELP_FLAGS },
     }),
     output: object(
       {

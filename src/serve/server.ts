@@ -79,7 +79,7 @@ import {
   toolName,
   type ServerOptions,
 } from "../mcp/server.js";
-import { buildStoreArchive, ExportSymlinkError } from "./archive.js";
+import { buildStoreArchive, ExportHardLinkError, ExportSymlinkError } from "./archive.js";
 import { checkVerbArguments } from "./arguments.js";
 
 /**
@@ -108,6 +108,19 @@ import {
 
 /** Largest request body accepted. A tool call and a hook envelope are small. */
 export const MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * How much of an oversized body this server will read and throw away before
+ * dropping the socket.
+ *
+ * An oversized request is refused at {@link MAX_BODY_BYTES}, but the refusal
+ * cannot be WRITTEN until the client stops writing, or the response closes the
+ * socket under it and the caller sees a transport error instead of a verdict.
+ * So the remainder is discarded as it arrives, up to this much, and beyond it
+ * the connection is simply dropped: a caller streaming without end is not a
+ * caller owed a polite answer.
+ */
+export const DRAIN_LIMIT_BYTES = 16 * 1024 * 1024;
 
 /**
  * How much of a captured stream travels back in a response body.
@@ -243,7 +256,10 @@ export const SERVE_REFUSAL_CODES = [
   "serve-invalid-cursor",
   "serve-path-pinned",
   "serve-path-outside-store",
+  "serve-positional-flag",
+  "serve-flag-not-permitted",
   "serve-export-symlink",
+  "serve-export-hardlink",
   "serve-export-failed",
 ] as const;
 
@@ -369,21 +385,50 @@ type BodyRead =
 async function readBody(req: IncomingMessage): Promise<BodyRead> {
   const chunks: Buffer[] = [];
   let size = 0;
+  let oversized = false;
   try {
     for await (const chunk of req) {
       const buffer = chunk as Buffer;
       size += buffer.length;
       if (size > MAX_BODY_BYTES) {
-        return {
-          ok: false,
-          status: 413,
-          code: "serve-body-too-large",
-          message: `request body exceeds ${String(MAX_BODY_BYTES)} bytes`,
-        };
+        // DO NOT return here. The client is still uploading, and a response
+        // written while it writes closes the socket under it: the caller then
+        // sees ECONNRESET instead of the 413, and a hook client that got a
+        // transport error rather than a refusal has no verdict to read. So the
+        // rest is DISCARDED as it arrives — never buffered, so the memory is
+        // bounded by one chunk — and the refusal is written once the client
+        // has finished speaking.
+        //
+        // Bounded twice over: the drain stops at DRAIN_LIMIT_BYTES, after
+        // which the socket is dropped, so a caller that streams forever is not
+        // a caller this loop follows forever.
+        oversized = true;
+        chunks.length = 0;
+        if (size > DRAIN_LIMIT_BYTES) {
+          req.destroy();
+          break;
+        }
+        continue;
       }
       chunks.push(buffer);
     }
+    if (oversized) {
+      return {
+        ok: false,
+        status: 413,
+        code: "serve-body-too-large",
+        message: `request body exceeds ${String(MAX_BODY_BYTES)} bytes`,
+      };
+    }
   } catch (cause) {
+    if (oversized) {
+      return {
+        ok: false,
+        status: 413,
+        code: "serve-body-too-large",
+        message: `request body exceeds ${String(MAX_BODY_BYTES)} bytes`,
+      };
+    }
     return {
       ok: false,
       status: 400,
@@ -624,10 +669,12 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     res: ServerResponse,
     spec: VerbSpec,
     args: unknown,
+    scope: ServeScope,
   ): Promise<void> {
-    // Every scope, before the argv is built: no caller names a store, and no
-    // caller names a path outside the one this process serves.
-    const checked = checkVerbArguments(spec, args, options.cwd, options.cwd);
+    // Every scope, before the argv is built: no caller names a store, no
+    // caller names a path outside the one this process serves, and no
+    // positional arrives wearing a dash.
+    const checked = checkVerbArguments(spec, args, options.cwd, options.cwd, scope);
     if (!checked.ok) {
       refuse(res, 403, checked.code, checked.message);
       return;
@@ -782,13 +829,19 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     let archive;
     try {
       archive = await serialize(async () => {
-        const locked = withAppendLock(options.log ?? logPathOf(options.cwd), () =>
-          buildStoreArchive(options.cwd),
-        );
+        const logPath = options.log ?? logPathOf(options.cwd);
+        const locked = withAppendLock(logPath, () => buildStoreArchive(options.cwd, logPath));
         if (!locked.ok) throw new Error(locked.error.message);
         return locked.value;
       });
     } catch (cause) {
+      if (cause instanceof ExportHardLinkError) {
+        refuse(res, 409, "serve-export-hardlink", cause.message, {
+          path: cause.path,
+          links: cause.links,
+        });
+        return;
+      }
       if (cause instanceof ExportSymlinkError) {
         // Named, and the whole export refused rather than the link skipped: an
         // archive silently missing a file is an archive nobody can tell from a
@@ -829,14 +882,36 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         // credential this server checks differ from the one a reader of the
         // request would say was sent. There is no correct way to choose; the
         // request is malformed and is treated as such.
+        // WHICH DIALECT this request would be answered in, read off the raw
+        // request target before anything else (second review pass, finding 3).
+        //
+        // It decides the SHAPE OF A REFUSAL and nothing else: no route is
+        // taken from it, no scope, no verb. It has to happen here because the
+        // two refusals below — a rotated credential, a malformed Host — fire
+        // before the URL is parsed, and a hook client that gets a body with no
+        // block directive reads exit 0 as ALLOW on four of the six dialects. A
+        // credential rotation should not open a gate.
+        //
+        // It discloses nothing: the path set is documented, the refusal's code
+        // and message are unchanged, and a name that is not a harness this
+        // runtime speaks for gets the generic body.
+        const early = /^\/hook\/(?<harness>[a-z0-9-]+)(?:[/?#]|$)/u.exec(req.url ?? "");
+        const earlyHarness =
+          early?.groups !== undefined && isHarnessKind(early.groups["harness"])
+            ? early.groups["harness"]
+            : null;
+        const refuseEarly = (status: number, code: string, message: string): void => {
+          if (earlyHarness === null) refuse(res, status, code, message);
+          else refuseHook(res, status, earlyHarness, code, message);
+        };
+
         const offered = req.rawHeaders.filter(
           (entry, index) => index % 2 === 0 && entry.toLowerCase() === "authorization",
         ).length;
         const bearer = offered > 1 ? null : bearerOf(req.headers.authorization);
         const scope = bearer === null ? null : options.credentials.identify(bearer);
         if (scope === null) {
-          refuse(
-            res,
+          refuseEarly(
             401,
             "serve-unauthorized",
             offered > 1
@@ -853,8 +928,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
           // After authentication, so this says nothing to a stranger. The
           // `Host` header is the usual culprit and is named without being
           // echoed back.
-          refuse(
-            res,
+          refuseEarly(
             400,
             "serve-malformed-url",
             "the request line and Host header do not form a URL this server can parse",
@@ -923,7 +997,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
             refuse(res, 500, "serve-unknown-verb", "the registry publishes no `status` verb");
             return;
           }
-          await handleVerb(res, spec, {});
+          await handleVerb(res, spec, {}, scope);
           return;
         }
 
@@ -986,7 +1060,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
             return;
           }
         }
-        await handleVerb(res, spec, args);
+        await handleVerb(res, spec, args, scope);
       } catch (cause) {
         // A throw out of a handler is still a refusal with a code, because a
         // caller that got a bare 500 would have nothing to branch on.

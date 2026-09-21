@@ -1,103 +1,99 @@
 /**
- * What a caller on this transport may say about the filesystem: nothing
- * outside the store (APRV-421, review finding 3).
+ * What a caller on this transport may say: nothing about the filesystem
+ * outside the store, and nothing shaped like a flag where a value belongs
+ * (APRV-421, review findings 3 and 1).
  *
- * ## The hole this closes
+ * ## The two holes this closes
  *
- * `approval mcp serve` publishes `--log`, `--dir` and `--policy` on the verbs
- * that accept them, and injects the operator's pins only when the operator
- * passed any. On a pipe the operator handed the server that is harmless: the
- * party at the other end is the party who started it, and it could read the
- * file itself. Over HTTP the party at the other end is a sandboxed harness on
- * another machine, and the same published flag is a filesystem oracle:
+ * **A published path flag is a filesystem oracle.** `approval mcp serve`
+ * publishes `--log`, `--dir` and `--policy` on the verbs that accept them and
+ * injects the operator's pins only where the operator passed any. On a pipe
+ * the operator handed the server that is harmless: the party at the other end
+ * is the party who started it. Over HTTP the party at the other end is a
+ * sandboxed harness on another machine, and the same flag answers questions
+ * about files it cannot see.
  *
- *     POST /verb/log_verify  {"flags": {"--log": "/etc/hosts"}}
+ * **A positional is a flag if it starts with a dash.** `buildArgv` emits
+ * positionals FIRST and verbatim, and `parseFlags` reads any token beginning
+ * with `-` as a flag. So a caller refused `{"flags":{"--payload":"…"}}` could
+ * write `{"positionals":["--payload","/tmp/secret","t1"]}` and reach the same
+ * flag through the front door — including the `--payload=/tmp/secret`
+ * spelling, which `parseFlags` splits on `=`. Positionals are VALUES. One that
+ * looks like a flag is refused rather than escaped, because escaping is a
+ * thing to get subtly wrong once and lose.
  *
- * answers with what the verifier made of the first bytes of a host file, and
- * pointed at a second tenant's log it verifies THAT. The positional arguments
- * are the same hole wearing different clothes: `payload hash <file>` names a
- * host path and `request --payload <file>` files host bytes into the payload
- * store.
+ * `trailing` needs no such rule and deliberately does not get one. `buildArgv`
+ * always emits `--` before it, and `parseFlags` STOPS at `--`, pushing the
+ * remainder into positionals without reading a single token as a flag. A
+ * blanket refusal of dash-leading trailing elements would instead break the
+ * one agent verb that needs them: `hook classify -- git push -f` classifies a
+ * command line, and command lines have flags. The invariant that makes this
+ * safe is pinned by a test rather than assumed here.
  *
- * ## The rule
+ * ## The rule, by scope
  *
- * Two halves, and both are needed.
+ * **Both scopes.** No positional may begin with `-`. `--dir`, `--log` and
+ * `--policy` are appended to every call from the launch configuration and are
+ * refused from a caller even when the value is correct: one process serves one
+ * store, and a caller restating it is a caller that believes it can choose.
  *
- * 1. **The server pins the store.** `--dir`, `--log` and `--policy` are
- *    appended to EVERY verb call, in every scope, from the launch
- *    configuration, whether or not the operator named them. One process serves
- *    one store, and that is now true of the argv as well as of the intent.
- * 2. **A caller may not name a path outside it.** Any argument this module
- *    reads as a path — a flag in {@link PATH_FLAGS}, or a positional a verb
- *    declares as a file — must resolve inside the store root, and is refused
- *    otherwise. The three pinned flags are refused outright even for a path
- *    inside the store, because they are the store and a caller does not get to
- *    restate it.
+ * **Agent scope.** Every path-typed flag is refused OUTRIGHT rather than
+ * confined: a sandboxed harness has no files on the daemon's machine, so a
+ * path it names is either useless or somebody else's. Payload bytes reach the
+ * gate for such a harness through the hook route, which builds the envelope
+ * from the tool call itself. On top of that, only the flags named in
+ * {@link AGENT_FLAGS} are accepted at all, per verb, so a flag added to one of
+ * the five agent verbs tomorrow is refused until somebody decides otherwise.
  *
- * The second half is what keeps the first honest. Pinning alone would leave
- * `payload hash /etc/passwd` answering, since that verb names its file as a
- * positional and no pin reaches it.
- *
- * ## Why confinement rather than outright refusal
- *
- * A path argument inside the store is a legitimate thing for a co-located
- * caller to send, and refusing every one of them would silently make
- * `payload_hash` and `--payload` dead letters rather than deciding they should
- * be. Confinement keeps the verbs meaning what they mean and removes the only
- * dangerous case.
- *
- * Worth stating plainly for the operator's runbook: a REMOTE harness has no
- * files on the host at all, so every path it could legitimately name is one
- * the host put there. `payload_hash` is therefore close to inert over this
- * transport, and the case for keeping it on the agent allowlist is weaker than
- * it looks. That is a scope decision and is recorded in the task's notes, not
- * taken here.
+ * **Tenant scope.** Every path-typed flag is CONFINED to the store, and which
+ * flags those are comes from the registry ({@link pathFlagsOf}) rather than
+ * from a list kept here, so a flag declared `"path"` tomorrow is confined on
+ * the day it appears. Positionals that name files are confined the same way.
  */
 
 import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 
-import { verbLabel, type VerbSpec } from "../cli/verb-registry.js";
+import { pathFlagsOf, verbLabel, type VerbSpec } from "../cli/verb-registry.js";
+import type { ServeScope } from "./credentials.js";
 
 /**
- * Flags whose value names a filesystem path, on any published verb.
+ * The three the server pins itself, refused from any caller in any scope.
  *
- * A LIST rather than a property of the registry, because the registry types a
- * flag as `"string"` and says no more. Enumerated fail-closed: a flag whose
- * value might be read as a path is on it, and `--source` (an enum of witness
- * names) and `--api-base` (a URL) are not, because neither opens a file.
- *
- * A flag added to the registry tomorrow is absent from this list, so the check
- * below is not a complete proof that no path reaches a verb. What makes the
- * gap survivable is the other half of the rule: the agent surface is seven
- * verbs, and every path-shaped argument any of them takes is named here.
- */
-export const PATH_FLAGS: ReadonlySet<string> = new Set([
-  "--dir",
-  "--log",
-  "--policy",
-  "--index",
-  "--out",
-  "--journal",
-  "--payload",
-  "--root",
-  "--vault",
-  "--read-jail",
-  "--tasks",
-]);
-
-/**
- * The three the server pins itself. Refused from a caller even when the value
- * would have been legal: one process serves one store, and a caller restating
- * it is a caller that believes it can choose.
+ * They ARE the store. Everything else this module decides is about values
+ * inside it.
  */
 export const PINNED_FLAGS: readonly string[] = ["--dir", "--log", "--policy"];
 
 /**
+ * What each AGENT verb may be given, flag by flag.
+ *
+ * A positive list per verb, and short on purpose. The agent surface is five
+ * verbs; between them they need an action key, a decision deadline, a note and
+ * `--json`. Everything else on those verbs is either the store (pinned), the
+ * identity (`--as`, refused by the argv builder both transports share), a path
+ * (refused below), or something nobody has decided a sandboxed harness should
+ * have.
+ *
+ * `--help` is absent deliberately: a help page over a transport whose client
+ * is a program is an odd thing to serve, and `instructions` is the verb for
+ * that.
+ */
+export const AGENT_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["instructions", new Set(["--schemas", "--json"])],
+  ["hook classify", new Set(["--json"])],
+  ["request", new Set(["--action", "--json"])],
+  ["wait", new Set(["--timeout", "--interval", "--withdraw-on-timeout", "--json"])],
+  ["withdraw", new Set(["--action", "--reason", "--note", "--json"])],
+]);
+
+/**
  * Verbs whose POSITIONAL argument names a file, by registry label.
  *
- * Read off the registry's own positional titles and descriptions rather than
- * guessed: each of these declares a `file`, a `task-file` or a path.
+ * Read off the registry's own positional titles: each declares a `file` or a
+ * `task-file`. None is on the agent surface any more, and the confinement
+ * still runs for the tenant, because one process serves one store whoever is
+ * asking.
  */
 const PATH_POSITIONAL_VERBS: ReadonlyMap<string, number> = new Map([
   ["payload hash", 0],
@@ -109,6 +105,8 @@ export type ArgumentCheck = { ok: true } | { ok: false; code: string; message: s
 
 const OUTSIDE = "serve-path-outside-store";
 const PINNED = "serve-path-pinned";
+const DASH = "serve-positional-flag";
+const UNSUPPORTED = "serve-flag-not-permitted";
 
 /**
  * Is `candidate` inside `root`?
@@ -121,8 +119,6 @@ const PINNED = "serve-path-pinned";
 function insideStore(root: string, candidate: string): boolean {
   const real = (path: string): string => {
     let current = path;
-    // Walk up to the deepest ancestor that exists, resolve that, then re-attach
-    // the tail. `realpathSync` throws on a path whose leaf is absent.
     const tail: string[] = [];
     for (;;) {
       try {
@@ -141,9 +137,8 @@ function insideStore(root: string, candidate: string): boolean {
   return realCandidate === realRoot || realCandidate.startsWith(`${realRoot}${sep}`);
 }
 
-function checkPath(root: string, cwd: string, label: string, value: string): ArgumentCheck {
-  // `-` is stdin and is refused earlier, by the argv builder both transports
-  // share. Named here so a reader does not wonder.
+function confine(root: string, cwd: string, label: string, value: string): ArgumentCheck {
+  // `-` is stdin and is refused by the argv builder both transports share.
   if (value === "-") return { ok: true };
   const absolute = isAbsolute(value) ? value : resolve(cwd, value);
   if (insideStore(root, absolute)) return { ok: true };
@@ -158,19 +153,38 @@ function checkPath(root: string, cwd: string, label: string, value: string): Arg
  * Check one verb call's arguments before an argv is built from them.
  *
  * Runs for EVERY scope. The tenant credential is the operator's and is trusted
- * with far more than the agent's, and it is still not a reason to let one
+ * with far more than the agent's, and that is still not a reason to let one
  * process serve two stores: the pins are the launch configuration's, and a
  * second store reached through an argument would be a second gate with no
- * attestation, no daemon id and no record of which one answered.
+ * attestation, no daemon id, and no record of which one answered.
  */
 export function checkVerbArguments(
   spec: VerbSpec,
   rawArgs: unknown,
   storeRoot: string,
   cwd: string,
+  scope: ServeScope,
 ): ArgumentCheck {
   const args = (rawArgs ?? {}) as Record<string, unknown>;
   if (typeof args !== "object" || Array.isArray(args)) return { ok: true };
+  const label = verbLabel(spec);
+
+  // A POSITIONAL THAT LOOKS LIKE A FLAG IS A FLAG. Checked first and in both
+  // scopes, because it is the route around every other rule in this file.
+  const positionals = args["positionals"];
+  if (Array.isArray(positionals)) {
+    for (const value of positionals) {
+      if (typeof value !== "string" || !value.startsWith("-")) continue;
+      return {
+        ok: false,
+        code: DASH,
+        message: `positional ${JSON.stringify(value)} begins with a dash. Positionals on this surface are VALUES, passed to the verb verbatim, and the verb reads anything starting with \`-\` as a flag: a value spelled this way reaches the flag parser through the front door. Send flags in \`flags\``,
+      };
+    }
+  }
+
+  const pathFlags = new Set(pathFlagsOf(spec));
+  const permitted = AGENT_FLAGS.get(label);
 
   const flags = args["flags"];
   if (typeof flags === "object" && flags !== null && !Array.isArray(flags)) {
@@ -182,17 +196,41 @@ export function checkVerbArguments(
           message: `${flag} is not accepted from a caller. This server serves the one store it was started for, and ${PINNED_FLAGS.join(", ")} are appended to every verb call from its launch configuration; a call that could restate them could point this process at another tenant's log, at another tenant's policy, or at the host's filesystem`,
         };
       }
-      if (!PATH_FLAGS.has(flag) || typeof value !== "string") continue;
-      const checked = checkPath(storeRoot, cwd, flag, value);
+
+      if (scope === "agent") {
+        // `--as` is not this module's to refuse. The argv builder both
+        // transports share owns identity and refuses it with
+        // `mcp-identity-fixed`, whose message is the whole reason this surface
+        // is safe to run; catching it here first would replace that with a
+        // vaguer code and leave the rule stated in two places.
+        if (flag === "--as") continue;
+        if (pathFlags.has(flag)) {
+          return {
+            ok: false,
+            code: UNSUPPORTED,
+            message: `${flag} names a file on the machine this server runs on, and the agent credential never names one. A harness reached through this transport has no files there; payload bytes reach the gate through \`POST /hook/<harness>\`, which builds the envelope from the tool call itself`,
+          };
+        }
+        if (permitted !== undefined && !permitted.has(flag)) {
+          return {
+            ok: false,
+            code: UNSUPPORTED,
+            message: `${flag} is not accepted on \`approval ${label}\` from the agent credential, which takes ${[...permitted].sort().join(", ")} on this verb and nothing else. A flag added to it later is refused until somebody decides a harness under oversight should have it`,
+          };
+        }
+        continue;
+      }
+
+      if (!pathFlags.has(flag) || typeof value !== "string") continue;
+      const checked = confine(storeRoot, cwd, flag, value);
       if (!checked.ok) return checked;
     }
   }
 
-  const index = PATH_POSITIONAL_VERBS.get(verbLabel(spec));
+  const index = PATH_POSITIONAL_VERBS.get(label);
   if (index === undefined) return { ok: true };
-  const positionals = args["positionals"];
   if (!Array.isArray(positionals)) return { ok: true };
   const value = positionals[index];
   if (typeof value !== "string") return { ok: true };
-  return checkPath(storeRoot, cwd, `\`approval ${verbLabel(spec)}\`'s file argument`, value);
+  return confine(storeRoot, cwd, `\`approval ${label}\`'s file argument`, value);
 }

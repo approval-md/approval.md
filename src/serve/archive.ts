@@ -40,7 +40,7 @@
  * day the writer put the vault in.
  */
 
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 
@@ -207,16 +207,23 @@ export function readTarEntries(archive: Buffer): TarEntry[] {
   return entries;
 }
 
-/** Is this store-relative path one an export may never carry? */
-export function isExcludedPath(path: string): boolean {
+/**
+ * Is this store-relative path one an export may never carry?
+ *
+ * `excludedLock` is the ONE lockfile this server itself creates, passed in as
+ * an exact path rather than matched as a class. An earlier pass excluded
+ * `*.lock` by suffix, which quietly deleted a tenant's own
+ * `.approval/payloads/x.lock` from their archive: the tenant's bytes are the
+ * tenant's, and a name this runtime happens to use for its own bookkeeping is
+ * not a reason to drop somebody else's file. Only the path derived from the
+ * log is dropped, and only because the export holds that lock while it walks,
+ * so the file exists for exactly the span of the copy and means nothing but
+ * "somebody was reading when this was made".
+ */
+export function isExcludedPath(path: string, excludedLock: string | null = null): boolean {
   const base = path.split("/").at(-1) ?? path;
   if (EXCLUDED_BASENAMES.includes(base)) return true;
-  // An advisory lockfile is transient process state and never evidence. It
-  // matters here because the export takes the append lock while it walks
-  // (`serve/server.ts`), so `<log>.lock` EXISTS for exactly the span of the
-  // copy: without this line every archive would carry a file whose only
-  // meaning is "somebody was reading when this was made".
-  if (base.endsWith(".lock")) return true;
+  if (excludedLock !== null && path === excludedLock) return true;
   return EXCLUDED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
@@ -240,7 +247,38 @@ export class ExportSymlinkError extends Error {
   }
 }
 
-function walk(root: string, relativeDir: string, into: TarEntry[]): void {
+/**
+ * A HARD link, which a name-based exclusion cannot see at all (APRV-421,
+ * second review pass).
+ *
+ * `ln .approval/keys/sender.key .approval/log/note.jsonl` produces a second
+ * name for the same inode. There is no link to refuse to follow and no target
+ * to notice: the excluded path and the admitted path ARE one file, and the
+ * admitted name is a perfectly ordinary regular file by every test a walker
+ * can apply to it except one — its link count.
+ *
+ * So `nlink > 1` on a regular file under the store is refused, fail-closed and
+ * whole, exactly as a symlink is. The false positive is a tenant who
+ * deliberately hard-linked something into their own store, which is rare, is
+ * visible in the refusal, and is repaired by copying the file.
+ */
+export class ExportHardLinkError extends Error {
+  /** The store-relative path of the link, which is also the file. */
+  readonly path: string;
+  /** How many names this inode has. */
+  readonly links: number;
+
+  constructor(path: string, links: number) {
+    super(
+      `${path} has ${String(links)} names (it is a hard link). A second name for one inode cannot be told from an ordinary file by its path, so an excluded file — a key under \`.approval/keys\`, the environment source map, the vault — can be given an admitted name and copied into the archive with nothing to notice. The whole export is refused rather than the file skipped, for the reason a symbolic link refuses it: an archive silently missing a file is one nobody can tell from a complete one. Replace the link with a copy.`,
+    );
+    this.name = "ExportHardLinkError";
+    this.path = path;
+    this.links = links;
+  }
+}
+
+function walk(root: string, relativeDir: string, into: TarEntry[], lock: string | null): void {
   let names: string[];
   try {
     names = readdirSync(join(root, relativeDir)).sort();
@@ -249,16 +287,21 @@ function walk(root: string, relativeDir: string, into: TarEntry[]): void {
   }
   for (const name of names) {
     const relativePath = posix.join(relativeDir, name);
-    collect(root, relativePath, into);
+    collect(root, relativePath, into, lock);
   }
 }
 
-function collect(root: string, relativePath: string, into: TarEntry[]): void {
+function collect(
+  root: string,
+  relativePath: string,
+  into: TarEntry[],
+  lock: string | null,
+): void {
   // Checked on every path rather than only on the roots: the allowlist decides
   // what is offered and this decides what is accepted, and a nested `vault.enc`
   // is refused by the second even when the first admitted the directory above
   // it.
-  if (isExcludedPath(relativePath)) return;
+  if (isExcludedPath(relativePath, lock)) return;
   const absolute = join(root, relativePath);
   let stats;
   try {
@@ -272,7 +315,7 @@ function collect(root: string, relativePath: string, into: TarEntry[]): void {
   }
   if (stats.isSymbolicLink()) throw new ExportSymlinkError(relativePath);
   if (stats.isDirectory()) {
-    walk(root, relativePath, into);
+    walk(root, relativePath, into, lock);
     return;
   }
   // Not a regular file: a fifo, a socket or a device. Skipped rather than
@@ -280,11 +323,33 @@ function collect(root: string, relativePath: string, into: TarEntry[]): void {
   // a store that happens to hold one is not a store that is lying about what
   // it contains.
   if (!stats.isFile()) return;
-  into.push({
-    path: relativePath,
-    data: readFileSync(absolute),
-    mtime: Math.floor(stats.mtimeMs / 1000),
-  });
+
+  // OPEN, then ask the DESCRIPTOR what it is (APRV-421, second review pass).
+  //
+  // `lstat` above and a `readFileSync(path)` below would be two resolutions of
+  // one name with a window between them, and the classic move is to replace a
+  // checked regular file with a symlink to somebody's key inside that window.
+  // `O_NOFOLLOW` refuses to open a symlink at all, and `fstat` describes THE
+  // FILE THAT WAS OPENED rather than whatever the name points at now — so the
+  // regular-file and link-count checks below are about the bytes actually read.
+  const fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) return;
+    if (opened.nlink > 1) throw new ExportHardLinkError(relativePath, opened.nlink);
+    into.push({
+      path: relativePath,
+      data: readFileSync(fd),
+      mtime: Math.floor(opened.mtimeMs / 1000),
+    });
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // `readFileSync(fd)` closes it on some paths; a double close is not an
+      // error worth propagating out of an export.
+    }
+  }
 }
 
 export interface StoreArchive {
@@ -305,11 +370,13 @@ export interface StoreArchive {
  * Throws {@link ExportSymlinkError} when the walk meets a symbolic link. The
  * caller turns that into a refusal naming the link's own relative path.
  */
-export function buildStoreArchive(root: string): StoreArchive {
+export function buildStoreArchive(root: string, logPath: string): StoreArchive {
+  // The one file this server's own append lock creates, as an exact path.
+  const lock = storeRelative(root, `${logPath}.lock`);
   const entries: TarEntry[] = [];
   for (const candidate of EXPORTED_PATHS) {
     const relativePath = candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
-    collect(root, relativePath, entries);
+    collect(root, relativePath, entries, lock);
   }
   // Sorted, so two exports of one unchanged store are the same archive: a
   // tenant comparing two downloads is comparing the store and not the order a
