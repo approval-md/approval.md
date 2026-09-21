@@ -791,6 +791,16 @@ test("export carries the store and nothing that is a credential", async () => {
       assert.equal(whole.includes(secret), false, `${secret} left the store`);
     }
 
+    // Not the append lockfile either. The export takes that lock while it
+    // walks, so it exists for exactly the span of the copy; an archive
+    // carrying it would carry a file whose only meaning is "somebody was
+    // reading when this was made".
+    assert.equal(
+      paths.some((path) => path.endsWith(".lock")),
+      false,
+      `the archive carries a lockfile: ${paths.join(", ")}`,
+    );
+
     // And what it does carry is the store's own bytes, unchanged.
     const log = archive.find((entry) => entry.path === ".approval/log/events.jsonl");
     assert.ok(log !== undefined);

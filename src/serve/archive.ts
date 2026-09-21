@@ -211,6 +211,12 @@ export function readTarEntries(archive: Buffer): TarEntry[] {
 export function isExcludedPath(path: string): boolean {
   const base = path.split("/").at(-1) ?? path;
   if (EXCLUDED_BASENAMES.includes(base)) return true;
+  // An advisory lockfile is transient process state and never evidence. It
+  // matters here because the export takes the append lock while it walks
+  // (`serve/server.ts`), so `<log>.lock` EXISTS for exactly the span of the
+  // copy: without this line every archive would carry a file whose only
+  // meaning is "somebody was reading when this was made".
+  if (base.endsWith(".lock")) return true;
   return EXCLUDED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 

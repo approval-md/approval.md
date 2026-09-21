@@ -69,6 +69,7 @@ import type { Streams } from "../cli/main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
 import { type VerbSpec } from "../cli/verb-registry.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
+import { withAppendLock } from "../core/log.js";
 import {
   buildArgv,
   invokeVerb,
@@ -756,12 +757,26 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   }
 
   async function handleExport(res: ServerResponse): Promise<void> {
-    // Serialized with the verbs. Two reasons, and both are about this process:
-    // an append landing mid-walk is a torn copy of the tenant's own evidence,
-    // and `gzipSync` blocks the event loop for as long as the store is large.
+    // Serialized with the verbs AND taken under the append lock.
+    //
+    // The queue is about this process: `gzipSync` blocks the event loop for as
+    // long as the store is large, and a hook call waiting behind it is a
+    // session waiting. The LOCK is about every other process — a daemon, a CLI
+    // run beside this server — because the walk reads the log and the payload
+    // store as one snapshot, and an append landing between the two copies a
+    // record whose payload bytes are not there yet. `withAppendLock` is the
+    // same exclusion `approval log sync` takes for the same reason, and it
+    // hands the callback no write primitive: this endpoint gains only the
+    // guarantee that nobody is appending while it reads.
     let archive;
     try {
-      archive = await serialize(async () => buildStoreArchive(options.cwd));
+      archive = await serialize(async () => {
+        const locked = withAppendLock(options.log ?? logPathOf(options.cwd), () =>
+          buildStoreArchive(options.cwd),
+        );
+        if (!locked.ok) throw new Error(locked.error.message);
+        return locked.value;
+      });
     } catch (cause) {
       if (cause instanceof ExportSymlinkError) {
         // Named, and the whole export refused rather than the link skipped: an
