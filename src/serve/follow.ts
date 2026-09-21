@@ -76,11 +76,17 @@ export function followFailureExit(code: string): number {
   return 4;
 }
 
-/** Clamp a caller's requested page size into the bounds above. */
-export function clampFollowLimit(requested: number | null): number {
-  if (requested === null) return DEFAULT_FOLLOW_LIMIT;
-  return Math.min(Math.max(requested, 1), MAX_FOLLOW_LIMIT);
-}
+/**
+ * There is deliberately NO clamp here any more (APRV-421, review).
+ *
+ * A limit outside the range above used to be pulled quietly into it, so
+ * `limit=0` returned two hundred records and a caller paging by a number it
+ * had computed could not tell that the server had answered a different
+ * question than the one it asked. The transport refuses an out-of-range limit
+ * with `serve-invalid-cursor` instead, and `docs/cli-reference.md` states the
+ * range. A silent correction is the failure mode this project exists to
+ * dislike.
+ */
 
 /**
  * Read one page of verified records after `cursor`.

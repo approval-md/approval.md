@@ -62,22 +62,24 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 
-import { commandHook, HARNESS_ADAPTERS } from "../cli/hook.js";
+import { StringDecoder } from "node:string_decoder";
+
+import { commandHook, harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
 import type { Streams } from "../cli/main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
-import { verbLabel, type VerbSpec } from "../cli/verb-registry.js";
+import { type VerbSpec } from "../cli/verb-registry.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
 import {
   buildArgv,
   invokeVerb,
-  lastJsonObject,
   publishedVerbs,
   serializer,
   toolDefinitions,
   toolName,
   type ServerOptions,
 } from "../mcp/server.js";
-import { buildStoreArchive } from "./archive.js";
+import { buildStoreArchive, ExportSymlinkError } from "./archive.js";
+import { checkVerbArguments } from "./arguments.js";
 
 /**
  * Identity is resolved by the MCP server's own function, re-exported here so
@@ -92,8 +94,9 @@ import { buildStoreArchive } from "./archive.js";
 export { resolveAgentActor, type IdentityCheck } from "../mcp/server.js";
 import { bearerOf, type ServeCredentials, type ServeScope } from "./credentials.js";
 import {
-  clampFollowLimit,
+  DEFAULT_FOLLOW_LIMIT,
   followFailureExit,
+  MAX_FOLLOW_LIMIT,
   followPage,
   type FollowCursor,
 } from "./follow.js";
@@ -106,15 +109,29 @@ import {
 export const MAX_BODY_BYTES = 1024 * 1024;
 
 /**
- * How much of a hook's stderr rides back on the response header.
+ * How much of a captured stream travels back in a response body.
  *
- * Hermes's ALLOW is `{}` and carries its reason on stderr and nowhere else
- * (`cli/hook.ts`), so a transport that dropped stderr would drop the only
- * account of why a Hermes session was let through. It is base64 so that a
- * multi-line value is one header, and bounded so that a verbose progress
- * report cannot make a response unsendable.
+ * Both streams are bounded, and both carry a flag saying whether they were
+ * clipped. Generous enough that a verdict is never clipped in practice, and
+ * present so that a verb which decided to print a megabyte cannot make a
+ * response unsendable. Clipping happens at a CODEPOINT boundary
+ * ({@link clip}), so what comes back is always valid text.
  */
-export const MAX_STDERR_HEADER_BYTES = 4096;
+export const MAX_STREAM_BYTES = 256 * 1024;
+
+/**
+ * The exit code every server-authored refusal carries.
+ *
+ * NON-ZERO, always, and this is the finding that made the whole response
+ * contract change. A refusal used to travel as an HTTP status with the exit
+ * code in a header that refusals did not set, so a client following the
+ * documented rule — write stdout, exit `x-approval-exit-code` — read a missing
+ * header as zero, and zero is ALLOW on Claude Code, Cursor, Codex and Muse. A
+ * 413 on an oversized hook envelope was therefore an allow. Nothing on this
+ * surface may be able to turn a refusal into a permission, so the exit code is
+ * in the body, it is always present, and on a refusal it is always this.
+ */
+export const REFUSAL_EXIT_CODE = 2;
 
 // ---------------------------------------------------------------------------
 // The route table
@@ -149,43 +166,45 @@ export const MAX_STDERR_HEADER_BYTES = 4096;
  *
  * What is on it, and why each:
  *
- * - `instructions`, `policy_check`, `policy_test`, `hook_classify` — read the
- *   guide and find out what the policy makes of a class or a command. None
- *   reads the log; all four tell an agent what it may ask for before it asks.
- * - `register`, `request`, `wait`, `withdraw` — declare, ask, wait for the
- *   answer, and retract your own question. This is the gate sequence, and it
- *   is the reason the agent credential exists.
+ * - `instructions`, `hook_classify` — read the guide, and find out what the
+ *   classifier makes of a command. Neither reads the log or the policy file;
+ *   both tell an agent what it is about to be judged for before it asks.
+ * - `request`, `wait`, `withdraw` — ask, wait for the answer, and retract your
+ *   own question. This is the gate sequence, and it is the reason the agent
+ *   credential exists.
  * - `payload_hash`, `payload_agentmail-draft` — the payload builders. Both
  *   produce a proposal and no authority: the draft reader uses the composing
- *   agent's own key, touches no vault, spends no token and sends nothing (the
- *   registry says so at length in its own `human_only_note`).
- * - `log_verify` — a statement about the chain's integrity, not its contents.
- *   It answers whether the log verifies and where its head is; it returns no
- *   record. An agent that cannot check that the gate judging it is intact is
- *   worse off for no gain to anybody.
- * - `gate_status` — whether an open window is standing. A harness whose calls
- *   are being bypassed by a human's window should be able to see that, and the
- *   window is the human's own act rather than a fact about the log's contents.
+ *   agent's own key, touches no vault, spends no token and sends nothing.
  *
- * Everything else is the tenant's, including the four that would otherwise be
- * easy to wave through: `log_tail` and `log_export` return RECORDS, `queue`
- * returns the tenant's pending decisions, and `status` is the tenant's view of
- * the oversight the agent is under. All four stay PUBLISHED, so the surface is
- * honest about what exists, and all four answer the tenant credential only.
+ * ## What came OFF this list in review, and why
+ *
+ * - `register` takes a task-file POSITIONAL, which is a host path. The hook
+ *   endpoint is a harness's way to register: it synthesises the envelope from
+ *   the tool call, so nothing is lost and a host path stops being something a
+ *   remote caller names.
+ * - `log_verify` and `gate_status` hand back the log's length, its head hash
+ *   and the live state of the gate. "Not a record" is not the same as "not
+ *   about the log": a head hash moving is a decision being recorded, and an
+ *   open window is the human's current posture toward this very agent.
+ * - `policy_check` and `policy_test` answer what the policy does with a class,
+ *   and `policy_check` names the absolute store path while doing it.
+ *
+ * Everything else is the tenant's, including the ones easiest to wave through:
+ * `log_tail` and `log_export` return RECORDS, `queue` returns the tenant's
+ * pending decisions, `run` and `sandbox` spawn argv on the daemon's machine,
+ * every `adapter_<name>` spends vault credentials, and `status` is the
+ * tenant's view of the oversight the agent is under. All of them stay
+ * PUBLISHED, so the surface is honest about what exists, and all of them
+ * answer the tenant credential only.
  */
 export const AGENT_VERBS: ReadonlySet<string> = new Set([
   "instructions",
   "hook_classify",
-  "register",
   "request",
   "wait",
   "withdraw",
   "payload_hash",
   "payload_agentmail-draft",
-  "policy_check",
-  "policy_test",
-  "log_verify",
-  "gate_status",
 ]);
 
 /**
@@ -203,13 +222,16 @@ export const SERVE_REFUSAL_CODES = [
   "serve-agent-forbidden",
   "serve-tenant-forbidden",
   "serve-unknown-path",
+  "serve-malformed-url",
   "serve-unknown-verb",
   "serve-unknown-harness",
   "serve-method-not-allowed",
   "serve-body-too-large",
   "serve-body-unreadable",
   "serve-invalid-cursor",
-  "serve-no-structured-output",
+  "serve-path-pinned",
+  "serve-path-outside-store",
+  "serve-export-symlink",
   "serve-export-failed",
 ] as const;
 
@@ -255,13 +277,20 @@ export interface ServeHandle {
 // ---------------------------------------------------------------------------
 
 /**
- * A refusal, always as a RESULT BODY.
+ * A refusal, always as a RESULT BODY, and always carrying an exit code.
  *
- * Never a bare HTTP error: the status code is a hint for the plumbing between
- * here and the caller, and the `{"error":{"code","message"}}` object is the
- * answer. A client branches on `error.code` exactly as it would on the CLI's
- * stderr, and every code it can see is either this file's (above), a verb's
- * own, or the subscription's.
+ * Never a bare HTTP error: the status is a hint for the plumbing between here
+ * and the caller, and the `{"error":{"code","message"}}` object is the answer.
+ * A client branches on `error.code` exactly as it would on the CLI's stderr,
+ * and every code it can see is either this file's (above), a verb's own, or
+ * the subscription's.
+ *
+ * `exit_code` is {@link REFUSAL_EXIT_CODE} on every one of them, and that is
+ * the review finding this shape exists for. A client's rule is "write
+ * `stdout`, exit `exit_code`"; if a refusal carried no exit code, the client's
+ * default would be zero, and zero is ALLOW on four of the six harness
+ * dialects. A refusal must never be readable as a permission, so it carries a
+ * blocking code as data rather than leaving one to be inferred.
  */
 function refuse(
   res: ServerResponse,
@@ -270,8 +299,42 @@ function refuse(
   message: string,
   extra: Record<string, unknown> = {},
 ): void {
-  send(res, status, JSON.stringify({ error: { code, message, ...extra } }), {
-    "content-type": "application/json",
+  send(
+    res,
+    status,
+    JSON.stringify({ error: { code, message }, exit_code: REFUSAL_EXIT_CODE, ...extra }),
+    { "content-type": "application/json" },
+  );
+}
+
+/**
+ * A refusal on the HOOK route, spoken in the harness's own dialect.
+ *
+ * Same body as {@link refuse}, plus `stdout` carrying the block directive
+ * `approval hook <harness>` itself prints. A client that writes `stdout` and
+ * exits `exit_code` therefore blocks on BOTH halves of every dialect: the body
+ * blocks Claude Code, Cursor, Codex and Muse, and the exit code blocks Grok
+ * Build and Hermes. A client that instead branches on `error.code` sees the
+ * refusal for what it is.
+ *
+ * Where the harness is not known — an unroutable path, an unrecognised name, a
+ * credential that failed before the URL was parsed — there is no dialect to
+ * speak and `stdout` is empty. That case is why `docs/cli-reference.md` states
+ * the client rule as it does: a missing or unparseable body is a BLOCK.
+ */
+function refuseHook(
+  res: ServerResponse,
+  status: number,
+  harness: HarnessKind,
+  code: string,
+  message: string,
+): void {
+  const directive = harnessBlockDirective(code, message, harness);
+  refuse(res, status, code, message, {
+    stdout: directive.stdout,
+    stderr: "",
+    stdout_truncated: false,
+    stderr_truncated: false,
   });
 }
 
@@ -317,6 +380,51 @@ async function readBody(req: IncomingMessage): Promise<BodyRead> {
     };
   }
   return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+}
+
+/**
+ * One captured stream, bounded and clipped at a CODEPOINT boundary.
+ *
+ * A naive byte slice can cut a multi-byte sequence in half and produce a
+ * string that is not valid text, which for a JSON body means either a
+ * replacement character where a verdict had a word or, worse, a body a strict
+ * client refuses to parse. `StringDecoder` emits only the complete codepoints
+ * in what it was given and keeps the incomplete tail to itself, which is
+ * exactly the clip wanted here.
+ */
+export function clip(text: string): { text: string; truncated: boolean } {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= MAX_STREAM_BYTES) return { text, truncated: false };
+  return {
+    text: new StringDecoder("utf8").write(bytes.subarray(0, MAX_STREAM_BYTES)),
+    truncated: true,
+  };
+}
+
+/**
+ * The ONE body shape a verb call and a hook call answer with.
+ *
+ * The exit code and both streams, exactly as the CLI produced them. A caller
+ * reproducing the invocation locally writes `stdout`, writes `stderr`, and
+ * exits `exit_code`; a caller that wants the verb's machine-readable refusal
+ * parses `stderr`, which is the stream the CLI prints refusals on.
+ *
+ * The alternative — unwrapping the verb's own JSON object into the response —
+ * was what this surface did before review, and it had two faults. It put the
+ * exit code in a header that refusals forgot to set, and it made a verb that
+ * printed something unexpected into a transport-level failure with its own
+ * invented code. Returning the streams says less and cannot be wrong about it.
+ */
+function streamsBody(result: { code: number; stdout: string; stderr: string }): string {
+  const out = clip(result.stdout);
+  const err = clip(result.stderr);
+  return JSON.stringify({
+    exit_code: result.code,
+    stdout: out.text,
+    stderr: err.text,
+    stdout_truncated: out.truncated,
+    stderr_truncated: err.truncated,
+  });
 }
 
 /** A collector shaped like the CLI's stream sink. */
@@ -470,10 +578,22 @@ export function scopeOf(route: Route): ServeScope | null {
 export async function serveApproval(options: ServeOptions): Promise<ServeHandle> {
   const host = options.host ?? "127.0.0.1";
   const notice = options.notice ?? ((): void => {});
+  // ALWAYS pinned, on every verb call and in every scope, whether or not the
+  // operator named them (review finding 3). One process serves one store, and
+  // before this these three were injected only when the operator had passed
+  // them and `--dir` never was — so a published `--log` from a caller was the
+  // store the verb actually read. `buildArgv` appends these LAST, so a
+  // caller's value loses even if the guard above somehow let one through.
   const paths: ServerOptions = {
     actor: options.actor,
     cwd: options.cwd,
-    ...(options.log === undefined ? {} : { log: options.log }),
+    dir: options.cwd,
+    log: options.log ?? logPathOf(options.cwd),
+    // `--policy` names a FILE, so it is pinned only where the operator named
+    // one. Where they did not, `--dir` above is the pin: the CLI resolves the
+    // policy from that directory, which is exactly "the launch configuration's
+    // policy". Pinning a directory here would hand every verb a path it would
+    // try to read as a policy document.
     ...(options.policy === undefined ? {} : { policy: options.policy }),
   };
 
@@ -493,34 +613,22 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     spec: VerbSpec,
     args: unknown,
   ): Promise<void> {
+    // Every scope, before the argv is built: no caller names a store, and no
+    // caller names a path outside the one this process serves.
+    const checked = checkVerbArguments(spec, args, options.cwd, options.cwd);
+    if (!checked.ok) {
+      refuse(res, 403, checked.code, checked.message);
+      return;
+    }
     const built = buildArgv(spec, args, paths);
     if (!built.ok) {
       refuse(res, 400, built.code, built.message);
       return;
     }
     const result = await serialize(() => invokeVerb(spec, built.argv, paths));
-    const payload = lastJsonObject(result.stdout) ?? lastJsonObject(result.stderr);
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      "x-approval-exit-code": String(result.code),
-    };
-    if (payload === null) {
-      // Every published verb takes `--json` and answers with an object, so this
-      // is the honest report of a verb that did not: the exit code and the text,
-      // rather than an invented shape.
-      const text = `${result.stdout}${result.stderr}`.trim();
-      refuse(
-        res,
-        result.code === 0 ? 200 : 500,
-        "serve-no-structured-output",
-        `\`approval ${verbLabel(spec)}\` exited ${String(result.code)} without a JSON object on either stream${text.length === 0 ? "" : `: ${text}`}`,
-      );
-      return;
-    }
-    // The verb's OWN bytes: a refusal arrives as the `{"error":{...}}` the CLI
-    // prints, with the same machine-readable code, and a success as the frozen
-    // `--json` shape. Nothing is rewrapped.
-    send(res, 200, JSON.stringify(payload), headers);
+    // The CLI's own streams and the CLI's own exit code. A refusal arrives as
+    // the `{"error":{...}}` the verb printed, on the stream it printed it on.
+    send(res, 200, streamsBody(result), { "content-type": "application/json" });
   }
 
   function handleHook(res: ServerResponse, harness: HarnessKind, body: string): void {
@@ -534,23 +642,14 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
       options.cwd,
       () => body,
     );
-    const stderr = sink.err();
-    const headers: Record<string, string> = {
+    // `stdout` is BYTE-FOR-BYTE what `approval hook <harness>` printed, and
+    // `exit_code` is the code it exited. Both travel in the body, because a
+    // header is a thing a refusal can forget to set and an exit code that can
+    // go missing is an allow waiting to happen. `stderr` rides along because
+    // Hermes's ALLOW is `{}` and carries its reason there and nowhere else.
+    send(res, 200, streamsBody({ code, stdout: sink.out(), stderr: sink.err() }), {
       "content-type": "application/json",
-      "x-approval-exit-code": String(code),
-      "x-approval-harness": harness,
-    };
-    if (stderr.length > 0) {
-      const clipped = Buffer.from(stderr, "utf8").subarray(0, MAX_STDERR_HEADER_BYTES);
-      headers["x-approval-stderr"] = clipped.toString("base64");
-      if (clipped.length < Buffer.byteLength(stderr)) {
-        headers["x-approval-stderr-truncated"] = "1";
-      }
-    }
-    // BYTE-FOR-BYTE what `approval hook <harness>` printed on stdout. Not
-    // re-serialized, not wrapped, not pretty-printed: a caller that pipes this
-    // body to its harness has piped the CLI's own answer.
-    send(res, 200, sink.out(), headers);
+    });
   }
 
   async function handleFollow(res: ServerResponse, url: URL): Promise<void> {
@@ -558,15 +657,41 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     const hashText = url.searchParams.get("cursor_hash");
     const limitText = url.searchParams.get("limit");
 
+    // Every query parameter is validated BEFORE anything reads a file, and a
+    // value out of range is refused rather than clamped. A clamp is a silent
+    // answer to a different question than the one asked, and the caller cannot
+    // tell it happened.
     if (fromText !== null && !/^\d+$/u.test(fromText)) {
       refuse(res, 400, "serve-invalid-cursor", `from expects a whole number, got ${JSON.stringify(fromText)}`);
+      return;
+    }
+    const from = fromText === null ? 0 : Number(fromText);
+    // `99999999999999999999` matches the digits above and is not a safe
+    // integer: it reached the subscription, which threw a TypeError, which
+    // escaped a GET as a 500. Refused here, in this verb's own vocabulary.
+    if (!Number.isSafeInteger(from)) {
+      refuse(
+        res,
+        400,
+        "serve-invalid-cursor",
+        `from ${JSON.stringify(fromText)} is larger than the largest sequence number this runtime can represent`,
+      );
       return;
     }
     if (limitText !== null && !/^\d+$/u.test(limitText)) {
       refuse(res, 400, "serve-invalid-cursor", `limit expects a whole number, got ${JSON.stringify(limitText)}`);
       return;
     }
-    const from = fromText === null ? 0 : Number(fromText);
+    const limit = limitText === null ? DEFAULT_FOLLOW_LIMIT : Number(limitText);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_FOLLOW_LIMIT) {
+      refuse(
+        res,
+        400,
+        "serve-invalid-cursor",
+        `limit expects 1 to ${String(MAX_FOLLOW_LIMIT)}, got ${JSON.stringify(limitText)}`,
+      );
+      return;
+    }
     if (hashText !== null && !/^[a-f0-9]{64}$/u.test(hashText)) {
       refuse(
         res,
@@ -580,10 +705,34 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
       refuse(res, 400, "serve-invalid-cursor", "cursor_hash requires from greater than zero");
       return;
     }
+    // A RESUME MUST CARRY ITS HASH. `core/log-subscribe.ts` calls the
+    // sequence-only form "a weaker bootstrap ... by design", and it is weaker
+    // in exactly one way: it cannot detect a fully recomputed replacement
+    // prefix on its FIRST read. In the streaming form that costs one read,
+    // because the process then retains the digest it verified and catches any
+    // later replacement. Here every request is a first read, so the weakness
+    // would be permanent: a replaced prefix would be served silently, forever,
+    // to the caller who omitted the hash, while an honest caller who kept it
+    // got the refusal. `from=0` is the only hashless form, because replaying
+    // from genesis binds nothing and claims nothing.
+    if (from > 0 && hashText === null) {
+      refuse(
+        res,
+        400,
+        "serve-invalid-cursor",
+        `from=${String(from)} requires cursor_hash: a resume names the prefix it consumed, and a sequence number alone cannot tell this log from one whose records were recomputed. Send the hash from the cursor of your last page, or from=0 to replay the whole verified log`,
+      );
+      return;
+    }
 
     const cursor: FollowCursor = { seq: from, hash: hashText };
-    const limit = clampFollowLimit(limitText === null ? null : Number(limitText));
-    const result = await followPage(options.log ?? logPathOf(options.cwd), cursor, limit);
+    // Serialized with the verbs, for the reason they are serialized with each
+    // other: this process has one event loop, a verified read walks the whole
+    // chain, and an append landing underneath one is a torn read this endpoint
+    // would report as an integrity failure of the tenant's own log.
+    const result = await serialize(() =>
+      followPage(options.log ?? logPathOf(options.cwd), cursor, limit),
+    );
     if (!result.ok) {
       // The subscription's own terminal failure, with the CLI's own code, the
       // CLI's own message, and NO RECORDS. `reason` carries `cursor-mismatch`
@@ -594,26 +743,34 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         result.code === "integrity" ? 409 : 500,
         JSON.stringify({
           error: { code: result.code, message: result.message, reason: result.reason },
+          exit_code: followFailureExit(result.code),
           records: [],
         }),
-        {
-          "content-type": "application/json",
-          "x-approval-exit-code": String(followFailureExit(result.code)),
-        },
+        { "content-type": "application/json" },
       );
       return;
     }
-    send(res, 200, JSON.stringify(result.page), {
+    send(res, 200, JSON.stringify({ ...result.page, exit_code: 0 }), {
       "content-type": "application/json",
-      "x-approval-exit-code": "0",
     });
   }
 
-  function handleExport(res: ServerResponse): void {
+  async function handleExport(res: ServerResponse): Promise<void> {
+    // Serialized with the verbs. Two reasons, and both are about this process:
+    // an append landing mid-walk is a torn copy of the tenant's own evidence,
+    // and `gzipSync` blocks the event loop for as long as the store is large.
     let archive;
     try {
-      archive = buildStoreArchive(options.cwd);
+      archive = await serialize(async () => buildStoreArchive(options.cwd));
     } catch (cause) {
+      if (cause instanceof ExportSymlinkError) {
+        // Named, and the whole export refused rather than the link skipped: an
+        // archive silently missing a file is an archive nobody can tell from a
+        // complete one, and a tenant checking their exit against their own
+        // `payload_hash` values would find the gap only by doing the check.
+        refuse(res, 409, "serve-export-symlink", cause.message, { path: cause.path });
+        return;
+      }
       refuse(
         res,
         500,
@@ -633,19 +790,48 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     void (async () => {
       requests += 1;
       try {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
-
-        // Authenticated FIRST, before the path is even looked up: there is no
-        // unauthenticated surface on this server, not a health check and not a
-        // 404. A caller with no credential learns nothing about what exists.
-        const bearer = bearerOf(req.headers.authorization);
+        // AUTHENTICATED FIRST, before the URL is even parsed. Two reasons, and
+        // the second was a review finding: there is no unauthenticated surface
+        // here, not a health check and not a 404, so a caller with no
+        // credential learns nothing about what exists; and `new URL()` throws
+        // on a malformed `Host` header, which used to happen BEFORE this check
+        // and handed an unauthenticated caller a 500.
+        //
+        // Duplicate `Authorization` headers are refused outright rather than
+        // resolved. Node keeps the FIRST and discards the rest for this header,
+        // so a proxy, a client library or an attacker sending two can make the
+        // credential this server checks differ from the one a reader of the
+        // request would say was sent. There is no correct way to choose; the
+        // request is malformed and is treated as such.
+        const offered = req.rawHeaders.filter(
+          (entry, index) => index % 2 === 0 && entry.toLowerCase() === "authorization",
+        ).length;
+        const bearer = offered > 1 ? null : bearerOf(req.headers.authorization);
         const scope = bearer === null ? null : options.credentials.identify(bearer);
         if (scope === null) {
           refuse(
             res,
             401,
             "serve-unauthorized",
-            "no usable Authorization: Bearer <credential>. This server has two credentials, one for the agent surface and one for the tenant surface, and every path requires one of them",
+            offered > 1
+              ? `this request carries ${String(offered)} Authorization headers. Exactly one is accepted: where there are several, the one this server would check is not the one a reader of the request would name`
+              : "no usable Authorization: Bearer <credential>. This server has two credentials, one for the agent surface and one for the tenant surface, and every path requires one of them",
+          );
+          return;
+        }
+
+        let url: URL;
+        try {
+          url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
+        } catch {
+          // After authentication, so this says nothing to a stranger. The
+          // `Host` header is the usual culprit and is named without being
+          // echoed back.
+          refuse(
+            res,
+            400,
+            "serve-malformed-url",
+            "the request line and Host header do not form a URL this server can parse",
           );
           return;
         }
@@ -661,16 +847,25 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
           return;
         }
 
+        // On the hook route every refusal from here on is spoken in the
+        // harness's own dialect as well as in this server's, so a client that
+        // writes `stdout` and exits `exit_code` blocks rather than proceeds.
+        const harness =
+          route.kind === "hook" && isHarnessKind(route.harness) ? route.harness : null;
+        const deny = (status: number, code: string, message: string): void => {
+          if (harness === null) refuse(res, status, code, message);
+          else refuseHook(res, status, harness, code, message);
+        };
+
         const required = scopeOf(route);
         if (required !== null && required !== scope) {
           const code = scope === "agent" ? "serve-agent-forbidden" : "serve-tenant-forbidden";
-          refuse(
-            res,
+          deny(
             403,
             code,
             scope === "agent"
-              ? `${url.pathname} answers to the TENANT credential. The agent credential reaches the verbs and the hook; it never reaches the log it is judged by, the store export, or the tenant's own status report`
-              : `${url.pathname} answers to the AGENT credential. The tenant credential reaches the log, the export and status; it does not act as the agent, because an action taken with it would be recorded under an identity nobody was acting as`,
+              ? `${url.pathname} answers to the TENANT credential. The agent credential reaches the hook and the verbs a harness under oversight needs in order to ask and to act on a grant; it never reaches the log it is judged by, the store export, the tenant's own status report, or anything that runs on the host`
+              : `${url.pathname} answers to the AGENT credential. The tenant credential reaches the log, the export, status and every verb that touches the host; it does not act as the agent, because an action taken with it would be recorded under an identity nobody was acting as`,
           );
           return;
         }
@@ -678,12 +873,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         const method = req.method ?? "GET";
         const wants = route.kind === "verb" || route.kind === "hook" ? "POST" : "GET";
         if (method !== wants) {
-          refuse(
-            res,
-            405,
-            "serve-method-not-allowed",
-            `${url.pathname} answers ${wants}, not ${method}`,
-          );
+          deny(405, "serve-method-not-allowed", `${url.pathname} answers ${wants}, not ${method}`);
           return;
         }
 
@@ -698,7 +888,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
           return;
         }
         if (route.kind === "export") {
-          handleExport(res);
+          await handleExport(res);
           return;
         }
         if (route.kind === "status") {
@@ -711,30 +901,41 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
           return;
         }
 
-        const body = await readBody(req);
-        if (!body.ok) {
-          refuse(res, body.status, body.code, body.message);
+        if (route.kind === "hook" && harness === null) {
+          refuse(
+            res,
+            404,
+            "serve-unknown-harness",
+            `no hook adapter for ${JSON.stringify(route.harness)}; this runtime speaks ${Object.keys(HARNESS_ADAPTERS).join(", ")}`,
+          );
           return;
         }
 
-        if (route.kind === "hook") {
-          if (!isHarnessKind(route.harness)) {
-            refuse(
-              res,
-              404,
-              "serve-unknown-harness",
-              `no hook adapter for ${JSON.stringify(route.harness)}; this runtime speaks ${Object.keys(HARNESS_ADAPTERS).join(", ")}`,
-            );
-            return;
-          }
+        const body = await readBody(req);
+        if (!body.ok) {
+          // The oversized-envelope case the review found: this used to be a
+          // 413 with no exit code anywhere, which a client turned into exit 0,
+          // and exit 0 is ALLOW on four of the six dialects. It is now a block
+          // in the harness's own words.
+          deny(body.status, body.code, body.message);
+          return;
+        }
+
+        if (harness !== null) {
           // Serialized with the verbs: a hook call registers, requests and
           // WAITS, and the wait blocks this process exactly as `wait` does.
           await serialize(async () => {
-            handleHook(res, route.harness as HarnessKind, body.text);
+            handleHook(res, harness, body.text);
           });
           return;
         }
 
+        // Only the verb route reaches here: the hook arm returned above, and
+        // every other route was handled before the body was read.
+        if (route.kind !== "verb") {
+          refuse(res, 500, "serve-unknown-path", `no handler for ${url.pathname}`);
+          return;
+        }
         const spec = byName.get(route.name);
         if (spec === undefined) {
           refuse(

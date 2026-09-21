@@ -283,13 +283,25 @@ for (const harness of Object.keys(HARNESS_ADAPTERS) as HarnessKind[]) {
           },
         );
         assert.equal(response.status, 200, `${label}: a verdict is an ANSWER, so its status is 200`);
-        served = await response.text();
-        exit = Number(response.headers.get("x-approval-exit-code"));
+        // ONE body, since the review: the exit code and both streams. Headers
+        // carry no part of the verdict, because a header is a thing a refusal
+        // can forget to set and a missing exit code reads as zero, which is an
+        // allow on four of the six dialects.
+        const body = (await response.json()) as {
+          exit_code: number;
+          stdout: string;
+          stdout_truncated: boolean;
+        };
+        assert.equal(body.stdout_truncated, false, `${label}: the verdict was clipped`);
+        served = body.stdout;
+        exit = body.exit_code;
       } finally {
         await server.close();
       }
 
       const printed = locally(harness, localDir, JSON.stringify(build(localDir)));
+      // AC2, and the assertion the response contract is built around: `stdout`
+      // is byte-for-byte what the stdin form printed.
       assert.equal(
         served,
         printed.out,
@@ -328,14 +340,20 @@ test("hook/hermes: the allow's reason travels, because its body has nowhere for 
       headers: { authorization: `Bearer ${AGENT_TOKEN}` },
       body,
     });
+    const parsed = (await response.json()) as {
+      exit_code: number;
+      stdout: string;
+      stderr: string;
+      stderr_truncated: boolean;
+    };
     // `{}` is the whole of a Hermes allow: it has no allow directive, and a
     // parser that finds no directive lets the call proceed.
-    assert.equal(await response.text(), "{}\n");
-    const header = response.headers.get("x-approval-stderr");
-    assert.ok(header !== null, "the Hermes allow's reason was dropped by the transport");
-    const stderr = Buffer.from(header, "base64").toString("utf8");
-    assert.match(stderr, /approval hook hermes: allow —/u);
-    assert.equal(stderr, locally("hermes", dir, body).err);
+    assert.equal(parsed.stdout, "{}\n");
+    assert.equal(parsed.exit_code, 0);
+    assert.ok(parsed.stderr.length > 0, "the Hermes allow's reason was dropped by the transport");
+    assert.equal(parsed.stderr_truncated, false);
+    assert.match(parsed.stderr, /approval hook hermes: allow —/u);
+    assert.equal(parsed.stderr, locally("hermes", dir, body).err);
   } finally {
     await server.close();
   }
@@ -369,8 +387,19 @@ test("hook/<harness>: the tenant credential does not act as the agent", async ()
       body: JSON.stringify(CASES["claude-code"].allow(dir)),
     });
     assert.equal(response.status, 403);
-    const parsed = (await response.json()) as { error: { code: string } };
+    const parsed = (await response.json()) as {
+      error: { code: string };
+      exit_code: number;
+      stdout: string;
+    };
     assert.equal(parsed.error.code, "serve-tenant-forbidden");
+    // Even a scope refusal on this route speaks the harness's dialect, so a
+    // misconfigured client that writes stdout and exits exit_code blocks
+    // rather than proceeding.
+    assert.notEqual(parsed.exit_code, 0);
+    const directive = JSON.parse(parsed.stdout) as Record<string, unknown>;
+    const nested = directive["hookSpecificOutput"] as Record<string, unknown>;
+    assert.equal(nested["permissionDecision"], "deny");
   } finally {
     await server.close();
   }

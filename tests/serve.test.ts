@@ -30,8 +30,10 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -151,6 +153,38 @@ async function post(
     method: "POST",
     headers: token === null ? {} : { authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Send request lines over a raw socket.
+ *
+ * `fetch` normalises a request before it goes out, so it cannot express the
+ * two inputs the review found: a `Host` header that is not a host, and two
+ * `Authorization` headers. Both are ordinary things a proxy or a hostile
+ * client can put on the wire, so the test has to put them there too.
+ */
+async function rawRequest(
+  server: ServeHandle,
+  lines: readonly string[],
+): Promise<{ statusLine: string; body: string }> {
+  return await new Promise((settle, fail) => {
+    const socket = connect(server.port, server.host, () => {
+      socket.write(`${lines.join("\r\n")}\r\nConnection: close\r\n\r\n`);
+    });
+    let raw = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    socket.on("error", fail);
+    socket.on("close", () => {
+      const split = raw.indexOf("\r\n\r\n");
+      settle({
+        statusLine: raw.split("\r\n", 1)[0] ?? "",
+        body: split === -1 ? "" : raw.slice(split + 4),
+      });
+    });
   });
 }
 
@@ -381,15 +415,10 @@ test("a call that names an identity is refused rather than quietly ignored", asy
  * merely annotated.
  */
 const EXPECTED_AGENT_VERBS = [
-  "gate_status",
   "hook_classify",
   "instructions",
-  "log_verify",
   "payload_agentmail-draft",
   "payload_hash",
-  "policy_check",
-  "policy_test",
-  "register",
   "request",
   "wait",
   "withdraw",
@@ -460,9 +489,21 @@ test("the agent credential never reaches the log, the export or status", async (
       assert.match(parsed.error.message, /TENANT credential/u);
     }
     // And by the verb route as well, which is the door somebody would try
-    // next: the two that return RECORDS, and the tenant's own view of the
-    // oversight the agent is under.
-    for (const verb of ["status", "log_tail", "log_export", "queue"]) {
+    // next: the two that return RECORDS, the tenant's own view of the
+    // oversight the agent is under, and the four the review took off the agent
+    // list (a head hash and a live window are facts about the log, and
+    // `register`'s positional is a host path).
+    for (const verb of [
+      "status",
+      "log_tail",
+      "log_export",
+      "queue",
+      "log_verify",
+      "gate_status",
+      "policy_check",
+      "policy_test",
+      "register",
+    ]) {
       const response = await post(server, `/verb/${verb}`, AGENT_TOKEN, {});
       assert.equal(response.status, 403, `${verb} answered the agent credential`);
       assert.equal(
@@ -488,7 +529,10 @@ test("the tenant credential never acts: request, wait and consume are refused", 
     // rather than a not-found: the authorization question is asked before the
     // routing one, and an unpublished name is an agent-side verb this surface
     // withholds for transport reasons rather than a door the tenant may probe.
-    for (const verb of ["request", "wait", "consume", "register", "withdraw"]) {
+    // `register` is NOT here any more: its positional is a host path, so the
+    // review moved it to the tenant side and the hook endpoint became the
+    // harness's way to register (it synthesises the envelope itself).
+    for (const verb of ["request", "wait", "consume", "withdraw", "payload_hash"]) {
       const response = await post(server, `/verb/${verb}`, TENANT_TOKEN, {});
       assert.equal(response.status, 403, `${verb} answered the tenant credential`);
       const parsed = (await response.json()) as { error: { code: string; message: string } };
@@ -526,8 +570,11 @@ test("the catalog answers either credential; status answers the tenant", async (
     }
     const status = await get(server, "/status", TENANT_TOKEN);
     assert.equal(status.status, 200);
-    const parsed = (await status.json()) as Record<string, unknown>;
-    assert.ok("ok" in parsed || "head" in parsed, `status answered something else: ${JSON.stringify(parsed)}`);
+    const parsed = (await status.json()) as { exit_code: number; stdout: string };
+    assert.equal(typeof parsed.exit_code, "number");
+    // The verb's own `--json` object, on the stream it printed it on.
+    const printed = JSON.parse(parsed.stdout.trim()) as Record<string, unknown>;
+    assert.ok("ok" in printed || "head" in printed, parsed.stdout);
   } finally {
     await server.close();
   }
@@ -643,13 +690,15 @@ test("log/follow refuses a cursor whose hash does not match, and returns no reco
     const response = await get(server, `/log/follow?from=1&cursor_hash=${"a".repeat(64)}`, TENANT_TOKEN);
     const parsed = (await response.json()) as {
       error: { code: string; message: string; reason: string | null };
+      exit_code: number;
       records: unknown[];
     };
     assert.equal(parsed.error.code, "integrity", "the CLI's own code for this failure");
     assert.equal(parsed.error.reason, "cursor-mismatch");
     assert.deepEqual(parsed.records, [], "a failed batch emits no record from it");
-    // The exit `approval log follow` would have carried for the same failure.
-    assert.equal(response.headers.get("x-approval-exit-code"), "1");
+    // The exit `approval log follow` would have carried for the same failure,
+    // in the body where a client cannot miss it.
+    assert.equal(parsed.exit_code, 1);
   } finally {
     await server.close();
   }
@@ -752,6 +801,316 @@ test("export carries the store and nothing that is a credential", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// 5b. The review's attack inputs, one test per finding
+// ---------------------------------------------------------------------------
+
+/** Finding 1. The archive-relative name was checked; the read followed the link. */
+test("export: a symlink under the store refuses the whole export and names the link", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  writeFileSync(join(dir, ".approval", "env"), "APPROVAL_TG_TOKEN=SECRET-TOKEN\n", "utf8");
+  mkdirSync(join(dir, ".approval", "keys"), { recursive: true });
+  writeFileSync(join(dir, ".approval", "keys", "sender.key"), "SECRET-KEY", "utf8");
+
+  // The reviewer's two inputs: a link to credential material inside the store,
+  // and a link straight out of it. Both sit under `.approval/log/` with names
+  // the allowlist admits, which is the whole trick.
+  symlinkSync(join(dir, ".approval", "keys", "sender.key"), join(dir, ".approval", "log", "note.jsonl"));
+
+  const server = await listener(dir);
+  try {
+    const response = await get(server, "/export", TENANT_TOKEN);
+    assert.equal(response.status, 409, "a store with a link in it must not export");
+    const parsed = (await response.json()) as {
+      error: { code: string; message: string };
+      path: string;
+      exit_code: number;
+    };
+    assert.equal(parsed.error.code, "serve-export-symlink");
+    assert.equal(parsed.path, ".approval/log/note.jsonl", "the refusal names the link");
+    assert.notEqual(parsed.exit_code, 0);
+    // No archive at all: refused whole, never partially produced.
+    assert.match(response.headers.get("content-type") ?? "", /application\/json/u);
+    assert.equal(response.headers.get("x-approval-export-paths"), null);
+    // And the secret is nowhere in the response.
+    assert.equal(JSON.stringify(parsed).includes("SECRET-KEY"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("export: a symlink pointing outside the store is refused the same way", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  const outside = join(scratch, `outside-${String(counter)}.txt`);
+  writeFileSync(outside, "HOST-FILE-CONTENTS", "utf8");
+  symlinkSync(outside, join(dir, ".approval", "log", "hosts.jsonl"));
+
+  const server = await listener(dir);
+  try {
+    const response = await get(server, "/export", TENANT_TOKEN);
+    assert.equal(response.status, 409);
+    const parsed = (await response.json()) as { error: { code: string }; path: string };
+    assert.equal(parsed.error.code, "serve-export-symlink");
+    assert.equal(parsed.path, ".approval/log/hosts.jsonl");
+    assert.equal(JSON.stringify(parsed).includes("HOST-FILE-CONTENTS"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * Finding 2. The 413 that was an allow.
+ *
+ * A 1.1 MB hook envelope used to come back as a bare 413 with no exit code
+ * anywhere, and a client following the documented rule read the missing header
+ * as zero. Zero is ALLOW on Claude Code, Cursor, Codex and Muse.
+ */
+test("hook: an oversized envelope is a BLOCK in the harness's own dialect, never an allow", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const oversized = JSON.stringify({ padding: "x".repeat(1_100_000) });
+    for (const harness of ["claude-code", "cursor", "grok", "hermes"] as const) {
+      const response = await fetch(url(server, `/hook/${harness}`), {
+        method: "POST",
+        headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+        body: oversized,
+      });
+      assert.equal(response.status, 413, harness);
+      const parsed = (await response.json()) as {
+        error: { code: string };
+        exit_code: number;
+        stdout: string;
+      };
+      assert.equal(parsed.error.code, "serve-body-too-large", harness);
+      // The two halves that make this a block on every dialect at once.
+      assert.notEqual(parsed.exit_code, 0, `${harness}: a refusal carried exit 0`);
+      assert.ok(parsed.stdout.length > 0, `${harness}: no block directive`);
+      const directive = JSON.parse(parsed.stdout) as Record<string, unknown>;
+      if (harness === "claude-code") {
+        const nested = directive["hookSpecificOutput"] as Record<string, unknown>;
+        assert.equal(nested["permissionDecision"], "deny");
+      } else if (harness === "cursor") {
+        assert.equal(directive["permission"], "deny");
+      } else if (harness === "grok") {
+        assert.equal(directive["decision"], "deny");
+      } else {
+        assert.equal(directive["action"], "block");
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("every refusal on every route carries a non-zero exit code in the body", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const refusals: Array<[string, Promise<Response>]> = [
+      ["401", get(server, "/verbs", null)],
+      ["403 agent", get(server, "/export", AGENT_TOKEN)],
+      ["403 tenant", post(server, "/verb/request", TENANT_TOKEN, {})],
+      ["404 path", get(server, "/nowhere", AGENT_TOKEN)],
+      ["404 verb", post(server, "/verb/frobnicate", AGENT_TOKEN, {})],
+      ["404 harness", post(server, "/hook/devin", AGENT_TOKEN, {})],
+      ["405", post(server, "/export", TENANT_TOKEN, {})],
+      ["400 cursor", get(server, "/log/follow?from=x", TENANT_TOKEN)],
+    ];
+    for (const [label, pending] of refusals) {
+      const response = await pending;
+      const parsed = (await response.json()) as { exit_code?: number; error?: { code?: string } };
+      assert.equal(typeof parsed.exit_code, "number", `${label} carried no exit_code`);
+      assert.notEqual(parsed.exit_code, 0, `${label} carried exit_code 0, which is an allow`);
+      assert.equal(typeof parsed.error?.code, "string", label);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+/** Finding 3. The published `--log` that was a filesystem oracle. */
+test("a caller may not name the store: --log, --dir and --policy are refused", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    // The reviewer's exact input, now on a tenant-scoped verb because the
+    // review moved `log_verify` there; the guard runs in EVERY scope.
+    const oracle = await post(server, "/verb/log_verify", TENANT_TOKEN, {
+      flags: { "--log": "/etc/hosts" },
+    });
+    assert.equal(oracle.status, 403);
+    const parsed = (await oracle.json()) as { error: { code: string }; exit_code: number };
+    assert.equal(parsed.error.code, "serve-path-pinned");
+    assert.notEqual(parsed.exit_code, 0);
+
+    for (const flag of ["--dir", "--policy", "--log"]) {
+      const response = await post(server, "/verb/log_verify", TENANT_TOKEN, {
+        flags: { [flag]: dir },
+      });
+      assert.equal(response.status, 403, flag);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        "serve-path-pinned",
+        `${flag} must be refused even when it names the right store`,
+      );
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("a caller may not name a path outside the store, by flag or by positional", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    // The positional hole the review's fix did not reach: `payload hash`
+    // names a host file and is on the agent allowlist.
+    const positional = await post(server, "/verb/payload_hash", AGENT_TOKEN, {
+      positionals: ["/etc/hosts"],
+    });
+    assert.equal(positional.status, 403);
+    assert.equal(
+      ((await positional.json()) as { error: { code: string } }).error.code,
+      "serve-path-outside-store",
+    );
+
+    // And the same through a flag that is not one of the three pins.
+    const flagged = await post(server, "/verb/request", AGENT_TOKEN, {
+      positionals: ["task-1"],
+      flags: { "--payload": "/etc/hosts" },
+    });
+    assert.equal(flagged.status, 403);
+    assert.equal(
+      ((await flagged.json()) as { error: { code: string } }).error.code,
+      "serve-path-outside-store",
+    );
+
+    // A path INSIDE the store is still allowed, so the guard confines rather
+    // than deletes the verb: this reaches `payload hash` and fails on the
+    // file's contents, not on the transport.
+    const inside = join(dir, "payload.json");
+    writeFileSync(inside, '{"command":"ls"}', "utf8");
+    const allowed = await post(server, "/verb/payload_hash", AGENT_TOKEN, {
+      positionals: [inside],
+    });
+    assert.equal(allowed.status, 200);
+    const body = (await allowed.json()) as { exit_code: number; stdout: string };
+    assert.equal(body.exit_code, 0, body.stdout);
+  } finally {
+    await server.close();
+  }
+});
+
+/** Finding 5. A resume without its hash is a replaced prefix served silently. */
+test("log/follow: from>0 requires cursor_hash", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  const server = await listener(dir);
+  try {
+    const response = await get(server, "/log/follow?from=1", TENANT_TOKEN);
+    assert.equal(response.status, 400);
+    const parsed = (await response.json()) as { error: { code: string; message: string } };
+    assert.equal(parsed.error.code, "serve-invalid-cursor");
+    assert.match(parsed.error.message, /requires cursor_hash/u);
+
+    // `from=0` is the one hashless form, because replaying from genesis binds
+    // nothing and claims nothing.
+    assert.equal((await get(server, "/log/follow?from=0", TENANT_TOKEN)).status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+/** Finding 6. A number past the safe-integer range escaped as a 500. */
+test("log/follow: an unrepresentable from is a cursor refusal, not a 500", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const response = await get(
+      server,
+      `/log/follow?from=99999999999999999999&cursor_hash=${"a".repeat(64)}`,
+      TENANT_TOKEN,
+    );
+    assert.equal(response.status, 400);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      "serve-invalid-cursor",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/** A note: out-of-range limits were clamped silently. */
+test("log/follow: limit=0 and an over-large limit are refused, not clamped", async () => {
+  const { dir, logPath } = await ready();
+  append(logPath, 1);
+  const server = await listener(dir);
+  try {
+    for (const limit of ["0", "1001", "99999999999999999999"]) {
+      const response = await get(server, `/log/follow?limit=${limit}`, TENANT_TOKEN);
+      assert.equal(response.status, 400, limit);
+      const parsed = (await response.json()) as { error: { code: string; message: string } };
+      assert.equal(parsed.error.code, "serve-invalid-cursor", limit);
+      assert.match(parsed.error.message, /limit expects 1 to 1000/u);
+    }
+    assert.equal((await get(server, "/log/follow?limit=1", TENANT_TOKEN)).status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+/** Finding 7. `Host: [` reached `new URL()` before the credential check. */
+test("a malformed request with no credential gets the 401 and nothing else", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    // Raw socket: `fetch` will not send a Host header this broken.
+    const raw = await rawRequest(server, ["GET /verbs HTTP/1.1", "Host: ["]);
+    assert.match(raw.statusLine, /^HTTP\/1\.1 401 /u, raw.statusLine);
+    const parsed = JSON.parse(raw.body) as { error: { code: string }; exit_code: number };
+    assert.equal(parsed.error.code, "serve-unauthorized");
+    assert.notEqual(parsed.exit_code, 0);
+
+    // With a credential, the same request is a malformed URL and says so.
+    const authed = await rawRequest(server, [
+      "GET /verbs HTTP/1.1",
+      "Host: [",
+      `Authorization: Bearer ${TENANT_TOKEN}`,
+    ]);
+    assert.match(authed.statusLine, /^HTTP\/1\.1 400 /u, authed.statusLine);
+    assert.equal(
+      (JSON.parse(authed.body) as { error: { code: string } }).error.code,
+      "serve-malformed-url",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/** A note: Node keeps the first Authorization header and discards the rest. */
+test("two Authorization headers are refused rather than resolved", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const raw = await rawRequest(server, [
+      "GET /verbs HTTP/1.1",
+      "Host: localhost",
+      `Authorization: Bearer ${TENANT_TOKEN}`,
+      "Authorization: Bearer not-the-credential-at-all-xxxx",
+    ]);
+    assert.match(raw.statusLine, /^HTTP\/1\.1 401 /u, raw.statusLine);
+    const parsed = JSON.parse(raw.body) as { error: { code: string; message: string } };
+    assert.equal(parsed.error.code, "serve-unauthorized");
+    assert.match(parsed.error.message, /2 Authorization headers/u);
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 6. Refusal shape, and the server's own restraint
 // ---------------------------------------------------------------------------
 
@@ -783,15 +1142,21 @@ test("a verb refusal keeps the CLI's own code rather than a transport one", asyn
   const { dir } = await ready();
   const server = await listener(dir);
   try {
-    const response = await post(server, "/verb/wait", AGENT_TOKEN, {
+    const response = await post(server, "/verb/request", AGENT_TOKEN, {
       positionals: ["task-does-not-exist"],
-      flags: { "--timeout": "1ms" },
     });
-    const parsed = (await response.json()) as Record<string, unknown>;
-    // Whatever `approval wait` says about an unknown task, it says it here, in
-    // its own vocabulary, with its own exit code beside it.
-    assert.ok(response.headers.get("x-approval-exit-code") !== null);
-    assert.ok("error" in parsed || "status" in parsed, JSON.stringify(parsed));
+    assert.equal(response.status, 200, "a verb's refusal is an ANSWER, not a transport failure");
+    const parsed = (await response.json()) as {
+      exit_code: number;
+      stdout: string;
+      stderr: string;
+    };
+    // What `approval request` says about a call with no action key, in its own
+    // vocabulary, on the stream it prints refusals on, with its own exit code.
+    assert.equal(parsed.exit_code, 2);
+    assert.equal(parsed.stdout, "");
+    const refusal = JSON.parse(parsed.stderr.trim()) as { error: { code: string } };
+    assert.equal(refusal.error.code, "usage");
   } finally {
     await server.close();
   }

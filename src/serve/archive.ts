@@ -40,7 +40,7 @@
  * day the writer put the vault in.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 
@@ -214,6 +214,26 @@ export function isExcludedPath(path: string): boolean {
   return EXCLUDED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
+/**
+ * A symlink the export walk reached.
+ *
+ * Thrown rather than returned because it must abort the WHOLE archive from
+ * wherever it is found, and an error is the one control flow that cannot be
+ * accidentally ignored by a caller that forgot to check a return value.
+ */
+export class ExportSymlinkError extends Error {
+  /** The store-relative path of the link itself, never its target. */
+  readonly path: string;
+
+  constructor(path: string) {
+    super(
+      `${path} is a symbolic link. An export copies the tenant's own store and never what a link points at: a link under the store can name credential material inside it (\`.approval/keys\`, \`.approval/env\`, the vault) or any file on the host, and a copy that followed one would put those bytes in the tenant's archive. The whole export is refused rather than the link skipped, because an archive silently missing a file is an archive nobody can tell from a complete one. Replace the link with the file, or move it outside the store.`,
+    );
+    this.name = "ExportSymlinkError";
+    this.path = path;
+  }
+}
+
 function walk(root: string, relativeDir: string, into: TarEntry[]): void {
   let names: string[];
   try {
@@ -229,21 +249,30 @@ function walk(root: string, relativeDir: string, into: TarEntry[]): void {
 
 function collect(root: string, relativePath: string, into: TarEntry[]): void {
   // Checked on every path rather than only on the roots: the allowlist decides
-  // what is offered and this decides what is accepted, and a symlinked or
-  // nested `vault.enc` is refused by the second even when the first admitted
-  // the directory above it.
+  // what is offered and this decides what is accepted, and a nested `vault.enc`
+  // is refused by the second even when the first admitted the directory above
+  // it.
   if (isExcludedPath(relativePath)) return;
   const absolute = join(root, relativePath);
   let stats;
   try {
-    stats = statSync(absolute);
+    // LSTAT, never stat (APRV-421). `stat` follows the link, so the exclusion
+    // check above would be reading one name while the copy below read another
+    // file entirely: `ln -s .approval/keys/sender.key .approval/log/note.jsonl`
+    // passes every name-based check ever written and hands over the key.
+    stats = lstatSync(absolute);
   } catch {
     return;
   }
+  if (stats.isSymbolicLink()) throw new ExportSymlinkError(relativePath);
   if (stats.isDirectory()) {
     walk(root, relativePath, into);
     return;
   }
+  // Not a regular file: a fifo, a socket or a device. Skipped rather than
+  // refused, because none of them is a way to name another file's bytes, and
+  // a store that happens to hold one is not a store that is lying about what
+  // it contains.
   if (!stats.isFile()) return;
   into.push({
     path: relativePath,
@@ -264,7 +293,11 @@ export interface StoreArchive {
  *
  * Reads only; writes nothing anywhere, appends no record, and touches no
  * credential. A path outside the allowlist cannot be reached from here, because
- * the walk starts at the allowlist and nowhere else.
+ * the walk starts at the allowlist and nowhere else, and no path is followed
+ * through a link.
+ *
+ * Throws {@link ExportSymlinkError} when the walk meets a symbolic link. The
+ * caller turns that into a refusal naming the link's own relative path.
  */
 export function buildStoreArchive(root: string): StoreArchive {
   const entries: TarEntry[] = [];
