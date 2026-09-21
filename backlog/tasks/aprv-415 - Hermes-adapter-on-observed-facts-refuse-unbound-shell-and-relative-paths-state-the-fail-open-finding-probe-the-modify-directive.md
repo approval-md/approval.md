@@ -3,11 +3,11 @@ id: APRV-415
 title: >-
   Hermes adapter on observed facts: refuse unbound shell and relative paths,
   state the fail-open finding, probe the modify directive
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-415'
 created_date: '2026-09-20 21:13'
-updated_date: '2026-09-21 03:07'
+updated_date: '2026-09-21 03:09'
 labels:
   - hermes
   - hook
@@ -89,6 +89,8 @@ ONE ENVIRONMENTAL NOTE, reported rather than hidden: the better-sqlite3 ABI fail
 AC2 IS CHECKED AGAINST ITS AMENDED TEXT, and the difference is worth naming because the criterion as first written is now false in two places. It says 'the observed fail-OPEN result' and 'no SPEC row is proposed while the harness fails open'; both belong to the confounded round on v0.21.3. This task's own notes amended it before any code moved: the doc opens with the observed fail-CLOSED result and the version floor, and the two SPEC hunks ARE proposed, because on a current Hermes this adapter is a gate. What was delivered against AC2: the doc opening, zero UNVERIFIED markers left in it, the register row and entry moved to adopted with caveats, and the SPEC status section rewritten to propose rather than defer.
 
 VERIFICATION, with numbers. Build, typecheck and lint exit 0, no warnings. cli-hook-hermes 38 of 38 (was 31; seven new cases and five existing ones rewritten to absolute paths). harness-version 28 of 28 (three new: the raw-versus-recordable split on the real version line, the parser and the floor comparison, and three doctor cases). probe-hermes-hook 23 of 23 (was 18). cli-doctor, cli-long-help and cli-instructions together 113 of 113, exit 0, and the better-sqlite3 ABI failure APRV-398 reported did NOT recur in this worktree. A ten-suite hook matrix (cli-hook, cli-hook-codex, cli-hook-muse, cli-hook-grok, cli-hook-cursor, cli-hook-read-scope, harness-enum, hook-module-graph, conformance, conformance-regen) 285 of 285. docs-guard 17 of 17 after the README-extended row was rewritten. node conformance/run.mjs: 456 vectors, 456 passed, 174 controls, manifest ok. FULL npm test: 5035 tests, 5012 pass, 22 FAIL, 1 skipped, 408 s, exit 1 — and the 22 are exactly the known Node 26 SMTP baseline (APRV-416, the options.servername refusal on an IP address), all of them in the email adapter, setup adapter email and smtp-probe suites, none in anything this task touched.
+
+Orchestrator review (Fable, 2026-09-21): accepted as built, including the absent-path refusal and the unreadable no-result post event. The APRV-418 filing rides this PR.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
