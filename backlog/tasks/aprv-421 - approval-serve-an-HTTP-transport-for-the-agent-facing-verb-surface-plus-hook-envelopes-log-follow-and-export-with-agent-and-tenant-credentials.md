@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:15'
+updated_date: '2026-09-21 07:23'
 labels:
   - hosting
   - daemon
@@ -160,4 +160,20 @@ A new subsection after §10.5, and one line in the §10.1 CLI block. Both additi
 > Authority is split between two credentials read from the launch environment (§11.1 invariant 7), and the split is the reason this transport is safe to expose. One credential reaches the agent-facing verbs and the harness hook; the other reaches the log, the export and the status report. An implementation MUST NOT let the agent credential read the log, since a party that can read the verified log can read every decision made about it and the shape of the oversight it is under. Each direction MUST refuse with its own distinct machine-readable code. An implementation MUST NOT serve any path without a credential.
 >
 > The server MUST bind a loopback interface unless the operator explicitly asks otherwise, and MUST NOT terminate TLS itself: the supported deployment is a proxy the operator owns in front of a loopback bind. It appends no record on its own account, holds no state a restart loses (a follow cursor belongs to the caller), and reads no `.approval/env`. (Added APRV-421, pending sign-off.)
+
+## Validation
+
+- `npm run build`, `npm run typecheck`, `npm run lint`: clean (exit 0).
+- Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and every cli-hook-<harness>, log, log-subscribe, cli-log-follow, cli-log-verbs, channels-cli, channels-web, channels-telegram, channels-contract, serve, serve-hook): **686 tests, 686 pass, 0 fail, exit 0**.
+- Full `npm test`: 5102 tests, 5079 pass, 22 fail, 1 skipped, exit 1.
+
+**The 22 failures are pre-existing and unrelated to this task, proved rather than assumed.** A clean clone at the base commit 99cd51e, carrying none of this branch's code, fails the identical 22 by name (182 tests, 160 pass, 22 fail). They are `tests/smtp-probe.test.ts`, `tests/adapter-email.test.ts`, `tests/adapters-contract.test.ts` and the `setup adapter email` cases in `tests/cli-setup.test.ts`. The cause is the Node version on this machine (v26.8.2): it refuses `tls` `servername` set to an IP address ("Setting the TLS ServerName to an IP address is not permitted. Received '127.0.0.1'"), and the SMTP mock binds loopback. This repo's floor is Node >= 20 and CI runs 20 and 22, so it is a newer-Node regression in the SMTP test harness and wants its own task.
+
+PR: https://github.com/approval-md/approval.md/pull/534 (not armed for merge: this lane was told not to run `gh pr merge`, which is the one point where the brief narrows CLAUDE.md's rule 7 — the orchestrator reviews first).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added `approval serve`: a foreground HTTP transport publishing the same registry-derived agent-facing verb surface `approval mcp serve` publishes, plus the three things that transport withheld for transport reasons — `POST /hook/<harness>` answering the byte-for-byte verdict the stdin form prints for every adapter in HARNESS_ADAPTERS, `GET /log/follow` paged by an exclusive (seq, hash) cursor over subscribeVerifiedLog, and `GET /export`, the store as an archive without the keys, the environment source map or the vault. Two bearer credentials come from the launch environment and the agent one never reads the log it is judged by; both directions refuse with their own code. It is transport only: the catalog, the argv build, the verb dispatch, the hook verdict and the verified read are all the functions the CLI dispatches to, reached by import rather than by copy. Verified with 686 passing tests across the mcp, hook, log and channels suites plus two new suites (tests/serve.test.ts, tests/serve-hook.test.ts), a clean build, typecheck and lint, and a full `npm test` whose only 22 failures reproduce identically at the base commit and are a Node 26 TLS regression in the SMTP test harness. SPEC.md untouched; the section 10 hunk is proposed in the notes. PR #534.
+<!-- SECTION:FINAL_SUMMARY:END -->
