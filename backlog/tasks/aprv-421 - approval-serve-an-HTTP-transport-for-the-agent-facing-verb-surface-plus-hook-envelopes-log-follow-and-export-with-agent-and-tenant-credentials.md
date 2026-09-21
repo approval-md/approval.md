@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:58'
+updated_date: '2026-09-21 08:01'
 labels:
   - hosting
   - daemon
@@ -314,6 +314,16 @@ Tests updated rather than added: `the agent allowlist is exactly the decided lis
 ### One operational observation for the hosted runbook, not a fix
 
 A hook envelope carries the harness's own `cwd`, and the classifier resolves relative paths against it. For a REMOTE harness that directory exists in the sandbox and not on the daemon host, while the gate root and the read scope are the host's. The result is fail-closed (an unresolvable path falls outside the read roots and denies), so nothing is weakened, but read-scope decisions will behave differently for a sandboxed harness than for a co-located one. Worth stating in the deployment runbook before the first tenant meets it.
+
+### Validation after the review fixes and the scope decision
+
+`npm run build`, `npm run typecheck`, `npm run lint`: clean (exit 0).
+
+Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and every cli-hook-<harness>, cli-hook-scope, cli-hook-read-scope, cli-hook-rewrite, cli-hook-scratch, log, log-subscribe, cli-log-follow, cli-log-verbs, channels-cli, channels-web, channels-telegram, channels-contract, serve, serve-hook, cli-help, cli-long-help, cli-instructions, docs-guard, layering, harness-enum, human-only, codex-bridge, codex-broker): **900 tests, 900 pass, 0 fail, exit 0.**
+
+Final surface: 36 published verbs, 5 agent-scoped, 31 tenant-scoped.
+
+The 22 Node 26 SMTP failures are APRV-416's and are unchanged by any of this; they are the only failures a full `npm test` produces and they reproduce at the base commit with none of this branch's code.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
