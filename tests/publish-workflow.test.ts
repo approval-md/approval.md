@@ -146,11 +146,24 @@ test("only the protected publisher job holds OIDC and it receives one fixed arti
   assert.deepEqual(job(publish, "publish")["permissions"], { "id-token": "write" });
   assert.equal(job(publish, "publish")["environment"], "npm");
   assert.equal(job(publish, "publish")["needs"], "verify");
+  // APRV-396: the Release job runs AFTER the publish, holds the one repository
+  // write permission this workflow has (to create the Release) and no OIDC, so
+  // the token that can publish and the token that can write the repository
+  // never sit in one job.
+  assert.deepEqual(job(publish, "release")["permissions"], { contents: "write" });
+  assert.deepEqual(job(publish, "release")["needs"], ["verify", "publish"]);
+  assert.equal(job(publish, "release")["environment"], undefined);
 
   assert.deepEqual(usesOf(publish), [
     "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    // The release job: a pinned checkout for the changelog, node for the
+    // section script, and the SAME artifact the publish job verified, so the
+    // Release carries the bytes the registry received.
+    "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
   ]);
