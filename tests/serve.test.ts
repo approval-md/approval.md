@@ -49,7 +49,12 @@ import {
   resolveServeCredentials,
   TENANT_TOKEN_ENV,
 } from "../src/serve/credentials.js";
-import { serveCatalog, serveApproval, type ServeHandle } from "../src/serve/server.js";
+import {
+  AGENT_VERBS,
+  serveApproval,
+  serveCatalog,
+  type ServeHandle,
+} from "../src/serve/server.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -350,7 +355,7 @@ test("a call that names an identity is refused rather than quietly ignored", asy
   const { dir } = await ready();
   const server = await listener(dir);
   try {
-    const response = await post(server, "/verb/queue", AGENT_TOKEN, {
+    const response = await post(server, "/verb/request", AGENT_TOKEN, {
       flags: { "--as": "human:carter" },
     });
     const parsed = (await response.json()) as { error: { code: string; message: string } };
@@ -365,6 +370,84 @@ test("a call that names an identity is refused rather than quietly ignored", asy
 // 3. Two credentials, two directions
 // ---------------------------------------------------------------------------
 
+/**
+ * The allowlist, spelled out here as well as in the source.
+ *
+ * Two copies on purpose, which is the one place this repository wants them: a
+ * change to what the party under oversight may do must be a diff in a test as
+ * well as a diff in `src/serve/server.ts`, so it cannot ride along with an
+ * unrelated edit. A verb added to the registry lands OUTSIDE this list and is
+ * tenant-scoped, and the sweep below proves it is actually refused rather than
+ * merely annotated.
+ */
+const EXPECTED_AGENT_VERBS = [
+  "gate_status",
+  "hook_classify",
+  "instructions",
+  "log_verify",
+  "payload_agentmail-draft",
+  "payload_hash",
+  "policy_check",
+  "policy_test",
+  "register",
+  "request",
+  "wait",
+  "withdraw",
+];
+
+test("the agent allowlist is exactly the decided list, so a registry addition is loud", () => {
+  assert.deepEqual([...AGENT_VERBS].sort(), EXPECTED_AGENT_VERBS);
+
+  // And every name on it is a verb this surface actually publishes: an
+  // allowlist entry matching nothing would be authority granted to a door that
+  // does not exist, which is the quiet half of the same mistake.
+  const published = new Set(serveCatalog().map((entry) => entry.name));
+  for (const name of EXPECTED_AGENT_VERBS) {
+    assert.ok(published.has(name), `the allowlist names ${name}, which is not published`);
+  }
+});
+
+test("every published verb off the allowlist refuses the agent credential", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    const tenantScoped = serveCatalog().filter((entry) => !AGENT_VERBS.has(entry.name));
+    // The sweep is worth nothing if it walks an empty list, and worth less if
+    // the split has quietly become "almost everything is the agent's".
+    assert.ok(
+      tenantScoped.length > 20,
+      `only ${String(tenantScoped.length)} published verbs are the tenant's`,
+    );
+
+    for (const entry of tenantScoped) {
+      assert.equal(entry.scope, "tenant", `${entry.name} is annotated ${entry.scope}`);
+      const response = await post(server, `/verb/${entry.name}`, AGENT_TOKEN, {});
+      assert.equal(response.status, 403, `${entry.name} answered the agent credential`);
+      const parsed = (await response.json()) as { error: { code: string } };
+      assert.equal(parsed.error.code, "serve-agent-forbidden", entry.name);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("the verbs a harness needs to ask and to act on a grant DO answer the agent", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    for (const name of EXPECTED_AGENT_VERBS) {
+      const response = await post(server, `/verb/${name}`, AGENT_TOKEN, {});
+      // Whatever the verb makes of an empty argument object is the VERB's
+      // answer. What must never come back is the scope refusal.
+      assert.notEqual(response.status, 403, `${name} refused the agent credential`);
+      const parsed = (await response.json()) as { error?: { code?: string } };
+      assert.notEqual(parsed.error?.code, "serve-agent-forbidden", name);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("the agent credential never reaches the log, the export or status", async () => {
   const { dir } = await ready();
   const server = await listener(dir);
@@ -376,26 +459,36 @@ test("the agent credential never reaches the log, the export or status", async (
       assert.equal(parsed.error.code, "serve-agent-forbidden", path);
       assert.match(parsed.error.message, /TENANT credential/u);
     }
-    // And by the verb route as well, which is the door somebody would try next.
-    const verb = await post(server, "/verb/status", AGENT_TOKEN, {});
-    assert.equal(verb.status, 403);
-    assert.equal(
-      ((await verb.json()) as { error: { code: string } }).error.code,
-      "serve-agent-forbidden",
-    );
+    // And by the verb route as well, which is the door somebody would try
+    // next: the two that return RECORDS, and the tenant's own view of the
+    // oversight the agent is under.
+    for (const verb of ["status", "log_tail", "log_export", "queue"]) {
+      const response = await post(server, `/verb/${verb}`, AGENT_TOKEN, {});
+      assert.equal(response.status, 403, `${verb} answered the agent credential`);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        "serve-agent-forbidden",
+        verb,
+      );
+    }
   } finally {
     await server.close();
   }
 });
 
 test("the tenant credential never acts: request, wait and consume are refused", async () => {
+  // `run` is deliberately NOT in this list any more: it spawns argv on the
+  // daemon's machine, so it moved to the TENANT side with the rest of the
+  // host-touching verbs, and the tenant credential is the one that may call
+  // it. The verbs below are the gate sequence, which is the agent's alone.
   const { dir } = await ready();
   const server = await listener(dir);
   try {
     // `consume` is not even published, and it still gets the SCOPE answer
     // rather than a not-found: the authorization question is asked before the
-    // routing one, so a caller learns the true fact about itself.
-    for (const verb of ["request", "wait", "consume", "run", "register"]) {
+    // routing one, and an unpublished name is an agent-side verb this surface
+    // withholds for transport reasons rather than a door the tenant may probe.
+    for (const verb of ["request", "wait", "consume", "register", "withdraw"]) {
       const response = await post(server, `/verb/${verb}`, TENANT_TOKEN, {});
       assert.equal(response.status, 403, `${verb} answered the tenant credential`);
       const parsed = (await response.json()) as { error: { code: string; message: string } };
@@ -588,6 +681,16 @@ test("export carries the store and nothing that is a credential", async () => {
   const { dir, logPath } = await ready();
   append(logPath, 1);
 
+  // The payload bytes behind a `payload_hash`. An archive that carried the
+  // hashes and not these would be a chain of references to evidence the tenant
+  // no longer holds, which is a receipt for an exit rather than an exit.
+  mkdirSync(join(dir, ".approval", "payloads"), { recursive: true });
+  writeFileSync(
+    join(dir, ".approval", "payloads", "abc123.json"),
+    '{"command":"the bytes a human approved"}',
+    "utf8",
+  );
+
   // The things an export must never carry, written into the store so their
   // absence is a fact about the archive rather than about the fixture.
   mkdirSync(join(dir, ".approval", "keys"), { recursive: true });
@@ -606,11 +709,25 @@ test("export carries the store and nothing that is a credential", async () => {
 
     const archive = readTarEntries(gunzipSync(Buffer.from(await response.arrayBuffer())));
     const paths = archive.map((entry) => entry.path).sort();
-    assert.deepEqual(paths, [
-      ".approval/QUEUE.md",
-      ".approval/log/events.jsonl",
-      "APPROVAL.md",
-    ]);
+    assert.deepEqual(
+      paths.filter((path) => !path.startsWith(".approval/payloads/")),
+      [".approval/QUEUE.md", ".approval/log/events.jsonl", "APPROVAL.md"],
+    );
+
+    // The payloads, stated as their own assertion because they are what makes
+    // this archive an exit rather than a receipt for one: the log records a
+    // `payload_hash` per action, and these are the bytes those hashes name.
+    const payloads = paths.filter((path) => path.startsWith(".approval/payloads/"));
+    const fixture = archive.find((entry) => entry.path === ".approval/payloads/abc123.json");
+    assert.ok(fixture !== undefined, "the export carries no payload bytes");
+    assert.equal(fixture.data.toString("utf8"), '{"command":"the bytes a human approved"}');
+    // And the one the RUNTIME wrote: attesting the policy stored its bytes
+    // under a hash-named file, so this is the real thing rather than only the
+    // fixture the test planted.
+    assert.ok(
+      payloads.some((path) => /\/[0-9a-f]{64}\.json$/u.test(path)),
+      `no runtime-written payload in the archive: ${payloads.join(", ")}`,
+    );
 
     for (const excluded of [...EXCLUDED_PREFIXES, ".approval/vault.enc"]) {
       assert.equal(

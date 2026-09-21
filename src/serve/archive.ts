@@ -23,12 +23,14 @@
  * from this archive until somebody decides it belongs, and that decision is a
  * diff here.
  *
- * `.approval/payloads/` is deliberately NOT on the list, and the omission is
- * the same choice rather than an oversight: the acceptance criteria name
- * APPROVAL.md, the log and the projections, payload bytes are neither, and the
- * strict reading is the one a fail-closed runtime takes. The log still records
- * every `payload_hash`; what an export of this shape cannot do is prove the
- * bytes behind one.
+ * `.approval/payloads/` IS on the list, and it is the entry the reasoning
+ * turns on. The log records a `payload_hash` for every action a human was
+ * shown, and the bytes those hashes name live in that directory. An archive
+ * carrying the hashes without the bytes would hand a tenant a chain of
+ * references to evidence they no longer hold: a receipt for an exit rather
+ * than an exit. Payload bytes are the tenant's own and are not credential
+ * material — the vault, the keys and the environment source map are, and
+ * those are the things excluded below.
  *
  * ## What the reader is for
  *
@@ -55,6 +57,7 @@ const BLOCK = 512;
 export const EXPORTED_PATHS: readonly string[] = [
   "APPROVAL.md",
   ".approval/log/",
+  ".approval/payloads/",
   ".approval/QUEUE.md",
   ".approval/index.sqlite",
 ];

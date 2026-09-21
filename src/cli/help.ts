@@ -259,9 +259,10 @@ Ask — an agent declares an action and acts on the answer:
             withheld for transport reasons: hook <harness> taking the harness
             envelope as the request body, log follow paged by an exclusive
             (seq, hash) cursor, and the store as an archive. TWO CREDENTIALS
-            from the launch environment — the agent one opens the verbs and the
-            hook, the tenant one opens the log, the export and status, and the
-            agent one never reads the log it is judged by
+            from the launch environment, and authorization is per verb: the
+            agent one opens the hook and an allowlist of what a harness under
+            oversight needs to ask and to act on a grant, the tenant one opens
+            everything else, so the agent never reads the log it is judged by
 
 Decide — a human answers, and only a human can:
   queue     the pending-decision INBOX: requests awaiting a human, inside their
@@ -2607,9 +2608,9 @@ For a harness in a sandbox with no local log and no policy. THE VERBS ARE mcp
 serve's: the registry less human_only, --as absent from every schema, the
 identity appended last, no grant. It adds hook/<harness> (envelope in, the
 bytes stdin prints out), log/follow (paged, exclusive (seq, hash) cursor) and
-export (the store, without keys, env or vault). APPROVAL_SERVE_AGENT_TOKEN
-opens the verbs and the hook; APPROVAL_SERVE_TENANT_TOKEN opens log/follow,
-export and status, so the agent never reads the log it is judged by. NO TLS.
+export (the store, minus keys, env and vault). AUTHORIZATION IS PER VERB:
+APPROVAL_SERVE_AGENT_TOKEN opens the hook and an allowlist (ask, and act on a
+grant); APPROVAL_SERVE_TENANT_TOKEN opens the rest, records included. NO TLS.
 
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
 ${JSON_ERRORS}

@@ -6537,18 +6537,44 @@ characters:
 
 | variable | opens |
 |---|---|
-| `APPROVAL_SERVE_AGENT_TOKEN` | `GET /verbs`, `POST /verb/<name>`, `POST /hook/<harness>` |
-| `APPROVAL_SERVE_TENANT_TOKEN` | `GET /verbs`, `GET /log/follow`, `GET /export`, `GET /status` |
+| `APPROVAL_SERVE_AGENT_TOKEN` | `GET /verbs`, `POST /hook/<harness>`, and the allowlisted verbs below |
+| `APPROVAL_SERVE_TENANT_TOKEN` | `GET /verbs`, `GET /log/follow`, `GET /export`, `GET /status`, and every other published verb |
 
 **The agent credential never reads the log it is judged by.** That is the
 sentence the split exists for. An agent that could stream the verified log
 could read every decision made about it and the shape of the oversight it is
-under; an agent that could export the store could carry all of it away. So an
-agent-credential call to `/log/follow`, `/export` or `/status` is refused
-`serve-agent-forbidden`, and a tenant-credential call to a verb (`request`,
-`wait`, `consume`, any of them) is refused `serve-tenant-forbidden`. Both are
-scope refusals rather than not-founds: a caller that guessed a path learns that
-the door exists and is not theirs.
+under; an agent that could export the store could carry all of it away.
+
+Authorization is therefore per verb, and it is an ALLOWLIST. The party at the
+other end of this transport is a sandboxed harness on another machine, not the
+operator at their own laptop, so the agent credential opens only what a harness
+under oversight needs in order to ASK and to ACT ON a grant:
+
+> `instructions`, `hook_classify`, `register`, `request`, `wait`, `withdraw`,
+> `payload_hash`, `payload_agentmail-draft`, `policy_check`, `policy_test`,
+> `log_verify`, `gate_status`
+
+Everything else the catalog publishes is the tenant's, including the four that
+would otherwise be easy to wave through: `log_tail` and `log_export` return
+records, `queue` returns the tenant's pending decisions, and `status` is the
+tenant's view of the oversight the agent is under. So are the verbs that touch
+the host rather than the log — `run` and `sandbox` spawn argv on the daemon's
+machine, every `adapter_<name>` spends vault credentials, `log_advance` opens
+pull requests against the tenant's records — and `token`, `coverage`, `doctor`,
+`audit_list`, `audit_obligations`, `channel_telegram_health`, `journal_write`,
+`journal_read`, `feedback`, `values`, `import_agents-md`, `reindex` and
+`render`.
+
+A verb added to the registry tomorrow is published on both surfaces the same
+day and is TENANT-scoped until somebody decides otherwise. The allowlist is
+what widens, and widening it is a diff in the server and a diff in a test.
+
+An agent-credential call to anything off that list is refused
+`serve-agent-forbidden`, and a tenant-credential call to an allowlisted verb
+(`request`, `wait`, `register`, or `consume`, which this surface withholds
+entirely) is refused `serve-tenant-forbidden`. Both are scope refusals rather
+than not-founds: a caller that guessed a path learns that the door exists and
+is not theirs.
 
 Every path requires one of the two. There is no unauthenticated surface at all,
 not a health check and not a 404, so a caller with no credential learns nothing
@@ -6597,12 +6623,15 @@ is a function of the cursor in the request and the bytes on disk, so a host that
 sleeps and wakes serves the same next page it would have served before.
 
 `GET /export` answers the store as a gzipped POSIX tar. Its contents are a
-positive allowlist (`APPROVAL.md`, `.approval/log/`, `.approval/QUEUE.md`,
-`.approval/index.sqlite`), so `.approval/keys`, `.approval/env`,
-`.approval/daemon` and any `vault.enc` are out by not being named rather than by
-a denylist remembering them. `.approval/payloads/` is out on the same rule and
-by the same reading: the log still records every `payload_hash`, and what an
-export of this shape cannot do is prove the bytes behind one.
+positive allowlist (`APPROVAL.md`, `.approval/log/`, `.approval/payloads/`,
+`.approval/QUEUE.md`, `.approval/index.sqlite`), so `.approval/keys`,
+`.approval/env`, `.approval/daemon` and any `vault.enc` are out by not being
+named rather than by a denylist remembering them. `.approval/payloads/` is in,
+and it is the entry the reasoning turns on: the log records a `payload_hash`
+for every action a human was shown, and those bytes live there. An archive
+carrying the hashes without the bytes would hand a tenant a chain of references
+to evidence they no longer hold, which is a receipt for an exit rather than an
+exit.
 
 `GET /status` is the `status` verb, answered to the tenant credential.
 

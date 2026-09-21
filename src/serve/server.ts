@@ -121,17 +121,72 @@ export const MAX_STDERR_HEADER_BYTES = 4096;
 // ---------------------------------------------------------------------------
 
 /**
- * Verbs the AGENT credential may not call, whatever the catalog publishes.
+ * The verbs the AGENT credential may call. An ALLOWLIST, and the direction is
+ * the whole of it.
  *
- * The catalog is the registry's (AC3, and `mcp/server.ts` owns it); this is
- * authorization, which is a different question asked one layer later. `status`
- * reports the tenant's gate — the head of their log, their pending queue,
- * their daemon — and that is the tenant's view of the oversight the agent is
- * under, not a fact the party under oversight is owed. It stays PUBLISHED, so
- * the surface is honest about what exists, and it answers to the tenant
- * credential at `GET /status`.
+ * The catalog is the registry's and does not change (`mcp/server.ts` owns it,
+ * and this surface publishes exactly what `approval mcp serve` publishes).
+ * This is authorization, which is a different question asked one layer later,
+ * and it is asked per verb.
+ *
+ * ## Why a list of what a harness MAY do
+ *
+ * The threat model this transport exists for is a sandboxed harness on another
+ * machine, not an operator at their own laptop. `approval mcp serve` is run BY
+ * the operator, on the operator's box, over a pipe the operator handed it; its
+ * whole catalog is reachable there because the party at the other end is the
+ * party who started it. Here the party at the other end is the party under
+ * oversight, and the operative rule is that it never reads the log it is
+ * judged by, nor spends the host's credentials, nor runs argv on the host.
+ *
+ * A denylist would have to name `log tail`, `log export`, `queue`, `coverage`,
+ * `doctor`, every `adapter <name>`, `run`, `sandbox`, `token`, `reindex`,
+ * `render` and every verb that lands next. This list names what a harness
+ * under oversight needs in order to ASK and to ACT ON a grant, so a verb added
+ * to the registry tomorrow is TENANT-scoped until somebody decides otherwise.
+ * Fail closed, per SPEC.md §11, which is the same reasoning `GUEST_VERBS`
+ * gives for being positive.
+ *
+ * What is on it, and why each:
+ *
+ * - `instructions`, `policy_check`, `policy_test`, `hook_classify` — read the
+ *   guide and find out what the policy makes of a class or a command. None
+ *   reads the log; all four tell an agent what it may ask for before it asks.
+ * - `register`, `request`, `wait`, `withdraw` — declare, ask, wait for the
+ *   answer, and retract your own question. This is the gate sequence, and it
+ *   is the reason the agent credential exists.
+ * - `payload_hash`, `payload_agentmail-draft` — the payload builders. Both
+ *   produce a proposal and no authority: the draft reader uses the composing
+ *   agent's own key, touches no vault, spends no token and sends nothing (the
+ *   registry says so at length in its own `human_only_note`).
+ * - `log_verify` — a statement about the chain's integrity, not its contents.
+ *   It answers whether the log verifies and where its head is; it returns no
+ *   record. An agent that cannot check that the gate judging it is intact is
+ *   worse off for no gain to anybody.
+ * - `gate_status` — whether an open window is standing. A harness whose calls
+ *   are being bypassed by a human's window should be able to see that, and the
+ *   window is the human's own act rather than a fact about the log's contents.
+ *
+ * Everything else is the tenant's, including the four that would otherwise be
+ * easy to wave through: `log_tail` and `log_export` return RECORDS, `queue`
+ * returns the tenant's pending decisions, and `status` is the tenant's view of
+ * the oversight the agent is under. All four stay PUBLISHED, so the surface is
+ * honest about what exists, and all four answer the tenant credential only.
  */
-export const TENANT_ONLY_VERBS: ReadonlySet<string> = new Set(["status"]);
+export const AGENT_VERBS: ReadonlySet<string> = new Set([
+  "instructions",
+  "hook_classify",
+  "register",
+  "request",
+  "wait",
+  "withdraw",
+  "payload_hash",
+  "payload_agentmail-draft",
+  "policy_check",
+  "policy_test",
+  "log_verify",
+  "gate_status",
+]);
 
 /**
  * The frozen refusal vocabulary this server authors itself (SPEC.md §11.1
@@ -296,23 +351,23 @@ export interface CatalogEntry {
  * the same day it appears as an MCP tool, with `--as` already deleted from its
  * schema by the same function, and `grant` is absent for the same reason it is
  * absent there — the registry marks it `human_only` and no transport publishes
- * a human's authority.
+ * a human's authority. Its SCOPE is tenant until somebody puts it on
+ * {@link AGENT_VERBS}, which is the fail-closed half of the same derivation.
  */
 export function serveCatalog(): CatalogEntry[] {
-  const scopeOf = new Map(
-    publishedVerbs().map((spec) => [
-      toolName(spec),
-      TENANT_ONLY_VERBS.has(verbLabel(spec)) ? ("tenant" as const) : ("agent" as const),
-    ]),
-  );
   return toolDefinitions().map((tool) => ({
     name: tool.name,
     title: tool.title ?? tool.name,
     description: tool.description ?? "",
     inputSchema: tool.inputSchema,
-    scope: scopeOf.get(tool.name) ?? "agent",
+    scope: AGENT_VERBS.has(tool.name) ? ("agent" as const) : ("tenant" as const),
   }));
 }
+
+/** Every name this surface publishes, for the scope rule below. */
+const PUBLISHED_TOOL_NAMES: ReadonlySet<string> = new Set(
+  publishedVerbs().map((spec) => toolName(spec)),
+);
 
 /**
  * The flags every hook call is made with.
@@ -385,12 +440,22 @@ export function scopeOf(route: Route): ServeScope | null {
     case "hook":
       return "agent";
     default:
-      // A verb is the agent's unless it is one of the tenant-only ones, and the
-      // check is on the LABEL rather than on membership of the catalog, so a
-      // name that is not published still gets the scope answer before the
-      // not-found one. A tenant credential naming `consume` learns that this
-      // door is not theirs, which is the true and more useful fact.
-      return TENANT_ONLY_VERBS.has(route.name.replaceAll("_", " ")) ? "tenant" : "agent";
+      // Three answers, and the third is the one worth reading twice.
+      //
+      // On the allowlist: the agent's. Published and not on it: the tenant's,
+      // which is where a verb added to the registry tomorrow lands.
+      //
+      // NOT PUBLISHED AT ALL: the agent's, so the TENANT credential is refused
+      // rather than falling through to a not-found. The names in that third
+      // case are the verbs `mcp/server.ts` withholds for TRANSPORT reasons —
+      // `consume` above all, which is the token spend, an agent-side act that
+      // `run` wraps. The tenant credential must not reach it under any
+      // spelling, and a caller that guessed a path is owed the true fact about
+      // itself rather than a probe that answers differently. The agent
+      // credential reaches the same arm and gets `serve-unknown-verb`, which
+      // is also true: the verb is not on this surface.
+      if (AGENT_VERBS.has(route.name)) return "agent";
+      return PUBLISHED_TOOL_NAMES.has(route.name) ? "tenant" : "agent";
   }
 }
 
