@@ -6583,14 +6583,35 @@ synthesises the envelope itself), the two payload builders, `token`,
 `channel_telegram_health`, `journal_write`, `journal_read`, `feedback`,
 `values`, `import_agents-md`, `reindex` and `render`.
 
-**No caller names a path.** The server appends `--dir`, `--log` and `--policy`
-to every verb call in every scope, from its own launch configuration, and a
-call that supplies one of them is refused `serve-path-pinned` even when the
-value is correct. Any other path-shaped argument, by flag or by positional,
-must resolve inside the store and is refused `serve-path-outside-store`
-otherwise. Both halves are needed: pinning alone leaves `payload hash <file>`
-naming a host file, and confinement alone leaves `--log` pointing the verb at
-another tenant's chain.
+**No caller names a path, and no positional wears a dash.** Four rules, and
+each closes a route around the others.
+
+1. The server appends `--dir`, `--log` and `--policy` to every verb call in
+   every scope from its own launch configuration, and a call supplying one of
+   them is refused `serve-path-pinned` even when the value is correct.
+2. A positional beginning with `-` is refused `serve-positional-flag`, in every
+   scope. Positionals are emitted first and verbatim, and the verb reads any
+   token starting with `-` as a flag — including the `--payload=/path`
+   spelling — so without this rule a refused flag could be sent as a value and
+   reach the parser through the front door. `trailing` needs no such rule: it
+   always follows a `--` separator, and the flag parser stops there, which is
+   what lets `hook classify -- git push -f` classify a command line that has
+   flags in it.
+3. The AGENT credential may not use a path-typed flag at all
+   (`serve-flag-not-permitted`), and may use only the flags on a short
+   per-verb list. A harness reached through this transport has no files on the
+   daemon's machine, so a path it names is either useless or somebody else's;
+   payload bytes arrive through the hook route, which builds the envelope from
+   the tool call.
+4. The TENANT credential's path-typed flags are confined to the store
+   (`serve-path-outside-store`), resolved through `realpath` on the deepest
+   existing ancestor so traversal and a symlinked directory both refuse.
+
+Which flags are path-typed comes from the registry rather than from a list
+kept beside the server: a flag declared `"path"` publishes as an ordinary
+`{"type":"string"}`, so the wire contract is unchanged, and it is confined on
+the day it appears. A test walks every published verb and fails on any flag
+that is neither declared `"path"` nor reviewed as something else.
 
 A verb added to the registry tomorrow is published on both surfaces the same
 day and is TENANT-scoped until somebody decides otherwise. The allowlist is
@@ -6662,9 +6683,15 @@ at the wrong door, a method it does not answer — carries `{"error":{…}}` and
 `exit_code: 2` **and** a `stdout` holding the harness's own block directive,
 rendered by the same function that prints one. A client that writes `stdout`
 and exits `exit_code` therefore blocks on both halves of every dialect at once.
-Where the harness is not known (an unroutable path, an unrecognised name, a
-credential that failed before the URL was parsed) `stdout` is absent, and the
-rule in the paragraph above is what covers it.
+That holds for the refusals that fire BEFORE the URL is parsed, too — a
+rotated credential, a malformed `Host` — because the harness is read off the
+raw request target for the purpose of the refusal body and nothing else. A
+credential rotation must not read as a permission, and on four of the six
+dialects a body with no block directive at exit 0 is exactly that.
+
+Where the harness is not known (an unroutable path, an unrecognised name)
+`stdout` is absent, and the client rule in the paragraph above is what covers
+it.
 
 A deny is a VERDICT, so its HTTP status is 200; only a refusal by the server
 is not.
@@ -6705,14 +6732,31 @@ carrying the hashes without the bytes would hand a tenant a chain of references
 to evidence they no longer hold, which is a receipt for an exit rather than an
 exit.
 
-**No link is followed, and a link refuses the whole export.** Every entry is
-`lstat`ed, and a symbolic link anywhere the walk reaches refuses the export
-with `serve-export-symlink` naming the link's own relative path. A name-based
-allowlist is no defence against a link: `ln -s .approval/keys/sender.key
-.approval/log/note.jsonl` passes every check that reads the name and hands over
-the key, and a link out of the store hands over any file on the host. The whole
-export is refused rather than the link skipped, because an archive silently
-missing a file is an archive nobody can tell from a complete one.
+**No link is followed, of either kind, and a link refuses the whole export.**
+A name-based allowlist is no defence against one: `ln -s
+.approval/keys/sender.key .approval/log/note.jsonl` passes every check that
+reads the name and hands over the key, and a link out of the store hands over
+any file on the host.
+
+So every entry is `lstat`ed and a symbolic link refuses the export with
+`serve-export-symlink`; every file is then opened `O_NOFOLLOW` and `fstat`ed,
+so the checks are made against the descriptor that is actually read rather
+than against a name that could have been swapped in between; and a regular
+file whose link count is greater than one refuses with
+`serve-export-hardlink`. That last is the case with nothing to notice — a hard
+link is a second name for one inode, with no link to refuse to follow and no
+target to inspect — so the link count is the only thing that distinguishes it.
+Each refusal names the path and never its target.
+
+The whole export is refused rather than the offending file skipped, because an
+archive silently missing a file is one nobody can tell from a complete one.
+
+The only file the export drops on its own account is the append lockfile
+derived from the log path, which exists for exactly the span of the copy
+because the export holds that lock. It is matched as an exact path, not as a
+`*.lock` class: a tenant's own `.approval/payloads/x.lock` is the tenant's, and
+a name this runtime happens to use for bookkeeping is no reason to drop
+somebody else's file.
 
 `GET /status` is the `status` verb, answered to the tenant credential.
 
