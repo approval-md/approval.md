@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 08:19'
+updated_date: '2026-09-21 08:21'
 labels:
   - hosting
   - daemon
@@ -392,6 +392,16 @@ Updated: `a caller may not name a path outside the store` now drives the confine
 ### Refusal vocabulary added this pass
 
 `serve-positional-flag`, `serve-flag-not-permitted`, `serve-export-hardlink`.
+
+### Validation after the second review pass
+
+`npm run build`, `npm run typecheck`, `npm run lint`: clean (exit 0).
+
+Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and every cli-hook-<harness>, cli-hook-scope, cli-hook-read-scope, cli-hook-rewrite, cli-hook-scratch, log, log-subscribe, cli-log-follow, cli-log-verbs, channels-cli, channels-web, channels-telegram, channels-contract, serve, serve-hook, cli-help, cli-long-help, cli-instructions, docs-guard, layering, harness-enum, human-only, codex-bridge, codex-broker, cli-run, cli-payload, cli-status, validate): **994 tests, 994 pass, 0 fail, exit 0.**
+
+The reviewer's own repro inputs were also replayed directly against `checkVerbArguments`: the separate-value positional, the inline `--payload=` spelling, the agent path flag and the pinned flag are all refused with their own codes, while `--as` passes this guard by design and is refused one layer later by `buildArgv` with `mcp-identity-fixed`, which the existing identity test pins.
+
+The 22 Node 26 SMTP failures remain APRV-416's and are untouched by any of this.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
