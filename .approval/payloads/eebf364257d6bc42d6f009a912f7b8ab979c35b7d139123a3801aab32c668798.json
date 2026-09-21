@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -rn 'HELP' tests/cli-long-help.test.ts | head -20; echo ---; /usr/bin/grep -a -rln '25' tests/*.ts | head; echo ---; /usr/bin/grep -a -rn 'lines\\b.*<=\\|<= 25\\|> 25' tests/ | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-376-refusal-counts"}

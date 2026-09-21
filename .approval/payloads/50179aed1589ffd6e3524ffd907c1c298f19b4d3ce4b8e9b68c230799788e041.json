@@ -1,0 +1,1 @@
+{"command":"grep -rn -l 'policy.edit.ci' src | head; echo ---; grep -rn 'policy.edit.ci' src --include='*.ts' | grep -v test | head -8; echo ---; grep -rn -i 'protected.*path\\|workflows' src/core/command-class*.ts 2>/dev/null | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

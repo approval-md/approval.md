@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes && /usr/bin/grep -rln 'CHANGELOG' docs/ *.md .github/ 2>/dev/null | head -20 && echo --- && /usr/bin/grep -rn 'Unreleased' docs/*.md | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

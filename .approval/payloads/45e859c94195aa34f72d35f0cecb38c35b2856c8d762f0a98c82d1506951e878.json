@@ -1,0 +1,1 @@
+{"command":"ls -d /opt/homebrew/lib/node_modules/npm/node_modules/libnpmpublish 2>/dev/null; ls -d /usr/local/lib/node_modules/npm/node_modules/libnpmpublish 2>/dev/null; ls -d \"$HOME/.nvm/versions\" 2>/dev/null | head -3; which npm","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes"}

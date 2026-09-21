@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged && gh pr merge 511 --merge 2>&1 | tail -2; gh pr view 511 --json autoMergeRequest --jq '.autoMergeRequest.enabledAt'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

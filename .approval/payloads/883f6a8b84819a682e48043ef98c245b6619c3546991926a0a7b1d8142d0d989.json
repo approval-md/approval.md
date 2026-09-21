@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -n \"loadPolicy\\|function policyLocation\\|function policyPathFor\" src/cli/execute.ts | head && echo --- && /usr/bin/grep -a -n \"export function policyLocation\" -r src/cli/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

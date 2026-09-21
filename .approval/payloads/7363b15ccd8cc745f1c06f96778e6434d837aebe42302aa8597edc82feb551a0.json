@@ -1,0 +1,1 @@
+{"command":"grep -n \"^  - \\|^- .*[Aa]ttest\" /Users/carter/.claude/projects/-Users-carter-dev-approval-md/memory/MEMORY.md | head -3; grep -c \"—\" README.md docs/README-extended.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

@@ -1,0 +1,1 @@
+{"command":"grep -nE '\"version\"' package.json | head -1; sed -n '/\"files\"/,/\\]/p' package.json; git tag | tail -4; git log --oneline -1 415c025","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

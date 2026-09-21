@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -n \"checkAttestation\\|policy-not-attested\" src/core/gate.ts src/daemon/*.ts | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

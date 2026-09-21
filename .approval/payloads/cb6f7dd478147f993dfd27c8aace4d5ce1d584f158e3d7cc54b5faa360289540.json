@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-381-audit-lock-timeout && /usr/bin/grep -rn \"'sampled'\\|sampled\\\"\" src/cli/*.ts src/daemon/*.ts | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

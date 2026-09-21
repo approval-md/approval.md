@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -A400 \"failing tests:\" /tmp/claude-501/full.out | /usr/bin/grep -a -E \"^✖\" | tail -5; echo ---; /usr/bin/grep -a -c \"better-sqlite3\\|NODE_MODULE_VERSION\" /tmp/claude-501/full.out; /usr/bin/grep -a -E \"^✖ .*(instructions|sqlite)\" /tmp/claude-501/full.out | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}

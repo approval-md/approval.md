@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rna \"has no row for\\|never mentions\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-397-packaging-rules"}

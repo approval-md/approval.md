@@ -1,0 +1,1 @@
+{"command":"sed -n 540,550p docs/integrations-considered.md; echo ---; grep -n -i 'handover' /Users/carter/.claude/projects/-Users-carter-dev-approval-md/memory/*.md | grep -v MEMORY.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
