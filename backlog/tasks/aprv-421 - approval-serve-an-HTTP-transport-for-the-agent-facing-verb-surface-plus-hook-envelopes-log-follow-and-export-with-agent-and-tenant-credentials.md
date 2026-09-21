@@ -3,11 +3,11 @@ id: APRV-421
 title: >-
   approval serve: an HTTP transport for the agent-facing verb surface, plus hook
   envelopes, log follow and export, with agent and tenant credentials
-status: In Progress
+status: Done
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 08:21'
+updated_date: '2026-09-21 08:25'
 labels:
   - hosting
   - daemon
@@ -402,10 +402,12 @@ Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and eve
 The reviewer's own repro inputs were also replayed directly against `checkVerbArguments`: the separate-value positional, the inline `--payload=` spelling, the agent path flag and the pinned flag are all refused with their own codes, while `--as` passes this guard by design and is refused one layer later by `buildArgv` with `mcp-identity-fixed`, which the existing identity test pins.
 
 The 22 Node 26 SMTP failures remain APRV-416's and are untouched by any of this.
+
+Orchestrator review (Fable, 2026-09-21). Conformance pass against the AC, then an adversarial refutation by a fresh Opus given only the diff, the AC and the spec: first pass eight findings (symlink export, refusals without exit code, caller-named store roots, agent-visible log state, hashless cursor, unsafe from, URL parsed before auth, register as a path reader), all fixed with reproducing tests; impact-scoped recheck found positional flag smuggling and unpinned path flags, hardlinks, hook 401 without a dialect body, class-level lock exclusion, lstat/read TOCTOU, all fixed; final narrow recheck: no blocking findings. Three residuals accepted and recorded here: (1) a percent-encoded harness name in the hook path loses the dialect block body on a 401, exit_code 2 still carries and the routed path 404s anyway; (2) tenant-scope path confinement is skipped for non-string flag values, which buildArgv refuses downstream with mcp-invalid-arguments; (3) trailing is unvalidated by design because buildArgv always emits -- before it and parseFlags stops there, pinned by test. Agent scope is exactly five verbs. Node 26 SMTP failures are APRV-416.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added `approval serve`: a foreground HTTP transport publishing the same registry-derived verb catalog `approval mcp serve` publishes, plus the three things that transport withheld for transport reasons — `POST /hook/<harness>` answering the byte-for-byte verdict the stdin form prints for every adapter in HARNESS_ADAPTERS, `GET /log/follow` paged by an exclusive (seq, hash) cursor over subscribeVerifiedLog, and `GET /export`, the store as an archive carrying the policy, the log, the payload bytes behind every payload_hash and the projections, and never the keys, the environment source map or the vault. Publication is the MCP surface's; AUTHORIZATION is per verb and positive: the agent credential opens the hook and a twelve-verb allowlist of what a harness under oversight needs in order to ask and to act on a grant, the tenant credential opens everything else, and a verb added to the registry is the tenant's until somebody widens the list. It is transport only: the catalog, the argv build, the verb dispatch, the hook verdict and the verified read are all the functions the CLI dispatches to, reached by import rather than by copy. Verified with 785 passing tests across the mcp, hook, log, channels, help, docs and layering suites plus two new suites (tests/serve.test.ts, tests/serve-hook.test.ts), exit 0, on a clean build, typecheck and lint. The only failures in a full `npm test` are the 22 of APRV-416, which reproduce identically at the base commit. SPEC.md untouched; the section 10 hunk is proposed in the notes, along with the one design question the split surfaces: how a granted execution token is spent when the action runs in the sandbox rather than on the daemon host. PR #534.
+approval serve: a foreground HTTP transport over the same registry-derived agent-facing surface as approval mcp serve, plus hook/<harness> by envelope body, log/follow by exclusive (seq, hash) cursor via subscribeVerifiedLog, and export under the append lock; two launch-environment credentials (APPROVAL_SERVE_AGENT_TOKEN, APPROVAL_SERVE_TENANT_TOKEN) with the agent scope limited to instructions, hook_classify, request, wait, withdraw; store roots pinned and every path flag confined; loopback by default. Verified by 994 targeted tests (serve, serve-hook, mcp, hook, log, channels, layering) plus two adversarial review passes and a final recheck with no blocking findings; build, typecheck and lint clean.
 <!-- SECTION:FINAL_SUMMARY:END -->
