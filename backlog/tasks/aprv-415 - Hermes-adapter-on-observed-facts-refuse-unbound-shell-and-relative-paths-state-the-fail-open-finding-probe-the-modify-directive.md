@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-20 21:13'
-updated_date: '2026-09-20 21:45'
+updated_date: '2026-09-21 02:04'
 labels:
   - hermes
   - hook
@@ -34,4 +34,6 @@ The live probe of APRV-398 ran on 2026-09-21 (report in APRV-398 notes; captures
 
 <!-- SECTION:NOTES:BEGIN -->
 Probe addenda from 2026-09-21 (see APRV-398 notes): the fail-open results came from Hermes v0.21.3, which does not know fail_closed; re-run on the fresh main clone is pending. Add to this task: a documented version floor for fail_closed and a harness-version doctor pin; the gateway session cwd is the user home, so the docs and help must say --dir is mandatory in gateway deployments; the headless first-use consent case is still unprobed.
+
+Probe complete (APRV-398 notes, 2026-09-21): on Hermes main 118984d7 fail_closed BLOCKS crash, garbage and hang (hang at the 300 s entry cap); {} allows and action block at exit 2 refuses; post_tool_call fires for blocked and timed-out calls too; v0.21.3 ignores the key silently. Update this task's AC2: the doc opens with the OBSERVED fail-closed result and the version floor, the register entry moves to adopted, and the SPEC 10.1 verb row and the organ-list hunk ARE proposed for a human, because on a current Hermes this adapter is a gate; the earlier wording that no row is proposed while the harness fails open no longer applies. Add: the doc states that a post event is not evidence the tool ran; the harness-version doctor row pins the floor; the gateway session cwd is the user home so --dir is mandatory in gateway deployments; and the model's observed behaviour after a block is to retry through another tool or path, which is why every tool is gated and relative paths are refused.
 <!-- SECTION:NOTES:END -->
