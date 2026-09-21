@@ -42,6 +42,27 @@ export interface LogSubscriptionOptions {
   signal?: AbortSignal;
   /** Bounded fallback when filesystem notifications are missing. */
   pollIntervalMs?: number;
+  /**
+   * Drain the currently verified snapshot and RETURN, rather than waiting for
+   * appends (APRV-421).
+   *
+   * The streaming form is what `approval log follow` wants: a foreground
+   * process that stays. A PAGED reader wants the opposite and has nowhere to
+   * put a wait. `approval serve`'s `log/follow` answers one request with the
+   * records after a cursor and the cursor they end at, and the caller comes
+   * back with that cursor when it wants more. Expressing "we are caught up" as
+   * a race between the iterator and a timer is a timing heuristic; expressing
+   * it here is one flag, because this module already knows exactly when the
+   * verified snapshot is exhausted.
+   *
+   * It changes nothing about what is emitted or what is refused. The
+   * genesis-to-head verification, the cursor binding, the retained hash and
+   * every terminal failure are the ones below; this decides only whether the
+   * generator waits after the drain or ends. No watcher is established either,
+   * which matters for the caller this exists for: a server that left one file
+   * watcher behind per request would leak handles at the rate it is polled.
+   */
+  once?: boolean;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 500;
@@ -122,11 +143,15 @@ export async function* subscribeVerifiedLog(
 
   // Watch the directory so creation of an initially absent log is visible.
   // Failure to establish a watch is harmless: bounded polling remains active.
-  try {
-    watcher = watch(dirname(logPath), { persistent: false }, hint);
-    watcher.on("error", hint);
-  } catch {
-    watcher = null;
+  // A `once` subscription never reaches the wait below, so it establishes no
+  // watch at all rather than opening and closing one per call.
+  if (options.once !== true) {
+    try {
+      watcher = watch(dirname(logPath), { persistent: false }, hint);
+      watcher.on("error", hint);
+    } catch {
+      watcher = null;
+    }
   }
 
   try {
@@ -177,6 +202,11 @@ export async function* subscribeVerifiedLog(
       }
 
       if (options.signal?.aborted) return;
+      // The verified snapshot is exhausted and this caller asked for exactly
+      // that much (APRV-421). Everything above ran unchanged: the chain was
+      // verified from genesis, the cursor was bound, and a mismatch already
+      // threw. What is skipped is only the waiting.
+      if (options.once === true) return;
       // An append between watcher setup/read/drain and this point changes the
       // version and causes an immediate verification instead of a lost wakeup.
       if (wakeVersion !== versionBeforeRead) continue;

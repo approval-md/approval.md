@@ -482,8 +482,17 @@ export function buildArgv(
 // Invocation: the same function main.ts dispatches to
 // ---------------------------------------------------------------------------
 
-/** What one verb invocation produced. */
-interface Invocation {
+/**
+ * What one verb invocation produced.
+ *
+ * Exported alongside {@link invokeVerb} since APRV-421, because a SECOND
+ * transport dispatches through it: `approval serve` answers the same
+ * agent-facing verb surface over HTTP, and the one thing it must not do is
+ * build its own route from a call to a command function. Two routes would be
+ * two answers to "what does this verb do here" on the day one of the arms
+ * below changes.
+ */
+export interface Invocation {
   code: number;
   stdout: string;
   stderr: string;
@@ -517,7 +526,7 @@ function collector(): { streams: Streams; out: string[]; err: string[] } {
  * `channel telegram health` goes through `commandChannel` for the same reason:
  * its dispatch arm in `main()` is the promise-unwrapping one.
  */
-async function invoke(
+export async function invokeVerb(
   spec: VerbSpec,
   argv: string[],
   options: ServerOptions,
@@ -578,8 +587,14 @@ async function invoke(
 // Invocation -> CallToolResult
 // ---------------------------------------------------------------------------
 
-/** The last line of `text` that parses as a JSON object, or null. */
-function lastJsonObject(text: string): Record<string, unknown> | null {
+/**
+ * The last line of `text` that parses as a JSON object, or null.
+ *
+ * Exported since APRV-421: `approval serve` answers a verb call with the same
+ * object this picks out of the same streams, so the two transports agree on
+ * which line of a verb's output IS the answer.
+ */
+export function lastJsonObject(text: string): Record<string, unknown> | null {
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = (lines[index] ?? "").trim();
@@ -753,7 +768,7 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
       throw new McpError(ErrorCode.InvalidParams, `${built.code}: ${built.message}`);
     }
 
-    return toolResult(await serialize(() => invoke(spec, built.argv, options)));
+    return toolResult(await serialize(() => invokeVerb(spec, built.argv, options)));
   });
 
   return server;
