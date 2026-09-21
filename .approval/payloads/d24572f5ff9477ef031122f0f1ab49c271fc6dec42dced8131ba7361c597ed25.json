@@ -1,0 +1,1 @@
+{"command":"wc -l design/*.md && sed -n '1,70p' design/multi-approver-semantics.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n \"CLAUDE_SETTINGS =\\|CODEX_HOOKS =\" src/cli/doctor.ts && /usr/bin/grep -n \"ORGAN_SEARCH\\|carries no gate organ\\|registers no\" tests/doctor*.test.ts tests/doctor-rows.ts 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/handover-2026-09-21 && gh pr merge 517 --merge 2>&1 | tail -1; gh pr view 517 --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // \"not-armed\"'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

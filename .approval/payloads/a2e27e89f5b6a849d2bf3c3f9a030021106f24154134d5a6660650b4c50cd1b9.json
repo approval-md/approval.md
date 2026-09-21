@@ -1,0 +1,1 @@
+{"command":"grep -rln \"FORCE_COLOR\" tests/*.ts scripts/*.mjs | head; grep -n \"FORCE_COLOR\" scripts/run-tests.mjs tests/helpers*.ts 2>/dev/null | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

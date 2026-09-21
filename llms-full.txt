@@ -143,7 +143,7 @@ features/index.html as JSON at `script#feature-index`.
 - **Single-use execution tokens** [shipped]. Minted on grant, delivered directly or sealed to the requester, and logged by hash; a second spend refuses `token-consumed`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **An approval binds bytes** [shipped]. The envelope declares a `payload_hash`, and bytes that hash to anything else are refused `payload-mismatch`. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
 - **Class comes from the envelope** [shipped]. Class, cost and reversibility are read from the registered envelope, never from a flag at request time. https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md
-- **Budgets computed from the log** [shipped]. Class `limits` and `budgets` scopes are conjunctive, and consumption is computed from the log over rolling windows. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
+- **Budgets computed from the log** [shipped]. Class `limits` and `budgets` scopes are conjunctive, and consumption is computed from the log over rolling windows. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#policy-reference
 - **Protected paths widen, never narrow** [shipped]. `protected_paths` adds paths, or routes each to a `policy.edit` sub-class, above a floor that never narrows. https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval
 - **Amend a policy with the verb** [shipped]. `approval policy amend` lands new policy bytes and their attestation together, printing a semantic diff of what changed. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#policy-amend
 - **The open window** [human-only]. `approval gate open` requires a terminal and typed `understood`; gated shell and protected-file bypasses append `gate.bypassed`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate
@@ -152,10 +152,10 @@ features/index.html as JSON at `script#feature-index`.
 ### channels
 
 - **Telegram, the reference channel** [shipped]. The prompt carries a COMPUTED block, a CLAIMED block marked unverified, the full payload, and two buttons. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
-- **Paced or burst delivery** [behind a policy key]. `channels.telegram.delivery` is `paced` by default, showing one pending request at a time, or `burst`. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
+- **Paced or burst delivery** [behind a policy key]. `channels.telegram.delivery` is `paced` by default, showing one pending request at a time, or `burst`. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#policy-reference
 - **Prompt rows a policy orders** [behind a policy key]. `channels.<name>.prompt.rows` sets order only, never a whitelist, and `.hide` is refused for rows a decision needs. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel
 - **Payloads rendered by shape** [shipped]. The canonical email view shows every recognized field, its payload hash, and the raw-byte store path. https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone
-- **A local web queue on loopback** [shipped]. `approval channel web` binds hard-coded `127.0.0.1`; a returned grant token is displayed once, then discarded. https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it
+- **A local web queue on loopback** [shipped]. `approval channel web` binds hard-coded `127.0.0.1`; a returned grant token is displayed once, then discarded. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#security-and-evidence-limits
 - **A terminal channel, and withdrawal** [shipped]. `approval channel cli` decides at a terminal, and `approval withdraw` takes a pending request back. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel-cli
 - **A channel in the other direction** [shipped]. `approval journal write`, `approval values` and `approval feedback` carry operator guidance that never reaches enforcement. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#journal
 
@@ -191,7 +191,7 @@ features/index.html as JSON at `script#feature-index`.
 
 ### log
 
-- **Append-only, hash-chained JSONL** [shipped, spec]. Every record chains to the previous hash under `sha256/jcs`, and appends go through compare-and-append. https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it
+- **Append-only, hash-chained JSONL** [shipped, spec]. Every record chains to the previous hash under `sha256/jcs`, and appends go through compare-and-append. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#security-and-evidence-limits
 - **One command answers for the chain** [shipped]. `approval log verify` walks it end to end and reports clean, torn-tail or corrupt, repairing nothing. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify
 - **Anchoring, the check a file cannot make about itself** [behind a flag]. `approval log verify --anchor` checks the working file against the newest committed copy this checkout can see. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify
 - **Human-signed checkpoints** [behind a policy key, human-only]. `approval log checkpoint` signs the head with an Ed25519 key from `audit.checkpoint_keys`; a due checkpoint warns, never refuses. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-checkpoint
@@ -205,8 +205,8 @@ features/index.html as JSON at `script#feature-index`.
 - **A preflight that fast-forwards and rebuilds** [shipped]. `approval up` fetches, fast-forwards when safe, rebuilds a stale `dist/`, then re-execs the freshly built binary. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up
 - **It refuses rather than choosing for you** [shipped]. The preflight makes exactly two writes, a `--ff-only` merge and `npm run build`; anything else stops it. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up
 - **Supervised-live draws** [behind a policy key]. `supervised-live` with a `live_rate` blocks that fraction on the gate, selected by HMAC over the `payload_hash`. https://github.com/approval-md/approval.md/blob/main/SPEC.md
-- **Retrospective sampling on a secret you hold** [behind a policy key]. `audit.supervised_sample_rate` escalates a fraction of supervised actions for review, under a secret the policy only names. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
-- **Incremental read proof** [behind a policy key]. `daemon.read_proof: incremental` hashes only the appended bytes, re-proving in full on a configured cadence. https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary
+- **Retrospective sampling on a secret you hold** [behind a policy key]. `audit.supervised_sample_rate` escalates a fraction of supervised actions for review, under a secret the policy only names. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#policy-reference
+- **Incremental read proof** [behind a policy key]. `daemon.read_proof: incremental` hashes only the appended bytes, re-proving in full on a configured cadence. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#policy-reference
 - **Start it at login, having read the unit** [shipped]. `approval setup service` writes the launchd or systemd user unit and prints it for you to read. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-service
 - **Secrets live in the OS keystore** [shipped]. `approval setup channel telegram` stores the token in the OS keystore, and `.approval/env` records only where it lives. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#env
 
@@ -217,7 +217,7 @@ features/index.html as JSON at `script#feature-index`.
 - **coverage joins witnesses this project does not write** [shipped]. `approval coverage` reports effects witnessed by git, `gh` and providers, each with an evidence seq or `none`. https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#coverage
 - **Conformance vectors for a second implementation** [shipped]. Six language-neutral vector files cover policy, chain, gate verdicts, JCS, refusal unions and schema, under a SHA-256 manifest. https://github.com/approval-md/approval.md/blob/main/conformance/README.md
 - **Exit codes an agent branches on** [shipped]. Seven frozen CLI codes; ordinary gate refusals use 1, while hook protocols also use 0 and 2. See the table below.
-- **Three check tiers, classified from the diff** [shipped]. `npm run check:changed` classifies the working tree into light, records or full, and ambiguity resolves to full. https://github.com/approval-md/approval.md/blob/main/README.md#running-the-checks
+- **Three check tiers, classified from the diff** [shipped]. `npm run check:changed` classifies the working tree into light, records or full, and ambiguity resolves to full. https://github.com/approval-md/approval.md/blob/main/docs/README-extended.md#running-the-checks
 - **Validate at the write boundary** [shipped]. Every event and envelope passes its JSON Schema before it is appended, and the policy schema is closed. https://github.com/approval-md/approval.md/blob/main/schema/event.schema.json
 
 ### examples

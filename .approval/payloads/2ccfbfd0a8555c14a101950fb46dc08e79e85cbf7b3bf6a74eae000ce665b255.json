@@ -1,0 +1,1 @@
+{"command":"cd /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-emilia-protocol-comparison-af4ffb/e53d96c7-c42d-4ec8-a52f-708a14964f8e/scratchpad/aprv371\nmkdir -p g\nnpm install -g --prefix ./g approval-md@0.3.0 2>&1 | tail -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a4f390e30552e1201"}

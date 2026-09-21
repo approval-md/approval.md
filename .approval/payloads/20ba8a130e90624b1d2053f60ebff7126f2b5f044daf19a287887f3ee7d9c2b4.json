@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -rln \"harness_outcomes\" tests/ | head && echo --- && /usr/bin/grep -a -rn \"payload_store\\\"\\|\\\"coverage\\\"\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

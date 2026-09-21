@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"harness-launch-muse\\b\" tests/*.ts | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

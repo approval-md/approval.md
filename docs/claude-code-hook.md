@@ -1471,6 +1471,27 @@ classify -- <command…>` says which class a command falls under, and the verdic
 line reports how it resolved. A manual class re-records just as well and costs
 one prompt, which is why the supervised one is the ritual.
 
+### What `harness-hook-wiring` reports (APRV-408)
+
+The other doctor row over this file reads the `PreToolUse` entry in the checkout
+it runs in, and since APRV-408 it reads four things rather than one. Its gated
+roster is the adapter's own (`Bash`, `Edit`, `Write`, `MultiEdit`,
+`NotebookEdit`), derived rather than restated, so a matcher missing one of them
+is named instead of passed. The read tools the adapter declares and the matcher
+leaves out (`Read`, `Glob`, `Grep`) get one informational line that says they
+are held out by design and points at [The read scope](#the-read-scope) above;
+that line never fails the row. A matcher tool the adapter handles as neither a
+shell, file nor read tool is named as the `is not a gated tool` allow it will
+actually receive, because the process cost is real and the coverage is not.
+Finally the handler command is parsed rather than substring-matched: its `--dir`
+is compared against this checkout's primary root, a command the parse cannot
+read (a wrapper, a substitution, a shell function) is reported as unresolved and
+is never a pass, and a matcher this file will not evaluate as a regular
+expression is reported as resolving no coverage either way. The row stays
+advisory, with one exception: a handler positively bound to a DIFFERENT checkout
+fails, because such an entry answers from another policy, another log and
+another open window, which is a different gate rather than a weaker one.
+
 ## The same binary, from a Python Agent SDK app (APRV-242)
 
 An application built on `claude-agent-sdk` has no `.claude/settings.json` to

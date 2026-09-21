@@ -1,0 +1,1 @@
+{"command":"grep -n \"FORCE_COLOR\\|CLICOLOR\\|NO_COLOR\" src/cli/style.ts | head; echo \"== servername ==\"; grep -rn \"servername\" src/adapters/*.ts src/cli/*.ts | head -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

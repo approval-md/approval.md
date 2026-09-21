@@ -1701,6 +1701,22 @@ const VERBS: VerbSpec[] = [
         // none emits the object it always emitted. It counts toward `healthy`,
         // which is why it is reported here rather than only by `gate status`.
         gate_window: OPEN_OBJECT,
+        // APRV-383: the daemon identity this instance resolves — the id a daemon
+        // started HERE would write onto every record it appends, where the id
+        // came from, and the `daemons` allowlist in force for it. ALWAYS present,
+        // like `coverage`, so every consumer sees the same three keys on every
+        // log. INFORMATIONAL and outside `healthy` and the exit code: nothing
+        // here is a fact about this log's integrity. `id: null` is an
+        // `APPROVAL_DAEMON_ID` that is not an id; `allowed: null` is no
+        // restriction, which is not the same fact as an empty list.
+        daemon: object(
+          {
+            id: nullable(STRING),
+            source: nullable(STRING),
+            allowed: { anyOf: [{ type: "array", items: STRING }, { type: "null" }] },
+          },
+          ["id", "source", "allowed"],
+        ),
       },
       [
         "ok",
@@ -1714,6 +1730,7 @@ const VERBS: VerbSpec[] = [
         "coverage",
         "reconciliation",
         "payload_store",
+        "daemon",
       ],
     ),
     error: ERROR_SCHEMA,

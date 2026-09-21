@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-397-packaging-rules && ls conformance && /usr/bin/grep -rna \"command-class\" conformance/*.mjs conformance/*.md | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

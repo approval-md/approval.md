@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -n \"only\\|--only\" scripts/run-tests.mjs | head -8; /usr/bin/grep -a -n \"dev/hermes/home\" docs/hermes-hook.md \"backlog/tasks/aprv-398 - \"*.md | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

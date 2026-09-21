@@ -1,0 +1,1 @@
+{"command":"backlog search \"classifier argument text\" --plain 2>/dev/null | head -6; grep -rn -i 'policy.edit.ci' src/cli/hook*.ts src/**/command-class*.ts src/*.ts 2>/dev/null | head -8; ls src | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

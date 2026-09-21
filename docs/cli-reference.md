@@ -2474,6 +2474,15 @@ does not know the flag exists.
   or a refused gesture: `{count, recent}` per family, each recent entry naming the
   `seq`, the refusal `code` and the observed `sender` where there was one.
   Informational.
+- `daemon` — `{id, source, allowed}`, always present (APRV-383): the daemon
+  instance id a daemon run against THIS log would write onto every record it
+  appends, whether it came from `APPROVAL_DAEMON_ID` (`source: "environment"`) or
+  was derived from the instance (`source: "derived"`), and the `daemons` allowlist
+  the attested policy puts in force. `id: null` means `APPROVAL_DAEMON_ID` holds
+  something that is not a usable id, so a daemon started here would be refused
+  every append. `allowed: null` means no restriction, which is not the same fact as
+  an empty list. Informational: nothing here moves `healthy` or the exit code, and
+  being listed grants a daemon nothing beyond the ability to write.
 
 **`--json`** (one object on stdout):
 
@@ -2494,7 +2503,8 @@ does not know the flag exists.
    "note":"..."},
  "refusals":{"decision":{"count":2,"recent":[{"seq":21,"code":"policy-drift"}]},
    "gesture":{"count":1,"recent":[{"seq":24,"code":"sender-unmapped",
-     "sender":{"channel":"telegram","id":"5551234567"}}]}}}
+     "sender":{"channel":"telegram","id":"5551234567"}}]}},
+ "daemon":{"id":"daemon-3f2a9c11","source":"derived","allowed":null}}
 ```
 
 `ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
@@ -2783,17 +2793,25 @@ The checks, at length:
   of the gate, so the repair is a line for a human to commit, printed by
   `approval instructions hook`.
 - **harness-hook-wiring** — whether THIS checkout's `.claude/settings.json`
-  registers `approval hook` for PreToolUse over every gated tool (Bash, Edit,
-  Write, NotebookEdit). SKIP, named, when the file is absent, unreadable, or
+  registers `approval hook claude-code` for PreToolUse over every gated tool.
+  The roster is read from the adapter that answers the calls (Bash, Edit, Write,
+  MultiEdit, NotebookEdit since APRV-408, where it was a hand list that had
+  drifted behind them). SKIP, named, when the file is absent, unreadable, or
   registers the hook for only some tools: a spawned-agent worktree without the
   entry is how the APRV-151 bypasses happened, and a session started elsewhere
   may still be hooked, so this row can only speak for the checkout it runs in.
   PASS means the entry is present on disk, and says so plainly: it is not proof
-  the running session loaded it. The check that trusts no session is the
-  CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
-  committed log, which since APRV-202 requires every added and removed line of a
-  protected path to trace to the bound material of a grant, rather than only
-  that the path was granted at some point in the week.
+  the running session loaded it. The one FAIL is a handler whose `--dir` names a
+  checkout other than this one, which answers from another policy, another log
+  and another open window. Two informational lines never decide anything: the
+  adapter read tools the matcher leaves out (Read, Glob, Grep) are named as the
+  documented default they are, and a matcher tool the adapter handles as none of
+  its own is named as the unclassified `allow` it will actually receive. The
+  check that trusts no session is the CI-side grant cross-check
+  (`scripts/protected-path-guard.mjs`) over the committed log, which since
+  APRV-202 requires every added and removed line of a protected path to trace to
+  the bound material of a grant, rather than only that the path was granted at
+  some point in the week.
 - **keychain-scope** — whose keystore items this instance's `.approval/env`
   names, answered from the NAMES alone so that it too can never block on an
   unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
@@ -3031,6 +3049,22 @@ The checks, at length:
   would find nothing and report green, which is the worst direction a health
   check can fail in. The `fix` points at the harness's own configuration,
   because nothing here can turn another system's reviewer off.
+- **daemon-identity** — which daemon id a daemon run against this log would
+  write onto every record it appends, and whether the attested policy admits it
+  (APRV-383). The id is `APPROVAL_DAEMON_ID` from this shell where it is set and
+  otherwise `daemon-` plus the instance id the `keychain-scope` row names, so the
+  two rows describe one gate. A FAIL where `APPROVAL_DAEMON_ID` is set to
+  something that is not an id: a daemon started from this shell would be refused
+  `daemon-id-invalid` on every append, so it would read, render and report while
+  writing nothing, and the `fix` is that one variable. A loud SKIP where the
+  attested policy's `daemons` list does not admit the id, naming what the list
+  does admit — expected where the daemon for this log runs on another machine,
+  which is the hosted case the key exists for, and wrong if that daemon is meant
+  to be this one. A PASS where the list admits it, and where there is no list at
+  all, which is every installation that never adopts the key. Being listed grants
+  nothing beyond the ability to write: no verdict, budget, floor, draw or token
+  reads the id. The row reads the policy and one variable's SHAPE, prints no
+  value on any path, and asks no running daemon anything.
 
 
 

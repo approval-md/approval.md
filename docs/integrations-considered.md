@@ -542,7 +542,7 @@ Meta's docs*, claiming the documented `.muse/hooks.json` path is not what the
 shipped binary reads and that the real mechanism is an experimental plugin
 flag. That contradiction is unresolved here.
 
-Against the six questions from `HANDOVER-2026-09-16.md` §4:
+Against the six questions from the 2026-09-16 session handover, section 4 (kept in the primary checkout under `private/handover/`, APRV-406):
 
 1. **Interception surface.** *Vendor-documented.* A hook system with
    `PreToolUse` and `PermissionRequest` events, configurable at three levels:
