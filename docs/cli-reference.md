@@ -2905,7 +2905,14 @@ The checks, at length:
   the `fix` is the promptless self-test in `docs/claude-code-hook.md`, one
   supervised-class tool call, after which the row is green. PASS says only that
   the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
-  and reduces nothing anywhere, so a match is not proof the hook fired.
+  and reduces nothing anywhere, so a match is not proof the hook fired. Since
+  APRV-415 the row carries a second finding for one harness: a Hermes below the
+  **fail-closed version floor** (a build at or after `main` `118984d7` of
+  2026-09-20) FAILS, because `v0.21.3` ignores `fail_closed` silently and every
+  broken hook on it proceeds. That half is read from `hermes --version` rather than
+  from a record — Hermes prints its build stamp behind a non-ASCII separator the
+  write boundary refuses, so no record can carry it — and it compares the build
+  date and the upstream commit, because the two builds report the same semver.
 - **live-draw** — whether a daemon is answering `supervised-live` draws for this
   log (APRV-208). SKIP when the policy declares no live class: no draw is ever
   made, and a missing socket is nothing. It FAILS in three shapes, all of them
@@ -4159,16 +4166,29 @@ stdout directive first; an **allow is `{}`** at exit 0, because Hermes has no
 allow directive and no directive is the allow, so an allow's reason goes to
 stderr. `execute_code` is refused outright
 (`hook-hermes-execute-code-unbound`): it carries a program and no path, no argv
-and no working directory, so no verdict could bind it. The file a human commits
-is `$HERMES_HOME/config.yaml` (default `~/.hermes`), where the event is a mapping
-KEY rather than an `event:` field, `fail_closed: true` belongs on every entry
-because its default is false, and TWO timeouts bound the wait — the per-entry
+and no working directory, so no verdict could bind it. **A call whose effective
+directory the event does not carry is refused too** (`hook-unsupported-execution-context`,
+APRV-415): a live probe found that the envelope `cwd` is the Hermes PROCESS
+directory while `terminal` keeps a per-session recorded directory that a `cd` moves
+and no field reports, and that the file tools resolve relative paths against that
+one — so a `terminal` call with no absolute `workdir`, and a `write_file`, `patch`,
+`read_file` or `search_files` call whose path is relative or missing, are refused
+with a reason telling the session to retry with an absolute path. The file a human
+commits is `$HERMES_HOME/config.yaml` — name the home explicitly and spell its last
+segment `.hermes`, or the classifier does not recognise the organ — where the event
+is a mapping KEY rather than an `event:` field, `fail_closed: true` belongs on every
+entry because its default is false, and TWO timeouts bound the wait: the per-entry
 `timeout` caps at 300s and `plugins.hook_callback_timeout` defaults to 30s and
-fails closed by itself, so `--timeout` must come down under 300s. Without
+fails closed by itself, so `--timeout` must come down under 300s. `--dir` is
+mandatory here, because a gateway session's `cwd` is the user's home. Without
 `hooks_auto_accept: true` (or `HERMES_ACCEPT_HOOKS=1`) and no TTY, Hermes
-**silently never registers the hook**. `approval hook hermes --help` prints the
-YAML; `docs/hermes-hook.md` marks every fact that a live probe has not yet
-confirmed.
+**silently never registers the hook**. `fail_closed: true` was OBSERVED to block a
+hook crash, a hook timeout and unparseable output on `main` `118984d7`, which makes
+this the first adapter since Claude Code that is a gate rather than a backstop;
+`v0.21.3` (build 2026.9.14) does not know the key and fails open silently, so
+`approval doctor`'s `harness-version-unverified` row pins that floor.
+`approval hook hermes --help` prints the YAML; `docs/hermes-hook.md` opens with the
+fail-closed result, the floor, and what a post event does not prove.
 
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
