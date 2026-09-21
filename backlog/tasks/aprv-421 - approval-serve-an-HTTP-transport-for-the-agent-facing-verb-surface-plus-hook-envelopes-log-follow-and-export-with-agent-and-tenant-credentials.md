@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:51'
+updated_date: '2026-09-21 07:58'
 labels:
   - hosting
   - daemon
@@ -296,6 +296,24 @@ Updated rather than added: the allowlist pin and the catalog sweep now carry the
 ### APRV-416
 
 The 22 SMTP failures under Node v26.8.2 remain tracked there and are referenced rather than re-filed.
+
+### Coordinator decision: both payload builders off the agent scope
+
+`payload_hash` dropped as instructed. The rule that came with it — a builder is the agent's only if it builds from the request's own arguments and never reaches a host resource — also lands on `payload_agentmail-draft`, so both are tenant-scoped now.
+
+`payload_hash` takes a FILE. On this transport the file is on the daemon's machine and the caller is not, so every path it could name is one the host put there; answering is a hash oracle that also files the bytes into the payload store.
+
+`payload_agentmail-draft` takes two ids rather than a path, which passes the letter of the rule, and reads the draft over HTTPS with `AGENTMAIL_API_KEY` **from this server's own environment**. A remote caller would therefore be spending the host's credential on ids it chose, which is the same fault wearing a network instead of a filesystem. The instruction's condition was written as a group test (`ONLY if EACH ... ; if ANY reads a path, tenant scope`) and one of the pair does read a path, so both readings of that sentence agree on the answer even before the AgentMail key is considered. The narrow reading was taken on purpose: publishing a builder that should have been withheld is a capability leak, and withholding one that should have been published is a line of configuration.
+
+**Agent scope is now exactly five verbs**: `instructions`, `hook_classify`, `request`, `wait`, `withdraw`. A harness under oversight asks and is answered; everything else about the gate belongs to the party the gate is for.
+
+The positional confinement stays and still runs in EVERY scope, which is what keeps `payload_hash` safe now that it is the tenant's: its test drives it with the tenant credential and proves both directions (outside the store refuses `serve-path-outside-store`, inside the store reaches the verb). Confinement resolves through `realpath` on the deepest existing ancestor, so `../../etc/hosts` and a symlinked directory inside the store are both refused.
+
+Tests updated rather than added: `the agent allowlist is exactly the decided list` now pins the five and additionally asserts both builders are absent by name; the scope-rule property test moves both builders to its tenant list; the path-confinement test drives `payload_hash` as the tenant; the tenant-direction test swaps `payload_hash` for `hook_classify`.
+
+### One operational observation for the hosted runbook, not a fix
+
+A hook envelope carries the harness's own `cwd`, and the classifier resolves relative paths against it. For a REMOTE harness that directory exists in the sandbox and not on the daemon host, while the gate root and the read scope are the host's. The result is fail-closed (an unresolvable path falls outside the read roots and denies), so nothing is weakened, but read-scope decisions will behave differently for a sandboxed harness than for a co-located one. Worth stating in the deployment runbook before the first tenant meets it.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
