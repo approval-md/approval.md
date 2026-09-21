@@ -3083,6 +3083,35 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "serve",
+    purpose:
+      "Serve the verbs of this registry over HTTP, in the foreground, for a harness in a sandbox that has no local log and no local policy. The published surface is `mcp serve`'s exactly — the registry filtered by human_only false, `--as` deleted from every schema, the launch identity appended last, no grant — plus the three things the MCP transport withheld for transport reasons: `hook/<harness>` taking the harness envelope as the request body and answering the bytes the stdin form prints, `log/follow` paged by an exclusive (seq, hash) cursor, and `export`, the store as an archive without the keys, the environment source map or the vault. TWO bearer credentials come from the launch environment: the agent one opens the verbs and the hook, the tenant one opens the log, the export and status, and the agent one never reads the log it is judged by. Binds loopback unless an explicit flag widens it; it terminates no TLS.",
+    human_only: true,
+    human_only_note:
+      "An OPERATOR process, for `mcp serve`'s reason and one more. It is long-lived, launched by a person, and holds the agent identity every call is recorded under; on top of that it holds BOTH credentials, and the party that decides which door an agent gets is not the agent.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--port": "string",
+        "--listen": "string",
+        "--allow-non-loopback": "boolean",
+        "--hook-timeout": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the server was interrupted and closed cleanly" },
+      USAGE,
+      { code: 4, meaning: "the listener could not bind, or did not close cleanly" },
+    ],
+  },
+
+  {
     name: "reindex",
     purpose:
       "Rebuild the SQLite index projection from the log. The database is a cache and the log is the truth: the index is rebuilt from scratch at a temporary path and renamed into place. A corrupt log is refused outright and a torn tail is refused without --force. The log is never written to.",

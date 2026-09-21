@@ -407,6 +407,10 @@ const HUMAN_ONLY: readonly string[] = [
   // long-lived writer and a choice of the identity every tool call is recorded
   // under, both of which belong to the operator who launches the process.
   "mcp serve",
+  // APRV-421. `mcp serve`'s reasoning, plus the one fact that is this verb's
+  // own: it holds BOTH bearer credentials, and the party that decides which
+  // door an agent gets is not the agent.
+  "serve",
   "env",
   "setup identity",
   "setup vault",

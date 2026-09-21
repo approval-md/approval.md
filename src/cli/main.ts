@@ -1357,6 +1357,17 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandMcp } = await import("./mcp.js");
       return settle(commandMcp(rest, streams, cwd), streams, "MCP server failed");
     }
+    // The hosted door (APRV-421). The same agent-facing surface as `mcp serve`,
+    // over HTTP, for a harness in a sandbox with no local log and no local
+    // policy, plus the three things the MCP transport withheld for transport
+    // reasons: the harness hook, a paged `log follow`, and the store export.
+    // Human-only for `mcp serve`'s reason and one more: this process holds both
+    // bearer credentials, and which door an agent gets is not the agent's to
+    // choose.
+    case "serve": {
+      const { commandServe } = await import("./serve.js");
+      return settle(commandServe(rest, streams, cwd), streams, "serve failed");
+    }
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and

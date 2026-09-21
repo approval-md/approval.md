@@ -6515,6 +6515,117 @@ The guest instructions string says so, tells the caller to poll `status`, and
 states plainly that a granted request executes nowhere: the demo is the approval
 flow itself.
 
+## serve
+
+`approval serve` is the same agent-facing surface as `mcp serve`, over HTTP,
+for a harness that has no local log and no local policy: a sandboxed tenant
+whose daemon runs elsewhere, one process per tenant. It is a transport and not
+a second gate. Every verdict, every verb and every batch of records comes from
+the function the CLI dispatches to; nothing under `src/serve/` classifies a
+command, resolves a policy, mints a token or verifies a chain.
+
+STDOUT IS EMPTY. The bound address, the identity, the daemon id and the store
+root go to stderr on one started line. SIGINT and SIGTERM close the listener
+and exit 0.
+
+### The two credentials
+
+Two bearer values, both read from the launch environment (SPEC.md §11.1
+invariant 7: nothing is loaded out of the working tree), both required before
+the listener exists, and refused when they are equal or shorter than 24
+characters:
+
+| variable | opens |
+|---|---|
+| `APPROVAL_SERVE_AGENT_TOKEN` | `GET /verbs`, `POST /verb/<name>`, `POST /hook/<harness>` |
+| `APPROVAL_SERVE_TENANT_TOKEN` | `GET /verbs`, `GET /log/follow`, `GET /export`, `GET /status` |
+
+**The agent credential never reads the log it is judged by.** That is the
+sentence the split exists for. An agent that could stream the verified log
+could read every decision made about it and the shape of the oversight it is
+under; an agent that could export the store could carry all of it away. So an
+agent-credential call to `/log/follow`, `/export` or `/status` is refused
+`serve-agent-forbidden`, and a tenant-credential call to a verb (`request`,
+`wait`, `consume`, any of them) is refused `serve-tenant-forbidden`. Both are
+scope refusals rather than not-founds: a caller that guessed a path learns that
+the door exists and is not theirs.
+
+Every path requires one of the two. There is no unauthenticated surface at all,
+not a health check and not a 404, so a caller with no credential learns nothing
+about what exists.
+
+### The endpoints
+
+`GET /verbs` is the published catalog: `approval mcp serve`'s tool list, name
+for name and schema for schema, because it is derived from the same registry
+filter by the same function. `--as` is absent from every published schema and
+the launch identity is appended last to every argv, so a caller can neither
+name an identity nor change one. `grant` is absent, as it is there and for the
+same reason: SPEC.md §11 makes the agent the untrusted policy, and a tool list
+is a statement about what a surface is for. Each entry carries the scope that
+opens it, so the catalog is honest about `status` being the tenant's.
+
+`POST /verb/<tool_name>` takes the same `{positionals, flags, trailing}` object
+an MCP tool call takes, builds the argv with the same function, and answers with
+the verb's own `--json` object. A refusal arrives as the CLI's own
+`{"error":{"code","message"}}`, with the CLI's own code, and the exit code rides
+on `x-approval-exit-code`.
+
+`POST /hook/<harness>` takes the harness envelope the stdin form would read, as
+the body, for every harness this runtime speaks a hook protocol for. The
+response body is BYTE-FOR-BYTE the stdout `approval hook <harness>` prints for
+that envelope, because it IS that stdout: the request body is handed to
+`commandHook` as its stdin and nothing reshapes the answer. The exit-code
+semantics travel with it, which they must, because the dialects disagree about
+where a block lives. Claude Code, Cursor and Codex put it in the body at exit 0;
+Grok Build and Hermes use exit 2. A caller reproducing the verb locally writes
+the body and exits `x-approval-exit-code`. Hermes's ALLOW is `{}` and carries
+its reason on stderr and nowhere else, so stderr comes back base64 on
+`x-approval-stderr`, bounded, with `x-approval-stderr-truncated` when it did not
+fit. A deny is a VERDICT, so its HTTP status is 200; only a refusal by the
+server is not.
+
+`GET /log/follow?from=<seq>&cursor_hash=<64hex>&limit=<n>` answers one page of
+verified records and the cursor to ask with next time. The cursor is EXCLUSIVE
+and the subscription is `core/log-subscribe.ts`'s, so SPEC.md §8 holds
+unchanged: the chain is verified from genesis before anything is emitted, and a
+`cursor_hash` that does not match the retained prefix is refused with the
+`integrity` code, `cursor-mismatch` as its reason, and NO RECORDS, not even the
+ones a partial drain had already produced. `caught_up` says whether the page
+exhausted the log or the limit. The server keeps no subscription state: a page
+is a function of the cursor in the request and the bytes on disk, so a host that
+sleeps and wakes serves the same next page it would have served before.
+
+`GET /export` answers the store as a gzipped POSIX tar. Its contents are a
+positive allowlist (`APPROVAL.md`, `.approval/log/`, `.approval/QUEUE.md`,
+`.approval/index.sqlite`), so `.approval/keys`, `.approval/env`,
+`.approval/daemon` and any `vault.enc` are out by not being named rather than by
+a denylist remembering them. `.approval/payloads/` is out on the same rule and
+by the same reading: the log still records every `payload_hash`, and what an
+export of this shape cannot do is prove the bytes behind one.
+
+`GET /status` is the `status` verb, answered to the tenant credential.
+
+### The bind, and where TLS is
+
+`--port <n>` picks the port (default 4682) and always binds `127.0.0.1`.
+`--listen <[host:]port>` is the only way to bind anything else, passing both is
+a usage error, and a non-loopback host ALSO requires `--allow-non-loopback`: two
+flags, because the credentials here are bearer values and a cleartext hop hands
+them to whoever is on it. A widened bind prints a banner on stderr saying
+exactly that. This process terminates no TLS and holds no certificate; the
+supported deployment is a loopback bind behind a proxy the operator owns.
+
+### What it never does
+
+It appends no record on its own account. Every event in the log under it was
+written by a verb a caller asked for, under the identity the operator fixed at
+launch, and the daemon id on the started line is the one those records carry.
+Verb and hook calls run serially in this process, for the reason the MCP
+transport gives (`wait` blocks the event loop, `run` spawns synchronously), and
+appends still go through the same lockfile and compare-and-append every
+`approval` process uses. It reads no `.approval/env`.
+
 ## Constrained Codex preparation
 
 approval codex prepare is an artifact generator. It writes one fresh review
