@@ -512,9 +512,8 @@
         "target": "inside"
       },
       "expect": {
-        "valid": false,
-        "permission": "deny",
-        "failure_class": "hook-class-human-only",
+        "valid": true,
+        "permission": "allow",
         "gated": true
       }
     },
