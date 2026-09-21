@@ -515,10 +515,17 @@ The following reflects the versions and evidence described in the linked reposit
 | Muse Code | `approval hook muse` | Formats and failure behavior have live-probe evidence for the documented build. The harness fails open on hook failures, including invalid mixed-dialect output. |
 | Hermes Agent | `approval hook hermes` | Implemented on `main` after the 0.3.0 release. Built from upstream source; live behavior remains unverified. Requires explicit hook registration and the documented `fail_closed` setting. |
 | Generic MCP | `approval mcp serve` | Agent-facing runtime tools. Does not automatically intercept native tools or give an agent human decision authority. |
+| Sandboxed harness (HTTP) | `approval serve` | The same agent-facing verbs over HTTP, plus `hook/<harness>` for every adapter above, a paged `log/follow`, and a store export. For a harness with no local log and no local policy. Two bearer credentials from the launch environment; the process terminates no TLS. |
 
 Runbooks: [Claude Code](claude-code-hook.md), [Cursor](cursor-hook.md), [Agent SDK](agent-sdk-hook.md), [Grok](grok-hook.md), [Muse](muse-hook.md), [Hermes](hermes-hook.md).
 
 Do not copy a hook command between harnesses on the assumption that similarly named events speak the same protocol. A deny encoded for one harness can be ignored by another.
+
+### A harness that has no local log: `approval serve`
+
+Every row above assumes the harness and the gate share a filesystem. When they do not, because the harness runs in a sandbox and the daemon runs elsewhere, `approval serve` is the door. It publishes the same agent-facing verbs `approval mcp serve` publishes, name for name and schema for schema, and adds three endpoints that transport withheld: `POST /hook/<harness>` takes the envelope the stdin form would read and answers the same verdict bytes with the same exit-code semantics, `GET /log/follow` pages the verified log by an exclusive `(seq, hash)` cursor, and `GET /export` returns the store as an archive.
+
+Two bearer credentials come from the launch environment. `APPROVAL_SERVE_AGENT_TOKEN` opens the verbs and the hook; `APPROVAL_SERVE_TENANT_TOKEN` opens the log, the export and status. The agent credential never reads the log it is judged by, and the export carries `APPROVAL.md`, the log and the projections and nothing under `.approval/keys`, `.approval/env`, `.approval/daemon` or the vault. The server binds loopback unless `--listen` names another interface in full and `--allow-non-loopback` is passed as well; it terminates no TLS, so put a proxy you control in front of it. See [the reference](cli-reference.md#serve).
 
 ### Wire the calls you intend to cover
 

@@ -314,6 +314,32 @@ export function serveCatalog(): CatalogEntry[] {
   }));
 }
 
+/**
+ * The flags every hook call is made with.
+ *
+ * Exported so a test can hand the SAME argv to `commandHook` directly and
+ * compare the bytes. That comparison is the acceptance criterion, and it is
+ * only honest if both sides are the same invocation of the same verb: a test
+ * that built its own flag list would be comparing two spellings.
+ *
+ * `--as` is appended LAST, as everywhere else on this surface, so the identity
+ * the operator fixed when they started the process wins over anything that
+ * arrived by another route (`parseFlags` keeps the last occurrence).
+ */
+export function hookArgv(
+  options: Pick<ServeOptions, "actor" | "cwd" | "log" | "policy" | "hookTimeout">,
+): string[] {
+  return [
+    "--dir",
+    options.cwd,
+    ...(options.log === undefined ? [] : ["--log", options.log]),
+    ...(options.policy === undefined ? [] : ["--policy", options.policy]),
+    ...(options.hookTimeout === undefined ? [] : ["--timeout", options.hookTimeout]),
+    "--as",
+    options.actor,
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
@@ -397,19 +423,6 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   let requests = 0;
   let closing = false;
 
-  const hookArgv = (): string[] => [
-    "--dir",
-    options.cwd,
-    ...(options.log === undefined ? [] : ["--log", options.log]),
-    ...(options.policy === undefined ? [] : ["--policy", options.policy]),
-    ...(options.hookTimeout === undefined ? [] : ["--timeout", options.hookTimeout]),
-    // LAST, as everywhere else on this surface: the identity the operator fixed
-    // when they started the process wins over anything that arrived by another
-    // route. `parseFlags` keeps the last occurrence.
-    "--as",
-    options.actor,
-  ];
-
   async function handleVerb(
     res: ServerResponse,
     spec: VerbSpec,
@@ -450,7 +463,12 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     // The same function `main()` dispatches to, with the request body as the
     // stdin the verb would have read. The verdict object, its dialect, its
     // reason and its exit code are decided entirely inside it.
-    const code = commandHook([harness, ...hookArgv()], sink.streams, options.cwd, () => body);
+    const code = commandHook(
+      [harness, ...hookArgv(options)],
+      sink.streams,
+      options.cwd,
+      () => body,
+    );
     const stderr = sink.err();
     const headers: Record<string, string> = {
       "content-type": "application/json",
