@@ -872,9 +872,14 @@ function readScopeInput(input: Record<string, unknown>, dir: string): Record<str
     // beside the command, which is the directory the classifier must resolve
     // relative paths against. APRV-398: Hermes's `terminal` carries the same
     // fact under the same key.
+    // APRV-415: `omit_workdir` sends the shape a live Hermes session was
+    // observed sending — `command` and nothing else — which the adapter refuses
+    // because the directory the command would run in is reported nowhere on
+    // this harness.
+    const omitWorkdir = input["omit_workdir"] === true;
     return {
       command: target === null ? "ls" : `cat ${target}`,
-      ...(tool === "bash" || tool === "terminal" ? { workdir: dir } : {}),
+      ...((tool === "bash" || tool === "terminal") && !omitWorkdir ? { workdir: dir } : {}),
     };
   }
   // APRV-398: Hermes's `execute_code` carries a program and NOTHING else — no

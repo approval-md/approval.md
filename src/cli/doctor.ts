@@ -154,7 +154,10 @@ import {
 import {
   HARNESS_BINARY,
   HARNESS_KINDS,
+  HERMES_FAIL_CLOSED_FLOOR,
+  hermesFailClosedSupport,
   installedHarnessVersion,
+  installedHarnessVersionRaw,
   isHarnessKind,
   readHarnessProvenance,
   type HarnessKind,
@@ -3193,6 +3196,20 @@ function recordedHarnessVersions(
  * has nothing to compare against, and inventing a baseline would be inventing
  * the fact); and no such binary on PATH, since doctor may be running somewhere
  * the harness is not installed, which is a state and not a fault.
+ *
+ * ## The Hermes fail-closed floor rides in this row (APRV-415)
+ *
+ * One harness has a second version question, and it is graver than the first. A
+ * Hermes below `HERMES_FAIL_CLOSED_FLOOR` does not know `fail_closed` and ignores
+ * it silently, so every broken hook PROCEEDS and the session looks gated while it
+ * is not. That belongs here rather than in a row of its own because both findings
+ * answer one question — is the binary hosting this hook in a state where the gate
+ * is known to fire — and a reader who sees this row green has been told both. It
+ * is read from `<binary> --version` rather than from a record, because Hermes's
+ * build stamp sits behind a non-ASCII separator that the write boundary refuses,
+ * so no record can ever carry it. The comparison is on the BUILD DATE and the
+ * upstream commit: the two builds that differ on this behaviour report the same
+ * semver.
  */
 function checkHarnessVersion(dir: string, records: readonly EventRecord[]): DoctorCheck {
   const check = "harness-version-unverified";
@@ -3211,6 +3228,38 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
   const mismatched: string[] = [];
   const matched: string[] = [];
   const unknown: string[] = [];
+  // APRV-415. The VERSION FLOOR, which is a different question from the rest of
+  // this row and belongs to it for one reason: both ask whether the binary
+  // hosting this hook is in a state where the gate is known to fire. The row
+  // above asks whether the binary CHANGED without the gate being exercised
+  // since; this asks whether the binary is old enough that a broken hook would
+  // not have stopped anything in the first place.
+  //
+  // It is read off the INSTALLED build rather than off a record, and that is not
+  // a shortcut: Hermes prints its build stamp behind a non-ASCII separator, so
+  // the write boundary's printable-ASCII rule (SPEC.md §11.1 invariant 3) refuses
+  // the whole line and no record ever carries a Hermes version. The floor would be
+  // permanently unknown if it waited for one.
+  const floor: string[] = [];
+  const belowFloor: string[] = [];
+  if (kinds.includes("hermes")) {
+    const raw = installedHarnessVersionRaw("hermes");
+    const support = hermesFailClosedSupport(raw);
+    const quoted = raw === null ? "(no answer)" : JSON.stringify(raw);
+    if (support === "ignores") {
+      belowFloor.push(
+        `the installed Hermes is BELOW the fail_closed floor: \`${HARNESS_BINARY["hermes"]} --version\` says ${quoted}, and the floor is ${HERMES_FAIL_CLOSED_FLOOR.statement}. On a build that does not know the key, a hook crash, a hook timeout and unparseable hook output all PROCEED, silently, so every gated tool call in this checkout is a backstop rather than a gate and nothing in the session says so`,
+      );
+    } else if (support === "honours") {
+      floor.push(
+        `hermes ${quoted} is at or above the fail_closed floor (${HERMES_FAIL_CLOSED_FLOOR.statement}), so a broken hook blocks rather than proceeding`,
+      );
+    } else {
+      floor.push(
+        `hermes: the fail_closed floor could not be established from ${quoted} (no build date and not the floor's own commit; two commits cannot be ordered without a repository), so check it by hand — the floor is ${HERMES_FAIL_CLOSED_FLOOR.statement}`,
+      );
+    }
+  }
 
   for (const kind of kinds) {
     const last = recorded.get(kind);
@@ -3238,12 +3287,30 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     );
   }
 
+  // APRV-415: the floor is reported FIRST when it is breached, because it is the
+  // graver of the two findings. An unverified change means nobody has checked
+  // whether the gate still fires; a build below the floor means a broken hook does
+  // not stop anything, which is established rather than unchecked.
+  if (belowFloor.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${belowFloor.join("; ")}${
+        mismatched.length === 0
+          ? ""
+          : `. And the harness binary changed with no gate exercised since: ${mismatched.join("; ")}`
+      }`,
+      fix: `hermes update (or reinstall from main), then \`approval doctor\` again. The installed version is self-reported, so this row can only ask for a look: it never widens a verdict, and the adapter's own refusals are the same on every build.`,
+    };
+  }
   if (mismatched.length > 0) {
     const first = kinds[0] as HarnessKind;
     return {
       check,
       status: "fail",
-      detail: `the harness binary changed and the gate has not been exercised since: ${mismatched.join("; ")}. A release can change the hook envelope semantics, so until one record is written under the new binary nothing here shows the hook still fires. The recorded version is self-reported and reduces nothing: a match would not have proved the hook fired either, and what a mismatch says is that nobody has looked.`,
+      detail: `the harness binary changed and the gate has not been exercised since: ${mismatched.join("; ")}. A release can change the hook envelope semantics, so until one record is written under the new binary nothing here shows the hook still fires. The recorded version is self-reported and reduces nothing: a match would not have proved the hook fired either, and what a mismatch says is that nobody has looked.${
+        floor.length === 0 ? "" : ` Separately: ${floor.join("; ")}.`
+      }`,
       fix: `approval hook ${first} --dir ${where} < one PreToolUse event for a supervised-class command — the self-test in docs/${first === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`,
     };
   }
@@ -3251,13 +3318,17 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     return {
       check,
       status: "pass",
-      detail: `${matched.join("; ")}${unknown.length === 0 ? "" : `; ${unknown.join("; ")}`}. A match is not proof the hook fired; it is the absence of the one thing this row can see, an unverified change of the binary hosting it.`,
+      detail: `${matched.join("; ")}${unknown.length === 0 ? "" : `; ${unknown.join("; ")}`}. A match is not proof the hook fired; it is the absence of the one thing this row can see, an unverified change of the binary hosting it.${
+        floor.length === 0 ? "" : ` ${floor.join("; ")}.`
+      }`,
     };
   }
   return {
     check,
     status: "skip",
-    detail: `${where} registers ${kinds.join(", ")} and no comparison could be made: ${unknown.join("; ")}`,
+    detail: `${where} registers ${kinds.join(", ")} and no comparison could be made: ${unknown.join("; ")}${
+      floor.length === 0 ? "" : `. ${floor.join("; ")}`
+    }`,
   };
 }
 

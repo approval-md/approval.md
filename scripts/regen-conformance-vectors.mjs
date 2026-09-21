@@ -961,9 +961,28 @@ const readScopeVectors = [
     input: { harness: "hermes", tool: "read_file", target: "inside" },
   },
   {
-    id: "hermes-read-inside-relative-allows",
-    description: "a relative read_file is resolved against the hook's own directory",
+    id: "hermes-read-inside-relative-denies",
+    description:
+      "a RELATIVE read_file is refused on this harness rather than resolved: Hermes resolves a relative path against a per-session recorded directory that a cd moves and that no field of the event carries (its cwd is the Hermes process directory), so the verdict and the read would name different files. The refusal names the retry, which is an absolute path",
     input: { harness: "hermes", tool: "read_file", target: "inside-relative" },
+  },
+  {
+    id: "hermes-write-relative-denies",
+    description:
+      "the same refusal on a write: the tool a blocked model was observed retrying through must not be the way round the refusal",
+    input: { harness: "hermes", tool: "write_file", target: "inside-relative" },
+  },
+  {
+    id: "hermes-terminal-no-workdir-denies",
+    description:
+      "the shape a live Hermes session actually sent — a terminal call carrying command and nothing else — is refused, because the directory the command runs in is a per-session fact the envelope does not report",
+    input: { harness: "hermes", tool: "terminal", target: "inside", omit_workdir: true },
+  },
+  {
+    id: "hermes-terminal-absolute-workdir-allows",
+    description:
+      "the control for the two above: the same read with an ABSOLUTE workdir is classified and allowed, so the refusal is about the unbound directory and not about the tool",
+    input: { harness: "hermes", tool: "terminal", target: "inside" },
   },
   {
     id: "hermes-read-outside-denies",
@@ -982,8 +1001,9 @@ const readScopeVectors = [
     input: { harness: "hermes", tool: "search_files", target: "outside" },
   },
   {
-    id: "hermes-search-files-no-path-allows",
-    description: "a search_files carrying no path names no file, so it stays not-a-gated-tool",
+    id: "hermes-search-files-no-path-denies",
+    description:
+      "a search_files carrying NO path is refused on this harness, which is the opposite of the answer every other harness in this suite gives and is a measured fact rather than a preference: an unnamed target here is the per-session recorded directory, not the workspace, and a live session's was $HERMES_HOME/cache/scratch while a gateway session's was the user's home",
     input: { harness: "hermes", tool: "search_files", target: "absent" },
   },
   {
@@ -2314,11 +2334,36 @@ const SUITES = [
     // answered it with a verdict would pass every other vector here and fail this
     // one, because a permission decision about a call that has already run is a
     // decision nobody can act on.
-    vectors_version: "1.3.0",
+    // 2.0.0 (APRV-415): a MAJOR bump, and the first one this suite has taken. Two
+    // expectations MOVED, which is the rule for a major here (the precedent is
+    // `policy-resolution` 2.0.0): a relative Hermes read used to ALLOW and now
+    // DENIES, and a Hermes `search_files` naming no path used to allow and now
+    // denies. Both vectors were renamed to say so, so an implementation cannot
+    // pass by matching an id whose meaning changed underneath it.
+    //
+    // What moved them is evidence rather than taste. A live probe (APRV-398's
+    // notes) established that Hermes reports no effective directory for a call
+    // that does not state one: the envelope `cwd` is the Hermes PROCESS directory,
+    // `terminal` keeps a per-session recorded directory that a `cd` moves, and all
+    // four file tools resolve a relative path against THAT. So the answer 1.3.0
+    // froze — resolve a relative path against the hook's own directory, as every
+    // other harness in this suite does — bound a different file from the one the
+    // harness would have touched. A conforming implementation on this harness now
+    // refuses with `hook-unsupported-execution-context` and names the retry.
+    //
+    // Two new vectors ride the same bump without moving anything:
+    // `hermes-terminal-no-workdir-denies` sends the exact shape a live session
+    // sent (a `command` and nothing else), and
+    // `hermes-terminal-absolute-workdir-allows` is its control, so a reader can
+    // see that the refusal is about the unbound directory rather than about the
+    // tool. Every OTHER harness's vectors are untouched, and deliberately: this
+    // answer is a fact about Hermes, and applying it to Muse (whose `cwd` IS the
+    // session root) would refuse calls that harness reports perfectly well.
+    vectors_version: "2.0.0",
     algorithm:
       "SPEC.md §5.2/§7 (amended, APRV-347): the read scope, and the harness verdict for a read inside it, outside it, absent, unresolvable, or unreadable as input",
     description:
-      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors. The `muse-*` vectors cover Meta Muse Code's own tool names (`read_file`, `search` with its ARRAY of paths, `bash` with a per-call `workdir`) and one refusal that is not about the action at all: `muse-contributor-model-denies-an-allowed-read` sends a read INSIDE the scope, which every other vector allows, and expects a deny, because a Contributor-tier session discloses every byte it reads and the guard therefore sits above policy resolution. An implementation that resolved that vector by policy would allow it.",
+      "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors. The `muse-*` vectors cover Meta Muse Code's own tool names (`read_file`, `search` with its ARRAY of paths, `bash` with a per-call `workdir`) and one refusal that is not about the action at all: `muse-contributor-model-denies-an-allowed-read` sends a read INSIDE the scope, which every other vector allows, and expects a deny, because a Contributor-tier session discloses every byte it reads and the guard therefore sits above policy resolution. An implementation that resolved that vector by policy would allow it. The `hermes-*` vectors carry one answer that is the OPPOSITE of every other harness's here, and it is a fact about the harness rather than a choice: a relative path, and a call naming no path, are REFUSED under `hook-unsupported-execution-context`, because Hermes resolves both against a per-session recorded working directory that no field of the event reports, so a verdict over them would bind a different file from the one the harness touches. `hermes-terminal-absolute-workdir-allows` is the control that keeps that refusal about the unbound directory rather than about the tool.",
     vectors: readScopeVectors,
   },
   {

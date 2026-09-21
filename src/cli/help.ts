@@ -1507,7 +1507,7 @@ Commands:
   codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   grok         Grok Build camelCase Pre/PostToolUse JSON in; {decision,reason} out, DENY IS EXIT 2. \`approval hook grok --help\` prints the config
   muse         Muse Code snake_case Pre/PostToolUse; ONE dialect out or it fails open. \`approval hook muse --help\` prints the config
-  hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true is the point, and its default is false. \`approval hook hermes --help\` prints the YAML
+  hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true BLOCKS a broken hook (observed on main 118984d7; default false, and v0.21.3 ignores it silently). \`approval hook hermes --help\` prints the YAML
   classify     print what the classifier makes of a command line and exit
   --as <id>        proposing identity (default agent:<harness>)
   --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
@@ -1577,16 +1577,16 @@ export const HOOK_HERMES_HELP = `approval hook hermes — the gate in front of H
 Usage:
   approval hook hermes [--as agent:<id>] [--timeout <d>] [--interval <d>]
                        [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
-snake_case in (hook_event_name pre_tool_call|post_tool_call, tool_name, tool_input,
-session_id, cwd). ONE dialect out: {"action":"block","message":"…"} AT EXIT 2 for a
-deny, {} at exit 0 for an allow (Hermes has no allow directive; reason on stderr).
-Tools: terminal (command + per-call workdir), write_file, patch, read_file,
-search_files. execute_code is REFUSED (hook-hermes-execute-code-unbound): a
-program with no path, argv or workdir, whose kernel can call tools in-process.
-READ docs/hermes-hook.md FIRST. fail_closed: true turns hook crash, timeout and
-unparseable output into a BLOCK; ITS DEFAULT IS false; UNVERIFIED until the probe
-runs. No hooks_auto_accept and no TTY: Hermes SILENTLY SKIPS REGISTERING THE HOOK.
-The file the human commits, $HERMES_HOME/config.yaml (~/.hermes; policy.core):
+snake_case in (hook_event_name pre_tool_call|post_tool_call, tool_name, tool_input).
+ONE dialect out: {"action":"block","message":"…"} AT EXIT 2 deny, {} at exit 0 allow
+(no allow directive; reason on stderr). Tools: terminal (command + ABSOLUTE workdir),
+write_file, patch, read_file, search_files. REFUSED: execute_code
+(hook-hermes-execute-code-unbound), and a call with no absolute workdir or a relative
+or missing path (hook-unsupported-execution-context): Hermes resolves those against a session directory no event reports.
+OBSERVED on main 118984d7: fail_closed: true BLOCKS hook crash, timeout and garbage.
+ITS DEFAULT IS false, and v0.21.3 (2026.9.14) fails open SILENTLY: run a 2026-09-20+ build.
+No hooks_auto_accept and no TTY: Hermes SILENTLY SKIPS REGISTERING THE HOOK. --dir IS MANDATORY (a gateway session's cwd is the user HOME); docs/hermes-hook.md has the evidence.
+The file the human commits, $HERMES_HOME/config.yaml — the home's LAST SEGMENT must be .hermes or the classifier does not see the organ (export HERMES_HOME=/Users/you/dev/hermes/.hermes; policy.core):
   plugins: { hook_callback_timeout: 600 }
   hooks_auto_accept: true
   hooks:

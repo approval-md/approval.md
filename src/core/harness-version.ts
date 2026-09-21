@@ -139,7 +139,40 @@ export function normalizeHarnessVersion(raw: unknown): string | null {
 export const HARNESS_PROBE_TIMEOUT_MS = 10_000;
 
 /**
- * Run `<binary> --version` once, uncached, and normalize what came back.
+ * How long the RAW first line of `<binary> --version` may be.
+ *
+ * Wider than {@link HARNESS_VERSION_LIMIT} because it holds a different kind of
+ * value for a different reader: nothing capped by this number is ever appended to
+ * the log (only {@link normalizeHarnessVersion}'s output is), and what needs the
+ * raw line is a diagnostic that must be able to read a build stamp a harness
+ * prints beside its semver. Hermes prints
+ * `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, which the log's own
+ * rule rejects on the non-ASCII separator alone. Capped and stripped of control
+ * characters all the same: this is third-party output on its way to a terminal.
+ */
+export const HARNESS_RAW_VERSION_LIMIT = 200;
+
+/**
+ * The first line of a `--version` output, as a line a diagnostic may print.
+ *
+ * One line, trimmed, control characters removed, capped. `null` for empty output
+ * or a line past the cap. It keeps non-ASCII bytes, which is the whole difference
+ * from {@link normalizeHarnessVersion}: a build stamp behind a typographic
+ * separator is exactly the fact a version floor has to read, and it is exactly
+ * the fact the write boundary will not accept.
+ */
+export function rawHarnessVersionLine(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const first = raw.split("\n", 1)[0] ?? "";
+  // `\p{Cc}` rather than an escaped range: the class is the Unicode CONTROL
+  // category, which is the thing being removed, and it reads as that.
+  const text = first.replace(/\p{Cc}/gu, "").trim();
+  if (text.length === 0 || text.length > HARNESS_RAW_VERSION_LIMIT) return null;
+  return text;
+}
+
+/**
+ * Run `<binary> --version` once, uncached, and return its raw first line.
  *
  * Every failure is a value rather than an exception, in the manner of
  * {@link spawnGloss}: a missing binary, a non-zero exit and a timeout kill are
@@ -150,7 +183,7 @@ export const HARNESS_PROBE_TIMEOUT_MS = 10_000;
  * vault passphrase, and it has no use for either. Nothing is declared, because
  * reading a version is not a granted action.
  */
-export function probeHarnessVersion(kind: HarnessKind): string | null {
+export function probeHarnessVersionRaw(kind: HarnessKind): string | null {
   let result;
   try {
     result = spawnSync(HARNESS_BINARY[kind], ["--version"], {
@@ -166,33 +199,180 @@ export function probeHarnessVersion(kind: HarnessKind): string | null {
     return null;
   }
   if (result.error !== undefined || result.status !== 0) return null;
-  return normalizeHarnessVersion(result.stdout);
+  return rawHarnessVersionLine(result.stdout);
+}
+
+/**
+ * Run `<binary> --version` once, uncached, and normalize what came back.
+ *
+ * The recordable form: one line, printable ASCII, capped. Exported for the test
+ * that proves the memo below is a memo.
+ */
+export function probeHarnessVersion(kind: HarnessKind): string | null {
+  return normalizeHarnessVersion(probeHarnessVersionRaw(kind));
 }
 
 /**
  * The memo. Holds the FAILURES too: a harness that is not on PATH is not on
  * PATH, and asking a second time in the same process would pay a second spawn
  * for the same `null`.
+ *
+ * It holds the RAW line rather than the recordable one, so the two readers — the
+ * provenance field and the version floor — still cost ONE spawn per process
+ * between them. A harness whose raw line the write boundary rejects has a
+ * `null` recordable version and a readable raw one, which is precisely Hermes's
+ * case and precisely why the floor is not read off a record.
  */
 const probed = new Map<HarnessKind, string | null>();
+
+/** The raw first line of `<binary> --version`, read at most once per process. */
+export function installedHarnessVersionRaw(kind: HarnessKind): string | null {
+  const memo = probed.get(kind);
+  if (memo !== undefined) return memo;
+  const value = probeHarnessVersionRaw(kind);
+  probed.set(kind, value);
+  return value;
+}
 
 /**
  * The installed version of `kind`, read at most once per process.
  *
- * This is the only entry point callers should use. `probeHarnessVersion` is
- * exported for the test that proves the memo is a memo.
+ * This is the only entry point callers should use for a RECORDABLE version.
+ * `probeHarnessVersion` is exported for the test that proves the memo is a memo.
  */
 export function installedHarnessVersion(kind: HarnessKind): string | null {
-  const memo = probed.get(kind);
-  if (memo !== undefined) return memo;
-  const value = probeHarnessVersion(kind);
-  probed.set(kind, value);
-  return value;
+  return normalizeHarnessVersion(installedHarnessVersionRaw(kind));
 }
 
 /** Drop the memo. TEST ONLY: a process reads a version once, by design. */
 export function resetHarnessVersionCache(): void {
   probed.clear();
+}
+
+// ---------------------------------------------------------------------------
+// The Hermes fail-closed version floor (APRV-415)
+// ---------------------------------------------------------------------------
+
+/**
+ * The build at which Hermes Agent starts honouring `fail_closed` (APRV-415).
+ *
+ * ## Why a floor exists at all, and why it is a DATE rather than a version
+ *
+ * `approval hook hermes` is enforcement rather than a backstop only because of a
+ * per-entry `fail_closed: true` that makes a hook crash, a hook timeout and
+ * unparseable hook output BLOCK. The live probe measured both halves of that on
+ * two builds of the same harness, and the answer differs between them:
+ *
+ * - `main` at `118984d7`, built 2026-09-20: crash, garbage and hang were all
+ *   REFUSED (the hang at the 300s per-entry cap). The key works;
+ * - `v0.21.3`, built 2026.9.14: all three PROCEEDED. That build does not know the
+ *   key and ignores it SILENTLY. `hermes hooks list` renders no `fail_closed`
+ *   flag on either build, so the listing cannot be used to tell them apart.
+ *
+ * The two builds report the SAME semver. `hermes --version` on the older one
+ * prints `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, and the update
+ * that fixed the behaviour moved 670 commits without moving `0.21.3`. So a floor
+ * expressed as a semantic version would compare the one field that did not
+ * change, and would pass a build that fails open. The build DATE and the upstream
+ * commit are the two fields that did move, and they are what this compares.
+ *
+ * ## What it can and cannot do
+ *
+ * It can only ADD a red line to `approval doctor` (SPEC.md §11.1 invariant 4: a
+ * self-reported field never reduces scrutiny). A build claiming a later date buys
+ * nothing — it defeats a row that would have asked a human to look — and nothing
+ * in the runtime reads this to widen a verdict, skip a wait or lower a class. The
+ * refusals the adapter emits are the same on every build; what changes below the
+ * floor is whether a BROKEN hook stops the call, which no code in this repository
+ * can observe from inside the hook it is broken in.
+ */
+export const HERMES_FAIL_CLOSED_FLOOR = {
+  /** The first build observed to honour the key, by upstream commit. */
+  upstream: "118984d7",
+  /** That build's date, in the `YYYY.M.D` stamp `hermes --version` prints. */
+  date: { year: 2026, month: 9, day: 20 },
+  /** The one sentence every surface quotes, so they cannot drift apart. */
+  statement:
+    "a build at or after main 118984d7 of 2026-09-20; v0.21.3 (2026.9.14) fails open silently",
+} as const;
+
+/** A build stamp, as `hermes --version` prints one. */
+export interface HermesBuildDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+/** What `hermes --version`'s first line states, field by field. */
+export interface HermesVersionFields {
+  /** The semver, which did NOT move across the fail-closed fix. */
+  semver: string | null;
+  /** The build date, `(2026.9.14)`, which did. */
+  date: HermesBuildDate | null;
+  /** The upstream commit, `· upstream 913d4098`, which did. */
+  upstream: string | null;
+}
+
+/**
+ * Read the fields out of `hermes --version`'s first line, or `null`.
+ *
+ * Shape-only and forgiving in one direction: a field this cannot find is `null`
+ * rather than a guess, and a line naming none of the three is not a Hermes
+ * version line at all. The observed line is
+ * `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`; the separator is read
+ * past rather than required, because a release that changes its punctuation must
+ * not silently turn the floor check into an unknown.
+ */
+export function parseHermesVersion(raw: unknown): HermesVersionFields | null {
+  const line = rawHarnessVersionLine(raw);
+  if (line === null) return null;
+  const semver = /\bv(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/u.exec(line);
+  const stamp = /\((\d{4})\.(\d{1,2})\.(\d{1,2})\)/u.exec(line);
+  const upstream = /\bupstream\s+([0-9a-f]{7,40})\b/iu.exec(line);
+  if (semver === null && stamp === null && upstream === null) return null;
+  return {
+    semver: semver?.[1] ?? null,
+    date:
+      stamp === null
+        ? null
+        : {
+            year: Number(stamp[1]),
+            month: Number(stamp[2]),
+            day: Number(stamp[3]),
+          },
+    upstream: upstream?.[1]?.toLowerCase() ?? null,
+  };
+}
+
+/**
+ * Does this Hermes build honour `fail_closed`?
+ *
+ * - `"honours"` — its upstream commit IS the floor's, or its build date is on or
+ *   after the floor's date;
+ * - `"ignores"` — its build date is BEFORE the floor's. This is the one answer
+ *   that names a fault, and it is the state a live probe measured rather than
+ *   inferred;
+ * - `"unknown"` — no version could be read, or the line carries neither a build
+ *   date nor the floor's commit. Two commit hashes cannot be ORDERED without a
+ *   repository, so a build stamped with an unfamiliar commit and no date is
+ *   honestly unknown rather than quietly either.
+ *
+ * `"unknown"` is not a synonym for `"ignores"`, deliberately. This value feeds a
+ * health check, and a health check that cried fault on every unreadable banner
+ * would train an operator to stop reading it, which costs more than the case it
+ * would catch. What guards the unknown case instead is the doc, the help block
+ * and the probe's own report, all of which state {@link
+ * HERMES_FAIL_CLOSED_FLOOR.statement} verbatim.
+ */
+export function hermesFailClosedSupport(raw: unknown): "honours" | "ignores" | "unknown" {
+  const fields = parseHermesVersion(raw);
+  if (fields === null) return "unknown";
+  const floor = HERMES_FAIL_CLOSED_FLOOR;
+  if (fields.upstream !== null && fields.upstream.startsWith(floor.upstream)) return "honours";
+  if (fields.date === null) return "unknown";
+  const asNumber = (date: HermesBuildDate): number =>
+    date.year * 10_000 + date.month * 100 + date.day;
+  return asNumber(fields.date) >= asNumber(floor.date) ? "honours" : "ignores";
 }
 
 /**

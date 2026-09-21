@@ -729,13 +729,14 @@ export const HERMES_POST_TOOL_EVENT = "post_tool_call";
  * answers everything here. A `paths` array arriving from a future release would
  * fall to that same list handling with no change, because the gate reads both.
  *
- * Read off the published source rather than a vendor page, and still UNVERIFIED
- * against a running session in the sense that matters (`docs/hermes-hook.md`
- * says so): AC1's probe records the tool names an actual session sends. The
- * failure direction is the one APRV-347 made safe — a listed tool Hermes never
- * sends is INERT, an unlisted tool it does send would be an unscoped read — and
- * a read arriving through `terminal` as `cat` is scoped by the classifier
- * regardless, which is the floor under all of it.
+ * OBSERVED (APRV-415, the live probe of APRV-398): a running session sent
+ * `read_file` with `path` and `limit`, and the tools it sent in total were
+ * `terminal`, `write_file`, `patch`, `read_file` and `execute_code`.
+ * `search_files` was not exercised by the five prompts, so it stays on this list
+ * as the registration says, in the direction APRV-347 made safe: a listed tool
+ * Hermes never sends is INERT, an unlisted tool it does send would be an
+ * unscoped read. A read arriving through `terminal` as `cat` is scoped by the
+ * classifier regardless, which is the floor under all of it.
  */
 const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
 
@@ -754,39 +755,57 @@ const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
  * Hermes's shell-hook parser accepts two block dialects, checked in this order:
  * its own `{action:"block", message}` and a Claude-compatible
  * `{decision:"block", reason}`. This adapter emits the NATIVE one and never
- * both. Muse is why (`docs/muse-hook.md`): there, a payload carrying several
- * dialects at once was itself unparseable, an unparseable hook was a failed
- * hook, and a failed hook failed OPEN, so being more explicit made the refusal
- * weaker. The native form is preferred over the compatible one because it is
- * the shape the parser tries first and the one least likely to be dropped by a
- * release that tidies up a compatibility layer.
+ * both.
+ *
+ * The live probe (APRV-415) measured every dialect one at a time and then all of
+ * them at once: `{action:"block"}` at exit 2, `{action:"block"}` at exit 0,
+ * `{decision:"block"}`, a bare exit 2, and the mixed payload ALL BLOCKED. So
+ * HERMES TOLERATES A SUPERSET, which is exactly where it differs from Muse — a
+ * payload carrying several dialects there was unparseable, an unparseable hook
+ * was a failed hook, and a failed hook failed OPEN, so being more explicit made
+ * the refusal weaker (`docs/muse-hook.md`). One dialect is still what this
+ * adapter emits, and the reason is now the smaller one rather than the load-
+ * bearing one: the native form is the shape the parser tries first and the one
+ * least likely to be dropped by a release that tidies up a compatibility layer,
+ * and a verdict whose meaning does not depend on how much of it the harness
+ * understood is a verdict a reader can check. The tolerance is a fact about this
+ * release, not a licence to hedge in the next one.
  *
  * THE ALLOW IS `{}`, and that is not a placeholder. Hermes has no
  * `{"action":"allow"}`: its parser returns "no directive" for an empty stdout,
  * for `{}`, and for any JSON object naming no directive key, and no directive
- * means the call proceeds. `{}` is chosen over an empty stdout because the two
- * are distinguishable to a human reading a log and only one of them says a hook
- * ran and decided; it is chosen over an invented `{"action":"allow"}` because
- * that spelling would be an allow only by falling through the parser's
- * unrecognised-directive path, and a verdict that works by not being understood
- * is a verdict one release could turn into a block. The reason text rides on
- * stderr, where Hermes reads it only as a block message at the blocking exit
- * code — which an allow never uses.
+ * means the call proceeds. The probe confirmed it: the `allow-empty-object`
+ * trial CREATED its file under `fail_closed: true`. `{}` is chosen over an empty
+ * stdout because the two are distinguishable to a human reading a log and only
+ * one of them says a hook ran and decided; it is chosen over an invented
+ * `{"action":"allow"}` because that spelling is an allow only by falling through
+ * the parser's unrecognised-directive path — which the probe also measured, and
+ * which did fall through on the old build — and a verdict that works by not being
+ * understood is a verdict one release could turn into a block. The reason text
+ * rides on stderr, where Hermes reads it only as a block message at the blocking
+ * exit code, which an allow never uses.
  *
- * ## Why this could be the first real gate since Claude Code
+ * ## The first real gate since Claude Code, measured
  *
  * A per-entry `fail_closed: true` turns three hook failures into a BLOCK: a
  * spawn error, a timeout, and stdout that is non-empty and not a JSON object.
- * Grok Build and Muse Code both fail open on all three with no setting to
- * change it, so both adapters are enforcement only while healthy. Two limits
- * ride with it, and `docs/hermes-hook.md` states both rather than selling the
- * headline: the default is `false`, so an entry without the key fails open; and
- * the key does not cover a hook that exits non-zero having printed NOTHING,
- * which is left to {@link HERMES_DENY_EXIT}'s unconditional block.
+ * Grok Build and Muse Code both fail open on all three with no setting to change
+ * it, so both adapters are enforcement only while healthy.
  *
- * DOCUMENTED, UNVERIFIED AGAINST A RUNNING SESSION. Read from the published
- * source, not from a vendor page, and `scripts/probes/hermes-hook.mjs` is what
- * confirms or overturns it.
+ * OBSERVED, 3 OF 3, on Hermes `main` at `118984d7` (APRV-415): the armed crash
+ * was refused, the armed garbage was refused, and the armed hang was refused at
+ * exactly 300s, the per-entry cap. So this adapter is a gate on a current Hermes
+ * rather than a backstop, which no adapter since Claude Code could say.
+ *
+ * THREE LIMITS RIDE WITH IT, and `docs/hermes-hook.md` states all three rather
+ * than selling the headline. The default is `false`, so an entry without the key
+ * fails open. The key does not cover a hook that exits non-zero having printed
+ * NOTHING, which is left to {@link HERMES_DENY_EXIT}'s unconditional block. And
+ * there is a VERSION FLOOR: `v0.21.3` (build `2026.9.14`) does not know the key
+ * at all and ignores it silently, with `hermes hooks list` rendering no
+ * `fail_closed` flag on either build, so the listing cannot be used to check it.
+ * {@link HERMES_FAIL_CLOSED_FLOOR} in `core/harness-version.ts` carries the floor
+ * and `approval doctor`'s harness-version row reports a build below it.
  *
  * ## `execute_code` has no readable surface, and may not even be hooked
  *
@@ -796,23 +815,30 @@ const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
  *
  * There is a second reason, and it is the stronger one. `execute_code` runs in
  * a persistent kernel whose scripts can call Hermes's other tools IN-PROCESS.
- * Whether those inner calls re-fire `pre_tool_call` is not established, and if
- * they do not, then one `execute_code` call is an unbounded bypass of this
- * entire adapter. Refusing the tool is the only answer available to a hook that
- * cannot see inside it, and it is the fail-closed one.
+ * Whether those inner calls re-fire `pre_tool_call` is STILL not established and
+ * cannot be established from here: the probe refused every `execute_code` call
+ * before it ran, twice, which is the refusal working and is also the reason no
+ * inner call was ever observed. If they do not re-fire, one `execute_code` call
+ * is an unbounded bypass of this entire adapter. Refusing the tool is the only
+ * answer available to a hook that cannot see inside it, and it is the
+ * fail-closed one.
  */
 const HERMES_ADAPTER: HarnessAdapter = {
   kind: "hermes",
   originApp: "hermes-hook",
   defaultActor: "agent:hermes",
-  // `terminal`, carrying `command` and a PER-CALL `workdir`. That second field
-  // is what makes this adapter enforcement rather than a refuse-early stub: it
-  // is the fact Codex's native contract withholds (APRV-310), and a verdict
-  // cannot bind bytes whose effective directory it cannot see.
+  // `terminal`, carrying `command` and a PER-CALL `workdir`. Hermes's contract
+  // has the field Codex's withholds (APRV-310), and the live probe found that
+  // having it is not the same as being sent it: the model passed no `workdir` at
+  // all, and the directory the command would have run in is reported nowhere
+  // else. So the field makes enforcement POSSIBLE and
+  // {@link hermesUnboundDirectory} is what makes it actual, by refusing the call
+  // that leaves the field out instead of guessing a directory for it.
   shellTool: "terminal",
   // `write_file` names `path` and `content`; `patch` names `path`,
   // `old_string` and `new_string`. Both shapes are already what
-  // `fileToolGate` reads, so neither needed a new key.
+  // `fileToolGate` reads, so neither needed a new key. Both were observed on the
+  // live run, `patch` with `new_string`, `old_string` and `path` exactly.
   fileTools: ["write_file", "patch"],
   readTools: HERMES_READ_TOOLS,
   shellCwdKey: "workdir",
@@ -890,8 +916,11 @@ function decision(
     // asserts the top-level keys precisely so a later edit cannot quietly add
     // one — on Muse a verdict carrying an unsupported key was a FAILED hook and
     // a failed hook failed open, which made the more explicit refusal the weaker
-    // one. Hermes is not Muse and may well tolerate a superset; one dialect
-    // costs nothing to be right about and the other bet costs a session.
+    // one. APRV-415 measured Hermes on the same question and it is NOT Muse: the
+    // mixed payload blocked, so this harness tolerates a superset. One dialect is
+    // kept anyway, because the tolerance is a property of one release and a
+    // verdict whose meaning depends on how much of it the harness parsed is not a
+    // verdict a reader can check.
     //
     // THE ALLOW IS `{}` AND CARRIES NO REASON, which is the harness's own
     // vocabulary rather than a shrug: Hermes has no allow directive, and a
@@ -993,6 +1022,96 @@ export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
 /** The tool that carries a program and no path, no argv and no directory. */
 const HERMES_EXECUTE_CODE_TOOL = "execute_code";
+
+/**
+ * The retry a Hermes session makes after one of these refusals, in one place.
+ *
+ * It is the whole point of refusing rather than falling back: a session that is
+ * told what to send next stays usable, and the live probe watched the model
+ * answer a block by trying the SAME effect through another tool and another
+ * directory. A refusal that did not name the repair would get that behaviour
+ * again, one tool along.
+ */
+const HERMES_ABSOLUTE_RETRY =
+  "spell the directory in full from `/` and send the call again; the classifier then reads the same path the harness will write";
+
+/**
+ * A Hermes call whose effective directory this hook cannot see, as the reason it
+ * is refused, or `null` when the call binds its own directory (APRV-415).
+ *
+ * ## The fact, observed rather than reasoned
+ *
+ * The live probe of APRV-398 (Hermes `main` at `118984d7`, 60 envelopes) settled
+ * three things that together make this refusal necessary:
+ *
+ * 1. the envelope's `cwd` is the Hermes PROCESS directory (`Path.cwd()` in its
+ *    payload builder), which is not where the work happens. A session launched in
+ *    the scratch project wrote into `$HERMES_HOME/cache/scratch`, and a Telegram
+ *    gateway session's `cwd` was the USER HOME;
+ * 2. `terminal` keeps a PER-SESSION recorded working directory that a `cd` in an
+ *    earlier call moves, and no field of the event reports it. The model passed
+ *    no `workdir` at all on the probe's shell call;
+ * 3. all four file tools resolve a RELATIVE path against that same unreported
+ *    directory (`tools/file_tools_paths.py`, `_resolve_path_for_task`).
+ *
+ * So a call that does not state an absolute directory is the APRV-310 shape
+ * across every tool on this harness: the verdict would bind bytes in one
+ * directory and the harness would act in another. That is not a narrower answer
+ * this runtime may reach by guessing, and `describeToolCall`'s fallback to the
+ * event `cwd` — correct on Muse, where `cwd` IS the session root — would bind a
+ * directory that does not even contain the work here.
+ *
+ * ## Why a refusal rather than a fallback, and why it is usable
+ *
+ * SPEC.md §11.1: ambiguity resolves to the stricter path, and a self-reported
+ * field never reduces scrutiny. A relative `workdir` cannot widen anything, and
+ * on this harness it cannot be narrowed into either, because there is no
+ * trustworthy directory to fall back TO. The refusal carries
+ * `hook-unsupported-execution-context`, the same code the Codex `Bash` refusal
+ * carries, because it is the same defect — the harness did not say WHERE — and
+ * the repair differs only in being available: a Hermes session repairs it
+ * itself, in the next call, by naming an absolute path. That is why the reason
+ * names the retry rather than describing the contract.
+ *
+ * The probe also watched what a blocked model does next: it retries the same
+ * effect through another tool or another path. Refusing the shell tool alone
+ * would have moved the work into `write_file`, which is exactly why every gated
+ * tool is covered here and why an ABSENT path is refused beside a relative one.
+ * A missing `path` on this harness does not mean "the workspace" the way Claude
+ * Code's `Glob` does; it means that same unreported recorded directory.
+ */
+function hermesUnboundDirectory(input: HookInput, adapter: HarnessAdapter): string | null {
+  const tool = input.toolName;
+  if (tool === adapter.shellTool) {
+    const key = adapter.shellCwdKey ?? "workdir";
+    const declared = readString(input.toolInput, key);
+    if (declared !== null && isAbsolute(declared)) return null;
+    return `Hermes \`${tool}\` is refused because the call ${
+      declared === null
+        ? `states no \`${key}\``
+        : `states a relative \`${key}\` (${JSON.stringify(declared)})`
+    }, and this harness reports the effective directory nowhere else: its \`cwd\` is the Hermes process directory, while the command runs in a per-session directory that an earlier \`cd\` moves and no field of this event carries. A verdict over the command alone would bind bytes in a directory the hook cannot see. Set \`${key}\` to an absolute path — ${HERMES_ABSOLUTE_RETRY}. No policy or open window authorizes bytes whose directory the hook cannot bind`;
+  }
+  if (!adapter.fileTools.includes(tool) && !adapter.readTools.includes(tool)) return null;
+  // The same keys `fileToolGate` and `readToolGate` read, in their order, plus
+  // the `paths` array neither Hermes tool sends today: a later release that
+  // added one would otherwise arrive as an unbound call that reads as bound.
+  const declared =
+    readString(input.toolInput, "path") ??
+    readString(input.toolInput, "file_path") ??
+    readString(input.toolInput, "notebook_path");
+  const list = input.toolInput["paths"];
+  const entries = Array.isArray(list)
+    ? list.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+    : [];
+  const candidates = declared === null ? entries : [declared, ...entries];
+  if (candidates.length === 0) {
+    return `Hermes \`${tool}\` is refused because the call names no path at all. On this harness an unnamed target is not the workspace: it is the per-session recorded directory that an earlier \`cd\` moves and that no field of this event carries, and a live session's was \`$HERMES_HOME/cache/scratch\` while a gateway session's was the user's home. Name the directory or file with an absolute \`path\` — ${HERMES_ABSOLUTE_RETRY}`;
+  }
+  const relative = candidates.find((candidate) => !isAbsolute(candidate));
+  if (relative === undefined) return null;
+  return `Hermes \`${tool}\` is refused because the path it names is relative (${JSON.stringify(relative)}), and Hermes resolves a relative path against the per-session recorded directory that an earlier \`cd\` moves, which this event does not carry: its \`cwd\` is the Hermes process directory. The verdict and the write would name different files. Send the same call with an absolute path — ${HERMES_ABSOLUTE_RETRY}. No policy or open window authorizes a path the hook cannot place`;
+}
 
 /** The machine-readable code a Contributor-tier session is refused with. */
 export const MUSE_CONTRIBUTOR_REFUSAL = "hook-muse-contributor-model";
@@ -3743,18 +3862,31 @@ function readMuseReportedOutcome(input: HookInput): OutcomeReading {
  * neither leaves the path as vacuous as it was before this adapter existed, for
  * that call.
  *
- * UNVERIFIED which key the result arrives under, and the fallback is written for
- * that: an envelope with no readable result at all still closes the start on the
- * strength of the EVENT NAME, which is Hermes saying its own `post_tool_call`
- * code path ran. That is the same provenance the generic reader leans on and it
- * is the best available here.
+ * A POST EVENT ON THIS HARNESS IS NOT EVIDENCE THE TOOL RAN, which APRV-415's
+ * probe established and which changes what the missing-result case may conclude.
+ * `post_tool_call` fired 29ms after an exit-2 deny, and it fired again after the
+ * armed hang was refused at the 300s cap: Hermes reports the end of its own
+ * dispatch, not the end of an execution. So an envelope this reader cannot read
+ * is UNREADABLE rather than complete. The event name is Hermes saying its
+ * `post_tool_call` code path ran and nothing more, and crediting a completion on
+ * that alone would clear a failure streak (amended SPEC.md §10.2) on a call that
+ * may have been blocked. A blocked call usually has no `execution.started` to
+ * close, because the pre half appended nothing; the case this protects is the one
+ * where the pre half ALLOWED and something later in Hermes's own executor —
+ * `approvals.mode`, a guardrail, a tool-scope check — stopped the call anyway.
  */
 function readHermesReportedOutcome(input: HookInput): OutcomeReading {
   // A shell result arrives as an object on this harness (`tool_input` is an
   // object throughout its contract), so the generic object reader is the right
-  // shape; a string result says nothing about success and the event name stands.
+  // shape; a string result says nothing about success and says so below.
   const response = input.toolResponse;
-  if (response === null) return { ok: true, outcome: "completed" };
+  if (response === null) {
+    return {
+      ok: false,
+      detail:
+        "the post_tool_call event carries no readable result, and on this harness a post event is not evidence the tool ran: it fires for a blocked call and after a refused timeout, so nothing here says the execution completed or failed",
+    };
+  }
   if (response["interrupted"] === true || input.interrupted) {
     return {
       ok: false,
@@ -3774,6 +3906,11 @@ function readHermesReportedOutcome(input: HookInput): OutcomeReading {
   ) {
     return { ok: true, outcome: "failed" };
   }
+  // A result object the harness DID attach, naming neither an exit code nor an
+  // error: read as a completion, which is the generic reader's own precedent. The
+  // residual is stated rather than hidden — if a blocked call turns out to carry a
+  // result object of this shape, this line credits a completion that did not
+  // happen, and the repair is one more key here once a capture names it.
   return { ok: true, outcome: "completed" };
 }
 
@@ -4743,6 +4880,20 @@ function runHarnessHook(
       `Hermes ${HERMES_EXECUTE_CODE_TOOL} is refused because the call carries a program and nothing else: no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Run the work through the \`${adapter.shellTool}\` tool, where the words are visible to the classifier, or through \`approval run\` with a granted token. No policy or open window authorizes bytes the hook cannot read`,
       adapter.kind,
     );
+  }
+
+  // APRV-415, and placed here for the reason the two refusals above are: before
+  // the open window, the gate-self path, the carry and the registration, because
+  // none of those can supply the directory a Hermes call leaves out. The live
+  // probe established that this harness reports NO effective directory for a
+  // call that does not state one — see {@link hermesUnboundDirectory} — so the
+  // refusal is the Codex `Bash` refusal one harness along, narrowed to the calls
+  // that actually withhold the fact.
+  if (adapter.kind === "hermes") {
+    const unbound = hermesUnboundDirectory(input, adapter);
+    if (unbound !== null) {
+      return deny(streams, "hook-unsupported-execution-context", unbound, adapter.kind);
+    }
   }
 
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
