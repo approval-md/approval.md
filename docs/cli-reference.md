@@ -2474,6 +2474,15 @@ does not know the flag exists.
   or a refused gesture: `{count, recent}` per family, each recent entry naming the
   `seq`, the refusal `code` and the observed `sender` where there was one.
   Informational.
+- `daemon` — `{id, source, allowed}`, always present (APRV-383): the daemon
+  instance id a daemon run against THIS log would write onto every record it
+  appends, whether it came from `APPROVAL_DAEMON_ID` (`source: "environment"`) or
+  was derived from the instance (`source: "derived"`), and the `daemons` allowlist
+  the attested policy puts in force. `id: null` means `APPROVAL_DAEMON_ID` holds
+  something that is not a usable id, so a daemon started here would be refused
+  every append. `allowed: null` means no restriction, which is not the same fact as
+  an empty list. Informational: nothing here moves `healthy` or the exit code, and
+  being listed grants a daemon nothing beyond the ability to write.
 
 **`--json`** (one object on stdout):
 
@@ -2494,7 +2503,8 @@ does not know the flag exists.
    "note":"..."},
  "refusals":{"decision":{"count":2,"recent":[{"seq":21,"code":"policy-drift"}]},
    "gesture":{"count":1,"recent":[{"seq":24,"code":"sender-unmapped",
-     "sender":{"channel":"telegram","id":"5551234567"}}]}}}
+     "sender":{"channel":"telegram","id":"5551234567"}}]}},
+ "daemon":{"id":"daemon-3f2a9c11","source":"derived","allowed":null}}
 ```
 
 `ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
@@ -3039,6 +3049,22 @@ The checks, at length:
   would find nothing and report green, which is the worst direction a health
   check can fail in. The `fix` points at the harness's own configuration,
   because nothing here can turn another system's reviewer off.
+- **daemon-identity** — which daemon id a daemon run against this log would
+  write onto every record it appends, and whether the attested policy admits it
+  (APRV-383). The id is `APPROVAL_DAEMON_ID` from this shell where it is set and
+  otherwise `daemon-` plus the instance id the `keychain-scope` row names, so the
+  two rows describe one gate. A FAIL where `APPROVAL_DAEMON_ID` is set to
+  something that is not an id: a daemon started from this shell would be refused
+  `daemon-id-invalid` on every append, so it would read, render and report while
+  writing nothing, and the `fix` is that one variable. A loud SKIP where the
+  attested policy's `daemons` list does not admit the id, naming what the list
+  does admit — expected where the daemon for this log runs on another machine,
+  which is the hosted case the key exists for, and wrong if that daemon is meant
+  to be this one. A PASS where the list admits it, and where there is no list at
+  all, which is every installation that never adopts the key. Being listed grants
+  nothing beyond the ability to write: no verdict, budget, floor, draw or token
+  reads the id. The row reads the policy and one variable's SHAPE, prints no
+  value on any path, and asks no running daemon anything.
 
 
 

@@ -115,6 +115,7 @@ import {
   DEFAULT_DARK_WINDOW_MS,
 } from "../daemon/dark-session.js";
 import { useReadProof } from "../core/state.js";
+import { resolveDaemonId } from "../core/daemon-host.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { glossRunnerFromOptions, parseGlossOptions } from "./gloss-options.js";
 import { UP_HELP } from "./help.js";
@@ -769,6 +770,23 @@ export function commandUp(
         `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this process's own environment.\n`,
       );
     }
+  }
+
+  // APRV-383. WHO this daemon is, resolved before it is constructed, for the
+  // reason `approval daemon run` resolves it there: an unusable id refuses every
+  // append at the write boundary, and a process whose whole purpose is writing
+  // should not start to find that out. Silent on the happy path; the `started`
+  // line names the id.
+  const identity = resolveDaemonId(logPath);
+  if (!identity.ok) {
+    if (json) {
+      streams.err(
+        `${JSON.stringify({ error: { code: identity.code, message: identity.message } })}\n`,
+      );
+    } else {
+      streams.err(`approval: ${identity.message}\n`);
+    }
+    return EXIT_USAGE;
   }
 
   // APRV-390. `up_started` is announced inside `runParts` below, AFTER the

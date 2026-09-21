@@ -1113,9 +1113,9 @@ Flags:
 
 THIS IS NOT "approval queue": queue is what a human must answer, status is what
 an operator must fix. Writes nothing, and reports in one object: attestation,
-verification, dangling executions, budget headroom per global limit,
-loop_escalations, harness_outcomes, git coverage, payload_store, plus anomalies
-and refusals when there are any. Coverage and refusals are informational only.
+verification, dangling executions, budget headroom, loop_escalations,
+harness_outcomes, payload_store, git coverage, the daemon id, plus anomalies and
+refusals when there are any. The last three report rather than judge.
 
 JSON shape: docs/cli-reference.md#status
 ${EXIT_CODES_POINTER} (1 when anything needs attention, including a torn tail)

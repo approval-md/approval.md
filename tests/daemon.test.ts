@@ -421,6 +421,131 @@ test("drift: a file whose state contradicts the log appends envelope.drift", () 
   assertClean(dir);
 });
 
+// ===========================================================================
+// Hosted-daemon identity, end to end (APRV-383)
+// ===========================================================================
+
+/** `POLICY` with a `daemons` allowlist naming exactly `ids`. */
+function policyAllowing(ids: readonly string[]): string {
+  return POLICY.replace(
+    "classes:",
+    ["daemons:", ...ids.map((id) => `  - ${id}`), "classes:"].join("\n"),
+  );
+}
+
+test("identity: the started line names the id, and every record the pass appends carries it", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+
+  const { run, lines } = daemonOnce(dir, [], { APPROVAL_DAEMON_ID: "village-goa-1" });
+  assert.equal(run.code, 0, run.stderr);
+
+  // AC1: printed on start, without an operator asking the process anything.
+  const started = lines.find((line) => line["event"] === "started");
+  assert.ok(started !== undefined, run.stdout);
+  assert.equal(started["daemon"], "village-goa-1");
+
+  // AC2: the record this pass appended carries it, and the records written
+  // BEFORE the daemon ran (by the CLI verbs in `ready` and `request`) carry
+  // nothing, which is what "additive" means on a log that already exists.
+  const drift = eventsOf(dir, "envelope.drift");
+  assert.equal(drift.length, 1, run.stdout);
+  assert.equal((drift[0] as Record<string, unknown>)["daemon"], "village-goa-1");
+  for (const event of ["policy.updated", "task.registered", "approval.requested"]) {
+    const earlier = eventsOf(dir, event);
+    assert.equal(earlier.length, 1, event);
+    assert.equal("daemon" in (earlier[0] as Record<string, unknown>), false, event);
+  }
+  // The chain still verifies with the new field on one of its records.
+  assertClean(dir);
+});
+
+test("identity: with nothing declared, the id derives from the instance and is stable", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+
+  const first = daemonOnce(dir);
+  assert.equal(first.run.code, 0, first.run.stderr);
+  const started = first.lines.find((line) => line["event"] === "started");
+  assert.ok(started !== undefined, first.run.stdout);
+  const id = String(started["daemon"]);
+  assert.match(id, /^daemon-[0-9a-f]{8}$/u);
+
+  // A second pass is a second process: the id survives a restart because it is
+  // derived from the instance home rather than stored anywhere.
+  const second = daemonOnce(dir);
+  assert.equal(second.run.code, 0, second.run.stderr);
+  const restarted = second.lines.find((line) => line["event"] === "started");
+  assert.equal(restarted?.["daemon"], id);
+  assertClean(dir);
+});
+
+test("identity: an unlisted daemon warns once and appends nothing", () => {
+  const dir = ready(policyAllowing(["village-goa-1"]), "proposed");
+  request(dir, "task-042:chaser");
+  const before = readFileSync(logPath(dir), "utf8");
+
+  const { run } = daemonOnce(dir, [], { APPROVAL_DAEMON_ID: "village-goa-9" });
+  // The loop keeps running: the refusal is per append, and reading, rendering
+  // and reporting are not writes.
+  assert.equal(run.code, 0, run.stderr);
+  // Warnings go to stderr even under --json, so a `daemon run > daemon.log`
+  // keeps the narrative and leaves the complaints on the terminal.
+  const warnings = run.stderr
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const refused = warnings.filter((line) => line["code"] === "daemon-identity-refused");
+  assert.equal(refused.length, 1, run.stderr);
+  assert.match(String(refused[0]?.["message"]), /village-goa-9/u);
+  assert.match(String(refused[0]?.["message"]), /village-goa-1/u);
+  // And the append that was actually refused says so in its own words, with the
+  // write boundary's code.
+  assert.ok(
+    warnings.some(
+      (line) =>
+        line["code"] === "append-refused" &&
+        String(line["message"]).includes("daemon-not-allowed"),
+    ),
+    run.stderr,
+  );
+
+  // Nothing was written. The drift the previous case recorded is exactly what
+  // this pass would have appended, and the log is byte-identical instead.
+  assert.equal(readFileSync(logPath(dir), "utf8"), before);
+  assert.equal(eventsOf(dir, "envelope.drift").length, 0);
+  assertClean(dir);
+});
+
+test("identity: a listed daemon writes the record an unlisted one could not", () => {
+  const dir = ready(policyAllowing(["village-goa-1", "village-goa-2"]), "proposed");
+  request(dir, "task-042:chaser");
+
+  const { run } = daemonOnce(dir, [], { APPROVAL_DAEMON_ID: "village-goa-2" });
+  assert.equal(run.code, 0, run.stderr);
+  const drift = eventsOf(dir, "envelope.drift");
+  assert.equal(drift.length, 1, run.stdout);
+  assert.equal((drift[0] as Record<string, unknown>)["daemon"], "village-goa-2");
+  assertClean(dir);
+});
+
+test("identity: a declared id that is not an id refuses to start at all", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+  const before = readFileSync(logPath(dir), "utf8");
+
+  const run = runCli(["daemon", "run", "--once", "--json"], dir, {
+    APPROVAL_DAEMON_ID: "Village Goa 1",
+  });
+  // Usage, not integrity: the repair is in the launch environment. And the
+  // process does not start, because a daemon that cannot name itself would
+  // otherwise read, render and report while writing nothing.
+  assert.equal(run.code, 2, run.stdout);
+  assert.match(run.stderr, /daemon-id-invalid/u);
+  assert.equal(run.stdout, "");
+  assert.equal(readFileSync(logPath(dir), "utf8"), before);
+});
+
 test("drift: an unregistered task claiming `approved` contradicts the log", () => {
   const dir = caseDir(POLICY, "approved");
   assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);

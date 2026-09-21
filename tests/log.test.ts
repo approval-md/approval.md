@@ -428,6 +428,11 @@ test("head-moved is pinned in the append-error union", () => {
     // APRV-20 finding B1, human-approved 2026-08-07: an addition to the closed
     // union, not a rename of anything in it.
     "head-moved",
+    // APRV-383: two more additions, spread in from `core/daemon-identity.ts`.
+    // Neither renames anything above them, and both leave the file
+    // byte-identical like every member before them.
+    "daemon-id-invalid",
+    "daemon-not-allowed",
   ]);
 });
 
