@@ -148,6 +148,19 @@
         }
       }
     },
+    "daemons": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "SPEC.md §5.2 (amended, APRV-383): the daemon instance ids permitted to append to this log. An ALLOWLIST, and the counterpart of `approvers` one layer down: that key says which humans may decide, this one says which daemon processes may write the records of those decisions down.\n\nIt exists for the hosted case (`design/hosted-daemon-identity.md`): when one party runs the daemon for another, records the daemon appends carry `daemon` (see `event.schema.json`) naming the instance that wrote them, and this list is how the tenant's own attested policy states which of them it expects. A daemon whose id this list does not name is refused AT THE WRITE BOUNDARY with `daemon-not-allowed` and writes nothing.\n\nABSENT means NO RESTRICTION, not an empty list: a policy that never declares the key behaves exactly as every policy written before it existed, and the daemon-written records still carry their id. An empty array is a policy that admits no daemon at all, which is a thing an author may say and the runtime will enforce.\n\nWhat being LISTED buys is nothing (SPEC.md §11.1 invariant 4). The id is self-reported by the writing process, so it may only ever cost a daemon the ability to write: no verdict, autonomy, budget, floor, sampling draw, token or TTL reads this key or the record field, and a hostile host holding the tenant's log handle is not what this defends against. What it catches is a daemon started against the wrong tenant's log, a second daemon nobody meant to leave running, and a rebuilt container whose id changed, each of which used to write records indistinguishable from the intended daemon's.\n\nIt is a top-level key rather than a member of the `daemon` block below, and the distinction is worth the two names: `daemon` (singular) is how THIS daemon reads a log it already may write, every key in it a latency setting whose strictest value is the default, while `daemons` (plural) is an ENFORCEMENT key deciding WHICH daemons may write at all. Read only from an ATTESTED policy, like every other fact a refusal is derived from.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z0-9][a-z0-9._-]*$",
+        "description": "One daemon instance id, in the same grammar the `daemon` record field carries: lowercase letters, digits, `.`, `-` and `_`, starting with a letter or digit. Either an id the operator declared in that daemon's launch environment through `APPROVAL_DAEMON_ID`, or the derived `daemon-<instance id>` form that `approval status` and `approval doctor` print for the instance they are run against."
+      },
+      "examples": [["daemon-3f2a9c11"], ["village-goa-1", "village-goa-2"]]
+    },
     "classes": {
       "type": "object",
       "additionalProperties": false,
@@ -213,7 +226,7 @@
     "daemon": {
       "type": "object",
       "additionalProperties": false,
-      "description": "APRV-217 (docs/proposals/incremental-prefix-proof.md): how the long-lived readers of this log prove a cached prefix before they reuse it. Read by `approval daemon run` and `approval up` and by nothing else: one-shot processes, the Claude Code hook included, always prove in full, and `approval log verify` and `approval doctor` never use the cache at all. Every key here is a LATENCY setting whose strictest value is the default, so a policy that omits the block, or the whole block, behaves exactly as the runtime did before it existed.",
+      "description": "APRV-217 (docs/proposals/incremental-prefix-proof.md): how the long-lived readers of this log prove a cached prefix before they reuse it. Read by `approval daemon run` and `approval up` and by nothing else: one-shot processes, the Claude Code hook included, always prove in full, and `approval log verify` and `approval doctor` never use the cache at all. Every key here is a LATENCY setting whose strictest value is the default, so a policy that omits the block, or the whole block, behaves exactly as the runtime did before it existed. Not to be confused with the top-level `daemons` list above (APRV-383), which is an enforcement key naming WHICH daemon instances may append to this log; this block is how a daemon that may already write reads.",
       "properties": {
         "read_proof": {
           "type": "string",

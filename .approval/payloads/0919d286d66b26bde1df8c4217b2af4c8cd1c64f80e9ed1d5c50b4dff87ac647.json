@@ -1,0 +1,1 @@
+{"command":"f=$(find . -name values.schema.json -not -path '*/node_modules/*' | head -1); echo $f; cat \"$f\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

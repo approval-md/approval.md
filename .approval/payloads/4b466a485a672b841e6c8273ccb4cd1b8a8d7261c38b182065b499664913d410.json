@@ -1,0 +1,1 @@
+{"command":"sed -n '1,120p' /opt/homebrew/lib/node_modules/npm/node_modules/pacote/lib/dir.js","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes"}

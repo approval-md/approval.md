@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -rn \"exceeds 25 lines\" tests/*.ts | head -3; F=$(/usr/bin/grep -a -rln \"exceeds 25 lines\" tests/*.ts | head -1); /usr/bin/grep -a -n -B4 -A30 \"exceeds 25 lines\" \"$F\" | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

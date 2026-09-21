@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes && gh release view v0.3.0 2>&1 | head -25","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

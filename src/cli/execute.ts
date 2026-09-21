@@ -105,6 +105,8 @@ import { readVerifiedRecords, requestState } from "../core/state.js";
 import { deliveredToken } from "../core/token.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import type { EventRecord } from "../core/log.js";
+import { resolveDaemonAllowlist, resolveDaemonId } from "../core/daemon-host.js";
+import { DAEMON_ID_ENV } from "../core/daemon-identity.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -1504,6 +1506,24 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     records: verification.status === "corrupt" ? null : verification.records,
   };
 
+  // APRV-383. The daemon identity this instance resolves, and the allowlist in
+  // force for it. `status` is not the daemon, so what it reports is the id a
+  // daemon started HERE would write: that is the fact an operator wiring up a
+  // hosted deployment needs, and the one a tenant needs to look up a `daemon`
+  // field they have just read in a record.
+  //
+  // The allowlist comes from `resolveDaemonAllowlist`, so it is reported only
+  // when the policy loads AND is attested — the same bytes the write boundary
+  // would refuse on. An unattested policy reports `null`, no restriction, which
+  // is exactly what the write boundary would do with it.
+  const daemonId = resolveDaemonId(logPath);
+  const daemonAllowlist = resolveDaemonAllowlist(records, loadPolicy(policyLocation(flags, cwd)));
+  const daemonReport = {
+    id: daemonId.ok ? daemonId.id : null,
+    source: daemonId.ok ? daemonId.source : null,
+    allowed: daemonAllowlist.ok ? daemonAllowlist.allowed : null,
+  };
+
   // APRV-376, and informational for the reason stated where it is computed: the
   // two refusal families, counted, with the newest few of each. Neither the
   // health line below nor the exit code reads it.
@@ -1571,6 +1591,11 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       },
       reconciliation: obligations,
       payload_store: payloadStore,
+      // APRV-383. Always present, for the reason `coverage` is: three keys every
+      // consumer sees on every log, whether or not a daemon has ever run here and
+      // whether or not the policy restricts one. `allowed: null` is no restriction
+      // and is not the same fact as an empty list, which admits nobody.
+      daemon: daemonReport,
       ...(anomalies.length === 0 ? {} : { anomalies }),
       // APRV-376. Present only when the log carries a refusal of either family,
       // and each family present only when that family has one, so a repository
@@ -1783,6 +1808,30 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
                   `seq ${item.seq}  ${item.action_key}  ${item.class}  ${item.obligation} — close with \`approval audit reconcile ${item.seq}\``,
               ),
             }),
+      },
+      {
+        // APRV-383. The id a daemon started against THIS log writes onto every
+        // record it appends, and whether the attested policy admits it. Printed
+        // by a verb that is not the daemon on purpose: an operator setting up a
+        // hosted deployment needs the id before anything is running, and a tenant
+        // reading a record's `daemon` field needs somewhere to look it up.
+        // Informational: it moves neither `healthy` nor the exit code, because
+        // nothing here is a fact about the log's integrity.
+        left: "daemon identity",
+        right:
+          daemonReport.id === null
+            ? st.fail(`UNUSABLE (${DAEMON_ID_ENV} is set to something that is not an id)`)
+            : `${daemonReport.id} ${st.muted(`(${daemonReport.source})`)}`,
+        under:
+          daemonReport.allowed === null
+            ? [st.muted("the policy lists no allowed daemon ids, so any daemon may write")]
+            : [
+                daemonReport.id !== null && daemonReport.allowed.includes(daemonReport.id)
+                  ? st.muted(`allowed by the policy's daemons list (${daemonReport.allowed.join(", ")})`)
+                  : st.warn(
+                      `NOT in the policy's daemons list (${daemonReport.allowed.length === 0 ? "empty" : daemonReport.allowed.join(", ")}) — a daemon started here would be refused every append`,
+                    ),
+              ],
       },
       { left: "log", right: relPath(logPath, cwd) },
     ];

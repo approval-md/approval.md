@@ -1,0 +1,1 @@
+{"command":"grep -n \"Read\\|Glob\\|Grep\\|matcher\" docs/claude-code-hook.md | head -20; echo ---; grep -rn \"Read|Glob|Grep\\|Glob|Grep\" docs/*.md src/cli/*.ts | grep -v \"readTools\" | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

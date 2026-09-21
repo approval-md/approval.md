@@ -1,0 +1,1 @@
+{"command":"cat eslint.config.* 2>/dev/null | head -80 && echo --- && cat package.json | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

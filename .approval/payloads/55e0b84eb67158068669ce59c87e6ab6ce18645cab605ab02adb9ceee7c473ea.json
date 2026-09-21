@@ -1,0 +1,1 @@
+{"command":"npm test > /tmp/claude-501/full.out 2>&1; echo \"npm test exit=$?\"; /usr/bin/grep -a -E \"^ℹ (tests|pass|fail|cancelled|skipped|todo)\" /tmp/claude-501/full.out | tail -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}

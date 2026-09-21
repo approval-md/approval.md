@@ -1,0 +1,1 @@
+{"command":"ls tests/ | head -80 && echo \"=== docs guard ===\" && grep -rln \"cli-reference\" tests/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

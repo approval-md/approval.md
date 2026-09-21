@@ -1,0 +1,1 @@
+{"command":"grep -rn \"settings.json\" tests/*.ts | grep -v cli-hook | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

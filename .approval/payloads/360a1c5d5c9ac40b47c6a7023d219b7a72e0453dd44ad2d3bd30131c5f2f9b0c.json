@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged && /usr/bin/grep -rn \"warning_codes\\|daemon_warning\" conformance/ src/ tests/ | head && echo --- && /usr/bin/grep -n \"case \\\"anchor-behind\\\"\\|DaemonWarningCode\" src/cli/*.ts src/daemon/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

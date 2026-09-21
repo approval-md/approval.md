@@ -1,0 +1,1 @@
+{"command":"SCRATCH=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/acd97477-1a12-4fc1-ade5-cd637812dfb1/scratchpad\ngrep -n -B3 -A15 'def register_hook' \"$SCRATCH/hermes_cli_plugins.py\" | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

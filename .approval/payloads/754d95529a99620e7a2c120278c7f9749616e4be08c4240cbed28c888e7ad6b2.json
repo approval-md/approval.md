@@ -1,0 +1,1 @@
+{"command":"node scripts/run-tests.mjs --only log-anchor > /tmp/claude-501/anchor.out 2>&1; echo \"exit=$?\"; tail -60 /tmp/claude-501/anchor.out","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}

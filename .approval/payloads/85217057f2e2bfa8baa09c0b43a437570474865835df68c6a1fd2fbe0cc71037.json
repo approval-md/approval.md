@@ -1,0 +1,1 @@
+{"command":"gh pr merge 522 --merge 2>&1 | tail -3; gh pr view 522 --json state,mergeStateStatus,autoMergeRequest -q '{state: .state, mergeState: .mergeStateStatus, auto: .autoMergeRequest}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

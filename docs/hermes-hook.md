@@ -445,13 +445,22 @@ What follows from the sections above, for that deployment:
 - **`execute_code` is refused**, so a resident's agent cannot run arbitrary Python
   through this gate at all. That is a real loss of capability and it is the honest
   trade while its in-process tool calls are unverified.
-- **Reaching the hosted daemon from a sandbox is unsolved here.** The hook writes
-  to a log and reads a policy; a sandboxed tenant has neither locally. APRV-383 is
-  that work, and this adapter cannot be deployed per-tenant until it lands.
+- **Reaching the hosted daemon from a sandbox is still unsolved here.** The hook
+  writes to a log and reads a policy; a sandboxed tenant has neither locally.
+  APRV-383 has since landed the part of that a tenant reads: every record the
+  hosted daemon appends names the daemon instance that wrote it, and the tenant's
+  attested policy may list which daemon ids may write at all
+  (`design/hosted-daemon-identity.md`). What it deliberately did NOT do is give a
+  sandbox a route to that daemon, so per-tenant deployment still waits on the
+  transport, the process isolation and the token scoping that document lists as out
+  of scope.
 
 What a future skill would install: the `hooks:` block above with the tenant's own
-`--dir`, the consent setting, and the daemon reach APRV-383 defines. Filed as its
-own task rather than sketched here.
+`--dir`, the consent setting, and whatever route to the hosted daemon that work
+settles on. Filed as its own task rather than sketched here. What it can already
+rely on: a record a resident's grant produces carries the id of the daemon that
+wrote it, so a resident reading their own log can tell which village process acted
+for them.
 
 ## SPEC status
 

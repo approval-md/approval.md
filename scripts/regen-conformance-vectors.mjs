@@ -2128,7 +2128,24 @@ const SUITES = [
     // that exposes the directory — here the call carries no path, no argv and no
     // directory at all, so there is nothing for a contract to expose. A caller
     // that could not tell the three apart would chase the wrong fix.
-    vectors_version: "20.0.0",
+    // 21.0.0 (APRV-383): `append_error_codes` gains `daemon-id-invalid` and
+    // `daemon-not-allowed`, the two ways the write boundary refuses an append for
+    // the IDENTITY of the daemon making it. Major for the reason 13.0.0 and 20.0.0
+    // were: this suite pins each union's whole array in definition order, so a
+    // longer union is a changed expectation.
+    //
+    // Two codes rather than one, because the repairs have nothing in common. The
+    // first says the process declared an id (`APPROVAL_DAEMON_ID`) that is not an
+    // id at all, so no record it wrote could be attributed to anything, and the
+    // repair is a launch environment. The second says the attested policy's
+    // `daemons` list does not admit this daemon, and the repair is a line in a
+    // policy a human re-attests. A second implementation that collapsed them would
+    // send an operator hunting through a policy for a broken variable.
+    //
+    // An implementation that carries no hosted-daemon identity at all still
+    // conforms to every OTHER vector here; what it cannot do is claim this union,
+    // because the union is what a caller branches on.
+    vectors_version: "21.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -2265,7 +2282,18 @@ const SUITES = [
     // exactly as it did. `tests/harness-enum.test.ts` is what makes the pair
     // unbreakable in future — it asserts one accepted record per harness kind, so
     // the adapter and the fixture land together or the suite fails.
-    vectors_version: "2.6.0",
+    // 2.7.0 (APRV-383): a MINOR bump, the same shape 2.1.0 and its successors
+    // were. Five new fixtures for the hosted-daemon identity: two accepted event
+    // records carrying the new optional top-level `daemon` field (one derived id,
+    // one declared), one refused for an id that is not an id (a space, a newline
+    // and a YAML fragment, which is precisely what a length-and-charset pattern
+    // exists to keep out of an append-only log), one accepted policy declaring a
+    // `daemons` allowlist, and one refused policy whose listed id is not in the
+    // grammar. No existing expectation moves: both keys are OPTIONAL and additive,
+    // so every record and every policy written before them validates exactly as it
+    // did, and an implementation that passed 2.6.0 fails this only by not knowing
+    // a field and a key that have been added.
+    vectors_version: "2.7.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -n -a -i \"hermes\\|nous\" SPEC.md docs/integrations-considered.md README.md CHANGELOG.md backlog/tasks/*.md 2>/dev/null | head -20; echo ---; /usr/bin/grep -n -a \"^### 6.3\\|^## 6\\|^### 6\\.\" SPEC.md | head; echo ---; /usr/bin/grep -n -a \"muse\" SPEC.md | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

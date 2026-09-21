@@ -4,8 +4,59 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
+A released version's heading is exactly `## X.Y.Z — YYYY-MM-DD`: a canonical
+stable version, an em dash, an ISO date. That is an interface, not a habit.
+`publish.yml` reads the matching section and publishes it as the body of the
+GitHub Release for the tag (`scripts/release-notes.mjs`, APRV-396), so a tag
+whose section is missing, undated or duplicated fails the release run before
+anything reaches npm. `## Unreleased` carries no version, which is what keeps
+it from ever being published as a release body; dating it is the last edit
+before a tag.
+
 ## Unreleased
 
+- **The Releases page fills itself from the changelog (APRV-396).** After a
+  successful publish, `publish.yml` creates the GitHub Release for the tag with
+  the matching changelog section as its body, the title `approval-md X.Y.Z`, and
+  the CI tarball plus its `sha256` file attached, so the Releases page and the
+  registry can be compared by hand. `scripts/release-notes.mjs` extracts the
+  section and refuses when the heading is missing, undated, duplicated or empty;
+  that check also runs in the verify job, ahead of `npm publish`, so a tag with
+  no notes never reaches the registry. A rerun updates the one Release rather
+  than duplicating it. The published manifest now also carries
+  `gitHead` (the release commit), which was `null` for 0.2.0 and 0.3.0 because
+  the publish job publishes a downloaded tarball with no repository beside it.
+
+- **Every record the daemon writes names the daemon that wrote it (APRV-383).**
+  A daemon-written record carries a new optional top-level `daemon` field holding
+  that daemon instance's id, so a tenant whose daemon is HOSTED by another party can
+  open their own log and tell which host process acted for them; before this they
+  all carried the same generic `system:daemon` actor. The id is
+  `APPROVAL_DAEMON_ID` from the daemon's launch environment where it is set, and
+  otherwise `daemon-` plus the instance id `approval doctor` already prints as its
+  `keychain-scope` suffix, so it is stable across restarts on one machine and
+  keystore with nothing stored anywhere. `approval up` and `approval daemon run`
+  name it on their `started` line, `approval status` reports it as `daemon`, and a
+  new `daemon-identity` doctor row reports it with the allowlist below. The field is
+  OPTIONAL and additive: every record written before it validates and verifies
+  unchanged, and its absence is absence rather than a claim that no daemon wrote the
+  record.
+- **`APPROVAL.md` may list which daemons may write (APRV-383).** A new top-level
+  `daemons` array names the daemon ids permitted to append to that log. ABSENT means
+  no restriction, exactly as every policy written before the key; an empty list
+  admits none. A daemon whose id an attested list does not name is refused at the
+  write boundary with a new `daemon-not-allowed`, and a daemon launched with an
+  `APPROVAL_DAEMON_ID` that is not a usable id is refused with a new
+  `daemon-id-invalid` (and `approval up` / `approval daemon run` decline to start at
+  all). Both join the frozen `append_error_codes` union, so the conformance vectors
+  take a major bump. The id is SELF-REPORTED, so it only ever costs a daemon the
+  ability to write: being listed grants nothing, and no verdict, autonomy, budget,
+  floor, sampling draw or token reads the field or the list (SPEC.md §11.1 invariant
+  4). The list is read only from the attested policy, and a policy that becomes
+  unreadable under a running daemon leaves the restriction it carried standing
+  rather than lapsing. `design/hosted-daemon-identity.md` states the whole hosting
+  model and what is deliberately out of scope: process isolation, token scoping and
+  billing.
 - **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398).**
   The sixth harness, and the first whose harness documents a **fail-closed** hook:
   a per-entry `fail_closed` turns a hook crash, a hook timeout and unparseable

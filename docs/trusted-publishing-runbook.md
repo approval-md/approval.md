@@ -38,12 +38,34 @@ that provenance identifies.
 
 The verifier requires package name `approval-md`, version equal to the tag,
 repository `github:approval-md/approval.md`, and a non-private package. It also
-requires Node 22.14.0 or newer and npm 11.5.1 or newer. It then runs the locked
-install, full test suite, lint, typecheck, and conformance suite without OIDC.
+requires Node 22.14.0 or newer and npm 11.5.1 or newer.
+
+It then requires the release notes to exist, before the locked install and so
+before anything that could publish: `node scripts/release-notes.mjs <tag>`
+extracts the `CHANGELOG.md` section whose heading matches the tag's version and
+refuses when there is no such section, when the heading carries no release date,
+when two headings name the version, or when the section is empty (APRV-396). A
+tag whose notes are not written therefore fails the release run with the
+registry untouched. The heading contract is exactly `## X.Y.Z — YYYY-MM-DD`,
+canonical version, em dash, ISO date; `## Unreleased` carries no version and can
+never match a tag.
+
+The verifier then runs the locked install, full test suite, lint, typecheck, and
+conformance suite without OIDC.
+
+Immediately before `npm pack`, and after the checks, the verifier binds the
+release commit into the manifest it is about to pack: `npm pkg set
+gitHead=$RELEASE_SHA`, validated as a full lowercase SHA first. The publish job
+publishes a downloaded tarball with no repository beside it, so npm has no
+repository to read a commit from and registry `gitHead` was `null` for 0.2.0 and
+0.3.0. This is the one field the release adds to the published metadata; no
+source file in the package changes.
 
 After `npm pack`, the verifier checks the pack result's name, version, and
 canonical filename. It reads `package/package.json` from the finished tarball and
-checks its name, version, public status, and repository again. It records and
+checks its name, version, public status, and repository again, plus that
+`gitHead` equals the release commit, so a field npm dropped would fail the
+release rather than pass unnoticed. It records and
 self-checks `release.tgz` with SHA-256, exposes that digest through the verify
 job's output channel, then uploads only `release.tgz` as the fixed `npm-package`
 artifact.
@@ -58,6 +80,27 @@ invokes exactly:
 ```text
 npm publish ./release/release.tgz --access public --ignore-scripts
 ```
+
+A third job creates the GitHub Release, and only after the publish job succeeds
+(APRV-396). It needs both earlier jobs, holds `contents: write` and no OIDC, and
+authenticates with the run's own `github.token`; no secret is referenced anywhere
+in the workflow. It checks out the pinned downstream commit with
+`persist-credentials: false`, downloads the same fixed `npm-package` artifact,
+re-verifies its SHA-256 against the verify job's independent output, copies it to
+`approval-md-X.Y.Z.tgz` and writes a `sha256sum` file beside it, and extracts the
+changelog section again from the checked-out bytes. Then either
+
+```text
+gh release create <tag> --verify-tag --title "approval-md X.Y.Z" --notes-file <body> <assets>
+```
+
+when no Release exists for the tag, or `gh release edit` plus
+`gh release upload --clobber` when one does, so a rerun updates the single
+Release and never duplicates it. `--verify-tag` refuses to invent a Release for a
+tag the remote does not have. The artifact keeps its one-file shape: the
+checksum attached to the Release is written from the verified bytes at release
+time, and the digest still travels between jobs through the job-output channel
+rather than beside the artifact.
 
 Fixed concurrency group `npm-publish` serializes release attempts and never
 cancels a run in progress. A relay rerun is rejected because its upstream
@@ -112,11 +155,15 @@ publish.
    The tag must point at current main and the package version must equal `X.Y.Z`.
 4. Keep main fixed until the downstream publish workflow's tag/main binding step
    passes. Then observe the relay, verifier, artifact upload, environment
-   admission, checksum verification, and npm publish jobs.
+   admission, checksum verification, npm publish, and Release jobs.
 5. Read back the exact package version and repository from npm, inspect the npm
    provenance statement, install that exact version in a clean directory, and
    run the repository's release verification. A successful workflow alone does
    not prove the public package is usable.
+6. Read the created Release: title `approval-md X.Y.Z`, body equal to the
+   changelog section, two assets, and the attached `sha256` equal to the digest
+   the verify job bound. `npm view approval-md@X.Y.Z gitHead` should print the
+   release commit.
 
 If the immutable tag fails the identity checks, do not move or delete it. Choose
 a new version and repeat the reviewed release process. A downstream workflow
@@ -137,6 +184,16 @@ version-matching current-main commit. Enforcing a hash-chained approval record a
 GitHub would require a separate server-side deployment protection or committed
 release-evidence contract. These workflows add no such mechanism and add no
 second GitHub reviewer.
+
+The Release job introduces the workflow's first repository write permission.
+`contents: write` is what creating a Release requires, and the same scope can
+write other repository contents where branch protection does not stop it. It is
+confined to a job with no OIDC and no npm authority, running after the publish,
+with a job-scoped `github.token` that expires with the run; its only commands are
+`gh release view`, `create`, `edit` and `upload` against the tag under release.
+The Release body and assets are public metadata and carry no npm authority: a
+Release that is wrong is corrected by editing it, and it cannot alter the
+published bytes.
 
 Repository and organization administrators can change rulesets, environments,
 workflow protections, and npm trust. GitHub-hosted runner images, Node 24 minor

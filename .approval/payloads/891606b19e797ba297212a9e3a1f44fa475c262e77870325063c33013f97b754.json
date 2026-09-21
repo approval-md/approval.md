@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'gitHead' /opt/homebrew/lib/node_modules/npm/node_modules/libnpmpublish/lib/*.js /opt/homebrew/lib/node_modules/npm/node_modules/@npmcli/package-json/lib/*.js /opt/homebrew/lib/node_modules/npm/node_modules/@npmcli/package-json/lib/**/*.js 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes"}

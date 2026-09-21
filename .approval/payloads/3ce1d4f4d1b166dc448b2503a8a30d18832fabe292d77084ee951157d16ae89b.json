@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes && /usr/bin/grep -rn 'agent-hours.mjs\\|classify-tier.mjs' README.md docs/*.md package.json 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"sed -n '1180,1210p' src/cli/main.ts && echo --- && /usr/bin/grep -a -n \"export function runStatus\\|export async function runStatus\" -r src/cli/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

@@ -92,6 +92,13 @@
         }
       ]
     },
+    "daemon": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "SPEC.md §8 (amended, APRV-383): WHICH daemon instance appended this record. Present exactly on the records a daemon wrote, so a tenant whose daemon is hosted by another party can open their own log and tell which host process acted on their behalf — before this field every daemon-written record carried the same generic `system:daemon` actor and nothing else. The value is either the id declared in the daemon's launch environment (`APPROVAL_DAEMON_ID`) or `daemon-` followed by the eight hex digits of the instance id `approval doctor` prints as its `keychain-scope` suffix, so it is stable across restarts on one machine and keystore without anything being stored.\n\nOPTIONAL and additive: every record written before the field existed still validates and still verifies, and the ABSENCE of the field is absence — it is never read as a claim that no daemon wrote the record, because until this task no daemon could say.\n\nSELF-REPORTED, and bounded by SPEC.md §11.1 invariant 4 in the only way a self-reported field may be: a policy MAY list the ids permitted to write (`daemons` in `policy.schema.json`), an id the list does not name is REFUSED at the write boundary (`daemon-not-allowed`), and an id the list DOES name gains nothing at all — no verdict, autonomy, budget, floor, sampling draw, token or TTL reads this field or that list. Its SHAPE is constrained here for the reason `payload.harness_version`'s is: the value comes from a launch environment and is being written into an append-only log, so a banner, a path, a newline or a shell fragment cannot arrive through it, and two ids differing only in case would be two ids nobody can tell apart on a phone."
+    },
     "task": {
       "type": "string",
       "minLength": 1,
