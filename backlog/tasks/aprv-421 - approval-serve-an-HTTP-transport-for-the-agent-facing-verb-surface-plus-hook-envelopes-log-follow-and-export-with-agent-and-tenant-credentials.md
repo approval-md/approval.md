@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:35'
+updated_date: '2026-09-21 07:51'
 labels:
   - hosting
   - daemon
@@ -216,6 +216,86 @@ Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and eve
 The partition was also checked directly against the coordinator's own list: 36 published verbs, 12 agent, 24 tenant, and the 24 are exactly the names the review enumerated with nothing left over in either direction.
 
 AC5 (both credential directions refuse with their own code) and AC6 (the export's contents) are the two the review touched. Both were re-verified after the fixes rather than left standing on the earlier run: AC5 by `every published verb off the allowlist refuses the agent credential`, `the agent allowlist is exactly the decided list`, `the verbs a harness needs ... DO answer the agent` and the unchanged tenant-direction test; AC6 by the archive test, which now asserts the payload bytes are present (both the fixture's and one the runtime itself wrote during attestation) alongside the four exclusions it already asserted by path and by byte scan.
+
+## Adversarial review of PR #534: eight findings, all fixed
+
+### 1 (BLOCKING). The export followed symlinks
+
+`archive.ts collect()` checked the archive-relative NAME against the allowlist and the exclusions, then `statSync`/`readFileSync` followed the link. `ln -s .approval/keys/sender.key .approval/log/note.jsonl` therefore passed every name-based check ever written and put the sender key in the tenant's archive; a link to a host file did the same for anything the process could read.
+
+Every entry is now `lstat`ed, and a symbolic link anywhere the walk reaches throws `ExportSymlinkError`, which the transport turns into a 409 `serve-export-symlink` naming the link's own relative path and never its target. The WHOLE export is refused rather than the link skipped: an archive silently missing a file is an archive nobody can tell from a complete one, and a tenant checking their exit against their own `payload_hash` values would find the gap only by doing the check.
+
+One consequence found while fixing it: the export now takes the append lock (see the note below), so `<log>.lock` exists for exactly the span of the copy and the archive started carrying it. Any `*.lock` under the store is excluded, asserted.
+
+### 2 (BLOCKING). Refusals carried no exit code, and the agent could force one
+
+The header contract is gone. `POST /verb/<name>` and `POST /hook/<harness>` now answer with ONE body:
+
+```json
+{"exit_code": 0, "stdout": "…", "stderr": "…",
+ "stdout_truncated": false, "stderr_truncated": false}
+```
+
+`stdout` and `stderr` are exactly what the CLI wrote to each stream and `exit_code` is exactly what it exited, so AC2 is satisfied by `stdout` being byte-equal to the stdin form's output — asserted directly in the table test, which also asserts `stdout_truncated` is false. Both streams are capped at 256 KiB and clipped with `StringDecoder`, which emits only whole codepoints; that also answers the note about `serve-no-structured-output` returning uncapped text, and retires that code, since the new contract never has to look for a JSON object in order to answer.
+
+Every refusal (401, 403, 404, 405, 413, 500, and the cursor refusals) keeps `{error:{code,message}}` and now also carries `exit_code: 2` in the body. A server-authored refusal on the HOOK route additionally carries the harness's own block directive in `stdout`, rendered by `harnessBlockDirective`, a new export over `cli/hook.ts`'s existing `deny()` — one construction site per dialect, no second implementation. A client that writes `stdout` and exits `exit_code` therefore blocks on both halves of every dialect at once.
+
+`docs/cli-reference.md` now states the client rule: **a missing, unparseable or truncated body is a BLOCK.** That covers the one case where no dialect can be spoken — a 401, which happens before the URL is parsed and so before the harness is known.
+
+### 3 (BLOCKING). Store-root flags were caller-supplied
+
+Two halves, both needed.
+
+`--dir`, `--log` and `--policy` are now pinned on EVERY verb call in EVERY scope from the launch configuration, whether or not the operator named them (`--dir` never was before). `ServerOptions` in `mcp/server.ts` gained an optional `dir`, injected by the same `buildArgv` both transports call and inert for `approval mcp serve`, which never sets it. `--policy` is pinned only where the operator named one, because it names a FILE; where they did not, `--dir` is the pin and the CLI resolves the policy from that directory.
+
+A caller supplying any of the three is refused `serve-path-pinned` even when the value is correct. Any other path-shaped argument must resolve inside the store and is refused `serve-path-outside-store` otherwise, checked through `realpath` on the deepest existing ancestor so a symlink in the middle cannot walk out and back in.
+
+**The stated fix did not reach positionals, and one of them is a hole.** `payload hash <file>` names a host file and is on the agent allowlist: `{"positionals":["/etc/hosts"]}` was a hash oracle over the host filesystem that also filed the bytes into the payload store. `request --payload <file>` was the same hole through a flag. The confinement above covers both, by flag and by positional, so the scope decision you made stands unchanged. **Worth your attention anyway:** a remote harness has no files on the host, so every path it could legitimately name is one the host put there, which makes `payload_hash` close to inert over this transport. Dropping it from the allowlist is a one-line change and I have not made it.
+
+### 4 and 8. Scope
+
+Agent scope is now exactly `instructions`, `hook_classify`, `request`, `wait`, `withdraw`, `payload_hash`, `payload_agentmail-draft`. `register`, `log_verify`, `gate_status`, `policy_check` and `policy_test` moved to the tenant side. The allowlist test pins that list exactly, and the sweep walks the published catalog asserting every verb off it refuses the agent credential.
+
+### 5. `from>0` without `cursor_hash`
+
+Refused `serve-invalid-cursor`. With `once` mode every request is a first read, so the hashless bootstrap's single weakness — it cannot detect a fully recomputed replacement prefix on a first read — would be permanent rather than paid once, and the caller who dropped the hash would be served the replaced prefix silently while the honest one got the refusal. `from=0` is the only hashless form.
+
+### 6. `from=99999999999999999999`
+
+Validated as a safe integer before anything reads a file, refused `serve-invalid-cursor`. It used to reach the subscription's `TypeError` and escape a GET as a 500.
+
+### 7. URL parsed before auth
+
+Authentication now runs first, before `new URL()`. An unauthenticated malformed request gets exactly the 401 body (asserted over a raw socket, because `fetch` will not send a `Host: [`); a malformed URL after authentication is a 400 `serve-malformed-url`.
+
+### The notes
+
+- **`limit`** out of range is refused `serve-invalid-cursor` rather than clamped, range documented as 1 to 1000. `clampFollowLimit` is gone.
+- **Duplicate `Authorization`** headers are counted from `req.rawHeaders` and refused 401, because Node keeps the first and discards the rest, so the credential this server checks need not be the one a reader of the request would name.
+- **`log/follow` and `export`** now run on the same `serialize()` queue as the verbs. The export additionally takes the append lock: `core/log.ts` DOES expose one, `withAppendLock`, the same exclusion `approval log sync` takes, so the log and the payload store are copied as one snapshot rather than as two reads an append can land between.
+- **Uncapped output** is covered by the stream caps in finding 2.
+
+### New tests, by name
+
+In `tests/serve.test.ts`:
+
+1. `export: a symlink under the store refuses the whole export and names the link`
+2. `export: a symlink pointing outside the store is refused the same way`
+3. `hook: an oversized envelope is a BLOCK in the harness's own dialect, never an allow`
+4. `every refusal on every route carries a non-zero exit code in the body`
+5. `a caller may not name the store: --log, --dir and --policy are refused`
+6. `a caller may not name a path outside the store, by flag or by positional`
+7. `log/follow: from>0 requires cursor_hash`
+8. `log/follow: an unrepresentable from is a cursor refusal, not a 500`
+9. `log/follow: limit=0 and an over-large limit are refused, not clamped`
+10. `a malformed request with no credential gets the 401 and nothing else`
+11. `two Authorization headers are refused rather than resolved`
+
+Updated rather than added: the allowlist pin and the catalog sweep now carry the seven-verb list; the archive test asserts no `*.lock`; the hook table asserts `stdout` byte-equality and `stdout_truncated`; the Hermes allow test reads `stderr` from the body; the tenant-direction test drops `register` and adds `payload_hash`.
+
+### APRV-416
+
+The 22 SMTP failures under Node v26.8.2 remain tracked there and are referenced rather than re-filed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
