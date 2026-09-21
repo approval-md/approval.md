@@ -2793,17 +2793,25 @@ The checks, at length:
   of the gate, so the repair is a line for a human to commit, printed by
   `approval instructions hook`.
 - **harness-hook-wiring** — whether THIS checkout's `.claude/settings.json`
-  registers `approval hook` for PreToolUse over every gated tool (Bash, Edit,
-  Write, NotebookEdit). SKIP, named, when the file is absent, unreadable, or
+  registers `approval hook claude-code` for PreToolUse over every gated tool.
+  The roster is read from the adapter that answers the calls (Bash, Edit, Write,
+  MultiEdit, NotebookEdit since APRV-408, where it was a hand list that had
+  drifted behind them). SKIP, named, when the file is absent, unreadable, or
   registers the hook for only some tools: a spawned-agent worktree without the
   entry is how the APRV-151 bypasses happened, and a session started elsewhere
   may still be hooked, so this row can only speak for the checkout it runs in.
   PASS means the entry is present on disk, and says so plainly: it is not proof
-  the running session loaded it. The check that trusts no session is the
-  CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
-  committed log, which since APRV-202 requires every added and removed line of a
-  protected path to trace to the bound material of a grant, rather than only
-  that the path was granted at some point in the week.
+  the running session loaded it. The one FAIL is a handler whose `--dir` names a
+  checkout other than this one, which answers from another policy, another log
+  and another open window. Two informational lines never decide anything: the
+  adapter read tools the matcher leaves out (Read, Glob, Grep) are named as the
+  documented default they are, and a matcher tool the adapter handles as none of
+  its own is named as the unclassified `allow` it will actually receive. The
+  check that trusts no session is the CI-side grant cross-check
+  (`scripts/protected-path-guard.mjs`) over the committed log, which since
+  APRV-202 requires every added and removed line of a protected path to trace to
+  the bound material of a grant, rather than only that the path was granted at
+  some point in the week.
 - **keychain-scope** — whose keystore items this instance's `.approval/env`
   names, answered from the NAMES alone so that it too can never block on an
   unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to

@@ -61,6 +61,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -164,7 +165,11 @@ import {
   readHarnessProvenance,
   type HarnessKind,
 } from "../core/harness-version.js";
-import { git, repoPath, repoRoot } from "./git-scope.js";
+import { git, primaryRoot, repoPath, repoRoot } from "./git-scope.js";
+// APRV-408: the gated tool roster of the `harness-hook-wiring` row is READ from
+// the adapter that answers the calls, never restated here. No new export; the
+// map has been exported since APRV-398.
+import { HARNESS_ADAPTERS } from "./hook.js";
 import {
   ScanError,
   checkAttestedPolicyOnMain,
@@ -2299,22 +2304,202 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
 /** Where Claude Code keeps the hook registration a human commits. */
 const CLAUDE_SETTINGS = join(".claude", "settings.json");
 
-/** Does any `hooks.<event>` entry run this CLI's harness hook? */
-function registersApprovalHook(hooks: unknown, event: string): boolean {
-  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return false;
-  const matchers = (hooks as Record<string, unknown>)[event];
-  if (!Array.isArray(matchers)) return false;
-  for (const matcher of matchers) {
-    if (typeof matcher !== "object" || matcher === null) continue;
-    const entries = (matcher as Record<string, unknown>)["hooks"];
+/** This runtime's own Claude Code hook adapter, the roster both rows read. */
+const CLAUDE_HOOK_ADAPTER = HARNESS_ADAPTERS["claude-code"];
+
+/**
+ * The tools a protected-path write can arrive as, DERIVED (APRV-408).
+ *
+ * Until APRV-408 this was a hand list, `["Edit", "Write", "Bash"]`, and it had
+ * drifted: the adapter gates `Bash` plus `Edit`, `Write`, `MultiEdit` and
+ * `NotebookEdit`, so a matcher of `Bash|Edit|Write` passed the wiring row while
+ * a `MultiEdit` to a protected path reached the file system unclassified. Two
+ * lists of the same fact is one list too many, so there is now one: the
+ * adapter's, because the adapter is what actually answers the call.
+ */
+function gatedClaudeTools(): string[] {
+  return [CLAUDE_HOOK_ADAPTER.shellTool, ...CLAUDE_HOOK_ADAPTER.fileTools];
+}
+
+/**
+ * What a `hooks.<event>` command entry is, as far as this file can read it.
+ *
+ * `handler` — this CLI's Claude Code hook, with the `--dir` it binds to (null
+ * when the command names none).
+ * `unresolved` — the command names `approval hook claude-code` somewhere, and
+ * what it would actually run cannot be read off the file: a wrapper, a shell
+ * function, a substitution, a pipeline. Never a pass anywhere downstream.
+ * `foreign` — not this handler at all (another harness's entry, another tool).
+ */
+type ClaudeHookParse =
+  | { kind: "handler"; dir: string | null }
+  | { kind: "unresolved"; reason: string }
+  | { kind: "foreign" };
+
+/**
+ * Anything that makes a command line mean something other than its own words.
+ *
+ * Deliberately generous. A command carrying any of these is reported as
+ * unresolved rather than parsed on a best guess, because the question this
+ * parse answers — which checkout does the gate resolve its policy and log from
+ * — has no safe approximation. Fail closed: SPEC §11.
+ */
+const SHELL_OPAQUE = /[$`\\;&|<>(){}\r\n*?[\]]/u;
+
+/**
+ * The `hook claude-code` verb named anywhere in a command, however wrapped.
+ *
+ * The VERB and not the executable, because the executable is exactly what a
+ * wrapper hides: `$(which approval) hook claude-code` and `bash -lc "approval
+ * hook claude-code …"` both name this handler and neither carries the word
+ * `approval` in a position any parse could trust. Naming the verb is what makes
+ * such an entry `unresolved` (reported, never a pass) instead of `foreign`
+ * (invisible, which is how a wrapped handler would read as "no hook
+ * registered"). Another harness's entry parked in this file — `approval hook
+ * cursor` — does not name it, and stays foreign.
+ */
+const CLAUDE_HOOK_MENTION = /\bhook\s+claude-code\b/u;
+
+/**
+ * Split a command line into words, honouring simple quotes.
+ *
+ * Only ever reached for a command {@link SHELL_OPAQUE} has already cleared, so
+ * there is no expansion, no escape and no operator left to get wrong; `null` is
+ * an unclosed quote.
+ */
+function shellWords(command: string): string[] | null {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let started = false;
+  for (const character of command) {
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      else current += character;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (started) tokens.push(current);
+      current = "";
+      started = false;
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (quote !== null) return null;
+  if (started) tokens.push(current);
+  return tokens;
+}
+
+/**
+ * Read a registered command as an `approval hook claude-code` invocation
+ * (APRV-408).
+ *
+ * Modelled on {@link isDirectCodexHookCommand}, which the Codex rows have had
+ * since APRV-313, and which the Claude Code rows had no counterpart of: they
+ * matched the substring `approval hook`, so a wrapper script, a different
+ * harness's entry and a handler bound to a checkout that does not exist on this
+ * machine all read the same. Tolerant of flag order and of `--as`/`--timeout`
+ * being absent, because those do not decide anything this row reports; strict
+ * about the three facts that do — the executable is `approval`, the verb is
+ * `hook claude-code`, and the `--dir` is whatever it is.
+ */
+function parseClaudeHookCommand(command: string): ClaudeHookParse {
+  const mentioned = CLAUDE_HOOK_MENTION.test(command);
+  const unreadable = (reason: string): ClaudeHookParse =>
+    mentioned ? { kind: "unresolved", reason } : { kind: "foreign" };
+
+  if (SHELL_OPAQUE.test(command)) {
+    return unreadable(
+      "it carries shell metacharacters, so what it runs depends on a shell rather than on these words",
+    );
+  }
+  const tokens = shellWords(command);
+  if (tokens === null) return unreadable("its quoting does not close");
+  const executable = tokens[0] ?? "";
+  if (tokens[1] !== "hook" || tokens[2] !== "claude-code") {
+    // `approval hook cursor` in this file is another harness's entry, and a
+    // wrapper name with the verb buried inside it is ours and unreadable.
+    return unreadable("its first words are not `approval hook claude-code`");
+  }
+  if (basename(executable) !== "approval") {
+    return unreadable(`its executable ${JSON.stringify(executable)} is not \`approval\``);
+  }
+  if (executable.includes("/") && !isAbsolute(executable)) {
+    return unreadable(
+      `its executable ${JSON.stringify(executable)} is a relative path, so which binary runs depends on the working directory`,
+    );
+  }
+
+  let dir: string | null = null;
+  for (let index = 3; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token.startsWith("--dir=")) {
+      dir = token.slice("--dir=".length);
+      continue;
+    }
+    if (token !== "--dir") continue;
+    const value = tokens[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      return unreadable("its `--dir` flag names no value");
+    }
+    dir = value;
+    index += 1;
+  }
+  return { kind: "handler", dir };
+}
+
+/** One registered hook entry of ours: its matcher, and what its command binds. */
+interface ClaudeHookEntry {
+  matcher: string;
+  command: string;
+  parse: ClaudeHookParse;
+}
+
+/**
+ * Every `hooks.<event>` entry of this file that is OURS (APRV-408).
+ *
+ * One reading for both harness rows, so `harness-hook-outcomes` and
+ * `harness-hook-wiring` cannot disagree about which entries they are talking
+ * about. An unresolved entry counts as ours here — it names the verb, and a
+ * command this file cannot read is a reason to report less confidently rather
+ * than to report that no hook is registered.
+ */
+function claudeHookEntries(hooks: unknown, event: string): ClaudeHookEntry[] {
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return [];
+  const groups = (hooks as Record<string, unknown>)[event];
+  if (!Array.isArray(groups)) return [];
+  const found: ClaudeHookEntry[] = [];
+  for (const group of groups) {
+    if (typeof group !== "object" || group === null) continue;
+    const entries = (group as Record<string, unknown>)["hooks"];
     if (!Array.isArray(entries)) continue;
+    const pattern = (group as Record<string, unknown>)["matcher"];
     for (const entry of entries) {
       if (typeof entry !== "object" || entry === null) continue;
       const command = (entry as Record<string, unknown>)["command"];
-      if (typeof command === "string" && /\bapproval hook\b/u.test(command)) return true;
+      if (typeof command !== "string") continue;
+      const parse = parseClaudeHookCommand(command);
+      if (parse.kind === "foreign") continue;
+      found.push({
+        matcher: typeof pattern === "string" ? pattern : "",
+        command,
+        parse,
+      });
     }
   }
-  return false;
+  return found;
+}
+
+/** Does any `hooks.<event>` entry run this CLI's Claude Code hook? */
+function registersApprovalHook(hooks: unknown, event: string): boolean {
+  return claudeHookEntries(hooks, event).length > 0;
 }
 
 /**
@@ -2331,6 +2516,12 @@ function registersApprovalHook(hooks: unknown, event: string): boolean {
  * `policy.core` in this taxonomy — a file that configures the gate is part of
  * the gate — so the repair is a line for a human to commit, printed by
  * `approval instructions hook`.
+ *
+ * Which entries are OURS is read by {@link claudeHookEntries} since APRV-408,
+ * the same reading `harness-hook-wiring` uses, so the two rows cannot come
+ * apart on the question. Before that this row matched the substring `approval
+ * hook`, which counted another harness's entry parked in Claude Code's own
+ * settings file as a post-execution reporter for Claude Code.
  */
 function checkHarnessOutcomes(dir: string): DoctorCheck {
   const check = "harness-hook-outcomes";
@@ -2364,21 +2555,21 @@ function checkHarnessOutcomes(dir: string): DoctorCheck {
     return {
       check,
       status: "skip",
-      detail: `${path} registers no \`approval hook\` entry, so this checkout is not gated by the harness hook at all`,
+      detail: `${path} registers no \`approval hook claude-code\` entry, so this checkout is not gated by the harness hook at all`,
     };
   }
   if (!post) {
     return {
       check,
       status: "fail",
-      detail: `${path} registers \`approval hook\` for PreToolUse and not for PostToolUse, so no tool call ever reports an outcome: every harness execution.started stays delegated, and the loop escalation of SPEC.md §10.2 cannot accrue on this path`,
+      detail: `${path} registers \`approval hook claude-code\` for PreToolUse and not for PostToolUse, so no tool call ever reports an outcome: every harness execution.started stays delegated, and the loop escalation of SPEC.md §10.2 cannot accrue on this path`,
       fix: "approval hook claude-code --help — prints the PostToolUse entry to add, which a human commits (.claude/settings.json is policy.core)",
     };
   }
   return {
     check,
     status: "pass",
-    detail: `${path} registers \`approval hook\` for the ${pre ? "pre-execution and " : ""}post-execution event, so tool call outcomes reach the log and loop escalation can accrue`,
+    detail: `${path} registers \`approval hook claude-code\` for the ${pre ? "pre-execution and " : ""}post-execution event, so tool call outcomes reach the log and loop escalation can accrue`,
   };
 }
 
@@ -2386,28 +2577,133 @@ function checkHarnessOutcomes(dir: string): DoctorCheck {
 // harness hook wiring in THIS worktree (APRV-151)
 // ---------------------------------------------------------------------------
 
-/** The tool names a protected-path write can arrive as. */
-const GATED_TOOLS: readonly string[] = ["Edit", "Write", "Bash"];
+/** The repair every wiring verdict but the two absences points at. */
+const HOOK_ENTRY_FIX = "approval instructions hook — prints the PreToolUse entry a human commits";
 
-/** The `matcher` strings of every `approval hook` entry registered for `event`. */
-function approvalHookMatchers(hooks: unknown, event: string): string[] {
-  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return [];
-  const matchers = (hooks as Record<string, unknown>)[event];
-  if (!Array.isArray(matchers)) return [];
-  const found: string[] = [];
-  for (const matcher of matchers) {
-    if (typeof matcher !== "object" || matcher === null) continue;
-    const entries = (matcher as Record<string, unknown>)["hooks"];
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (typeof entry !== "object" || entry === null) continue;
-      const command = (entry as Record<string, unknown>)["command"];
-      if (typeof command !== "string" || !/\bapproval hook\b/u.test(command)) continue;
-      const pattern = (matcher as Record<string, unknown>)["matcher"];
-      found.push(typeof pattern === "string" ? pattern : "");
-    }
+/** A tool name as a `matcher` may spell it: no regex syntax anywhere in it. */
+const MATCHER_TOOL_NAME = /^[A-Za-z0-9_-]+$/u;
+
+/**
+ * The tools a `matcher` names, or `"pattern"` when it is not a plain list
+ * (APRV-408).
+ *
+ * Claude Code treats `matcher` as a regular expression, and this file will not
+ * evaluate one: a regex is answered by matching it against candidate strings,
+ * and the candidates here are "every tool name that exists", which is not a set
+ * this runtime holds. So the only shape read is the documented one — tool names
+ * joined by `|` — and everything else is reported as unresolved coverage rather
+ * than guessed at. An empty matcher is `"pattern"` too: it selects every tool
+ * in Claude Code, which is a coverage claim this row would rather see written
+ * down than infer.
+ *
+ * Nothing here compiles the pattern, so a hostile one (`(a+)+$` and its kin)
+ * costs one anchored character-class test per alternative and cannot make
+ * `doctor` hang.
+ */
+function matcherTools(pattern: string): readonly string[] | "pattern" {
+  if (pattern.trim().length === 0) return "pattern";
+  const parts = pattern.split("|");
+  if (parts.some((part) => !MATCHER_TOOL_NAME.test(part))) return "pattern";
+  return parts;
+}
+
+/** `realpathSync` that answers the path itself when it cannot be resolved. */
+function realOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
   }
-  return found;
+}
+
+/** What the registered handlers bind to, and how sure this row is of it. */
+interface BindingReport {
+  status: "pass" | "skip" | "fail";
+  clause: string;
+}
+
+/**
+ * Which checkout the registered handler resolves policy and log from
+ * (APRV-408).
+ *
+ * The committed entry in this repository hardcodes one absolute `--dir`, which
+ * is correct on the machine it was written on and names a directory that does
+ * not exist in a clone anywhere else; nothing checked. A handler bound to
+ * another checkout is not a weaker gate, it is a DIFFERENT gate: another
+ * policy, another log, another open window. That is the one thing this row
+ * fails on.
+ *
+ * `primaryRoot` first and `repoRoot` as the fallback, because the documented
+ * `--dir` names the PRIMARY checkout: in a linked worktree the two differ, and
+ * the primary is the one the gate must answer from.
+ */
+function describeBinding(
+  entries: readonly ClaudeHookEntry[],
+  dir: string,
+  fallbackRoot: string | null,
+): BindingReport {
+  const primary = primaryRoot(dir);
+  const expected = primary ?? fallbackRoot;
+  const expectedName = primary === null ? "repository root" : "primary root";
+  const rank = { pass: 0, skip: 1, fail: 2 } as const;
+  const reports: BindingReport[] = [];
+
+  for (const entry of entries) {
+    const parse = entry.parse;
+    // `claudeHookEntries` keeps no foreign entry, and the narrowing is written
+    // out anyway: a reader of this loop should not have to hold that invariant.
+    if (parse.kind === "foreign") continue;
+    if (parse.kind === "unresolved") {
+      reports.push({
+        status: "skip",
+        clause: `BINDING UNRESOLVED: the PreToolUse command ${JSON.stringify(entry.command)} cannot be read as an \`approval hook claude-code\` invocation (${parse.reason}), so which checkout it would gate is not established here — and unresolved is never a pass.`,
+      });
+      continue;
+    }
+    const declared = parse.dir;
+    if (declared === null) {
+      reports.push({
+        status: "skip",
+        clause: `BINDING UNSTATED: the PreToolUse command names no \`--dir\`, so the hook resolves its policy and log from wherever the harness happens to run it (APRV-101) rather than from a directory this row can read. The ${expectedName} here is ${expected ?? "unknown to git"}.`,
+      });
+      continue;
+    }
+    if (!isAbsolute(declared)) {
+      reports.push({
+        status: "skip",
+        clause: `BINDING RELATIVE: the PreToolUse command binds \`--dir ${declared}\`, which names a different directory from every working directory it could be launched in. The ${expectedName} here is ${expected ?? "unknown to git"}.`,
+      });
+      continue;
+    }
+    if (expected === null) {
+      reports.push({
+        status: "skip",
+        clause: `BINDING UNCHECKED: the PreToolUse command binds \`--dir ${declared}\`, and git could not say what checkout ${dir} belongs to, so the two cannot be compared here.`,
+      });
+      continue;
+    }
+    if (realOrSelf(declared) !== realOrSelf(expected)) {
+      reports.push({
+        status: "fail",
+        clause: `MISBOUND: the PreToolUse command binds \`--dir ${declared}\`, and this checkout's ${expectedName} is ${expected}. A hook answering from another checkout answers another checkout's policy, log and open window, so a call gated here is not gated by the gate a reader of this repository is looking at.`,
+      });
+      continue;
+    }
+    reports.push({
+      status: "pass",
+      clause: `BOUND to ${expected}, this checkout's ${expectedName}, by the \`--dir\` the PreToolUse command carries.`,
+    });
+  }
+
+  if (reports.length === 0) {
+    return { status: "skip", clause: "BINDING UNRESOLVED: no PreToolUse command to read." };
+  }
+  const status = reports.reduce(
+    (worst, report) => (rank[report.status] > rank[worst] ? report.status : worst),
+    "pass" as BindingReport["status"],
+  );
+  const clauses = [...new Set(reports.map((report) => report.clause))];
+  return { status, clause: clauses.join(" ") };
 }
 
 /**
@@ -2432,11 +2728,25 @@ function approvalHookMatchers(hooks: unknown, event: string): string[] {
  * CI-side, over the committed log, in `core/protected-path-guard.ts`: it does
  * not trust session wiring, and this row does not claim to establish it.
  *
- * Advisory, so it never fails the run. Doctor reads and never writes; the file
- * is `policy.edit` and its repair is a line for a human to commit.
+ * Advisory, so it never fails the run — with the single exception APRV-408
+ * added: a handler POSITIVELY bound to a different checkout. That is not a
+ * weaker report of the same gate, it is a statement that the entry on disk
+ * answers from somewhere else, which this row can establish from the file
+ * alone. Everything else it learned in APRV-408 only ADDS lines from disk
+ * facts: the gated roster comes from the adapter rather than a hand list, the
+ * read tools the adapter declares and the matcher leaves out are named as the
+ * documented default they are, and a matcher tool the adapter does not handle
+ * is named as the `allow` it will actually receive. None of those feeds a
+ * verdict, and none of them asks the session anything about itself (SPEC §11:
+ * a self-reported field never reduces scrutiny, and this row reads no
+ * self-report at all).
+ *
+ * Doctor reads and never writes; the file is `policy.core` and its repair is a
+ * line for a human to commit.
  */
 function checkHarnessWiring(dir: string): DoctorCheck {
   const check = "harness-hook-wiring";
+  const gated = gatedClaudeTools();
   const root = repoRoot(dir);
   const where = root === null ? dir : root;
   const path = join(where, CLAUDE_SETTINGS);
@@ -2474,33 +2784,80 @@ function checkHarnessWiring(dir: string): DoctorCheck {
     typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)["hooks"]
       : null;
-  const matchers = approvalHookMatchers(hooks, "PreToolUse");
-  if (matchers.length === 0) {
+  const entries = claudeHookEntries(hooks, "PreToolUse");
+  if (entries.length === 0) {
     return {
       check,
       status: "skip",
-      detail: `NOT WIRED: ${path} registers no \`approval hook\` entry for PreToolUse, so a protected-path Edit, Write or Bash call in this checkout reaches the file system unclassified.`,
-      fix: "approval instructions hook — prints the PreToolUse entry a human commits",
+      detail: `NOT WIRED: ${path} registers no \`approval hook claude-code\` entry for PreToolUse, so a protected-path write arriving through ${gated.join(", ")} in this checkout reaches the file system unclassified.`,
+      fix: HOOK_ENTRY_FIX,
     };
   }
 
-  const covered = GATED_TOOLS.filter((tool) =>
-    matchers.some((pattern) => pattern.length === 0 || pattern.split("|").includes(tool)),
-  );
-  const missing = GATED_TOOLS.filter((tool) => !covered.includes(tool));
+  const matchers = entries.map((entry) => entry.matcher);
+  const named = new Set<string>();
+  const patterns: string[] = [];
+  for (const matcher of matchers) {
+    const tools = matcherTools(matcher);
+    if (tools === "pattern") {
+      patterns.push(matcher);
+      continue;
+    }
+    for (const tool of tools) named.add(tool);
+  }
+
+  const binding = describeBinding(entries, dir, root);
+  const wired = `${path} registers \`approval hook claude-code\` for PreToolUse with matcher ${JSON.stringify(matchers.join(", "))}`;
+  const notProof = `This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log, which asks whether the CHANGE was granted rather than whether the path ever was (APRV-202).`;
+
+  // A matcher this file will not read leaves every coverage question open, so
+  // the roster, read-tool and passthrough lines are withheld rather than
+  // computed against a set that may be incomplete. The binding is independent
+  // of the matcher and is still reported (and can still fail).
+  if (patterns.length > 0) {
+    return {
+      check,
+      status: binding.status === "fail" ? "fail" : "skip",
+      detail: `MATCHED BY PATTERN: ${wired}. ${patterns
+        .map((pattern) => JSON.stringify(pattern))
+        .join(" and ")} is not a plain \`|\`-joined list of tool names, and this row does not evaluate a regular expression, so which of ${gated.join(", ")} it covers is not resolved here. ${binding.clause} ${notProof}`,
+      fix: HOOK_ENTRY_FIX,
+    };
+  }
+
+  const missing = gated.filter((tool) => !named.has(tool));
   if (missing.length > 0) {
     return {
       check,
-      status: "skip",
-      detail: `NOT WIRED for every tool: ${path} registers \`approval hook\` for PreToolUse with matcher ${JSON.stringify(matchers.join(", "))}, which does not cover ${missing.join(", ")}. A protected-path write arriving through ${missing[0]} is never classified.`,
-      fix: "approval instructions hook — prints the PreToolUse entry a human commits",
+      status: binding.status === "fail" ? "fail" : "skip",
+      detail: `NOT WIRED for every tool: ${wired}, which does not cover ${missing.join(", ")}. This runtime's Claude Code adapter gates ${gated.join(", ")}, so a protected-path write arriving through ${missing[0]} is never classified. ${binding.clause}`,
+      fix: HOOK_ENTRY_FIX,
     };
   }
 
+  // Informational, both of them, and neither is ever a verdict.
+  const held = CLAUDE_HOOK_ADAPTER.readTools.filter((tool) => !named.has(tool));
+  const readLine =
+    held.length === 0
+      ? ""
+      : ` READ TOOLS HELD BY DESIGN: the adapter also knows ${held.join(", ")}, and the matcher leaves ${held.length === 1 ? "it" : "them"} out, so a read is answered without reaching the gate. That is the documented default rather than a gap — see "The read scope" in docs/claude-code-hook.md, where the \`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Glob|Grep\` matcher is printed and deliberately left out of the installed one, because a read is the most frequent tool call a session makes and every matched call is a Node process start. This line never fails this row.`;
+
+  const handled = new Set([
+    ...gated,
+    ...CLAUDE_HOOK_ADAPTER.readTools,
+    ...(CLAUDE_HOOK_ADAPTER.passThroughTools ?? []),
+  ]);
+  const unhandled = [...named].filter((tool) => !handled.has(tool));
+  const passthroughLine =
+    unhandled.length === 0
+      ? ""
+      : ` MATCHED AND NOT CLASSIFIED: ${unhandled.join(", ")} ${unhandled.length === 1 ? "is" : "are"} in the matcher and this runtime's Claude Code adapter handles ${unhandled.length === 1 ? "it" : "them"} as neither a shell, file nor read tool, so every such call spawns the hook and is answered \`allow\` with "is not a gated tool". The cost is real and the coverage is not.`;
+
   return {
     check,
-    status: "pass",
-    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log, which asks whether the CHANGE was granted rather than whether the path ever was (APRV-202).`,
+    status: binding.status,
+    detail: `WIRED on disk: ${path} registers \`approval hook claude-code\` for PreToolUse over ${gated.join(", ")}, the tools this runtime's own adapter gates. ${binding.clause}${readLine}${passthroughLine} ${notProof}`,
+    ...(binding.status === "pass" ? {} : { fix: HOOK_ENTRY_FIX }),
   };
 }
 
