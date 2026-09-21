@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 07:23'
+updated_date: '2026-09-21 07:33'
 labels:
   - hosting
   - daemon
@@ -170,6 +170,42 @@ A new subsection after §10.5, and one line in the §10.1 CLI block. Both additi
 **The 22 failures are pre-existing and unrelated to this task, proved rather than assumed.** A clean clone at the base commit 99cd51e, carrying none of this branch's code, fails the identical 22 by name (182 tests, 160 pass, 22 fail). They are `tests/smtp-probe.test.ts`, `tests/adapter-email.test.ts`, `tests/adapters-contract.test.ts` and the `setup adapter email` cases in `tests/cli-setup.test.ts`. The cause is the Node version on this machine (v26.8.2): it refuses `tls` `servername` set to an IP address ("Setting the TLS ServerName to an IP address is not permitted. Received '127.0.0.1'"), and the SMTP mock binds loopback. This repo's floor is Node >= 20 and CI runs 20 and 22, so it is a newer-Node regression in the SMTP test harness and wants its own task.
 
 PR: https://github.com/approval-md/approval.md/pull/534 (not armed for merge: this lane was told not to run `gh pr merge`, which is the one point where the brief narrows CLAUDE.md's rule 7 — the orchestrator reviews first).
+
+## Review of PR #534: two conformance fixes
+
+### 1. Agent scope narrowed to an allowlist
+
+Authorization is now per verb and positive. `AGENT_VERBS` in `src/serve/server.ts` is exactly: `instructions`, `hook_classify`, `register`, `request`, `wait`, `withdraw`, `payload_hash`, `payload_agentmail-draft`, `policy_check`, `policy_test`, `log_verify`, `gate_status`. Everything else the catalog publishes is TENANT-scoped, and a verb added to the registry tomorrow lands outside the list, so widening is a diff in the server and a diff in a test rather than a silent consequence of adding a verb. `TENANT_ONLY_VERBS` (the one-element set that used to hold `status`) is gone; one rule replaces two.
+
+Publication is unchanged, so AC3 still holds: `serveCatalog()` is still `toolDefinitions()` name for name and schema for schema, and the existing entry-for-entry test proves it. What changed is the `scope` annotation on each entry and the check behind it.
+
+Two tests added. `the agent allowlist is exactly the decided list` pins the twelve names and asserts each is actually published, so a registry addition or a rename fails loudly. `every published verb off the allowlist refuses the agent credential` walks the live catalog, asserts the list it walks is not trivially small (>20), and for each entry asserts both the `tenant` annotation and a real `403` carrying `serve-agent-forbidden`. A third test asserts the twelve allowlisted verbs never answer with that code, so the sweep cannot pass by refusing everything.
+
+**One rule needed a decision the instruction did not cover: an UNPUBLISHED verb name.** With "default to tenant" applied literally, a tenant-credential call to `/verb/consume` would have passed the scope check and fallen through to `serve-unknown-verb` (404), which breaks AC5's "a tenant-credential call to request, wait or consume is refused likewise". So `scopeOf` has three arms: on the allowlist means agent; published and off it means tenant; **not published at all means agent**, so the tenant credential is refused `serve-tenant-forbidden` and the agent credential gets `serve-unknown-verb`. Both answers are true, and the fail-closed direction is preserved in both: the names in that third arm are the ones `mcp/server.ts` withholds for transport reasons, `consume` above all, which is an agent-side act and not a door the tenant may probe. The coordinator's "a new verb defaults to tenant" rule is intact for everything that reaches the catalog, which is where a new verb arrives.
+
+### 2. Export now carries `.approval/payloads/`
+
+Added to `EXPORTED_PATHS`. The four exclusions are unchanged and still asserted in both directions: by path, and by scanning every byte of the archive for the planted secrets. The archive test asserts the fixture payload's bytes come back verbatim, and separately that a RUNTIME-written payload is present (attesting the policy stores its bytes under a hash-named file), so the assertion is about the real store and not only about a file the test planted.
+
+### The design question the review invited: how a granted token is spent from a sandbox
+
+Leaving it tenant-scoped as instructed, and naming it here because it is real.
+
+The HOOK flow is complete and needs nothing more. `POST /hook/<harness>` runs the whole sequence inside `commandHook` on the host: classify, register, request, wait, and the `execution.started` the hook writes with `execution: "harness"`, which SPEC §10.2 makes terminal by design because a harness adapter answers before the tool runs and never observes an exit status. No agent-scoped verb is needed for any of it.
+
+The EXPLICIT flow is the one with a gap. An agent that drives `register` -> `request` -> `wait` itself and is granted now holds a decision it has no published way to act on from inside the sandbox: `run` spawns argv on the daemon's machine (correctly tenant-scoped, and over this transport the wrong machine entirely), and `consume` — the token spend `run` wraps — is published on neither transport. SPEC §10.5's APRV-105 amendment makes this sharper: under `token_delivery: sealed`, `wait` MAY return the raw execution token in its result, so an agent can RECEIVE a token over this transport and cannot spend it through anything published.
+
+This pre-exists the review and is not created by it. `approval mcp serve` has the same shape; there it is harmless because the server and the agent share a machine, so `run` is the right answer. What the narrowed scope does is make the gap visible rather than paper over it with a `run` that would execute in the wrong place.
+
+Three ways out, none implemented, all the orchestrator's call: publish `consume` on this transport only and put it on the agent allowlist; add an execution-report endpoint shaped like the hook's post-execution counterpart, so the sandbox reports an outcome the host records; or declare the hook path the only supported sandbox path and the explicit sequence host-side only, which is the status quo and wants saying out loud in §10.7 if so.
+
+### One observation about `payload_agentmail-draft`
+
+It is on the agent allowlist as a payload builder, per the instruction, and the registry's own reasoning supports it: the key it reads cannot send, the sending key is in the vault and answers only to a grant, and the verb produces a proposal and no authority. Worth noting anyway: it reads `AGENTMAIL_API_KEY` from THIS SERVER's launch environment, so a sandboxed agent calling it through the transport reads drafts with the host's copy of that key rather than its own. That is a hosted-deployment fact for whoever writes the operator runbook, not a reason to withhold the verb.
+
+### The 22 SMTP failures
+
+Already tracked as **APRV-416**; not filed again. They are `tests/smtp-probe.test.ts`, `tests/adapter-email.test.ts`, `tests/adapters-contract.test.ts` and the `setup adapter email` cases in `tests/cli-setup.test.ts`, and they reproduce identically at the base commit `99cd51e` with none of this branch's code (control run: 182 tests, 160 pass, 22 fail). Cause: Node v26.8.2 refuses a TLS `servername` set to an IP address while the SMTP mock binds `127.0.0.1`.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
