@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-421'
 created_date: '2026-09-21 06:41'
-updated_date: '2026-09-21 08:01'
+updated_date: '2026-09-21 08:19'
 labels:
   - hosting
   - daemon
@@ -324,6 +324,74 @@ Targeted suites (mcp-server, mcp-http, mcp-guest, e2e-mcp-demo, cli-hook and eve
 Final surface: 36 published verbs, 5 agent-scoped, 31 tenant-scoped.
 
 The 22 Node 26 SMTP failures are APRV-416's and are unchanged by any of this; they are the only failures a full `npm test` produces and they reproduce at the base commit with none of this branch's code.
+
+## Second review pass (impact-scoped recheck): five findings, all fixed
+
+### 1 (BLOCKING). Path flags smuggled as positionals, and unpinned path flags
+
+The repro was exact. `buildArgv` (`mcp/server.ts`) emits positionals FIRST and verbatim, and `parseFlags` (`cli/args.ts`) reads any token beginning with `-` as a flag, splitting on `=`. So a caller refused `{"flags":{"--payload":"/tmp/host-secret"}}` could send `{"positionals":["--payload","/tmp/host-secret","t1"]}` — or the `--payload=/tmp/host-secret` spelling — and reach the same flag through the front door.
+
+**(a) Positionals.** A positional beginning with `-` is refused `serve-positional-flag` in every scope. Both spellings and the bare `-` (stdin) are covered by the same rule.
+
+**`trailing` deliberately does NOT get this rule, and this is the one place I did not follow the instruction to the letter.** `parseFlags` reads `if (token === "--") { positionals.push(...argv.slice(index + 1)); break; }` — it STOPS at the separator and pushes the remainder as positionals, never reading one as a flag. `buildArgv` always emits `--` before trailing (`...(trailing.length === 0 ? [] : ["--", ...trailing])`). So trailing is provably not a flag-smuggling vector. Refusing dash-leading trailing elements would instead break `hook classify -- git push -f`, which is the one agent verb whose argument is a command line, and command lines have flags. Instead of the blanket refusal, the invariant that makes trailing safe is now PINNED BY A TEST (`trailing cannot reach the flag parser, because the separator always precedes it`), which asserts the separator's presence, its position before every flag-shaped element, and that `parseFlags` accepts the result. If you want the blanket refusal anyway, say so and I will apply it, but `hook_classify` becomes able to classify only flagless commands.
+
+**(b) Agent scope.** Every path-typed flag is refused OUTRIGHT (`serve-flag-not-permitted`) rather than confined: a sandboxed harness has no files on the daemon's machine, so a path it names is either useless or somebody else's, and the hook route is how payload bytes arrive for a remote harness. On top of that, `AGENT_FLAGS` is a per-verb positive list for the five agent verbs:
+
+| verb | flags |
+|---|---|
+| `instructions` | `--schemas`, `--json` |
+| `hook classify` | `--json` |
+| `request` | `--action`, `--json` |
+| `wait` | `--timeout`, `--interval`, `--withdraw-on-timeout`, `--json` |
+| `withdraw` | `--action`, `--reason`, `--note`, `--json` |
+
+`--as` is deliberately NOT caught here: it falls through to `buildArgv`, which refuses it with `mcp-identity-fixed`, whose message is the whole reason this surface is safe to run. Catching it earlier would replace a precise refusal with a vaguer one and state the identity rule in two places.
+
+**(c) Tenant scope, derived from the registry.** `verb-registry.ts` gains a `"path"` flag kind. It PUBLISHES as an ordinary `{"type":"string"}` — the wire contract is byte-identical, so AC3 and the `--schemas` byte-stability test are unaffected — while the registry retains the fact through a WeakMap keyed by the input schema, read by the new `pathFlagsOf(spec)`. A WeakMap rather than a `VerbSpec` field because `input()` returns the schema and all hundred-odd call sites would otherwise have to change.
+
+192 flag declarations across the registry are now path-typed. The tenant's are confined to the store through `realpath` on the deepest existing ancestor, so traversal and a symlinked directory both refuse.
+
+The completeness test walks every published verb: each flag must be either declared `"path"` (and therefore pinned or confined) or present in the test's reviewed `NON_PATH_FLAGS` list. A flag added to any published verb tomorrow lands in neither and fails the test until somebody classifies it, which is the fail-closed shape the instruction asked for.
+
+### 2. Hard links
+
+`nlink > 1` on a regular file under the store refuses the whole export with `serve-export-hardlink`, naming the path and the link count. A separate code from the symlink refusal because the repairs differ (replace the link with a copy, versus replace the symlink with the file). A hard link is the case with nothing to notice: one inode, two names, no link to refuse to follow and no target to inspect, so the link count is the only thing that tells it apart.
+
+### 3. Hook-route 401 and 400 had no dialect
+
+Both fire before the URL is parsed, so the harness was unknown and the body carried no block directive; on Claude Code, Cursor, Codex and Muse a body with no directive at exit 0 is an ALLOW, so a credential rotation opened the gate. The harness is now read off the raw request target with a narrow regex, BEFORE authentication, for the purpose of the refusal body and nothing else: no route, no scope and no verb is taken from it, and the refusal's code and message are unchanged. A name that is not a harness this runtime speaks for keeps the generic body, which the documented client rule (a missing or unparseable body is a block) covers.
+
+### 4. `*.lock` as a class
+
+Replaced with the exact path derived from the log (`<logPath>.lock`, relative to the store). A tenant's own `.approval/payloads/x.lock` now survives the export, asserted. The class exclusion had been silently deleting a tenant's file because this runtime happens to use that suffix for its own bookkeeping.
+
+### 5. TOCTOU between `lstat` and `readFileSync`
+
+Files are opened with `O_RDONLY | O_NOFOLLOW`, `fstat`ed, and read FROM THE DESCRIPTOR, so the regular-file and link-count checks are about the bytes actually read rather than about a name that could have been swapped in between.
+
+**Residual, stated rather than hidden:** `O_NOFOLLOW` covers the FINAL component only. A directory anywhere above the file could in principle be replaced by a symlink between the walk's `readdir` and the open. Closing that needs `openat` with `O_DIRECTORY|O_NOFOLLOW` at every level, which Node does not expose. It is strictly smaller than the hole it replaces, and exploiting it needs write access inside the tenant's own store — at which point the attacker can write the payload bytes directly.
+
+### A real bug the suite surfaced while fixing these
+
+Refusing an oversized body wrote the 413 while the client was still uploading, which closed the socket under it: the caller saw `ECONNRESET` rather than the refusal, and a hook client that gets a transport error has no verdict to read. The remainder is now discarded as it arrives (never buffered, so memory is bounded by one chunk) and the refusal is written once the client has finished, bounded by `DRAIN_LIMIT_BYTES` (16 MiB) after which the socket is dropped. The oversized-envelope test went from 6s-with-a-reset to 5ms.
+
+### New tests, by name
+
+In `tests/serve.test.ts`:
+
+1. `a positional that looks like a flag is refused, in both spellings`
+2. `trailing cannot reach the flag parser, because the separator always precedes it`
+3. `the agent credential may not use any path flag, or any flag off its verb's list`
+4. `every path-typed flag on every published verb is pinned or confined`
+5. `export: a hard link into the store refuses the whole export`
+6. `hook: a 401 carries the harness's block directive, so a rotation cannot open the gate`
+7. `export: a tenant's own .lock file survives; only the append lockfile is dropped`
+
+Updated: `a caller may not name a path outside the store` now drives the confinement case through a tenant-scoped verb (`render --out`), because the agent can no longer reach a path flag at all; `a call that names an identity` still expects `mcp-identity-fixed`, which is why `--as` falls through the agent flag check.
+
+### Refusal vocabulary added this pass
+
+`serve-positional-flag`, `serve-flag-not-permitted`, `serve-export-hardlink`.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
