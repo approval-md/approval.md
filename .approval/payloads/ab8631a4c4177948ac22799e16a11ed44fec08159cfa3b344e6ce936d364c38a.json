@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -an \"probeHarnessVersion\\|installedHarnessVersion\\|resetHarnessVersionCache\" tests/*.ts src/**/*.ts | /usr/bin/grep -av \"^src/core/harness-version.ts\" | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-415-hermes-observed"}
