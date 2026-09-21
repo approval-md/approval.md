@@ -1,0 +1,1 @@
+{"command":"npm run build > /tmp/claude-501/build.out 2>&1; echo \"build exit=$?\"; tail -20 /tmp/claude-501/build.out","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}

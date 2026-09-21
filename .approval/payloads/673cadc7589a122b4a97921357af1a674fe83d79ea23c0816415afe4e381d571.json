@@ -1,0 +1,1 @@
+{"command":"wc -l docs/claude-code-hook.md docs/codex-hook.md docs/cursor-hook.md docs/grok-hook.md docs/muse-hook.md docs/adapter-api.md && ls src | head -80 && ls src/hook* src/adapters 2>/dev/null; grep -rn \"cursor\" src --include=*.ts -l | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

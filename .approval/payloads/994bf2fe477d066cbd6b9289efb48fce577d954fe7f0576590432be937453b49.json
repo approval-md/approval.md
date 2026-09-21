@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-397-packaging-rules && gh pr merge 513 --merge 2>&1 | tail -1; gh pr view 513 --json autoMergeRequest --jq '.autoMergeRequest.enabledAt'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

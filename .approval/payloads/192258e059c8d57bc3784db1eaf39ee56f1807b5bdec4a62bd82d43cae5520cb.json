@@ -1,0 +1,1 @@
+{"command":"sed -n '1,60p' /opt/homebrew/lib/node_modules/npm/node_modules/libnpmpublish/lib/publish.js; echo ---; /usr/bin/grep -n 'buildMetadata' -A40 /opt/homebrew/lib/node_modules/npm/node_modules/libnpmpublish/lib/publish.js | sed -n '1,60p'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes"}

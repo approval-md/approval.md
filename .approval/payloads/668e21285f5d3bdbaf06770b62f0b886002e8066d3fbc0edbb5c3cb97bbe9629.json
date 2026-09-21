@@ -1,0 +1,1 @@
+{"command":"grep -n 'isProtectedPath\\|protectedPathClass(' src/core/command-class.ts src/cli/hook.ts src/core/*.ts | grep -v '^\\S*:\\s*\\*\\|function ' | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

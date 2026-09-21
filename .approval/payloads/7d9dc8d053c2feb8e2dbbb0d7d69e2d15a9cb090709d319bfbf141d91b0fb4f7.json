@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn 'retries on the next tick' tests/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-381-audit-lock-timeout"}

@@ -1,0 +1,1 @@
+{"command":"git add \"backlog/tasks/aprv-412 - README-split-short-README-plus-docs-README-extended.md.md\" && git commit -q -m \"APRV-412: task finalization notes and Done status\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\" && git push 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

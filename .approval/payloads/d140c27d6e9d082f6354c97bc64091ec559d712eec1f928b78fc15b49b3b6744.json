@@ -1,0 +1,1 @@
+{"command":"sed -n '3030,3045p' docs/cli-reference.md && echo --- && /usr/bin/grep -a -n \"33 rows\\|33 lines\\|of the 33\" README.md docs/cli-reference.md src/cli/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-383-hosted-daemon-identity"}

@@ -1,0 +1,1 @@
+{"command":"ls -la /Users/carter/dev/approval-md/private/aprv-396 /Users/carter/dev/approval-md/private/handover; ls -lat /Users/carter/dev/approval-md/private | head -5; ls -la /Users/carter/dev/approval-md/README*.md /Users/carter/dev/approval-md/private/*README* 2>&1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/gated-messages-approval-60aa72"}

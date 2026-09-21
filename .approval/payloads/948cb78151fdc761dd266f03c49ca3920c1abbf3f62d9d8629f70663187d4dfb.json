@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -rn \"harness-launch-grok\\|harness.launch.grok\" tests/command-class-fixtures.ts tests/fixtures/*.ts 2>/dev/null | head -5; ls tests/ | /usr/bin/grep -i \"fixture\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

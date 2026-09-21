@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -A400 \"failing tests:\" /tmp/claude-501/full.out | /usr/bin/grep -a -E \"^✖\" | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}

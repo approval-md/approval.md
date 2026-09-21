@@ -1,0 +1,1 @@
+{"command":"sed -n 1,40p \"backlog/tasks/aprv-401 - \"*.md 2>/dev/null | head -40; echo ---; backlog task list --plain -s \"To Do\" 2>&1 | /usr/bin/grep -a \"APRV-399\\|APRV-400\\|APRV-401\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin && git status -sb | head -3 && git log --oneline -1 origin/main && ls *.md | head -30 && ls docs | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

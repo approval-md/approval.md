@@ -1,0 +1,1 @@
+{"command":"/usr/bin/sed -i '' 's|/retries on the next tick/u|/retries it on the next tick/u|g' tests/audit.test.ts tests/daemon.test.ts && /usr/bin/grep -rn 'retries it on the next tick' tests/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-381-audit-lock-timeout"}

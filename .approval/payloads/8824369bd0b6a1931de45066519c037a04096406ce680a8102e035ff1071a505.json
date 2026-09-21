@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-396-release-notes && sed -n '/--only/,/^}/p' scripts/run-tests.mjs | head -60 && echo --- && /usr/bin/grep -rn 'publish.yml\\|workflows' tests/*.ts | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

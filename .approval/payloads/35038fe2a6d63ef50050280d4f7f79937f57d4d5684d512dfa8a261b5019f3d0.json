@@ -1,0 +1,1 @@
+{"command":"grep -rn 'TELEGRAM_REVIEW_RECORDED\\|TELEGRAM_REVIEW_DENIED' src --include=*.ts | grep -v 'export const' | head; grep -n -B3 -A12 'headline: TELEGRAM_REVIEW_RECORDED\\|headline: verdict' src/cli/*.ts src/channels/*.ts | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/approval-capability-inventory-4d7c73"}

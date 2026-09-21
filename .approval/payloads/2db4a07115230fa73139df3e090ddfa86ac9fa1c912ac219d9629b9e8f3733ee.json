@@ -1,0 +1,1 @@
+{"command":"/usr/bin/grep -a -rln 'HELP_MAX\\|25\\b.*line\\|line.*cap' tests/*help* 2>/dev/null; ls tests | /usr/bin/grep -a -i help","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-376-refusal-counts"}

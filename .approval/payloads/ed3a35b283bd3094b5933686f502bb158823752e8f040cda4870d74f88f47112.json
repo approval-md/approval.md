@@ -1,0 +1,1 @@
+{"command":"F=/Users/carter/.claude/projects/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/acd97477-1a12-4fc1-ade5-cd637812dfb1/tool-results/bcrx67nve.txt\ngrep -iE 'website/docs|website/.*hook' \"$F\" | head -50","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

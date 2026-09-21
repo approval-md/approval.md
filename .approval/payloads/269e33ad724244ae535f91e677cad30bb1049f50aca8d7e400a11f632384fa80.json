@@ -1,0 +1,1 @@
+{"command":"ls tests | /usr/bin/grep -a -iE \"doc|spec|help|reference\" | tr '\\n' ' '; echo; /usr/bin/grep -rn \"anchor-behind\\|draw-unavailable\" SPEC.md docs/*.md | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-389-anchor-diverged"}
