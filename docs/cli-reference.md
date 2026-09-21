@@ -6550,8 +6550,22 @@ other end of this transport is a sandboxed harness on another machine, not the
 operator at their own laptop, so the agent credential opens only what a harness
 under oversight needs in order to ASK and to ACT ON a grant:
 
-> `instructions`, `hook_classify`, `request`, `wait`, `withdraw`,
-> `payload_hash`, `payload_agentmail-draft`
+> `instructions`, `hook_classify`, `request`, `wait`, `withdraw`
+
+Five verbs, and the shortness is the point: a harness under oversight asks and
+is answered, and everything else about the gate belongs to the party the gate
+is for.
+
+Neither payload builder is on it, under the rule that a builder is the agent's
+only if it builds from the request's own arguments and never reaches a host
+resource. `payload_hash` takes a FILE, and on this transport that file is on
+the daemon's machine while the caller is not: every path it could name is one
+the host put there, so answering would be a hash oracle that also files the
+bytes into the payload store. `payload_agentmail-draft` takes two ids rather
+than a path, but reads the draft over HTTPS with `AGENTMAIL_API_KEY` from this
+server's own environment, so a remote caller would be spending the host's
+credential on ids it chose: the same fault wearing a network instead of a
+filesystem.
 
 Everything else the catalog publishes is the tenant's. The ones easiest to wave
 through and most worth naming: `log_tail` and `log_export` return records,
@@ -6564,9 +6578,10 @@ rather than the log: `run` and `sandbox` spawn argv on the daemon's machine,
 every `adapter_<name>` spends vault credentials, `log_advance` opens pull
 requests against the tenant's records. And so are `register` (its positional is
 a host path; the hook endpoint is a harness's way to register, and it
-synthesises the envelope itself), `token`, `coverage`, `doctor`, `audit_list`,
-`audit_obligations`, `channel_telegram_health`, `journal_write`, `journal_read`,
-`feedback`, `values`, `import_agents-md`, `reindex` and `render`.
+synthesises the envelope itself), the two payload builders, `token`,
+`coverage`, `doctor`, `audit_list`, `audit_obligations`,
+`channel_telegram_health`, `journal_write`, `journal_read`, `feedback`,
+`values`, `import_agents-md`, `reindex` and `render`.
 
 **No caller names a path.** The server appends `--dir`, `--log` and `--policy`
 to every verb call in every scope, from its own launch configuration, and a
@@ -6583,8 +6598,8 @@ what widens, and widening it is a diff in the server and a diff in a test.
 
 An agent-credential call to anything off that list is refused
 `serve-agent-forbidden`, and a tenant-credential call to an allowlisted verb
-(`request`, `wait`, `withdraw`, or `consume`, which this surface withholds
-entirely) is refused `serve-tenant-forbidden`. Both are scope refusals rather
+(`request`, `wait`, `withdraw`, `hook_classify`, or `consume`, which this
+surface withholds entirely) is refused `serve-tenant-forbidden`. Both are scope refusals rather
 than not-founds: a caller that guessed a path learns that the door exists and
 is not theirs.
 

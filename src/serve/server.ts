@@ -173,9 +173,9 @@ export const REFUSAL_EXIT_CODE = 2;
  * - `request`, `wait`, `withdraw` — ask, wait for the answer, and retract your
  *   own question. This is the gate sequence, and it is the reason the agent
  *   credential exists.
- * - `payload_hash`, `payload_agentmail-draft` — the payload builders. Both
- *   produce a proposal and no authority: the draft reader uses the composing
- *   agent's own key, touches no vault, spends no token and sends nothing.
+ * That is the whole list. It is five verbs, and the shortness is the point: a
+ * harness under oversight asks and is answered, and everything else about the
+ * gate belongs to the party the gate is for.
  *
  * ## What came OFF this list in review, and why
  *
@@ -189,6 +189,19 @@ export const REFUSAL_EXIT_CODE = 2;
  *   open window is the human's current posture toward this very agent.
  * - `policy_check` and `policy_test` answer what the policy does with a class,
  *   and `policy_check` names the absolute store path while doing it.
+ * - **Both payload builders**, under the rule that a builder is the agent's
+ *   only if it builds from the request's own arguments and never reaches a
+ *   host resource. `payload_hash` takes a FILE, and on this transport that
+ *   file is on the daemon's machine while the caller is not: every path it
+ *   could name is one the host put there, so answering would be a hash oracle
+ *   that also files the bytes into the payload store.
+ *   `payload_agentmail-draft` takes two ids rather than a path, but it reads
+ *   the draft over HTTPS with `AGENTMAIL_API_KEY` FROM THIS SERVER'S OWN
+ *   ENVIRONMENT, so a remote caller would be spending the host's credential on
+ *   ids it chose — the same fault wearing a network instead of a filesystem.
+ *   The narrow reading was taken on purpose: publishing a builder that should
+ *   have been withheld is a capability leak, and withholding one that should
+ *   have been published is a line of configuration.
  *
  * Everything else is the tenant's, including the ones easiest to wave through:
  * `log_tail` and `log_export` return RECORDS, `queue` returns the tenant's
@@ -204,8 +217,6 @@ export const AGENT_VERBS: ReadonlySet<string> = new Set([
   "request",
   "wait",
   "withdraw",
-  "payload_hash",
-  "payload_agentmail-draft",
 ]);
 
 /**

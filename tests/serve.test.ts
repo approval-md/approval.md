@@ -420,15 +420,28 @@ test("a call that names an identity is refused rather than quietly ignored", asy
 const EXPECTED_AGENT_VERBS = [
   "hook_classify",
   "instructions",
-  "payload_agentmail-draft",
-  "payload_hash",
   "request",
   "wait",
   "withdraw",
 ];
 
+/**
+ * The payload builders are NOT on it, and the reason is a rule rather than a
+ * pair of judgments: a builder is the agent's only if it builds from the
+ * request's own arguments and never reaches a host resource. `payload_hash`
+ * takes a file on the daemon's machine; `payload_agentmail-draft` takes ids
+ * but reads the draft with the host's own `AGENTMAIL_API_KEY`. Asserted
+ * explicitly so that putting either back is a deliberate edit here.
+ */
+const WITHHELD_PAYLOAD_BUILDERS = ["payload_hash", "payload_agentmail-draft"];
+
 test("the agent allowlist is exactly the decided list, so a registry addition is loud", () => {
   assert.deepEqual([...AGENT_VERBS].sort(), EXPECTED_AGENT_VERBS);
+
+  // Both builders reach a host resource, so neither is the agent's.
+  for (const builder of WITHHELD_PAYLOAD_BUILDERS) {
+    assert.equal(AGENT_VERBS.has(builder), false, `${builder} reaches the host and is not the agent's`);
+  }
 
   // And every name on it is a verb this surface actually publishes: an
   // allowlist entry matching nothing would be authority granted to a door that
@@ -535,7 +548,7 @@ test("the tenant credential never acts: request, wait and consume are refused", 
     // `register` is NOT here any more: its positional is a host path, so the
     // review moved it to the tenant side and the hook endpoint became the
     // harness's way to register (it synthesises the envelope itself).
-    for (const verb of ["request", "wait", "consume", "withdraw", "payload_hash"]) {
+    for (const verb of ["request", "wait", "consume", "withdraw", "hook_classify"]) {
       const response = await post(server, `/verb/${verb}`, TENANT_TOKEN, {});
       assert.equal(response.status, 403, `${verb} answered the tenant credential`);
       const parsed = (await response.json()) as { error: { code: string; message: string } };
@@ -984,10 +997,19 @@ test("a clipped stream ends on a whole character, and says it was clipped", () =
  * and AC5 requires the tenant to be refused it under any spelling.
  */
 test("scope: allowlisted is the agent's, published is the tenant's, unpublished is neither", () => {
-  for (const name of ["request", "wait", "payload_hash"]) {
+  for (const name of ["request", "wait", "withdraw", "instructions", "hook_classify"]) {
     assert.equal(scopeOf({ kind: "verb", name }), "agent", name);
   }
-  for (const name of ["status", "log_tail", "run", "adapter_email", "register", "log_verify"]) {
+  for (const name of [
+    "status",
+    "log_tail",
+    "run",
+    "adapter_email",
+    "register",
+    "log_verify",
+    "payload_hash",
+    "payload_agentmail-draft",
+  ]) {
     assert.equal(scopeOf({ kind: "verb", name }), "tenant", name);
   }
   // Not published, so not the tenant's to call: the scope answer comes before
@@ -1037,9 +1059,11 @@ test("a caller may not name a path outside the store, by flag or by positional",
   const { dir } = await ready();
   const server = await listener(dir);
   try {
-    // The positional hole the review's fix did not reach: `payload hash`
-    // names a host file and is on the agent allowlist.
-    const positional = await post(server, "/verb/payload_hash", AGENT_TOKEN, {
+    // The positional hole: `payload hash` names a host file. The verb is now
+    // TENANT-scoped, and the confinement still applies there — one process
+    // serves one store whoever is asking, which is why the guard runs in every
+    // scope rather than only on the agent surface.
+    const positional = await post(server, "/verb/payload_hash", TENANT_TOKEN, {
       positionals: ["/etc/hosts"],
     });
     assert.equal(positional.status, 403);
@@ -1064,7 +1088,7 @@ test("a caller may not name a path outside the store, by flag or by positional",
     // file's contents, not on the transport.
     const inside = join(dir, "payload.json");
     writeFileSync(inside, '{"command":"ls"}', "utf8");
-    const allowed = await post(server, "/verb/payload_hash", AGENT_TOKEN, {
+    const allowed = await post(server, "/verb/payload_hash", TENANT_TOKEN, {
       positionals: [inside],
     });
     assert.equal(allowed.status, 200);
