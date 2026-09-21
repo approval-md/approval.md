@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-09-20 19:45'
-updated_date: '2026-09-20 20:04'
+updated_date: '2026-09-20 21:07'
 labels: []
 dependencies: []
 references:
@@ -51,6 +51,8 @@ Landed from the two ChatGPT drafts plus six fixes. Moved sections: How this comp
 docs-guard: the autonomy count phrase and the doctor row-count and tally literals are dropped by design; the guide argues five levels plus one alias, and the row count is volatile and lives in tests/doctor-rows.ts. Every enum level and every fresh-skip row is still asserted by name. New test: README.md links docs/README-extended.md.
 
 Verification: build ok; docs-guard 17/17; lint and typecheck clean; anchor sweep of 53 references resolved with none missing; policy check of the README example resolves vcs.push.main and read.file.out_of_scope to manual with loadFailure null (no defaults.channel cross-check exists in the loader). AC5 unchecked: npm pack --dry-run was denied hook-unclassified by the primary build (this worktree classifies it npm-pack, so the enforcing build is stale relative to main); files list verified by reading package.json. AC8 unchecked: npm test has 41 pre-existing failures on this host (better-sqlite3 NODE_MODULE_VERSION 137 vs 147 under Node 26, and SMTP mock TLS handshake), none in touched files; CI is the verdict.
+
+Follow-up (same day): the README told readers to attest a changed policy with the bare attest verb, and the guide never said what to do when a policy edit sits in a checkout behind main. Both now name approval policy amend (--pr) as the way to land a policy edit, and the guide says explicitly not to stash, reset or check the file out to get past a refused sync. Prompted by Carter hitting log-sync-git-failed on a wanted APPROVAL.md diff.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
