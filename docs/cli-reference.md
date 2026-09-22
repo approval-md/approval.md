@@ -5069,7 +5069,8 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
 `advance-refused`, `dark-session-undetermined`, `anchor-behind`,
-`anchor-reread`, `checkpoint-due`, `draw-unavailable`, `sample-deferred`. A
+`anchor-reread`, `checkpoint-due`, `draw-unavailable`, `sample-deferred`,
+`drift-deferred`. A
 warning never stops the loop, and neither does
 `{"event":"git_evidence_failed","step":"commit",…}`.
 
@@ -5124,6 +5125,33 @@ daemon never runs again.
 Every other append refusal on a sample keeps the `append-refused` form, because
 `validation`, `canonicalization`, `corrupt-tail` and `io` are facts about the
 record or the file that no amount of retrying repairs.
+
+**A drift record that met another writer is deferred too (APRV-403).** The drift
+scan's append is the same compare-and-append against the head it read, and it
+met the same contention: the end-to-end test that holds the append lockfile for
+a whole tick showed the scan printing `append-refused … (lock-timeout)` for an
+`envelope.drift` the next tick went on to write. So the same split applies, from
+the same closed list of transient codes, on both drift reasons:
+
+```
+warning  drift-deferred  envelope.drift for task-042 was deferred (lock-timeout):
+  another writer holds .approval/log/events.jsonl.lock; gave up after 2000ms The
+  record is NOT lost: the disagreement is still there in the log's own terms, and
+  the scan re-derives it and retries on the next tick.
+envelope.drift: task-042 (backlog/tasks/task-042.md) claims state approved, the
+  log says proposed — recorded at seq 12, the retry of the record this run
+  deferred earlier; the file is repaired to match the log later in this tick
+```
+
+The `retry` flag has the same standing as the sample's: it is on the `drift`
+event only when THIS run is the one that deferred the record, it is output
+bookkeeping that no append consults, and a restarted daemon makes the same
+append and claims nothing. Deferring costs nothing because the scan carries no
+state between ticks: it re-reads the folder, re-derives the state from the
+verified log, and `driftAlreadyLogged` keeps a repeat idempotent.
+
+An `envelope.drift` refused for `validation`, `canonicalization`, `corrupt-tail`
+or `io` keeps the `append-refused` form it always had.
 
 **The sweep waits `2000ms` for the lock and no longer, by decision.** The daemon
 is the one writer that could afford a longer wait and deliberately takes the

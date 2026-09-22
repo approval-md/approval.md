@@ -289,14 +289,19 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
         }${event.watching ? "" : " (fs watch unavailable — polling only)"}`,
         stderr: false,
       };
-    case "drift":
+    case "drift": {
+      // APRV-403, the same pairing `sampled` gets below: an operator who read a
+      // `drift-deferred` warning earlier in this run is owed the other half of
+      // the pair here rather than left to match task ids by eye.
+      const retried =
+        event.retry === true ? ", the retry of the record this run deferred earlier" : "";
       // The envelope-missing case (APRV-63) reads differently on purpose: there
       // is no claim to quote, and the repair is a restoration a human makes.
       if (event.reason === "envelope-missing") {
         return {
           text: `envelope.drift: ${event.task} (${event.file}) has NO approval: envelope, but the log registered it — the log says state ${event.derived_state}; recorded at seq ${String(
             event.seq,
-          )}. Restore the envelope by hand from the log; the runtime never rewrites the file`,
+          )}${retried}. Restore the envelope by hand from the log; the runtime never rewrites the file`,
           stderr: false,
         };
       }
@@ -305,9 +310,10 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
           event.declared_state === null ? "<none>" : event.declared_state
         }, the log says ${event.derived_state} — recorded at seq ${String(
           event.seq,
-        )}; the file is repaired to match the log later in this tick`,
+        )}${retried}; the file is repaired to match the log later in this tick`,
         stderr: false,
       };
+    }
     case "write_back":
       return {
         text: `write-back: ${event.task} (${event.file}) state ${
