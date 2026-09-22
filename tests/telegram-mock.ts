@@ -115,8 +115,16 @@ export interface MockBotApi {
    * get (APRV-74).
    */
   pendingUpdateCount(): number;
-  /** Inject a failure mode for every subsequent call, or `null` to behave. */
-  fail(mode: MockFailure | null): void;
+  /**
+   * Inject a failure mode for every subsequent call, or `null` to behave.
+   *
+   * `options.method` narrows it to ONE Bot API method (APRV-424 review): the
+   * webhook runner's start-up order is `getMe`, `getWebhookInfo`,
+   * `sendMessage`, `setWebhook`, so a global failure can never reach the last
+   * of them, and the refusal a rejected registration produces cannot be
+   * driven at all without naming the call that fails.
+   */
+  fail(mode: MockFailure | null, options?: { method?: string }): void;
   /**
    * Called after every `getUpdates` has been answered (APRV-248).
    *
@@ -250,6 +258,8 @@ export async function startMockBotApi(
   let updateId = 1000;
   let messageId = 500;
   let failure: MockFailure | null = null;
+  /** The one method an injected failure applies to, or `null` for all of them. */
+  let failureMethod: string | null = null;
   let webhook: { url?: string; pendingUpdateCount?: number } = {};
   let registration: { url: string; secretToken: string } | null = null;
   let pollsAnswered = 0;
@@ -291,21 +301,25 @@ export async function startMockBotApi(
     const received: MockRequest = { path, method, raw, body };
     requests.push(received);
 
-    if (failure === "drop") {
+    // The injected failure, narrowed to one method when the test named one.
+    const injected =
+      failure !== null && (failureMethod === null || failureMethod === method) ? failure : null;
+
+    if (injected === "drop") {
       request.socket.destroy();
       return;
     }
-    if (failure === "500") {
+    if (injected === "500") {
       response.writeHead(500, { "content-type": "text/plain" });
       response.end("mock: internal server error");
       return;
     }
-    if (failure === "malformed") {
+    if (injected === "malformed") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end('{"ok":true,"result":[  <- not JSON');
       return;
     }
-    if (failure === "409") {
+    if (injected === "409") {
       // The Bot API's own text, verbatim, because the runtime matches on it as
       // well as on the status (`isPollConflict`).
       response.writeHead(409, { "content-type": "application/json" });
@@ -319,7 +333,7 @@ export async function startMockBotApi(
       );
       return;
     }
-    if (failure === "echo-secret") {
+    if (injected === "echo-secret") {
       const quoted = typeof body["secret_token"] === "string" ? body["secret_token"] : raw;
       send(response, {
         ok: false,
@@ -328,7 +342,7 @@ export async function startMockBotApi(
       });
       return;
     }
-    if (failure === "timeout") {
+    if (injected === "timeout") {
       // Accepted and never answered: the client's own transport timeout is the
       // only thing that ends this, which is the point of the mode.
       held.add(response);
@@ -541,8 +555,9 @@ export async function startMockBotApi(
     onGetUpdatesAnswered(hook) {
       pollHook = hook;
     },
-    fail(mode) {
+    fail(mode, options = {}) {
       failure = mode;
+      failureMethod = options.method ?? null;
       if (mode === null) {
         for (const response of held) response.destroy();
         held.clear();
@@ -651,6 +666,7 @@ export async function startMockBotApi(
     },
     async close() {
       failure = null;
+      failureMethod = null;
       pollHook = null;
       for (const response of held) response.destroy();
       held.clear();

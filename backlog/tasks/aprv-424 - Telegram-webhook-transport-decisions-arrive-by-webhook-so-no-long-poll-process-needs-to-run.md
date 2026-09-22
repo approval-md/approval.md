@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-424'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 01:56'
+updated_date: '2026-09-22 02:16'
 labels:
   - telegram
   - channels
@@ -46,6 +46,8 @@ Read first (done): channels/telegram.ts (listen/pollOnce/handleUpdate/routeCallb
 8. Tests. tests/telegram-webhook.test.ts: (a) the SHARED CONTRACT TEST -- one scenario, one callback_query, driven through pollOnce and through an HTTP POST, asserting the appended approval.granted / approval.rejected records are identical field for field apart from seq/ts/hash/prev, under a policy that maps senders so the mapped approver (not the launch actor) is proven on both, plus the unmapped-account refusal on both; (b) a forged post (wrong, missing, duplicate secret) refused with its code, nothing appended, the request still pending; (c) each remaining refusal code; (d) transport exclusivity; (e) the secret appears in no response body and no complaint; (f) runChannelConformance driven through the webhook. tests/telegram-mock.ts gains setWebhook/deleteWebhook and a registration accessor.
 9. Docs: docs/cli-reference.md gains `## channel telegram webhook` (the anchor the help's why: footer needs), covering the mode, the endpoint, the env var, the secret header, the refusal vocabulary, the mutual exclusion and the proxy-or-tunnel requirement; the listen section names the new refusal. SPEC.md is NOT edited: a proposed §10.3 hunk goes in the implementation notes.
 10. Verify: npm run build, typecheck, lint, then channels/conformance/daemon suites and the new tests, then npm test once (22 SMTP failures on Node 26 are pre-existing, APRV-416).
+
+REVIEW PASS (fixer, adversarial-review findings 1-10). 11. Per-gate transport lease: new core/channel-lease.ts, an O_EXCL lockfile under .approval/daemon/ holding pid + mode + start time, liveness-checked (stale pid reclaimed), taken by claimListenerBot in poll mode for up/listen and webhook mode for the webhook verb, released on clean stop; a second taker refuses telegram-poller-running or webhook-registered naming pid and mode. 12. handle.close() stops accepting, drains the serialize queue and the in-flight request count, then destroys idle sockets; the verb deleteWebhooks and prints stopped only after the drain, with SIGINT still hooked. 13. --path must start with /, hold no .., and equal url.pathname (webhook-path-invalid / webhook-path-mismatch). 14. setWebhook failure emits webhook-registration-failed with status and redacted description; the frozen union is pinned member by member. 15. webhook-unknown-path splits into webhook-malformed-request (400) and webhook-unknown-path (404). 16. Any existing registration refuses webhook-registered unless --reclaim; URLs normalised (lowercase host, no trailing slash) for the reclaim compare. 17. A failed getWebhookInfo/getMe probe refuses the webhook verb (webhook-probe-failed); the poller keeps its documented fail-soft. 18. Bind resolution refuses port 0 and anything outside 1..65535, through TELEGRAM_WEBHOOK_DEFAULT_HOST/PORT. 19. --url with userinfo refused; every printed url is origin plus served path, redacted otherwise. Finding 7 (secret_env in policy) is NOTE ONLY: recorded as a proposed follow-up task.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

@@ -64,6 +64,66 @@ export const TELEGRAM_CHAT_ENV = "APPROVAL_TG_CHAT";
  */
 export const TELEGRAM_WEBHOOK_SECRET_ENV = "APPROVAL_TG_WEBHOOK_SECRET";
 
+/**
+ * One webhook URL, reduced so two spellings of one endpoint compare equal
+ * (APRV-424, review finding 6).
+ *
+ * The host is lowercased and one trailing slash is dropped from the path.
+ * Nothing more is attempted: `normaliseApiBase` in `core/channel-owner.ts`
+ * argues the same restraint, and the direction of the error matters here. Two
+ * spellings that compare UNEQUAL turn a restart into a refusal, which an
+ * operator clears with one flag; two that compare equal when they are
+ * different endpoints would let a second host quietly take a first host's
+ * taps, which nobody would see.
+ *
+ * The path's case is preserved, because a path is case-sensitive and a webhook
+ * path is often a random token.
+ *
+ * `null` for anything that is not a URL, so a caller compares two known URLs
+ * or refuses. A failed parse is never "equal to everything".
+ */
+export function normaliseWebhookUrl(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const path = url.pathname.length > 1 ? url.pathname.replace(/\/+$/u, "") : url.pathname;
+  return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${path}${url.search}`;
+}
+
+/**
+ * A webhook URL as it may be PRINTED (APRV-424, review finding 10).
+ *
+ * A webhook URL is not a credential and is not treated as one, but two things
+ * travel inside one often enough that echoing it verbatim is a habit worth
+ * dropping. The first is userinfo (`https://user:pw@host/hook`), which the
+ * webhook verb refuses outright before it registers anything. The second is
+ * the token-in-path pattern: a tunnel that hands out
+ * `https://host/hook/8Xk2-a-long-random-value` puts a bearer value in a path,
+ * and a runtime that copied that path into a start-up banner, a `--json` line
+ * and a refusal has written it into three places the operator did not choose.
+ *
+ * So what is printed is the ORIGIN, which carries no userinfo by
+ * construction, plus the path this process actually serves. A path that is not
+ * the served one is reported as redacted rather than quoted: the origin is
+ * what tells one host from another, and the rest is the operator's.
+ */
+export function redactWebhookUrl(raw: string, servedPath?: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "<not a url>";
+  }
+  if (servedPath !== undefined && url.pathname === servedPath && url.search === "") {
+    return `${url.origin}${servedPath}`;
+  }
+  const hasPath = url.pathname !== "" && url.pathname !== "/";
+  return hasPath || url.search !== "" ? `${url.origin}/<path redacted>` : url.origin;
+}
+
 /** The NAME of the variable this policy says the bot token lives in. */
 export function telegramTokenEnvFor(load: PolicyLoadResult): string {
   return declaredEnvName(load, "token_env") ?? TELEGRAM_TOKEN_ENV;

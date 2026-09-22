@@ -48,13 +48,18 @@
 
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
+import { TelegramApiError } from "../channels/telegram.js";
 import {
   serveTelegramWebhook,
+  TELEGRAM_WEBHOOK_DEFAULT_HOST,
   TELEGRAM_WEBHOOK_DEFAULT_PORT,
   TELEGRAM_SECRET_HEADER,
   type TelegramWebhookHandle,
 } from "../channels/telegram-webhook.js";
-import { TELEGRAM_WEBHOOK_SECRET_ENV } from "../core/telegram-config.js";
+import {
+  redactWebhookUrl,
+  TELEGRAM_WEBHOOK_SECRET_ENV,
+} from "../core/telegram-config.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -83,6 +88,8 @@ const WEBHOOK_FLAGS: Record<string, FlagKind> = {
   "--port": "string",
   "--path": "string",
   "--allow-non-loopback": "boolean",
+  /** APRV-424 review finding 6: register over a webhook that already holds this bot. */
+  "--reclaim": "boolean",
   "--cycle": "string",
   "--log": "string",
   "--policy": "string",
@@ -148,9 +155,44 @@ export const WEBHOOK_REFUSAL_CODES = [
   "webhook-url-insecure",
   /** `--url` names a port Telegram does not deliver to. */
   "webhook-url-port",
+  /**
+   * `--url` carries userinfo (`https://user:pw@host/hook`) (review finding 10).
+   *
+   * Refused rather than stripped. A credential in a url is a credential the
+   * operator put on a command line, and a runtime that quietly dropped it
+   * would register an endpoint that answers differently from the one they
+   * typed; a runtime that kept it would carry it into `setWebhook`, into the
+   * start-up banner and into every refusal that names the url.
+   */
+  "webhook-url-userinfo",
+  /**
+   * `--path` is not a servable path: it does not start with `/`, or it holds a
+   * `..` segment (review finding 3).
+   */
+  "webhook-path-invalid",
+  /**
+   * `--path` is a servable path, and not the one `--url` names (review finding
+   * 3).
+   *
+   * The pair used to be free to disagree, described as an override for a proxy
+   * that rewrites on the way. What it actually bought was a receiver that
+   * registered cleanly, verified the secret on every real delivery, and then
+   * answered all of them 404: `telegram/webhook` against a url path of
+   * `/telegram/webhook`, or `/hook/` against a url ending `/hook`, both start
+   * without a word. A path mismatch is now a startup refusal.
+   */
+  "webhook-path-mismatch",
   /** `--cycle` was not a duration. */
   "webhook-cycle",
-  /** `setWebhook` was refused by the Bot API. */
+  /**
+   * `setWebhook` was refused by the Bot API.
+   *
+   * Emitted by {@link runWebhook} since the review of this task; before it the
+   * code was declared here and the failure was reported as a bare `io`, which
+   * made "Telegram will not take this registration" indistinguishable from
+   * "the log could not be read". The status and the Bot API's own description
+   * are carried, redacted of the token and the secret by the channel.
+   */
   "webhook-registration-failed",
 ] as const;
 
@@ -171,6 +213,15 @@ export interface WebhookSetup {
   port: number;
   /** How often the dispatch cycle runs. */
   cycleMs: number;
+  /**
+   * `--reclaim`: register over a webhook that already holds this bot (review
+   * finding 6).
+   *
+   * Carried on the setup rather than consulted from the flags again, because
+   * the check it overrides is made by {@link claimListenerBot}, which this
+   * verb shares with the poller.
+   */
+  reclaim: boolean;
 }
 
 export type WebhookPreparation =
@@ -195,6 +246,8 @@ export interface WebhookRequest {
   port: number;
   /** `--cycle` as typed, or `null` for {@link WEBHOOK_DEFAULT_CYCLE_MS}. */
   cycle: string | null;
+  /** `--reclaim` as passed. Defaults to false, which is the refusing side. */
+  reclaim?: boolean;
   /** The environment the secret is read from. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
   log(message: string): void;
@@ -210,6 +263,27 @@ function usageError(streams: Streams, json: boolean, message: string): number {
 
 function ioError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "io", message } })}\n`);
+  else streams.err(`approval: ${message}\n`);
+  return EXIT_IO;
+}
+
+/**
+ * A refusal that has its own code, rather than the transport-shaped `io`.
+ *
+ * Added for review finding 4: `webhook-registration-failed` was declared in
+ * the frozen union above and never emitted, so a `setWebhook` the Bot API
+ * turned down reached the operator as `{"error":{"code":"io"}}` — the same
+ * code an unreadable log produces, for a completely different repair. The exit
+ * code stays {@link EXIT_IO}, because what failed is still a call out of this
+ * process; what changes is that the machine-readable half names it.
+ */
+function refusalError(
+  streams: Streams,
+  json: boolean,
+  code: WebhookRefusalCode,
+  message: string,
+): number {
+  if (json) streams.err(`${JSON.stringify({ error: { code, message } })}\n`);
   else streams.err(`approval: ${message}\n`);
   return EXIT_IO;
 }
@@ -312,6 +386,41 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
       message: `--url names port ${String(urlPort)}, and Telegram delivers a webhook only to ${[...TELEGRAM_WEBHOOK_PORTS].join(", ")}. That is the PUBLIC port your proxy answers on; this process's own bind is --port / --listen and can be anything`,
     };
   }
+  if (url.username !== "" || url.password !== "") {
+    // Refused, not stripped. See `webhook-url-userinfo`: the value is a
+    // credential on a command line, and this runtime neither carries it into
+    // `setWebhook` nor decides on the operator's behalf that they did not mean
+    // it. The message quotes the origin alone, so the refusal does not print
+    // the thing it is refusing.
+    return {
+      ok: false,
+      code: "webhook-url-userinfo",
+      message: `--url carries a username or a password (${url.origin} was given with userinfo in front of the host). Telegram's delivery would not use it, this runtime will not register it, and a credential in a url ends up in shell history, in a process listing and in every line that names the url. Put the authentication in the proxy in front of this process, and give --url the plain https address it answers on`,
+    };
+  }
+
+  // The path this process SERVES is the url's own, always (review finding 3).
+  // `--path` is an explicit restatement of it and nothing more: the two used
+  // to be free to disagree, and a disagreement produced a receiver that
+  // registered, verified the secret on every real delivery, and 404'd every
+  // one of them.
+  if (request.path !== null) {
+    const declared = request.path;
+    if (!declared.startsWith("/") || declared.split("/").includes("..")) {
+      return {
+        ok: false,
+        code: "webhook-path-invalid",
+        message: `--path ${JSON.stringify(declared)} is not a path this server can serve: it must begin with "/" and hold no ".." segment. It is the path Telegram will POST to, which is the path in --url (${url.pathname})`,
+      };
+    }
+    if (declared !== url.pathname) {
+      return {
+        ok: false,
+        code: "webhook-path-mismatch",
+        message: `--path ${JSON.stringify(declared)} is not the path --url names (${url.pathname}). Telegram posts to the url it was given, so a receiver listening on any other path verifies the secret on every real delivery and then answers it 404. Pass --path only to restate the url's own path, and put any rewriting in the proxy in front of this process`,
+      };
+    }
+  }
 
   const cycleMs =
     request.cycle === null ? WEBHOOK_DEFAULT_CYCLE_MS : (parseDuration(request.cycle) ?? -1);
@@ -331,16 +440,82 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
       listen: listen.setup,
       secret,
       url: request.url,
-      // The url's own path, because that is what a proxy forwarding straight
-      // through will ask for. `--path` is the override for a proxy that
-      // rewrites on the way: it serves what the operator says arrives, and
-      // the registered url stays what Telegram was told.
-      path: request.path ?? url.pathname,
+      // The url's own path, checked against `--path` above when one was given.
+      // One path, one registration, one route: what Telegram posts to is what
+      // this process answers.
+      path: url.pathname,
       host: request.host,
       port: request.port,
       cycleMs,
+      reclaim: request.reclaim ?? false,
     },
   };
+}
+
+/**
+ * `--listen` / `--port` -> the interface and port this process binds (review
+ * finding 9).
+ *
+ * Its own function, and exported, because three refusals live in it and each
+ * one is a thing an operator can type:
+ *
+ * - **Port 0 is refused.** The kernel hands out an ephemeral port for it, and
+ *   an ephemeral port is the one thing this transport cannot use: the whole
+ *   deployment is a proxy forwarding a fixed public url to a fixed local
+ *   address, so a receiver that bound 51423 registered a url nothing would
+ *   ever reach and said nothing about it. Tests bind 0 by calling the receiver
+ *   directly, which is the level where an ephemeral port is the point.
+ * - **A port outside 1..65535 is refused**, on either flag. `parseListen`
+ *   accepts 0 for `approval serve`'s own reasons, so the floor is applied
+ *   here rather than assumed there.
+ * - **A routable interface needs `--allow-non-loopback`**, because this
+ *   process speaks plain HTTP and the secret arrives in a header.
+ */
+export type WebhookBind =
+  | { ok: true; host: string; port: number }
+  | { ok: false; message: string };
+
+export function resolveWebhookBind(
+  listenFlag: string | null,
+  portFlag: string | null,
+  allowNonLoopback: boolean,
+): WebhookBind {
+  if (listenFlag !== null && portFlag !== null) {
+    return {
+      ok: false,
+      message:
+        "--listen and --port name the same thing; pass one. --listen <[host:]port> is the only way to bind a non-loopback interface",
+    };
+  }
+  let host = TELEGRAM_WEBHOOK_DEFAULT_HOST;
+  let port = TELEGRAM_WEBHOOK_DEFAULT_PORT;
+  if (listenFlag !== null) {
+    const bind = parseListen(listenFlag);
+    if (!bind.ok) return { ok: false, message: bind.message };
+    host = bind.host;
+    port = bind.port;
+  } else if (portFlag !== null) {
+    if (!/^\d+$/u.test(portFlag.trim())) {
+      return { ok: false, message: `--port expects a whole number, got ${JSON.stringify(portFlag)}` };
+    }
+    port = Number(portFlag.trim());
+  }
+  if (port === 0) {
+    return {
+      ok: false,
+      message: `the bind port may not be 0. Port 0 asks the kernel for an ephemeral port, and this transport is a fixed public url forwarded to a fixed local address: a receiver on a port nobody registered would verify nothing and answer nothing. Name the port your proxy forwards to (the default is ${String(TELEGRAM_WEBHOOK_DEFAULT_PORT)})`,
+    };
+  }
+  if (port < 1 || port > 65535) {
+    return { ok: false, message: `the bind port ${String(port)} is outside the TCP port range 1..65535` };
+  }
+  if (!isLoopbackHost(host) && !allowNonLoopback) {
+    return {
+      ok: false,
+      message: `--listen ${JSON.stringify(host)} is not the loopback interface, and this process speaks plain HTTP: the webhook secret arrives in a header and a cleartext hop hands it to whoever is on it. Add --allow-non-loopback if you meant it and TLS is terminated in front of this process`,
+    };
+  }
+  return { ok: true, host, port };
 }
 
 /**
@@ -376,6 +551,8 @@ export function webhookNonLoopbackBanner(host: string, port: number): string {
 export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise<number> {
   const { listen } = setup;
   const json = listen.json;
+  /** The url as it may be printed: origin plus the path this process serves. */
+  const shownUrl = redactWebhookUrl(setup.url, setup.path);
 
   for (const finding of listen.crossInstance) {
     streams.err(`approval: --allow-cross-instance: starting anyway — ${finding.detail}\n`);
@@ -383,141 +560,185 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
 
   // Which bot is this, whose is it, and what is already receiving its updates.
   // The same preflight `approval channel telegram listen` runs, told that THIS
-  // process is the webhook at this URL so a restart re-registering its own URL
-  // is not mistaken for a competitor.
+  // process is the webhook at this URL: without `--reclaim` any registration
+  // refuses, including one at this very url, because two hosts sharing one
+  // configuration both read that as their own restart (review finding 6). It
+  // also takes this gate's transport lease, which is what makes a poller
+  // already running in the same project a refusal rather than a double
+  // delivery (review finding 1).
   const claimed = await claimListenerBot(listen, (message) => streams.err(`${message}\n`), {
     webhookUrl: setup.url,
+    reclaim: setup.reclaim,
+    mode: "webhook",
   });
   if (!claimed.ok) return integrityError(streams, json, claimed.message);
 
-  const state = wireListener(listen, streams);
-
-  // The startup cycle, before anything is bound: an operator who has just
-  // mistyped a token or pointed at an unreadable log should learn it here
-  // rather than watch a receiver sit on a port. Same call, same state and same
-  // fatal-failure rule as `startListener`'s.
-  const startup = await dispatchPending(listen, streams, state, new Date().toISOString());
-  if (startup.queueError !== undefined) {
-    return startup.queueError.code === "log-unreadable"
-      ? ioError(streams, json, startup.queueError.message)
-      : integrityError(streams, json, startup.queueError.message);
-  }
-  const firstFailure = startup.failed[0];
-  if (firstFailure !== undefined) {
-    return ioError(streams, json, `telegram sendMessage failed: ${firstFailure.message}`);
-  }
-
-  const cycle = async (): Promise<void> => {
-    reportCycle(await dispatchPending(listen, streams, state, new Date().toISOString()), streams);
-  };
-
-  let handle: TelegramWebhookHandle;
   try {
-    handle = await serveTelegramWebhook({
-      channel: listen.channel,
-      secret: setup.secret,
-      path: setup.path,
-      host: setup.host,
-      port: setup.port,
-      log: (message) => streams.err(`${message}\n`),
-      // The dispatch cycle, run after each update the channel accepted: this
-      // is where a paced listener's NEXT question goes out once the shown one
-      // is decided, and the poll loop gets the same thing from `beforePoll`.
-      afterUpdate: cycle,
-    });
-  } catch (cause) {
-    return ioError(
-      streams,
-      json,
-      `telegram webhook could not bind ${setup.host}:${String(setup.port)}: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
-    );
-  }
+    const state = wireListener(listen, streams);
 
-  try {
-    await listen.channel.registerWebhook(setup.url, setup.secret);
-  } catch (cause) {
-    await handle.close();
-    return ioError(
-      streams,
-      json,
-      `telegram setWebhook was refused (${
-        cause instanceof Error ? cause.message : String(cause)
-      }); nothing is registered and this process is not listening`,
-    );
-  }
+    // The startup cycle, before anything is bound: an operator who has just
+    // mistyped a token or pointed at an unreadable log should learn it here
+    // rather than watch a receiver sit on a port. Same call, same state and
+    // same fatal-failure rule as `startListener`'s.
+    const startup = await dispatchPending(listen, streams, state, new Date().toISOString());
+    if (startup.queueError !== undefined) {
+      return startup.queueError.code === "log-unreadable"
+        ? ioError(streams, json, startup.queueError.message)
+        : integrityError(streams, json, startup.queueError.message);
+    }
+    const firstFailure = startup.failed[0];
+    if (firstFailure !== undefined) {
+      return ioError(streams, json, `telegram sendMessage failed: ${firstFailure.message}`);
+    }
 
-  if (!isLoopbackHost(handle.host)) {
-    streams.err(webhookNonLoopbackBanner(handle.host, handle.port));
-  }
-  const started = `approval: telegram webhook registered ${setup.url} and bound http://${handle.host}:${String(handle.port)}${handle.path} as ${listen.actor}. Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
-  if (json) {
-    streams.out(
-      `${JSON.stringify({
-        event: "webhook_started",
-        url: setup.url,
-        host: handle.host,
-        port: handle.port,
-        path: handle.path,
-        cycle_ms: setup.cycleMs,
-      })}\n`,
-    );
-  }
-  streams.err(`${started}\n`);
-
-  // The cycle a poller gets from its poll loop. Serialized with delivery, so a
-  // dispatch never runs while an update is being handled: the channel's maps
-  // and its single ack slot are not reentrant.
-  const timer = setInterval(() => {
-    void handle.serialize(cycle).catch((cause: unknown) => {
-      streams.err(
-        `approval: telegram webhook dispatch cycle failed (${
-          cause instanceof Error ? cause.message : String(cause)
-        }); retrying next cycle\n`,
-      );
-    });
-  }, setup.cycleMs);
-  // Nothing about a cycle should hold the process open on its own.
-  timer.unref?.();
-
-  return await new Promise<number>((settle) => {
-    let stopping = false;
-    const stop = (): void => {
-      if (stopping) return;
-      stopping = true;
-      clearInterval(timer);
-      process.off("SIGINT", stop);
-      process.off("SIGTERM", stop);
-      void (async () => {
-        // Best effort, and said out loud when it fails: a webhook left
-        // registered is a bot no poller can start against, which is exactly
-        // the refusal this task added.
-        try {
-          await listen.channel.deleteWebhook();
-        } catch (cause) {
-          streams.err(
-            `approval: telegram deleteWebhook failed (${
-              cause instanceof Error ? cause.message : String(cause)
-            }); the webhook is still registered, so getUpdates will refuse until it is removed\n`,
-          );
-        }
-        await handle.close();
-        if (json) {
-          streams.out(
-            `${JSON.stringify({
-              event: "stopped",
-              ...listen.channel.stats(),
-              webhook: handle.stats(),
-            })}\n`,
-          );
-        }
-        settle(EXIT_OK);
-      })();
+    const cycle = async (): Promise<void> => {
+      reportCycle(await dispatchPending(listen, streams, state, new Date().toISOString()), streams);
     };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
-  });
+
+    let handle: TelegramWebhookHandle;
+    try {
+      handle = await serveTelegramWebhook({
+        channel: listen.channel,
+        secret: setup.secret,
+        path: setup.path,
+        host: setup.host,
+        port: setup.port,
+        log: (message) => streams.err(`${message}\n`),
+        // The dispatch cycle, run after each update the channel accepted: this
+        // is where a paced listener's NEXT question goes out once the shown one
+        // is decided, and the poll loop gets the same thing from `beforePoll`.
+        afterUpdate: cycle,
+      });
+    } catch (cause) {
+      return ioError(
+        streams,
+        json,
+        `telegram webhook could not bind ${setup.host}:${String(setup.port)}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+
+    try {
+      await listen.channel.registerWebhook(setup.url, setup.secret);
+    } catch (cause) {
+      await handle.close();
+      // Its own code since the review of this task (finding 4): "Telegram will
+      // not take this registration" and "the log could not be read" used to
+      // arrive as the same `io`, which is two different repairs under one
+      // name. The status and the Bot API's own description come through, both
+      // already scrubbed of the token and the secret by the channel.
+      const api = cause instanceof TelegramApiError ? cause : null;
+      const detail =
+        api === null
+          ? cause instanceof Error
+            ? cause.message
+            : String(cause)
+          : [
+              api.status === null ? null : `HTTP ${String(api.status)}`,
+              api.description ?? api.message,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(": ");
+      return refusalError(
+        streams,
+        json,
+        "webhook-registration-failed",
+        `telegram setWebhook was refused for ${shownUrl} (${detail}); nothing is registered and this process is not listening`,
+      );
+    }
+
+    if (!isLoopbackHost(handle.host)) {
+      streams.err(webhookNonLoopbackBanner(handle.host, handle.port));
+    }
+    const started = `approval: telegram webhook registered ${shownUrl} and bound http://${handle.host}:${String(handle.port)}${handle.path} as ${listen.actor}. Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
+    if (json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "webhook_started",
+          // The origin and the served path, not the url as typed (review
+          // finding 10): a tunnel that puts a random token in the path should
+          // not have it copied into a log line nobody asked for.
+          url: shownUrl,
+          host: handle.host,
+          port: handle.port,
+          path: handle.path,
+          cycle_ms: setup.cycleMs,
+        })}\n`,
+      );
+    }
+    streams.err(`${started}\n`);
+
+    // The cycle a poller gets from its poll loop. Serialized with delivery, so
+    // a dispatch never runs while an update is being handled: the channel's
+    // maps and its single ack slot are not reentrant.
+    const timer = setInterval(() => {
+      void handle.serialize(cycle).catch((cause: unknown) => {
+        streams.err(
+          `approval: telegram webhook dispatch cycle failed (${
+            cause instanceof Error ? cause.message : String(cause)
+          }); retrying next cycle\n`,
+        );
+      });
+    }, setup.cycleMs);
+    // Nothing about a cycle should hold the process open on its own.
+    timer.unref?.();
+
+    return await new Promise<number>((settle) => {
+      let stopping = false;
+      const stop = (): void => {
+        if (stopping) return;
+        stopping = true;
+        clearInterval(timer);
+        void (async () => {
+          // THE ORDER IS THE POINT (review finding 2). The receiver stops
+          // accepting and then drains: an update mid-append keeps its socket,
+          // finishes its decision and writes its response. Only then does this
+          // process tell Telegram to stop delivering, and only then does it
+          // say it has stopped. The first version closed first and resolved in
+          // about a millisecond, so `deleteWebhook`, the stopped line and the
+          // exit all happened inside somebody's append.
+          //
+          // SIGINT stays hooked for the whole of it, so a second Ctrl-C is
+          // absorbed by the `stopping` guard rather than killing the process
+          // through Node's default handler halfway through the drain.
+          await handle.close();
+
+          // Best effort, and said out loud when it fails: a webhook left
+          // registered is a bot no poller can start against, which is exactly
+          // the refusal this task added.
+          try {
+            await listen.channel.deleteWebhook();
+          } catch (cause) {
+            streams.err(
+              `approval: telegram deleteWebhook failed (${
+                cause instanceof Error ? cause.message : String(cause)
+              }); the webhook is still registered, so getUpdates will refuse until it is removed\n`,
+            );
+          }
+          if (json) {
+            streams.out(
+              `${JSON.stringify({
+                event: "stopped",
+                ...listen.channel.stats(),
+                webhook: handle.stats(),
+              })}\n`,
+            );
+          }
+          process.off("SIGINT", stop);
+          process.off("SIGTERM", stop);
+          settle(EXIT_OK);
+        })();
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+    });
+  } finally {
+    // The transport lease goes back however this verb ends: a clean stop, a
+    // refused registration, a log that could not be read. The next process to
+    // start in this gate finds no lease rather than one it has to reclaim.
+    claimed.lease.release();
+  }
 }
 
 /** `approval channel telegram webhook [flags]`. */
@@ -544,43 +765,15 @@ export async function commandTelegramWebhook(
 
   // The bind, parsed exactly as `approval serve` parses its own: `--port`
   // never reaches a routable interface, `--listen` is the only thing that can,
-  // and a non-loopback host needs a second flag on top.
-  const listenFlag = stringFlag(flags, "--listen");
-  const portFlag = stringFlag(flags, "--port");
-  if (listenFlag !== null && portFlag !== null) {
-    return usageError(
-      streams,
-      json,
-      "--listen and --port name the same thing; pass one. --listen <[host:]port> is the only way to bind a non-loopback interface",
-    );
-  }
-  let bindHost = "127.0.0.1";
-  let bindPort = TELEGRAM_WEBHOOK_DEFAULT_PORT;
-  if (listenFlag !== null) {
-    const bind = parseListen(listenFlag);
-    if (!bind.ok) return usageError(streams, json, bind.message);
-    bindHost = bind.host;
-    bindPort = bind.port;
-  } else if (portFlag !== null) {
-    if (!/^\d+$/u.test(portFlag.trim())) {
-      return usageError(
-        streams,
-        json,
-        `--port expects a whole number, got ${JSON.stringify(portFlag)}`,
-      );
-    }
-    bindPort = Number(portFlag.trim());
-    if (bindPort > 65535) {
-      return usageError(streams, json, `--port ${String(bindPort)} is outside the TCP port range`);
-    }
-  }
-  if (!isLoopbackHost(bindHost) && !boolFlag(flags, "--allow-non-loopback")) {
-    return usageError(
-      streams,
-      json,
-      `--listen ${JSON.stringify(bindHost)} is not the loopback interface, and this process speaks plain HTTP: the webhook secret arrives in a header and a cleartext hop hands it to whoever is on it. Add --allow-non-loopback if you meant it and TLS is terminated in front of this process`,
-    );
-  }
+  // a non-loopback host needs a second flag on top, and since the review of
+  // this task port 0 is refused rather than turned into an ephemeral bind
+  // nothing has registered.
+  const bind = resolveWebhookBind(
+    stringFlag(flags, "--listen"),
+    stringFlag(flags, "--port"),
+    boolFlag(flags, "--allow-non-loopback"),
+  );
+  if (!bind.ok) return usageError(streams, json, bind.message);
 
   const policyFlag = stringFlag(flags, "--policy");
   const dirFlag = stringFlag(flags, "--dir");
@@ -600,9 +793,10 @@ export async function commandTelegramWebhook(
     allowCrossInstance: boolFlag(flags, "--allow-cross-instance"),
     url: stringFlag(flags, "--url"),
     path: stringFlag(flags, "--path"),
-    host: bindHost,
-    port: bindPort,
+    host: bind.host,
+    port: bind.port,
     cycle: stringFlag(flags, "--cycle"),
+    reclaim: boolFlag(flags, "--reclaim"),
     log: (message: string) => streams.err(`${message}\n`),
     ...glossWiring(flags, passphraseEnvFor(loadPolicy(policy)), {
       diagnostic: (reason) =>

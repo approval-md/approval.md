@@ -1921,20 +1921,20 @@ export const TELEGRAM_WEBHOOK_HELP = `approval channel telegram webhook — deci
 Usage:
   approval channel telegram webhook --url <https://host/path> [--path <p>]
         [--listen [host:]port | --port <n>] [--allow-non-loopback] [--cycle <d>]
-        [--as human:<id>] [--policy <p>] [--dir <p>] [--log <p>] [--payloads <f>]
-        [--api-base <url>] [--no-gloss] [--allow-cross-instance] [--json]
+        [--reclaim] [--as human:<id>] [--policy <p>] [--dir <p>] [--log <p>]
+        [--payloads <f>] [--api-base <url>] [--no-gloss] [--json]
 
 Flags:
-  --url <https://...>  REQUIRED: the PUBLIC url registered with setWebhook. https only, on port 443, 80, 88 or 8443 (Telegram's list)
-  --port <n> / --listen <[host:]port>   this process's own bind. LOOPBACK by default (4683); routable also needs --allow-non-loopback
-  --path <p> / --cycle <d>   path served (default: the url's) / dispatch period (30s)
+  --url <https://...>  REQUIRED: the PUBLIC url registered with setWebhook. https only, on port 443, 80, 88 or 8443 (Telegram's list), and no user:password
+  --port <n> / --listen <[host:]port>   this process's own bind. LOOPBACK by default (4683); routable also needs --allow-non-loopback. Never 0
+  --path <p> / --cycle <d>   must equal the url's own path / dispatch period (30s)
+  --reclaim            register over the webhook already holding this bot
   -h, --help           this text
 
-APPROVAL_TG_WEBHOOK_SECRET is REQUIRED and comes from the launch environment.
-It is Telegram's secret_token, echoed on every delivery; a post without the
-matching header is refused, counted and never a decision. NO TLS HERE: plain
-HTTP behind a proxy or tunnel you own, which is what --url names. Registering
-it stops long polling for that bot until this process exits.
+APPROVAL_TG_WEBHOOK_SECRET is REQUIRED, from the launch environment: it is
+Telegram's secret_token, echoed on every delivery, and a post without the
+matching header is refused and never a decision. NO TLS HERE: plain HTTP
+behind a proxy or tunnel you own (--url names it); long polling then refuses.
 
 JSON shape: docs/cli-reference.md#channel-telegram-webhook
 ${EXIT_CODES_POINTER}

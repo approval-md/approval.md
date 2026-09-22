@@ -164,7 +164,17 @@ import {
   HOOK_DEFAULT_WAIT_MS,
   HOOK_RETRY_GRACE_MS,
 } from "../core/harness-wait.js";
-import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
+import {
+  normaliseWebhookUrl,
+  redactWebhookUrl,
+  telegramDeliveryFor,
+  type TelegramDelivery,
+} from "../core/telegram-config.js";
+import {
+  takeChannelLease,
+  type ChannelLease,
+  type ChannelLeaseMode,
+} from "../core/channel-lease.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { valueFindings, type InstanceFinding } from "../core/instance.js";
 import { defaultSourceRunner } from "../core/env-file.js";
@@ -378,58 +388,138 @@ export interface ListenSetup {
 }
 
 /**
- * Claim this listener's bot before it polls (APRV-390).
+ * Claim this listener's bot before it polls (APRV-390, extended by APRV-424).
  *
- * ONE `getMe`, once per process, before the first `getUpdates`. Two things
- * come out of it: the bot's identity, which is the only thing that can tell
- * two instances holding two differently-named copies of one token apart; and
- * a claim in the per-machine registry, which is what makes the SECOND such
- * listener refuse instead of joining a 409 loop.
+ * Three questions, in order, and each one has its own authority:
  *
- * ## Why an unreachable Bot API is not a refusal
+ * 1. **Does anything else in THIS gate already hold the Telegram transport?**
+ *    A lockfile in the gate's own `daemon/` directory (`core/channel-lease.ts`)
+ *    answers it, and the answer is per PROCESS. This is the check the review of
+ *    APRV-424 added, and the hole it closes is the one neither of the other two
+ *    could see: an `approval up` long-polling and an `approval channel telegram
+ *    webhook` started in the same project pass both of them — `getWebhookInfo`
+ *    is empty while the poller is the one running, and the ownership registry
+ *    compares instance ids, which are equal because it IS the same instance —
+ *    and then each runs its own dispatch cycle over its own state against one
+ *    log, so every request reaches the phone twice under two nonces and only
+ *    one copy can resolve a tap.
+ * 2. **What is the Bot API delivering this bot's updates to?** `getWebhookInfo`
+ *    answers it, and it is the only thing that can see a webhook registered
+ *    from another machine. A webhook beats a poller outright — `getUpdates` is
+ *    refused while one is set — so any registration refuses a poller.
+ * 3. **Does another INSTANCE on this machine hold this bot?** `getMe` plus the
+ *    per-machine registry answers it (APRV-390's incident: two gates, one
+ *    token, two names, a 409 on every poll).
  *
- * A `getMe` that fails says nothing about ownership. The machine may be behind
- * a captive portal, the API may be rate-limiting, the network may be down for
- * four seconds. Refusing to start on that would mean a transient network fault
- * took the phone channel down until somebody noticed, in exchange for no
- * safety: an unreachable Bot API is also a `getUpdates` that cannot conflict
- * with anything. So the preflight says what happened and lets the listener
- * start, where the existing retry loop is already the right behaviour. The
- * refusal is reserved for the case this task is about, which is a bot that is
- * demonstrably somebody else's.
+ * ## An unreachable Bot API: fail-soft for a poller, fail-closed for a webhook
+ *
+ * A `getMe` or a `getWebhookInfo` that fails says nothing about ownership. The
+ * machine may be behind a captive portal, the API may be rate-limiting, the
+ * network may be down for four seconds. For a POLLER, refusing on that would
+ * mean a transient network fault took the phone channel down until somebody
+ * noticed, in exchange for no safety: an unreachable Bot API is also a
+ * `getUpdates` that cannot conflict with anything, and the HTTP 409 the loop
+ * already reports is the backstop. So the poller says what happened and starts.
+ *
+ * For the WEBHOOK VERB there is no such backstop, and the review of APRV-424
+ * turned this direction around. Its next act is `setWebhook`, which overwrites
+ * whatever registration exists without asking, so proceeding on an unknown
+ * answer is proceeding to take another host's taps with no error anywhere. A
+ * probe it could not make is therefore a refusal (`webhook-probe-failed`), and
+ * the operator retries or passes `--reclaim` deliberately.
  */
 export async function claimListenerBot(
   setup: ListenSetup,
   report: (message: string) => void,
-  /**
-   * The webhook URL THIS process is about to register, when it is a webhook
-   * runner rather than a poller (APRV-424).
-   *
-   * Absent for a poller, and then any registered webhook is a refusal. Present
-   * for the webhook verb, and then a registration at that same URL is this
-   * process restarting rather than a competitor: `setWebhook` is idempotent,
-   * so re-registering is how a restart says it is still here. A DIFFERENT URL
-   * is the same refusal a poller gets, because two webhooks on one bot mean
-   * one of them stops receiving.
-   */
-  options: { webhookUrl?: string } = {},
-): Promise<{ ok: true } | { ok: false; code: ListenRefusalCode; message: string }> {
+  options: {
+    /**
+     * The webhook URL THIS process is about to register, when it is a webhook
+     * runner rather than a poller (APRV-424).
+     *
+     * Absent for a poller. Present for the webhook verb, and then it is the
+     * url a `--reclaim` is measured against: `setWebhook` is idempotent, so a
+     * restart re-registering its own url is the ordinary case, while a
+     * DIFFERENT url is a second host about to take the first host's taps.
+     */
+    webhookUrl?: string;
+    /**
+     * Register over an existing webhook (`--reclaim`, APRV-424 review finding
+     * 6).
+     *
+     * Without it, ANY registration refuses — including one at the same url,
+     * which used to be waved through on a bare string compare. Two hosts
+     * sharing one configuration both passed that check, the second overwrote
+     * the first's `secret_token`, and from then on every real tap arrived at
+     * the first host with a secret it did not recognise: a forgery, as far as
+     * it could tell, on every press of a button that had worked an hour
+     * earlier. So taking over is now a thing the operator says out loud.
+     */
+    reclaim?: boolean;
+    /**
+     * Which transport this process is about to run, for the lease.
+     *
+     * Derived from {@link webhookUrl} when it is not given, because the two
+     * callers that pass a url are the two that run a webhook.
+     */
+    mode?: ChannelLeaseMode;
+  } = {},
+): Promise<ClaimedListenerBot> {
+  const mode: ChannelLeaseMode = options.mode ?? (options.webhookUrl === undefined ? "poll" : "webhook");
+
+  // The local, deterministic question first: it needs no network, and a
+  // refusal here is one an operator can act on without waiting for a round
+  // trip. Released again below if a later check refuses, so a refused start
+  // never leaves a lease behind for the next one to reclaim.
+  const leased = takeChannelLease(setup.logPath, mode);
+  if (!leased.ok) {
+    return {
+      ok: false,
+      code: leased.code,
+      message: leased.message,
+    };
+  }
+  if (leased.reclaimed !== null) {
+    report(
+      `approval: the telegram transport lease was held by pid ${String(
+        leased.reclaimed.pid,
+      )} in ${leased.reclaimed.mode} mode since ${leased.reclaimed.startedAt}, and that process is gone; reclaimed`,
+    );
+  }
+  const release = (): void => leased.lease.release();
+  const refuse = (code: ListenRefusalCode, message: string): ClaimedListenerBot => {
+    release();
+    return { ok: false, code, message };
+  };
+
   let identity: { id: string; username: string };
   try {
     identity = await setup.channel.identify();
   } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    if (mode === "webhook") {
+      // Fail closed: see the module note above. `setWebhook` would overwrite a
+      // registration this process could not see.
+      return refuse(
+        "webhook-probe-failed",
+        `telegram getMe could not be reached (${detail}), so which bot this token names and what is already receiving its updates are both unknown. This verb registers a webhook, and setWebhook overwrites whatever is registered without reporting it, so it does not run on an unknown answer: fix the connection and start again, or pass --reclaim to take the bot deliberately`,
+      );
+    }
     report(
-      `approval: telegram getMe could not be reached (${
-        cause instanceof Error ? cause.message : String(cause)
-      }), so which bot this token names is unknown and no ownership was recorded; starting anyway`,
+      `approval: telegram getMe could not be reached (${detail}), so which bot this token names is unknown and no ownership was recorded; starting anyway`,
     );
-    return { ok: true };
+    return { ok: true, lease: leased.lease };
   }
   if (identity.id.length === 0) {
+    if (mode === "webhook") {
+      return refuse(
+        "webhook-probe-failed",
+        "telegram getMe answered without a bot id, so which bot this token names is unknown. This verb registers a webhook over whatever is already registered, and will not do that on an unknown answer",
+      );
+    }
     report(
       "approval: telegram getMe answered without a bot id, so no ownership was recorded; starting anyway",
     );
-    return { ok: true };
+    return { ok: true, lease: leased.lease };
   }
 
   // APRV-424, and before the ownership claim: the registry answers "which
@@ -437,25 +527,55 @@ export async function claimListenerBot(
   // this bot's updates going to at all". A webhook beats both — `getUpdates`
   // is refused while one is set — so a listener started here would receive
   // nothing whoever else is or is not running locally.
-  //
-  // An unreachable probe is not a refusal, exactly as an unreachable `getMe`
-  // is not: a captive portal says nothing about which transport owns the bot,
-  // and a transient fault must not take the phone channel down. The existing
-  // 409 path is the backstop when this call could not be made.
-  const hooked = await webhookOwner(setup, report);
-  if (hooked !== null && hooked.url !== options.webhookUrl) {
+  const hooked = await webhookOwner(setup);
+  if (hooked.state === "unknown") {
+    if (mode === "webhook") {
+      return refuse(
+        "webhook-probe-failed",
+        `telegram getWebhookInfo could not be reached (${hooked.detail}), so whether another host's webhook holds this bot is unknown. setWebhook would overwrite it without saying so, and the displaced receiver would simply stop being posted to, so this verb refuses rather than guessing: try again, or pass --reclaim to register over whatever is there`,
+      );
+    }
+    // The poller's documented fail-soft (see the module note): what a missed
+    // probe costs is the clear refusal, and the 409 path is still there.
+    report(
+      `approval: telegram getWebhookInfo could not be reached (${hooked.detail}), so whether a webhook holds this bot is unknown; starting anyway`,
+    );
+  }
+  if (hooked.state === "registered") {
     const queued =
       hooked.pendingUpdateCount === 0
         ? ""
         : ` (${String(hooked.pendingUpdateCount)} update(s) are queued for it)`;
-    return {
-      ok: false,
-      code: "webhook-registered",
-      message:
-        options.webhookUrl === undefined
-          ? `telegram ${identity.username} delivers its updates to a webhook at ${hooked.url}, and the Bot API refuses getUpdates while one is set, so this listener would receive no tap at all${queued}. Long polling and a webhook are alternatives per bot: stop the \`approval channel telegram webhook\` process, which removes the webhook as it exits, or give this instance its own bot with \`approval setup channel telegram\``
-          : `telegram ${identity.username} already delivers its updates to a webhook at ${hooked.url}, and this process was asked to register ${options.webhookUrl}${queued}. One bot has one webhook: registering this one would silently take the taps away from whatever is serving that URL. Stop that process first, or give this instance its own bot with \`approval setup channel telegram\``,
-    };
+    // Origin plus a redacted path, never the url as the Bot API spelled it:
+    // this is somebody else's registration, its path may itself be a bearer
+    // value (review finding 10), and the origin is what tells hosts apart.
+    const shown = redactWebhookUrl(hooked.url);
+    if (options.webhookUrl === undefined) {
+      return refuse(
+        "webhook-registered",
+        `telegram ${identity.username} delivers its updates to a webhook at ${shown}, and the Bot API refuses getUpdates while one is set, so this listener would receive no tap at all${queued}. Long polling and a webhook are alternatives per bot: stop the \`approval channel telegram webhook\` process, which removes the webhook as it exits, or give this instance its own bot with \`approval setup channel telegram\``,
+      );
+    }
+    if (options.reclaim !== true) {
+      const mine = normaliseWebhookUrl(options.webhookUrl);
+      const theirs = normaliseWebhookUrl(hooked.url);
+      const same = mine !== null && theirs !== null && mine === theirs;
+      return refuse(
+        "webhook-registered",
+        `telegram ${identity.username} already delivers its updates to a webhook at ${shown}${queued}. ${
+          same
+            ? "That is the url this process was asked to register, which looks like a restart and may not be one: two hosts running one configuration both read this as their own, the second overwrites the first's secret_token, and from then on every real tap reaches the first host as a forgery"
+            : "This process was asked to register a different url, and a bot has exactly one webhook: registering would silently take the taps away from whatever is serving that one"
+        }. Telegram allows one webhook per bot and keeps the last registration. Stop the other process, or pass --reclaim to register over it deliberately`,
+      );
+    }
+    const mine = normaliseWebhookUrl(options.webhookUrl);
+    const theirs = normaliseWebhookUrl(hooked.url);
+    report(
+      mine !== null && theirs !== null && mine === theirs
+        ? `approval: --reclaim: re-registering ${shown}, which is the url already registered for ${identity.username}`
+        : `approval: --reclaim: registering over the webhook at ${shown}; whatever is serving it stops being posted to, because Telegram keeps only the last registration for ${identity.username}`,
+    );
   }
 
   const claim = claimBot(setup.logPath, {
@@ -466,48 +586,58 @@ export async function claimListenerBot(
   });
   if (!claim.ok) {
     if (!setup.allowCrossInstance) {
-      return { ok: false, code: "bot-owned-elsewhere", message: claim.message };
+      return refuse("bot-owned-elsewhere", claim.message);
     }
     // The deliberate case. It says what it is doing, and it does NOT record a
     // second claim: the registry answers "who owns this bot", and two owners
     // is the state it exists to report rather than a state to write down.
     report(`approval: --allow-cross-instance: starting anyway — ${claim.message}`);
-    return { ok: true };
+    return { ok: true, lease: leased.lease };
   }
   report(
     `approval: telegram ${identity.username} (bot id ${identity.id}) is this instance's own; no update was consumed by this check`,
   );
-  return { ok: true };
+  return { ok: true, lease: leased.lease };
 }
 
 /**
- * The webhook this bot's updates go to, or `null` for "none, or unknown"
- * (APRV-424).
+ * What {@link claimListenerBot} answers.
  *
- * Two states collapse into `null` on purpose, and the collapse is the
- * fail-SOFT direction rather than the fail-closed one. A Bot API that cannot
- * be reached tells us nothing about the bot's transport, and the alternative —
- * refusing to start a listener because a probe timed out — would take the
- * phone channel down over a captive portal. What a missed probe costs is the
- * clear refusal; the listener then meets the same conflict as an HTTP 409,
- * which it already reports and retries through.
+ * The lease travels with the success, because the caller is the only thing
+ * that knows when this process has stopped receiving: `runListener`,
+ * `approval up` and `runWebhook` each release it on their way out, and a
+ * refusal releases nothing because it took nothing.
  */
-async function webhookOwner(
-  setup: ListenSetup,
-  report: (message: string) => void,
-): Promise<{ url: string; pendingUpdateCount: number } | null> {
+export type ClaimedListenerBot =
+  | { ok: true; lease: ChannelLease }
+  | { ok: false; code: ListenRefusalCode; message: string };
+
+/**
+ * What the Bot API says is receiving this bot's updates (APRV-424).
+ *
+ * THREE states rather than two, which is review finding 8. The first version
+ * collapsed "nothing is registered" and "the probe failed" into `null`, and
+ * the webhook verb then treated an unknown answer as a free one: it went on to
+ * `setWebhook`, which silently overwrites a registration this process never
+ * saw. The states are now distinct, and each caller decides what an unknown
+ * one means — fail-soft for the poller, which has the 409 backstop, fail-closed
+ * for the verb, which has none.
+ */
+type WebhookProbe =
+  | { state: "none" }
+  | { state: "registered"; url: string; pendingUpdateCount: number }
+  | { state: "unknown"; detail: string };
+
+async function webhookOwner(setup: ListenSetup): Promise<WebhookProbe> {
   let info: { url: string; pendingUpdateCount: number };
   try {
     info = await setup.channel.webhookInfo();
   } catch (cause) {
-    report(
-      `approval: telegram getWebhookInfo could not be reached (${
-        cause instanceof Error ? cause.message : String(cause)
-      }), so whether a webhook holds this bot is unknown; starting anyway`,
-    );
-    return null;
+    return { state: "unknown", detail: cause instanceof Error ? cause.message : String(cause) };
   }
-  return info.url.length === 0 ? null : info;
+  return info.url.length === 0
+    ? { state: "none" }
+    : { state: "registered", url: info.url, pendingUpdateCount: info.pendingUpdateCount };
 }
 
 /**
@@ -598,8 +728,45 @@ export const LISTEN_REFUSAL_CODES = [
    * BEFORE the first poll, in the same preflight and for the same reason
    * `bot-owned-elsewhere` is, so the operator reads which transport owns the
    * bot instead of a status code.
+   *
+   * Since the review of APRV-424 it carries a second, local source: the
+   * transport lease in this gate's own `daemon/` directory, when the process
+   * holding it is a webhook runner. Same fact, same repair, so the same code.
    */
   "webhook-registered",
+  /**
+   * A long-poll listener in THIS gate already holds the Telegram transport
+   * (APRV-424 review finding 1).
+   *
+   * The counterpart to `webhook-registered`, from the same lease. It is what
+   * the webhook verb meets when an `approval up` or an `approval channel
+   * telegram listen` is already running in the same project — the case
+   * `getWebhookInfo` cannot see (nothing is registered yet) and the ownership
+   * registry cannot see either (it is the same instance). Two of them on one
+   * log put every prompt on the phone twice, under two nonces, and only one
+   * copy can resolve a tap.
+   */
+  "telegram-poller-running",
+  /**
+   * The transport lease could not be taken at all (APRV-424 review finding 1).
+   *
+   * A `daemon/` directory that cannot be created, a lockfile that cannot be
+   * written. Unlike the bot registry, whose absence is the status quo, this
+   * file is the only thing keeping one gate from running two transports, so a
+   * gate that cannot hold one does not start.
+   */
+  "telegram-lease-unavailable",
+  /**
+   * The webhook verb could not learn what already holds this bot (APRV-424
+   * review finding 8).
+   *
+   * `getMe` or `getWebhookInfo` failed, and the next act would have been a
+   * `setWebhook` that overwrites a registration nobody saw. A poller keeps its
+   * fail-soft on the same failure, because an unreachable Bot API is also a
+   * `getUpdates` that cannot conflict and the HTTP 409 loop is its backstop;
+   * this verb has no backstop, so it refuses.
+   */
+  "webhook-probe-failed",
 ] as const;
 
 export type ListenRefusalCode = (typeof LISTEN_REFUSAL_CODES)[number];
@@ -3162,6 +3329,11 @@ async function runListener(setup: ListenSetup, streams: Streams): Promise<number
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
+    // The transport lease goes back on every exit, clean or not (APRV-424
+    // review finding 1). A listener that crashed leaves a lockfile whose pid
+    // is gone and the next taker reclaims it; a listener that stopped politely
+    // leaves nothing to reclaim.
+    claimed.lease.release();
   }
 
   switch (outcome.kind) {

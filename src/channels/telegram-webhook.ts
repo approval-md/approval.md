@@ -78,6 +78,17 @@
  * The poll loop gets this for free by awaiting each update in turn; an HTTP
  * server has to say it.
  *
+ * ## Stopping waits for the update it is holding
+ *
+ * A stop closes the listener, drains what is in flight, and only then drops
+ * the sockets. The first version of this file did the opposite — it destroyed
+ * every socket synchronously and resolved in about a millisecond — so
+ * `deleteWebhook`, the "stopped" line and the process's exit all ran while an
+ * update was still being handled: an append in progress, a dispatch cycle
+ * halfway through a send, and a caller whose response never arrived. The order
+ * is now stop accepting, drain, drop, and the verb's own stop path does its
+ * `deleteWebhook` after this resolves rather than beside it.
+ *
  * ## Redelivery is safe because the gate is
  *
  * Telegram retries a delivery it did not get a 2xx for, so the same tap can
@@ -123,6 +134,24 @@ export const TELEGRAM_WEBHOOK_MAX_BODY_BYTES = 256 * 1024;
 export const TELEGRAM_WEBHOOK_DRAIN_LIMIT_BYTES = 4 * 1024 * 1024;
 
 /**
+ * How long {@link TelegramWebhookHandle.close} waits for requests already in
+ * flight before it destroys their sockets (APRV-424, review finding 2).
+ *
+ * A stop has to end. What this bounds is the pathological case — a client that
+ * opened a request and stopped writing, a handler that will never return — and
+ * not the ordinary one, which is an update whose decision is being appended
+ * and takes milliseconds. The ordinary one is what the drain exists for: the
+ * first version of this file destroyed every socket synchronously and
+ * resolved in about a millisecond, so `deleteWebhook`, the "stopped" line and
+ * the process's exit all happened while an append and a dispatch were still
+ * running.
+ */
+export const TELEGRAM_WEBHOOK_CLOSE_TIMEOUT_MS = 10_000;
+
+/** How long the close drain waits between checks of the in-flight count. */
+export const TELEGRAM_WEBHOOK_DRAIN_POLL_MS = 5;
+
+/**
  * Everything this receiver refuses, and nothing else. Frozen, per SPEC.md
  * §11.1 invariant 6: a refusal is machine-readable and distinct.
  *
@@ -136,7 +165,19 @@ export const TELEGRAM_WEBHOOK_REFUSAL_CODES = [
   "webhook-secret-mismatch",
   /** More than one secret header. Malformed, and not resolvable by choosing. */
   "webhook-duplicate-secret-header",
-  /** A path this server does not serve. */
+  /**
+   * The request line and the `Host` header do not form a URL (400).
+   *
+   * Split from `webhook-unknown-path` in the review of this task: one code for
+   * both collapsed "what arrived is not a request this server can parse" into
+   * "you are posting to a path this server does not serve", and those two
+   * share nothing but a status family — the first is a broken proxy or a
+   * hand-written client, the second is a registration that does not match the
+   * bind. `src/serve/server.ts` makes the same split, between
+   * `serve-malformed-url` and `serve-unknown-path`.
+   */
+  "webhook-malformed-request",
+  /** A path this server does not serve (404). */
   "webhook-unknown-path",
   /** The right path, the wrong method. Telegram POSTs. */
   "webhook-method-not-allowed",
@@ -184,6 +225,12 @@ export interface TelegramWebhookOptions {
   /** Where operational complaints go. Defaults to stderr. */
   log?: (message: string) => void;
   /**
+   * How long {@link TelegramWebhookHandle.close} drains before it drops what
+   * is left. Defaults to {@link TELEGRAM_WEBHOOK_CLOSE_TIMEOUT_MS}; a test
+   * that deliberately holds a handler open shortens it.
+   */
+  closeTimeoutMs?: number;
+  /**
    * Run after each update the channel accepted (APRV-424).
    *
    * This is where the runtime's dispatch cycle goes, and it is the webhook's
@@ -203,6 +250,17 @@ export interface TelegramWebhookHandle {
   stats(): TelegramWebhookStats;
   /** Run `work` behind the same queue update delivery uses. */
   serialize<T>(work: () => Promise<T>): Promise<T>;
+  /** Requests this receiver has accepted and not yet answered. */
+  inFlight(): number;
+  /**
+   * Stop accepting, let what is in flight finish, then drop the sockets.
+   *
+   * In that order, and the order is the fix for review finding 2: a close that
+   * destroyed sockets first would tear the response off an update whose
+   * decision was mid-append, and would hand its caller back control in time
+   * to call `deleteWebhook` and print "stopped" over the top of it. Idempotent
+   * and safe to await twice; a second call awaits the first.
+   */
   close(): Promise<void>;
 }
 
@@ -210,6 +268,7 @@ function emptyRefusals(): Record<TelegramWebhookRefusalCode, number> {
   return {
     "webhook-secret-mismatch": 0,
     "webhook-duplicate-secret-header": 0,
+    "webhook-malformed-request": 0,
     "webhook-unknown-path": 0,
     "webhook-method-not-allowed": 0,
     "webhook-body-too-large": 0,
@@ -329,7 +388,16 @@ export async function serveTelegramWebhook(
 
   const stats: TelegramWebhookStats = { requests: 0, updates: 0, refusals: emptyRefusals() };
   const sockets = new Set<Socket>();
-  let closing = false;
+  /**
+   * Requests accepted and not yet answered.
+   *
+   * The serialize queue alone is not the whole of "busy": a request that is
+   * still having its body read off the socket, or one whose refusal has been
+   * decided and not yet written, is on no queue and would be torn off by a
+   * socket destroy. So the drain waits for this to reach zero as well.
+   */
+  let inFlight = 0;
+  let closed: Promise<void> | null = null;
 
   // One update at a time, for the reason the module doc gives: `handleUpdate`
   // holds a single ack slot and the delivery maps are not reentrant. A plain
@@ -371,6 +439,7 @@ export async function serveTelegramWebhook(
   const http: Server = createServer((req, res) => {
     void (async () => {
       stats.requests += 1;
+      inFlight += 1;
       try {
         // THE SECRET FIRST, before the path, the method or the body. A caller
         // without it learns only that something refused: no path is confirmed
@@ -404,7 +473,7 @@ export async function serveTelegramWebhook(
           refuse(
             res,
             400,
-            "webhook-unknown-path",
+            "webhook-malformed-request",
             "the request line and Host header do not form a URL this server can parse",
           );
           return;
@@ -513,6 +582,8 @@ export async function serveTelegramWebhook(
         } else {
           res.end();
         }
+      } finally {
+        inFlight -= 1;
       }
     })();
   });
@@ -538,20 +609,63 @@ export async function serveTelegramWebhook(
       : (options.port ?? TELEGRAM_WEBHOOK_DEFAULT_PORT);
   const boundHost = typeof address === "object" && address !== null ? address.address : host;
 
+  /**
+   * Wait for the work already accepted, bounded.
+   *
+   * Two things are waited on, and both are needed. `serialize` empties the
+   * update queue, which is where a `deliverUpdate` and the dispatch cycle that
+   * follows it run; `inFlight` covers the rest of a request's life, from the
+   * body read to the byte the response ends with. A request that never
+   * finishes is what the deadline is for: past it the sockets go, because a
+   * stop that could be held open forever is not a stop.
+   */
+  async function drain(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      await serialize(async () => undefined);
+      if (inFlight === 0) return;
+      if (Date.now() >= deadline) {
+        complain(
+          `approval: telegram webhook: ${String(inFlight)} request(s) were still in flight after ${String(timeoutMs)}ms; closing anyway`,
+        );
+        return;
+      }
+      await new Promise<void>((settle) => {
+        setTimeout(settle, TELEGRAM_WEBHOOK_DRAIN_POLL_MS).unref?.();
+      });
+    }
+  }
+
+  async function stop(): Promise<void> {
+    // 1. Stop accepting. `close` refuses new connections at once and calls
+    //    back only once every existing one is gone, so the callback is the
+    //    thing to await and not the thing to race.
+    const accepted = new Promise<void>((settle) => {
+      http.close(() => settle());
+    });
+    // 2. Let what is in flight finish. This is the whole of the fix: an update
+    //    mid-append keeps its socket, writes its response, and only then is
+    //    anything torn down — so `deleteWebhook` and the "stopped" line, which
+    //    the caller runs after this resolves, cannot land inside an append.
+    await drain(options.closeTimeoutMs ?? TELEGRAM_WEBHOOK_CLOSE_TIMEOUT_MS);
+    // 3. Now the idle ones. A keep-alive socket with nothing on it would hold
+    //    the callback above open until its own timeout, which is a stop that
+    //    looks like a hang.
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
+    await accepted;
+  }
+
   return {
     host: boundHost,
     port: boundPort,
     path,
     stats: () => ({ ...stats, refusals: { ...stats.refusals } }),
     serialize,
-    close: async () => {
-      if (closing) return;
-      closing = true;
-      await new Promise<void>((settle) => {
-        http.close(() => settle());
-        for (const socket of sockets) socket.destroy();
-        sockets.clear();
-      });
+    inFlight: () => inFlight,
+    close: () => {
+      closed ??= stop();
+      return closed;
     },
   };
 }

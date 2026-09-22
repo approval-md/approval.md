@@ -92,6 +92,7 @@ import {
   claimListenerBot,
   prepareListen,
   startListener,
+  type ClaimedListenerBot,
   type ListenSetup,
   type RunningListener,
 } from "./channel-telegram.js";
@@ -1006,14 +1007,17 @@ export function commandUp(
    *
    * `--no-telegram` skips it, because there is no bot to own.
    */
-  const claimed: Promise<{ ok: true } | { ok: false; code: string; message: string }> =
+  const claimed: Promise<ClaimedListenerBot | { ok: true; lease: null }> =
     telegram === null
-      ? Promise.resolve({ ok: true })
+      ? Promise.resolve({ ok: true, lease: null })
       : claimListenerBot(telegram, (message) => streams.err(`${message}\n`));
 
   return claimed.then((owned) => {
     if (!owned.ok) return integrityError(streams, json, owned.message, owned.code);
-    return runParts();
+    // The transport lease this preflight took (APRV-424 review finding 1) is
+    // held for as long as `up` is receiving, and goes back when the verb is
+    // done — including when the daemon's own failure is what stopped it.
+    return runParts().finally(() => owned.lease?.release());
   });
 
   function runParts(): Promise<number> {

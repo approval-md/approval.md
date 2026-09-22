@@ -3739,9 +3739,13 @@ project: competing `getUpdates` calls produce Telegram HTTP 409.
 
 A bot whose updates go to a webhook cannot be long-polled at all, so this verb
 and `approval up` refuse `webhook-registered` in the same preflight that asks
-`getMe`, naming the URL that holds it. See
+`getMe`, naming the origin that holds it. That preflight also takes this gate's
+transport lease (`.approval/daemon/telegram-transport.lock`), so a second
+listener or a webhook runner started in the same project refuses
+`telegram-poller-running` naming the pid that holds it, rather than both
+processes putting every request on the phone under their own nonce. See
 [`channel telegram webhook`](#channel-telegram-webhook), which is the other
-transport and removes its registration when it exits.
+transport and removes both its registration and its lease when it exits.
 
 **Delivery is per cycle, not only at startup.** Before every `getUpdates` the
 listener re-derives the pending queue from the verified log and sends whatever
@@ -4099,7 +4103,8 @@ everything that leaves it, exactly as it redacts the bot token.
 |---|---|
 | `webhook-secret-mismatch` | no `X-Telegram-Bot-Api-Secret-Token`, or not the registered value |
 | `webhook-duplicate-secret-header` | more than one of that header; malformed, and not resolvable by choosing |
-| `webhook-unknown-path` | a path this process does not serve |
+| `webhook-malformed-request` | the request line and `Host` header do not form a URL (400) |
+| `webhook-unknown-path` | a path this process does not serve (404) |
 | `webhook-method-not-allowed` | the right path, the wrong method; Telegram POSTs |
 | `webhook-body-too-large` | over 256 KiB; drained before the refusal is written |
 | `webhook-body-unreadable` | the body could not be read off the socket, or is not JSON |
@@ -4110,9 +4115,30 @@ everything that leaves it, exactly as it redacts the bot token.
 Startup refuses in its own vocabulary before anything binds:
 `webhook-secret-missing`, `webhook-secret-weak`, `webhook-secret-charset`,
 `webhook-url-missing`, `webhook-url-insecure`, `webhook-url-port`,
-`webhook-cycle`, `webhook-registration-failed`, plus every `channel telegram
-listen` refusal, which this verb inherits because it needs the same bot token,
-chat, identity, log and policy.
+`webhook-url-userinfo`, `webhook-path-invalid`, `webhook-path-mismatch`,
+`webhook-cycle`, and `webhook-registration-failed` for a `setWebhook` the Bot
+API turned down (its status and its own description, scrubbed of the token and
+the secret), plus every `channel telegram listen` refusal, which this verb
+inherits because it needs the same bot token, chat, identity, log and policy.
+
+Four of those are the review's, and each one closes a start that used to
+succeed and then not work:
+
+- **`--path` must be the url's own path.** `telegram/webhook` with no leading
+  slash, or `/hook/` against a `--url` ending `/hook`, registered cleanly and
+  then answered every real delivery 404 after verifying its secret. `--path` is
+  an explicit restatement of the url's path and nothing else; rewriting belongs
+  in the proxy in front of this process.
+- **`--url` may not carry userinfo.** `https://user:pw@host/hook` is a
+  credential on a command line. It is refused, never stripped.
+- **The bind port may not be 0**, and must be inside 1..65535. Port 0 asks the
+  kernel for an ephemeral port, and this transport is a fixed public url
+  forwarded to a fixed local address: a receiver on a port nobody registered
+  verifies nothing and answers nothing.
+- **Every line that prints the url prints its origin and the served path**, in
+  the start-up banner, in `webhook_started` and in refusals. A tunnel that
+  hands out `https://host/hook/<random>` puts a bearer value in a path, and
+  this runtime does not copy it into three more places.
 
 ### The proxy or tunnel is required, and this process holds no certificate
 
@@ -4133,15 +4159,44 @@ before any call is made rather than attempted and rejected by the Bot API.
 ### One transport per bot, refused on both sides
 
 `getUpdates` is refused by the Bot API outright while a webhook is set, so the
-two are alternatives and never a pair. Three checks say so before anything runs:
+two are alternatives and never a pair. Four checks say so before anything runs,
+and they are in that order because the first needs no network:
 
-- `approval channel telegram listen` and `approval up` ask `getWebhookInfo` in
+- **A lease per gate.** `approval up`, `approval channel telegram listen` and
+  this verb take a lockfile in the gate's own derived state directory,
+  `.approval/daemon/telegram-transport.lock`, holding the holder's pid, which
+  transport it is running and when it started. It is created with `O_EXCL`, so
+  two processes racing cannot both believe they took it, and a holder whose pid
+  is gone is reclaimed automatically (a crash must not lock a gate out of its
+  own channel). A second taker refuses `telegram-poller-running` when a poller
+  holds it and `webhook-registered` when a webhook does, naming the pid and the
+  mode; a directory the lease cannot be written in refuses
+  `telegram-lease-unavailable`, because this file is the only thing keeping one
+  gate from running two transports. Both transports release it on a clean stop.
+
+  This is the check the other three cannot make. Two processes started in the
+  SAME project — one `approval up` long-polling, one `approval channel telegram
+  webhook` — passed all of them: `getWebhookInfo` is empty while the poller is
+  the one running, and the ownership registry compares instance ids, which are
+  equal because it is the same instance. Each then ran its own dispatch cycle
+  over its own state against one log, so every request reached the phone twice
+  under two nonces and only one copy could resolve a tap.
+- **What the Bot API says.** `listen` and `approval up` ask `getWebhookInfo` in
   the same preflight that asks `getMe`, and refuse `webhook-registered` naming
-  the URL that holds the bot. An unreachable Bot API is not a refusal (a captive
-  portal says nothing about which transport owns a bot); the existing HTTP 409
-  path is the backstop.
-- This verb refuses when a webhook at a DIFFERENT url already holds the bot. Its
-  own url is a restart re-registering, which `setWebhook` is happy to take.
+  the origin that holds the bot. For a poller an unreachable Bot API is not a
+  refusal (a captive portal says nothing about which transport owns a bot) and
+  the HTTP 409 path is the backstop. For THIS verb it is: a probe it could not
+  make refuses `webhook-probe-failed`, because the next call would be a
+  `setWebhook` that overwrites a registration this process never saw.
+- **Any existing registration, including the same url, refuses.** Telegram
+  allows one webhook per bot and keeps the last registration, so a second host
+  registering takes the taps: it overwrites the first host's `secret_token`, and
+  from then on every real tap arrives at the first host with a secret it does
+  not recognise, indistinguishable from a forgery. `--reclaim` is how an
+  operator takes the bot deliberately; with it, a url that matches the
+  registered one (host lowercased, trailing slash dropped) is reported as a
+  re-registration and anything else as a takeover that stops the other receiver
+  being posted to.
 - Within one process, `TelegramChannel.claimTransport` refuses the second claim.
 
 A clean stop (SIGINT, SIGTERM) removes the webhook, so long polling works again
@@ -4163,6 +4218,13 @@ equivalent of the poll loop's per-cycle dispatch: it re-derives the pending
 queue and sends what has not been sent. A cycle also runs immediately after each
 handled update, so a paced listener's next question follows a tap without
 waiting for the timer.
+
+**A stop waits for the update it is holding.** Ctrl-C stops the receiver
+accepting, then drains: an update mid-append keeps its socket, finishes its
+decision and writes its response, and only then is `deleteWebhook` called and
+the stopped line printed. A second Ctrl-C during the drain is absorbed rather
+than killing the process, and a request that never finishes is dropped after ten
+seconds, because a stop has to end.
 
 ```json
 {"event":"webhook_started","url":"https://gate.example/telegram/webhook",

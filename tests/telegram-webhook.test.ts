@@ -60,13 +60,25 @@ import {
 } from "../src/channels/telegram-webhook.js";
 import {
   prepareWebhook,
+  resolveWebhookBind,
+  runWebhook,
   WEBHOOK_MIN_SECRET_LENGTH,
   WEBHOOK_REFUSAL_CODES,
   type WebhookRefusalCode,
 } from "../src/cli/channel-telegram-webhook.js";
 import { claimListenerBot, prepareListen } from "../src/cli/channel-telegram.js";
 import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
-import { TELEGRAM_WEBHOOK_SECRET_ENV } from "../src/core/telegram-config.js";
+import {
+  normaliseWebhookUrl,
+  redactWebhookUrl,
+  TELEGRAM_WEBHOOK_SECRET_ENV,
+} from "../src/core/telegram-config.js";
+import {
+  channelLeasePathFor,
+  readChannelLease,
+  takeChannelLease,
+} from "../src/core/channel-lease.js";
+import { EXIT_IO } from "../src/cli/exit-codes.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -135,13 +147,25 @@ const POLICY = [
 ].join("\n");
 
 let mock: MockBotApi;
+/**
+ * The per-machine bot registry this suite writes to.
+ *
+ * Pointed at the scratch tree, because `claimListenerBot` records an ownership
+ * claim and a suite that wrote the operator's real `bots.json` would refuse
+ * their own gate's next start.
+ */
+let previousStateDir: string | undefined;
 
 before(async () => {
+  previousStateDir = process.env["APPROVAL_STATE_DIR"];
+  process.env["APPROVAL_STATE_DIR"] = `${scratch.root}/state`;
   mock = await startMockBotApi(TOKEN);
 });
 
 after(async () => {
   await mock.close();
+  if (previousStateDir === undefined) delete process.env["APPROVAL_STATE_DIR"];
+  else process.env["APPROVAL_STATE_DIR"] = previousStateDir;
   scratch.cleanup();
 });
 
