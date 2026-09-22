@@ -7,7 +7,7 @@ status: Done
 assignee:
   - 'agent:lane-b'
 created_date: '2026-09-20 09:03'
-updated_date: '2026-09-22 02:09'
+updated_date: '2026-09-22 02:23'
 labels:
   - payload
   - gate
@@ -104,6 +104,8 @@ VERIFICATION, with the numbers rather than a summary block. Build, typecheck and
 The full npm test was also run earlier in the session, against the broad-rule build: 5147 tests, 5123 passed, 23 failed. 22 of those are a pre-existing SMTP/TLS failure in this worktree, in adapter-email (14), smtp-probe (4) and the four setup adapter email probe cases in cli-setup, all from this Node refusing a TLS servername that is an IP address against the local mock. Proved unrelated by A/B rather than asserted: the two SMTP suites are 32 passed and 18 failed IDENTICALLY with and without this change, measured by reverting src/core/payload.ts to the branch point, rebuilding, re-running and restoring. The 23rd failure was the serve unclassified-flag guard, which is this diff's and is fixed.
 
 AC EVIDENCE. AC1 and AC3: tests/run-payload.test.ts, 22 cases, including the byte-for-byte unchanged case pinned against RFC 8785 by hand. AC2: tests/cli-resolve.test.ts, a supervised action whose script is edited after the declaration, refused with the event list unchanged and the chain clean, plus the refusal-text case. AC4: tests/channels-telegram.test.ts asserts path, size and digest reach the card, and the wysiwys suite passes with CANONICAL_RENDERER_VERSION untouched. AC5: tests/cli-payload.test.ts for the verb, tests/mcp-server.test.ts for the exclusion, tests/serve.test.ts for the flag classification. AC6: docs/run-payload-binding.md and docs/cli-reference.md, with cli-long-help's anchor test proving the pointer resolves. AC7: the numbers above.
+
+ONE FIX AFTER THE FIRST GREEN CI RUN, because a reviewer would have asked. The operand walk used to stop at the first non-option word, which is wrong for an interpreter that takes a SUBCOMMAND: deno run job.ts offered the word run and bound nothing, and python3 -m pkg job.py offered pkg. The walk now collects every non-option word and binds the first that resolves to a readable regular file, so a subcommand is walked past. It cannot bind anything the argv does not name; the worst case is the harmless direction, where a command whose script is absent and whose later argument is a file binds that file. The inline-program guard is unchanged and still answers before any walking. Two cases added to tests/run-payload.test.ts.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -171,14 +171,20 @@ test("an absolute script path anywhere after the interpreter is bound", () => {
   });
 });
 
-test("options are skipped and `--` ends them, so the operand is the script", () => {
+test("options and subcommands are walked past, so the operand is the script", () => {
   const cwd = dir();
   write(cwd, "job.js", "console.log(1);\n");
+  write(cwd, "job.ts", "console.log(1);\n");
 
   assert.equal(boundScript(["node", "--enable-source-maps", "job.js"], cwd)?.argv_index, 2);
   assert.equal(boundScript(["node", "--", "job.js"], cwd)?.argv_index, 2);
   // Nothing after `--` is nothing to bind.
   assert.equal(boundScript(["node", "--"], cwd), null);
+
+  // A SUBCOMMAND is not the script, and stopping at the first non-option word
+  // would have bound nothing here. `run` names no file; `job.ts` does.
+  assert.equal(boundScript(["deno", "run", "job.ts"], cwd)?.argv_index, 2);
+  assert.equal(boundScript(["python3", "-m", "pkg", "job.js"], cwd)?.argv_index, 3);
 });
 
 test("an INLINE program binds no file: the program is already a word of the argv", () => {

@@ -30,9 +30,11 @@ The argv names a script in exactly two shapes:
    six shells (`bash`, `sh`, `zsh`, `dash`, `ksh`, `fish`), `node`/`nodejs`,
    `python`/`python3`, `perl`, `ruby` and `deno` — every one of them a name
    `core/command-class.ts` already knows, from its unwrappable-shell set, its
-   `node` branch and its inline-source table. The operand is the first word
-   after the interpreter that is not an option, or the word after `--`.
-   `/usr/bin/bash` counts: the match is on the last path segment.
+   `node` branch and its inline-source table. `/usr/bin/bash` counts: the match
+   is on the last path segment. The operand is the first word after the
+   interpreter that resolves to a readable regular file, so options and
+   subcommands are walked past rather than stopped at: `deno run job.ts` binds
+   `job.ts` and not `run`.
 2. **A path at `argv[0]`.** `./install.sh` or `/tmp/install.sh` with no
    interpreter word: the kernel reads the shebang and the script is the program.
    This is the same fact with the interpreter implied rather than typed.

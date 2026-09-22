@@ -32,7 +32,9 @@
  * > classifier does not name.
  *
  * So this is an INTERPRETER-KEYED rule and not "every argv word that happens to
- * name a file". One script per invocation, the one the interpreter runs.
+ * name a file". One script per invocation: the first word after the interpreter
+ * that resolves to a readable regular file, which is the interpreter's operand
+ * whether or not a subcommand comes first (`deno run job.ts`).
  * {@link SCRIPT_INTERPRETERS} is the list, and every member of it is a name
  * `core/command-class.ts` already knows: the six shells of its unwrappable set,
  * `node` from its own branch, and `python`, `python3`, `perl`, `ruby` and
@@ -212,28 +214,39 @@ function isInlineProgramFlag(word: string, markers: readonly (string | RegExp)[]
 }
 
 /**
- * Where the script operand of an interpreter invocation is, or `null`.
+ * The words of an interpreter invocation that could be its script, in order,
+ * or `null` when the program is inline and there is no file at all.
  *
- * The walk is deliberately small. An inline-program marker anywhere in the
- * options means there is no file to bind and the answer is `null`, not "keep
- * looking": the program is in the argv and already bound. `--` ends the options
- * and the next word is the operand. Any other `-`-leading word is skipped as an
- * option, which is the one place this can be wrong in the harmless direction —
- * an option that takes a separate path value binds that path instead of the
- * script, and both are files this invocation reads.
+ * An inline-program marker anywhere in the options answers `null` rather than
+ * "keep looking": the program is a word of the argv and already bound, and a
+ * file that happens to share its spelling is a file the command never opens.
+ *
+ * Otherwise every non-option word is a candidate, in argv order, and the caller
+ * binds the first that resolves to a readable regular file. Not just the first
+ * non-option word, because interpreters take SUBCOMMANDS: `deno run job.ts`
+ * would otherwise offer `run` and stop, and `python3 -m pkg job.py` would offer
+ * `pkg`. Walking on cannot bind anything the argv does not name, and the worst
+ * case is the harmless direction — a command whose script is missing and whose
+ * later argument happens to be a file binds that file, which is one more thing
+ * bound rather than one fewer.
+ *
+ * An option that takes a separate path value is the one place this can pick the
+ * wrong file (`node --require ./a.js job.js` binds `./a.js`), and both are
+ * files that invocation executes.
  */
-function scriptOperandIndex(
+function scriptCandidateIndexes(
   argv: readonly string[],
   markers: readonly (string | RegExp)[],
-): number | null {
+): number[] | null {
+  const candidates: number[] = [];
   for (let index = 1; index < argv.length; index += 1) {
     const word = argv[index] as string;
     if (isInlineProgramFlag(word, markers)) return null;
-    if (word === "--") return index + 1 < argv.length ? index + 1 : null;
+    if (word === "--") continue;
     if (word.startsWith("-") && word.length > 1) continue;
-    return index;
+    candidates.push(index);
   }
-  return null;
+  return candidates;
 }
 
 /**
@@ -263,12 +276,15 @@ export function boundScript(argv: readonly string[], cwd: string): BoundScript |
 
   const markers = SCRIPT_INTERPRETERS.get(basenameOf(program));
   if (markers !== undefined) {
-    const index = scriptOperandIndex(argv, markers);
-    if (index === null) return null;
-    const path = resolveArgvPath(argv[index] as string, cwd);
-    if (path === null) return null;
-    const digest = fileDigest(path);
-    return digest === null ? null : { argv_index: index, path, ...digest };
+    const candidates = scriptCandidateIndexes(argv, markers);
+    if (candidates === null) return null;
+    for (const index of candidates) {
+      const path = resolveArgvPath(argv[index] as string, cwd);
+      if (path === null) continue;
+      const digest = fileDigest(path);
+      if (digest !== null) return { argv_index: index, path, ...digest };
+    }
+    return null;
   }
 
   // The degenerate case: no interpreter word, so the script IS argv[0] and the
