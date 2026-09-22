@@ -3024,8 +3024,13 @@ function readLogText(path: string): string {
 //   - if the base already carries this attestation's records, the log is
 //     published and the amendment has nothing to add to it;
 //   - if a records advance is live (`records-log-<date>` is open on origin),
-//     that advance publishes the WHOLE log, this attestation included, so the
-//     amendment has nothing to add to it either;
+//     that advance publishes the log, so the amendment has nothing to add to
+//     it either. Whether the branch already carries THIS attestation is
+//     checked, not assumed: an advance pushed before the human signed does
+//     not, the next advance does, and the pull request's protected-path guard
+//     holds the policy change until a records branch or main carries the
+//     record. Either way the amendment must not append to `events.jsonl`
+//     beside a branch that is appending to it;
 //   - otherwise the amendment is the only publisher and carries the log, which
 //     is what it has always done.
 //
@@ -3054,16 +3059,47 @@ interface LogCarriage {
  * (`cli/log-advance.ts`), and merged branches are deleted by the reconcile
  * script, so a branch matching that pattern on origin is a live advance.
  */
-function recordsPublisher(root: string): string | null {
+function recordsPublisher(root: string): { name: string; sha: string } | null {
   const listed = git(["ls-remote", "--heads", "origin", "records-log-*"], root);
   if (!listed.ok) return null;
   for (const line of listed.stdout.split("\n")) {
-    const ref = line.trim().split(/\s+/u)[1];
-    if (ref === undefined) continue;
+    const [sha, ref] = line.trim().split(/\s+/u);
+    if (ref === undefined || sha === undefined) continue;
     const name = ref.replace(/^refs\/heads\//u, "");
-    if (name.startsWith("records-log-")) return name;
+    if (name.startsWith("records-log-")) return { name, sha };
   }
   return null;
+}
+
+/**
+ * Whether the records branch at `sha` already carries every record of the
+ * working log, this attestation included.
+ *
+ * A branch pushed BEFORE the attestation was appended does not, and that is
+ * the ordinary order (the cadence advance ran, then the human signed), so
+ * saying "this attestation included" of it would be a claim the committed
+ * log contradicts. What publishes the attestation then is the NEXT advance,
+ * and the pull request's protected-path guard holds the policy change until
+ * a records branch or main carries the record. `null` when the branch's log
+ * could not be fetched or read, which the caller reports as unknown rather
+ * than as either answer.
+ */
+function publisherCarriesLog(
+  root: string,
+  sha: string,
+  logArg: string,
+  logPath: string,
+): boolean | null {
+  const fetched = git(["fetch", "--quiet", "origin", sha], root);
+  if (!fetched.ok) return null;
+  const branchLog = showBlob(root, sha, logArg);
+  if (branchLog === null) return null;
+  const compared = compareChains(
+    { label: "the working log", text: readLogText(logPath) },
+    { label: `records branch ${sha.slice(0, 12)}:${logArg}`, text: branchLog.toString("utf8") },
+  );
+  if (!compared.ok) return null;
+  return compared.drift.relation === "equal" || compared.drift.relation === "behind";
 }
 
 /**
@@ -3097,10 +3133,16 @@ function decideLogCarriage(
   }
   const publisher = recordsPublisher(root);
   if (publisher !== null) {
+    const carries = publisherCarriesLog(root, publisher.sha, logArg, logPath);
     return {
       carry: false,
-      reason: `the records advance on ${publisher} publishes the whole log, this attestation included, so this amendment carries only the policy and cannot conflict with it`,
-      publisher,
+      reason:
+        carries === true
+          ? `the records advance on ${publisher.name} publishes the whole log, this attestation included, so this amendment carries only the policy and cannot conflict with it`
+          : `a records advance is live on ${publisher.name}${
+              carries === null ? " (its log could not be read from here)" : ", pushed before this attestation was appended"
+            }, so this amendment carries only the policy and cannot conflict with it; the attestation record lands with the next advance, and the pull request's protected-path check holds the policy change until a records branch or main carries it`,
+      publisher: publisher.name,
     };
   }
   return { carry: true, reason: null, publisher: null };

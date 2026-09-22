@@ -354,7 +354,7 @@ test("an amendment opened while a records advance is pending carries no log, and
   // never a surprise to the person who just signed the policy.
   assert.match(
     run.stdout,
-    /records advance on records-log-2026-09-21 publishes the whole log/u,
+    /records advance is live on records-log-2026-09-21, pushed before this attestation was appended/u,
     `the ceremony did not say who publishes the log:\n${run.stdout}`,
   );
 

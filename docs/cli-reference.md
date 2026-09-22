@@ -1055,8 +1055,13 @@ on, in this order:
 1. does the base's log already carry every record this attestation added? Then
    the log is published and the amendment has nothing to add to it.
 2. is a records advance live, meaning origin carries a `records-log-*` branch?
-   That advance publishes the WHOLE log, this attestation included, so the
-   amendment has nothing to add to it either.
+   That advance publishes the log, so the amendment has nothing to add to it
+   either. Whether the branch already carries THIS attestation is checked
+   rather than assumed: the ceremony fetches the branch and compares chains.
+   An advance pushed before the human signed does not carry it, which is the
+   ordinary order; the ceremony then says so, the next advance publishes the
+   record, and the pull request's protected-path guard holds the policy
+   change until a records branch or main carries it.
 
 Either way the commit is the policy bytes, the attested text and the pins, and a
 commit that does not touch `events.jsonl` cannot conflict on `events.jsonl`,
