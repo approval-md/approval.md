@@ -391,8 +391,8 @@ export async function serveTelegramWebhook(
             401,
             "webhook-secret-mismatch",
             offered === null
-              ? `no ${TELEGRAM_SECRET_HEADER} header. Every delivery Telegram makes to this URL carries the secret_token the runtime registered; a post without it decides nothing and was recorded as a refusal`
-              : `the ${TELEGRAM_SECRET_HEADER} header is not the registered secret_token. Nothing was recorded, and no decision reached the gate`,
+              ? `no ${TELEGRAM_SECRET_HEADER} header. Every delivery Telegram makes to this URL carries the secret_token the runtime registered; a post without it decides nothing, and is counted and reported here as a refusal rather than written to the log`
+              : `the ${TELEGRAM_SECRET_HEADER} header is not the registered secret_token. No decision reached the gate, and nothing was appended`,
           );
           return;
         }
