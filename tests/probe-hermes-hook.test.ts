@@ -844,3 +844,347 @@ test("an unparseable capture line does not stop the report", () => {
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// The driver (APRV-418)
+// ---------------------------------------------------------------------------
+
+/** A version line at or above the floor, and one below it. */
+const AT_FLOOR = "Hermes Agent v0.21.3 (2026.9.21) · upstream 118984d7ab";
+const BELOW_FLOOR = "Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098";
+
+/** Drive `run`, returning its exit code and both streams. */
+function runDriver(extra: string[] = []): { code: number; out: string; warn: string } {
+  let out = "";
+  let warn = "";
+  const code = run(["node", "hermes-hook.mjs", "run", "--binary", FAKE_HERMES, ...extra], {
+    write: (text: string) => {
+      out += text;
+    },
+    warn: (text: string) => {
+      warn += text;
+    },
+  });
+  return { code, out, warn };
+}
+
+/** The pointer file's contents, or `null`. Used to prove a refusal wrote nothing. */
+function pointerNow(): string | null {
+  try {
+    return readFileSync(TEST_POINTER, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+after(() => {
+  delete process.env["FAKE_HERMES_VERSION"];
+  delete process.env["FAKE_HERMES_HOOK_TIMEOUT_MS"];
+  delete process.env["FAKE_HERMES_INERT"];
+});
+
+test("the probe's copy of the fail-closed floor IS the runtime's, field for field", () => {
+  // The probe is plain ESM an operator runs before any build, so it cannot
+  // import the compiled module and carries a copy. A copy drifts; this is what
+  // makes the drift cost a test failure rather than a probe round measured
+  // against a floor the runtime stopped believing in.
+  assert.deepEqual(
+    FAIL_CLOSED_FLOOR,
+    HERMES_FAIL_CLOSED_FLOOR as unknown as typeof FAIL_CLOSED_FLOOR,
+  );
+});
+
+test("the probe's floor verdict agrees with the runtime's on every shape", () => {
+  // Not just the constant: the READING of it. A probe that parsed the version
+  // line differently from `approval doctor` would refuse rounds the doctor
+  // passes, or worse, drive one the doctor would have stopped.
+  for (const line of [
+    AT_FLOOR,
+    BELOW_FLOOR,
+    "Hermes Agent v0.21.3 (2026.9.20) · upstream deadbeef",
+    "Hermes Agent (dev build)",
+    "",
+  ]) {
+    assert.equal(floorVerdict(line), hermesFailClosedSupport(line), `for ${JSON.stringify(line)}`);
+  }
+  assert.equal(floorVerdict(undefined), "unknown");
+  assert.equal(versionLine("first\nsecond"), "first", "only the first line is read");
+  assert.equal(versionLine("x".repeat(201)), null, "and a line past the cap is no line");
+});
+
+test("the matrix covers the baseline, BOTH fail-closed passes and every dialect", () => {
+  const steps = matrix();
+  const ids = steps.map((step) => step.id);
+  assert.equal(new Set(ids).size, ids.length, "every step id is unique");
+
+  assert.deepEqual(
+    steps.filter((step) => step.phase === "baseline").map((step) => step.prompt),
+    BASELINE_PROMPTS,
+  );
+  // The pair is the finding, and the driver is the first thing that can get
+  // both halves without a human quitting and relaunching the harness.
+  for (const trial of FAIL_TRIALS) {
+    for (const failClosed of [true, false]) {
+      const step = steps.find(
+        (candidate) =>
+          candidate.trial === trial &&
+          candidate.phase === "fail-closed" &&
+          candidate.failClosed === failClosed,
+      );
+      assert.ok(step !== undefined, `${trial} is missing its fail_closed=${String(failClosed)} pass`);
+      assert.equal(step.artifact, trialArtifact(trial, failClosed));
+    }
+  }
+  for (const trial of DIALECT_TRIALS) {
+    const step = steps.find(
+      (candidate) => candidate.phase === "dialect" && candidate.trial === trial,
+    );
+    assert.ok(step !== undefined, `${trial} has no step`);
+    assert.equal(step.failClosed, true, "the dialect trials all run with the key on");
+  }
+  // Only the hang trials get the long timeout, because only they wait out a
+  // harness timeout rather than a model.
+  assert.deepEqual(
+    steps.filter((step) => step.hang).map((step) => step.id),
+    ["hang-failclosed", "hang-failopen"],
+  );
+  // The modify trial is asked for through the SHELL: a prompt naming a file
+  // would be answered by a file tool, which carries its own path.
+  const modify = steps.find((step) => step.trial === MODIFY_TRIAL);
+  assert.match(String(modify?.prompt), /^run the shell command:/u);
+});
+
+test("the one-shot template substitutes both placeholders, and refuses a prompt-less one", () => {
+  assert.deepEqual(oneShotArgv(ONE_SHOT_TEMPLATE, "do a thing", "/tmp/p"), [
+    "-z",
+    "do a thing",
+    "--in",
+    "/tmp/p",
+    "--accept-hooks",
+  ]);
+  // The prompt is the one token the round cannot do without; a template missing
+  // it would run the harness with no instruction and capture nothing, which
+  // reads exactly like a harness that ignores hooks.
+  assert.equal(oneShotArgv("--headless {dir}", "p", "/tmp/p"), null);
+  assert.deepEqual(oneShotArgv("--task {prompt}", "p", "/tmp/p"), ["--task", "p"]);
+});
+
+test("run refuses a build BELOW the floor and writes nothing at all", () => {
+  const before = pointerNow();
+  process.env["FAKE_HERMES_VERSION"] = BELOW_FLOOR;
+  try {
+    const { code, warn } = runDriver();
+    assert.equal(code, 3);
+    assert.match(warn, /BELOW THE FAIL-CLOSED FLOOR/u);
+    assert.match(warn, new RegExp(FAIL_CLOSED_FLOOR.upstream, "u"), "the floor is quoted");
+    assert.match(warn, /hermes update/u, "and the repair is named");
+    // The refusal happens BEFORE `prepare`, which is the property worth
+    // pinning: a refused build never has a hook block installed in its home.
+    assert.equal(pointerNow(), before, "no scratch project, no config, nothing to undo");
+  } finally {
+    delete process.env["FAKE_HERMES_VERSION"];
+  }
+});
+
+test("run refuses an UNREADABLE version unless the operator says otherwise", () => {
+  const before = pointerNow();
+  process.env["FAKE_HERMES_VERSION"] = "Hermes Agent (dev build)";
+  try {
+    const { code, warn } = runDriver();
+    assert.equal(code, 3);
+    assert.match(warn, /THE VERSION COULD NOT BE READ/u);
+    assert.match(warn, /--allow-unknown-version/u, "and the override is named rather than hidden");
+    assert.equal(pointerNow(), before);
+  } finally {
+    delete process.env["FAKE_HERMES_VERSION"];
+  }
+});
+
+test("run drives the WHOLE matrix through a fake harness, with no human input", () => {
+  const before = pointerNow();
+  process.env["FAKE_HERMES_VERSION"] = AT_FLOOR;
+  // The real per-entry cap is 300s and no test may wait for it; the fake's hook
+  // timeout stands in for it, so the `hang` trials still measure a timeout.
+  process.env["FAKE_HERMES_HOOK_TIMEOUT_MS"] = "2000";
+  try {
+    const { code, out } = runDriver(["--step-timeout", "30000", "--hang-timeout", "30000"]);
+    assert.equal(code, 0, out);
+
+    const pointer = JSON.parse(readFileSync(TEST_POINTER, "utf8")) as Pointer;
+    assert.notEqual(pointerNow(), before, "the driver built its own round");
+    created.push(pointer.root);
+
+    // The version was read and recorded BEFORE the config was written.
+    const version = JSON.parse(readFileSync(join(pointer.state, "version.json"), "utf8")) as {
+      raw: string;
+      verdict: string;
+    };
+    assert.equal(version.verdict, "honours");
+    assert.equal(version.raw, AT_FLOOR);
+
+    // One row per step, one one-shot invocation per row.
+    const rows = readFileSync(join(pointer.state, "runs.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as { id: string; captured: number; status: number | null });
+    assert.equal(rows.length, matrix().length);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      matrix().map((step) => step.id),
+    );
+    assert.ok(
+      rows.every((row) => row.status === 0),
+      "every invocation of the fake harness completed",
+    );
+
+    // THE PAIR, driven without a human: with the key the broken hook blocked,
+    // without it the effect happened. The manual round never got pass B,
+    // because switching the key needs the harness restarted and a one-shot
+    // invocation IS a restart.
+    for (const trial of FAIL_TRIALS) {
+      assert.equal(
+        existsSync(join(pointer.project, trialArtifact(trial, true))),
+        false,
+        `${trial} was withheld under fail_closed: true`,
+      );
+      assert.equal(
+        existsSync(join(pointer.project, trialArtifact(trial, false))),
+        true,
+        `${trial} proceeded without the key`,
+      );
+    }
+    assert.match(out, /CONFIRMED — every broken hook BLOCKED/u);
+    assert.match(out, /PASS A — fail_closed: true/u);
+    assert.match(out, /PASS B — fail_closed ABSENT/u);
+    for (const trial of FAIL_TRIALS) {
+      assert.equal(
+        new RegExp(`${trial} \\(fail_closed absent\\): NOT RUN`, "u").test(out),
+        false,
+        `pass B of ${trial} was actually driven`,
+      );
+    }
+
+    // The dialect answers the shipped adapter uses.
+    assert.match(out, /deny-action-exit2 \(fail_closed TRUE\): FAIL CLOSED/u);
+    assert.match(out, /allow-empty-object \(fail_closed TRUE\): ACCEPTED/u);
+
+    // And the round says how it was run.
+    assert.match(out, /=== 1b\. THE DRIVEN ROUND \(one launch grant/u);
+    assert.match(out, /version read BEFORE the config was written/u);
+    assert.match(out, /=== 5b\./u, "the modify trial still gets its own reading");
+
+    // The manual pass the driver cannot do is printed, with the three messages.
+    assert.match(out, /THE MANUAL PASS THE DRIVER CANNOT DO/u);
+    assert.match(out, /gateway-probe\.txt/u);
+  } finally {
+    delete process.env["FAKE_HERMES_VERSION"];
+    delete process.env["FAKE_HERMES_HOOK_TIMEOUT_MS"];
+    cleanup();
+  }
+});
+
+test("run ABORTS after one invocation when nothing reached the hook", () => {
+  process.env["FAKE_HERMES_VERSION"] = AT_FLOOR;
+  process.env["FAKE_HERMES_INERT"] = "1";
+  try {
+    const { code, out, warn } = runDriver(["--step-timeout", "20000"]);
+    assert.equal(code, 4);
+    // One wasted invocation, not twenty: every later step would fail the same
+    // silent way and the round would read as "the harness ignored everything".
+    const pointer = JSON.parse(readFileSync(TEST_POINTER, "utf8")) as Pointer;
+    created.push(pointer.root);
+    const rows = readFileSync(join(pointer.state, "runs.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "");
+    assert.equal(rows.length, 1, out);
+    assert.match(warn, /ROUND ABORTED/u);
+    assert.match(warn, /the one-shot spelling/u, "the first cause is named first");
+    assert.match(warn, /--one-shot/u, "and the knob that fixes it");
+    assert.match(warn, /hook never registered/u);
+  } finally {
+    delete process.env["FAKE_HERMES_VERSION"];
+    delete process.env["FAKE_HERMES_INERT"];
+    cleanup();
+  }
+});
+
+test("a step label tells a retry INSIDE the armed session from a later step's file", () => {
+  try {
+    const { state, project } = runSetup();
+    const name = trialArtifact("crash", true);
+    failClosedVerb(["node", "hermes-hook.mjs", "fail-closed", "on", "--state", state]);
+
+    // The armed call, in step one, refused; then the model retries the same
+    // effect through another tool IN THE SAME one-shot session.
+    arm(
+      ["node", "hermes-hook.mjs", "arm", "crash", "--state", state, "--step", "crash-failclosed"],
+      () => {},
+    );
+    runRecord(state, envelope({ cwd: project, tool_input: { command: `touch ${name}` } }));
+    runRecord(
+      state,
+      envelope({
+        tool_name: "write_file",
+        cwd: project,
+        tool_input: { path: join(project, name), content: "x\n" },
+      }),
+    );
+    writeFileSync(join(project, name), "x\n", "utf8");
+
+    const sameSession = runReport(state);
+    assert.match(sameSession, /in the SAME one-shot session \(step crash-failclosed\)/u);
+    assert.match(sameSession, /so it is a model retry/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a file named in a LATER step belongs to that step, not to the armed trial", () => {
+  try {
+    const { state, project } = runSetup();
+    const name = trialArtifact("crash", true);
+    failClosedVerb(["node", "hermes-hook.mjs", "fail-closed", "on", "--state", state]);
+    arm(
+      ["node", "hermes-hook.mjs", "arm", "crash", "--state", state, "--step", "crash-failclosed"],
+      () => {},
+    );
+    runRecord(state, envelope({ cwd: project, tool_input: { command: `touch ${name}` } }));
+
+    // A DIFFERENT step now names the same path. A different step is a different
+    // process, so this says nothing about whether the armed call proceeded — and
+    // the report must not let a reader read it as if it did.
+    arm(
+      ["node", "hermes-hook.mjs", "arm", "none", "--state", state, "--step", "garbage-failclosed"],
+      () => {},
+    );
+    runRecord(
+      state,
+      envelope({
+        tool_name: "write_file",
+        cwd: project,
+        tool_input: { path: join(project, name), content: "x\n" },
+      }),
+    );
+    writeFileSync(join(project, name), "x\n", "utf8");
+
+    const out = runReport(state);
+    assert.match(out, /in a LATER step \(garbage-failclosed\)/u);
+    assert.match(out, /a different process/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a hand-typed round says so, and names the verb that would have driven it", () => {
+  try {
+    const { state, project } = runSetup();
+    runRecord(state, envelope({ cwd: project, tool_input: { command: "ls", workdir: project } }));
+    const out = runReport(state);
+    assert.match(out, /=== 1b\. HOW THIS ROUND WAS RUN ===/u);
+    assert.match(out, /BY HAND/u);
+    assert.match(out, /harness\.launch\.hermes/u, "and why that costs what it costs");
+    assert.match(out, /hermes-hook\.mjs run/u);
+  } finally {
+    cleanup();
+  }
+});
