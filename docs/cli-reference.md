@@ -3849,6 +3849,16 @@ This starts the standalone Telegram component. For normal operation, use
 `up` or another listener polling the same bot, even for a different policy
 project: competing `getUpdates` calls produce Telegram HTTP 409.
 
+A bot whose updates go to a webhook cannot be long-polled at all, so this verb
+and `approval up` refuse `webhook-registered` in the same preflight that asks
+`getMe`, naming the origin that holds it. That preflight also takes this gate's
+transport lease (`.approval/daemon/telegram-transport.lock`), so a second
+listener or a webhook runner started in the same project refuses
+`telegram-poller-running` naming the pid that holds it, rather than both
+processes putting every request on the phone under their own nonce. See
+[`channel telegram webhook`](#channel-telegram-webhook), which is the other
+transport and removes both its registration and its lease when it exits.
+
 **Delivery is per cycle, not only at startup.** Before every `getUpdates` the
 listener re-derives the pending queue from the verified log and sends whatever
 it has not already sent, so a request appended while this listener is running
@@ -4157,6 +4167,232 @@ rather than a query:
 ```
 
 The raw execution token is never in the JSON stream.
+
+## channel telegram webhook
+
+The same channel, the other arrival (APRV-424). `listen` holds a socket open
+against `getUpdates` for as long as the gate exists, which needs one
+always-running process per bot and forbids a second poller on the same token.
+This registers a URL with `setWebhook` and serves the callback, so Telegram
+posts each update as it happens and a host that sleeps between requests can run
+a gate.
+
+**Only the arrival changes, and that is the whole claim.** The pending queue is
+re-derived from the verified log every cycle by the same `dispatchPending`. The
+handlers are the same four function objects `listen` registers. A tap becomes a
+decision through the same `handleUpdate`, the same `callback_query.from.id`
+reading, the same `approvers.<id>.senders` resolution, the same
+`recordChannelDecision` and the same annotate-after-decision edit. There is no
+second decision path and no second copy of the sender mapping:
+`tests/telegram-webhook.test.ts` drives one callback through both transports and
+compares the records the log ends up holding, field for field.
+
+### The secret, which is the whole of the authentication
+
+`APPROVAL_TG_WEBHOOK_SECRET` is REQUIRED and is read from the launch
+environment, never from a file in the tree (SPEC.md §11.1 invariant 7, the rule
+`approval serve`'s two credentials follow). It is Telegram's own `secret_token`:
+set on `setWebhook`, echoed on every delivery in the
+`X-Telegram-Bot-Api-Secret-Token` header, compared here in constant time over
+SHA-256 digests.
+
+A webhook URL is a public endpoint, and nothing in a request body could tell a
+delivery from a forgery — a self-reported field never reduces scrutiny (§11.1
+invariant 4). So the header is checked FIRST, before the path, the method and
+the body, and a post without the matching value is refused with its own code,
+counted, and reported on stderr. **A refusal is never a decision, and it appends
+nothing to the log.** That is the rule `TELEGRAM_ANOMALY_KINDS` states for
+ignored callbacks, and it binds harder here: an endpoint the internet can reach
+that could append would be an endpoint anyone could use to pad the record a
+human is asked to trust.
+
+The value is refused at startup when it is unset, shorter than 24 characters, or
+holds a character outside Telegram's `A-Z a-z 0-9 _ -`. It appears in no policy,
+no log, no record, no message and no error line: the channel redacts it from
+everything that leaves it, exactly as it redacts the bot token.
+
+| refusal | what happened |
+|---|---|
+| `webhook-secret-mismatch` | no `X-Telegram-Bot-Api-Secret-Token`, or not the registered value |
+| `webhook-duplicate-secret-header` | more than one of that header; malformed, and not resolvable by choosing |
+| `webhook-malformed-request` | the request line and `Host` header do not form a URL (400) |
+| `webhook-unknown-path` | a path this process does not serve (404) |
+| `webhook-method-not-allowed` | the right path, the wrong method; Telegram POSTs |
+| `webhook-body-too-large` | over 256 KiB; drained before the refusal is written |
+| `webhook-body-unreadable` | the body could not be read off the socket, or is not JSON |
+| `webhook-not-an-update` | JSON that is not an Update object |
+| `webhook-transport-conflict` | this channel is already receiving updates by long poll |
+| `webhook-handler-failed` | the channel threw; the log is what says what was recorded |
+
+Startup refuses in its own vocabulary before anything binds:
+`webhook-secret-missing`, `webhook-secret-weak`, `webhook-secret-charset`,
+`webhook-url-missing`, `webhook-url-insecure`, `webhook-url-port`,
+`webhook-url-userinfo`, `webhook-path-invalid`, `webhook-path-mismatch`,
+`webhook-cycle`, and `webhook-registration-failed` for a `setWebhook` the Bot
+API turned down (its status and its own description, scrubbed of the token and
+the secret), plus every `channel telegram listen` refusal, which this verb
+inherits because it needs the same bot token, chat, identity, log and policy.
+
+Four of those are the review's, and each one closes a start that used to
+succeed and then not work:
+
+- **`--path` must be the url's own path.** `telegram/webhook` with no leading
+  slash, or `/hook/` against a `--url` ending `/hook`, registered cleanly and
+  then answered every real delivery 404 after verifying its secret. `--path` is
+  an explicit restatement of the url's path and nothing else; rewriting belongs
+  in the proxy in front of this process.
+- **`--url` may not carry userinfo.** `https://user:pw@host/hook` is a
+  credential on a command line. It is refused, never stripped.
+- **The bind port may not be 0**, and must be inside 1..65535. Port 0 asks the
+  kernel for an ephemeral port, and this transport is a fixed public url
+  forwarded to a fixed local address: a receiver on a port nobody registered
+  verifies nothing and answers nothing.
+- **Every line that prints the url prints its origin and a redacted path**, in
+  the start-up banner, in `webhook_started` and in refusals: with two segments
+  or more the first is kept and the rest becomes `<path redacted>`, a path of
+  exactly one segment is replaced whole (that is the shape a tunnel's own token
+  takes), and a query string becomes `<query redacted>`. A tunnel that hands out
+  `https://host/hook/<random>` puts a bearer value in a path, and this runtime
+  does not copy it into three more places. The local bind line is redacted the
+  same way, because it carries the same path. The operator has the whole of it
+  already: they typed it into `--url`.
+
+### The proxy or tunnel is required, and this process holds no certificate
+
+Telegram delivers to HTTPS only, on port 443, 80, 88 or 8443. This process
+terminates no TLS and holds no certificate, exactly as `approval serve` does
+not: `--url` names the PUBLIC address your proxy or tunnel answers on, and
+`--port` / `--listen` names this process's own bind, which is `127.0.0.1:4683`
+unless you say otherwise. A routable bind takes both `--listen <host:port>` and
+`--allow-non-loopback` and prints a banner, because the secret arrives in a
+header and a cleartext hop hands it to whoever is on it.
+
+So a working deployment is a reverse proxy (nginx, Caddy, a cloud load balancer)
+or a tunnel (Cloudflare Tunnel, ngrok, Tailscale Funnel) terminating TLS on a
+name you control and forwarding to the loopback bind. Without one there is
+nothing to register: a plain-HTTP `--url`, or one on another port, is refused
+before any call is made rather than attempted and rejected by the Bot API.
+
+### One transport per bot, refused on both sides
+
+`getUpdates` is refused by the Bot API outright while a webhook is set, so the
+two are alternatives and never a pair. Four checks say so before anything runs,
+and they are in that order because the first needs no network:
+
+- **A lease per gate.** `approval up`, `approval channel telegram listen` and
+  this verb take a lockfile in the gate's own derived state directory,
+  `.approval/daemon/telegram-transport.lock`, holding the holder's pid, which
+  transport it is running and when it started. It is created with `O_EXCL`, so
+  two processes racing cannot both believe they took it, and a holder that is
+  no longer running is reclaimed automatically (a crash must not lock a gate
+  out of its own channel). A second taker refuses `telegram-poller-running`
+  when a poller holds it and `webhook-registered` when a webhook does, naming
+  the pid and the mode; a directory the lease cannot be written in refuses
+  `telegram-lease-unavailable`, because this file is the only thing keeping one
+  gate from running two transports. Both transports release it on a clean stop.
+
+  **A holder is a process, not a number.** Pids are reused, so the probe asks
+  three questions: does a process with that number exist, can this process
+  signal it, and did it start before the lease was written. A number that is
+  gone, one owned by a process this one cannot signal, and one belonging to a
+  process that started *after* the lease are all reclaimed, and the line says
+  which of the three it was. Only a process that is running, signalable and
+  older than its own lease keeps the gate. Where the platform will not report a
+  start time, a running pid keeps the gate, which is the stricter reading.
+
+  **Taking a lease over is a critical section, and the section is owned.**
+  Reclaiming happens inside a sibling `O_EXCL` lock that carries the entering
+  process's pid and a nonce. Inside it the lease record must still be exactly
+  the one that was judged (same pid, same `started_at`), the lock must still
+  name this entry at the moment of the write, and the lock is removed on the
+  way out only while it still does. Without the first, two processes that had
+  both read one dead holder took turns deleting each other's live lease;
+  without the other two, a process that stalled inside the section renamed its
+  lease over the one that replaced it and deleted the new holder's lock. The
+  replacement is a rename, so the lockfile is never absent and never half
+  written. A reclaim lock is evicted only when its own process is gone, judged
+  by the probe above: its age is reported and decides nothing, because "five
+  seconds have passed" says nothing about whether anybody is still inside. A
+  lock this build cannot read names no process, so the take refuses and names
+  the file rather than forcing it.
+
+  This is the check the other three cannot make. Two processes started in the
+  SAME project — one `approval up` long-polling, one `approval channel telegram
+  webhook` — passed all of them: `getWebhookInfo` is empty while the poller is
+  the one running, and the ownership registry compares instance ids, which are
+  equal because it is the same instance. Each then ran its own dispatch cycle
+  over its own state against one log, so every request reached the phone twice
+  under two nonces and only one copy could resolve a tap.
+- **What the Bot API says.** `listen` and `approval up` ask `getWebhookInfo` in
+  the same preflight that asks `getMe`, and refuse `webhook-registered` naming
+  the origin that holds the bot. For a poller an unreachable Bot API is not a
+  refusal (a captive portal says nothing about which transport owns a bot) and
+  the HTTP 409 path is the backstop. For THIS verb it is: a probe it could not
+  make refuses `webhook-probe-failed`, because the next call would be a
+  `setWebhook` that overwrites a registration this process never saw.
+- **Any existing registration, including the same url, refuses.** Telegram
+  allows one webhook per bot and keeps the last registration, so a second host
+  registering takes the taps: it overwrites the first host's `secret_token`, and
+  from then on every real tap arrives at the first host with a secret it does
+  not recognise, indistinguishable from a forgery. `--reclaim` is how an
+  operator takes the bot deliberately; with it, a url that matches the
+  registered one (host lowercased, trailing slash dropped) is reported as a
+  re-registration and anything else as a takeover that stops the other receiver
+  being posted to.
+
+  **One case needs no flag: this gate's own runner was killed.** A `SIGKILL`
+  leaves the registration in place, because the dead process never reached
+  `deleteWebhook`, and a restart that refused every time would teach operators
+  to put `--reclaim` in the unit file, which retires the protection above for
+  good in exchange for a crash recovery. So a restart may re-register the SAME
+  normalised url without the flag when the lease it just reclaimed was this
+  gate's own, written by a webhook runner, and that process is **gone**. A dead
+  poller's lease does not count, a different url does not count, and a gate
+  with no such lease does not count. Nor do the other two reclaim reasons: a
+  lease reclaimed because its pid is owned by a process this one cannot signal,
+  or because the number has been reused, is the right call for the lease and no
+  evidence at all that the runner which registered the url has stopped. Those
+  keep the refusal and the `--reclaim` demand.
+- Within one process, `TelegramChannel.claimTransport` refuses the second claim.
+
+A clean stop (SIGINT, SIGTERM) removes the webhook, so long polling works again
+afterwards. Pending updates are kept in both directions: a tap that arrived
+while the process was down is the approver's answer, and the gate is what
+decides whether it is still honourable.
+
+### Redelivery, and the cycle
+
+Telegram retries a delivery it did not get a 2xx for, so the same tap can arrive
+twice. Nothing deduplicates it: the second one reaches the gate through the same
+path as the first and is refused `already-decided`, with the first human answer
+standing — the property a button pressed twice has had since the channel
+shipped. Updates are handled one at a time, in arrival order, and the response
+is written after the update has been handled.
+
+`--cycle <duration>` (default 30s) is the dispatch period, the webhook's
+equivalent of the poll loop's per-cycle dispatch: it re-derives the pending
+queue and sends what has not been sent. A cycle also runs immediately after each
+handled update, so a paced listener's next question follows a tap without
+waiting for the timer.
+
+**A stop waits for the update it is holding.** Ctrl-C stops the receiver
+accepting, then drains: an update mid-append keeps its socket, finishes its
+decision and writes its response, and only then is `deleteWebhook` called and
+the stopped line printed. A second Ctrl-C during the drain is absorbed rather
+than killing the process, and a request that never finishes is dropped after ten
+seconds, because a stop has to end. `deleteWebhook` on that path is given five
+seconds rather than the channel's usual thirty, for the same reason: a stop an
+operator has asked for twice should not sit behind an unreachable Bot API, and
+a removal that does not land is reported as a webhook still registered.
+
+```json
+{"event":"webhook_started","url":"https://gate.example/telegram/<path redacted>",
+ "host":"127.0.0.1","port":4683,"path":"/telegram/<path redacted>","cycle_ms":30000}
+{"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
+ "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
+ "key-mismatch":0},
+ "webhook":{"requests":2,"updates":1,"refusals":{"webhook-secret-mismatch":1}}}
+```
 
 ## channel telegram health
 

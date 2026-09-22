@@ -36,6 +36,115 @@ export const TELEGRAM_TOKEN_ENV = "APPROVAL_TG_TOKEN";
  */
 export const TELEGRAM_CHAT_ENV = "APPROVAL_TG_CHAT";
 
+/**
+ * The environment variable the webhook `secret_token` is read from (APRV-424).
+ *
+ * ## Why this one is conventional and the two above are declared
+ *
+ * `token_env` and `chat_id_env` are policy keys because a machine may run two
+ * gates against two bots, and the policy is where that pair is written down.
+ * This is not that kind of key, for two reasons and in that order:
+ *
+ * 1. `channels.telegram` in `schema/policy.schema.json` is
+ *    `additionalProperties: false`, so declaring a name there is a schema
+ *    amendment, which is its own task. A capability does not get to arrive by
+ *    widening a validated document on the way past.
+ * 2. It is launch configuration in the sense of SPEC.md §11.1 invariant 7,
+ *    which is where the precedent is: `APPROVAL_SENDER_KEY` (APRV-370) and
+ *    `approval serve`'s two bearer credentials (APRV-421) are conventional
+ *    names for the same reason. The host that launches one process per tenant
+ *    sets it, exactly as it sets the bot token and the vault passphrase
+ *    (`design/hosted-daemon-identity.md` §1.2), and two gates on one machine
+ *    already have two environments rather than one.
+ *
+ * The VALUE never appears in a policy, a log, a record or a message. Telegram
+ * constrains it to 1-256 characters of `A-Z a-z 0-9 _ -`; the verb refuses
+ * anything outside that, and anything short enough to have been chosen by a
+ * person rather than generated.
+ */
+export const TELEGRAM_WEBHOOK_SECRET_ENV = "APPROVAL_TG_WEBHOOK_SECRET";
+
+/**
+ * One webhook URL, reduced so two spellings of one endpoint compare equal
+ * (APRV-424, review finding 6).
+ *
+ * The host is lowercased and one trailing slash is dropped from the path.
+ * Nothing more is attempted: `normaliseApiBase` in `core/channel-owner.ts`
+ * argues the same restraint, and the direction of the error matters here. Two
+ * spellings that compare UNEQUAL turn a restart into a refusal, which an
+ * operator clears with one flag; two that compare equal when they are
+ * different endpoints would let a second host quietly take a first host's
+ * taps, which nobody would see.
+ *
+ * The path's case is preserved, because a path is case-sensitive and a webhook
+ * path is often a random token.
+ *
+ * `null` for anything that is not a URL, so a caller compares two known URLs
+ * or refuses. A failed parse is never "equal to everything".
+ */
+export function normaliseWebhookUrl(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const path = url.pathname.length > 1 ? url.pathname.replace(/\/+$/u, "") : url.pathname;
+  return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${path}${url.search}`;
+}
+
+/**
+ * A webhook PATH as it may be printed (APRV-424, reviews 1 to 3).
+ *
+ * With two segments or more, the first is kept and the rest is replaced:
+ * `/hook/8Xk2-a-long-random-value` prints as `/hook/<path redacted>`, which is
+ * enough for an operator to recognise their own endpoint while the bearer half
+ * stays theirs. With exactly ONE segment the whole path is replaced, because a
+ * single-segment path is the shape a tunnel's own token takes
+ * (`https://host/8Xk2-a-long-random-value`) and keeping "the first segment"
+ * there would print the token itself (third review, finding 3).
+ *
+ * The operator loses nothing either way. They typed it into `--url`.
+ *
+ * The second review found the first version printing the SERVED path verbatim,
+ * on the argument that a path this process serves is a path the operator
+ * chose. That argument is right about the operator and wrong about everyone
+ * else who reads a terminal, a log aggregator or a pasted banner.
+ */
+export function redactWebhookPath(path: string): string {
+  const segments = path
+    .replace(/^\/+/u, "")
+    .split("/")
+    .filter((segment) => segment.length > 0);
+  const first = segments[0];
+  if (first === undefined) return "/";
+  return segments.length === 1 ? "/<path redacted>" : `/${first}/<path redacted>`;
+}
+
+/**
+ * A webhook URL as it may be printed (APRV-424, review finding 10).
+ *
+ * The origin, which carries no userinfo by construction, plus
+ * {@link redactWebhookPath}'s reading of the path. Used by every line this
+ * runtime writes about a webhook url: the start-up banner, the
+ * `webhook_started` object, the registration refusal and the listener's
+ * `webhook-registered` message, whether the url is this process's own or
+ * another host's.
+ *
+ * A url carrying userinfo is refused at startup rather than printed; this is
+ * the belt on that brace, because the origin never contains it.
+ */
+export function redactWebhookUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "<not a url>";
+  }
+  const query = url.search === "" ? "" : "?<query redacted>";
+  return `${url.origin}${redactWebhookPath(url.pathname)}${query}`;
+}
+
 /** The NAME of the variable this policy says the bot token lives in. */
 export function telegramTokenEnvFor(load: PolicyLoadResult): string {
   return declaredEnvName(load, "token_env") ?? TELEGRAM_TOKEN_ENV;

@@ -52,7 +52,17 @@ export type MockFailure =
    * to stop because this one asked again, which is why the listener reports it
    * once instead of printing an identical line every few seconds forever.
    */
-  | "409";
+  | "409"
+  /**
+   * Answer `ok: false` with a description that QUOTES the request's own
+   * `secret_token` (APRV-424).
+   *
+   * Realistic — the Bot API quotes offending parameters back — and it is the
+   * one shape that can prove the channel's redaction rather than assume it: a
+   * failure description is a string the channel puts on an operator's
+   * terminal, so a webhook secret inside one is a credential being printed.
+   */
+  | "echo-secret";
 
 /** One request the mock received, recorded verbatim. */
 export interface MockRequest {
@@ -105,8 +115,16 @@ export interface MockBotApi {
    * get (APRV-74).
    */
   pendingUpdateCount(): number;
-  /** Inject a failure mode for every subsequent call, or `null` to behave. */
-  fail(mode: MockFailure | null): void;
+  /**
+   * Inject a failure mode for every subsequent call, or `null` to behave.
+   *
+   * `options.method` narrows it to ONE Bot API method (APRV-424 review): the
+   * webhook runner's start-up order is `getMe`, `getWebhookInfo`,
+   * `sendMessage`, `setWebhook`, so a global failure can never reach the last
+   * of them, and the refusal a rejected registration produces cannot be
+   * driven at all without naming the call that fails.
+   */
+  fail(mode: MockFailure | null, options?: { method?: string }): void;
   /**
    * Called after every `getUpdates` has been answered (APRV-248).
    *
@@ -136,6 +154,17 @@ export interface MockBotApi {
    * defaults to whatever is still queued here.
    */
   setWebhookInfo(info: { url?: string; pendingUpdateCount?: number }): void;
+  /**
+   * What `setWebhook` was last called with, or `null` (APRV-424).
+   *
+   * The registration is real in this mock: `setWebhook` records the url and
+   * the secret and makes `getWebhookInfo` report them, and `deleteWebhook`
+   * clears both. That is what lets a test assert the two things the task turns
+   * on — that the secret this runtime compares is the one it registered, and
+   * that a clean stop leaves the bot pollable again — rather than assuming
+   * them.
+   */
+  webhookRegistration(): { url: string; secretToken: string } | null;
   /** The `callback_data` of the Approve/Reject button delivered for `actionKey`. */
   callbackDataFor(actionKey: string, decision: "grant" | "reject"): string;
   /**
@@ -229,7 +258,10 @@ export async function startMockBotApi(
   let updateId = 1000;
   let messageId = 500;
   let failure: MockFailure | null = null;
+  /** The one method an injected failure applies to, or `null` for all of them. */
+  let failureMethod: string | null = null;
   let webhook: { url?: string; pendingUpdateCount?: number } = {};
+  let registration: { url: string; secretToken: string } | null = null;
   let pollsAnswered = 0;
   let pollHook: ((poll: PollAnswered) => void) | null = null;
   let server: Server;
@@ -269,21 +301,25 @@ export async function startMockBotApi(
     const received: MockRequest = { path, method, raw, body };
     requests.push(received);
 
-    if (failure === "drop") {
+    // The injected failure, narrowed to one method when the test named one.
+    const injected =
+      failure !== null && (failureMethod === null || failureMethod === method) ? failure : null;
+
+    if (injected === "drop") {
       request.socket.destroy();
       return;
     }
-    if (failure === "500") {
+    if (injected === "500") {
       response.writeHead(500, { "content-type": "text/plain" });
       response.end("mock: internal server error");
       return;
     }
-    if (failure === "malformed") {
+    if (injected === "malformed") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end('{"ok":true,"result":[  <- not JSON');
       return;
     }
-    if (failure === "409") {
+    if (injected === "409") {
       // The Bot API's own text, verbatim, because the runtime matches on it as
       // well as on the status (`isPollConflict`).
       response.writeHead(409, { "content-type": "application/json" });
@@ -297,7 +333,16 @@ export async function startMockBotApi(
       );
       return;
     }
-    if (failure === "timeout") {
+    if (injected === "echo-secret") {
+      const quoted = typeof body["secret_token"] === "string" ? body["secret_token"] : raw;
+      send(response, {
+        ok: false,
+        error_code: 400,
+        description: `Bad Request: secret_token ${quoted} is invalid`,
+      });
+      return;
+    }
+    if (injected === "timeout") {
       // Accepted and never answered: the client's own transport timeout is the
       // only thing that ends this, which is the point of the mode.
       held.add(response);
@@ -333,6 +378,27 @@ export async function startMockBotApi(
           pending_update_count: webhook.pendingUpdateCount ?? queued.length,
         },
       });
+      return;
+    }
+
+    // APRV-424. The two calls the webhook transport makes, behaving as the
+    // real API does in the one respect the runtime depends on: a registered
+    // webhook is what `getWebhookInfo` then reports, and a deleted one is not.
+    if (method === "setWebhook") {
+      const url = typeof body["url"] === "string" ? body["url"] : "";
+      registration = {
+        url,
+        secretToken: typeof body["secret_token"] === "string" ? body["secret_token"] : "",
+      };
+      webhook = { ...webhook, url };
+      send(response, { ok: true, result: true });
+      return;
+    }
+
+    if (method === "deleteWebhook") {
+      registration = null;
+      webhook = { ...webhook, url: "" };
+      send(response, { ok: true, result: true });
       return;
     }
 
@@ -483,11 +549,15 @@ export async function startMockBotApi(
     setWebhookInfo(info) {
       webhook = { ...info };
     },
+    webhookRegistration() {
+      return registration === null ? null : { ...registration };
+    },
     onGetUpdatesAnswered(hook) {
       pollHook = hook;
     },
-    fail(mode) {
+    fail(mode, options = {}) {
       failure = mode;
+      failureMethod = options.method ?? null;
       if (mode === null) {
         for (const response of held) response.destroy();
         held.clear();
@@ -596,6 +666,7 @@ export async function startMockBotApi(
     },
     async close() {
       failure = null;
+      failureMethod = null;
       pollHook = null;
       for (const response of held) response.destroy();
       held.clear();

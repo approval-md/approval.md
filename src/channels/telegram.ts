@@ -34,6 +34,24 @@
  * notify, long-poll, callbacks, failure modes — against a local mock Bot API
  * server and never touches the real network.
  *
+ * ## Two transports, one update path (APRV-424)
+ *
+ * An update reaches this channel either because it long-polled for it
+ * ({@link TelegramChannel.pollOnce}) or because Telegram posted it to a URL the
+ * runtime registered ({@link TelegramChannel.deliverUpdate}, fed by
+ * `channels/telegram-webhook.ts`). That is the WHOLE of the difference. Both
+ * entry points hand the update to the same {@link TelegramChannel.handleUpdate}
+ * and therefore to the same chat check, the same `senderOf`, the same
+ * resolution ladder, the same `onDecision` handler and the same
+ * annotate-after-decision edit; a decision does not know which door it came
+ * through, and there is no second copy of any of it to drift.
+ *
+ * The two are mutually exclusive per bot, and the Bot API says so first:
+ * `getUpdates` is refused outright while a webhook is set.
+ * {@link TelegramChannel.claimTransport} refuses the in-process form of the
+ * mistake, and the verbs above ask `getWebhookInfo` and the ownership registry
+ * about the cross-process one.
+ *
  * ## Config-declared identity — SPEC.md §11
  *
  * > Human identity in v0.1 is config-declared (an environment variable or
@@ -2312,6 +2330,59 @@ export interface TelegramPollResult {
   reviews: { tap: ReviewTap; ok: boolean }[];
 }
 
+/** A fresh, empty batch report. One shape for both transports (APRV-424). */
+function emptyPollResult(): TelegramPollResult {
+  return { updates: 0, outcomes: [], ignored: [], commands: [], reviews: [] };
+}
+
+/**
+ * How updates reach this channel (APRV-424).
+ *
+ * `poll` is `getUpdates`, the transport every build before APRV-424 had.
+ * `webhook` is Telegram posting each update to a URL the runtime registered.
+ * They are alternatives and never a pair: the Bot API refuses `getUpdates`
+ * outright while a webhook is set, so a process that did both would spend its
+ * life in a 409 loop and the approver's tap would land on whichever half was
+ * lucky.
+ */
+export type TelegramTransport = "poll" | "webhook";
+
+/**
+ * Why a transport claim was refused. Frozen, per SPEC §11.1 invariant 6.
+ *
+ * One code, because there is one fact: this channel is already receiving
+ * updates by the other transport.
+ */
+export const TELEGRAM_TRANSPORT_REFUSAL_CODES = ["transport-conflict"] as const;
+
+export type TelegramTransportRefusalCode = (typeof TELEGRAM_TRANSPORT_REFUSAL_CODES)[number];
+
+export type TelegramTransportClaim =
+  | { ok: true; transport: TelegramTransport }
+  | { ok: false; code: TelegramTransportRefusalCode; message: string };
+
+/**
+ * The in-process half of "long-poll and webhook are mutually exclusive"
+ * (APRV-424).
+ *
+ * It is a belt on the braces and says so. The exclusion that matters is per
+ * BOT and lives above this class, where a process can ask the Bot API
+ * (`getWebhookInfo`) and the per-machine ownership registry who else is
+ * receiving this bot's updates; a channel object knows only about itself.
+ * What this rules out is the one failure a caller could cause here and
+ * nowhere else: feeding one channel instance from both a poll loop and an
+ * HTTP handler, where `handleUpdate`'s single ack slot and the delivery maps
+ * would be written by two arrivals nobody ordered.
+ */
+export class TelegramTransportError extends Error {
+  readonly code: TelegramTransportRefusalCode = "transport-conflict";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "TelegramTransportError";
+  }
+}
+
 export interface TelegramListenOptions {
   /** Process exactly one successful `getUpdates` batch, then return. */
   once?: boolean;
@@ -2469,6 +2540,21 @@ export class TelegramChannel implements TestableChannel {
   private counter = 0;
   private stopped = false;
   private inFlight: AbortController | null = null;
+  /**
+   * The transport this channel has started receiving updates by, or `null`
+   * before the first one (APRV-424). Sticky for the life of the object: a
+   * process that stopped polling has not stopped being a poller, and the
+   * question this answers is which arrival path owns the maps below.
+   */
+  private transport: TelegramTransport | null = null;
+  /**
+   * Everything {@link redact} scrubs out of anything that leaves this class.
+   *
+   * The bot token from construction, plus any secret a later call was handed:
+   * {@link registerWebhook} adds the `secret_token` before it sends it, so a
+   * Bot API error quoting the request cannot put it on an operator's terminal.
+   */
+  private readonly secrets: { value: string; label: string }[];
 
   private readonly counters: TelegramStats = {
     notified: 0,
@@ -2490,6 +2576,8 @@ export class TelegramChannel implements TestableChannel {
 
   constructor(config: TelegramConfig) {
     this.token = config.token;
+    this.secrets =
+      config.token.length === 0 ? [] : [{ value: config.token, label: "<token redacted>" }];
     this.chatId = String(config.chatId);
     this.apiBase = (config.apiBase ?? TELEGRAM_DEFAULT_API_BASE).replace(/\/+$/u, "");
     this.fetchImpl = config.fetch ?? (globalThis.fetch as unknown as TelegramFetch);
@@ -3329,6 +3417,7 @@ export class TelegramChannel implements TestableChannel {
    * decision", not "deliver once at startup, then wait forever".
    */
   async listen(options: TelegramListenOptions = {}): Promise<void> {
+    this.claimOrThrow("poll");
     this.stopped = false;
     let backoff = this.backoffMs;
     /**
@@ -3399,6 +3488,7 @@ export class TelegramChannel implements TestableChannel {
    * what {@link listen} catches and retries.
    */
   async pollOnce(): Promise<TelegramPollResult> {
+    this.claimOrThrow("poll");
     // APRV-135. Before the long poll, not after: this is where the loop is
     // about to block for up to `pollTimeoutSeconds`, and a sweep that ran after
     // the block would be a sweep that never runs on a quiet chat. Rate-limited
@@ -3412,37 +3502,174 @@ export class TelegramChannel implements TestableChannel {
       {
         offset: this.offset,
         timeout: this.pollTimeoutSeconds,
-        // APRV-216. `message` is asked for only while a command handler is
-        // registered: see {@link onCommand} for why a listener that reads
-        // messages nobody asked for would break `approval setup channel
-        // telegram`'s chat discovery.
-        // APRV-299 adds the second reason to read messages: a `loved` or
-        // `disliked` on a review card collects the human's words as a REPLY,
-        // because an inline keyboard has no text input.
-        allowed_updates:
-          this.commandHandler === null && this.reviewHandler === null
-            ? ["callback_query"]
-            : ["callback_query", "message"],
+        allowed_updates: this.allowedUpdates(),
       },
       this.requestTimeoutMs ?? (this.pollTimeoutSeconds + 10) * 1000,
     );
 
-    const result: TelegramPollResult = {
-      updates: 0,
-      outcomes: [],
-      ignored: [],
-      commands: [],
-      reviews: [],
-    };
-    for (const raw of updates) {
-      const update = (raw ?? {}) as Record<string, unknown>;
-      const id = update["update_id"];
-      if (typeof id === "number") this.offset = Math.max(this.offset, id + 1);
-      this.counters.updates += 1;
-      result.updates += 1;
-      await this.handleUpdate(update, result);
-    }
+    const result = emptyPollResult();
+    for (const raw of updates) await this.intake(raw, result);
     return result;
+  }
+
+  /**
+   * Which update types this channel asks for, on either transport (APRV-424).
+   *
+   * APRV-216. `message` is asked for only while a command handler is
+   * registered: see {@link onCommand} for why a listener that reads messages
+   * nobody asked for would break `approval setup channel telegram`'s chat
+   * discovery. APRV-299 adds the second reason to read messages: a `loved` or
+   * `disliked` on a review card collects the human's words as a REPLY, because
+   * an inline keyboard has no text input.
+   *
+   * One function since APRV-424, because `setWebhook` takes the same list as
+   * `getUpdates` and two spellings of it would be two answers to "what does
+   * this listener read" — with the webhook's answer frozen at registration
+   * time, where nobody would look for it.
+   */
+  allowedUpdates(): string[] {
+    return this.commandHandler === null && this.reviewHandler === null
+      ? ["callback_query"]
+      : ["callback_query", "message"];
+  }
+
+  /**
+   * One update, from whichever transport carried it (APRV-424).
+   *
+   * The whole of what the webhook adds is the ARRIVAL. Everything a tap then
+   * passes through — the chat check, `senderOf`, the checkpoint and review
+   * parsers, the resolution ladder, the early ack, `this.handler` and the
+   * annotation written from the record the gate appended — is
+   * {@link handleUpdate}, called from here and from {@link pollOnce}, and
+   * there is no second copy of any of it. `tests/telegram-webhook.test.ts`
+   * drives one callback through both entry points and compares the records the
+   * log ends up holding.
+   *
+   * The sweep is `pollOnce`'s, for `pollOnce`'s reason: this is the moment the
+   * process is about to be idle, and a channel that only ever wakes for taps
+   * would otherwise never run one.
+   */
+  async deliverUpdate(update: unknown): Promise<TelegramPollResult> {
+    this.claimOrThrow("webhook");
+    const nowMs = this.now();
+    if (nowMs - this.lastSweepMs >= TELEGRAM_SWEEP_INTERVAL_MS) this.sweep(nowMs);
+    const result = emptyPollResult();
+    await this.intake(update, result);
+    return result;
+  }
+
+  /** The per-update bookkeeping both transports do, before `handleUpdate`. */
+  private async intake(raw: unknown, result: TelegramPollResult): Promise<void> {
+    const update = (raw ?? {}) as Record<string, unknown>;
+    const id = update["update_id"];
+    // Meaningless on the webhook, where Telegram acknowledges by the HTTP
+    // response, and harmless: the offset is read by `getUpdates` alone, and a
+    // channel that has claimed the webhook transport never issues one.
+    if (typeof id === "number") this.offset = Math.max(this.offset, id + 1);
+    this.counters.updates += 1;
+    result.updates += 1;
+    await this.handleUpdate(update, result);
+  }
+
+  /**
+   * Bind this channel to one transport, or say which one already holds it
+   * (APRV-424).
+   *
+   * Idempotent for the transport already claimed, so a webhook server that
+   * claims at start-up and then delivers, or a driver calling `pollOnce` in a
+   * loop, pays nothing. Not released by {@link stop}: a process that stopped
+   * polling has not stopped being a poller, and re-pointing a live channel's
+   * delivery maps at a second arrival path is the state this exists to refuse.
+   */
+  claimTransport(transport: TelegramTransport): TelegramTransportClaim {
+    if (this.transport === null || this.transport === transport) {
+      this.transport = transport;
+      return { ok: true, transport };
+    }
+    return {
+      ok: false,
+      code: "transport-conflict",
+      message: `this channel is already receiving updates by ${this.transport}, so it cannot also receive them by ${transport}. Long polling and a webhook are alternatives per bot: the Bot API refuses getUpdates outright while a webhook is set, and a process running both would answer a tap from whichever half reached it first`,
+    };
+  }
+
+  /** {@link claimTransport}, for the paths where a refusal is a caller's bug. */
+  private claimOrThrow(transport: TelegramTransport): void {
+    const claim = this.claimTransport(transport);
+    if (!claim.ok) throw new TelegramTransportError(claim.message);
+  }
+
+  // -------------------------------------------------------------------------
+  // Webhook registration (APRV-424)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Point this bot's updates at `url`, and require `secret` on every post.
+   *
+   * Three properties, and each is a refusal to be clever:
+   *
+   * - **The secret is Telegram's own mechanism**, `secret_token`, echoed back
+   *   on every delivery in the `X-Telegram-Bot-Api-Secret-Token` header. The
+   *   receiver compares it and refuses anything else, so a URL that leaks (a
+   *   proxy log, a referrer, a screenshot) is a URL that still decides
+   *   nothing.
+   * - **It is redacted from this moment on.** The value is added to the
+   *   channel's secret list BEFORE the call, so a Bot API error that quotes
+   *   the request cannot print it.
+   * - **Pending updates are kept.** `drop_pending_updates` is left false:
+   *   taps that arrived while the process was down are the approver's answers,
+   *   and the gate is what decides whether they are still honourable.
+   */
+  async registerWebhook(url: string, secret: string): Promise<void> {
+    if (secret.length > 0 && !this.secrets.some((held) => held.value === secret)) {
+      this.secrets.push({ value: secret, label: "<webhook secret redacted>" });
+    }
+    await this.call("setWebhook", {
+      url,
+      secret_token: secret,
+      allowed_updates: this.allowedUpdates(),
+      drop_pending_updates: false,
+    });
+  }
+
+  /**
+   * Take this bot's webhook away, so `getUpdates` works again.
+   *
+   * Called on a clean stop of the webhook runner. Pending updates are kept for
+   * {@link registerWebhook}'s reason: the next process to start — a poller or
+   * another webhook — is entitled to the taps that arrived in between.
+   *
+   * `timeoutMs` is what the stop path passes, and it is shorter than this
+   * channel's ordinary request timeout on purpose (APRV-424, second review,
+   * note 6). A stop already waits for the receiver to drain, and an operator
+   * pressing Ctrl-C a second time is asking for the process to end: half a
+   * minute of an unreachable Bot API on top of that reads as a hang, and the
+   * webhook it failed to remove is reported rather than silently retried.
+   */
+  async deleteWebhook(timeoutMs?: number): Promise<void> {
+    await this.call(
+      "deleteWebhook",
+      { drop_pending_updates: false },
+      ...(timeoutMs === undefined ? [] : [timeoutMs]),
+    );
+  }
+
+  /**
+   * What the Bot API says is receiving this bot's updates right now.
+   *
+   * The one authority on the question, and the reason it is asked at start-up
+   * by both transports: the ownership registry knows about processes on THIS
+   * machine, and a webhook registered from a laptop in another timezone is
+   * still a webhook swallowing every tap this poller is waiting for.
+   */
+  async webhookInfo(): Promise<{ url: string; pendingUpdateCount: number }> {
+    const result = await this.call<Record<string, unknown>>("getWebhookInfo", {});
+    const url = result["url"];
+    const pending = result["pending_update_count"];
+    return {
+      url: typeof url === "string" ? url : "",
+      pendingUpdateCount: typeof pending === "number" ? pending : 0,
+    };
   }
 
   /**
@@ -4434,9 +4661,20 @@ export class TelegramChannel implements TestableChannel {
   // Transport
   // -------------------------------------------------------------------------
 
-  /** Replace the token with a placeholder anywhere it appears in `text`. */
+  /**
+   * Replace every secret this channel holds with a placeholder in `text`.
+   *
+   * The bot token always, and since APRV-424 the webhook `secret_token` too,
+   * from the moment {@link registerWebhook} is handed it. Both are values that
+   * only ever travel TO the Bot API, so anything coming back that quotes one
+   * is a diagnostic about to print a credential.
+   */
   private redact(text: string): string {
-    return this.token.length === 0 ? text : text.split(this.token).join("<token redacted>");
+    let redacted = text;
+    for (const secret of this.secrets) {
+      redacted = redacted.split(secret.value).join(secret.label);
+    }
+    return redacted;
   }
 
   private describe(cause: unknown): string {

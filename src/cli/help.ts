@@ -1901,22 +1901,23 @@ ${why("render")}`;
 export const TELEGRAM_HELP = `approval channel telegram — the Telegram push channel
 
 Usage:
-  approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
-                                   [--policy <path>] [--dir <path>]
-                                   [--log <path>] [--api-base <url>]
-                                   [--poll-timeout <seconds>] [--json]
-  approval channel telegram health [--dir <path>] [--log <path>] [--json]
+  approval channel telegram listen  [--once] [--as human:<id>] [--payloads <f>]
+        [--policy <p>] [--dir <p>] [--log <p>] [--api-base <url>] [--poll-timeout <s>] [--json]
+  approval channel telegram webhook --url <https://...> [--listen [host:]port]
+        [--path <p>] [--cycle <d>] and every listen flag above
+  approval channel telegram health  [--dir <path>] [--log <path>] [--json]
+
+Two transports, MUTUALLY EXCLUSIVE per bot: listen long-polls getUpdates;
+webhook has Telegram post each update to a url you register (no poller).
 
 Configuration is ENVIRONMENT-ONLY: APPROVAL_TG_TOKEN holds the bot token and
-APPROVAL_TG_CHAT the approver chat id by default. APPROVAL.md carries only those
-variable NAMES — a second gate on one machine declares a pair of its own — and
-there is no flag that would put a bot token into a shell history.
+APPROVAL_TG_CHAT the approver chat id; APPROVAL.md carries only those NAMES,
+and no flag puts a bot token into a shell history.
 
 Anyone in the configured chat can approve as the actor this process was started
 with, so the chat's membership is part of your trust boundary. Use a private
 chat with the bot — or map senders: approvers.<id>.senders.telegram: "<id>"
-records each decision against the person that Telegram account is attested to
-and refuses a tap from an account the policy does not name.
+records each decision against the attested person and refuses every other account.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1946,6 +1947,31 @@ JSON shape: docs/cli-reference.md#channel-telegram-listen
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("channel-telegram-listen")}`;
+
+export const TELEGRAM_WEBHOOK_HELP = `approval channel telegram webhook — decisions arrive by webhook, no poller
+
+Usage:
+  approval channel telegram webhook --url <https://host/path> [--path <p>]
+        [--listen [host:]port | --port <n>] [--allow-non-loopback] [--cycle <d>]
+        [--reclaim] [--as human:<id>] [--policy <p>] [--dir <p>] [--log <p>]
+        [--payloads <f>] [--api-base <url>] [--no-gloss] [--json]
+
+Flags:
+  --url <https://...>  REQUIRED: the PUBLIC url registered with setWebhook. https only, on port 443, 80, 88 or 8443 (Telegram's list), and no user:password
+  --port <n> / --listen <[host:]port>   this process's own bind. LOOPBACK by default (4683); routable also needs --allow-non-loopback. Never 0
+  --path <p> / --cycle <d>   must equal the url's own path / dispatch period (30s)
+  --reclaim            register over the webhook already holding this bot
+  -h, --help           this text
+
+APPROVAL_TG_WEBHOOK_SECRET is REQUIRED, from the launch environment: it is
+Telegram's secret_token, echoed on every delivery, and a post without the
+matching header is refused and never a decision. NO TLS HERE: plain HTTP
+behind a proxy or tunnel you own (--url names it); long polling then refuses.
+
+JSON shape: docs/cli-reference.md#channel-telegram-webhook
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("channel-telegram-webhook")}`;
 
 export const TELEGRAM_HEALTH_HELP = `approval channel telegram health — is this runtime configured for Telegram?
 
