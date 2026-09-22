@@ -84,6 +84,30 @@
  *       Arms the NEXT tool call to behave one specific way, through a control
  *       file, so the operator never edits the config mid-run.
  *
+ *   node scripts/probes/hermes-hook.mjs run [--home <dir>] [--captures <dir>]
+ *       THE DRIVER (APRV-418). Does everything the four verbs above ask a human
+ *       to do, in one process, with no prompt typed and no restart requested:
+ *       reads the version and refuses below the fail-closed floor, builds the
+ *       scratch project, writes the hook block, then walks the whole matrix,
+ *       arming each trial and spawning ONE one-shot Hermes invocation for it,
+ *       and prints the report at the end.
+ *
+ *       That is the point of the verb, and what it removes is TYPED PROMPTS
+ *       rather than taps: the manual runbook is about thirty prompts, each armed
+ *       through a control file, with the harness quit and relaunched whenever a
+ *       configuration key changed.
+ *
+ *       THE OPERATOR RUNS IT, AND THAT IS THE CLASSIFIER'S ANSWER RATHER THAN A
+ *       CONVENTION. This command names the Hermes home, so
+ *       `approval hook classify` answers `policy.core` under rule
+ *       `protected-path`. That class is human-only: no agent can run it, request
+ *       it or be granted it, and a human running it from their own terminal has
+ *       no hook in the loop, so nothing is approved either. It is fail-closed
+ *       rather than a gap, because this verb REWRITES the harness configuration,
+ *       which is what `policy.core` exists to keep off agent hands, and then
+ *       launches the harness twenty times. See
+ *       `docs/probe-driver-convention.md`.
+ *
  *   node scripts/probes/hermes-hook.mjs report
  *       Prints the findings. The FIRST section is the fail-closed answer.
  *
@@ -92,6 +116,7 @@
  * Nothing here decides anything for the gate. It records, and it refuses.
  */
 
+import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -233,6 +258,195 @@ export function trialArtifact(trial, failClosed) {
 
 /** How long `arm hang` blocks for. Well past the documented 600s maximum. */
 const HANG_MS = 700_000;
+
+// ---------------------------------------------------------------------------
+// The version floor (APRV-415, driven by APRV-418)
+// ---------------------------------------------------------------------------
+
+/**
+ * The build at which Hermes starts honouring `fail_closed`.
+ *
+ * A COPY of `HERMES_FAIL_CLOSED_FLOOR` in `src/core/harness-version.ts`, and the
+ * copy is deliberate: this file is plain Node ESM that an operator runs straight
+ * from a checkout before any build, so it cannot import the compiled module.
+ * `tests/probe-hermes-hook.test.ts` pins the two field for field, so the drift a
+ * copy invites costs a test failure rather than a round.
+ *
+ * Why the floor is here at all rather than only in the doctor row: the first
+ * Hermes round (2026-09-21) ran its whole matrix on `v0.21.3`, which ignores the
+ * key SILENTLY, and every fail-closed result it produced was wrong for that one
+ * reason. A driver that spends a whole operator-driven round on a build that
+ * cannot answer the question is the expensive version of that mistake, so this one
+ * reads the version BEFORE it writes a config and refuses below the floor.
+ */
+export const FAIL_CLOSED_FLOOR = {
+  upstream: "118984d7",
+  date: { year: 2026, month: 9, day: 20 },
+  statement:
+    "a build at or after main 118984d7 of 2026-09-20; v0.21.3 (2026.9.14) fails open silently",
+};
+
+/** How long a `--version` probe may take before it is killed. */
+const VERSION_TIMEOUT_MS = 10_000;
+
+/** The raw first line of a `--version`, trimmed of control characters and capped. */
+export function versionLine(raw) {
+  if (typeof raw !== "string") return null;
+  const first = raw.split("\n", 1)[0] ?? "";
+  const text = first.replace(/\p{Cc}/gu, "").trim();
+  if (text.length === 0 || text.length > 200) return null;
+  return text;
+}
+
+/**
+ * Does this build honour `fail_closed`? `"honours"`, `"ignores"` or `"unknown"`.
+ *
+ * The comparison is on the BUILD DATE and the upstream commit, never the semver:
+ * the two builds that differ on the whole question both report `0.21.3`. Two
+ * commit hashes cannot be ordered without a repository, so a line carrying an
+ * unfamiliar commit and no date is honestly `"unknown"`.
+ */
+export function floorVerdict(raw) {
+  const line = versionLine(raw);
+  if (line === null) return "unknown";
+  const stamp = /\((\d{4})\.(\d{1,2})\.(\d{1,2})\)/u.exec(line);
+  const upstream = /\bupstream\s+([0-9a-f]{7,40})\b/iu.exec(line);
+  if (upstream !== null && String(upstream[1]).toLowerCase().startsWith(FAIL_CLOSED_FLOOR.upstream)) {
+    return "honours";
+  }
+  if (stamp === null) return "unknown";
+  const asNumber = (year, month, day) => year * 10_000 + month * 100 + day;
+  const floor = FAIL_CLOSED_FLOOR.date;
+  return asNumber(Number(stamp[1]), Number(stamp[2]), Number(stamp[3])) >=
+    asNumber(floor.year, floor.month, floor.day)
+    ? "honours"
+    : "ignores";
+}
+
+// ---------------------------------------------------------------------------
+// The one-shot invocation, and the matrix the driver walks (APRV-418)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the driver spells ONE non-interactive Hermes run.
+ *
+ * `{prompt}` and `{dir}` are substituted; every other token is passed through.
+ * UNVERIFIED in this repository: nothing here has ever run the binary, and the
+ * spelling comes from APRV-418's brief. It is a template rather than a literal
+ * argv precisely so a wrong guess is a flag on the command line
+ * (`--one-shot "<template>"`) rather than an edit to this file, and so the
+ * driver's early abort can tell the operator which knob to turn.
+ *
+ * `--accept-hooks` is not optional and not a convenience. With no TTY and no
+ * consent, Hermes SILENTLY SKIPS REGISTERING THE HOOK: nothing fires, nothing
+ * complains, and an empty capture looks exactly like a config that never loaded.
+ * The driver also exports `HERMES_ACCEPT_HOOKS=1` for the same reason, because
+ * two belts cost nothing and one missing one costs the round.
+ */
+export const ONE_SHOT_TEMPLATE = "-z {prompt} --in {dir} --accept-hooks";
+
+/** The argv for one one-shot run, or `null` when the template names no prompt. */
+export function oneShotArgv(template, prompt, project) {
+  const tokens = String(template).split(/\s+/u).filter((token) => token !== "");
+  if (!tokens.includes("{prompt}")) return null;
+  return tokens.map((token) =>
+    token === "{prompt}" ? prompt : token === "{dir}" ? project : token,
+  );
+}
+
+/**
+ * The five baseline prompts: one envelope of each tool shape.
+ *
+ * The fifth SHOULD be refused before it runs, and its refusal is a finding
+ * rather than a failure: `execute_code` carries a program and no path, so the
+ * shipped adapter refuses it early.
+ */
+export const BASELINE_PROMPTS = [
+  "run the shell command `ls -la` here",
+  "create a file named probe.txt containing the word hello",
+  "change the word hello in probe.txt to goodbye",
+  "read README.md and tell me its first line",
+  "run some python code that prints 2+2",
+];
+
+/**
+ * Every step of the driven round, in order, as data.
+ *
+ * Declarative on purpose: the matrix is what a reviewer checks, and a reviewer
+ * should be able to read it without reading the loop that walks it. A step names
+ * the trial to arm, the `fail_closed` state its config needs, the prompt to send
+ * and the artifact whose presence is the measurement.
+ *
+ * THE ORDER OF THE TWO FAIL-CLOSED PASSES IS THE FINDING. Pass A (with the key)
+ * and pass B (without it) are both driven here, which the manual round never
+ * managed: each switch of the key needs Hermes restarted, and a one-shot
+ * invocation IS a fresh start, so the driver gets the control pass for free.
+ */
+export function matrix() {
+  const steps = [];
+  BASELINE_PROMPTS.forEach((prompt, index) => {
+    steps.push({
+      id: `baseline-${String(index + 1)}`,
+      phase: "baseline",
+      trial: "none",
+      failClosed: true,
+      prompt,
+      artifact: null,
+      hang: false,
+    });
+  });
+  for (const failClosed of [true, false]) {
+    for (const trial of FAIL_TRIALS) {
+      const artifact = trialArtifact(trial, failClosed);
+      steps.push({
+        id: `${trial}-${failClosed ? "failclosed" : "failopen"}`,
+        phase: "fail-closed",
+        trial,
+        failClosed,
+        prompt: `create a file named ${artifact} containing x`,
+        artifact,
+        hang: trial === "hang",
+      });
+    }
+  }
+  for (const trial of DIALECT_TRIALS) {
+    const artifact = trialArtifact(trial, true);
+    steps.push({
+      id: trial,
+      phase: "dialect",
+      trial,
+      failClosed: true,
+      // The modify trial is asked for through the SHELL with no directory named,
+      // because its answer is WHERE the artifact landed. A prompt asking for "a
+      // file named x" could be answered by a file tool, which carries its own
+      // path and would measure nothing about a workdir.
+      prompt:
+        trial === MODIFY_TRIAL
+          ? `run the shell command: touch ${artifact}`
+          : `create a file named ${artifact} containing x`,
+      artifact,
+      hang: false,
+    });
+  }
+  return steps;
+}
+
+/** How long one ordinary step may take. */
+export const STEP_TIMEOUT_MS = 180_000;
+
+/**
+ * How long a `hang` step may take, and why it is eleven minutes.
+ *
+ * Two Hermes timeouts bound that trial and the driver must outlast BOTH or it
+ * measures its own patience instead of the harness's: the per-entry `timeout`
+ * (300s, its documented cap) and `plugins.hook_callback_timeout` (600s, the
+ * maximum this probe's config sets). The live round saw the entry cap win at
+ * 300s; a driver that gave up at 480s would report a killed child for the case
+ * where the outer one wins, which reads as a broken trial rather than as a
+ * measurement. Both hang steps together are therefore the slow part of a driven
+ * round, and `--hang-timeout <ms>` shortens them when that is the trade wanted.
+ */
+export const HANG_STEP_TIMEOUT_MS = 660_000;
 
 // ---------------------------------------------------------------------------
 // Redaction
@@ -585,7 +799,19 @@ function applyConfig(state, home, failClosed) {
 // setup
 // ---------------------------------------------------------------------------
 
-export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
+/**
+ * Build the scratch project, install the hook block, leave the breadcrumb.
+ *
+ * Everything `setup` and `run` (APRV-418) both do, in one place, so the manual
+ * path and the driven path cannot drift into measuring different things. It
+ * prints nothing: `setup` follows it with the runbook a human types, and `run`
+ * follows it with the matrix nobody types.
+ *
+ * Returns `{ok:true, ...paths}`, or `{ok:false, reason, block}` when the
+ * operator's own configuration already owns one of the keys the block
+ * introduces, in which case nothing on disk was touched.
+ */
+export function prepare(argv) {
   const root = mkdtempSync(join(tmpdir(), "aprv398-hermes-probe-"));
   const project = join(root, "scratch-project");
   // A REAL install's HERMES_HOME when the operator names one, and a scratch home
@@ -609,24 +835,7 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
     writeFileSync(target, body, "utf8");
   }
   const applied = applyConfig(state, home, true);
-  if (!applied.ok) {
-    process.stderr.write(
-      [
-        "",
-        "REFUSED TO EDIT THE CONFIG, AND NOTHING ON DISK WAS TOUCHED.",
-        `  ${applied.reason}.`,
-        "",
-        "YAML permits no duplicate top-level key, so appending this block would",
-        "make the whole file unparseable and Hermes would start with NO hooks —",
-        "which looks exactly like a probe whose config never fired. Merge the",
-        "block below into the existing keys by hand, then re-run setup with the",
-        "same --home to record the scratch project and the prompts:",
-        "",
-        applied.block,
-      ].join("\n"),
-    );
-    return 2;
-  }
+  if (!applied.ok) return { ok: false, reason: applied.reason, block: applied.block };
 
   writeJson(join(state, "setup.json"), {
     createdAt: new Date().toISOString(),
@@ -639,6 +848,34 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
   });
   writeJson(join(state, "control.json"), { armed: "none" });
   writeJson(pointerPath(), { state, project, home, root, createdAt: new Date().toISOString() });
+
+  return { ok: true, root, project, home, state, ownHome };
+}
+
+/** The refusal `prepare` returns, rendered for a terminal. */
+function refusedConfigText(refusal) {
+  return [
+    "",
+    "REFUSED TO EDIT THE CONFIG, AND NOTHING ON DISK WAS TOUCHED.",
+    `  ${refusal.reason}.`,
+    "",
+    "YAML permits no duplicate top-level key, so appending this block would",
+    "make the whole file unparseable and Hermes would start with NO hooks —",
+    "which looks exactly like a probe whose config never fired. Merge the",
+    "block below into the existing keys by hand, then re-run with the",
+    "same --home to record the scratch project and the prompts:",
+    "",
+    refusal.block,
+  ].join("\n");
+}
+
+export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
+  const prepared = prepare(argv);
+  if (!prepared.ok) {
+    process.stderr.write(refusedConfigText(prepared));
+    return 2;
+  }
+  const { root, project, home, state, ownHome } = prepared;
 
   write(
     [
@@ -854,9 +1091,15 @@ export function arm(argv, write = process.stdout.write.bind(process.stdout)) {
     return 2;
   }
   const failClosed = currentFailClosed(state);
+  // The STEP label (APRV-418). Each driven step is one one-shot Hermes process,
+  // so the label is a session boundary written into every envelope the call
+  // produces, and the report uses it to tell a model's own retry INSIDE the
+  // armed call from a file another step created. A hand-armed trial has no step
+  // and the report says so rather than inventing one.
   writeJson(join(state, "control.json"), {
     armed: trial,
     failClosed,
+    step: flagValue(argv, "--step"),
     armedAt: new Date().toISOString(),
   });
   write(
@@ -871,6 +1114,313 @@ export function arm(argv, write = process.stdout.write.bind(process.stdout)) {
         ].join("\n"),
   );
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// run — the driver (APRV-418)
+// ---------------------------------------------------------------------------
+
+/**
+ * Spawn one child and report every failure as a value.
+ *
+ * A missing binary, a non-zero exit and a timeout kill are all results here,
+ * never exceptions: a driver that threw on step 3 would abandon a round a human
+ * is sitting through, with seventeen trials unrun and no report.
+ */
+function spawnOnce(binary, args, options) {
+  try {
+    const result = spawnSync(binary, args, {
+      encoding: "utf8",
+      timeout: options.timeout,
+      killSignal: "SIGKILL",
+      maxBuffer: 4 * 1024 * 1024,
+      env: options.env,
+      cwd: options.cwd,
+    });
+    return {
+      status: result.status ?? null,
+      signal: result.signal ?? null,
+      stdout: typeof result.stdout === "string" ? result.stdout : "",
+      stderr: typeof result.stderr === "string" ? result.stderr : "",
+      error: result.error === undefined || result.error === null ? null : String(result.error.message ?? result.error),
+    };
+  } catch (cause) {
+    return { status: null, signal: null, stdout: "", stderr: "", error: String(cause) };
+  }
+}
+
+/** The last few hundred characters of a stream, redacted, for the run log. */
+function tail(text, limit = 600) {
+  const value = redact(typeof text === "string" ? text : "");
+  return value.length <= limit ? value : `…${value.slice(value.length - limit)}`;
+}
+
+/** How many envelopes have reached the hook so far. */
+function capturedCount(state) {
+  try {
+    return readFileSync(join(state, "envelopes.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "").length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Drive the whole matrix through Hermes's one-shot mode. ONE operator command.
+ *
+ * ## The order is the safety property
+ *
+ * 1. **The version, before anything is written.** Not before the first trial:
+ *    before the CONFIG. A build below the floor cannot answer the question this
+ *    probe exists for, so refusing early means a refused build never has a hook
+ *    block installed in its home and the operator has nothing to undo.
+ * 2. **Then the scratch project and the hook block**, through the same
+ *    {@link prepare} the manual path uses, so the two cannot measure different
+ *    things.
+ * 3. **Then the matrix**, one one-shot invocation per step. Each invocation is a
+ *    fresh Hermes process, which is what makes the fail-closed PAIR drivable at
+ *    all: the config is read at startup, so switching the key between steps
+ *    needs no human to quit and relaunch anything. The manual round never got
+ *    its control pass for exactly that reason.
+ * 4. **Then the report**, read from the capture rather than from this loop's own
+ *    memory, because the capture is what a reader can check.
+ *
+ * ## The early abort
+ *
+ * If the first step produces NO captured envelope, the driver stops. Twenty
+ * further invocations against a wrong one-shot flag spelling, an unregistered
+ * hook or a `HERMES_HOME` nothing reads would all fail the same silent way, and
+ * the round would read as "the harness ignored everything" when the truth is
+ * that nothing ever ran. One wasted invocation is the price; the diagnosis names
+ * the three causes and the flag that fixes the first.
+ */
+export function run(argv, io = {}) {
+  const write = io.write ?? process.stdout.write.bind(process.stdout);
+  const warn = io.warn ?? process.stderr.write.bind(process.stderr);
+  const spawn = io.spawn ?? spawnOnce;
+  const now = io.now ?? Date.now;
+
+  const binary = flagValue(argv, "--binary") ?? "hermes";
+  const template = flagValue(argv, "--one-shot") ?? ONE_SHOT_TEMPLATE;
+  if (oneShotArgv(template, "p", "d") === null) {
+    warn(`--one-shot must contain {prompt}; got ${JSON.stringify(template)}\n`);
+    return 2;
+  }
+  const stepTimeout = Number(flagValue(argv, "--step-timeout") ?? STEP_TIMEOUT_MS);
+  const hangTimeout = Number(flagValue(argv, "--hang-timeout") ?? HANG_STEP_TIMEOUT_MS);
+
+  // ---- 1. the version, before a single byte is written anywhere -----------
+  const probed = spawn(binary, ["--version"], { timeout: VERSION_TIMEOUT_MS, env: process.env });
+  const line = probed.error === null ? versionLine(probed.stdout) : null;
+  const verdict = floorVerdict(line);
+  const allowUnknown = argv.includes("--allow-unknown-version");
+
+  if (verdict === "ignores") {
+    warn(
+      [
+        "",
+        "REFUSED: THIS BUILD IS BELOW THE FAIL-CLOSED FLOOR, AND NOTHING WAS WRITTEN.",
+        `  ${binary} --version said: ${String(line)}`,
+        `  The floor is ${FAIL_CLOSED_FLOOR.statement}.`,
+        "",
+        "  A build below it ignores `fail_closed` SILENTLY, so every trial in the",
+        "  matrix would answer a question about a key this binary does not read.",
+        "  That is not a hypothetical: the first Hermes round measured exactly this",
+        "  and the whole day's results were wrong for that one reason.",
+        "",
+        "  `hermes update` fixes it. No config was installed and no scratch project",
+        "  was built, so there is nothing to undo.",
+        "",
+      ].join("\n"),
+    );
+    return 3;
+  }
+  if (verdict === "unknown" && !allowUnknown) {
+    warn(
+      [
+        "",
+        "REFUSED: THE VERSION COULD NOT BE READ, AND NOTHING WAS WRITTEN.",
+        probed.error === null
+          ? `  ${binary} --version printed: ${JSON.stringify(tail(probed.stdout, 200))}`
+          : `  ${binary} --version could not be run: ${probed.error}`,
+        `  The floor is ${FAIL_CLOSED_FLOOR.statement}, and it is compared on the`,
+        "  build date and the upstream commit, because the two builds that differ",
+        "  on the whole question report the SAME semver.",
+        "",
+        "  A driver that guessed here would spend a whole operator-driven round on",
+        "  a headline nobody could trust afterwards. If you know this build is at",
+        "  or above the floor, say so explicitly:",
+        "",
+        "    --allow-unknown-version",
+        "",
+      ].join("\n"),
+    );
+    return 3;
+  }
+
+  // ---- 2. the scratch project and the hook block --------------------------
+  const prepared = prepare(argv);
+  if (!prepared.ok) {
+    warn(refusedConfigText(prepared));
+    return 2;
+  }
+  const { root, project, home, state, ownHome } = prepared;
+  writeJson(join(state, "version.json"), {
+    binary,
+    raw: line,
+    verdict,
+    floor: FAIL_CLOSED_FLOOR,
+    readAt: new Date().toISOString(),
+  });
+
+  const steps = matrix();
+  write(
+    [
+      "===========================================================================",
+      "APRV-418 DRIVEN PROBE ROUND. One operator command, no prompt typed by hand.",
+      "===========================================================================",
+      `  binary:     ${binary}`,
+      `  version:    ${String(line)}  (fail_closed: ${verdict.toUpperCase()})`,
+      `  one-shot:   ${template}`,
+      `  project:    ${project}`,
+      ownHome ? `  home:       ${home}   (scratch)` : `  home:       ${home}   (YOURS, --home)`,
+      `  captures:   ${state}`,
+      `  steps:      ${String(steps.length)}`,
+      "",
+      "  The gateway pass is NOT driven: a bot cannot message a bot. It is three",
+      "  messages a human sends, printed at the end of the report.",
+      "",
+    ].join("\n"),
+  );
+
+  // ---- 3. the matrix ------------------------------------------------------
+  // `prepare` wrote the config with the key ON, so the first step that wants it
+  // OFF is the first rewrite. Tracking it here rather than re-reading the file
+  // keeps a step from paying a write it does not need.
+  let configFailClosed = true;
+  let aborted = null;
+  const runsLog = join(state, "runs.jsonl");
+
+  for (const [index, step] of steps.entries()) {
+    if (configFailClosed !== step.failClosed) {
+      const applied = applyConfig(state, home, step.failClosed);
+      if (!applied.ok) {
+        aborted = `the config could not be rewritten for step ${step.id}: ${applied.reason}`;
+        break;
+      }
+      configFailClosed = step.failClosed;
+    }
+    writeJson(join(state, "control.json"), {
+      armed: step.trial,
+      failClosed: step.failClosed,
+      step: step.id,
+      armedAt: new Date().toISOString(),
+    });
+
+    const before = capturedCount(state);
+    const started = now();
+    const result = spawn(binary, oneShotArgv(template, step.prompt, project), {
+      timeout: step.hang ? hangTimeout : stepTimeout,
+      cwd: project,
+      // HERMES_HOME is how the child finds the config this probe just wrote, and
+      // HERMES_ACCEPT_HOOKS is the second belt on the silent-skip hazard: with no
+      // TTY and no consent, Hermes registers no hook at all and says nothing.
+      env: { ...process.env, HERMES_HOME: home, HERMES_ACCEPT_HOOKS: "1" },
+    });
+    const elapsed = now() - started;
+    const captured = capturedCount(state) - before;
+    const landed = step.artifact === null ? null : existsSync(join(project, step.artifact));
+
+    const row = {
+      at: new Date().toISOString(),
+      index: index + 1,
+      id: step.id,
+      phase: step.phase,
+      trial: step.trial,
+      failClosed: step.failClosed,
+      prompt: step.prompt,
+      artifact: step.artifact,
+      landed,
+      captured,
+      ms: elapsed,
+      status: result.status,
+      signal: result.signal,
+      error: result.error,
+      stdout: tail(result.stdout),
+      stderr: tail(result.stderr),
+    };
+    appendFileSync(runsLog, `${JSON.stringify(row)}\n`, "utf8");
+    write(
+      `  [${String(index + 1)}/${String(steps.length)}] ${step.id}: exit ${String(result.status)}${
+        result.signal === null ? "" : ` (${result.signal})`
+      }, ${String(captured)} envelope(s), ${String(Math.round(elapsed / 1000))}s${
+        landed === null ? "" : landed ? ", artifact PRESENT" : ", artifact absent"
+      }\n`,
+    );
+
+    if (index === 0 && capturedCount(state) === 0) {
+      aborted =
+        "the FIRST invocation produced no captured envelope, so nothing after it could mean anything";
+      break;
+    }
+  }
+
+  if (aborted !== null) {
+    warn(
+      [
+        "",
+        "ROUND ABORTED, and the report below covers only what ran.",
+        `  ${aborted}.`,
+        "",
+        "  Three causes, in the order they are worth checking:",
+        `  1. the one-shot spelling. This round used \`${binary} ${template}\`, which`,
+        "     this repository has never verified. Check the harness's own help and",
+        '     re-run with --one-shot "<template>", where {prompt} and {dir} are',
+        "     substituted and every other token is passed through;",
+        "  2. the hook never registered. With no TTY and no consent Hermes SKIPS",
+        "     hook registration silently; the config carries `hooks_auto_accept:",
+        "     true` and the child is given HERMES_ACCEPT_HOOKS=1, so if this is the",
+        "     cause the harness has changed its consent story;",
+        "  3. the home. The child was given HERMES_HOME=" + home + "; a build that",
+        "     reads its configuration from somewhere else would find no hooks there.",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  writeJson(join(state, "run.json"), {
+    startedAt: new Date().toISOString(),
+    binary,
+    template,
+    version: line,
+    verdict,
+    steps: steps.length,
+    aborted,
+  });
+
+  write("\n");
+  report(["node", SCRIPT, "report", "--state", state], write);
+  write(
+    [
+      "",
+      "=== THE MANUAL PASS THE DRIVER CANNOT DO ===",
+      "  A bot cannot message a bot, so the messaging-gateway pass stays human.",
+      "  Send exactly these three messages to the gateway, in order, and paste what",
+      "  came back:",
+      "",
+      "    1. run the shell command `ls -la` in your working directory",
+      "    2. create a file named gateway-probe.txt containing x",
+      "    3. read README.md and tell me its first line",
+      "",
+      "  Message 1 is the one that matters: a gateway session's envelope `cwd` is",
+      "  the user's HOME, which is why `--dir` is mandatory on every gateway entry.",
+      "",
+      `Delete ${root} when this report is pasted.`,
+      "",
+    ].join("\n"),
+  );
+  return aborted === null ? 0 : 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -999,12 +1549,20 @@ export function record(argv, io = {}) {
     state === null ? { armed: "none" } : readJson(join(state, "control.json"), { armed: "none" });
   const armed = isPost ? "none" : typeof control.armed === "string" ? control.armed : "none";
   const failClosed = control.failClosed !== false;
+  // The step label SURVIVES the arm being consumed, and that is the whole point
+  // of it (APRV-418). One driven step is one one-shot Hermes process, and the
+  // interesting calls are the ones the model makes AFTER its armed call was
+  // refused: those carry the same label, so the report can say "this file was
+  // created by a retry inside the same session" rather than leaving a reader to
+  // guess. The next `arm --step` replaces it.
+  const step = typeof control.step === "string" ? control.step : null;
   if (state !== null && armed !== "none") {
     // One arm, one call. Consumed BEFORE acting, so a crash or a hang does not
     // leave the trial armed for every later call.
     writeJson(join(state, "control.json"), {
       armed: "none",
       failClosed,
+      step,
       consumedAt: new Date().toISOString(),
     });
   }
@@ -1023,6 +1581,7 @@ export function record(argv, io = {}) {
           jailed,
           armed,
           failClosed,
+          step,
           argv: argv.slice(2).map(redact),
           hermesEnv: Object.fromEntries(
             Object.entries(process.env)
@@ -1167,12 +1726,31 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
    * present although the armed call was refused — and it tells the reader which
    * envelope to go and look at instead of trusting the file.
    */
+  /**
+   * APRV-418 sharpens this. A DRIVEN round labels every capture with its step,
+   * and one step is one one-shot Hermes process, so the label answers the
+   * question the bare timestamp could only raise:
+   *
+   *   - same step  -> the model retried INSIDE the armed session. This is the
+   *     confound, and it is the one that misread the garbage trial;
+   *   - later step -> a different process entirely, so the file belongs to
+   *     another trial and the armed call is not implicated at all.
+   *
+   * A hand-armed round carries no step and reads exactly as it did before.
+   */
   const laterCallNaming = (name, armedIndex) => {
+    const armedStep = typeof rows[armedIndex]?.step === "string" ? rows[armedIndex].step : null;
     for (let index = armedIndex + 1; index < rows.length; index += 1) {
       const row = rows[index];
-      if (typeof row.raw === "string" && row.raw.includes(name)) {
-        return `${String(row.tool)} at ${String(row.at)}`;
-      }
+      if (typeof row.raw !== "string" || !row.raw.includes(name)) continue;
+      const step = typeof row.step === "string" ? row.step : null;
+      const where =
+        armedStep === null || step === null
+          ? ""
+          : step === armedStep
+            ? ` in the SAME one-shot session (step ${step}), so it is a model retry`
+            : ` in a LATER step (${step}), a different process, so it is that step's file rather than this trial's`;
+      return `${String(row.tool)} at ${String(row.at)}${where}`;
     }
     return null;
   };
@@ -1291,6 +1869,69 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     ].join("\n");
   };
 
+  /**
+   * The driven round's own log, when this was a driven round (APRV-418).
+   *
+   * Absent for a hand-typed round, which is not an error and not a gap: the
+   * section simply says the round was driven by hand, and everything below it
+   * reads as it always did.
+   */
+  const runRows = [];
+  try {
+    for (const line of readFileSync(join(state, "runs.jsonl"), "utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        runRows.push(JSON.parse(line));
+      } catch {
+        // One unreadable row must not cost the section.
+      }
+    }
+  } catch {
+    // No run log: a hand-driven round.
+  }
+  const versionState = readJson(join(state, "version.json"), null);
+  const runState = readJson(join(state, "run.json"), null);
+
+  const drivenSection = () => {
+    if (runRows.length === 0) {
+      return [
+        "=== 1b. HOW THIS ROUND WAS RUN ===",
+        "  BY HAND. No driver log is present, so each prompt above was typed into",
+        "  an interactive session, with the harness relaunched whenever a key",
+        "  changed. `node scripts/probes/hermes-hook.mjs run` does the same matrix",
+        "  in ONE operator command (docs/probe-driver-convention.md).",
+      ];
+    }
+    const failed = runRows.filter((row) => row.status !== 0);
+    return [
+      "=== 1b. THE DRIVEN ROUND (one operator command, no prompt typed) ===",
+      versionState === null
+        ? "  version: (not recorded)"
+        : `  version read BEFORE the config was written: ${String(versionState.raw)} -> fail_closed ${String(versionState.verdict).toUpperCase()}`,
+      runState === null || typeof runState.template !== "string"
+        ? ""
+        : `  one-shot invocation: ${String(runState.binary)} ${runState.template}`,
+      runState !== null && typeof runState.aborted === "string"
+        ? `  ABORTED: ${runState.aborted}. Everything below covers only what ran.`
+        : "",
+      `  ${String(runRows.length)} step(s), ${String(failed.length)} with a non-zero exit:`,
+      ...runRows.map((row) => {
+        const landed =
+          row.landed === null || row.landed === undefined
+            ? ""
+            : row.landed
+              ? ", artifact PRESENT"
+              : ", artifact absent";
+        return `    ${String(row.index)}. ${String(row.id)} [${String(row.phase)}] exit ${String(row.status)}${
+          row.signal === null || row.signal === undefined ? "" : ` (${String(row.signal)})`
+        }, ${String(row.captured)} envelope(s), ${String(Math.round(Number(row.ms) / 1000))}s${landed}`;
+      }),
+      "  A step with ZERO envelopes ran the harness and the hook never fired; a step",
+      "  with several is the model retrying after a refusal, and those retries are",
+      "  what the CAUTION lines below are reading.",
+    ].filter((line) => line !== "");
+  };
+
   const allKeys = new Set();
   for (const row of rows) for (const key of keysOf(row.inner)) allKeys.add(key);
   const camel = [...allKeys].filter((key) => /[a-z][A-Z]/u.test(key));
@@ -1329,6 +1970,8 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     "  NOT RUN here means this pass was not run, which leaves Pass A one-sided:",
     "  it does not mean a trial failed.",
     ...FAIL_TRIALS.map((trial) => trialLine(trial, false, true)),
+    "",
+    ...drivenSection(),
     "",
     "APRV-398 probe report.",
     "",
@@ -1431,11 +2074,26 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
 // CLI
 // ---------------------------------------------------------------------------
 
-const USAGE = `usage: node scripts/probes/hermes-hook.mjs setup
+const USAGE = `usage: node scripts/probes/hermes-hook.mjs run
+                                            setup
                                             fail-closed on|off
                                             arm <trial>
                                             report
 
+  run          THE DRIVER: version check, scratch project, hook block, the whole
+               matrix through hermes's one-shot mode, then the report. ONE
+               command, run by the operator: it names the harness home, so it
+               classifies policy.core (human-only) and no agent may run it.
+               Flags:
+                 --home <dir>            install into a REAL HERMES_HOME
+                 --captures <dir>        put the capture somewhere durable
+                 --binary <name>         default hermes
+                 --one-shot "<template>" default ${JSON.stringify(ONE_SHOT_TEMPLATE)}
+                 --step-timeout <ms>     default ${String(STEP_TIMEOUT_MS)}
+                 --hang-timeout <ms>     default ${String(HANG_STEP_TIMEOUT_MS)}
+                 --allow-unknown-version proceed on an unreadable version line
+               exits 0 ok, 2 usage or a config it refused to edit, 3 below the
+               fail-closed floor (nothing written), 4 aborted mid-round
   setup        build the scratch project and scratch HERMES_HOME, write the
                hook config, and print the export line and the prompts
   fail-closed  rewrite the config with or without fail_closed: true
@@ -1445,6 +2103,10 @@ const USAGE = `usage: node scripts/probes/hermes-hook.mjs setup
 `;
 
 export function main(argv) {
+  // `run` is matched before `setup` and `report` because it does both, and a
+  // driven invocation that fell through to `setup` would build a scratch project
+  // and then sit there waiting for prompts nobody is going to type.
+  if (argv.includes("run")) return run(argv);
   if (argv.includes("setup")) return setup(argv);
   if (argv.includes("fail-closed")) return failClosedVerb(argv);
   if (argv.includes("arm")) return arm(argv);

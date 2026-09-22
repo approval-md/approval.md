@@ -967,3 +967,15 @@ each one before it states anything else.
 5. Use the five headings above, in that order, so entries stay comparable.
    Detailed designs go under `docs/proposals/`; this file holds the summary
    and the verdict.
+6. **A harness entry does not move off `parked` without a live probe, and the
+   probe is a DRIVER rather than a runbook.** Follow
+   [docs/probe-driver-convention.md](probe-driver-convention.md): a `run` verb
+   that reads the version first and refuses below a measured floor, one one-shot
+   invocation per trial, an early abort when the first one captures nothing, and
+   canned-envelope tests with a fake harness binary so the script is verified
+   before any install. Run `approval hook classify` on the driver command and
+   quote the answer in the runbook: the reference driver comes out `policy.core`
+   (it names the harness home), which is human-only, so the OPERATOR runs the one
+   command and no agent can. The two harness rounds that predate that page cost an
+   afternoon each of typed prompts, and one of them measured the wrong build for a
+   day.

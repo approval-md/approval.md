@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-02 21:10'
-updated_date: '2026-09-17 04:32'
+updated_date: '2026-09-22 02:20'
 labels: []
 dependencies: []
 references:
@@ -82,4 +82,22 @@ Conformance: six grok vectors added to hook-read-scope, suite version 1.1.0, a M
 Also added a read-jail case to tests/cli-hook-grok.test.ts and reserved read.file.out_of_scope to human hands in that file's fixture policy, for the same reason the conformance fixture does: human-only is the one autonomy whose refusal is immediate and total, so the case measures routing without standing up a channel and a timeout. The pass-through case moved off Read, which is now a gated tool, onto a name in none of the three lists.
 
 Verification after the merge: build, typecheck and lint each exit 0. node scripts/run-tests.mjs over conformance, conformance-regen, all six hook suites, hook-module-graph, harness-version, command-class, the three help suites, the three doctor suites, docs-guard, classify-tier, ci-guard and this lane's own suites: 1,023 tests, 1,023 pass, 0 fail, 0 skipped, exit 0.
+
+APRV-418, 2026-09-21: THIS PROBE IS NOW ONE TAP, AND AC1 IS STILL YOURS AND STILL UNCHECKED.
+
+scripts/probes/grok-build-hook.mjs took the driver shape (docs/probe-driver-convention.md). The whole round is one command now:
+
+  node scripts/probes/grok-build-hook.mjs run --captures /Users/carter/dev/grok-probe
+
+filed as ONE request classified harness.launch.grok. It reads the version before it writes anything, builds a scratch project, registers BOTH candidate hook files in it, drives six trials through the harness's one-shot mode and prints the three answers this criterion asks for.
+
+Three changes worth knowing before you run it. (1) IT NO LONGER ASKS YOU TO EDIT THIS REPOSITORY'S OWN CLAUDE SETTINGS FILE. That file is policy.core, the old runbook had you add an entry and remember to remove it, and a probe entry left behind is a hook that answers nothing. Both registrations go in the scratch project, each naming its own --config-id, so one round says which file a session of this harness reads. (2) THE NATIVE HOOK FILE IS REGISTERED AS A CONTROL. A round in which nothing fires is inconclusive rather than reassuring, and the report says that in those words instead of letting a reader record a finding that was really a misconfiguration. (3) THE MATRIX GAINED THREE TRIALS BEYOND THE ORIGINAL THREE QUESTIONS: the deny this adapter ships at exit 2, the same body WITHOUT the exit code (so the report can say whether exit 2 is load-bearing), and a plain allow as the control. The two documented fail-open cases, crash and garbage, are measured rather than repeated.
+
+THE ONE-SHOT SPELLING IS A GUESS with an override. It defaults to grok -p {prompt} --cwd {dir}, following this harness's Claude Code lineage, and this repository has never run the binary. If the first invocation captures nothing the driver ABORTS after that one invocation and names the spelling first, so re-run with --one-shot and a template from the harness's own help. The second cause it names is worth reading too: both registrations are written under the scratch PROJECT, and a harness that reads only a user-level settings file would find nothing there, which is itself a finding to write down.
+
+tests/probe-grok-build-hook.test.ts, 20 cases, drives every path with canned envelopes and a fake harness binary, so this script is verified before any install for the first time. tests/fake-grok.mjs models this harness's DOCUMENTED semantics and its header says so, because nothing here has run it and a fake that quietly modelled documentation would turn this open criterion into an apparent answer.
+
+AC1 IS DELIBERATELY LEFT UNCHECKED. Nothing in this task's evidence changed: no Grok Build session has run. What changed is that running one now costs one tap instead of an afternoon.
+
+Correction to the note above, from the orchestrator's review of PR #541 on 2026-09-22: 'one tap' was the wrong word and the classifier says so. The driver command answers class files.write.workspace under rule node-script, not a harness launch class, because it names no protected path. So there is no request to approve: it is ONE COMMAND YOU RUN, replacing six typed prompts and six arms. And because the class is not human-only, the hook would ALLOW an agent to run it, which an agent still must not do: the harness invocations inside are child processes the shell hook never sees, so a wrapper would put the launch outside the gate that APRV-354 closed for the bare command. Whether a driver like this should be made human-only is an open question for you; docs/grok-hook.md and docs/probe-driver-convention.md both state it as one. The Hermes driver has no such question because its command names the harness home and classifies policy.core.
 <!-- SECTION:NOTES:END -->

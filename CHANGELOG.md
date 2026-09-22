@@ -15,6 +15,39 @@ before a tag.
 
 ## Unreleased
 
+- **A harness probe drives its own matrix, so an operator runs one command
+  instead of typing thirty prompts (APRV-418).**
+  `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human
+  to do in about thirty steps: it reads `hermes --version` BEFORE it writes
+  anything and refuses below the fail-closed floor (a build below it ignores the
+  key silently, which is what made the first Hermes round measure the wrong thing
+  for a day), builds the scratch project and the hook block, then walks a
+  declarative matrix through one one-shot invocation per trial, and prints the
+  report. Each invocation is a fresh harness start, which is what makes the
+  fail-closed PAIR drivable at all: the manual round never got its control pass
+  because switching the key needs a restart a person has to perform. A step label
+  now survives the arm being consumed, so a later call naming the armed artifact
+  is reported as a retry inside that one-shot session or as a different step's
+  file, which is the confound that misread a trial. The round aborts after ONE
+  invocation when nothing reached the hook, and names the causes. The same shape
+  is now on `scripts/probes/grok-build-hook.mjs`, whose runbook no longer asks
+  anybody to add a probe entry to this repository's own `policy.core` settings
+  file: both candidate registrations go in a scratch project, each naming its own
+  `--config-id`, so one round answers which one a session of that harness reads.
+  `docs/probe-driver-convention.md` states the shape, what
+  `approval hook classify` answers for a driver command, and the two credential
+  options for the next harness. That classify answer is the one thing a reader
+  would guess wrong: the Hermes driver command names the harness home, so it
+  classifies `policy.core` under rule `protected-path`, which is human-only. No
+  agent can run it, request it or be granted it, and an operator running it from
+  their own terminal has no hook in the loop, so there is nothing to approve
+  either. That is fail-closed rather than a gap, because the driver rewrites the
+  harness configuration and then launches the harness twenty times, and both are
+  protected acts. The Grok driver names no protected path and comes out
+  `files.write.workspace`, which the docs record as an open question rather than a
+  green light. Both drivers are verified with canned envelopes and a fake harness
+  binary before any install.
+
 - **Drift-append contention is reported as deferred and retried (APRV-403).** A
   `lock-timeout` or `head-moved` on an `envelope.drift` append used to print
   `append-refused … was not appended`, which is true and reads as a lost record

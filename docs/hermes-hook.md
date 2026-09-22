@@ -476,156 +476,143 @@ side.
 
 ## Running the probe
 
-The runbook, verbatim, so it survives without the conversation it was written in.
-It has been run once (2026-09-21) and it is written to be run again: the findings
-it settled are marked as such in the sections above, and the five it did not are
-listed under "Still UNPROBED". Carter runs it; no agent runs `hermes`.
+Three steps and a manual pass: install, set a key once, run one command, read the
+report. The driver does the rest, which is APRV-418's point. What it replaces is
+not taps, it is TYPED PROMPTS: the matrix is twenty-odd prompts, each armed
+through a control file, with the harness quit and relaunched every time a
+configuration key changed, all with a person sitting there. The shape is general:
+see [docs/probe-driver-convention.md](probe-driver-convention.md).
 
-**TWO WINDOWS, and which one needs a restart.** The probe is driven from a shell
-while Hermes runs in another, and the two have different rhythms:
+**Carter runs it, and that is a classifier fact rather than a convention.** The
+command names the Hermes home, which this repository protects as a gate organ:
 
-- **`arm` needs no restart.** It writes a control file the hook reads on the next
-  call, so arm a trial in window A and type the prompt in the already-running
-  Hermes in window B;
-- **`fail-closed on|off` DOES need a restart.** It rewrites `config.yaml`, and
-  Hermes reads that at startup. Quit and relaunch Hermes after every switch, or the
-  trial runs under the previous setting and the pair is worthless;
-- one arm, one call. It is consumed by the next pre event, so a crash or a hang
-  leaves nothing armed behind.
+```text
+$ approval hook classify -- "node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe"
+class        rule            command
+policy.core  protected-path  node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe
 
-In window A, this saves typing the path forty times:
-
-```sh
-probe() { node /Users/carter/dev/approval-md/scripts/probes/hermes-hook.mjs "$@"; }
+classes: policy.core
 ```
 
-Everything below is written as `probe <verb>` on the assumption that function is
-defined.
+`policy.core` is **human-only**, so no agent can run this command, request it or
+be granted it: a human-only class is inert to agents (SPEC.md §11.1 invariant 9)
+and `approval run` refuses it. And when Carter runs it from his own terminal there
+is no hook in the loop, so there is nothing to approve either. The round is his
+from start to finish; no agent runs `hermes`.
 
-**A live model is needed first**, because the probe measures TOOL CALLS and only a
-model makes them. The home is the one "Installing it" names, and its last segment
-must stay `.hermes` or the classifier stops recognising the organ:
+That is fail-closed rather than a gap. The driver **rewrites `config.yaml`**,
+which is precisely what `policy.core` exists to keep off agent hands, and it then
+launches the harness twenty times. A driver an agent could run would have both of
+those outside the gate.
+
+**Step 1 — install Hermes and set a key, once.** The home is the one "Installing
+it" names, and its last segment must stay `.hermes` or the classifier stops
+recognising the organ:
 
 ```sh
 export HERMES_HOME=/Users/carter/dev/hermes/.hermes
-hermes --version        # check the fail-closed floor BEFORE anything else
+hermes --version        # the driver checks this too, and refuses below the floor
 hermes setup            # the wizard: pick a provider and paste a key
 hermes setup --portal   # or Nous Portal specifically
 hermes model            # change the provider or model later
 ```
 
-**Check `hermes --version` first.** A build before `main` `118984d7` of 2026-09-20
-ignores `fail_closed` silently, which is what made the first round of this probe
-measure the wrong thing for a day (`hermes update` fixes it).
-
-Point it at the cheapest small model the provider lists. The five prompts below
+A live model is needed because the probe measures TOOL CALLS and only a model
+makes them. Point it at the cheapest small model the provider lists: the prompts
 are one-line tool calls, so capability is irrelevant and spend is the only axis
 that matters. Nous's own documentation names no specific cheap id, so pick one
-from `hermes model`'s list rather than from this page. Keys live in
-`$HERMES_HOME/.env`, which this repository's classifier treats as
-`account.credential`, human-only, and which no agent reads.
+from `hermes model`'s list rather than from this page.
 
-**Step 1 — install the hook block and get the prompts.** One command:
+Keys live in `$HERMES_HOME/.env`, which this repository's classifier treats as
+`account.credential`, human-only, and which no agent reads. The alternative, for a
+machine where a key in a home directory is not wanted, would be a vault entry
+inside a consumed-token window; the convention page states both and says why the
+second one does not exist for this command yet.
+
+**Step 2 — one command, run by you.** Not a request and not a tap: see the
+classify output above. This is the whole of the round:
 
 ```sh
-probe setup \
+node scripts/probes/hermes-hook.mjs run \
   --home /Users/carter/dev/hermes/.hermes \
   --captures /Users/carter/dev/hermes/probe
 ```
 
-It appends its block to that `config.yaml` between named markers, backs the
-original up once to `config.yaml.aprv398-backup`, and **refuses outright** if the
-file already carries a top-level `hooks:`, `plugins:` or `hooks_auto_accept:` key,
-printing the block to merge by hand and touching nothing. YAML forbids duplicate
-top-level keys, and a config Hermes cannot parse starts with **no hooks at all**,
-which looks identical to a probe that never fired. Captures land in
-`--captures`, which is where the findings outlive the scratch root.
+What that one invocation does, in order, and the order is the safety property:
+
+1. **reads `hermes --version` before it writes anything** and REFUSES below the
+   fail-closed floor (`main` `118984d7` of 2026-09-20). A build below it ignores
+   `fail_closed` silently, which is what made the first round of this probe
+   measure the wrong thing for a day. Nothing is installed on a refusal, so there
+   is nothing to undo; `hermes update` fixes it. An unreadable version line also
+   refuses, and names `--allow-unknown-version` for the case where the operator
+   knows better than the banner;
+2. **builds the scratch project and writes the hook block** into that
+   `config.yaml` between named markers, backing the original up once to
+   `config.yaml.aprv398-backup`. It **refuses outright** if the file already
+   carries a top-level `hooks:`, `plugins:` or `hooks_auto_accept:` key, printing
+   the block to merge by hand and touching nothing: YAML forbids duplicate
+   top-level keys, and a config Hermes cannot parse starts with **no hooks at
+   all**, which looks identical to a probe that never fired;
+3. **drives the whole matrix** — the five baseline prompts, `crash`, `hang` and
+   `garbage` with `fail_closed: true` AND without it, the eight dialect trials and
+   the `modify-workdir` trial — one one-shot invocation per trial
+   (`hermes -z <prompt> --in <project> --accept-hooks`, and `--one-shot` overrides
+   that spelling). Each invocation is a fresh Hermes start, which is what makes
+   the fail-closed PAIR drivable at all: the config is read at startup, so
+   switching the key between trials needs nobody to quit and relaunch anything.
+   The 2026-09-21 round ran pass A only for exactly that reason;
+4. **prints the report**, whose first section is the fail-closed answer with both
+   passes labelled.
+
+If the FIRST invocation captures no envelope the driver stops there rather than
+burning twenty more on the same silent failure, and names the three causes: the
+one-shot spelling (unverified in this repository, hence `--one-shot`), a hook that
+never registered, and a home nothing reads.
 
 **With `--home` the REAL home is used**, and the banner says so: the block sits
 between the markers, the backup holds what was there before, and the scratch
 project is the whole of the control. With no `--home` it builds a scratch
-`HERMES_HOME` of its own instead, which is what the test suite drives, and the
-banner says that instead. It never assumes a default home: an install directed
-elsewhere would leave the probe writing a config nothing reads.
+`HERMES_HOME` of its own, which is what the test suite drives. It never assumes a
+default home: an install directed elsewhere would leave the probe writing a config
+nothing reads.
 
-**Step 2 — the baseline.** In the scratch project the setup names, with
-`HERMES_HOME` exported, run `hermes` and type these five prompts separately:
+**Step 3 — read the report, and read its PRESENT artifacts twice.** After a block
+the model retries the same effect through another tool or path, and a retry can
+create the very file whose absence was the measurement. That happened twice on the
+live round. A driven round labels every capture with its step, so the report now
+says whether the later call naming the same path was a retry INSIDE that one-shot
+session or a different step's file entirely. Paste the whole report into the task.
+
+**Step 4 — the gateway pass, which stays manual: three messages.** A bot cannot
+message a bot, so this is the one part no driver can do. With a gateway running
+from the probe's `HERMES_HOME`, send exactly these to it, in order, and paste what
+came back:
 
 ```text
-1. run the shell command `ls -la` here
-2. create a file named probe.txt containing the word hello
-3. change the word hello in probe.txt to goodbye
-4. read README.md and tell me its first line
-5. run some python code that prints 2+2      <- this one SHOULD be refused before it runs
+1. run the shell command `ls -la` in your working directory
+2. create a file named gateway-probe.txt containing x
+3. read README.md and tell me its first line
 ```
 
-**Step 3 — the fail-closed trials. The point of the whole probe.** Each of
-`crash`, `hang` and `garbage` runs **twice**, once with `fail_closed: true` and
-once without; **the pair is the finding**, and pass B is what shows the key is what
-caused pass A's blocks. The 2026-09-21 round ran pass A only, so the report labels
-the two and says which one is missing. `hang` blocks past the 600s timeout: let it,
-and do not interrupt it.
+Message 1 is the one that matters: a gateway session's envelope `cwd` is the
+user's HOME, which is why `--dir` is mandatory on every gateway entry. The driver
+prints these three at the end of its report so they are not a separate thing to
+remember.
 
-```sh
-probe fail-closed on        # then QUIT AND RELAUNCH hermes
-  probe arm crash           # then: create a file named crash-failclosed-probe.txt containing x
-  probe arm hang            # then: hang-failclosed-probe.txt
-  probe arm garbage         # then: garbage-failclosed-probe.txt
-probe fail-closed off       # then QUIT AND RELAUNCH hermes again
-  probe arm crash           # then: crash-failopen-probe.txt
-  probe arm hang            # then: hang-failopen-probe.txt
-  probe arm garbage         # then: garbage-failopen-probe.txt
-```
+**The hand-typed verbs still work**, for a round where somebody wants to watch a
+single trial: `setup`, `fail-closed on|off`, `arm <trial>` and `report`, with the
+two rhythms that made the manual round slow — an `arm` is read on the next call
+and needs no restart, a `fail-closed` switch rewrites `config.yaml` and does. The
+report says which way the round was run, so a hand-typed one cannot be mistaken
+for a driven one.
 
-`fail-closed` rewrites only the region between the markers; everything else in
-that config is the operator's and is left alone. The restart is not optional: the
-config is read at startup, while an `arm` is read on the next call.
-
-**Read the report's PRESENT artifacts twice.** After a block the model retries the
-same effect through another tool or path, and a retry can create the very file whose
-absence was the measurement. That happened twice on the live round, so the report
-now names any later call that mentioned the same path and says to read that envelope
-before concluding.
-
-**Step 4 — the dialect trials, with `fail_closed` ON.** The first two are the
-forms the shipped adapter emits; if either is the wrong answer, nothing else
-matters.
-
-```sh
-probe fail-closed on        # then QUIT AND RELAUNCH hermes
-# then arm each of, one prompt per trial, creating <trial>-failclosed-probe.txt:
-#   deny-action-exit2   allow-empty-object
-#   deny-action   deny-decision   deny-exit2   deny-mixed
-#   allow-empty   allow-action-allow
-```
-
-`deny-mixed` is the one trial that is deliberately not single-variable: it prints
-every dialect at once, which is the payload that failed OPEN on Muse. It blocked
-here, so Hermes tolerates a superset. `allow-action-allow` prints the invented
-`{"action":"allow"}` and also allowed, which is the spelling working by falling
-through, and is why the adapter does not ship it.
-
-**Step 4b — the `modify` trial, which has not been run.**
-
-```sh
-probe arm modify-workdir
-# then, in hermes: run the shell command: touch modify-workdir-failclosed-probe.txt
-```
-
-It reads differently from every trial above: the answer is WHERE the artifact
+**The `modify` trial has still never run** against a real Hermes, driven or not.
+It reads differently from every other trial: the answer is WHERE the artifact
 landed. In `modify-target/` means Hermes **honoured** the hook's `workdir`, in the
 project root means it **ignored** it, and in neither means the call never ran. A
 honoured directive is the one result that could retire the unbound-directory
 refusal, so it is worth a second confirming round before anything depends on it.
-
-**Step 5 — the report.**
-
-```sh
-probe report
-```
-
-Its first section is the fail-closed answer, with both passes labelled. Paste the
-whole thing into the task.
 
 ## For Agent Village
 
@@ -759,5 +746,9 @@ than an added row, so it wants its own task and its own reading of §6.3.
   fix is upstream, here the session sends an absolute path.
 - [docs/integrations-considered.md](integrations-considered.md) — the register
   entry, **adopted with caveats** since the probe ran.
+- [docs/probe-driver-convention.md](probe-driver-convention.md) — the driver
+  shape this probe is the reference for, what the classifier says about a driver
+  command and the credential options, written for the next harness.
 - `scripts/probes/hermes-hook.mjs` — the probe, and `tests/probe-hermes-hook.test.ts`
-  the suite that makes it safe to run once.
+  the suite that makes it safe to run once, including the driven round against
+  `tests/fake-hermes.mjs`.
