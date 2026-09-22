@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-lane-d'
 created_date: '2026-09-20 21:43'
-updated_date: '2026-09-22 00:27'
+updated_date: '2026-09-22 01:29'
 labels: []
 dependencies: []
 references:
@@ -57,6 +57,8 @@ THE GUARD IS IN tests/ci-guard.test.ts, next to the runner's other properties, a
 GLOBAL INVARIANTS. None touched. Test-harness plumbing: no runtime module changed, no verdict, no log write.
 
 SCOPE NOTE. The scrub reaches runs through scripts/run-tests.mjs, which is npm test and CI. A bare node --test dist/tests/x.test.js during development still inherits the developer's terminal, which is the same documented gap the harness-binary stub in the same runner already states in its header.
+
+FULL-SUITE NUMBER for the record: npm test on Node 26.8.2 from this worktree is 5140 tests, 5134 pass, 5 fail, 1 skipped, exit 1, in 435 s. The five are tests/package-adapters (4) and tests/codex-package (1), all of them one environmental cause recorded in APRV-416's notes: both suites read <REPO_ROOT>/node_modules by path and this agent worktree has none of its own. None of the roughly twenty-five colour failures this task was filed on appears, and the forced run is identical to the piped one.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

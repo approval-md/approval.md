@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-lane-d'
 created_date: '2026-09-20 21:38'
-updated_date: '2026-09-22 00:18'
+updated_date: '2026-09-22 01:28'
 labels: []
 dependencies: []
 references:
@@ -54,6 +54,15 @@ THE REGRESSION TEST TURNS VERIFICATION ON, which no other case in tests/smtp-pro
 AC4 IS NOT A NO-OP. The probe's guarantee does change for an address: identity is checked against the IP SAN entry instead of an SNI-selected hostname, so a relay whose certificate names only a hostname passes when configured by name and fails when configured by address. docs/cli-reference.md 'setup adapter email' now says that in one paragraph.
 
 GLOBAL INVARIANTS. None touched. This is transport code below the gate: no log write, no verdict, no classification, no self-reported field.
+
+FULL-SUITE EVIDENCE, and what is left failing on this machine. A whole npm test run on Node 26.8.2 from this worktree ends with five failures and they are all one environmental cause, named here so the next lane does not chase it:
+
+  tests/package-adapters.test.ts (4): the package exposes exactly the five runtime names and refuses private paths / a strict NodeNext TypeScript consumer implements the public types / the packed contract binds bytes and permits one execution / a consumer runs public conformance against the packed contract
+  tests/codex-package.test.ts (1): packed npm artifact installs without scripts and runs outside the checkout
+
+Both suites read <REPO_ROOT>/node_modules directly, the first to symlink ajv, yaml and four more into a temporary consumer, the second to read node_modules/yaml/package.json. This agent worktree has no node_modules of its own: it sits under the primary checkout, so node and npm find the primary's by walking up, which is why tsc, oxlint and the other 4940 tests are fine, while a test that names the path explicitly gets ENOENT. Not a regression, not related to this stack, and green in CI, where the checkout root has its own node_modules.
+
+EVERY SMTP BASELINE FAILURE IS GONE. The failures this task was filed on (tests/smtp-probe, tests/adapter-email, the cli-setup adapter email transcript, and the e2e email demo) all pass in that run, and the five above are the only failures left in the whole suite.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
