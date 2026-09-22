@@ -92,10 +92,21 @@
  *       arming each trial and spawning ONE one-shot Hermes invocation for it,
  *       and prints the report at the end.
  *
- *       That is the point of the verb. The manual runbook is about thirty steps
- *       and every one of them is a `harness.launch.hermes`, which is manual by
- *       policy; the driver is ONE launch, so the human taps once. See
- *       `docs/probe-driver-convention.md` for the shape and the one-grant flow.
+ *       That is the point of the verb, and what it removes is TYPED PROMPTS
+ *       rather than taps: the manual runbook is about thirty prompts, each armed
+ *       through a control file, with the harness quit and relaunched whenever a
+ *       configuration key changed.
+ *
+ *       THE OPERATOR RUNS IT, AND THAT IS THE CLASSIFIER'S ANSWER RATHER THAN A
+ *       CONVENTION. This command names the Hermes home, so
+ *       `approval hook classify` answers `policy.core` under rule
+ *       `protected-path`. That class is human-only: no agent can run it, request
+ *       it or be granted it, and a human running it from their own terminal has
+ *       no hook in the loop, so nothing is approved either. It is fail-closed
+ *       rather than a gap, because this verb REWRITES the harness configuration,
+ *       which is what `policy.core` exists to keep off agent hands, and then
+ *       launches the harness twenty times. See
+ *       `docs/probe-driver-convention.md`.
  *
  *   node scripts/probes/hermes-hook.mjs report
  *       Prints the findings. The FIRST section is the fail-closed answer.
@@ -264,9 +275,9 @@ const HANG_MS = 700_000;
  * Why the floor is here at all rather than only in the doctor row: the first
  * Hermes round (2026-09-21) ran its whole matrix on `v0.21.3`, which ignores the
  * key SILENTLY, and every fail-closed result it produced was wrong for that one
- * reason. A driver that spends a human's launch grant on a build that cannot
- * answer the question is the expensive version of that mistake, so this one reads
- * the version BEFORE it writes a config and refuses below the floor.
+ * reason. A driver that spends a whole operator-driven round on a build that
+ * cannot answer the question is the expensive version of that mistake, so this one
+ * reads the version BEFORE it writes a config and refuses below the floor.
  */
 export const FAIL_CLOSED_FLOOR = {
   upstream: "118984d7",
@@ -1114,7 +1125,7 @@ export function arm(argv, write = process.stdout.write.bind(process.stdout)) {
  *
  * A missing binary, a non-zero exit and a timeout kill are all results here,
  * never exceptions: a driver that threw on step 3 would abandon a round a human
- * had already paid a launch grant for, with seventeen trials unrun and no report.
+ * is sitting through, with seventeen trials unrun and no report.
  */
 function spawnOnce(binary, args, options) {
   try {
@@ -1156,7 +1167,7 @@ function capturedCount(state) {
 }
 
 /**
- * Drive the whole matrix through Hermes's one-shot mode. ONE launch grant.
+ * Drive the whole matrix through Hermes's one-shot mode. ONE operator command.
  *
  * ## The order is the safety property
  *
@@ -1237,9 +1248,9 @@ export function run(argv, io = {}) {
         "  build date and the upstream commit, because the two builds that differ",
         "  on the whole question report the SAME semver.",
         "",
-        "  A driver that guessed here would spend a human's launch grant on a round",
-        "  whose headline nobody could trust afterwards. If you know this build is",
-        "  at or above the floor, say so explicitly:",
+        "  A driver that guessed here would spend a whole operator-driven round on",
+        "  a headline nobody could trust afterwards. If you know this build is at",
+        "  or above the floor, say so explicitly:",
         "",
         "    --allow-unknown-version",
         "",
@@ -1267,7 +1278,7 @@ export function run(argv, io = {}) {
   write(
     [
       "===========================================================================",
-      "APRV-418 DRIVEN PROBE ROUND. One launch grant, no prompt typed by hand.",
+      "APRV-418 DRIVEN PROBE ROUND. One operator command, no prompt typed by hand.",
       "===========================================================================",
       `  binary:     ${binary}`,
       `  version:    ${String(line)}  (fail_closed: ${verdict.toUpperCase()})`,
@@ -1886,14 +1897,14 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
       return [
         "=== 1b. HOW THIS ROUND WAS RUN ===",
         "  BY HAND. No driver log is present, so each prompt above was typed into",
-        "  an interactive session and every one of them was its own",
-        "  `harness.launch.hermes`. `node scripts/probes/hermes-hook.mjs run` does",
-        "  the same matrix under ONE launch grant (docs/probe-driver-convention.md).",
+        "  an interactive session, with the harness relaunched whenever a key",
+        "  changed. `node scripts/probes/hermes-hook.mjs run` does the same matrix",
+        "  in ONE operator command (docs/probe-driver-convention.md).",
       ];
     }
     const failed = runRows.filter((row) => row.status !== 0);
     return [
-      "=== 1b. THE DRIVEN ROUND (one launch grant, no prompt typed) ===",
+      "=== 1b. THE DRIVEN ROUND (one operator command, no prompt typed) ===",
       versionState === null
         ? "  version: (not recorded)"
         : `  version read BEFORE the config was written: ${String(versionState.raw)} -> fail_closed ${String(versionState.verdict).toUpperCase()}`,
@@ -2070,8 +2081,10 @@ const USAGE = `usage: node scripts/probes/hermes-hook.mjs run
                                             report
 
   run          THE DRIVER: version check, scratch project, hook block, the whole
-               matrix through hermes's one-shot mode, then the report. One
-               harness.launch grant, no prompt typed. Flags:
+               matrix through hermes's one-shot mode, then the report. ONE
+               command, run by the operator: it names the harness home, so it
+               classifies policy.core (human-only) and no agent may run it.
+               Flags:
                  --home <dir>            install into a REAL HERMES_HOME
                  --captures <dir>        put the capture somewhere durable
                  --binary <name>         default hermes

@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@opus-lane-closeouts'
 created_date: '2026-09-02 21:10'
-updated_date: '2026-09-22 01:39'
+updated_date: '2026-09-22 02:20'
 labels: []
 dependencies: []
 references:
@@ -98,4 +98,6 @@ THE ONE-SHOT SPELLING IS A GUESS with an override. It defaults to grok -p {promp
 tests/probe-grok-build-hook.test.ts, 20 cases, drives every path with canned envelopes and a fake harness binary, so this script is verified before any install for the first time. tests/fake-grok.mjs models this harness's DOCUMENTED semantics and its header says so, because nothing here has run it and a fake that quietly modelled documentation would turn this open criterion into an apparent answer.
 
 AC1 IS DELIBERATELY LEFT UNCHECKED. Nothing in this task's evidence changed: no Grok Build session has run. What changed is that running one now costs one tap instead of an afternoon.
+
+Correction to the note above, from the orchestrator's review of PR #541 on 2026-09-22: 'one tap' was the wrong word and the classifier says so. The driver command answers class files.write.workspace under rule node-script, not a harness launch class, because it names no protected path. So there is no request to approve: it is ONE COMMAND YOU RUN, replacing six typed prompts and six arms. And because the class is not human-only, the hook would ALLOW an agent to run it, which an agent still must not do: the harness invocations inside are child processes the shell hook never sees, so a wrapper would put the launch outside the gate that APRV-354 closed for the bare command. Whether a driver like this should be made human-only is an open question for you; docs/grok-hook.md and docs/probe-driver-convention.md both state it as one. The Hermes driver has no such question because its command names the harness home and classifies policy.core.
 <!-- SECTION:NOTES:END -->

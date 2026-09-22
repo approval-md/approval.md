@@ -476,13 +476,34 @@ side.
 
 ## Running the probe
 
-Four steps, and only one of them is a decision: install, set a key once, approve
-the driver's one launch request, read the report. The driver does the rest, which
-is APRV-418's whole point — the matrix is twenty-odd prompts and each one typed
-into an interactive session was its own `harness.launch.hermes`, manual by policy.
-`node scripts/probes/hermes-hook.mjs run` is ONE launch. Carter runs it; no agent
-runs `hermes`. The shape is general: see
-[docs/probe-driver-convention.md](probe-driver-convention.md).
+Three steps and a manual pass: install, set a key once, run one command, read the
+report. The driver does the rest, which is APRV-418's point. What it replaces is
+not taps, it is TYPED PROMPTS: the matrix is twenty-odd prompts, each armed
+through a control file, with the harness quit and relaunched every time a
+configuration key changed, all with a person sitting there. The shape is general:
+see [docs/probe-driver-convention.md](probe-driver-convention.md).
+
+**Carter runs it, and that is a classifier fact rather than a convention.** The
+command names the Hermes home, which this repository protects as a gate organ:
+
+```text
+$ approval hook classify -- "node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe"
+class        rule            command
+policy.core  protected-path  node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe
+
+classes: policy.core
+```
+
+`policy.core` is **human-only**, so no agent can run this command, request it or
+be granted it: a human-only class is inert to agents (SPEC.md §11.1 invariant 9)
+and `approval run` refuses it. And when Carter runs it from his own terminal there
+is no hook in the loop, so there is nothing to approve either. The round is his
+from start to finish; no agent runs `hermes`.
+
+That is fail-closed rather than a gap. The driver **rewrites `config.yaml`**,
+which is precisely what `policy.core` exists to keep off agent hands, and it then
+launches the harness twenty times. A driver an agent could run would have both of
+those outside the gate.
 
 **Step 1 — install Hermes and set a key, once.** The home is the one "Installing
 it" names, and its last segment must stay `.hermes` or the classifier stops
@@ -504,12 +525,12 @@ from `hermes model`'s list rather than from this page.
 
 Keys live in `$HERMES_HOME/.env`, which this repository's classifier treats as
 `account.credential`, human-only, and which no agent reads. The alternative, for a
-machine where a key in a home directory is not wanted, is a vault entry injected
-through `approval run`'s credential window; the convention page states both.
+machine where a key in a home directory is not wanted, would be a vault entry
+inside a consumed-token window; the convention page states both and says why the
+second one does not exist for this command yet.
 
-**Step 2 — one tap.** The lane files ONE request classified
-`harness.launch.hermes` for this command and waits; the approval card carries it,
-and with APRV-401 the grant binds the driver's bytes rather than only its name:
+**Step 2 — one command, run by you.** Not a request and not a tap: see the
+classify output above. This is the whole of the round:
 
 ```sh
 node scripts/probes/hermes-hook.mjs run \
@@ -726,8 +747,8 @@ than an added row, so it wants its own task and its own reading of §6.3.
 - [docs/integrations-considered.md](integrations-considered.md) — the register
   entry, **adopted with caveats** since the probe ran.
 - [docs/probe-driver-convention.md](probe-driver-convention.md) — the driver
-  shape this probe is the reference for, the one-grant flow and the credential
-  options, written for the next harness.
+  shape this probe is the reference for, what the classifier says about a driver
+  command and the credential options, written for the next harness.
 - `scripts/probes/hermes-hook.mjs` — the probe, and `tests/probe-hermes-hook.test.ts`
   the suite that makes it safe to run once, including the driven round against
   `tests/fake-hermes.mjs`.

@@ -1073,7 +1073,7 @@ test("run drives the WHOLE matrix through a fake harness, with no human input", 
     assert.match(out, /allow-empty-object \(fail_closed TRUE\): ACCEPTED/u);
 
     // And the round says how it was run.
-    assert.match(out, /=== 1b\. THE DRIVEN ROUND \(one launch grant/u);
+    assert.match(out, /=== 1b\. THE DRIVEN ROUND \(one operator command/u);
     assert.match(out, /version read BEFORE the config was written/u);
     assert.match(out, /=== 5b\./u, "the modify trial still gets its own reading");
 
@@ -1186,7 +1186,11 @@ test("a hand-typed round says so, and names the verb that would have driven it",
     const out = runReport(state);
     assert.match(out, /=== 1b\. HOW THIS ROUND WAS RUN ===/u);
     assert.match(out, /BY HAND/u);
-    assert.match(out, /harness\.launch\.hermes/u, "and why that costs what it costs");
+    // What the driver replaces is TYPED PROMPTS, not taps: the one launch a
+    // hand-typed round costs is the session's, and the driver command itself
+    // classifies policy.core, so nobody approves that either (APRV-418 review).
+    assert.match(out, /typed into/u, "and what it cost");
+    assert.match(out, /ONE operator command/u);
     assert.match(out, /hermes-hook\.mjs run/u);
   } finally {
     cleanup();

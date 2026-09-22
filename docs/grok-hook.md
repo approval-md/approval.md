@@ -70,9 +70,9 @@ by speaking the dialect Grok reads: the deny is exit 2, which Grok acts on.
 
 Whether that compatibility read actually fires is unverified. APRV-243 AC1 is a
 live probe on an installed Grok Build, and `scripts/probes/grok-build-hook.mjs`
-is the script that answers it, in ONE tap since APRV-418: see "Running the probe"
-below. Until it runs, the register entry in `docs/integrations-considered.md`
-stays **parked**.
+is the script that answers it, in ONE command since APRV-418: see "Running the
+probe" below. Until it runs, the register entry in
+`docs/integrations-considered.md` stays **parked**.
 
 ## The dialect
 
@@ -184,15 +184,15 @@ this adapter exists to bring back inside the gate. See
 ## Running the probe
 
 APRV-243 AC1 is the one criterion still open, it is Carter's, and since APRV-418
-it is **one tap**. The probe follows the driver convention in
+it is **one command** rather than an afternoon of typed prompts. The probe follows
+the driver convention in
 [docs/probe-driver-convention.md](probe-driver-convention.md).
 
 **Step 1 — install Grok Build and set a key, once.** The installer is opaque to
 the classifier (`curl … | bash`), so a human runs it, and the harness's own setup
 puts the key where the harness reads it. No agent touches either.
 
-**Step 2 — one tap.** The lane files ONE request classified
-`harness.launch.grok` for this command and waits:
+**Step 2 — one command, run by the operator.**
 
 ```sh
 node scripts/probes/grok-build-hook.mjs run \
@@ -205,6 +205,27 @@ harness's one-shot mode and prints the report. There is no fail-closed version
 floor for this harness, because no build difference has been measured here, and
 the driver says so rather than inventing one; an unreadable version line still
 refuses before anything is written.
+
+**What the classifier says about that command, and the one open question in it.**
+Unlike the Hermes driver, which names a protected gate organ and therefore
+classifies `policy.core`, this one names no protected path:
+
+```text
+$ approval hook classify -- "node scripts/probes/grok-build-hook.mjs run --captures /Users/carter/dev/grok-probe"
+class                  rule         command
+files.write.workspace  node-script  node scripts/probes/grok-build-hook.mjs run --captures /Users/carter/dev/grok-probe
+
+classes: files.write.workspace
+```
+
+So the harness hook would ALLOW an agent to run it, and **an agent still must
+not**, for a reason the class does not carry: the `grok` invocations inside it are
+child processes the hook never sees, so a wrapper puts `harness.launch.grok`
+outside the gate entirely, which is exactly what APRV-354 closed for the bare
+command. This is recorded as an open question for a human rather than settled
+here: the honest statement today is that the round is the operator's, and the
+asymmetry with the Hermes command is a fact about paths rather than a decision
+about drivers.
 
 **It no longer asks anybody to edit this repository's own Claude settings file.**
 The old runbook did, that file is `policy.core`, and a probe entry left behind in
@@ -270,9 +291,9 @@ stale-confident documentation this project exists to avoid.
 - `docs/cursor-hook.md` — the adapter this one is modelled on.
 - `docs/claude-code-hook.md` — the original, and the settings file Grok reads.
 - `docs/integrations-considered.md` — the register entry, parked until AC1.
-- `docs/probe-driver-convention.md` — the driver shape, the one-grant flow and
-  the credential options this probe follows.
-- `scripts/probes/grok-build-hook.mjs` — the probe for AC1, one tap.
+- `docs/probe-driver-convention.md` — the driver shape, what the classifier says
+  about a driver command and the credential options this probe follows.
+- `scripts/probes/grok-build-hook.mjs` — the probe for AC1, one command.
 - `tests/probe-grok-build-hook.test.ts` — the probe's own suite, driven with
   canned envelopes and a fake harness binary so AC1's script is verified before
   any install.

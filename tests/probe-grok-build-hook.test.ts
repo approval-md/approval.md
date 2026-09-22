@@ -626,7 +626,9 @@ test("a hand-typed round says so, and names the verb that would have driven it",
     const out = runReport(state);
     assert.match(out, /=== HOW THIS ROUND WAS RUN ===/u);
     assert.match(out, /BY HAND/u);
-    assert.match(out, /harness\.launch\.grok/u);
+    // Typed prompts are what the driver replaces, not taps (APRV-418 review).
+    assert.match(out, /typed into an/u);
+    assert.match(out, /ONE operator command/u);
     assert.match(out, /grok-build-hook\.mjs run/u);
   } finally {
     cleanup();

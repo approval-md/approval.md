@@ -5,16 +5,25 @@
  * the Claude-shaped nested output on exit 0?
  *
  * ===========================================================================
- * ONE TAP (APRV-418). READ THIS FIRST.
+ * ONE COMMAND (APRV-418). READ THIS FIRST, INCLUDING THE SECOND PARAGRAPH.
  * ===========================================================================
  *
  * This probe follows the driver convention in `docs/probe-driver-convention.md`.
  * `run` does the whole matrix in one process: it reads the version before it
  * writes anything, builds a scratch project, registers BOTH candidate hook
  * files in it, then drives every trial through Grok Build's one-shot mode and
- * prints the report. Launching a harness classifies `harness.launch.grok` and is
- * manual by policy, so the manual runbook cost one tap PER PROMPT; the driver
- * costs one tap for the round.
+ * prints the report. What that removes is TYPED PROMPTS: the manual runbook was
+ * six prompts and six arms with a person sitting there.
+ *
+ * THE OPERATOR RUNS IT, AND UNLIKE THE HERMES DRIVER THE CLASSIFIER DOES NOT
+ * ENFORCE THAT. `approval hook classify` answers `files.write.workspace` under
+ * rule `node-script` for this command, because it names no protected path: this
+ * harness has no home for the probe to write into. So the hook would ALLOW an
+ * agent to run it, and an agent still must not, for a reason the class does not
+ * carry: the `grok` invocations inside are child processes the hook never sees,
+ * so a wrapper puts `harness.launch.grok` outside the gate entirely, which is
+ * what APRV-354 closed for the bare command. Recorded as an open question for a
+ * human rather than settled here.
  *
  * `arm`, `record` and `report` still work on their own, for a human who wants to
  * type prompts into an interactive session. Nothing about them changed except
@@ -48,7 +57,7 @@
  *
  *   node scripts/probes/grok-build-hook.mjs run [--captures <dir>]
  *       THE DRIVER. Version, scratch project, both hook files, the matrix, the
- *       report. One `harness.launch.grok` grant and no prompt typed.
+ *       report. One command the OPERATOR runs, and no prompt typed.
  *
  *   node scripts/probes/grok-build-hook.mjs setup [--captures <dir>]
  *       Build the scratch project and print the prompts, for a hand-typed round.
@@ -490,7 +499,7 @@ export function setup(argv, write = process.stdout.write.bind(process.stdout)) {
       `  node ${SCRIPT} report`,
       "",
       "OR SKIP ALL OF THAT: `node scripts/probes/grok-build-hook.mjs run` drives",
-      "every trial above through Grok's one-shot mode under ONE launch grant.",
+      "every trial above through Grok's one-shot mode in ONE operator command.",
       "",
       `Delete ${root} when you are done.`,
       "",
@@ -742,7 +751,7 @@ function capturedCount(state) {
 }
 
 /**
- * Drive the whole matrix through Grok Build's one-shot mode. ONE launch grant.
+ * Drive the whole matrix through Grok Build's one-shot mode. ONE command.
  *
  * Same order as the Hermes driver, and the order is the safety property: the
  * version before anything is written, then the scratch project and both
@@ -781,7 +790,7 @@ export function run(argv, io = {}) {
         "",
         "  There is no fail-closed version floor for this harness, so this is not a",
         "  floor refusal: it is that a round whose binary nobody can name is a round",
-        "  nobody can reproduce, and this one costs a human's launch grant. If the",
+        "  nobody can reproduce, and this one costs an operator's round. If the",
         "  binary is right and only its banner is unreadable, say so explicitly:",
         "",
         "    --allow-unknown-version",
@@ -804,7 +813,7 @@ export function run(argv, io = {}) {
   write(
     [
       "===========================================================================",
-      "APRV-243 DRIVEN PROBE ROUND (APRV-418 driver). One launch grant.",
+      "APRV-243 DRIVEN PROBE ROUND (APRV-418 driver). One operator command.",
       "===========================================================================",
       `  binary:     ${binary}`,
       `  version:    ${String(line)}`,
@@ -1139,9 +1148,9 @@ export function report(argv, write = process.stdout.write.bind(process.stdout)) 
     ...(runRows.length === 0
       ? [
           "  BY HAND. No driver log is present, so every prompt was typed into an",
-          "  interactive session and each one was its own `harness.launch.grok`.",
-          "  `node scripts/probes/grok-build-hook.mjs run` does the same matrix under",
-          "  ONE launch grant (docs/probe-driver-convention.md).",
+          "  interactive session, one arm at a time.",
+          "  `node scripts/probes/grok-build-hook.mjs run` does the same matrix in",
+          "  ONE operator command (docs/probe-driver-convention.md).",
         ]
       : [
           versionState === null
@@ -1187,8 +1196,10 @@ const USAGE = `usage: node scripts/probes/grok-build-hook.mjs run
                                                 report
 
   run      THE DRIVER: version, scratch project, both registrations, the whole
-           matrix through grok's one-shot mode, then the report. One
-           harness.launch grant, no prompt typed. Flags:
+           matrix through grok's one-shot mode, then the report. ONE command,
+           run by the operator; this one classifies files.write.workspace rather
+           than policy.core, so the hook does not enforce that (see the header).
+           Flags:
              --captures <dir>        put the capture somewhere durable
              --binary <name>         default grok
              --one-shot "<template>" default ${JSON.stringify(ONE_SHOT_TEMPLATE)}

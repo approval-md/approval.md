@@ -18,16 +18,79 @@ next harness.
 
 ## Where the cost actually came from
 
-Three sources, and only one of them is the gate:
+Three sources, and **none of them is the gate**. That is worth saying plainly,
+because the first draft of this page said the opposite:
 
 1. **Launching a harness is `harness.launch.<kind>`, manual by policy.** That is
-   correct and it costs ONE tap. It is not what made the rounds expensive.
-2. **The probes assumed an interactive TUI session.** That is a design choice,
-   and it is what made every prompt its own launch, its own tap and its own wait.
-   It is the one this convention changes.
+   correct, and it cost ONE tap for the whole session: the tap is on the `hermes`
+   command that starts the session, not on each prompt typed into it. It is not
+   what made the rounds expensive.
+2. **The probes assumed an interactive TUI session.** That is the expensive one,
+   and it is the one this convention changes. Thirty prompts typed by hand, a
+   control file armed between each, and the harness quit and relaunched every time
+   a configuration key changed, all with a person sitting there.
 3. **A model key has to be in the harness home**, because a probe measures tool
    calls and only a model makes them. Agents do not touch credentials, so a human
    places the key once. See "Credentials" below.
+
+So what a driver buys is **typed prompts and restarts**, not taps. A driven round
+is one command the operator runs, and the harness launches inside it are that
+command's own child processes.
+
+## What the classifier says about a driver, which is not what you would guess
+
+Run `approval hook classify` on the command before writing a runbook around it.
+The answer for the reference driver is not `harness.launch.hermes`:
+
+```text
+$ approval hook classify -- "node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe"
+class        rule            command
+policy.core  protected-path  node scripts/probes/hermes-hook.mjs run --home /Users/carter/dev/hermes/.hermes --captures /Users/carter/dev/hermes/probe
+
+classes: policy.core
+```
+
+**`policy.core`, under rule `protected-path`**, because the command names the
+Hermes home, which this repository protects as a gate organ. Two consequences,
+and both of them are the point rather than an obstacle:
+
+- **no agent can run it, request it, or be granted it.** A `human-only` class is
+  inert to agents (SPEC.md §11.1 invariant 9): request, grant, token issue and
+  `approval run` all refuse it with `class-human-only`, and the harness hooks
+  deny it. There is no version of this round an agent performs;
+- **there is no tap either.** When the operator runs it from their own terminal
+  there is no hook in the loop, so nothing is filed and nothing is approved. The
+  command is the operator's from start to finish.
+
+**This is fail-closed rather than a gap.** The driver REWRITES THE HARNESS
+CONFIGURATION FILE, which is exactly what `policy.core` exists to keep off agent
+hands: a program that installs a hook block and then launches the harness twenty
+times is two protected acts in a wrapper, and an agent that could run it would
+have both of them outside the gate. The class is the classifier agreeing with the
+convention, so a driver that dodged it (by taking the home from an environment
+variable, say) would be working around the protection rather than satisfying it.
+
+### The Grok driver classifies differently, and that difference is a hazard
+
+```text
+$ approval hook classify -- "node scripts/probes/grok-build-hook.mjs run --captures /Users/carter/dev/grok-probe"
+class                  rule         command
+files.write.workspace  node-script  node scripts/probes/grok-build-hook.mjs run --captures /Users/carter/dev/grok-probe
+
+classes: files.write.workspace
+```
+
+That harness has no home for this probe to name, so the command names no
+protected path and the classifier answers `files.write.workspace`, which the hook
+ALLOWS. The round is still the operator's, and an agent still must not run it, for
+a reason the class does not carry: the `grok` invocations inside it are child
+processes the harness hook never sees, so a wrapper would put
+`harness.launch.grok` outside the gate entirely, which is the shape APRV-354
+closed for the bare command.
+
+A driver whose command classifies below `policy.core` is therefore an OPEN
+QUESTION for the human rather than a green light, and this page records it as one.
+Whatever the answer, a runbook must say which of the two shapes its driver is.
 
 ## The driver shape
 
@@ -131,35 +194,39 @@ models a DOCUMENTED one, because nothing here has ever run that binary, and its
 header says so in as many words. A fake that quietly modelled documentation would
 turn an open question into an apparent answer.
 
-## The one-grant flow
+## The flow: the operator runs one command
 
-The lane files ONE request for the driver invocation, against the PRIMARY
-checkout's log and policy, and waits. With APRV-401 the grant binds the driver's
-bytes rather than only its path.
+There is no request and no grant for a driver that classifies `policy.core`,
+because there cannot be one. The operator runs the command themselves, in their
+own terminal, and the round is theirs:
 
 ```sh
-cd /Users/carter/dev/approval-md
-
-approval register "backlog/tasks/<task file>.md" --as agent:<session>
-approval request <TASK-ID> --action "<task>:probe:<date>" --as agent:<session> \
-  --payload <payload.json>          # {"argv": [...], "cwd": "..."}
-approval wait <TASK-ID> --timeout 6h
-approval run "<task>:probe:<date>" --token <token> --as agent:<session> \
-  -- node scripts/probes/<harness>.mjs run --home <harness home> --captures <dir>
+export HERMES_HOME=<harness home>
+node scripts/probes/<harness>.mjs run --home <harness home> --captures <dir>
 ```
 
-The human taps once, the report comes back to the lane, and the lane pastes it
-into the task. On a reject the lane records the refusal and does not retry the
-same request. Where a lane cannot reach the gate at all, CLAUDE.md's standing
-rule applies: stop and escalate.
+The lane's part is everything either side of that: it writes the driver, it says
+in the task exactly which command to run and where the report lands, and it reads
+the report back into the task when the operator pastes it. What it must not do is
+describe that command as something a human approves. It is something a human
+performs.
 
-Two things the driver must NOT do, and both are the reason it is one request
-rather than none:
+Two rules for the driver itself, and they are what make the class the right one
+rather than an inconvenience:
 
-- it never runs the harness outside a grant. A probe driver is a program that
-  launches a harness many times, and `harness.launch.<kind>` is manual by policy;
-- it never widens what the grant covers. One grant over these exact bytes, one
-  round, one report.
+- **it never tries to launch a harness on its own account.** A probe driver is a
+  program that installs a hook configuration and then launches a harness twenty
+  times, and both halves are protected acts. A driver that arranged to be runnable
+  by an agent would be putting both outside the gate;
+- **it never takes a protected path from the environment to dodge the class.**
+  Reading the harness home from an environment variable instead of an argument
+  would change what the classifier sees without changing what the program does,
+  which is working around the protection rather than satisfying it. The home is an
+  argument, and the command carries it.
+
+Where an agent needs something gated in the course of BUILDING a driver (a
+dependency, a network call), that is an ordinary request and CLAUDE.md's dogfood
+sequence applies unchanged. The driver invocation is not one of those.
 
 ## Credentials
 
@@ -182,11 +249,14 @@ key. Two options, and the first is the one in use today:
    directory, on a machine where that is what is wanted.
 
    **This route does not exist for a probe today**, and the page says so rather
-   than implying it: no adapter serves the `harness.launch.*` classes, so there is
-   no `requiredCredentials` declaration to keep a variable alive. Making it work
-   is an adapter's worth of work and its own task. Until then option 1 is the
-   supported one, and a driver must not invent a flag that names a variable to
-   keep, because a flag like that hands the credential to whoever passes it.
+   than implying it. Two reasons stack. No adapter serves the `harness.launch.*`
+   classes, so there is no `requiredCredentials` declaration to keep a variable
+   alive. And the reference driver's own command classifies `policy.core`, which
+   is human-only, so `approval run` refuses it outright and there is no
+   consumed-token window to put a credential inside. Making the route real is an
+   adapter's worth of work and its own task. Until then option 1 is the supported
+   one, and a driver must not invent a flag that names a variable to keep, because
+   a flag like that hands the credential to whoever passes it.
 
 Either way the capture is redacted before it is written: token-shaped strings are
 stripped on the way to disk, deliberately over-eagerly, because a capture is
@@ -207,6 +277,11 @@ way the round was run.
 
 ## Checklist for the next harness probe
 
+0. **Run `approval hook classify` on the driver command and quote the answer in
+   the runbook.** It decides what the runbook may claim, and it is not what a
+   reader would guess: the reference driver is `policy.core`, human-only, so the
+   operator runs it and nobody approves it. A driver that comes out below that is
+   an open question for the human.
 1. `run` reads the version FIRST and refuses below a measured floor, or states
    that no floor is known for this harness.
 2. `prepare` is shared with `setup`, and the scratch project holds only synthetic
@@ -220,8 +295,8 @@ way the round was run.
    call from a later retry.
 7. A canned-envelope suite plus a fake harness binary, with the fake's header
    stating whether it models measurement or documentation.
-8. The runbook in `docs/<harness>-hook.md` is: install, set a key once, one tap,
-   read the report, plus whatever genuinely cannot be driven.
+8. The runbook in `docs/<harness>-hook.md` is: install, set a key once, run the
+   one command, read the report, plus whatever genuinely cannot be driven.
 
 ## Related
 
