@@ -1,0 +1,1 @@
+{"command":"node conformance/run.mjs > /tmp/claude-501/conf.log 2>&1; echo \"exit=$?\"; tail -20 /tmp/claude-501/conf.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

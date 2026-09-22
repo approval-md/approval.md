@@ -1,0 +1,1 @@
+{"command":"backlog task view APRV-217 --plain 2>&1 | sed -n 3,6p; grep -n -A6 \"APRV-217\" /Users/carter/.claude/projects/-Users-carter-dev-approval-md/memory/hook-daemon-cpu-lineage.md | head -12","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

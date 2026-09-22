@@ -1,0 +1,1 @@
+{"command":"sed -n 1,40p \"tests/fixtures/backlog/envelope-edit-before/\"*.md 2>/dev/null | head -45; ls tests/fixtures/backlog/envelope-edit-before/","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -1,0 +1,1 @@
+{"command":"ls schema; echo ---; ls schema/fixtures 2>/dev/null; echo ---; grep -rn \"payload\" schema/*.json | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5184ab73bc90995c"}

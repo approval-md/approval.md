@@ -1,0 +1,1 @@
+{"command":"git merge origin/main > /tmp/claude-501/merge.log 2>&1; echo \"merge exit=$?\"; cat /tmp/claude-501/merge.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

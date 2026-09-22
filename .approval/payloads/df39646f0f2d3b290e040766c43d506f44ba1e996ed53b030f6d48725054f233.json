@@ -1,0 +1,1 @@
+{"command":"wc -l src/daemon/*.ts src/core/harness-wait.ts src/cli/daemon.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

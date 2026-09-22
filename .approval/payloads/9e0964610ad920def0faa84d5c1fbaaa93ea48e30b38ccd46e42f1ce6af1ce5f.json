@@ -1,0 +1,1 @@
+{"command":"grep -n \"digest of every file\\|every file the argv\\|files the argv names\" docs/*.md src/*/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5184ab73bc90995c"}

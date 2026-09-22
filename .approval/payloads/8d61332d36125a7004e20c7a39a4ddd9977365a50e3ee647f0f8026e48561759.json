@@ -1,0 +1,1 @@
+{"command":"grep -rn \"\\\"harness\\\"\" src/core/*.ts src/cli/hook.ts | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a424e30bbd650fc35"}

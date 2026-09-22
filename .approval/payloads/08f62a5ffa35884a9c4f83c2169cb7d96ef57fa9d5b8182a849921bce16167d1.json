@@ -1,0 +1,1 @@
+{"command":"grep -rln \"spawn(\" tests/*.ts | head -30 && echo \"----count----\" && grep -rlc \"spawn\" tests/*.ts | wc -l","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a2f448129bf591efc"}

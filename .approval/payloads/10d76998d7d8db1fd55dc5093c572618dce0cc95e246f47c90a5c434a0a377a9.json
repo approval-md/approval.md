@@ -1,0 +1,1 @@
+{"command":"node conformance/run.mjs > /tmp/claude-501/rconf.log 2>&1; echo \"exit=$?\"; grep -E \"\\\"vectors\\\"|\\\"passed\\\"|\\\"failed\\\"|\\\"controls\\\"|\\\"ok\\\"\" /tmp/claude-501/rconf.log | tail -6","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

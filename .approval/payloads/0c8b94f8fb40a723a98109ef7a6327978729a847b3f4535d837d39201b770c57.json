@@ -1,0 +1,1 @@
+{"command":"grep -n \"^+\" /tmp/claude-501/pr535.diff | grep -n \"harness_cap_ms\\|dependentSchemas\\|minimum\\|exclusiveMinimum\" | sed -n '1,25p'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

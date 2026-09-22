@@ -1,0 +1,1 @@
+{"command":"backlog task list --status \"In Progress\" --plain 2>&1 | head -20; grep -n \"assignee\" backlog/tasks/aprv-415*.md 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a424e30bbd650fc35"}

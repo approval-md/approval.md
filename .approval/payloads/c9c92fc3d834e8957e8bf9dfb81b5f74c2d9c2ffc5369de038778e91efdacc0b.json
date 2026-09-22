@@ -1,0 +1,1 @@
+{"command":"npm run build > /tmp/claude-501/build.log 2>&1; echo \"build exit=$?\"; node scripts/run-tests.mjs --only cli-long-help cli-help > /tmp/claude-501/helptests.log 2>&1; echo \"tests exit=$?\"; tail -10 /tmp/claude-501/helptests.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}
