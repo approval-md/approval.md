@@ -57,27 +57,49 @@ before a tag.
   rather than lapsing. `design/hosted-daemon-identity.md` states the whole hosting
   model and what is deliberately out of scope: process isolation, token scoping and
   billing.
-- **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398).**
-  The sixth harness, and the first whose harness documents a **fail-closed** hook:
-  a per-entry `fail_closed` turns a hook crash, a hook timeout and unparseable
-  hook output into a block, which would make this the first adapter since Claude
-  Code that is a gate rather than a backstop. Its default is `false`, it does not
-  cover a hook that exits non-zero printing nothing (which is why this adapter's
-  deny exits 2, blocking unconditionally), and the whole table is read from the
-  harness's published source rather than measured — `docs/hermes-hook.md` marks
-  every fact a live probe has not yet confirmed, and
-  `scripts/probes/hermes-hook.mjs` is the probe that settles them. Its event names
-  are its own (`pre_tool_call`, `post_tool_call`), its verdict is a third dialect
-  (`{action,message}` at exit 2 for a deny; **`{}`** at 0 for an allow, because
-  Hermes has no allow directive), and `execute_code` is refused outright with a
-  new code `hook-hermes-execute-code-unbound`: it carries a program and no path,
-  no argv and no working directory, and its kernel can call the other tools
-  in-process where the hook may not see them. It is also the first harness whose
-  gate organ lives in the USER HOME — `$HERMES_HOME/config.yaml`, with no
+- **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398,
+  corrected against a live probe in APRV-415).** The sixth harness, and the first
+  since Claude Code whose hook is a **gate rather than a backstop** — measured, not
+  documented: on Hermes `main` at `118984d7` a per-entry `fail_closed: true`
+  BLOCKED an armed hook crash, armed garbage output and an armed hang (at the 300s
+  per-entry cap), three of three. Its default is `false`, it does not cover a hook
+  that exits non-zero printing nothing (which is why this adapter's deny exits 2,
+  blocking unconditionally), and **there is a version floor**: `v0.21.3` (build
+  2026.9.14) does not know the key and fails open silently, both builds report the
+  same semver, and `hermes hooks list` shows no flag either way, so
+  `core/harness-version.ts` compares the build date and the upstream commit and
+  `approval doctor`'s `harness-version-unverified` row fails below the floor. Its
+  event names are its own (`pre_tool_call`, `post_tool_call`), its verdict is a
+  third dialect (`{action,message}` at exit 2 for a deny; **`{}`** at 0 for an
+  allow, because Hermes has no allow directive), and `execute_code` is refused
+  outright with a new code `hook-hermes-execute-code-unbound`: it carries a program
+  and no path, no argv and no working directory, and its kernel can call the other
+  tools in-process where the hook may not see them. It is also the first harness
+  whose gate organ lives OUTSIDE a checkout — `$HERMES_HOME/config.yaml`, with no
   project-local directory anywhere — so `.hermes/config.yaml`,
   `.hermes/agent-hooks/` and `.hermes/shell-hooks-allowlist.json` classify
   `policy.core` at any path position, while `$HERMES_HOME/.env` and
-  `auth.json` classify `account.credential`.
+  `auth.json` classify `account.credential`. Name the home explicitly and spell its
+  last segment `.hermes`: the classifier recognises the organ by that segment and
+  nothing else.
+- **A Hermes call whose working directory the event does not carry is refused
+  (APRV-415).** The same live probe found that the envelope's `cwd` is the Hermes
+  PROCESS directory, that `terminal` keeps a per-session recorded directory an
+  earlier `cd` moves and that no field of the event reports, and that all four file
+  tools resolve relative paths against THAT — observed as a refused write reappearing
+  under `$HERMES_HOME/cache/scratch` and a gateway session's write landing in the
+  user's home. So a `terminal` call with no absolute `workdir`, and a `write_file`,
+  `patch`, `read_file` or `search_files` call whose path is relative or missing, are
+  refused with `hook-unsupported-execution-context` and a reason naming the retry, so
+  the session repairs itself on the next call. It is the Codex `Bash` refusal
+  (APRV-310) one harness along, and it covers every gated tool because the probe
+  watched the model answer a block by retrying the same effect through another one.
+  `--dir` is now mandatory in gateway deployments for the same reason. Two related
+  corrections: a `post_tool_call` event is **not** evidence the tool ran (it fires
+  for a blocked call and after a refused timeout), so one carrying no readable result
+  is now unreadable rather than a completion; and the `hook-read-scope` conformance
+  suite goes to **2.0.0**, a major bump, because two expectations moved — a relative
+  Hermes read and a Hermes `search_files` naming no path used to allow and now deny.
 - **`approval doctor`'s harness rows cover every harness (APRV-398).** The
   settings-path list, the hook-command pattern and the organ search are now
   `Record<HarnessKind, …>` and pinned set-equal to the kind list by

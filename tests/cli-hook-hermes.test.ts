@@ -1,12 +1,15 @@
 /**
- * `approval hook hermes` (APRV-398).
+ * `approval hook hermes` (APRV-398, corrected against the live probe in
+ * APRV-415).
  *
- * Every envelope below is shaped from the PUBLISHED SOURCE of
- * `NousResearch/hermes-agent` — its tool registrations and its shell-hook
- * dispatcher — rather than from a vendor page. It is still UNVERIFIED against a
- * running session, which `docs/hermes-hook.md` states in its opening section and
- * which AC1's probe (`scripts/probes/hermes-hook.mjs`) settles. The facts that
- * shape the adapter:
+ * Every envelope below was shaped from the PUBLISHED SOURCE of
+ * `NousResearch/hermes-agent` and is now CONFIRMED by a live run: 60 envelopes
+ * from a session on `main` at `118984d7`, reported in APRV-398's notes. What the
+ * run added rather than confirmed is the third fact below, and it is the reason
+ * this suite gained the refusal cases: the envelope's `cwd` is the Hermes PROCESS
+ * directory, the `terminal` tool keeps a per-session recorded directory that a
+ * `cd` moves, and every file tool resolves a relative path against THAT. The
+ * facts that shape the adapter:
  *
  *   1. snake_case keys, and the EVENT NAMES ARE ITS OWN: `pre_tool_call` and
  *      `post_tool_call`, not `PreToolUse`. The envelope is
@@ -25,10 +28,20 @@
  *   4. `execute_code` carries a program and no path, no argv and no workdir, and
  *      its kernel can call the other tools in-process where this hook may not
  *      see them, so it is refused before anything else looks at it.
+ *   5. A CALL WHOSE DIRECTORY IS UNBOUND IS REFUSED (APRV-415): `terminal`
+ *      without an absolute `workdir`, and any path tool whose `path` is relative
+ *      or missing, get `hook-unsupported-execution-context` and a reason naming
+ *      the retry. Observed rather than reasoned: the probe's model sent no
+ *      `workdir` at all, and after each block it retried the same effect through
+ *      another tool into a directory the envelope never named.
  *
  * The single-dialect assertions are not style checks and none of them may be
  * relaxed: a second key in that object is a verdict a harness may decline to
  * parse, and a declined verdict is a session that was never gated.
+ *
+ * EVERY PATH IN THIS FILE IS ABSOLUTE, and that is load-bearing rather than
+ * tidy. A relative one would be answered by the refusal above, so a case that
+ * meant to measure a class would measure the refusal instead.
  *
  * Spawn the compiled CLI; never hand-write log lines.
  */
@@ -286,18 +299,25 @@ test("a write to the Hermes config is denied through the hook itself", () => {
   );
   assert.equal(shell.permission, "deny");
 
-  // And through the file tool, which must not be the cheaper way in.
+  // And through the file tool, which must not be the cheaper way in. Absolute,
+  // so what is measured is the CLASS rather than APRV-415's unbound-directory
+  // refusal.
   const write = verdictOf(
     hook(
       dir,
       event(dir, {
         tool_name: "write_file",
-        tool_input: { path: ".hermes/config.yaml", content: "hooks: {}\n" },
+        tool_input: { path: join(dir, ".hermes", "config.yaml"), content: "hooks: {}\n" },
       }),
       ["--timeout", "1ms", "--interval", "1ms"],
     ),
   );
   assert.equal(write.permission, "deny");
+  // The CODE is deliberately not pinned here: this second call reuses the
+  // session and tool ids of the first, so it is refused at intake rather than at
+  // the policy. What matters is that it is refused and that it is not refused for
+  // an unbound directory, which the absolute path above rules out.
+  assert.equal(write.message.includes("hook-unsupported-execution-context"), false);
 });
 
 test("the Hermes home's secrets are account.credential, not merely policy.core", () => {
@@ -322,6 +342,18 @@ test("--help prints the committable YAML with fail_closed and both timeouts", ()
   assert.match(help.stdout, /HERMES_HOME\/config\.yaml/u, "names the file the human commits");
   assert.match(help.stdout, /fail_closed: true/u, "and the key that makes this a gate");
   assert.match(help.stdout, /DEFAULT IS false/u, "and says the default is not that");
+  // APRV-415: the key is measured now rather than documented, and the build it
+  // was measured on is part of the fact. A help that said `fail_closed` blocks
+  // without saying which builds honour it would be true of one install and
+  // silently false of the other.
+  assert.match(help.stdout, /OBSERVED on main 118984d7/u, "the observed fail-closed result");
+  assert.match(help.stdout, /v0\.21\.3 \(2026\.9\.14\) fails open SILENTLY/u, "the version floor");
+  assert.match(help.stdout, /--dir IS MANDATORY/u, "a gateway session's cwd is the user home");
+  assert.match(
+    help.stdout,
+    /hook-unsupported-execution-context/u,
+    "and the refusal a call with no absolute directory gets",
+  );
   // The event is a KEY under `hooks:`, not an `event:` field on an entry. An
   // operator who copied another harness's shape would install nothing.
   assert.match(help.stdout, /^\s{4}pre_tool_call:$/mu, "the event is a mapping key");
@@ -473,23 +505,185 @@ test("terminal is classified against its PER-CALL workdir, not the session root"
   assert.equal(atRoot.permission, "deny");
   assert.match(atRoot.message, /policy\.core|policy\.edit/u);
 
-  // A workdir the harness supplies but which is NOT absolute must not be
-  // trusted into a narrower answer; the session cwd stands instead. A
-  // self-reported field may raise scrutiny, never lower it.
+  // A workdir the harness supplies but which is NOT absolute is refused rather
+  // than fallen back from (APRV-415). The fallback was the right answer on Muse,
+  // where the envelope `cwd` IS the session root; here the envelope `cwd` is the
+  // Hermes process directory and the session's own is reported nowhere, so there
+  // is no directory to fall back TO.
   const relative = verdictOf(
     hook(dir, shellEvent(dir, "echo x > APPROVAL.md", "sub"), ["--timeout", "1ms", "--interval", "1ms"]),
   );
-  assert.equal(relative.permission, "deny", "a relative workdir falls back, it does not widen");
+  assert.equal(relative.permission, "deny", "a relative workdir is refused, not narrowed");
+  assert.match(relative.message, /hook-unsupported-execution-context/u);
+});
+
+// ---------------------------------------------------------------------------
+// The unbound directory (APRV-415)
+// ---------------------------------------------------------------------------
+
+const UNBOUND = /hook-unsupported-execution-context/u;
+
+test("terminal with NO workdir is refused, and the reason names the retry", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  // The shape the live probe actually captured: the model asked for `ls -la` and
+  // sent `command` and nothing else. The directory that command would have run
+  // in is the per-session recorded one, which no field of the event carries — the
+  // envelope `cwd` is the Hermes PROCESS directory — so there is nothing for a
+  // verdict to bind.
+  const verdict = verdictOf(hook(dir, shellEvent(dir, "ls -la")));
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, UNBOUND);
+  assert.match(verdict.message, /workdir/u);
+  assert.match(verdict.message, /absolute/u, "a refusal that does not name the repair earns the retry");
+  assert.equal(rawLog(dir), before, "nothing is appended for a refusal this early");
+});
+
+test("an autonomous command is refused for its directory before its class is read", () => {
+  const dir = ready();
+  // `ls -la` is autonomous under this policy WITH a workdir (the allow case
+  // above). Without one it is refused, which is the ordering that matters: the
+  // directory is a precondition for classifying at all, not a detail the policy
+  // could excuse. A policy cannot widen this and neither can an open window.
+  const withWorkdir = verdictOf(hook(dir, shellEvent(dir, "ls -la", dir)));
+  assert.equal(withWorkdir.permission, "allow");
+  const without = verdictOf(hook(dir, shellEvent(dir, "ls -la")));
+  assert.equal(without.permission, "deny");
+  assert.match(without.message, UNBOUND);
+});
+
+test("every path tool is refused for a RELATIVE path, in the same words", () => {
+  const dir = ready();
+  const calls: Record<string, unknown>[] = [
+    { tool_name: "write_file", tool_input: { path: "probe.txt", content: "hello\n" } },
+    { tool_name: "patch", tool_input: { path: "src/widget.py", old_string: "a", new_string: "b" } },
+    { tool_name: "read_file", tool_input: { path: "README.md", limit: 5 } },
+    { tool_name: "search_files", tool_input: { pattern: "needle", target: "content", path: "src" } },
+  ];
+  for (const call of calls) {
+    const before = rawLog(dir);
+    const verdict = verdictOf(hook(dir, event(dir, call)));
+    assert.equal(
+      verdict.permission,
+      "deny",
+      `${String(call["tool_name"])} with a relative path must be refused`,
+    );
+    assert.match(verdict.message, UNBOUND);
+    assert.match(verdict.message, /relative/u);
+    assert.match(verdict.message, /absolute path/u, "the retry is named");
+    assert.equal(rawLog(dir), before, "a refusal this early appends nothing");
+  }
+});
+
+test("a path tool naming no path at all is refused too", () => {
+  const dir = ready();
+  // `write_file` always names one in practice; the case is here because the
+  // ANSWER must not depend on which key was omitted. An unnamed target resolves
+  // against the same unreported directory a relative one does.
+  const verdict = verdictOf(
+    hook(dir, event(dir, { tool_name: "read_file", tool_input: { limit: 5 } })),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, UNBOUND);
+});
+
+test("a relative entry in a future `paths` ARRAY is refused with the rest", () => {
+  const dir = ready();
+  // No Hermes tool sends a list today. If one does, an unbound entry must not
+  // arrive as a bound call: the refusal reads the array the same way the read
+  // gate does.
+  const verdict = verdictOf(
+    hook(
+      dir,
+      event(dir, {
+        tool_name: "search_files",
+        tool_input: { pattern: "needle", paths: [dir, "src"] },
+      }),
+    ),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, UNBOUND);
+});
+
+test("the refusal precedes the policy and the log entirely", () => {
+  // No APPROVAL.md and no log: a classified call in this directory answers
+  // `hook-policy-unavailable`. The unbound-directory refusal answers FIRST,
+  // which is the placement the Codex `Bash` refusal has and for its reason —
+  // nothing below it can supply a fact the call does not carry, and a repo
+  // whose policy is missing must not change what this call is told to do.
+  counter += 1;
+  const dir = join(scratch, `unbound-nopolicy-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  const verdict = verdictOf(
+    hook(dir, event(dir, { tool_name: "write_file", tool_input: { path: "probe.txt", content: "x" } })),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, UNBOUND);
+  assert.equal(
+    verdict.message.includes("hook-policy-unavailable"),
+    false,
+    "the directory is decided before the policy is even looked for",
+  );
+});
+
+test("execute_code keeps its OWN code, which is checked before the directory", () => {
+  const dir = ready();
+  // Both refusals would fire on this call: it carries no path and no workdir.
+  // The `execute_code` one wins because the REPAIRS differ — one says send an
+  // absolute path, the other says there is no spelling of this call that would
+  // be answered — and a session told the wrong repair retries forever.
+  const verdict = verdictOf(
+    hook(dir, event(dir, { tool_name: "execute_code", tool_input: { code: "print(2 + 2)" } })),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, /hook-hermes-execute-code-unbound/u);
+  assert.equal(verdict.message.includes("hook-unsupported-execution-context"), false);
+});
+
+test("a POST event with a relative path is a report, not a refusal", () => {
+  const dir = ready();
+  // The post half answers a call that has already run, so there is nothing left
+  // to bind and nothing to refuse. It prints no verdict, at exit 0, exactly as
+  // every other post event on this harness does.
+  const run = hook(
+    dir,
+    event(dir, {
+      hook_event_name: "post_tool_call",
+      tool_name: "write_file",
+      tool_input: { path: "probe.txt", content: "x" },
+      tool_response: { exit_code: 0 },
+    }),
+  );
+  assert.equal(run.stdout, "", "a post event never carries a verdict, refusal or otherwise");
+  assert.equal(run.code, 0);
+});
+
+test("a tool this adapter does not gate is not refused for its directory", () => {
+  const dir = ready();
+  // The refusal covers the shell tool, the file tools and the read tools, which
+  // is the set a verdict could bind. An unknown tool takes the path it took
+  // before, because denying every tool a later release adds would break a
+  // session on an upgrade.
+  const verdict = verdictOf(
+    hook(dir, event(dir, { tool_name: "some_future_tool", tool_input: { path: "wherever" } })),
+  );
+  assert.equal(verdict.permission, "allow");
 });
 
 // ---------------------------------------------------------------------------
 // File and read tools
 // ---------------------------------------------------------------------------
 
-test("write_file resolves its RELATIVE path against the session cwd", () => {
+test("write_file with an ABSOLUTE path is classified by the path it names", () => {
   const dir = ready();
   const verdict = verdictOf(
-    hook(dir, event(dir, { tool_name: "write_file", tool_input: { path: "probe.txt", content: "hello\n" } })),
+    hook(
+      dir,
+      event(dir, {
+        tool_name: "write_file",
+        tool_input: { path: join(dir, "probe.txt"), content: "hello\n" },
+      }),
+    ),
   );
   assert.equal(verdict.permission, "allow", "an ordinary workspace write");
 
@@ -497,12 +691,14 @@ test("write_file resolves its RELATIVE path against the session cwd", () => {
   // write: editing through a file tool must not be cheaper than editing through
   // a shell redirect.
   const protectedWrite = verdictOf(
-    hook(dir, event(dir, { tool_name: "write_file", tool_input: { path: "APPROVAL.md", content: "x" } }), [
-      "--timeout",
-      "1ms",
-      "--interval",
-      "1ms",
-    ]),
+    hook(
+      dir,
+      event(dir, {
+        tool_name: "write_file",
+        tool_input: { path: join(dir, "APPROVAL.md"), content: "x" },
+      }),
+      ["--timeout", "1ms", "--interval", "1ms"],
+    ),
   );
   assert.equal(protectedWrite.permission, "deny");
 });
@@ -516,7 +712,7 @@ test("patch is gated by the path it names, with its before and after bound", () 
         tool_name: "patch",
         tool_input: {
           mode: "str_replace",
-          path: "src/widget.py",
+          path: join(dir, "src", "widget.py"),
           old_string: "DUMMY = 0",
           new_string: "DUMMY = 1",
           replace_all: false,
@@ -531,7 +727,11 @@ test("patch is gated by the path it names, with its before and after bound", () 
       dir,
       event(dir, {
         tool_name: "patch",
-        tool_input: { path: "APPROVAL.md", old_string: "manual", new_string: "autonomous" },
+        tool_input: {
+          path: join(dir, "APPROVAL.md"),
+          old_string: "manual",
+          new_string: "autonomous",
+        },
       }),
       ["--timeout", "1ms", "--interval", "1ms"],
     ),
@@ -543,7 +743,10 @@ test("read_file inside the workspace is allowed and writes nothing", () => {
   const dir = ready();
   const before = rawLog(dir);
   const verdict = verdictOf(
-    hook(dir, event(dir, { tool_name: "read_file", tool_input: { path: "README.md", limit: 5 } })),
+    hook(
+      dir,
+      event(dir, { tool_name: "read_file", tool_input: { path: join(dir, "README.md"), limit: 5 } }),
+    ),
   );
   assert.equal(verdict.permission, "allow");
   assert.equal(rawLog(dir), before, "an in-scope read is not a gated question");
@@ -586,16 +789,22 @@ test("search_files is scoped by the ONE path it names, in both directions", () =
   assert.equal(outside.permission, "deny", "read.file.out_of_scope is human-only in this policy");
 });
 
-test("a read naming no path at all keeps the allow it has always had", () => {
+test("a read naming NO path is refused on this harness, not allowed (APRV-415)", () => {
   const dir = ready();
-  // A path the harness did not send is not a path this runtime may invent. The
-  // default target is the workspace, which is inside the gate root by
-  // construction.
+  // The reverse of the answer every other harness gives, and the reason is a
+  // measured fact rather than a preference. Claude Code's `Glob` with no path
+  // defaults to the workspace, which is inside the gate root by construction, so
+  // the pass-through allow is honest there. Hermes defaults to the per-session
+  // recorded directory instead: the probe watched one session's writes land in
+  // `$HERMES_HOME/cache/scratch` and a gateway session's in the user's home. An
+  // unnamed target here is therefore an unbounded read, not a workspace read.
   const verdict = verdictOf(
     hook(dir, event(dir, { tool_name: "search_files", tool_input: { pattern: "needle", target: "files" } })),
   );
-  assert.equal(verdict.permission, "allow");
-  assert.match(verdict.message, /^$/u, "an allow carries no message");
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, /hook-unsupported-execution-context/u);
+  assert.match(verdict.message, /names no path at all/u);
+  assert.match(verdict.message, /absolute/u, "the refusal names the retry");
 });
 
 test("a read outside the scope that does not exist is still outside it", () => {
@@ -618,11 +827,24 @@ test("a read outside the scope that does not exist is still outside it", () => {
 test("a read that escapes the root with .. is resolved before it is judged", () => {
   const dir = ready();
   // The RESOLVED path is the fact, not the spelling. A harness-supplied
-  // `<root>/../<sibling>` must not be able to describe itself as in scope.
+  // `<root>/../<sibling>` must not be able to describe itself as in scope. The
+  // spelling is ABSOLUTE and still escapes, which is what keeps this case about
+  // resolution rather than about APRV-415's refusal of a relative path.
   const verdict = verdictOf(
-    hook(dir, event(dir, { tool_name: "read_file", tool_input: { path: "../../../../etc/hosts" } })),
+    hook(
+      dir,
+      event(dir, {
+        tool_name: "read_file",
+        tool_input: { path: join(dir, "..", "..", "..", "..", "etc", "hosts") },
+      }),
+    ),
   );
   assert.equal(verdict.permission, "deny");
+  assert.equal(
+    verdict.message.includes("hook-unsupported-execution-context"),
+    false,
+    "an absolute path is placed and judged, not refused for being unplaceable",
+  );
 });
 
 test("a tool this adapter does not know is answered, not gated", () => {

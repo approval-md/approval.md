@@ -37,7 +37,15 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -466,7 +474,13 @@ let gateCounter = 0;
 let gateRoot: string | null = null;
 
 function gateHome(): string {
-  gateRoot ??= mkdtempSync(join(tmpdir(), "approval-md-conformance-"));
+  // Resolved once, so the suite says the same thing on every machine. On macOS
+  // `tmpdir()` sits under a symlink (`/var` -> `/private/var`); the classifier
+  // realpaths a shell command's target against its per-call working directory,
+  // and a gate root left unresolved then reads as OUTSIDE its own scope. That
+  // is how `hermes-terminal-absolute-workdir-allows` was regenerated as a deny
+  // on a Mac and failed as an allow on Linux CI (PR #532).
+  gateRoot ??= realpathSync(mkdtempSync(join(tmpdir(), "approval-md-conformance-")));
   gateCounter += 1;
   const dir = join(gateRoot, `case-${String(gateCounter)}`);
   mkdirSync(dir, { recursive: true });
@@ -872,9 +886,14 @@ function readScopeInput(input: Record<string, unknown>, dir: string): Record<str
     // beside the command, which is the directory the classifier must resolve
     // relative paths against. APRV-398: Hermes's `terminal` carries the same
     // fact under the same key.
+    // APRV-415: `omit_workdir` sends the shape a live Hermes session was
+    // observed sending — `command` and nothing else — which the adapter refuses
+    // because the directory the command would run in is reported nowhere on
+    // this harness.
+    const omitWorkdir = input["omit_workdir"] === true;
     return {
       command: target === null ? "ls" : `cat ${target}`,
-      ...(tool === "bash" || tool === "terminal" ? { workdir: dir } : {}),
+      ...((tool === "bash" || tool === "terminal") && !omitWorkdir ? { workdir: dir } : {}),
     };
   }
   // APRV-398: Hermes's `execute_code` carries a program and NOTHING else — no

@@ -6,65 +6,87 @@ own dialect. It resolves every command through the same deterministic core as
 classifier, same policy, same log, same refusal codes. What differs is the wire
 format, the event names, and one thing no previous adapter has had.
 
-Read the next two sections before you commit anything.
+Read the next three sections before you commit anything.
 
-> ## EVERY FACT BELOW IS DOCUMENTED AND UNVERIFIED UNTIL THE PROBE RUNS
+> ## THE HOOK IS FAIL-CLOSED, MEASURED, AND ONLY ABOVE A VERSION FLOOR
 >
-> This adapter was built from the published source of
-> [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) — its
-> tool registrations, its shell-hook dispatcher, its config parser — read on
-> 2026-09-20 against `main` (`pyproject.toml` at `0.21.3`). That is better
-> provenance than a vendor page, and it is still not a running session.
+> The probe has run (2026-09-21, 60 envelopes, APRV-398's notes). On Hermes
+> `main` at `118984d7` a per-entry `fail_closed: true` **BLOCKED all three ways a
+> hook can be broken**: the armed crash was refused, the armed garbage was
+> refused, and the armed hang was refused at exactly 300s, the per-entry cap. So
+> `approval hook hermes` is the first adapter since Claude Code that is a **gate**
+> rather than a backstop.
 >
-> `docs/muse-hook.md` is the argument for why the difference matters: on Muse,
-> three of the facts that shaped the adapter were in no source at all, and one
-> third-party claim that turned out correct sat beside another that turned out
-> wrong. The two halves of THIS document that a live run could overturn are
-> marked **UNVERIFIED** where they appear. The probe is
-> `scripts/probes/hermes-hook.mjs` and "Running the probe" below is its runbook;
-> when it has run, the register entry in
-> [docs/integrations-considered.md](integrations-considered.md) moves from parked
-> and every **UNVERIFIED** mark in this file is either deleted or corrected.
+> **The floor: a build at or after `main` `118984d7` of 2026-09-20.** `v0.21.3`
+> (build `2026.9.14`) does not know the key and **fails open silently** — the same
+> three trials all proceeded on it — and `hermes hooks list` renders no
+> `fail_closed` flag on either build, so the listing cannot be used to tell them
+> apart. Both builds report the same semver, so the floor is compared on the
+> BUILD DATE and the upstream commit that `hermes --version` prints:
 >
-> Nothing here is a guess about a field's NAME. Those were read off the source.
-> What is unverified is BEHAVIOUR: what the harness does with a hook that breaks,
-> and which spelling of an answer it honours.
+> ```text
+> Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098    <- fails open, silently
+> ```
+>
+> `approval doctor`'s `harness-version-unverified` row reads that line and fails
+> when the installed build is below the floor. It is the only surface that
+> notices, because a hook cannot report from inside a failure that did not stop
+> anything.
+>
+> **A `post_tool_call` event is NOT evidence the tool ran.** It fired 29ms after
+> an exit-2 deny and again after the refused hang. Hermes reports the end of its
+> own dispatch, not the end of an execution, so the post half reads an outcome
+> from the event's result and treats a result it cannot read as unreadable rather
+> than as a completion.
+>
+> What is still **UNPROBED** is listed under "Still UNPROBED" below, five items,
+> each with what would settle it. Nothing in this document is a guess
+> about a field's NAME: those came from the published source of
+> [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) on
+> 2026-09-20 and the live run confirmed them.
 
-## Hermes documents a fail-CLOSED hook, which no harness since Claude Code has
+## The fail-CLOSED hook, measured, which no harness since Claude Code has
 
-This is why the adapter exists at all, and it is the finding the probe is pointed
+This is why the adapter exists at all, and it is the thing the probe was pointed
 at.
 
 Every hook entry takes a per-entry `fail_closed`. With it set, three hook
-failures become a **block** rather than a shrug:
+failures become a **block** rather than a shrug. The right-hand columns are the
+live run rather than the dispatcher's source:
 
-| The hook… | With `fail_closed: true` | Without it (the default) |
-| --- | --- | --- |
-| cannot be spawned | **blocks** | proceeds |
-| exceeds its `timeout` | **blocks** | proceeds |
-| prints non-empty stdout that is not a JSON object | **blocks** | proceeds |
+| The hook… | `fail_closed: true` on `main` `118984d7` | On `v0.21.3` (2026.9.14) | Without the key |
+| --- | --- | --- | --- |
+| cannot be spawned (armed `crash`) | **blocked** | proceeded | proceeds |
+| exceeds its `timeout` (armed `hang`) | **blocked at 300s** | proceeded | proceeds |
+| prints stdout that is not a JSON object (armed `garbage`) | **blocked** | proceeded | proceeds |
 
 Grok Build and Muse Code fail open on all three with no setting to change it
 (`docs/grok-hook.md`, `docs/muse-hook.md`), so both adapters are enforcement only
-while healthy. If the table holds, `approval hook hermes` is a gate in the
-SPEC.md §11.1 sense.
+while healthy. This one is a gate in the SPEC.md §11.1 sense, above the floor.
 
-**Three caveats, and none of them is small.**
+**Four caveats, and none of them is small.**
 
-1. **The default is `false`.** An entry without the key fails open. Set it on
-   every entry; `approval hook hermes --help` prints a block that does.
-2. **It does not cover a hook that exits non-zero having printed NOTHING.** The
+1. **The version floor.** `v0.21.3` ignores the key with no warning of any kind:
+   it is not an error, not a startup complaint, and not visible in
+   `hermes hooks list`. A deployment that pins an older build has a backstop while
+   believing it has a gate. `approval doctor` is the check.
+2. **The default is `false`.** An entry without the key fails open on every build.
+   Set it on every entry; `approval hook hermes --help` prints a block that does.
+3. **It does not cover a hook that exits non-zero having printed NOTHING.** The
    condition requires a non-empty stdout, so a crash with no output slips past
    it. That gap is covered here rather than by the key: **this adapter's deny
    exits 2**, which Hermes treats as an unconditional block, so every refusal it
    reaches blocks on the exit code alone, including the ones where the body never
    made it out.
-3. **A hook Hermes never registered cannot fail either way.** See "The silent
-   no-op" below. It is the most dangerous thing in this document.
+4. **A hook Hermes never registered cannot fail either way.** See "The silent
+   no-op" below. It is still the most dangerous thing in this document.
 
-**UNVERIFIED.** The table is read from the dispatcher, not measured. The probe's
-`crash`, `hang` and `garbage` trials each run twice, once per setting, and the
-pair is the finding.
+One thing the run showed that no reading of the dispatcher would have: **after a
+block, the model retries the same effect through another tool or another path.**
+The refused crash write reappeared as a second `write_file` under
+`$HERMES_HOME/cache/scratch`, and the refused garbage write reappeared as a
+`terminal` command. That is the reason every gated tool is covered by the
+working-directory refusal below rather than the shell tool alone.
 
 ## The silent no-op, which is worse than an error
 
@@ -85,19 +107,30 @@ So one of these must be set, and a deployment that forgets it has no gate:
 - `--accept-hooks` on the command line.
 
 `approval doctor` is the check that catches the omission after the fact: its
-harness-version row now reads `$HERMES_HOME/config.yaml` and reports whether this
-checkout's hook is registered anywhere at all (APRV-398 gave the same row to
-`grok` and `muse`, which had never had one).
+`harness-version-unverified` row reads `$HERMES_HOME/config.yaml`, reports whether
+this checkout's hook is registered anywhere at all (APRV-398 gave the same row to
+`grok` and `muse`, which had never had one), and since APRV-415 also reports a
+build below the fail-closed floor.
+
+The gateway pass added one fact to this section: **the hooks DO fire for gateway
+sessions**, pre and post, when consent was recorded earlier from a TTY. What is
+still unprobed is first use with no prior TTY approval, which is the sandbox case,
+and that is precisely why one of the three settings above is mandatory rather than
+convenient.
 
 ## The dialect: one form each way, and the allow is not what you would guess
 
-Hermes's shell-hook parser accepts two block dialects, tried in this order:
+Hermes's shell-hook parser accepts two block dialects, tried in this order. Every
+row below was measured one trial at a time under `fail_closed: true`:
 
 | Form | Blocks? |
 | --- | --- |
-| `{"action":"block","message":"…"}` | yes (its own) |
-| `{"decision":"block","reason":"…"}` | yes (Claude-compatible) |
-| exit code 2, whatever stdout said | yes, unconditionally, on `pre_tool_call` only |
+| `{"action":"block","message":"…"}` | **yes**, observed (its own) |
+| `{"decision":"block","reason":"…"}` | **yes**, observed (Claude-compatible) |
+| exit code 2, with nothing on stdout | **yes**, observed, on `pre_tool_call` only |
+| every dialect at once (`deny-mixed`) | **yes**, observed — Hermes tolerates a superset |
+| `{}`, or an empty stdout | allows, observed |
+| an invented `{"action":"allow"}` | allows, observed (it falls through as an unrecognised directive) |
 
 **This adapter emits the native form, at exit 2, and nothing else.**
 
@@ -106,8 +139,14 @@ first and the one least likely to be dropped by a release that tidies up a
 compatibility layer. One form rather than both because of Muse: there, a verdict
 carrying a key the harness did not support was itself unparseable, an unparseable
 hook was a failed hook, and a failed hook failed open — so being *more* explicit
-made the refusal *weaker*. Hermes may well tolerate a superset; being right about
-one dialect costs nothing and the other bet costs a session.
+made the refusal *weaker*.
+
+**Hermes is not Muse on that point, and the mixed payload blocked here.** One
+dialect is kept anyway, and the reason is now the smaller one: the tolerance is a
+property of one release, and a verdict whose meaning depends on how much of it the
+harness understood is a verdict a reader cannot check. The measurement is in the
+table so that a future task weighing the same question starts from it rather than
+from this paragraph.
 
 Exit 2 **as well as** the body, which is the one place Muse's lesson does not
 carry over, and the difference is in Hermes's own code rather than in taste.
@@ -135,35 +174,49 @@ directive key, and no directive means the call proceeds. So:
   the loop floor's own words when one stood. Hermes reads stderr only as a block
   message at the blocking exit code, which an allow never uses.
 
-**UNVERIFIED.** The probe's `allow-empty-object` trial is what licenses `{}`, and
-`allow-action-allow` measures the invented spelling so the choice is recorded
-rather than asserted.
+**Both halves are measured.** The `allow-empty-object` trial created its file
+under `fail_closed: true`, which licenses `{}`; `allow-action-allow` also created
+its file, which is the invented spelling working *by falling through*, and is
+exactly why it is not shipped.
 
 ## Installing it
 
 The file a human commits is **`$HERMES_HOME/config.yaml`**, and it is not in the
 repository. Hermes has no project-local configuration directory: `HERMES_HOME`
-comes from a context override, then the environment variable, then `~/.hermes`.
+comes from a context override, then the environment variable, then a default this
+page deliberately does not build on.
 
-That makes this the first gate organ that lives in the user's home, and the
-classifier follows it there. `.hermes/config.yaml`, `.hermes/agent-hooks/`,
-`.hermes/shell-hooks-allowlist.json` and `.hermes/hooks*` are `policy.core`
-wherever they sit — `.hermes/config.yaml`, `/Users/x/.hermes/config.yaml` and
-`~/.hermes/config.yaml` all match, because the classifier's segment walk was
-already position-agnostic and nothing was extended for this. An agent that could
-write any of them could write itself out of the gate, and the allowlist is the
-sharpest of the four: an agent that could edit it could pre-consent itself to a
-hook command of its own.
+**Name the home, and spell its last segment `.hermes`.** On this machine there is
+one home, under the Hermes checkout rather than under `$HOME`, and every example
+below uses it:
 
-**The match is on the directory NAME, and that is a limit to know about.** The
-classifier is pure and reads no environment, so it cannot know what `HERMES_HOME`
-points at; it recognises the organ by a `.hermes` path segment. A home directed
-elsewhere (`--hermes-home /srv/tenant-7/home`, say) holds the same `config.yaml`
-and the same allowlist, and a write to it classifies as an ordinary workspace or
-out-of-scope write rather than `policy.core`. Keep the last segment of every
-`HERMES_HOME` spelled `.hermes` (`/srv/tenant-7/.hermes`) and the organ is
-recognised wherever it sits; name it anything else and this protection is not
-there. The probe runbook below follows that rule for the same reason.
+```sh
+export HERMES_HOME=/Users/carter/dev/hermes/.hermes
+```
+
+Two reasons, and the first is enforcement rather than tidiness. The classifier is
+pure and reads no environment, so it cannot know what `HERMES_HOME` points at: it
+recognises the organ by a **`.hermes` path segment**. A home whose last segment is
+spelled anything else — `/Users/carter/dev/hermes/home`, which is what the
+2026-09-20 install created before it was renamed — holds the same `config.yaml` and
+the same allowlist, and a write to it classifies as an ordinary workspace or
+out-of-scope write rather than `policy.core`. The rule generalizes: any
+`HERMES_HOME` is fine as long as its last segment is `.hermes`
+(`/srv/tenant-7/.hermes`), and nothing else gets this protection.
+
+The second reason is that a home nobody named is whatever `$HOME` resolves to in
+the process that happens to start Hermes, and the live run caught a gateway service
+and a terminal disagreeing about exactly that.
+
+With the last segment right, the organ is recognised wherever it sits.
+`.hermes/config.yaml`, `.hermes/agent-hooks/`,
+`.hermes/shell-hooks-allowlist.json` and `.hermes/hooks*` are `policy.core` at any
+path position, so `/Users/carter/dev/hermes/.hermes/config.yaml` and a
+repository-relative `.hermes/config.yaml` both match: the classifier's segment walk
+was already position-agnostic and nothing was extended for this. An agent that
+could write any of them could write itself out of the gate, and the allowlist is
+the sharpest of the four — an agent that could edit it could pre-consent itself to
+a hook command of its own.
 
 `$HERMES_HOME/.env` and `$HERMES_HOME/auth.json` are a different class again:
 `account.credential`, human-only, because what leaves the machine there is the
@@ -183,11 +236,16 @@ hooks:
       timeout: 300
 ```
 
-Four things about that shape:
+Five things about that shape:
 
 - **The event is a mapping KEY, not an `event:` field.** `hooks:` maps an event
   name to a list of entries. An operator who copied another harness's
   `- event: pre_tool_call` shape would produce a file that configures nothing.
+- **`--dir` is not optional.** It names the checkout whose policy and log the hook
+  resolves against. Without it the hook resolves them from wherever Hermes happens
+  to be running, and on this harness that is not the project: a gateway session's
+  `cwd` was the user's home. See "The working directory is not where you think"
+  below.
 - **`matcher` is optional and is omitted here.** It is a regex (full match) on the
   tool name, supported on the two tool events only. Omitting it matches every
   tool, which is what a gate wants.
@@ -235,9 +293,9 @@ Tool names and argument keys are Hermes's own, read off its tool registrations:
 
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
-session root, so a relative path resolves the way the shell will resolve it. A
-`workdir` that is not absolute is ignored in favour of the session `cwd`: a
-self-reported field may raise scrutiny, never lower it.
+session root, so a relative path resolves the way the shell will resolve it. What
+the live run added is that having the field is not the same as being sent it, which
+is the next section.
 
 **`search_files` is both readers behind one enum, and it names ONE path.** There
 is no `glob`, no `grep` and no `list_files` on this harness, and **no tool takes a
@@ -256,31 +314,110 @@ second is the stronger one:
    never parsed. SPEC.md §11.1 resolves ambiguity to the stricter path.
 2. `execute_code` runs in a persistent kernel whose scripts can call Hermes's
    other tools **in-process**. Whether those inner calls re-fire `pre_tool_call`
-   is **UNVERIFIED and is the highest-risk unknown about this harness**: if they
-   do not, one `execute_code` call is an unbounded bypass of this entire adapter.
-   Refusing the tool is the only answer available to a hook that cannot see
-   inside it.
+   is **still UNPROBED and is the highest-risk unknown about this harness**: if
+   they do not, one `execute_code` call is an unbounded bypass of this entire
+   adapter. The live run cannot settle it, and the reason is the refusal working:
+   both `execute_code` calls were refused before they ran (the model asked twice),
+   so no inner call was ever made. Settling it means arming the probe to ALLOW one
+   `execute_code` call in a scratch project and watching whether a tool call from
+   inside the kernel produces an envelope. Until somebody does that, refusing the
+   tool is the only answer available to a hook that cannot see inside it.
 
 The code is distinct from its two nearest neighbours because the repairs differ.
 `hook-opaque` says a command line carried a construct the classifier could not
 read, and its repair is to write the command differently — there is no rewriting
 of an `execute_code` call. `hook-unsupported-execution-context` says the harness
-did not say *where* a call would run, and its repair is a harness contract that
-exposes the directory — here there is no path, argv or directory to expose. The
-repair for this one is to do the work through `terminal`, where the words are
-visible, or through `approval run` with a granted token.
+did not say *where* a call would run, and on this harness its repair is available
+to the session itself (the next section) — here there is no path, argv or directory
+to expose at all. The repair for this one is to do the work through `terminal`,
+where the words are visible, or through `approval run` with a granted token.
+
+## The working directory is not where you think, and unbound calls are refused
+
+This is the finding of APRV-415, it came from the live run rather than from the
+source, and it changes what a session may send.
+
+Three facts, and the trouble is in how they combine:
+
+1. **the envelope's `cwd` is the Hermes PROCESS directory** (`Path.cwd()` in its
+   payload builder), not the session's working directory and not the project;
+2. **`terminal` keeps a per-session recorded working directory** that a `cd` in an
+   earlier call moves, and **no field of the event reports it**;
+3. **all four file tools resolve a RELATIVE path against that same recorded
+   directory** (`tools/file_tools_paths.py`, `_resolve_path_for_task`).
+
+So a call that does not name an absolute directory would be classified against one
+directory and executed in another. Two observations of that, both from the run: a
+session launched in the scratch project wrote into
+`$HERMES_HOME/cache/scratch`, and a Telegram gateway session's `cwd` was the user's
+**home**, where its file landed. And the model sent no `workdir` at all on the
+probe's shell call, so this is the ordinary case rather than an edge one.
+
+**The answer is a refusal, and it names its own repair:**
+
+| The call | Answered with |
+| --- | --- |
+| `terminal` with an absolute `workdir` | classified normally, the existing gate path |
+| `terminal` with no `workdir`, or a relative one | `hook-unsupported-execution-context` |
+| `write_file`, `patch`, `read_file`, `search_files` with an absolute `path` | classified normally |
+| the same tools with a relative `path`, or with none | `hook-unsupported-execution-context` |
+
+The reason text tells the model exactly what to send instead — set `workdir` to an
+absolute path, or spell the path in full from `/` — so a session repairs itself on
+the next call rather than stalling. That matters more here than it would elsewhere,
+because the run also showed what a blocked model does: **it retries the same effect
+through another tool or another path.** A refusal that covered only `terminal` would
+have moved the work into `write_file`, which is why every gated tool is covered.
+
+Three things worth being explicit about:
+
+- **a missing path is refused like a relative one.** On Claude Code, a `Glob` with
+  no path means the workspace, which is inside the gate root by construction. On
+  Hermes it means that same unreported recorded directory, so the pass-through
+  allow other adapters give it would be an unbounded read here;
+- **the fallback other adapters use is not available.** On Muse a non-absolute
+  `workdir` falls back to the event `cwd`, which on that harness IS the session
+  root. Here the event `cwd` does not even contain the work, so there is no
+  directory to fall back to and a fallback would be a guess (SPEC.md §11.1:
+  ambiguity resolves to the stricter path, and a self-reported field never lowers
+  scrutiny);
+- **the refusal is above the policy.** It is answered before the policy is loaded,
+  before the log is read and before an open window is looked up, because none of
+  those can supply a fact the call does not carry. `approval hook classify` is
+  unaffected: it reads command text and no directory.
+
+The probe has a `modify-workdir` trial for the one thing that could retire this
+refusal. Hermes documents `{"action":"modify", args}` beside `block`; if a hook may
+rewrite a call's `workdir`, the adapter could PIN the directory it classified the
+way the Codex adapter pins exact command bytes through `updatedInput`, and the
+session would never see a refusal. **UNPROBED:** the trial was added after the live
+round and has not been run.
 
 **The post half prints nothing on stdout.** A verdict there would be a permission
 decision about a call that has already run. Exit 2 is Hermes's blocking code, so
 the post half always exits 0 as well, and the diagnostic goes to stderr. It reads
 an outcome from the event's result where one is present — an `exit_code` decides a
 shell call, an `error` decides anything, an interrupt is **unreadable** rather
-than assumed either way — and falls back to the event name, which is Hermes saying
-which of its own code paths ran.
+than assumed either way.
 
-**UNVERIFIED:** which key the post event's result arrives under. The reader is
-shape-only and falls back to the event name, so a result it cannot read closes the
-start on the weakest honest evidence rather than on a guess.
+**A post event is NOT evidence the tool ran, and this is the correction the live
+run forced.** `post_tool_call` fired 29ms after an exit-2 deny, and it fired again
+after the armed hang was refused at the 300s cap. Hermes reports the end of its own
+dispatch, not the end of an execution. So an envelope carrying **no readable
+result** is now treated as unreadable rather than as a completion: crediting a
+completion on the event name alone would clear a failure streak (amended SPEC.md
+§10.2) for a call that may have been blocked. A blocked call usually has no
+`execution.started` to close, because the pre half appended nothing; the case this
+protects is the one where the pre half ALLOWED and something later in Hermes's own
+executor — `approvals.mode`, a guardrail, a tool-scope check — stopped the call
+anyway.
+
+**UNPROBED:** which key a real post event's result arrives under. The capture holds
+post envelopes but the round did not enumerate their result keys, so the reader is
+shape-only over `exit_code`/`exitCode`/`returncode`, `error` and `status`. A result
+object naming none of those is read as a completion, which is the one place this
+reader still leans generous, and the repair is one more key here once a capture
+names it.
 
 ### The hook runs BEFORE Hermes's own approval prompt
 
@@ -301,10 +438,6 @@ off.
 - The session's reads *before* the first hook fires.
 - `execute_code`'s in-process tool calls, if those bypass the hook. Refused
   rather than covered.
-- **Subagents.** `delegate_task` can run a child agent in an isolated worktree,
-  and whether that child inherits this `HERMES_HOME` and its hooks is
-  **UNVERIFIED**. A child with a different config is a session this gate never
-  sees.
 - MCP tools register into the same tool registry, so they *should* flow through
   the same dispatch. Not traced end to end.
 - A tool Hermes adds in a later release. An unknown tool takes the path it took
@@ -313,29 +446,77 @@ off.
 - The events this hook is not registered for. Hermes has some forty hook events;
   this adapter speaks two.
 
+### Still UNPROBED, and what would settle each
+
+The live round of 2026-09-21 settled the fail-closed question, the dialects, the
+envelope shape, the tool names and the working directory. These five it did not,
+and each one says what a next round would have to do. Nothing on this list is a
+guess dressed as a fact: where the adapter had to choose, it chose the refusing
+side.
+
+1. **`execute_code`'s in-process tool calls.** Whether a tool call made from inside
+   the persistent kernel re-fires `pre_tool_call`. Arm the probe to ALLOW one
+   `execute_code` call in the scratch project and see whether an envelope appears
+   for the inner call. The highest-risk unknown here.
+2. **First-use consent with no TTY.** The gateway pass ran with consent already
+   recorded from a terminal, so it proves the hooks fire for gateway sessions and
+   nothing about the sandbox case. Clear
+   `$HERMES_HOME/shell-hooks-allowlist.json`, run headless with and without
+   `hooks_auto_accept`, and see whether the hook registers.
+3. **The `modify` directive.** `arm modify-workdir`, ask for the artifact through
+   the shell, and read WHERE it lands. If honoured, the refusal above could become
+   a pin the session never sees.
+4. **The post event's result keys.** Enumerate the keys a real `post_tool_call`
+   carries for a shell call, a write and a failure, so the outcome reader stops
+   leaning on shapes.
+5. **Subagents.** `delegate_task` can run a child agent in an isolated worktree,
+   and whether that child inherits this `HERMES_HOME` and its hooks is untested. A
+   child with a different config is a session this gate never sees. Ask for a
+   delegated task and look for its envelopes.
+
 ## Running the probe
 
 The runbook, verbatim, so it survives without the conversation it was written in.
-Carter runs it; no agent runs `hermes`.
+It has been run once (2026-09-21) and it is written to be run again: the findings
+it settled are marked as such in the sections above, and the five it did not are
+listed under "Still UNPROBED". Carter runs it; no agent runs `hermes`.
 
-**A live model is needed first**, because the probe measures TOOL CALLS and only a
-model makes them. If the install has no provider configured:
+**TWO WINDOWS, and which one needs a restart.** The probe is driven from a shell
+while Hermes runs in another, and the two have different rhythms:
 
-The install of 2026-09-20 was directed at `/Users/carter/dev/hermes/home`, whose
-last segment is not `.hermes`, so the classifier would not recognise that home as
-a gate organ (see "Installing it"). `--skip-setup` left it all but empty, so
-rename it once before anything else:
+- **`arm` needs no restart.** It writes a control file the hook reads on the next
+  call, so arm a trial in window A and type the prompt in the already-running
+  Hermes in window B;
+- **`fail-closed on|off` DOES need a restart.** It rewrites `config.yaml`, and
+  Hermes reads that at startup. Quit and relaunch Hermes after every switch, or the
+  trial runs under the previous setting and the pair is worthless;
+- one arm, one call. It is consumed by the next pre event, so a crash or a hang
+  leaves nothing armed behind.
+
+In window A, this saves typing the path forty times:
 
 ```sh
-mv /Users/carter/dev/hermes/home /Users/carter/dev/hermes/.hermes
+probe() { node /Users/carter/dev/approval-md/scripts/probes/hermes-hook.mjs "$@"; }
 ```
+
+Everything below is written as `probe <verb>` on the assumption that function is
+defined.
+
+**A live model is needed first**, because the probe measures TOOL CALLS and only a
+model makes them. The home is the one "Installing it" names, and its last segment
+must stay `.hermes` or the classifier stops recognising the organ:
 
 ```sh
 export HERMES_HOME=/Users/carter/dev/hermes/.hermes
+hermes --version        # check the fail-closed floor BEFORE anything else
 hermes setup            # the wizard: pick a provider and paste a key
 hermes setup --portal   # or Nous Portal specifically
 hermes model            # change the provider or model later
 ```
+
+**Check `hermes --version` first.** A build before `main` `118984d7` of 2026-09-20
+ignores `fail_closed` silently, which is what made the first round of this probe
+measure the wrong thing for a day (`hermes update` fixes it).
 
 Point it at the cheapest small model the provider lists. The five prompts below
 are one-line tool calls, so capability is irrelevant and spend is the only axis
@@ -347,7 +528,7 @@ from `hermes model`'s list rather than from this page. Keys live in
 **Step 1 — install the hook block and get the prompts.** One command:
 
 ```sh
-node scripts/probes/hermes-hook.mjs setup \
+probe setup \
   --home /Users/carter/dev/hermes/.hermes \
   --captures /Users/carter/dev/hermes/probe
 ```
@@ -360,10 +541,12 @@ top-level keys, and a config Hermes cannot parse starts with **no hooks at all**
 which looks identical to a probe that never fired. Captures land in
 `--captures`, which is where the findings outlive the scratch root.
 
-With no `--home` it builds a scratch `HERMES_HOME` of its own instead, which is
-what the test suite drives. It never assumes `~/.hermes`: an install directed
-elsewhere with `--hermes-home` would leave the probe writing a config nothing
-reads.
+**With `--home` the REAL home is used**, and the banner says so: the block sits
+between the markers, the backup holds what was there before, and the scratch
+project is the whole of the control. With no `--home` it builds a scratch
+`HERMES_HOME` of its own instead, which is what the test suite drives, and the
+banner says that instead. It never assumes a default home: an install directed
+elsewhere would leave the probe writing a config nothing reads.
 
 **Step 2 — the baseline.** In the scratch project the setup names, with
 `HERMES_HOME` exported, run `hermes` and type these five prompts separately:
@@ -378,30 +561,38 @@ reads.
 
 **Step 3 — the fail-closed trials. The point of the whole probe.** Each of
 `crash`, `hang` and `garbage` runs **twice**, once with `fail_closed: true` and
-once without; the pair is the finding. Quit `hermes` between trials. `hang` blocks
-past the 600s timeout: let it, and do not interrupt it.
+once without; **the pair is the finding**, and pass B is what shows the key is what
+caused pass A's blocks. The 2026-09-21 round ran pass A only, so the report labels
+the two and says which one is missing. `hang` blocks past the 600s timeout: let it,
+and do not interrupt it.
 
 ```sh
-node scripts/probes/hermes-hook.mjs fail-closed on
-  node scripts/probes/hermes-hook.mjs arm crash     # then: create a file named crash-failclosed-probe.txt containing x
-  node scripts/probes/hermes-hook.mjs arm hang      # then: hang-failclosed-probe.txt
-  node scripts/probes/hermes-hook.mjs arm garbage   # then: garbage-failclosed-probe.txt
-node scripts/probes/hermes-hook.mjs fail-closed off
-  node scripts/probes/hermes-hook.mjs arm crash     # then: crash-failopen-probe.txt
-  node scripts/probes/hermes-hook.mjs arm hang      # then: hang-failopen-probe.txt
-  node scripts/probes/hermes-hook.mjs arm garbage   # then: garbage-failopen-probe.txt
+probe fail-closed on        # then QUIT AND RELAUNCH hermes
+  probe arm crash           # then: create a file named crash-failclosed-probe.txt containing x
+  probe arm hang            # then: hang-failclosed-probe.txt
+  probe arm garbage         # then: garbage-failclosed-probe.txt
+probe fail-closed off       # then QUIT AND RELAUNCH hermes again
+  probe arm crash           # then: crash-failopen-probe.txt
+  probe arm hang            # then: hang-failopen-probe.txt
+  probe arm garbage         # then: garbage-failopen-probe.txt
 ```
 
 `fail-closed` rewrites only the region between the markers; everything else in
-that config is the operator's and is left alone. Restart `hermes` after each
-switch so it re-reads the file.
+that config is the operator's and is left alone. The restart is not optional: the
+config is read at startup, while an `arm` is read on the next call.
+
+**Read the report's PRESENT artifacts twice.** After a block the model retries the
+same effect through another tool or path, and a retry can create the very file whose
+absence was the measurement. That happened twice on the live round, so the report
+now names any later call that mentioned the same path and says to read that envelope
+before concluding.
 
 **Step 4 — the dialect trials, with `fail_closed` ON.** The first two are the
 forms the shipped adapter emits; if either is the wrong answer, nothing else
 matters.
 
 ```sh
-node scripts/probes/hermes-hook.mjs fail-closed on
+probe fail-closed on        # then QUIT AND RELAUNCH hermes
 # then arm each of, one prompt per trial, creating <trial>-failclosed-probe.txt:
 #   deny-action-exit2   allow-empty-object
 #   deny-action   deny-decision   deny-exit2   deny-mixed
@@ -409,18 +600,32 @@ node scripts/probes/hermes-hook.mjs fail-closed on
 ```
 
 `deny-mixed` is the one trial that is deliberately not single-variable: it prints
-every dialect at once, which is the payload that failed OPEN on Muse.
-`allow-action-allow` prints the invented `{"action":"allow"}`, to find out whether
-an unrecognised directive *value* still falls through to an allow or is a parse
-failure — and under `fail_closed: true` a parse failure is a block.
+every dialect at once, which is the payload that failed OPEN on Muse. It blocked
+here, so Hermes tolerates a superset. `allow-action-allow` prints the invented
+`{"action":"allow"}` and also allowed, which is the spelling working by falling
+through, and is why the adapter does not ship it.
+
+**Step 4b — the `modify` trial, which has not been run.**
+
+```sh
+probe arm modify-workdir
+# then, in hermes: run the shell command: touch modify-workdir-failclosed-probe.txt
+```
+
+It reads differently from every trial above: the answer is WHERE the artifact
+landed. In `modify-target/` means Hermes **honoured** the hook's `workdir`, in the
+project root means it **ignored** it, and in neither means the call never ran. A
+honoured directive is the one result that could retire the unbound-directory
+refusal, so it is worth a second confirming round before anything depends on it.
 
 **Step 5 — the report.**
 
 ```sh
-node scripts/probes/hermes-hook.mjs report
+probe report
 ```
 
-Its first section is the fail-closed answer. Paste the whole thing into the task.
+Its first section is the fail-closed answer, with both passes labelled. Paste the
+whole thing into the task.
 
 ## For Agent Village
 
@@ -432,16 +637,37 @@ hosted daemon are not.
 
 What follows from the sections above, for that deployment:
 
-- **One `HERMES_HOME` per tenant.** The hook config, the consent allowlist and the
-  provider key all live there, so per-tenant isolation is per-directory isolation.
-  Set `HERMES_HOME` explicitly in each sandbox rather than relying on `~/.hermes`,
-  which in a container is whatever `$HOME` happens to be.
+- **One `HERMES_HOME` per tenant, and start that tenant's gateway from it.** The
+  hook config, the consent allowlist and the provider key all live there, so
+  per-tenant isolation is per-directory isolation. Export `HERMES_HOME` explicitly
+  in each sandbox, spell its last segment `.hermes`
+  (`/srv/tenant-7/.hermes`), and launch `hermes gateway run` with that variable in
+  its environment rather than inheriting whatever `$HOME` is in a container. A
+  gateway started from the wrong home reads the wrong consent allowlist and the
+  wrong hooks block, and neither mistake announces itself.
+
+  On this machine that matters today rather than in October: the 2026-09-20
+  install's launchd service (`ai.hermes.gateway-<id>`) runs against the DEFAULT home
+  under `$HOME`, not against `/Users/carter/dev/hermes/.hermes`, so it is a gateway
+  this repository's hooks block does not cover. It had to be stopped for the gateway
+  pass of the probe and was restarted afterwards.
+- **`--dir` on every entry.** The gateway pass showed a session whose envelope `cwd`
+  was the user's HOME, so a hook without `--dir` would resolve its policy and log
+  from there. In a sandbox that is the tenant's container root, which holds neither.
 - **`hooks_auto_accept: true` or `HERMES_ACCEPT_HOOKS=1` is mandatory.** A sandbox
   has no TTY, and without one of these the hook is silently never registered. This
-  is the single most likely way a tenant ends up ungated while looking gated.
-- **`fail_closed: true` on every entry**, and `plugins.hook_callback_timeout`
-  raised, and `--timeout` under 300s. The five-minute ceiling is the resident's
-  answering window.
+  is the single most likely way a tenant ends up ungated while looking gated. The
+  gateway pass ran with consent already recorded from a terminal, so the headless
+  first-use case is still unprobed and this line is still the load-bearing one.
+- **`fail_closed: true` on every entry, above the version floor.** Plus
+  `plugins.hook_callback_timeout` raised and `--timeout` under 300s. The
+  five-minute ceiling is the resident's answering window. Pin the Hermes build at or
+  after `main` `118984d7`: an older image ignores the key and every tenant on it has
+  a backstop rather than a gate.
+- **Absolute paths, or a refusal.** A tenant's agent that sends a `terminal` call
+  with no `workdir`, or a relative path, gets
+  `hook-unsupported-execution-context` and a reason telling it to retry absolutely.
+  Residents should be told this once rather than discovering it as a wall.
 - **`execute_code` is refused**, so a resident's agent cannot run arbitrary Python
   through this gate at all. That is a real loss of capability and it is the honest
   trade while its in-process tool calls are unverified.
@@ -462,47 +688,60 @@ rely on: a record a resident's grant produces carries the id of the daemon that
 wrote it, so a resident reading their own log can tell which village process acted
 for them.
 
-## SPEC status
+## SPEC status: two hunks PROPOSED, with the evidence, for a human to apply
 
-SPEC.md has **not** been amended for this adapter, and the reason is different
-from the reason `docs/grok-hook.md` and `docs/muse-hook.md` give.
+SPEC.md is still **unamended** by this task, because an agent may not edit it. What
+has changed since APRV-398 wrote this section is the condition it was waiting on.
+That task's AC5 said: amend only if the probe shows fail-closed enforcement. **The
+probe showed it** — crash, garbage and hang all refused on `main` `118984d7`, three
+of three, the trials and their artifacts recorded in APRV-398's notes. So the two
+hunks below are proposed for Carter to apply, not deferred again, and the evidence
+each rests on is named beside it.
 
-Those two say a row would be false: their harnesses fail open, so the SPEC's gate
-language does not describe them. Here a row might well be **true** — a harness
-with a documented fail-closed hook is the first one since Claude Code that the
-gate language fits. But it is not yet *established*, and a SPEC that asserted a
-fail-closed gate on documentation alone would be the confident-stale
-documentation this project exists to avoid. The condition in APRV-398's own AC5 is
-explicit: amend only if the probe shows fail-closed enforcement.
+This is where the Hermes entry parts company with `docs/grok-hook.md` and
+`docs/muse-hook.md`. Those two say a row would be FALSE: their harnesses fail open,
+so the SPEC's gate language does not describe them. Here the gate language fits, and
+fits with a measurement behind it.
 
-So the hunks below are proposed, not applied, for a human to decide on **after**
-the probe. Two of them:
-
-The §10 verb listing gains one line:
+**Hunk 1 — the §10.1 verb listing gains one line.** Evidence: the dialect trials and
+the fail-closed trials, plus `tests/cli-hook-hermes.test.ts`'s one-dialect
+assertion.
 
 ```
 approval hook hermes               # gate a Hermes Agent session: snake_case
                                    #   pre_tool_call/post_tool_call JSON in, ONE
                                    #   dialect out ({action,message}), deny at
-                                   #   EXIT 2 which blocks unconditionally. The
-                                   #   harness documents a per-entry
-                                   #   fail_closed that BLOCKS on hook crash,
-                                   #   timeout and unparseable output, whose
-                                   #   default is false; execute_code is refused
-                                   #   outright. See docs/hermes-hook.md
+                                   #   EXIT 2 which blocks unconditionally. A
+                                   #   per-entry fail_closed BLOCKS on hook
+                                   #   crash, timeout and unparseable output
+                                   #   (observed on main 118984d7; its default
+                                   #   is false, and v0.21.3 ignores it
+                                   #   silently). execute_code is refused
+                                   #   outright, and so is any call whose
+                                   #   effective directory the event does not
+                                   #   carry. See docs/hermes-hook.md
 ```
 
-The §11.1 organ list gains `$HERMES_HOME/config.yaml`, `$HERMES_HOME/agent-hooks/`
-and `$HERMES_HOME/shell-hooks-allowlist.json`, which is the first entry in that
-list that is **not repository-relative**. That is the part worth a human's
-attention rather than a nod: every other organ this project protects sits in a
-checkout, and the sentence that describes the set would have to change shape to
-admit one that does not.
+**Hunk 2 — the §11.1 organ list gains three paths that are not repository-relative:**
+`$HERMES_HOME/config.yaml`, `$HERMES_HOME/agent-hooks/` and
+`$HERMES_HOME/shell-hooks-allowlist.json`, with `$HERMES_HOME/.env` and
+`$HERMES_HOME/auth.json` as `account.credential` beside them. Evidence:
+`approval hook classify` answers `policy.core` for a write to the config at any path
+position and `account.credential` for a read of the env file, quoted in
+[docs/integrations-considered.md](integrations-considered.md).
 
-If the probe confirms the fail-closed table, a third hunk becomes arguable and is
-deliberately not drafted here: a §6.3 statement that a harness hook can be
-enforcement rather than a backstop, which is currently true of exactly one
-harness and would become true of two.
+This is the hunk worth a human's attention rather than a nod, for two reasons.
+Every other organ this project protects sits in a checkout, so the sentence that
+describes the set has to change shape to admit one that does not. And the protection
+is **conditional on the spelling**: the classifier recognises these by a `.hermes`
+path segment, so the SPEC text should say that a home whose last segment is spelled
+otherwise is not protected, rather than implying the set is closed under any
+`HERMES_HOME`.
+
+A third hunk is now arguable and is still deliberately not drafted: a §6.3 statement
+that a harness hook can be enforcement rather than a backstop, which was true of
+exactly one harness and is now true of two. It is a change to a general claim rather
+than an added row, so it wants its own task and its own reading of §6.3.
 
 ## Related
 
@@ -514,7 +753,11 @@ harness and would become true of two.
   per-call working directory, which is the fact `terminal` supplies here.
 - [docs/claude-code-hook.md](claude-code-hook.md) — the original adapter, and the
   classifier tables every adapter shares.
+- [docs/codex-hook.md](codex-hook.md) again, for the refusal this one is modelled
+  on: `hook-unsupported-execution-context` on a `Bash` call whose directory the
+  native contract withholds. Same code, same defect, different repair — there the
+  fix is upstream, here the session sends an absolute path.
 - [docs/integrations-considered.md](integrations-considered.md) — the register
-  entry, parked pending the probe.
+  entry, **adopted with caveats** since the probe ran.
 - `scripts/probes/hermes-hook.mjs` — the probe, and `tests/probe-hermes-hook.test.ts`
   the suite that makes it safe to run once.

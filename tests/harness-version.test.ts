@@ -42,13 +42,18 @@ import { openWindow } from "../src/core/gate-window.js";
 import {
   HARNESS_BINARY,
   HARNESS_KINDS,
+  HARNESS_RAW_VERSION_LIMIT,
   HARNESS_VERSION_LIMIT,
+  HERMES_FAIL_CLOSED_FLOOR,
   harnessProvenance,
+  hermesFailClosedSupport,
   installedHarnessVersion,
   isHarnessKind,
   normalizeHarnessVersion,
+  parseHermesVersion,
   probeHarnessVersion,
   readHarnessProvenance,
+  rawHarnessVersionLine,
   resetHarnessVersionCache,
 } from "../src/core/harness-version.js";
 import type { EventRecord } from "../src/core/log.js";
@@ -85,6 +90,84 @@ test("normalizeHarnessVersion takes the first line, trimmed, and nothing else", 
   assert.equal(normalizeHarnessVersion("v".repeat(HARNESS_VERSION_LIMIT + 1)), null);
   assert.equal(normalizeHarnessVersion(42), null);
   assert.equal(normalizeHarnessVersion(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// The Hermes fail-closed version floor (APRV-415)
+// ---------------------------------------------------------------------------
+
+/**
+ * What `hermes --version` printed on the build that FAILS OPEN, verbatim.
+ *
+ * Quoted from the live probe (APRV-398's notes) rather than composed, because the
+ * separator is the load-bearing byte: it is U+00B7, so the write boundary's
+ * printable-ASCII rule refuses the whole line and no record can carry a Hermes
+ * version. That is why the floor is read from the installed binary.
+ */
+const HERMES_OLD_VERSION = "Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098";
+
+/** The same shape, stamped on or after the floor. */
+const HERMES_FLOOR_VERSION = "Hermes Agent v0.21.3 (2026.9.20) · upstream 118984d7";
+
+test("a Hermes version line is readable raw and unrecordable normalized", () => {
+  // The two readers, side by side, on one string. The log takes nothing from it;
+  // the floor takes everything it needs.
+  assert.equal(rawHarnessVersionLine(HERMES_OLD_VERSION), HERMES_OLD_VERSION);
+  assert.equal(
+    normalizeHarnessVersion(HERMES_OLD_VERSION),
+    null,
+    "the middle dot keeps this line out of the log, which is the write boundary working",
+  );
+  // A raw line is still one line, still trimmed, still stripped of control
+  // characters, and still capped: this is third-party output bound for a terminal.
+  assert.equal(rawHarnessVersionLine("  v1 (2026.1.1)  \nbanner"), "v1 (2026.1.1)");
+  assert.equal(rawHarnessVersionLine(BELL_SUFFIXED), "2.0.14");
+  assert.equal(rawHarnessVersionLine("v".repeat(HARNESS_RAW_VERSION_LIMIT + 1)), null);
+  assert.equal(rawHarnessVersionLine(""), null);
+  assert.equal(rawHarnessVersionLine(42), null);
+});
+
+test("parseHermesVersion reads the semver, the build date and the upstream commit", () => {
+  assert.deepEqual(parseHermesVersion(HERMES_OLD_VERSION), {
+    semver: "0.21.3",
+    date: { year: 2026, month: 9, day: 14 },
+    upstream: "913d4098",
+  });
+  // A field that is not there is `null` rather than a guess, and a line naming
+  // none of the three is not a version line at all.
+  assert.deepEqual(parseHermesVersion("Hermes Agent v0.22.0"), {
+    semver: "0.22.0",
+    date: null,
+    upstream: null,
+  });
+  assert.equal(parseHermesVersion("command not found"), null);
+  assert.equal(parseHermesVersion(""), null);
+});
+
+test("the floor compares the BUILD DATE, because the semver did not move", () => {
+  // The whole reason this machinery exists: the build that ignores `fail_closed`
+  // and the build that honours it report the same `0.21.3`. A floor expressed as
+  // a semantic version would compare the one field that did not change and would
+  // pass a build that fails open.
+  assert.equal(parseHermesVersion(HERMES_OLD_VERSION)?.semver, "0.21.3");
+  assert.equal(parseHermesVersion(HERMES_FLOOR_VERSION)?.semver, "0.21.3");
+  assert.equal(hermesFailClosedSupport(HERMES_OLD_VERSION), "ignores");
+  assert.equal(hermesFailClosedSupport(HERMES_FLOOR_VERSION), "honours");
+  // The floor's own commit is enough on its own: a build that names it IS the
+  // build the probe measured, whatever it stamps as a date.
+  assert.equal(
+    hermesFailClosedSupport(`Hermes Agent v0.21.3 · upstream ${HERMES_FAIL_CLOSED_FLOOR.upstream}`),
+    "honours",
+  );
+  // A later stamp is above the floor; an earlier one is below it.
+  assert.equal(hermesFailClosedSupport("Hermes Agent v0.22.0 (2026.10.1)"), "honours");
+  assert.equal(hermesFailClosedSupport("Hermes Agent v0.21.0 (2025.12.31)"), "ignores");
+  // UNKNOWN is not a synonym for below: two commits cannot be ordered without a
+  // repository, and a health check that cried fault on every unreadable banner
+  // would train an operator to stop reading it.
+  assert.equal(hermesFailClosedSupport("Hermes Agent v0.22.0 · upstream deadbeef"), "unknown");
+  assert.equal(hermesFailClosedSupport("who knows"), "unknown");
+  assert.equal(hermesFailClosedSupport(null), "unknown");
 });
 
 test("readHarnessProvenance needs both halves and a kind this build knows", () => {
@@ -749,6 +832,84 @@ test("doctor reads only the records the hook writes, and only verified ones", ()
   const row = doctorRow(dir, pathWith(bin));
   assert.equal(row.status, "pass");
   assert.deepEqual(readFileSync(join(dir, LOG)), before);
+});
+
+// ---------------------------------------------------------------------------
+// The Hermes floor, through the doctor row (APRV-415)
+// ---------------------------------------------------------------------------
+
+/** A stub `hermes` whose `--version` prints `version`. */
+function stubHermes(version: string): string {
+  return stubBin("hermes", `echo ${JSON.stringify(version)}`);
+}
+
+/**
+ * A scratch `HERMES_HOME` whose `config.yaml` registers this CLI.
+ *
+ * The organ is not in the checkout on this harness, which is the whole reason
+ * `HARNESS_SETTINGS` has a home-resolved location: a row that looked only under
+ * the repository would report that a gated Hermes session is ungated.
+ */
+function hermesHome(dir: string): string {
+  counter += 1;
+  const home = join(scratch, `hermes-home-${counter}`);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(home, "config.yaml"),
+    [
+      "hooks_auto_accept: true",
+      "hooks:",
+      "  pre_tool_call:",
+      `    - command: "approval hook hermes --dir ${dir} --timeout 4m"`,
+      "      timeout: 300",
+      "      fail_closed: true",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return home;
+}
+
+test("doctor FAILS when the installed Hermes is below the fail_closed floor", () => {
+  const dir = ready();
+  const home = hermesHome(dir);
+  const row = doctorRow(dir, { ...pathWith(stubHermes(HERMES_OLD_VERSION)), HERMES_HOME: home });
+  assert.equal(row.status, "fail");
+  assert.match(row.detail, /BELOW the fail_closed floor/u);
+  // The floor is quoted from one constant, so the row, the help and the doc
+  // cannot drift apart.
+  assert.ok(
+    row.detail.includes(HERMES_FAIL_CLOSED_FLOOR.statement),
+    `the row states the floor verbatim: ${row.detail}`,
+  );
+  // What a build below the floor costs, said plainly: the refusals still fire,
+  // and a BROKEN hook stops nothing.
+  assert.match(row.detail, /PROCEED/u);
+  const fix = row.fix;
+  assert.ok(fix !== undefined, "a failing row carries a fix");
+  assert.match(fix, /hermes update/u);
+  assertClean(dir);
+});
+
+test("doctor reports a Hermes at or above the floor without claiming more", () => {
+  const dir = ready();
+  const home = hermesHome(dir);
+  const row = doctorRow(dir, { ...pathWith(stubHermes(HERMES_FLOOR_VERSION)), HERMES_HOME: home });
+  // A skip rather than a pass, and the reason is the row's older half: no
+  // hook-written record names `hermes` yet, so there is no baseline for the
+  // unverified-change comparison. The floor clause rides in the detail either way.
+  assert.equal(row.status, "skip");
+  assert.match(row.detail, /at or above the fail_closed floor/u);
+  assert.equal(row.fix, undefined);
+});
+
+test("a Hermes version this runtime cannot read is unknown, not a fault", () => {
+  const dir = ready();
+  const home = hermesHome(dir);
+  const row = doctorRow(dir, { ...pathWith(stubHermes("hermes, somehow")), HERMES_HOME: home });
+  assert.notEqual(row.status, "fail");
+  assert.match(row.detail, /could not be established/u);
+  assert.ok(row.detail.includes(HERMES_FAIL_CLOSED_FLOOR.statement), row.detail);
 });
 
 // ---------------------------------------------------------------------------
