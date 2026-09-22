@@ -1392,6 +1392,165 @@ test("the webhook verb refuses every configuration it cannot serve (APRV-424)", 
   if (!unconfigured.ok) assert.equal(unconfigured.code, "not-configured");
 });
 
+test("a setWebhook the Bot API refuses is webhook-registration-failed (APRV-424)", async () => {
+  // Review finding 4. The code was declared in the frozen union and never
+  // emitted: a registration Telegram turned down reached the operator as
+  // {"error":{"code":"io"}}, the same code an unreadable log produces, for a
+  // completely different repair.
+  const world = live(1, false, "registration-failed");
+  process.env["APPROVAL_TG_TOKEN"] = TOKEN;
+  process.env["APPROVAL_TG_CHAT"] = CHAT;
+  const out: string[] = [];
+  const err: string[] = [];
+  try {
+    // `allowCrossInstance` for this suite's own reason, stated at
+    // `listenSetupFor`: one mock bot across a gate per case is the ownership
+    // refusal APRV-390 exists for, and this case is about the registration.
+    const prepared = prepareWith(world, { json: true, allowCrossInstance: true });
+    assert.equal(prepared.ok, true, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+
+    // Aimed at the one call: the verb's start-up order is getMe,
+    // getWebhookInfo, sendMessage, setWebhook, and a failure that applied to
+    // all of them would never reach the last.
+    mock.setWebhookInfo({ url: "" });
+    mock.fail("echo-secret", { method: "setWebhook" });
+    const code = await runWebhook(prepared.setup, {
+      out: (text) => out.push(text),
+      err: (text) => err.push(text),
+    });
+    assert.equal(code, EXIT_IO, "a refused registration exited as something other than an I/O failure");
+  } finally {
+    mock.fail(null);
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+  }
+
+  const refusal = err.map((line) => {
+    try {
+      return JSON.parse(line) as { error?: { code?: string; message?: string } };
+    } catch {
+      return {};
+    }
+  });
+  const failure = refusal.find((entry) => entry.error?.code === "webhook-registration-failed");
+  assert.ok(
+    failure !== undefined,
+    `the refusal did not carry its own code: ${err.join("")}`,
+  );
+  const message = failure?.error?.message ?? "";
+  // The Bot API's own description comes through, redacted by the channel: this
+  // mock answers by quoting the secret_token back, which is realistic and is
+  // the one shape that can prove the redaction rather than assume it.
+  assert.match(message, /setWebhook was refused/u);
+  assert.match(message, /secret_token/u);
+  assert.match(message, /<webhook secret redacted>/u);
+  assert.ok(!message.includes(SECRET), `the refusal printed the secret: ${message}`);
+  assert.ok(!message.includes(TOKEN), `the refusal printed the bot token: ${message}`);
+  // Nothing is registered and nothing is listening, which is what the sentence
+  // promises the operator.
+  assert.match(message, /nothing is registered/u);
+  assert.equal(mock.webhookRegistration(), null);
+  // And the lease went back: the next start in this gate finds no holder.
+  assert.equal(readChannelLease(world.unit.logPath), null, "a failed start kept the gate's lease");
+});
+
+test("every member of the webhook verb's frozen union is produced by something (APRV-424)", () => {
+  // The union is frozen, so an unused member is a refusal the runtime claims
+  // and cannot make (SPEC.md §11.1 invariant 6). `webhook-registration-failed`
+  // was exactly that until the case above; this pins the whole set so the next
+  // one cannot be added and left dangling.
+  const world = live(1, false, "union");
+  process.env["APPROVAL_TG_TOKEN"] = TOKEN;
+  process.env["APPROVAL_TG_CHAT"] = CHAT;
+  const produced = new Set<string>();
+  try {
+    const cases: Partial<Parameters<typeof prepareWebhook>[0]>[] = [
+      { env: { APPROVAL_TG_TOKEN: TOKEN, APPROVAL_TG_CHAT: CHAT } },
+      {
+        env: {
+          APPROVAL_TG_TOKEN: TOKEN,
+          APPROVAL_TG_CHAT: CHAT,
+          [TELEGRAM_WEBHOOK_SECRET_ENV]: "hunter2",
+        },
+      },
+      {
+        env: {
+          APPROVAL_TG_TOKEN: TOKEN,
+          APPROVAL_TG_CHAT: CHAT,
+          [TELEGRAM_WEBHOOK_SECRET_ENV]: `${SECRET}/with/slashes`,
+        },
+      },
+      { url: null },
+      { url: "http://gate.example/hook" },
+      { url: "https://gate.example:9443/hook" },
+      { url: "https://user:pw@gate.example/hook" },
+      { url: "https://gate.example/hook", path: "hook" },
+      { url: "https://gate.example/hook", path: "/elsewhere" },
+      { cycle: "soonish" },
+    ];
+    for (const overrides of cases) {
+      const refused = prepareWith(world, overrides);
+      assert.equal(refused.ok, false, `${JSON.stringify(overrides)} was accepted`);
+      if (!refused.ok) produced.add(refused.code);
+    }
+  } finally {
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+  }
+  // The eleventh member is emitted by `runWebhook`, proven in the case above
+  // rather than here: it needs a Bot API that refuses.
+  produced.add("webhook-registration-failed");
+
+  assert.deepEqual(
+    [...produced].sort(),
+    [...WEBHOOK_REFUSAL_CODES].sort(),
+    "a member of the frozen union is declared and never produced, or a refusal escaped the union",
+  );
+});
+
+test("a probe it could not make refuses the webhook verb, not the poller (APRV-424)", async () => {
+  // Review finding 8. `getWebhookInfo` failing used to collapse into "nothing
+  // is registered", and the verb went on to setWebhook — which overwrites a
+  // registration this process never saw, silently taking another host's taps.
+  const world = live(1, false, "probe");
+  const setup = listenSetupFor(world);
+  try {
+    for (const method of ["getWebhookInfo", "getMe"] as const) {
+      mock.fail("500", { method });
+      const refused = await claimListenerBot(setup, (message) => complaints.push(message), {
+        webhookUrl: "https://gate.example/telegram/webhook",
+        mode: "webhook",
+      });
+      assert.equal(refused.ok, false, `a failed ${method} let the webhook verb register anyway`);
+      if (!refused.ok) {
+        assert.equal(refused.code, "webhook-probe-failed");
+        assert.match(refused.message, /--reclaim/u);
+      }
+      assert.equal(
+        readChannelLease(world.unit.logPath),
+        null,
+        `a failed ${method} left the gate's lease behind`,
+      );
+
+      // The POLLER keeps its documented fail-soft on the same failure: an
+      // unreachable Bot API is also a getUpdates that cannot conflict, and the
+      // HTTP 409 path is the backstop.
+      const before = complaints.length;
+      const poller = await claimListenerBot(setup, (message) => complaints.push(message));
+      assert.equal(poller.ok, true, `a failed ${method} took the phone channel down: ${JSON.stringify(poller)}`);
+      if (poller.ok) poller.lease.release();
+      assert.match(
+        complaints.slice(before).join("\n"),
+        /starting anyway/u,
+        `a poller started silently after a failed ${method}`,
+      );
+    }
+  } finally {
+    mock.fail(null);
+  }
+});
+
 test("--path must be the path --url names (APRV-424)", () => {
   // Review finding 3. `--path` was unvalidated and free to disagree with the
   // url, described as an override for a rewriting proxy. What it bought was a
