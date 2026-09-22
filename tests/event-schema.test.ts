@@ -843,3 +843,91 @@ test("execution.completed admits provider_ref and rejects every other shape", ()
     "execution.failed stopped validating",
   );
 });
+
+// ---------------------------------------------------------------------------
+// APRV-423: the harness cap is a count of milliseconds above the margin, on a
+// harness request, or it is refused. Ported from PR #539's suite (a duplicate
+// APRV-423 withdrawn in favour of this branch) and adjusted to this branch's
+// floor and pairing rule.
+// ---------------------------------------------------------------------------
+
+test("approval.requested takes a harness_cap_ms that is an integer above the margin, and nothing else", () => {
+  const record = fixture("approval.requested");
+  const withCap = (harness_cap_ms: unknown): Record<string, unknown> => ({
+    ...record,
+    payload: {
+      ...(record["payload"] as Record<string, unknown>),
+      execution: "harness",
+      harness_cap_ms,
+    },
+  });
+
+  // Optional and additive: the field is what a harness hook records about how
+  // long its harness can hold the call, and a request that declares none is
+  // bounded by the policy TTL exactly as every request was before it existed.
+  assert.equal(validate("event", record).ok, true);
+  assert.equal(validate("event", withCap(300_000)).ok, true, "the documented hermes cap");
+  assert.equal(validate("event", withCap(60_001)).ok, true, "one past the margin is the smallest real window");
+  assert.equal(validate("event", withCap(86_400_000)).ok, true, "the 24h ceiling itself");
+
+  // A deadline is not a field to accept on faith. The hook refuses a cap with
+  // no window in it before the append, so a record reaching the write boundary
+  // with one was written by something else — which is what a write boundary is
+  // for (SPEC.md §11.1, validate at the write boundary). Zero and everything
+  // up to the margin are refused as well as the non-numbers: the schema's
+  // `minimum` is HARNESS_CAP_MARGIN_MS + 1, pinned in tests/harness-cap-ttl.
+  for (const bad of [
+    0,
+    1,
+    60_000,
+    -1,
+    -300_000,
+    299_999.5,
+    0.5,
+    86_400_001,
+    "300s",
+    "300000",
+    null,
+    true,
+    [300_000],
+    {},
+  ]) {
+    assert.equal(
+      validate("event", withCap(bad)).ok,
+      false,
+      `approval.requested accepted harness_cap_ms ${JSON.stringify(bad)}`,
+    );
+  }
+
+  // The pairing rule: a cap on a request that does NOT declare
+  // `execution: "harness"` is refused, because it would be a question with a
+  // shorter life than the token its grant would mint.
+  const unpaired = {
+    ...record,
+    payload: { ...(record["payload"] as Record<string, unknown>), harness_cap_ms: 300_000 },
+  };
+  assert.equal(validate("event", unpaired).ok, false, "a cap without execution: harness");
+  const wrongExecution = {
+    ...record,
+    payload: {
+      ...(record["payload"] as Record<string, unknown>),
+      execution: "token",
+      harness_cap_ms: 300_000,
+    },
+  };
+  assert.equal(validate("event", wrongExecution).ok, false, "a cap beside a non-harness execution");
+
+  // The constraint is on the REQUEST alone. `appendExpiry` records the cap that
+  // shortened the window on `approval.expired`, so the name is legal there, and
+  // this schema says nothing about it on any other type.
+  assert.equal(
+    validate("event", {
+      ...record,
+      event: "approval.expired",
+      actor: "system:gate",
+      payload: { ...(record["payload"] as Record<string, unknown>), harness_cap_ms: 300_000 },
+    }).ok,
+    true,
+    "the cap constraint leaked onto another event type",
+  );
+});

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-423'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 02:09'
+updated_date: '2026-09-22 02:18'
 labels:
   - daemon
   - hook
@@ -228,6 +228,12 @@ Each fix below carries a test that reproduces the finding. Opus was unavailable,
 Invariants: fail closed (a wait the harness would have cut short is shortened by the runtime, so the hook always answers before the harness stops listening); §11.1 invariant 7 unchanged (no code added; `hook-timeout` keeps its meaning, the wait ran out, the question is open); the log is untouched by the clamp and the adopted question's recorded deadline is unchanged.
 
 Validation: build, typecheck, lint clean; cli-hook-hermes, harness-cap-ttl, cli-hook, serve-hook, harness-enum, cli-help: 242/242 after the change, plus the broader hook and docs sweep recorded in the commit.
+
+## Ported from PR #539 (duplicate APRV-423, withdrawn in favour of this branch)
+
+Its `harness_cap_ms` schema cases are kept here, adjusted to this branch's floor (60001) and `dependentSchemas` pairing. `tests/event-schema.test.ts` gained "approval.requested takes a harness_cap_ms that is an integer above the margin, and nothing else": accepts 300000, 60001 and 86400000 on a harness request; refuses 0, 1, 60000, -1, -300000, 299999.5, 0.5, 86400001, "300s", "300000", null, true, an array and an object; refuses a cap with no `execution` and a cap beside `execution: "token"`; and asserts the constraint does not leak onto `approval.expired`, where `appendExpiry` legitimately records the cap that shortened the window. Fixtures under `schema/fixtures/event/`: `valid/approval-requested-harness-cap.json` (ported), `invalid/harness-cap-{zero,negative,fractional,string}.json` (ported), and two new for this branch's rules, `invalid/harness-cap-at-margin.json` (60000) and `invalid/harness-cap-without-harness-execution.json`. `tests/fixtures.test.ts` proves each as filed. PR #539's `withCap(1)` acceptance was dropped on purpose: under this branch 1 ms is below the margin and is refused. event-schema, fixtures, harness-cap-ttl: 276/276.
+
+The seven fixtures reach `conformance/vectors/schema-validation.v1.json`, which is generated from `schema/fixtures`, so `scripts/regen-conformance-vectors.mjs` bumps that suite to **2.8.0** (a MINOR: new vectors, no existing expectation moves; rationale beside the earlier bumps in the script) and the vectors and `conformance-manifest.json` are regenerated. conformance, conformance-regen, fixtures: 265/265.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

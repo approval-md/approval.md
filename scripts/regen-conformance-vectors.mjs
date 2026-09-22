@@ -2327,7 +2327,20 @@ const SUITES = [
     // so every record and every policy written before them validates exactly as it
     // did, and an implementation that passed 2.6.0 fails this only by not knowing
     // a field and a key that have been added.
-    vectors_version: "2.7.0",
+    // 2.8.0 (APRV-423): a MINOR bump, the same shape. Seven new fixtures for
+    // `payload.harness_cap_ms` on `approval.requested`: one accepted (a hermes
+    // request carrying the documented 300 000 ms cap beside `execution:
+    // "harness"`) and six refused — zero, a negative, a fraction, a duration
+    // string, a cap exactly AT the 60 000 ms margin (the schema's `minimum` is
+    // the margin plus one, pinned equal to `HARNESS_CAP_MARGIN_MS` by
+    // tests/harness-cap-ttl.test.ts), and a cap on a request that declares no
+    // `execution: "harness"` (the `dependentSchemas` pairing rule). Four of the
+    // seven are ported from PR #539, a duplicate APRV-423 withdrawn in favour
+    // of this branch. No existing expectation moves: the field is OPTIONAL and
+    // additive, so every record written before it validates exactly as it did,
+    // and an implementation that passed 2.7.0 fails this only by not knowing a
+    // field that has been added and the two rules that bound it.
+    vectors_version: "2.8.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
