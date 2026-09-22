@@ -278,6 +278,52 @@ Consequences, in order of how much they cost:
    project's other adapters give an approver, and it is a property of the
    harness rather than a choice made here.
 
+### The effective window is 240s, and the runtime knows it (APRV-423)
+
+The 300s cap above is a ceiling on the hook PROCESS, and before APRV-423 it was
+a fact this runtime was never told. When Hermes killed the hook the request it
+had opened stayed pending, so a tap arriving afterwards was recorded as a grant
+on a tool call nobody was holding: two records about one request, disagreeing
+(APRV-410). The fix is to make the question end before its asker does.
+
+This adapter therefore carries the 300s maximum itself. It is observed rather
+than read off a page: the probe above armed a hang and Hermes refused it at
+exactly 300s, so no entry can outlive that however it is written. The runtime
+judges every request the hook opens against the **shorter** of:
+
+| | |
+| --- | --- |
+| the policy's `defaults.approval_ttl` | what the operator declared |
+| the cap minus a **60s margin** | what this harness leaves room for |
+
+So the effective approval window on Hermes is **240s**, four minutes rather than
+five, unless the policy's TTL is shorter, in which case the policy wins. The margin
+is a constant in `src/core/harness-wait.ts` (`HARNESS_CAP_MARGIN_MS`), and it is
+60s because the daemon's TTL sweep runs on a 30s interval: two intervals of room
+mean the `approval.expired` record lands while Hermes is still listening, wherever
+in the sweep cycle the lapse fell.
+
+Three things follow, and they matter here more than on any other adapter
+because this is the harness with the smallest ceiling:
+
+- **Set the entry's `timeout` below 300 and say so.** The config above pairs
+  `timeout: 300` with `--timeout 4m`. An entry written with `timeout: 120`
+  should also pass `--harness-cap 120s`, or the runtime keeps assuming the
+  contractual 300s and the window it computes is longer than the one the process
+  actually has. The smaller of the stated cap and the 300s ceiling always wins,
+  so stating one can only shorten the window, never lengthen it (SPEC.md §11.1
+  invariant 4).
+- **`approval.expired` is the runtime's record, never the hook's.** The daemon's
+  sweep appends it, or `approval grant` on a lapsed request appends it before
+  refusing. A tap after the window is refused with the gate's existing `expired`
+  code, lands on the channel as `audit.decision_refused` carrying that code, and
+  is never a grant.
+- **A cap that does not clear 60s is refused** with `hook-harness-cap-too-short`
+  before anything is registered or requested. With `plugins.hook_callback_timeout`
+  left at its 30s default, the dispatch fails closed at 30s anyway; passing
+  `--harness-cap 30s` to describe that makes the refusal explicit instead of
+  leaving a prompt on a phone that nothing can answer in time.
+
 ## What is gated
 
 Tool names and argument keys are Hermes's own, read off its tool registrations:
@@ -660,10 +706,11 @@ What follows from the sections above, for that deployment:
   gateway pass ran with consent already recorded from a terminal, so the headless
   first-use case is still unprobed and this line is still the load-bearing one.
 - **`fail_closed: true` on every entry, above the version floor.** Plus
-  `plugins.hook_callback_timeout` raised and `--timeout` under 300s. The
-  five-minute ceiling is the resident's answering window. Pin the Hermes build at or
-  after `main` `118984d7`: an older image ignores the key and every tenant on it has
-  a backstop rather than a gate.
+  `plugins.hook_callback_timeout` raised and `--timeout` under 300s. The effective
+  answering window the resident gets is 240s: the 300s ceiling less APRV-423's 60s
+  margin, which is what keeps the `approval.expired` record inside the cap. Pin the
+  Hermes build at or after `main` `118984d7`: an older image ignores the key and
+  every tenant on it has a backstop rather than a gate.
 - **Absolute paths, or a refusal.** A tenant's agent that sends a `terminal` call
   with no `workdir`, or a relative path, gets
   `hook-unsupported-execution-context` and a reason telling it to retry absolutely.

@@ -126,6 +126,7 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from
 import { resolve } from "node:path";
 
 import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
+import { harnessCappedTtlMs } from "./harness-wait.js";
 import { onLogAppended, type EventRecord, type LogHead } from "./log.js";
 import { normalizeUsd } from "./money.js";
 import { isPayloadHash } from "./payload.js";
@@ -1194,6 +1195,27 @@ export interface DeclaredAction {
    */
   wait_until: string | null;
   /**
+   * The harness's own ceiling on the hook process that opened this request, in
+   * milliseconds, or `null` (APRV-423).
+   *
+   * A BOUNDED INPUT rather than a deadline. The hook states the per-entry
+   * timeout its harness runs it under (Hermes caps an entry at 300 s; Claude
+   * Code kills the process at the `timeout` in its settings file), and the
+   * runtime takes the SHORTER of that minus a fixed margin and the policy's
+   * own `defaults.approval_ttl` — see `core/harness-wait.ts`'s
+   * `harnessCappedTtlMs`. Claimed, and on the ratchet's safe side for the same
+   * structural reason `execution` is: the minimum can only move the deadline
+   * EARLIER, so a requester that overstates its cap changes nothing and one
+   * that understates it gives itself less time, never more (SPEC.md §11.1
+   * invariant 4).
+   *
+   * A value that is not a positive integer reads as `null`, which is the
+   * pre-APRV-423 shape: the policy's TTL governs alone. That is the baseline
+   * rather than a reduction below it, and the write boundary refuses such a
+   * value anyway.
+   */
+  harness_cap_ms: number | null;
+  /**
    * The SHA-256 of the attested policy in force when the runtime evaluated the
    * request (APRV-118, amended SPEC.md §5.2), or `null` for a record written
    * before the field existed.
@@ -1235,6 +1257,16 @@ export interface RequestDerivation {
   expiredByEvent: boolean;
   /** The TTL lapsed by arithmetic, with no `approval.expired` record. */
   expiredLazily: boolean;
+  /**
+   * The window this cycle was actually judged by: the policy's TTL narrowed by
+   * the requesting hook's declared harness ceiling, or `null` when neither
+   * bounds it (APRV-423).
+   *
+   * Reported rather than left to be recomputed. A caller that wants to SAY the
+   * deadline (the hook's deny text, the expiry record, a channel's line) reads
+   * it from here, so the words and the verdict come from one derivation.
+   */
+  effectiveTtlMs: number | null;
   declared: DeclaredAction;
   execution: ExecutionFacts;
 }
@@ -1254,6 +1286,7 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const hash = payload["payload_hash"];
   const execution = payload["execution"];
   const waitUntil = payload["wait_until"];
+  const capMs = payload["harness_cap_ms"];
   const policySha256 = payload[POLICY_HASH_FIELD];
   return {
     class: typeof cls === "string" ? cls : null,
@@ -1267,6 +1300,12 @@ function declaredFrom(record: EventRecord): DeclaredAction {
     execution: execution === "harness" ? "harness" : null,
     wait_until:
       typeof waitUntil === "string" && !Number.isNaN(Date.parse(waitUntil)) ? waitUntil : null,
+    // A positive integer or nothing (APRV-423). Zero, a fraction, a negative
+    // and a non-number all read as `null` — the policy TTL alone — because a
+    // cap this runtime cannot read is a cap it cannot subtract a margin from,
+    // and guessing one would be inventing a deadline for the requester.
+    harness_cap_ms:
+      typeof capMs === "number" && Number.isInteger(capMs) && capMs > 0 ? capMs : null,
     // A malformed hash reads as `null`, which is the pre-APRV-118 shape: the
     // grant path then has nothing to compare and proceeds under the current
     // policy. Treating an unreadable value as a mismatch would let a corrupt
@@ -1303,7 +1342,12 @@ function declaredFrom(record: EventRecord): DeclaredAction {
  *   appended after a human's answer does not erase the answer; the gate refuses
  *   to append one at all in that case.
  * - Expiry: an `approval.expired` record sets `expiredByEvent`. With no such
- *   record, `ttlMs !== null` and `ts > requestTs + ttlMs` sets `expiredLazily`.
+ *   record, the request lapses against the EFFECTIVE window — `ttlMs` narrowed
+ *   by the declared harness ceiling (APRV-423, `core/harness-wait.ts`) — and
+ *   `ts > requestTs + effectiveTtlMs` sets `expiredLazily`. The ceiling can
+ *   only shorten that window, never lengthen it, so a request under a policy
+ *   with no TTL is bounded exactly when the hook that opened it declared a
+ *   ceiling and not otherwise.
  *   Both yield `state: "expired"`. An unparseable `requestTs` or `ts` also
  *   yields `expired`: liveness that cannot be demonstrated is not assumed. (The
  *   event schema's `date-time` format makes that unreachable through the real
@@ -1331,6 +1375,7 @@ export function requestState(
     payload_hash: null,
     execution: null,
     wait_until: null,
+    harness_cap_ms: null,
     policy_sha256: null,
   };
   const execution: ExecutionFacts = { started: null, completed: null, failed: null };
@@ -1399,14 +1444,24 @@ export function requestState(
 
   let state: RequestState;
   let expiredLazily = false;
+  // APRV-423. The window this cycle is judged by, which is the policy's TTL
+  // narrowed by whatever ceiling the requesting hook declared it runs under.
+  // Derived HERE, from the declaration this loop just read, so that every
+  // caller of this function — the gate's decide, the withdraw and expire
+  // verbs, the carry lookup, the daemon's sweep, the queue, the channels —
+  // reaches the same deadline without a second copy of the arithmetic. Two
+  // copies would be two answers to "has this lapsed", and the one that said
+  // "no" would be the one a late tap was recorded against.
+  const effectiveTtlMs = harnessCappedTtlMs(ttlMs, declared.harness_cap_ms);
   if (requestSeq === null) {
     state = "none";
   } else if (decision !== null) {
     state = decision;
-  } else if (ttlMs === null) {
-    // No `defaults.approval_ttl` means the policy declares no lapse. A request
-    // stays live until a human decides it; inventing a default TTL here would
-    // silently reject approvals a policy author never asked to expire.
+  } else if (effectiveTtlMs === null) {
+    // No `defaults.approval_ttl` and no declared cap means nothing bounded this
+    // request. It stays live until a human decides it; inventing a default TTL
+    // here would silently reject approvals a policy author never asked to
+    // expire.
     state = "requested";
   } else {
     const requestedAt = Date.parse(requestTs ?? "");
@@ -1414,7 +1469,7 @@ export function requestState(
     if (Number.isNaN(requestedAt) || Number.isNaN(now)) {
       state = "expired";
       expiredLazily = true;
-    } else if (now > requestedAt + ttlMs) {
+    } else if (now > requestedAt + effectiveTtlMs) {
       state = "expired";
       expiredLazily = true;
     } else {
@@ -1434,7 +1489,29 @@ export function requestState(
     decisionTs,
     expiredByEvent,
     expiredLazily,
+    effectiveTtlMs,
     declared,
     execution,
   };
+}
+
+/**
+ * The instant this request lapses, ISO-8601, or `null` when nothing bounds it
+ * (APRV-423).
+ *
+ * The deadline in words, for the places that have to SAY it: the hook's deny
+ * text, the `approval.expired` payload's own account of the window it closed,
+ * and the line a channel renders on a phone. Derived from the same
+ * `effectiveTtlMs` the state above was derived from, so a message can never
+ * name a deadline the verdict beside it disagreed with.
+ *
+ * `null` for a request whose instant does not parse, because a deadline
+ * measured from an unreadable start is not a deadline — that request already
+ * reads `expired`, and the caller says so in those words instead.
+ */
+export function requestExpiresAt(derivation: RequestDerivation): string | null {
+  if (derivation.effectiveTtlMs === null) return null;
+  const requestedAt = Date.parse(derivation.requestTs ?? "");
+  if (Number.isNaN(requestedAt)) return null;
+  return new Date(requestedAt + derivation.effectiveTtlMs).toISOString();
 }

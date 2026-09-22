@@ -84,6 +84,7 @@ export async function commandServe(
     "--port": "string",
     "--allow-non-loopback": "boolean",
     "--hook-timeout": "string",
+    "--hook-harness-cap": "string",
     "--json": "boolean",
     "--help": "boolean",
     "-h": "boolean",
@@ -143,6 +144,21 @@ export async function commandServe(
     );
   }
 
+  // APRV-423, the companion to the flag above and independent of it: one bounds
+  // how long a hook call WAITS, this one states the ceiling the harness on the
+  // other end of that call runs its own hook process under. A tenant harness
+  // that kills the hook while the question is still on a phone is the case
+  // APRV-410 describes, and this is how the operator of a shared gate tells the
+  // runtime where that ceiling is.
+  const hookHarnessCap = stringFlag(parsed.flags, "--hook-harness-cap");
+  if (hookHarnessCap !== null && parseDuration(hookHarnessCap) === null) {
+    return usageError(
+      streams,
+      json,
+      `--hook-harness-cap expects a duration like 300s, 4m, got ${JSON.stringify(hookHarnessCap)}`,
+    );
+  }
+
   const dir = stringFlag(parsed.flags, "--dir");
   const root = dir === null ? cwd : resolvePath(dir, ".", cwd);
   const logFlag = stringFlag(parsed.flags, "--log");
@@ -184,6 +200,7 @@ export async function commandServe(
       ...(logFlag === null ? {} : { log: logPath }),
       ...(policyFlag === null ? {} : { policy: resolvePath(policyFlag, ".", cwd) }),
       ...(hookTimeout === null ? {} : { hookTimeout }),
+      ...(hookHarnessCap === null ? {} : { hookHarnessCap }),
       notice: () => undefined,
     });
   } catch (cause) {

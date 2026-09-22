@@ -192,11 +192,65 @@ A few things about those numbers and paths:
 - The default `--timeout` is 55s, which suits Claude Code's default 60s hook
   timeout. Raise both together if you want a human to have minutes rather than a
   minute.
+- `--harness-cap <duration>` tells the hook what `timeout` you wrote, and it is
+  the one flag that changes how long the QUESTION lives rather than how long
+  this process waits. See the next section.
 
 Install the CLI on `PATH` (`npm link`, or an absolute path in the `command`).
 **A hook whose binary cannot be launched is a non-blocking error in Claude Code,
 which means the tool call proceeds.** An uninstalled CLI is therefore an open
 gate, and `approval doctor` will not know to look for it.
+
+### The effective window: `--harness-cap`, and the 60s margin (APRV-423)
+
+Claude Code kills the hook process at the `timeout` in `.claude/settings.json`,
+and a killed hook is a non-blocking error, so the tool call proceeds. Before
+this flag the request that hook had opened stayed pending afterwards, and a tap
+that arrived later was recorded as an ordinary grant on a tool call nobody was
+holding: the deny and the grant described the same request and disagreed about
+it (APRV-410, observed 2026-09-20).
+
+`--harness-cap` closes that by making the question end before its asker does.
+The hook records the ceiling on the `approval.requested` record
+(`payload.harness_cap_ms`), and the runtime judges the request against the
+**shorter** of two windows:
+
+| | |
+| --- | --- |
+| the policy's `defaults.approval_ttl` | what an operator declared for every request |
+| the cap minus a **60s margin** | what this harness leaves room for |
+
+The margin is a constant in `src/core/harness-wait.ts`
+(`HARNESS_CAP_MARGIN_MS`) and it is 60s because the daemon's TTL sweep runs on a
+30s interval: a request that lapses a moment after one sweep waits a full
+interval for the next, so two intervals of room mean the `approval.expired`
+record is appended while Claude Code is still listening. With `"timeout": 600`
+the effective window is **540s**, or the policy's `approval_ttl` if that is
+shorter.
+
+Three consequences worth stating plainly:
+
+- **The cap can only shorten.** It is a number the hook states about itself, and
+  SPEC.md §11.1 invariant 4 says a self-reported field never reduces scrutiny.
+  The runtime takes a minimum, so a cap longer than the TTL changes nothing and
+  a cap shorter than it moves the deadline earlier. There is no spelling of this
+  flag that buys an agent more time.
+- **`approval.expired` is the runtime's.** The hook never appends one. The
+  daemon's sweep materialises it on its cadence, and `approval grant` on a
+  lapsed request materialises it before refusing. A tap after the window is
+  refused with the gate's existing `expired` code and is never a grant; on a
+  channel it lands as `audit.decision_refused` carrying that code, and the
+  sender is told the question expired.
+- **A cap at or below 60s is refused**, with the deny code
+  `hook-harness-cap-too-short`, before anything is registered or requested.
+  There is no window left for a human in it, and opening a question that lapses
+  as it is asked would put a dead prompt on a phone.
+
+Without the flag nothing changes: Claude Code documents a default hook timeout
+and no maximum, so this adapter assumes no ceiling and the policy's TTL governs
+alone. The hook also now prints one stderr line when `--timeout` is not shorter
+than the cap it was told about. That is the check this document used to say the
+runtime could not make, because a hook was not told the cap it ran under.
 
 ## What the classifier decides
 
@@ -1021,7 +1075,8 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
+| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once. The deny names the instant the request expires |
+| `hook-harness-cap-too-short` | the `--harness-cap` this hook was told about does not clear the 60s margin, so no window is left for a human. Nothing registered, nothing requested, no prompt sent |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
@@ -1314,9 +1369,11 @@ harness boundary, and none of them is reachable from inside this runtime:
 1. **The hook process is killed** at the `timeout` in `.claude/settings.json`.
    A killed hook exits non-zero with no JSON, which Claude Code reads as a
    non-blocking error, and the tool call proceeds. This is why `--timeout` MUST
-   be comfortably below `timeout`: the relation is a requirement, not a
-   nicety, and the runtime cannot check it because a hook is not told the cap
-   it runs under.
+   be comfortably below `timeout`: the relation is a requirement, not a nicety.
+   Since APRV-423 the runtime CAN check it, once `--harness-cap` tells it what
+   the cap is: it prints a line when the wait is not shorter, and it shortens
+   the request's own window so the lapse is recorded before the kill. What it
+   still cannot do is stop the tool call, which is Claude Code's to run.
 2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
    reason; every other non-zero code is a non-blocking error and the tool runs.
    On the PRE-execution event the verb exits 2 only for a misconfigured hook and

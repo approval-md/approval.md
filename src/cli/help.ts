@@ -1510,7 +1510,7 @@ ${why("quickstart")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor|codex|grok|muse|hermes [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex|grok|muse|hermes [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--harness-cap <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
@@ -1522,12 +1522,12 @@ Commands:
   hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true BLOCKS a broken hook (observed on main 118984d7; default false, and v0.21.3 ignores it silently). \`approval hook hermes --help\` prints the YAML
   classify     print what the classifier makes of a command line and exit
   --as <id>        proposing identity (default agent:<harness>)
-  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
+  --timeout/--interval/--retry-grace/--harness-cap <d>  wait / poll / hold for a retry / the harness's OWN kill timeout (9m/1s/5m/none), which lapses the request 60s inside it so approval.expired lands first
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
-Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
+Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout, hook-harness-cap-too-short,
 hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-hermes-execute-code-unbound, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
@@ -1537,7 +1537,7 @@ export const HOOK_GROK_HELP = `approval hook grok — the gate in front of Grok 
 
 Usage:
   approval hook grok [--as agent:<id>] [--timeout <d>] [--interval <d>]
-                     [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+                     [--retry-grace <d>] [--harness-cap <d>] [--policy <p>] [--dir <p>] [--log <p>]
 
 camelCase in (hookEventName, sessionId, cwd, workspaceRoot, toolName, toolInput);
 {"decision":"allow"|"deny","reason":"…"} out, never "ask". DENY IS EXIT 2,
@@ -1563,7 +1563,7 @@ export const HOOK_MUSE_HELP = `approval hook muse — the gate in front of Meta 
 
 Usage:
   approval hook muse [--as agent:<id>] [--timeout <d>] [--interval <d>]
-                     [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+                     [--retry-grace <d>] [--harness-cap <d>] [--policy <p>] [--dir <p>] [--log <p>]
 snake_case in (hook_event_name, tool_name, tool_input, cwd, model); ONE dialect
 out, nested {"hookSpecificOutput":{"permissionDecision":…}} at exit 0, never
 "ask". Tools: bash (per-call workdir), write_file, read_file, search.
@@ -1588,7 +1588,7 @@ ${why("hook")}`;
 export const HOOK_HERMES_HELP = `approval hook hermes — the gate in front of Hermes Agent (APRV-398)
 Usage:
   approval hook hermes [--as agent:<id>] [--timeout <d>] [--interval <d>]
-                       [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+                       [--retry-grace <d>] [--harness-cap <d>] [--policy <p>] [--dir <p>] [--log <p>]
 snake_case in (hook_event_name pre_tool_call|post_tool_call, tool_name, tool_input).
 ONE dialect out: {"action":"block","message":"…"} AT EXIT 2 deny, {} at exit 0 allow
 (no allow directive; reason on stderr). Tools: terminal (command + ABSOLUTE workdir),
@@ -1607,7 +1607,7 @@ The file the human commits, $HERMES_HOME/config.yaml — the home's LAST SEGMENT
     post_tool_call:
       - { command: "approval hook hermes --dir <repo> --timeout 4m", timeout: 300 }
 The entry "timeout" caps at 300s; hook_callback_timeout (default 30s) fails closed
-by itself, so --timeout MUST BE UNDER 300s (4m). Register BOTH events. Long form:
+by itself, so --timeout MUST BE UNDER 300s (4m). That 300s cap is assumed here, so the approval window is 240s (cap-60s) or approval_ttl, whichever is shorter; a lower entry timeout goes in --harness-cap. Register BOTH events. Long form:
 ${EXIT_CODES_POINTER} (0 allow, 2 deny; post_tool_call always 0; never "ask")
 ${why("hook")}`;
 
@@ -2602,7 +2602,7 @@ Flags:
   --dir/--log/--policy <p>   the store root, and the log and policy pinned
   --port <n>=4682  loopback. --listen <host:port> widens, and a non-loopback
                    host ALSO needs --allow-non-loopback
-  --hook-timeout <d>   pinned on every hook call, as the stdin form's --timeout
+  --hook-timeout/--hook-harness-cap <d>  pinned on every hook call, as the stdin form's --timeout and --harness-cap (the CALLER's own kill timeout)
 
 For a harness in a sandbox with no local log and no policy. THE VERBS ARE mcp
 serve's: the registry less human_only, --as absent from every schema, the

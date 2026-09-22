@@ -156,6 +156,21 @@ export function taskEnvelopeState(
   return { task, registered, state, actions };
 }
 
+/**
+ * Does this `approval.requested` carry a harness ceiling (APRV-423)?
+ *
+ * A cheap shape test over the raw record, used only to decide whether a key is
+ * worth deriving under a policy that declares no TTL. Whether the value is
+ * USABLE is `core/state.ts`'s to say, and it says so in exactly one place; a
+ * record that passes this and fails there simply derives `requested` and is no
+ * candidate, which is the same answer skipping it would have given.
+ */
+function declaresHarnessCap(record: EventRecord): boolean {
+  const payload = record.payload;
+  if (typeof payload !== "object" || payload === null) return false;
+  return (payload as Record<string, unknown>)["harness_cap_ms"] !== undefined;
+}
+
 /** One request the TTL sweep would materialise an `approval.expired` for. */
 export interface LapsedRequest {
   actionKey: string;
@@ -175,8 +190,19 @@ export interface LapsedRequest {
  * restarted daemon to expire something twice.
  *
  * `ttlMs === null` (a policy that declares no `defaults.approval_ttl`) yields no
- * candidates at all: nothing lapses when nothing was bounded, and inventing a
- * deadline is not the daemon's to invent.
+ * candidates of its own: nothing lapses when nothing was bounded, and inventing
+ * a deadline is not the daemon's to invent.
+ *
+ * It yields one exception since APRV-423, and it is the case this whole sweep
+ * matters most for. A request a harness hook opened may declare the CEILING its
+ * own process runs under (`payload.harness_cap_ms`), and that is a bound the
+ * requester put on its own question rather than a duration the runtime made up.
+ * Such a request is bounded whether or not the policy declares a TTL, so it is
+ * considered here: under the Hermes-shaped policies that ship with no
+ * `approval_ttl` at all, skipping it would leave exactly the pending question
+ * APRV-410 describes, live on a phone after the hook that asked it was killed.
+ * The cheap path is kept intact — with no policy TTL, a record carrying no cap
+ * is not even looked at.
  *
  * Returned in first-request order, so a sweep's appends land in a deterministic
  * sequence.
@@ -186,14 +212,19 @@ export function lapsedRequests(
   ts: string,
   ttlMs: number | null,
 ): LapsedRequest[] {
-  if (ttlMs === null) return [];
-
   const keys: string[] = [];
   for (const record of records) {
     if (record.event !== "approval.requested") continue;
     const key = record.action_key;
-    if (typeof key === "string" && key.length > 0 && !keys.includes(key)) keys.push(key);
+    if (typeof key !== "string" || key.length === 0 || keys.includes(key)) continue;
+    // With a policy TTL every request is a candidate for the derivation below.
+    // Without one, only a request that declared its own ceiling is bounded at
+    // all, and walking the log per key for the rest would be work with no
+    // possible answer.
+    if (ttlMs === null && !declaresHarnessCap(record)) continue;
+    keys.push(key);
   }
+  if (keys.length === 0) return [];
 
   const lapsed: LapsedRequest[] = [];
   for (const actionKey of keys) {
