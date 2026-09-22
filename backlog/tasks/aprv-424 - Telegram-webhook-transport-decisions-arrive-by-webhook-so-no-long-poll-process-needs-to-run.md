@@ -3,11 +3,11 @@ id: APRV-424
 title: >-
   Telegram webhook transport: decisions arrive by webhook so no long-poll
   process needs to run
-status: In Progress
+status: Done
 assignee:
   - '@opus-424'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 04:06'
+updated_date: '2026-09-22 04:07'
 labels:
   - telegram
   - channels
@@ -192,4 +192,12 @@ build, typecheck, lint: clean.
 tests/channel-lease.test.ts: 22 tests (was 19). tests/telegram-webhook.test.ts: 30 tests (was 29).
 Targeted matrix (telegram-webhook, channel-lease, channels-*, conformance, conformance-regen, daemon suites, cli-up-preflight, layering, cli-help, cli-long-help, docs-guard): 499 tests, 499 pass.
 Full `npm test`: 5177 tests, 5154 pass, 22 fail, 1 skipped. The 22 are exactly the pre-existing Node 26 SMTP set (APRV-416): adapter-email 14, cli-setup 4, smtp-probe 4.
+
+Orchestrator review (Fable, 2026-09-22). Conformance pass, then adversarial refutation by a fresh Opus subagent given only the diff, the AC and the spec: first pass ten findings (a poller and the webhook verb in one project both dispatching, close() abandoning the in-flight update, --path unvalidated, a dead refusal code, one code for two conditions, same-url takeover by string compare, probe fail-soft in the wrong direction, port 0, userinfo and verbatim url echo, and the fixed secret env name noted for a follow-up); all fixed with reproducing tests, the exclusivity by a per-gate transport lease. Recheck: the stale reclaim raced (unlink without re-compare), pid-only liveness wedged the gate on a reused or foreign pid, a killed runner forced --reclaim into unit files, token-in-path urls still printed; all fixed (owned critical section with pid and nonce, temp+rename, /proc or ps start-time liveness, gone-only restart allowance, segment redaction). Final recheck: three items (age-out evicting a live section holder, foreign or recycled pids excusing a restart, one-segment paths printed) fixed; the orchestrator verified the guards and ran the lease and webhook suites (52/52) rather than a fourth pass. Follow-up to file: a policy-declared secret_env for the webhook secret (policy schema amendment). Residual recorded: delivery and nonce maps are in memory, so a process that did not deliver a request cannot resolve its tap after a full restart (parity with long-poll); a log-backed resolution is its own task before wake-on-event across restarts is trusted. SPEC section 10.3 hunk proposed in these notes, not applied.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval channel telegram webhook: registers Telegram's webhook with a launch-environment secret (APPROVAL_TG_WEBHOOK_SECRET), serves the callback on loopback (127.0.0.1:4683 by default; wider bind needs --allow-non-loopback), verifies the secret header first in constant time, routes every update through the same handleUpdate, sender mapping and decision path as long-poll (shared contract test), refuses forged posts without appending, runs the dispatch cycle, and is mutually exclusive with the poller per gate through an owned transport lease (telegram-poller-running / webhook-registered). Verified by 30 webhook and 22 lease tests, adjacent channel, conformance and daemon suites, full runs at the APRV-416 baseline, and three adversarial passes.
+<!-- SECTION:FINAL_SUMMARY:END -->
