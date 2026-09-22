@@ -50,7 +50,6 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import {
   serveTelegramWebhook,
-  TELEGRAM_WEBHOOK_DEFAULT_PATH,
   TELEGRAM_WEBHOOK_DEFAULT_PORT,
   TELEGRAM_SECRET_HEADER,
   type TelegramWebhookHandle,
@@ -332,7 +331,11 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
       listen: listen.setup,
       secret,
       url: request.url,
-      path: request.path ?? (url.pathname === "" ? TELEGRAM_WEBHOOK_DEFAULT_PATH : url.pathname),
+      // The url's own path, because that is what a proxy forwarding straight
+      // through will ask for. `--path` is the override for a proxy that
+      // rewrites on the way: it serves what the operator says arrives, and
+      // the registered url stays what Telegram was told.
+      path: request.path ?? url.pathname,
       host: request.host,
       port: request.port,
       cycleMs,
