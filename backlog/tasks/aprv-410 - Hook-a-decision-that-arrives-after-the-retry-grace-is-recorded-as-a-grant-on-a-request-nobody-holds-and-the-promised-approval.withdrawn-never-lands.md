@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@lane-a'
 created_date: '2026-09-20 19:06'
-updated_date: '2026-09-22 01:41'
+updated_date: '2026-09-22 01:55'
 labels:
   - hook
   - log
@@ -98,6 +98,8 @@ node scripts/run-tests.mjs --only gate command-class command-class-quoting comma
 node conformance/run.mjs: totals vectors 474, passed 474, failed 0, controls 176, manifest ok true. 474 rather than 471 because upstream's hook-read-scope gained three; command-class stands at 86 with vectors_version 1.5.0, and no other open branch claims that number.
 
 APRV-409's numbers on the same post-rebase base, for the record, since the two tasks ship as one stack: the 13 new tests/command-class-quoting.test.ts cases are inside the 916 above, and the command-class conformance suite is 86 vectors / 10 negative controls at 1.5.0.
+
+CI verdict on PR #538 (run 35676814830): completed / success, gh pr checks 538 --watch exited 0. classify tier pass 14s; protected paths (grant cross-check) pass 47s; full gate node 22 shard 1/3 pass 5m49s, shard 2/3 pass 10m51s, shard 3/3 pass 8m24s; ci pass 3s. The three skipping jobs are tier gates this change does not trigger. No shard was red, so there are no failing test names to name; the CI full gate is the run that would have carried the known SMTP baseline, and it passed, so nothing is being waved through on a count. The PR is green and the merge is NOT armed, deliberately: the gate daemon is down today and gh pr merge classifies vcs.push.main, which routes to a human who is not there.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@lane-a'
 created_date: '2026-09-20 19:06'
-updated_date: '2026-09-22 01:41'
+updated_date: '2026-09-22 01:55'
 labels:
   - classifier
   - hook
@@ -69,6 +69,8 @@ Re-verified after rebasing onto main at 534ea8e, which had moved 17 commits and 
 npm run build, npm run typecheck, npx oxlint src tests: each exit 0, no warnings.
 node scripts/run-tests.mjs --only gate command-class command-class-quoting command-class-routing cli-hook cli-hook-read-scope cli-hook-hermes conformance conformance-regen hook-module-graph: tests 916, pass 916, fail 0, exit 0.
 node conformance/run.mjs: 474 vectors, 474 passed, 0 failed, 176 controls, manifest ok. command-class stands at 86 vectors (10 negative controls), vectors_version 1.5.0; upstream's hook-read-scope took 2.0.0 in the same window and no other open branch claims 1.5.0 for this suite.
+
+CI verdict on PR #538 (run 35676814830): completed / success, gh pr checks 538 --watch exited 0. classify tier pass 14s; protected paths (grant cross-check) pass 47s; full gate node 22 shard 1/3 pass 5m49s, shard 2/3 pass 10m51s, shard 3/3 pass 8m24s; ci pass 3s. The three skipping jobs (docs guard light tier, node 20 floor, records guards) are tier gates this change does not trigger, not failures. No shard was red, so no failing test names to name.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
