@@ -375,7 +375,7 @@ The re-delivery above used to arrive as a wall: five pending requests, five new
 messages with no warning, sitting under five older copies whose buttons had
 quietly stopped working. Taps on the older copies did nothing at all, so the
 natural response (tap it again, harder) was the one response that could not
-help. Three things changed.
+help. Four things changed.
 
 **A restart announces itself.** Under `burst`, the first batch a listener sends is
 preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
@@ -384,6 +384,25 @@ same flood in silence is an incident. Later cycles send no banner, because a
 request that arrives at 14:00 is a notification and not a re-delivery. The line
 says *started* rather than *restarted* because the listener genuinely cannot
 tell the two apart: it keeps nothing across a restart, on purpose.
+
+**The live one is on top, and the dead ones are one message** (APRV-425). A
+restart no longer sends a message per pending request. The requests nobody can
+still be holding — older than the hook's wait plus its retry grace — arrive as
+one summary with a single `Reject all` (APRV-287), and so do the ones a newer
+pending request has superseded: two requests naming the same payload bytes and
+the same class are two askings of one question, and the older one's session is
+gone. So a restart with five stale requests is ONE message rather than six, and a
+restart with nothing live sends nothing else at all.
+
+What is still live arrives newest first, then the stale backlog oldest first,
+with any attestation prompt last. `/queue` lists them in the same order, because
+two orders would be two answers to "what is waiting on me".
+
+None of that decides anything. A collapsed or superseded request stays pending in
+the log, is listed by `/queue`, and is decidable from any copy already on your
+phone (below). If the listener forgets what it has sent — a crash, a restart, a
+failed summary — it shows the requests again, which is the direction SPEC §10.3
+requires: a duplicate in front of you, never a pending request nobody is shown.
 
 **Every copy's buttons work.** A button now carries a short digest of the action
 key alongside its own message nonce, so a tap on last night's copy resolves to

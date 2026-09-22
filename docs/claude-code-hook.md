@@ -1273,6 +1273,45 @@ approver walking an old queue deliberately came for. Losing the summary — a
 failed send, a restarted process — degrades to showing the requests again, never
 to a pending request nobody is shown.
 
+### The order the queue arrives in (APRV-425)
+
+Dogfooding produced a shorter complaint than the flood: a live prompt arriving
+buried behind dead ones, and an approver rejecting the one they wanted
+(APRV-118). So the pending set has a stated order, applied once per cycle and
+used by the delivery, the `paced` walkthrough's seeding and `/queue` alike:
+
+1. **Live requests first, newest first.** Live means younger than the hook's
+   wait plus its retry grace — the same boundary the collapse uses, so there is
+   one meaning of "somebody may still be holding this". Newest first because the
+   newest is the one most likely to have a tool call blocked on it right now.
+2. **Stale requests after them, oldest first.** These are what the collapse
+   takes on a first cycle; where it does not apply (fewer than two of them),
+   oldest-first is the order to work a backlog in.
+3. **Attestation prompts last**, which is where `approval queue` already put
+   them: a policy amendment changes the rules every request above it was routed
+   by, so an approver answers under the current policy before changing what the
+   current policy is.
+
+Ties break on log order, so one log at one instant has one order. Under `paced`
+the order reaches only the SEEDING: a request already in the walkthrough keeps
+the place `/skip` gave it, and only requests the listener has not seen before are
+inserted in the new order.
+
+**A superseded duplicate is collapsed whatever its age.** Two pending requests
+naming the same payload bytes and the same class are two askings of one question,
+and only the newer one has an asker: the older is what a `hook-timeout` past the
+retry grace leaves behind when the session that would have withdrawn it never
+came back. The older ones join the collapsed summary on a first cycle, and the
+summary says which of its members are there for age and which for supersession
+rather than claiming all of them are old. The pairing is by bytes and class
+rather than by task, because a harness adapter mints a fresh task id per tool
+call, so two askings of one command never share one.
+
+Collapsing is not deciding, here as everywhere: a superseded request stays
+pending in the log, is listed by `/queue`, and is decidable from any copy already
+on the phone, because `callback_data` carries a restart-stable action reference
+(APRV-196). Only a human's decision or the requester's own withdrawal ends it.
+
 ### What counts toward the loop floor (APRV-287)
 
 Loop safety (SPEC §10.2) counts consecutive failed side-effecting **tool calls**
