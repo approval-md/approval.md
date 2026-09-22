@@ -411,6 +411,9 @@ const HUMAN_ONLY: readonly string[] = [
   // own: it holds BOTH bearer credentials, and the party that decides which
   // door an agent gets is not the agent.
   "serve",
+  // APRV-437. The operator fixes tenant and credentials before this local
+  // listener accepts proposals; it never supplies human decision authority.
+  "muse",
   "env",
   "setup identity",
   "setup vault",
