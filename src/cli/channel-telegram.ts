@@ -471,7 +471,9 @@ export async function claimListenerBot(
   // refusal here is one an operator can act on without waiting for a round
   // trip. Released again below if a later check refuses, so a refused start
   // never leaves a lease behind for the next one to reclaim.
-  const leased = takeChannelLease(setup.logPath, mode);
+  const leased = takeChannelLease(setup.logPath, mode, {
+    note: (message) => report(`approval: ${message}`),
+  });
   if (!leased.ok) {
     return {
       ok: false,
@@ -494,10 +496,24 @@ export async function claimListenerBot(
    * for good, in exchange for a crash recovery.
    *
    * It is deliberately narrow. Same gate (it is the same lockfile), same
-   * transport (a dead poller proves nothing about a registration), and the
-   * url still has to match after normalisation. Anything else keeps refusing.
+   * transport (a dead poller proves nothing about a registration), the process
+   * demonstrably GONE, and the url still has to match after normalisation.
+   * Anything else keeps refusing.
+   *
+   * "Gone" is the only reclaim reason that counts (third review, finding 2).
+   * The other two are reclaims on a judgement about a NUMBER rather than a
+   * death: `foreign` means a pid this process cannot signal, and `recycled`
+   * means a pid whose process started after the lease was written. Both are
+   * the right call for the lease, which only has to stop being held; neither
+   * is evidence that the webhook runner that registered this url has stopped
+   * running, and on a shared machine a foreign pid is as likely to be the
+   * OTHER host's live runner. So they keep the refusal and the `--reclaim`
+   * demand.
    */
-  const ownWebhookDied = leased.reclaimed !== null && leased.reclaimed.mode === "webhook";
+  const ownWebhookDied =
+    leased.reclaimed !== null &&
+    leased.reclaimed.mode === "webhook" &&
+    leased.reclaimedBecause === "gone";
   const release = (): void => leased.lease.release();
   const refuse = (code: ListenRefusalCode, message: string): ClaimedListenerBot => {
     release();

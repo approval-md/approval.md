@@ -4136,9 +4136,10 @@ succeed and then not work:
   forwarded to a fixed local address: a receiver on a port nobody registered
   verifies nothing and answers nothing.
 - **Every line that prints the url prints its origin and a redacted path**, in
-  the start-up banner, in `webhook_started` and in refusals: the first path
-  segment is kept and the rest becomes `<path redacted>`, and a query string
-  becomes `<query redacted>`. A tunnel that hands out
+  the start-up banner, in `webhook_started` and in refusals: with two segments
+  or more the first is kept and the rest becomes `<path redacted>`, a path of
+  exactly one segment is replaced whole (that is the shape a tunnel's own token
+  takes), and a query string becomes `<query redacted>`. A tunnel that hands out
   `https://host/hook/<random>` puts a bearer value in a path, and this runtime
   does not copy it into three more places. The local bind line is redacted the
   same way, because it carries the same path. The operator has the whole of it
@@ -4187,14 +4188,21 @@ and they are in that order because the first needs no network:
   older than its own lease keeps the gate. Where the platform will not report a
   start time, a running pid keeps the gate, which is the stricter reading.
 
-  **Taking a lease over is a critical section.** Reclaiming happens inside a
-  sibling `O_EXCL` lock, and inside it the record must still be exactly the one
-  that was judged (same pid, same `started_at`) or the take-over is abandoned.
-  Without that, two processes that had both read one dead holder took turns
-  deleting each other's live lease and both ended up holding the gate. The
+  **Taking a lease over is a critical section, and the section is owned.**
+  Reclaiming happens inside a sibling `O_EXCL` lock that carries the entering
+  process's pid and a nonce. Inside it the lease record must still be exactly
+  the one that was judged (same pid, same `started_at`), the lock must still
+  name this entry at the moment of the write, and the lock is removed on the
+  way out only while it still does. Without the first, two processes that had
+  both read one dead holder took turns deleting each other's live lease;
+  without the other two, a process that stalled inside the section renamed its
+  lease over the one that replaced it and deleted the new holder's lock. The
   replacement is a rename, so the lockfile is never absent and never half
-  written, and a reclaim lock left behind by a crash ages out after five
-  seconds.
+  written. A reclaim lock is evicted only when its own process is gone, judged
+  by the probe above: its age is reported and decides nothing, because "five
+  seconds have passed" says nothing about whether anybody is still inside. A
+  lock this build cannot read names no process, so the take refuses and names
+  the file rather than forcing it.
 
   This is the check the other three cannot make. Two processes started in the
   SAME project — one `approval up` long-polling, one `approval channel telegram
@@ -4226,9 +4234,13 @@ and they are in that order because the first needs no network:
   to put `--reclaim` in the unit file, which retires the protection above for
   good in exchange for a crash recovery. So a restart may re-register the SAME
   normalised url without the flag when the lease it just reclaimed was this
-  gate's own, written by a webhook runner, and its process is gone. A dead
+  gate's own, written by a webhook runner, and that process is **gone**. A dead
   poller's lease does not count, a different url does not count, and a gate
-  with no such lease does not count: those keep the refusal.
+  with no such lease does not count. Nor do the other two reclaim reasons: a
+  lease reclaimed because its pid is owned by a process this one cannot signal,
+  or because the number has been reused, is the right call for the lease and no
+  evidence at all that the runner which registered the url has stopped. Those
+  keep the refusal and the `--reclaim` demand.
 - Within one process, `TelegramChannel.claimTransport` refuses the second claim.
 
 A clean stop (SIGINT, SIGTERM) removes the webhook, so long polling works again

@@ -83,6 +83,7 @@ import {
 } from "../src/core/telegram-config.js";
 import {
   channelLeasePathFor,
+  probePid,
   readChannelLease,
   takeChannelLease,
 } from "../src/core/channel-lease.js";
@@ -1085,6 +1086,13 @@ function listenSetupFor(world: Live): ListenSetup {
  * a recycled number and is reclaimed (second review, finding 3). `pid 1` is
  * exactly that shape, so it no longer stands in for a peer.
  */
+/**
+ * A live pid this process cannot signal: `init`/`launchd`, owned by root.
+ *
+ * The one shape a test can rely on for the `foreign` reading of a holder.
+ */
+const FOREIGN_OWNER_PID = 1;
+
 async function sleeper(): Promise<{ pid: number; stop: () => void }> {
   const { spawn } = await import("node:child_process");
   const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
@@ -1350,6 +1358,58 @@ test("a restart after a killed webhook runner re-registers its own url (APRV-424
     });
     assert.equal(elsewhere.ok, false, "a dead runner's lease excused registering a different url");
     if (!elsewhere.ok) assert.equal(elsewhere.code, "webhook-registered");
+  } finally {
+    mock.setWebhookInfo({ url: "" });
+  }
+});
+
+test("only a runner that is GONE excuses a restart's registration (APRV-424)", async () => {
+  // Third review, finding 2. The restart allowance turns on evidence that
+  // this gate's own webhook runner died. A lease reclaimed because its pid is
+  // `foreign` (alive, and not signalable by this process) or `recycled` (a
+  // number whose process started after the lease) is the right call for the
+  // LEASE, which only has to stop being held; neither is evidence that the
+  // runner which registered this url has stopped running, and on a shared
+  // machine a foreign pid is as likely to be the other host's live runner.
+  const world = live(1, false, "reclaim-reason");
+  const setup = listenSetupFor(world);
+  const url = "https://gate.example/telegram/webhook";
+  try {
+    mock.setWebhookInfo({ url, pendingUpdateCount: 1 });
+
+    // A pid that is alive and that this process cannot signal: init, which is
+    // exactly the shape `foreign` names.
+    const foreign = probePid(FOREIGN_OWNER_PID);
+    const planted = takeChannelLease(world.unit.logPath, "webhook", {
+      pid: FOREIGN_OWNER_PID,
+      probe: () => ({ running: true, foreign: false, startedAt: null }),
+    });
+    assert.equal(planted.ok, true, JSON.stringify(planted));
+
+    const before = complaints.length;
+    const refused = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: url,
+      mode: "webhook",
+    });
+    assert.equal(
+      refused.ok,
+      false,
+      `a lease reclaimed from a live foreign pid excused a registration: ${JSON.stringify(refused)}`,
+    );
+    if (!refused.ok) {
+      assert.equal(refused.code, "webhook-registered");
+      assert.match(refused.message, /--reclaim/u, "the refusal stopped demanding the flag");
+    }
+
+    if (foreign.foreign) {
+      // The lease WAS reclaimed (so this case is about the reason and not
+      // about a refusal to reclaim), and the reason was said out loud.
+      assert.match(
+        complaints.slice(before).join("\n"),
+        /cannot signal/u,
+        "the foreign reclaim was silent, so this case proves nothing about the reason",
+      );
+    }
   } finally {
     mock.setWebhookInfo({ url: "" });
   }
@@ -1757,7 +1817,22 @@ test("--url with userinfo is refused, and no line prints a url verbatim (APRV-42
     redactWebhookUrl("https://gate.example/telegram/webhook"),
     "https://gate.example/telegram/<path redacted>",
   );
-  assert.equal(redactWebhookUrl("https://gate.example/hook"), "https://gate.example/hook");
+  // A SINGLE segment is replaced whole (third review, finding 3): that is the
+  // shape a tunnel's own token takes, and "keep the first segment" would
+  // print the token itself.
+  assert.equal(
+    redactWebhookPath("/8Xk2LongRandomTunnelToken"),
+    "/<path redacted>",
+    "a single-segment path is the token, and it was printed",
+  );
+  assert.equal(redactWebhookPath("/telegram/webhook"), "/telegram/<path redacted>");
+  assert.equal(redactWebhookPath("/hook/"), "/<path redacted>");
+  assert.equal(redactWebhookPath("/"), "/");
+  assert.equal(redactWebhookPath(""), "/");
+  assert.equal(
+    redactWebhookUrl("https://gate.example/8Xk2LongRandomTunnelToken"),
+    "https://gate.example/<path redacted>",
+  );
   assert.equal(redactWebhookUrl("https://gate.example/"), "https://gate.example/");
   assert.equal(
     redactWebhookUrl("https://user:pw@gate.example/hook/secret"),
@@ -1765,12 +1840,9 @@ test("--url with userinfo is refused, and no line prints a url verbatim (APRV-42
   );
   assert.equal(
     redactWebhookUrl("https://gate.example/hook?token=abc"),
-    "https://gate.example/hook?<query redacted>",
+    "https://gate.example/<path redacted>?<query redacted>",
   );
   assert.equal(redactWebhookUrl("not a url at all"), "<not a url>");
-  assert.equal(redactWebhookPath("/telegram/webhook"), "/telegram/<path redacted>");
-  assert.equal(redactWebhookPath("/hook/"), "/hook");
-  assert.equal(redactWebhookPath("/"), "/");
 });
 
 test("the bind refuses port 0 and anything outside the port range (APRV-424)", () => {

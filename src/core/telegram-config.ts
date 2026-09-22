@@ -94,25 +94,31 @@ export function normaliseWebhookUrl(raw: string): string | null {
 }
 
 /**
- * A webhook PATH as it may be printed (APRV-424, reviews 1 and 2).
+ * A webhook PATH as it may be printed (APRV-424, reviews 1 to 3).
  *
- * The first segment is kept and everything after it is replaced. A tunnel that
- * hands out `https://host/hook/8Xk2-a-long-random-value` puts a bearer value
- * in a path, and `/hook` is enough for an operator to recognise their own
- * endpoint in a log line. The rest is theirs, and they already have it: they
- * typed it into `--url`.
+ * With two segments or more, the first is kept and the rest is replaced:
+ * `/hook/8Xk2-a-long-random-value` prints as `/hook/<path redacted>`, which is
+ * enough for an operator to recognise their own endpoint while the bearer half
+ * stays theirs. With exactly ONE segment the whole path is replaced, because a
+ * single-segment path is the shape a tunnel's own token takes
+ * (`https://host/8Xk2-a-long-random-value`) and keeping "the first segment"
+ * there would print the token itself (third review, finding 3).
  *
- * The second review found the first version of this printing the served path
- * verbatim, on the argument that a path this process serves is a path the
- * operator chose. That argument is right about the operator and wrong about
- * everyone else who reads a terminal, a log aggregator or a pasted banner.
+ * The operator loses nothing either way. They typed it into `--url`.
+ *
+ * The second review found the first version printing the SERVED path verbatim,
+ * on the argument that a path this process serves is a path the operator
+ * chose. That argument is right about the operator and wrong about everyone
+ * else who reads a terminal, a log aggregator or a pasted banner.
  */
 export function redactWebhookPath(path: string): string {
-  const segments = path.replace(/^\/+/u, "").split("/");
+  const segments = path
+    .replace(/^\/+/u, "")
+    .split("/")
+    .filter((segment) => segment.length > 0);
   const first = segments[0];
-  if (first === undefined || first === "") return "/";
-  const rest = segments.slice(1).filter((segment) => segment.length > 0);
-  return rest.length === 0 ? `/${first}` : `/${first}/<path redacted>`;
+  if (first === undefined) return "/";
+  return segments.length === 1 ? "/<path redacted>" : `/${first}/<path redacted>`;
 }
 
 /**
