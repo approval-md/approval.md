@@ -199,6 +199,7 @@ const PENDING = [
     requested_ts: "2026-08-18T10:00:00.000Z",
     seq: 3,
     ttl_remaining_ms: 3_600_000,
+    ttl_ms: 3_600_000,
   },
   {
     action_key: "task-042:followup",
@@ -208,6 +209,7 @@ const PENDING = [
     requested_ts: "2026-08-18T10:05:00.000Z",
     seq: 4,
     ttl_remaining_ms: 60_000,
+    ttl_ms: 3_600_000,
   },
 ];
 

@@ -80,15 +80,29 @@ export function abandonedAfterMs(waitMs: number, graceMs: number): number {
  * and this is the distance between the two. It is 60 s because the daemon's
  * TTL sweep runs on a 30 s interval (`daemon/daemon.ts`'s
  * `DEFAULT_INTERVAL_MS`): a request that lapses one millisecond after a sweep
- * waits a whole interval for the next one, so a
- * margin of two intervals leaves the `approval.expired` append a full tick of
- * room and still lands inside the cap. Anything smaller would make the ordering
- * this task is about depend on where in the sweep cycle the lapse fell.
+ * waits a whole interval for the next one, so a margin of two intervals leaves
+ * the `approval.expired` append a full tick of room in the common case, and it
+ * lands inside the cap. Anything smaller would make the ordering this task is
+ * about depend on where in the sweep cycle the lapse fell.
+ *
+ * The common case, and not a guarantee. `Daemon.tick` skips a sweep when the
+ * previous tick is still running, and the request record's `ts` is stamped at
+ * the write boundary, some intake latency after the harness spawned the hook,
+ * so the cap runs from an instant slightly before the one the margin counts
+ * from. An overrunning tick plus a slow intake can put the `approval.expired`
+ * record after the kill. What keeps a late tap safe regardless is not this
+ * margin but the lazy refusal: `core/state.ts` judges the lapse by arithmetic
+ * whether or not the record exists, so `decide` refuses the tap `expired` and
+ * materialises the record then. The margin buys the ORDERING in the common
+ * case, so the two records agree without a human ever seeing the disagreement;
+ * the refusal is what makes the grant impossible in every case.
  *
  * It is a floor on the cap as well as a subtraction from it. A cap at or below
- * the margin leaves no window in which a human could answer at all, and
- * `cli/hook.ts` refuses such a configuration rather than opening a question
- * that is already dead.
+ * the margin leaves no window in which a human could answer at all: `cli/hook.ts`
+ * refuses such a configuration rather than opening a question that is already
+ * dead, and `schema/event.schema.json` refuses a record carrying one at the
+ * write boundary (its `minimum` is this constant plus one, pinned equal by
+ * `tests/harness-cap-ttl.test.ts`).
  */
 export const HARNESS_CAP_MARGIN_MS = 60_000;
 
@@ -113,7 +127,9 @@ export const HARNESS_CAP_MARGIN_MS = 60_000;
  * A cap that does not clear the margin yields `0`, which reads as lapsed from
  * the instant the request is written. That is the fail-closed answer for a
  * harness whose ceiling leaves no room for a human, and it is unreachable
- * through the hook, which refuses the configuration before it appends.
+ * through the write path: the hook refuses the configuration before it
+ * appends, and the event schema refuses the record for any caller that did
+ * not come through the hook.
  */
 export function harnessCappedTtlMs(
   policyTtlMs: number | null,

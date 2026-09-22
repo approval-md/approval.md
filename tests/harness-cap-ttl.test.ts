@@ -423,8 +423,11 @@ function runCli(args: string[], cwd: string, input = ""): Run {
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** A hook-shaped case directory: policy on disk, attested by a human. */
-function hookCase(): string {
+/**
+ * A hook-shaped case directory: policy on disk, attested by a human. `withTtl`
+ * false drops `defaults.approval_ttl`, the shape the hosted Hermes policies have.
+ */
+function hookCase(withTtl = true): string {
   cliCase += 1;
   const dir = join(root, `hook-${cliCase}`);
   mkdirSync(dir, { recursive: true });
@@ -437,7 +440,7 @@ function hookCase(): string {
       'version: "0.1"',
       "defaults:",
       "  autonomy: manual",
-      '  approval_ttl: "1h"',
+      ...(withTtl ? ['  approval_ttl: "1h"'] : []),
       "  on_expiry: reject",
       "classes:",
       "  read.*:",
@@ -562,5 +565,192 @@ test("an uncapped hook deny is unchanged, and names no instant", () => {
   // reader can see it. A varying instant here would also make two invocations
   // of one command produce two different denies.
   assert.ok(!/expire at /u.test(verdict.reason), verdict.reason);
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Second review pass
+// ---------------------------------------------------------------------------
+
+/** dist/tests/harness-cap-ttl.test.js -> schema/event.schema.json */
+const EVENT_SCHEMA = fileURLToPath(new URL("../../schema/event.schema.json", import.meta.url));
+
+/** The first schema node named `name` that carries a `minimum`, depth-first. */
+function schemaNodeNamed(node: unknown, name: string): Record<string, unknown> | null {
+  if (typeof node !== "object" || node === null) return null;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === name && typeof value === "object" && value !== null && "minimum" in value) {
+      return value as Record<string, unknown>;
+    }
+    const found = schemaNodeNamed(value, name);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+test("F6: the schema's floor on harness_cap_ms is the margin plus one, so a non-hook caller cannot open a zero-length window", () => {
+  // The margin has ONE owner, `HARNESS_CAP_MARGIN_MS`; the schema's `minimum`
+  // is a mirror of it, and this is the pin that keeps the two from drifting
+  // (the way `docs/cursor-hook.md`'s deny table is pinned to HOOK_DENY_CODES).
+  const schema = JSON.parse(readFileSync(EVENT_SCHEMA, "utf8")) as unknown;
+  const field = schemaNodeNamed(schema, "harness_cap_ms");
+  assert.ok(field !== null, "the requested payload declares harness_cap_ms");
+  assert.equal(field["minimum"], HARNESS_CAP_MARGIN_MS + 1);
+  assert.equal(harnessCapFitsMargin((field["minimum"] as number) - 1), false);
+  assert.equal(harnessCapFitsMargin(field["minimum"] as number), true);
+
+  // And the write boundary enforces it: `request()` called directly, as a
+  // non-hook caller would, with a cap that leaves no window. Before this pin
+  // the record was accepted and the request read as expired the instant it
+  // was written, a question that could never be answered.
+  const unit = ready(POLICY_TTL_1H);
+  const before = records(unit).length;
+  for (const capMs of [1, HARNESS_CAP_MARGIN_MS - 1, HARNESS_CAP_MARGIN_MS]) {
+    const result = request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: KEY,
+        cls: CLS,
+        summary: "send the deposit chaser",
+        payload_hash: BOUND,
+        payload: { value: PAYLOAD },
+        execution: "harness",
+        harnessCapMs: capMs,
+      },
+      "agent:claude-code",
+      { ...unit.options, clock: fixedClock(T0) },
+    );
+    assert.equal(result.ok, false, `a ${String(capMs)}ms cap must be refused`);
+    assert.equal(records(unit).length, before, "nothing was appended");
+  }
+  // One past the margin is the smallest cap that opens a real (1ms) window.
+  opened(unit, HARNESS_CAP_MARGIN_MS + 1);
+  assert.equal(requestState(records(unit), KEY, T0, 3_600_000).effectiveTtlMs, 1);
+  assertClean(unit);
+});
+
+/** The stderr lines the hook printed before it waited. */
+function announceOf(run: Run): string {
+  return run.stderr;
+}
+
+test("F7: when the capped window closes before the retry grace, the deny says the window is what holds the question open", () => {
+  const dir = hookCase();
+  // 1s wait + the 5m default grace = 301s from the request; the 300s cap leaves
+  // a 240s window, so the window closes first and "open for the 5m grace"
+  // would be a claim the runtime does not keep.
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms", "--harness-cap", "300s"],
+    dir,
+    bashEvent("curl -X POST https://example.com -d hello", "tu-f7-a"),
+  );
+  const verdict = verdictOf(run);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    verdict.reason,
+    /the request\(s\) expire at \S+, which comes before the 5m retry grace would run out, so that is how long they stay open/u,
+    verdict.reason,
+  );
+  assert.ok(!/stay open for the 5m retry grace/u.test(verdict.reason), verdict.reason);
+  assert.ok(!/Past the grace the hook takes the question back/u.test(verdict.reason), verdict.reason);
+  assert.match(
+    announceOf(run),
+    /The request expires at \S+, which comes before the 5m retry grace would run out/u,
+    run.stderr,
+  );
+  assert.ok(!/leaving the request open for a 5m retry grace/u.test(run.stderr), run.stderr);
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+test("F7: when the retry grace is the shorter of the two, the grace sentence stands and the deadline is added", () => {
+  const dir = hookCase();
+  // 1s wait + a 10s grace = 11s from the request, well inside the 240s window:
+  // the grace is what ends the retry, and the APRV-287 sentence is kept with
+  // the harness deadline stated after it.
+  const run = runCli(
+    [
+      "hook",
+      "claude-code",
+      "--timeout",
+      "1s",
+      "--interval",
+      "200ms",
+      "--retry-grace",
+      "10s",
+      "--harness-cap",
+      "300s",
+    ],
+    dir,
+    bashEvent("curl -X POST https://example.com -d hello", "tu-f7-b"),
+  );
+  const verdict = verdictOf(run);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /stay open for the 10s retry grace/u, verdict.reason);
+  assert.match(verdict.reason, /Past the grace the hook takes the question back/u, verdict.reason);
+  assert.match(
+    verdict.reason,
+    /The harness ceiling this hook runs under bounds the question too: the request\(s\) expire at \S+/u,
+    verdict.reason,
+  );
+  assert.ok(!/which comes before the 10s retry grace/u.test(verdict.reason), verdict.reason);
+  assert.match(
+    announceOf(run),
+    /leaving the request open for a 10s retry grace\. The request expires at \S+, after which/u,
+    run.stderr,
+  );
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+/** `approval queue --json`'s pending entries. */
+function queuePending(dir: string): Record<string, unknown>[] {
+  const run = runCli(["queue", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const body = JSON.parse(run.stdout) as Record<string, unknown>;
+  return body["pending"] as Record<string, unknown>[];
+}
+
+test("F3: approval queue shows a capped request its real remaining window, not the policy's hour", () => {
+  const dir = hookCase();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms", "--harness-cap", "300s"],
+    dir,
+    bashEvent("curl -X POST https://example.com -d hello", "tu-queue-1"),
+  );
+  assert.equal(verdictOf(run).permission, "deny");
+
+  const pending = queuePending(dir);
+  assert.equal(pending.length, 1);
+  const entry = pending[0] as Record<string, unknown>;
+  assert.equal(entry["ttl_ms"], WINDOW_MS, "the window is the cap less the margin, not 1h");
+  const remaining = entry["ttl_remaining_ms"] as number;
+  // The hook waited a second, and this test has taken a moment since: what is
+  // left is the 240s window less that, and nowhere near the policy's hour.
+  assert.ok(
+    remaining > WINDOW_MS - 60_000 && remaining <= WINDOW_MS,
+    `ttl_remaining_ms ${String(remaining)} is not inside the 240s window`,
+  );
+  assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+test("F3: a capped request under a policy with no TTL is no longer shown as 'no TTL'", () => {
+  const dir = hookCase(false);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms", "--harness-cap", "300s"],
+    dir,
+    bashEvent("curl -X POST https://example.com -d hello", "tu-queue-2"),
+  );
+  assert.equal(verdictOf(run).permission, "deny");
+
+  const pending = queuePending(dir);
+  assert.equal(pending.length, 1);
+  const entry = pending[0] as Record<string, unknown>;
+  assert.equal(entry["ttl_ms"], WINDOW_MS);
+  assert.equal(typeof entry["ttl_remaining_ms"], "number", "the cap bounds what the policy did not");
+
+  const human = runCli(["queue"], dir);
+  assert.equal(human.code, 0, human.stderr);
+  assert.ok(!/no TTL/u.test(human.stdout), human.stdout);
+  assert.match(human.stdout, /\d+m left|\d+s left/u, human.stdout);
   assert.equal(runCli(["log", "verify"], dir).code, 0);
 });

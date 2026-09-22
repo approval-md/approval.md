@@ -1557,8 +1557,21 @@ const VERBS: VerbSpec[] = [
               requested_ts: STRING,
               seq: INTEGER,
               ttl_remaining_ms: nullable(INTEGER),
+              // APRV-423: the whole window `ttl_remaining_ms` counts down from,
+              // which is the policy's TTL narrowed by the requesting hook's
+              // harness cap; null only when nothing bounds the request.
+              ttl_ms: nullable(INTEGER),
             },
-            ["action_key", "task", "class", "est_cost_usd", "requested_ts", "seq", "ttl_remaining_ms"],
+            [
+              "action_key",
+              "task",
+              "class",
+              "est_cost_usd",
+              "requested_ts",
+              "seq",
+              "ttl_remaining_ms",
+              "ttl_ms",
+            ],
           ),
         ),
       },

@@ -1137,9 +1137,9 @@
               },
               "harness_cap_ms": {
                 "type": "integer",
-                "minimum": 1,
+                "minimum": 60001,
                 "maximum": 86400000,
-                "description": "SPEC.md §6 (APRV-423): the ceiling, in milliseconds, that the harness running the requesting hook imposes on that hook's own process — Hermes caps a `pre_tool_call` entry at 300 s, Claude Code kills the hook at the `timeout` in its settings file. A BOUNDED INPUT and never a deadline of its own: the runtime judges the request against the SHORTER of this minus a fixed margin and the policy's `defaults.approval_ttl`, so a stated cap can only move the lapse EARLIER (§11.1 invariant 4). The bounds are shape rather than policy — below 1 ms is not a duration, and above 24 h is a number no harness contract states."
+                "description": "SPEC.md §6 (APRV-423): the ceiling, in milliseconds, that the harness running the requesting hook imposes on that hook's own process — Hermes caps a `pre_tool_call` entry at 300 s, Claude Code kills the hook at the `timeout` in its settings file. A BOUNDED INPUT and never a deadline of its own: the runtime judges the request against the SHORTER of this minus a fixed margin and the policy's `defaults.approval_ttl`, so a stated cap can only move the lapse EARLIER (§11.1 invariant 4). The minimum is HARNESS_CAP_MARGIN_MS + 1 (src/core/harness-wait.ts, 60 000 ms; tests/harness-cap-ttl.test.ts pins the two equal): a cap at or below the margin leaves a zero-length window, a question that lapses as it is asked, and the hook refuses such a configuration before it appends, so a record carrying one could only come from a caller that skipped the hook and is refused here. Above 24 h is a number no harness contract states."
               }
             },
             "dependentSchemas": {

@@ -1434,6 +1434,14 @@ export interface DigestState {
    * the request's own `ts` remains the only instant a TTL is measured from.
    */
   deliveredAtMs: number;
+  /**
+   * How long after {@link deliveredAtMs} the LAST of this digest's members can
+   * still be decided, or `null` when some member is bounded by nothing
+   * (APRV-423, second review pass). The widest of the members' own windows
+   * ({@link Delivery.windowMs}), because a digest is droppable only once every
+   * member is past deciding.
+   */
+  windowMs: number | null;
 }
 
 /**
@@ -2345,6 +2353,19 @@ interface Delivery {
   batchDeliveryId?: DeliveryId;
   /** When this process sent it, on {@link TelegramConfig.now}'s clock (APRV-135). */
   deliveredAtMs: number;
+  /**
+   * How long after {@link deliveredAtMs} this request can still be decided, or
+   * `null` when nothing bounds it (APRV-423, second review pass).
+   *
+   * The request's OWN window rather than the policy's number: a request a
+   * harness hook opened under a ceiling lapses at the cap less the margin, and a
+   * sweep that waited out the policy's hour would hold a dead button armed for
+   * fifty-six minutes; a request under a policy with no TTL but with a cap
+   * lapses too, where the policy alone would have said never. See
+   * {@link TelegramChannel.retentionWindowMs} for where the number comes from
+   * and why it is never shorter than the gate's own window.
+   */
+  windowMs: number | null;
 }
 
 /**
@@ -2755,8 +2776,15 @@ export class TelegramChannel implements TestableChannel {
   ): Promise<TelegramBatchDelivery | null> {
     const allNonce = this.makeNonce();
     const deliveredAtMs = this.now();
+    // The digest's window is the widest member's: it may be forgotten only when
+    // every member is past deciding, and a member nothing bounds keeps it.
+    const windows = members.map((member) => this.retentionWindowMs(member));
+    const windowMs = windows.includes(null)
+      ? null
+      : Math.max(...windows.filter((window): window is number => window !== null));
     const state: DigestState = {
       deliveredAtMs,
+      windowMs,
       // Assigned once the message exists; nothing consults it before then.
       deliveryId: "",
       batchDeliveryId,
@@ -2825,13 +2853,14 @@ export class TelegramChannel implements TestableChannel {
 
     // Armed only now, and all at once: until the message with the buttons on it
     // exists there is nothing a callback could legitimately answer.
-    for (const member of state.members) {
+    for (const [index, member] of state.members.entries()) {
       this.deliveries.set(member.nonce, {
         actionKey: member.actionKey,
         actionRef: actionRefOf(member.actionKey),
         deliveryId,
         batchDeliveryId,
         deliveredAtMs,
+        windowMs: windows[index] ?? null,
       });
     }
     this.digests.set(deliveryId, state);
@@ -2941,6 +2970,7 @@ export class TelegramChannel implements TestableChannel {
       actionRef: actionRefOf(actionKey),
       deliveryId: sent.deliveryId,
       deliveredAtMs: this.now(),
+      windowMs: this.retentionWindowMs(request),
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
     });
 
@@ -2984,6 +3014,34 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * How long after delivery the request behind a prompt can still be decided,
+   * on this process's clock, or `null` when nothing bounds it (APRV-423, second
+   * review pass).
+   *
+   * The SHORTER of two bounds, each of which is at or past the gate's own
+   * lapse, so the sweep never forgets a button a decision could still reach:
+   *
+   * - the request's `ttl_remaining_ms`, computed by the listener from the
+   *   verified log against the window the gate judges by (the policy's TTL
+   *   narrowed by the harness cap the requesting hook declared). It was
+   *   measured at tagging time, and delivery is at or after tagging, so
+   *   counting it from delivery ends at or after the real lapse;
+   * - the policy's own TTL ({@link TelegramConfig.approvalTtlMs}), counted from
+   *   delivery, which is at or after the `approval.requested` it really runs
+   *   from. This was the only bound before APRV-423 and it stays as one.
+   *
+   * A request neither bounds is decidable forever, and its entry is dropped
+   * only on an observed settlement. This channel still reads no policy and no
+   * log: both numbers arrive computed, by the verb and by the tagger.
+   */
+  private retentionWindowMs(request: ChannelRequest): number | null {
+    const bounds = [request.ttl_remaining_ms.value, this.approvalTtlMs].filter(
+      (bound): bound is number => bound !== null,
+    );
+    return bounds.length === 0 ? null : Math.min(...bounds);
+  }
+
+  /**
    * Drop the delivery bookkeeping no callback can still be honoured against
    * (APRV-135).
    *
@@ -3017,18 +3075,29 @@ export class TelegramChannel implements TestableChannel {
    */
   sweep(nowMs: number = this.now()): { deliveries: number; digests: number } {
     this.lastSweepMs = nowMs;
-    const retention = this.approvalTtlMs ?? TELEGRAM_DEFAULT_RETENTION_MS;
-    const expired = (deliveredAtMs: number): boolean => nowMs - deliveredAtMs >= retention;
-    // Past the approval TTL the gate refuses every decision, so the request is
-    // terminal whether or not this process saw it settle. With no TTL declared
-    // nothing expires, and only an observed settlement makes an entry droppable.
-    const lapsed = (deliveredAtMs: number): boolean =>
-      this.approvalTtlMs !== null && nowMs - deliveredAtMs >= this.approvalTtlMs;
+    // APRV-423 (second review pass): both halves read the ENTRY's own window,
+    // which is the effective one the gate judges its request by, and fall back
+    // to the policy's TTL and then the default only for an entry that carries
+    // none (a review card, which has no request).
+    const retentionOf = (windowMs: number | null): number =>
+      windowMs ?? this.approvalTtlMs ?? TELEGRAM_DEFAULT_RETENTION_MS;
+    const expired = (deliveredAtMs: number, windowMs: number | null): boolean =>
+      nowMs - deliveredAtMs >= retentionOf(windowMs);
+    // Past its window the gate refuses every decision on the request, so it is
+    // terminal whether or not this process saw it settle. With nothing bounding
+    // it nothing expires, and only an observed settlement makes it droppable.
+    const lapsed = (deliveredAtMs: number, windowMs: number | null): boolean =>
+      windowMs !== null && nowMs - deliveredAtMs >= windowMs;
 
     let digests = 0;
     for (const [deliveryId, digest] of this.digests) {
       const terminal = digest.members.every((member) => member.settled !== null);
-      if (!(terminal || lapsed(digest.deliveredAtMs)) || !expired(digest.deliveredAtMs)) continue;
+      if (
+        !(terminal || lapsed(digest.deliveredAtMs, digest.windowMs)) ||
+        !expired(digest.deliveredAtMs, digest.windowMs)
+      ) {
+        continue;
+      }
       this.digests.delete(deliveryId);
       this.allNonces.delete(digest.allNonce);
       digests += 1;
@@ -3040,7 +3109,12 @@ export class TelegramChannel implements TestableChannel {
       // with buttons, whatever its own age says; the digest is the entry that
       // decides, and it was just judged above.
       if (this.digests.has(delivery.deliveryId)) continue;
-      if (!lapsed(delivery.deliveredAtMs) || !expired(delivery.deliveredAtMs)) continue;
+      if (
+        !lapsed(delivery.deliveredAtMs, delivery.windowMs) ||
+        !expired(delivery.deliveredAtMs, delivery.windowMs)
+      ) {
+        continue;
+      }
       this.deliveries.delete(nonce);
       deliveries += 1;
     }
@@ -3053,7 +3127,7 @@ export class TelegramChannel implements TestableChannel {
     // this map holds, so keeping the buttons alive costs a map entry and
     // dropping them early would cost a human their thumb.
     for (const [deliveryId, card] of this.reviewCards) {
-      if (card.settled === null || !expired(card.deliveredAtMs)) continue;
+      if (card.settled === null || !expired(card.deliveredAtMs, null)) continue;
       this.reviewCards.delete(deliveryId);
       this.reviewNonces.delete(card.nonce);
       if (card.awaitingNote !== null) this.reviewNotePrompts.delete(card.awaitingNote.promptId);

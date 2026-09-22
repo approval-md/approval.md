@@ -1603,11 +1603,11 @@ The file the human commits, $HERMES_HOME/config.yaml — the home's LAST SEGMENT
   hooks_auto_accept: true
   hooks:
     pre_tool_call:
-      - { command: "approval hook hermes --dir <repo> --timeout 4m", timeout: 300, fail_closed: true }
+      - { command: "approval hook hermes --dir <repo> --timeout 4m --harness-cap 300s", timeout: 300, fail_closed: true }
     post_tool_call:
       - { command: "approval hook hermes --dir <repo> --timeout 4m", timeout: 300 }
 The entry "timeout" caps at 300s; hook_callback_timeout (default 30s) fails closed
-by itself, so --timeout MUST BE UNDER 300s (4m). That 300s cap is assumed here, so the approval window is 240s (cap-60s) or approval_ttl, whichever is shorter; a lower entry timeout goes in --harness-cap. Register BOTH events. Long form:
+by itself, so --timeout MUST BE UNDER 300s (4m). WITHOUT --harness-cap the hook assumes the 30s default and denies every manual call hook-harness-cap-too-short: raise hook_callback_timeout above the entry timeout, then pass --harness-cap <the smaller of the two>. The window is then cap-60s (240s above) or approval_ttl, whichever is shorter. Register BOTH events. Long form:
 ${EXIT_CODES_POINTER} (0 allow, 2 deny; post_tool_call always 0; never "ask")
 ${why("hook")}`;
 

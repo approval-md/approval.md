@@ -64,6 +64,8 @@ import { fileURLToPath } from "node:url";
 
 import { classifyCommand, protectedPathClass } from "../src/core/command-class.js";
 import { HARNESS_BINARY, HARNESS_KINDS } from "../src/core/harness-version.js";
+import { HARNESS_CAP_MARGIN_MS } from "../src/core/harness-wait.js";
+import type { EventRecord } from "../src/core/log.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -428,8 +430,30 @@ test("an autonomous command is allowed and records the execution it authorized",
   assert.match(after, /agent:hermes/u);
 });
 
-test("a manual-class command is refused rather than asked about, and the log is untouched", () => {
+// ---------------------------------------------------------------------------
+// The harness cap on this adapter (APRV-423, second review pass)
+// ---------------------------------------------------------------------------
+
+/** What a stated 300s cap leaves once the margin is taken off it. */
+const HERMES_WINDOW_MS = 300_000 - HARNESS_CAP_MARGIN_MS;
+
+/** The `approval.requested` record the hook wrote, or `undefined`. */
+function requestedRecord(dir: string): EventRecord | undefined {
+  return rawLog(dir)
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as EventRecord)
+    .find((record) => record.event === "approval.requested");
+}
+
+test("a manual-class command with no --harness-cap is refused for Hermes's 30s default, and the log is untouched", () => {
   const dir = ready();
+  const before = rawLog(dir);
+  // No flag. A Hermes install runs with `plugins.hook_callback_timeout` at its
+  // 30s default until an operator raises it, and 30s does not clear the margin,
+  // so the runtime must not assume the 300s per-entry maximum here: that was
+  // the first pass's defect, a T+240s deadline asserted for a hook Hermes kills
+  // at 30s (APRV-410 with a fictional deadline).
   const verdict = verdictOf(
     hook(dir, shellEvent(dir, "npm install left-pad", dir), [
       "--timeout",
@@ -441,7 +465,67 @@ test("a manual-class command is refused rather than asked about, and the log is 
     ]),
   );
   assert.equal(verdict.permission, "deny");
-  assert.match(verdict.message, /hook-timeout/u, "it waited on a real decision and got none");
+  assert.match(verdict.message, /^hook-harness-cap-too-short: /u);
+  assert.match(verdict.message, /30000ms harness ceiling/u, "the assumed ceiling is the 30s default");
+  assert.match(verdict.message, /assumed from the harness's documented defaults because no --harness-cap was passed/u);
+  // The repair, in Hermes's own vocabulary and in this order: raise the outer
+  // timeout above the per-entry one, then state the smaller of the two.
+  assert.match(
+    verdict.message,
+    /raise `plugins\.hook_callback_timeout` above the per-entry `timeout`[\s\S]*?then pass `--harness-cap <the smaller of the two>`/u,
+    verdict.message,
+  );
+  // And the class that routed the call to a human is still named, so a reader
+  // of the deny knows WHAT was refused, not only why no question was asked.
+  assert.match(verdict.message, /deps\.add|npm install left-pad/u);
+  assert.equal(rawLog(dir), before, "nothing was registered or requested");
+});
+
+test("a manual-class command under --harness-cap 300s waits, and the window it is judged by is 240s", () => {
+  const dir = ready();
+  const verdict = verdictOf(
+    hook(dir, shellEvent(dir, "npm install left-pad", dir), [
+      "--timeout",
+      "1ms",
+      "--interval",
+      "1ms",
+      "--harness-cap",
+      "300s",
+    ]),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, /^hook-timeout: /u, "it waited on a real decision and got none");
+
+  const requested = requestedRecord(dir);
+  assert.ok(requested !== undefined, "the question was asked");
+  const payload = (requested.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["harness_cap_ms"], 300_000, "the stated cap is recorded as stated");
+  const expected = new Date(Date.parse(requested.ts) + HERMES_WINDOW_MS).toISOString();
+  assert.ok(
+    verdict.message.includes(`expire at ${expected}`),
+    `the deny names the 240s deadline ${expected}: ${verdict.message}`,
+  );
+});
+
+test("a stated cap above Hermes's 300s per-entry maximum is clamped to it", () => {
+  const dir = ready();
+  // Hermes will not honour an entry above 300s however it is written, so a flag
+  // that overstates it is a window the process will not live to see; the
+  // effective cap is the smaller of the statement and the contract.
+  const verdict = verdictOf(
+    hook(dir, shellEvent(dir, "npm install left-pad", dir), [
+      "--timeout",
+      "1ms",
+      "--interval",
+      "1ms",
+      "--harness-cap",
+      "10m",
+    ]),
+  );
+  assert.match(verdict.message, /^hook-timeout: /u);
+  const requested = requestedRecord(dir);
+  assert.ok(requested !== undefined);
+  assert.equal(((requested.payload ?? {}) as Record<string, unknown>)["harness_cap_ms"], 300_000);
 });
 
 test("a deny reaches a log that does not exist, and says which log", () => {

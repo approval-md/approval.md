@@ -224,9 +224,17 @@ The margin is a constant in `src/core/harness-wait.ts`
 (`HARNESS_CAP_MARGIN_MS`) and it is 60s because the daemon's TTL sweep runs on a
 30s interval: a request that lapses a moment after one sweep waits a full
 interval for the next, so two intervals of room mean the `approval.expired`
-record is appended while Claude Code is still listening. With `"timeout": 600`
-the effective window is **540s**, or the policy's `approval_ttl` if that is
-shorter.
+record is appended while Claude Code is still listening in the common case. It
+is the common case and not a guarantee. The daemon skips a sweep when the
+previous tick is still running, and the request's `ts` is stamped at the write
+boundary, some intake latency after Claude Code spawned the hook, so an
+overrunning tick plus a slow intake can put the record after the kill. What
+keeps a late tap safe regardless is the lazy refusal: the gate judges the lapse
+by arithmetic whether or not the record exists, so the tap is refused `expired`
+and the record is written then. The margin buys the ordering, so the two records
+agree without anyone seeing them disagree; the refusal is what makes the grant
+impossible. With `"timeout": 600` the effective window is **540s**, or the
+policy's `approval_ttl` if that is shorter.
 
 Three consequences worth stating plainly:
 
