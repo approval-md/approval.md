@@ -295,6 +295,13 @@ test("mcp: the exclusions are agent-facing verbs, each with a stated reason", ()
     "hook hermes",
     "hook muse",
     "log follow",
+    // APRV-401. The one exclusion here that is about a FILESYSTEM ORACLE rather
+    // than about stdin or plumbing: `payload run` digests the script an argv
+    // names, the argv arrives in `trailing` where no transport guard confines
+    // it, and a digest for a path the caller cannot otherwise reach is an
+    // answer about that path. The value is also only true where the command
+    // will run, which is not this process.
+    "payload run",
   ]);
 });
 

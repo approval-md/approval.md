@@ -54,12 +54,14 @@ import {
 } from "../adapters/agentmail.js";
 import { canonicalize } from "../core/jcs.js";
 import { payloadHash } from "../core/payload.js";
+import { runPayloadValue } from "../core/run-payload.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
   PAYLOAD_AGENTMAIL_DRAFT_HELP,
   PAYLOAD_HASH_HELP,
   PAYLOAD_HELP,
+  PAYLOAD_RUN_HELP,
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { usageErrorText } from "./usage.js";
@@ -172,6 +174,96 @@ function commandPayloadHash(argv: string[], streams: Streams, cwd: string): numb
 
   if (json) streams.out(`${JSON.stringify({ ok: true, hash })}\n`);
   else streams.out(`${hash}\n`);
+  return EXIT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// `payload run` (APRV-401)
+// ---------------------------------------------------------------------------
+
+const RUN_FLAGS: Record<string, FlagKind> = {
+  "--cwd": "string",
+  "--hash": "boolean",
+  "--json": "boolean",
+  "--help": "boolean",
+  "-h": "boolean",
+};
+
+/**
+ * `approval payload run [--cwd <dir>] [--hash] -- <cmd…>`.
+ *
+ * The step before a request exists, for the shape `approval run` will execute:
+ * print the exact payload value that verb will recompute, or its hash.
+ *
+ * It exists because APRV-401 put the argv's SCRIPT inside that value. Before
+ * then a requester could type `{"argv":[…],"cwd":"…"}` by hand and be right;
+ * now a declaration for a command that names a script must carry that script's
+ * size and digest, and a human assembling it by hand would be assembling a
+ * field they cannot compute without this runtime. Without the verb, the honest
+ * repair for a `payload-mismatch` would be "read the source", so the verb is
+ * the repair.
+ *
+ * It is the LOCAL counterpart of `payload agentmail-draft`: that one snapshots a
+ * remote mutable object so a human approves the words rather than a draft id,
+ * this one snapshots local mutable bytes so a human approves the script rather
+ * than its path. Neither reads a log, writes a file, spends a token or executes
+ * anything; the only thing this one touches is the script the argv names, read.
+ */
+function commandPayloadRun(argv: string[], streams: Streams, cwd: string): number {
+  // `--` splits our flags from the command being described, on the RAW argv and
+  // before any parsing, exactly as `cli/execute.ts` splits `approval run`'s. The
+  // two must agree about where the child's argv begins, or this verb would
+  // describe a different command from the one that eventually spawns.
+  const separator = argv.indexOf("--");
+  const ours = separator === -1 ? argv : argv.slice(0, separator);
+  const childArgv = separator === -1 ? [] : argv.slice(separator + 1);
+
+  const json = wantsJson(ours);
+  const parsed = parseFlags(ours, RUN_FLAGS);
+  if (!parsed.ok) return usageError(streams, json, parsed.message, PAYLOAD_RUN_HELP);
+  if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
+    streams.out(`${PAYLOAD_RUN_HELP}\n`);
+    return EXIT_OK;
+  }
+
+  const stray = parsed.positionals[0];
+  if (stray !== undefined) {
+    return usageError(
+      streams,
+      json,
+      `unexpected argument ${JSON.stringify(stray)}; the command to describe goes after \`--\``,
+      PAYLOAD_RUN_HELP,
+    );
+  }
+  if (childArgv.length === 0) {
+    return usageError(
+      streams,
+      json,
+      "missing command: `approval payload run [--cwd <dir>] -- <cmd…>`",
+      PAYLOAD_RUN_HELP,
+    );
+  }
+
+  // The cwd is part of the hashed value, so it is stated rather than assumed
+  // where the caller knows the run will happen elsewhere. Relative values
+  // resolve against this process's own directory, which is the only reading
+  // that makes `--cwd build` mean what a shell would mean by it.
+  const cwdFlag = stringFlag(parsed.flags, "--cwd");
+  const runCwd = cwdFlag === null ? cwd : absolute(cwdFlag, cwd);
+
+  const payload = runPayloadValue(childArgv, runCwd);
+  if (boolFlag(parsed.flags, "--hash")) {
+    const hash = payloadHash(payload);
+    if (json) streams.out(`${JSON.stringify({ ok: true, hash })}\n`);
+    else streams.out(`${hash}\n`);
+    return EXIT_OK;
+  }
+
+  // The canonical serialization itself, for the same reason
+  // `payload agentmail-draft` prints it: the hash is defined over these bytes,
+  // and a re-serialization by any other printer is a second answer about what
+  // this payload is. `--json` prints the same bytes; the payload IS the result.
+  streams.out(`${canonicalize(payload)}\n`);
   return EXIT_OK;
 }
 
@@ -333,6 +425,8 @@ export function commandPayload(
   switch (sub) {
     case "hash":
       return commandPayloadHash(rest, streams, cwd);
+    case "run":
+      return commandPayloadRun(rest, streams, cwd);
     case "agentmail-draft":
       return commandPayloadAgentmailDraft(rest, streams, deps);
     default:

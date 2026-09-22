@@ -48,6 +48,42 @@ before a tag.
   green light. Both drivers are verified with canned envelopes and a fake harness
   binary before any install.
 
+- **Drift-append contention is reported as deferred and retried (APRV-403).** A
+  `lock-timeout` or `head-moved` on an `envelope.drift` append used to print
+  `append-refused … was not appended`, which is true and reads as a lost record
+  while the next tick quietly re-derives and writes it. It is now a
+  `drift-deferred` warning naming the task and saying the scan retries, and the
+  `drift` line that lands carries `retry` so the pair closes — the same split
+  APRV-381 made for `audit.sampled`, using the same shared classifier so the two
+  sweeps cannot come to disagree about which failures a retry fixes. Both drift
+  reasons take it. Every other append refusal keeps the `append-refused` form,
+  because `validation`, `canonicalization`, `corrupt-tail` and `io` are facts
+  about the record or the file that no retry repairs. **Write-back no longer
+  repairs a file whose drift record was deferred**: it used to rewrite the
+  `state:` line anyway, so the next tick found the file agreeing with the log,
+  the retry had nothing to re-derive, and the deferral resolved into silence — a
+  correction made off the record, which is what SPEC §6.3's append-then-write
+  order exists to prevent.
+- **A listener restart sends one summary and no re-prompts (APRV-425).** The
+  pending queue has a stated order now, shared by the delivery, the paced
+  walkthrough and `/queue`: live requests newest first (live meaning younger than
+  the hook's wait plus its retry grace), then stale ones oldest first, with
+  attestation prompts last where `approval queue` already put them. A pending
+  request whose payload bytes and class a NEWER pending request also names is
+  collapsed whatever its age — two askings of one question, of which only the
+  newer has an asker — so a live prompt no longer arrives buried behind dead
+  ones, and the collapsed summary says which of its members are there for age and
+  which for supersession instead of claiming all of them are old. A restart with
+  N stale pending went from a banner plus N prompts to one summary and zero
+  prompts, with the next cycle of that process sending nothing. Collapsing is
+  still not deciding: every collapsed request stays pending in the log, is listed
+  by `/queue`, and is decidable from any copy already on the phone. **The literal
+  "zero messages" is held for a SPEC decision**: a listener cannot tell a request
+  a previous process delivered from one that arrived while nothing was running,
+  since both predate its start, so withholding a re-delivery on age alone would
+  produce the one outcome SPEC §10.3 forbids — a pending request nobody is shown.
+  The summary is what keeps it legal; the amendment literal zero would need is
+  written out in APRV-425's notes and deliberately not applied.
 - **A workspace write is checked against the disk, and some of them are now
   questions (APRV-402).** `files.write.workspace` used to be decided on the
   command text alone, so a relative destination was the workspace whatever a

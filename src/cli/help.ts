@@ -99,6 +99,7 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval payload run [--cwd <dir>] [--hash] [--json] -- <cmd…>
   approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
                       [--json]
   approval journal write --message "<text>" | - [--task <id>] [--session <id>]
@@ -318,6 +319,9 @@ Inspect — what the log says, and whether anything needs repair:
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
             --payload" hashes, verifies and stores the bytes in one step.
+            "payload run" prints the payload a gated command binds to: its
+            argv, its cwd, and the digest of the script that argv names, so a
+            grant over a script binds the script and not its path.
             "payload agentmail-draft" snapshots one AgentMail draft with the
             AGENT's key, so a human approves the words and not a draft id
   daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
@@ -1654,12 +1658,15 @@ export const PAYLOAD_HELP = `approval payload — work with the bytes an approva
 
 Usage:
   approval payload hash <file|-> [--json]
+  approval payload run [--cwd <dir>] [--hash] [--json] -- <cmd…>
   approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
                                    [--json]
 
 Commands:
   hash      print the payload_hash of a JSON document: SHA-256 over its RFC 8785
             canonical serialization (SPEC.md §6.2)
+  run       print the payload \`approval run\` will recompute for a command: its
+            argv, its cwd, and the digest of the script that argv names
   agentmail-draft
             snapshot one AgentMail draft as the payload a grant can bind to,
             read with the AGENT's key from AGENTMAIL_API_KEY
@@ -1692,6 +1699,31 @@ JSON shape (stdout, one object): {"ok":true,"hash":"<64hex>"}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("payload-hash")}`;
+
+export const PAYLOAD_RUN_HELP = `approval payload run — the payload a gated command binds to
+
+Usage:
+  approval payload run [--cwd <dir>] [--hash] [--json] -- <cmd…>
+
+Flags:
+  --cwd <dir>       the directory the command will run in (default: this one)
+  --hash            print the payload_hash instead of the payload bytes
+  --json / -h, --help   machine-readable (with --hash) / this text
+
+Prints what \`approval run\` recomputes before it spawns:
+  {"argv":[…],"cwd":"…","script":{"argv_index":N,"path":…,bytes,sha256}}
+
+THE SCRIPT IS THE POINT (APRV-401): a known interpreter followed by a path, or
+a path at argv[0], binds THAT FILE'S BYTES, so a script edited before the run is
+payload-mismatch rather than a silent substitution. An argv naming no script
+carries no "script" key and hashes as it always did. NOT bound: an inline
+program, the interpreter, an unlisted launcher, what the script itself runs.
+
+  approval payload run --hash -- bash install.sh   # the declaration
+  approval payload run -- bash install.sh | approval request … --payload -
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("payload-run")}`;
 
 export const PAYLOAD_AGENTMAIL_DRAFT_HELP = `approval payload agentmail-draft — snapshot a draft as an approvable payload
 
