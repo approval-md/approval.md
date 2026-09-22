@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-424'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 03:50'
+updated_date: '2026-09-22 04:06'
 labels:
   - telegram
   - channels
@@ -177,4 +177,19 @@ build, typecheck, lint: clean.
 tests/channel-lease.test.ts: 19 tests (was 11). tests/telegram-webhook.test.ts: 29 tests (was 28).
 Targeted matrix (telegram-webhook, channel-lease, channels-*, conformance, conformance-regen, daemon suites, cli-up-preflight, layering, cli-help, cli-long-help, docs-guard): 495 tests, 495 pass.
 Full `npm test`: 5173 tests, 5150 pass, 22 fail, 1 skipped. The 22 are exactly the pre-existing Node 26 SMTP set (APRV-416): adapter-email 14, cli-setup 4, smtp-probe 4. The gloss-codex timing flake reported in the first pass did not recur.
+
+THIRD REVIEW PASS (fixer): three items
+
+1 The reclaim section was given away on age alone and taken back unconditionally, so a stall reopened the double-hold: A enters, re-reads, stalls; B evicts A's five-second-old lock, reclaims, renames its own lease in; A resumes, renames over B's live lease, and A's `finally` deletes B's reclaim lock. All three halves of the fix are about identity. (a) The reclaim lock carries this process's pid AND a nonce (`randomBytes(8)`), so one entry is told from another entry by the same process, and the `finally` unlinks only while the file still names this entry. (b) Ownership is re-checked immediately before the rename; a process that lost the section returns `busy`, and its next pass meets the new holder's live record and refuses. (c) Eviction turns on the same liveness probe a lease holder is judged by: a reclaim lock is removed only when its own process is gone. `CHANNEL_LEASE_RECLAIM_STALE_MS` no longer decides anything and the age is reported through a new `note` callback, which `claimListenerBot` wires to its own reporter. A lock this build cannot read names no process and has no age that may answer for it, so the take refuses `telegram-lease-unavailable` naming the `.reclaim` file, which is a repair an operator runs in one command. A second seam (`insideTakeOver`, documented as test-only like `beforeTakeOver`) runs the stall. Tests: "a reclaimer that stalls out of the section does not overwrite the lease that replaced it" (exactly one holder, the loser refuses, the record on disk is the winner's, and no reclaim lock was left behind or taken from its owner), "a reclaimer neither writes nor unlinks once the section is somebody else's", "a reclaim lock is evicted for a dead process, never for its age" (the same old lock waited for while its process lives, evicted once it does not, with the age reported), "a reclaim lock nobody can read refuses rather than being forced".
+
+2 `ownWebhookDied` now requires `reclaimedBecause === "gone"`. The other two reasons are reclaims on a judgement about a NUMBER rather than a death: `foreign` is a pid this process cannot signal, `recycled` is a pid whose process started after the lease was written. Both are the right call for the lease, which only has to stop being held, and neither says the runner that registered the url has stopped; on a shared machine a foreign pid is as likely to be the other host's live runner. They keep `webhook-registered` and the `--reclaim` demand. Test: "only a runner that is GONE excuses a restart's registration", which plants a webhook lease on pid 1 (alive, and `EPERM` to a non-root user, which is exactly the `foreign` shape) and asserts the refusal still names `--reclaim`; where the platform reads that pid as foreign the test also asserts the reclaim happened and said "cannot signal", so the case is about the REASON rather than about a refusal to reclaim. Verified on this machine: `probePid(1)` answers `{running:true, foreign:true}`.
+
+3 `redactWebhookPath` replaces a single-segment path whole (`/<path redacted>`) and keeps the first segment only from two segments up. A single-segment path is the shape a tunnel's own token takes, so "keep the first segment" printed the token it was meant to hide; this is the residual the second pass recorded rather than fixed, and it is now fixed. Test: the redaction case covers `/8Xk2LongRandomTunnelToken`, `/telegram/webhook`, `/hook/`, the empty path, the query string and the userinfo url.
+
+VALIDATION (third pass)
+
+build, typecheck, lint: clean.
+tests/channel-lease.test.ts: 22 tests (was 19). tests/telegram-webhook.test.ts: 30 tests (was 29).
+Targeted matrix (telegram-webhook, channel-lease, channels-*, conformance, conformance-regen, daemon suites, cli-up-preflight, layering, cli-help, cli-long-help, docs-guard): 499 tests, 499 pass.
+Full `npm test`: 5177 tests, 5154 pass, 22 fail, 1 skipped. The 22 are exactly the pre-existing Node 26 SMTP set (APRV-416): adapter-email 14, cli-setup 4, smtp-probe 4.
 <!-- SECTION:NOTES:END -->
