@@ -34,17 +34,22 @@ approval register "backlog/tasks/<task file>.md" --as agent:<session>
 
 # 2. Request the action. The class, cost, and reversibility come from the
 #    registered record; the payload is supplied here and filed by hash.
-#    For a command-shaped action the payload is {"argv": [...], "cwd": "..."}.
-approval request <TASK-ID> --action "<idempotency-key>" --as agent:<session> \
-  --payload <payload.json>
+#    For a command-shaped action, `approval payload run` prints those bytes:
+#    the argv, the cwd, and the digest of the script the argv names (APRV-401).
+#    Do not hand-write them — a command naming a script needs that digest, and
+#    a declaration without it is refused at execution.
+approval payload run -- <cmd...> \
+  | approval request <TASK-ID> --action "<idempotency-key>" \
+      --as agent:<session> --payload -
 
 # 3. Block on the decision. Exit code encodes it: 0 granted, and each refusal
 #    shape is its own documented code (approval wait --help).
 approval wait <TASK-ID> --timeout 6h
 
 # 4. On grant, execute through the gate with the token the human's grant
-#    minted. run recomputes the payload hash from the argv+cwd it is about to
-#    spawn; a changed command is refused payload-mismatch.
+#    minted. run recomputes the payload hash from the argv, the cwd and the
+#    files that argv names; a changed command, or a changed script behind an
+#    unchanged command, is refused payload-mismatch.
 approval run "<idempotency-key>" --token <token> --as agent:<session> -- <cmd...>
 ```
 
@@ -375,7 +380,7 @@ The re-delivery above used to arrive as a wall: five pending requests, five new
 messages with no warning, sitting under five older copies whose buttons had
 quietly stopped working. Taps on the older copies did nothing at all, so the
 natural response (tap it again, harder) was the one response that could not
-help. Three things changed.
+help. Four things changed.
 
 **A restart announces itself.** Under `burst`, the first batch a listener sends is
 preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
@@ -384,6 +389,25 @@ same flood in silence is an incident. Later cycles send no banner, because a
 request that arrives at 14:00 is a notification and not a re-delivery. The line
 says *started* rather than *restarted* because the listener genuinely cannot
 tell the two apart: it keeps nothing across a restart, on purpose.
+
+**The live one is on top, and the dead ones are one message** (APRV-425). A
+restart no longer sends a message per pending request. The requests nobody can
+still be holding — older than the hook's wait plus its retry grace — arrive as
+one summary with a single `Reject all` (APRV-287), and so do the ones a newer
+pending request has superseded: two requests naming the same payload bytes and
+the same class are two askings of one question, and the older one's session is
+gone. So a restart with five stale requests is ONE message rather than six, and a
+restart with nothing live sends nothing else at all.
+
+What is still live arrives newest first, then the stale backlog oldest first,
+with any attestation prompt last. `/queue` lists them in the same order, because
+two orders would be two answers to "what is waiting on me".
+
+None of that decides anything. A collapsed or superseded request stays pending in
+the log, is listed by `/queue`, and is decidable from any copy already on your
+phone (below). If the listener forgets what it has sent — a crash, a restart, a
+failed summary — it shows the requests again, which is the direction SPEC §10.3
+requires: a duplicate in front of you, never a pending request nobody is shown.
 
 **Every copy's buttons work.** A button now carries a short digest of the action
 key alongside its own message nonce, so a tap on last night's copy resolves to

@@ -3370,12 +3370,70 @@ function grantLapsed(derivation: RequestDerivation, ts: string): boolean {
   return asked > requestedAt + ttlMs;
 }
 
+/**
+ * Was the question already abandoned when it was answered? (APRV-410.)
+ *
+ * The state this names, observed 2026-09-20 in this repository's own log. A
+ * hook wait expired at 18:52:37 on a request opened at 18:43:37; the retry
+ * grace ran out at 18:57:37 with nothing retrying; a human tapped approve at
+ * 19:03:32 and `approval.granted` seq 64473 was recorded, six minutes past the
+ * grace, on a question no hook process was holding. The grant authorized
+ * nothing that ran on the day only because the session had already moved on. It
+ * was still live: a retry of that exact command in that directory inside the
+ * TTL would have found it here and proceeded on it, which is one human tap
+ * authorizing an execution nobody connected to the tap.
+ *
+ * {@link grantLapsed} bounds a grant by the request's TTL, which is the shelf
+ * life of an ANSWER. This bounds it by the life of the QUESTION: past
+ * `requestTs + abandonAfterMs` the asker is gone (`core/harness-wait.ts` is
+ * where that duration and its reasoning live), so an answer arriving after it
+ * answered nobody. Both bounds apply; either one alone lets a case through.
+ *
+ * Two facts and no third. The request's own runtime-assigned timestamp and the
+ * decision record's own runtime-assigned timestamp, both read from the log the
+ * caller verified. Nothing self-reported enters it, and the caller's
+ * `abandonAfterMs` is the window the CALLER is configured for rather than
+ * anything the requester said about itself, which is why a false claim cannot
+ * widen it.
+ *
+ * Strictly stricter, and opt-in. A caller that passes no window gets exactly
+ * today's behaviour, and a caller that passes one can only lose a carry it
+ * would otherwise have had. Losing one costs a fresh question; keeping one
+ * costs an execution on an answer nobody was waiting for.
+ *
+ * An unparseable instant on either side reads as abandoned, exactly as
+ * {@link grantLapsed} reads one as lapsed: the strict direction is the one a
+ * corrupt byte must resolve to.
+ */
+function questionAbandoned(
+  derivation: RequestDerivation,
+  abandonAfterMs: number | null,
+): boolean {
+  if (abandonAfterMs === null) return false;
+  const requestedAt = Date.parse(derivation.requestTs ?? "");
+  const answeredAt = Date.parse(derivation.decisionTs ?? "");
+  if (Number.isNaN(requestedAt) || Number.isNaN(answeredAt)) return true;
+  return answeredAt > requestedAt + Math.max(0, abandonAfterMs);
+}
+
 export function findHarnessCarry(
   records: EventRecord[],
   payloadHash: string,
   cls: string,
   ts: string,
   ttlMs: number | null,
+  /**
+   * How long a question of this caller's outlives the wait that opened it
+   * (APRV-410, `core/harness-wait.ts`'s `abandonedAfterMs`), or `null` for a
+   * caller that declares no such window.
+   *
+   * Only a GRANTED candidate is bounded by it. A pending one is the question
+   * this invocation is about to adopt, and the withdrawal of an abandoned
+   * pending question is the requester's own business, not this function's:
+   * `cli/hook.ts` sweeps those through `withdraw`, which is requester-only by
+   * design (APRV-106 rule 1).
+   */
+  abandonAfterMs: number | null = null,
 ): HarnessCarry | null {
   if (!isPayloadHash(payloadHash)) return null;
 
@@ -3407,7 +3465,12 @@ export function findHarnessCarry(
     if (derivation.execution.started !== null) continue;
     if (derivation.state === "granted") {
       // An answer has a shelf life, and it is its request's TTL.
+      // APRV-423: judged by the request's own effective window, read off the
+      // derivation, never the raw policy TTL.
       if (grantLapsed(derivation, ts)) continue;
+      // And a question has a life of its own: an answer that landed after the
+      // asker was gone authorized nobody (APRV-410).
+      if (questionAbandoned(derivation, abandonAfterMs)) continue;
       return {
         actionKey,
         task: derivation.task,

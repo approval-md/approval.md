@@ -98,6 +98,7 @@ import { harnessLoopEscalation, harnessOutcomeCoverage, loopClearance } from "..
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
+import { boundScript, describeBoundScript } from "../core/run-payload.js";
 import { withdraw } from "../core/gate.js";
 import { openGateWindow } from "../core/gate-window.js";
 import { keyStoreDirFor } from "../core/seal.js";
@@ -544,12 +545,24 @@ export function commandRun(
       RUN_HELP,
     );
   }
+  // APRV-401 put the SCRIPT inside that computation: an interpreter followed by
+  // a path operand, or a path at argv[0], carries that file's digest, so a
+  // script rewritten between the declaration and this moment hashes differently
+  // and is refused here rather than executed under a grant nobody gave it. The
+  // refusal names what was bound, because "the hash differs" leaves an agent to
+  // guess whether the argv moved or the file under it did, and those have
+  // different repairs.
   const payloadHash = runPayloadHash(childArgv, cwd);
   if (hashFlag !== null && hashFlag !== payloadHash) {
+    const script = boundScript(childArgv, cwd);
+    const binding =
+      script === null
+        ? `The argv names no readable script, so the binding is the argv and the cwd alone (amended SPEC.md §6.2, APRV-401).`
+        : `The binding covers the script's bytes as well (amended SPEC.md §6.2, APRV-401): ${describeBoundScript(script)}, so a script edited since the declaration changes this value.`;
     return emitRefusal(streams, json, {
       ok: false,
       code: "payload-mismatch",
-      message: `--payload-hash ${hashFlag} is not the hash of the command this would spawn: ${JSON.stringify(childArgv[0])} and ${childArgv.length - 1} argument(s) in ${cwd} hash to ${payloadHash}. \`approval run\` recomputes the binding from the argv and cwd it is about to spawn and never accepts a caller's substitute for it (amended SPEC.md §10.4, APRV-140); the flag states what you believe you are running, and this is a refusal to run something else. Nothing was appended.`,
+      message: `--payload-hash ${hashFlag} is not the hash of the command this would spawn: ${JSON.stringify(childArgv[0])} and ${childArgv.length - 1} argument(s) in ${cwd} hash to ${payloadHash}. ${binding} \`approval run\` recomputes the binding from the argv, the cwd and those bytes and never accepts a caller's substitute for it (amended SPEC.md §10.4, APRV-140); the flag states what you believe you are running, and this is a refusal to run something else. Nothing was appended.`,
     });
   }
 

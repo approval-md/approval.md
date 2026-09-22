@@ -505,6 +505,12 @@ const AGENT_FACING: readonly string[] = [
   "policy check",
   "policy test",
   "payload hash",
+  // APRV-401. The declaration an agent is about to ask permission for, read out
+  // of the tree it will run in: the argv, the cwd, and the digest of every file
+  // that argv names. It reads files, produces no authority at all, and the
+  // bytes it prints are checked at intake and recomputed at execution, so a
+  // wrong answer here refuses rather than widens.
+  "payload run",
   // APRV-223. The composing half of the AgentMail flow: the agent's own key
   // reads the agent's own draft, before any approval exists, and that key
   // cannot send. What the verb produces is a proposal and no authority.

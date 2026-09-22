@@ -77,7 +77,7 @@
  * randomness, no ambient configuration, no environment reads.
  */
 
-import { connect as netConnect, type Socket } from "node:net";
+import { connect as netConnect, isIP, type Socket } from "node:net";
 import { connect as tlsConnect, type ConnectionOptions, type TLSSocket } from "node:tls";
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,28 @@ export interface SmtpTransportOptions {
   tlsRejectUnauthorized?: boolean;
   /** Applied to every string this module returns. See the module header. */
   redact?(text: string): string;
+}
+
+/**
+ * The TLS `servername` (SNI) to use for `host`, or `undefined` when there is
+ * none to send (APRV-416).
+ *
+ * SNI names a virtual host, and an IP address is not one. Sending an address
+ * there has always been meaningless; Node 26 turned the long-standing
+ * deprecation into a hard error, so a session against an IP-addressed relay
+ * fails at the handshake with "Setting the TLS ServerName to an IP address is
+ * not permitted" before it reaches the certificate. Omitting it is the whole
+ * fix: verification of an IP host then rests on the certificate's IP SAN
+ * entry, which is what TLS intends for an address, and `rejectUnauthorized`
+ * keeps its meaning either way.
+ *
+ * A bracketed IPv6 literal (`[::1]`, the URL spelling) is unwrapped before the
+ * test, because it is an address in every sense that matters here and nothing
+ * that reaches this function is a hostname shaped like one.
+ */
+export function tlsServername(host: string): string | undefined {
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return isIP(bare) === 0 ? host : undefined;
 }
 
 /** The SMTP envelope, which is not the message's headers. */
@@ -493,7 +515,7 @@ async function runSession(
           host: options.host,
           port: options.port,
           rejectUnauthorized,
-          servername: options.host,
+          servername: tlsServername(options.host),
         };
         const created = tlsConnect(tlsOptions, () => {
           created.removeListener("error", onError);
@@ -545,7 +567,7 @@ async function runSession(
           reject(new SmtpError("smtp-tls-failed", `the STARTTLS handshake failed: ${redact(cause.message)}`));
         };
         const upgraded = tlsConnect(
-          { socket: plain, rejectUnauthorized, servername: options.host },
+          { socket: plain, rejectUnauthorized, servername: tlsServername(options.host) },
           () => {
             upgraded.removeListener("error", onError);
             resolve(upgraded);

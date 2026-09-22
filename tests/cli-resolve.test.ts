@@ -359,6 +359,105 @@ test("--payload-hash is checked against the computation, and a malformed one is 
 });
 
 // ---------------------------------------------------------------------------
+// run: the bytes behind a script the argv names (APRV-401)
+// ---------------------------------------------------------------------------
+
+/**
+ * A repo whose supervised action binds a command that NAMES A SCRIPT.
+ *
+ * Supervised rather than manual on purpose: off the manual path there is no
+ * grant and no token, so the registered declaration is the whole of what
+ * authorizes the run, and the case is the harder one — nothing but the hash
+ * stands between the declaration and the execution.
+ */
+function scriptCase(): { dir: string; script: string; argv: string[] } {
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY, "utf8");
+
+  const script = join(dir, "job.js");
+  writeFileSync(script, "console.log('the approved script');\n", "utf8");
+  // `node job.js`: the interpreter is a name this runtime knows and the operand
+  // is relative, the way a human types it, so the case also pins that the
+  // operand resolves against the RUN's cwd rather than the hashing process's.
+  const argv = [process.execPath, "job.js"];
+  writeFileSync(join(dir, "task-042.md"), taskFile(runPayloadHash(argv, dir)), "utf8");
+
+  assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
+  assert.equal(runCli(["register", "task-042.md", "--as", "agent:claude"], dir).code, 0);
+  return { dir, script, argv };
+}
+
+test("a declaration over a script binds the script's bytes, and the approved bytes run", () => {
+  const unit = scriptCase();
+  const run = runCli(
+    ["run", "task-042:draft", "--as", "agent:claude", "--", ...unit.argv],
+    unit.dir,
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.stdout.includes("the approved script"), true);
+  assertClean(unit.dir);
+});
+
+test("editing the script after the declaration is payload-mismatch, and nothing is appended", () => {
+  const unit = scriptCase();
+  const before = events(unit.dir);
+
+  // The hazard APRV-401 was filed for, acted out: same action key, same argv,
+  // same cwd, different bytes behind the name. Before the files were bound this
+  // ran, and the log recorded the binding the approver had seen.
+  writeFileSync(unit.script, "console.log('something else entirely');\n", "utf8");
+
+  const run = runCli(
+    ["run", "task-042:draft", "--as", "agent:claude", "--json", "--", ...unit.argv],
+    unit.dir,
+  );
+  assert.equal(run.code, 1, run.stderr);
+  const error = (JSON.parse(run.stderr.trim()) as Record<string, unknown>)["error"] as Record<
+    string,
+    unknown
+  >;
+  assert.equal(error["code"], "payload-mismatch");
+  assert.equal(run.stdout.includes("something else entirely"), false, "the child ran anyway");
+  assert.deepEqual(events(unit.dir), before, "a mismatched run appended something");
+  assertClean(unit.dir);
+});
+
+test("--payload-hash's refusal names the file it bound, so an agent knows what moved", () => {
+  const unit = scriptCase();
+  const stale = runPayloadHash(unit.argv, unit.dir);
+  writeFileSync(unit.script, "console.log('edited');\n", "utf8");
+
+  const run = runCli(
+    [
+      "run",
+      "task-042:draft",
+      "--payload-hash",
+      stale,
+      "--as",
+      "agent:claude",
+      "--json",
+      "--",
+      ...unit.argv,
+    ],
+    unit.dir,
+  );
+  assert.equal(run.code, 1, run.stderr);
+  const error = (JSON.parse(run.stderr.trim()) as Record<string, unknown>)["error"] as Record<
+    string,
+    unknown
+  >;
+  assert.equal(error["code"], "payload-mismatch");
+  assert.equal(
+    String(error["message"]).includes(unit.script),
+    true,
+    "the refusal did not say which file it bound",
+  );
+  assert.equal(events(unit.dir).includes("execution.started"), false);
+});
+
+// ---------------------------------------------------------------------------
 // execution resolve
 // ---------------------------------------------------------------------------
 

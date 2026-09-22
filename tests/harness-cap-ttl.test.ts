@@ -653,7 +653,7 @@ test("F7: when the capped window closes before the retry grace, the deny says th
     verdict.reason,
   );
   assert.ok(!/stay open for the 5m retry grace/u.test(verdict.reason), verdict.reason);
-  assert.ok(!/Past the grace the hook takes the question back/u.test(verdict.reason), verdict.reason);
+  assert.ok(!/Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT GATED TOOL CALL/u.test(verdict.reason), verdict.reason);
   assert.match(
     announceOf(run),
     /The request expires at \S+, which comes before the 5m retry grace would run out/u,
@@ -687,7 +687,7 @@ test("F7: when the retry grace is the shorter of the two, the grace sentence sta
   const verdict = verdictOf(run);
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.match(verdict.reason, /stay open for the 10s retry grace/u, verdict.reason);
-  assert.match(verdict.reason, /Past the grace the hook takes the question back/u, verdict.reason);
+  assert.match(verdict.reason, /Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT GATED TOOL CALL/u, verdict.reason);
   assert.match(
     verdict.reason,
     /The harness ceiling this hook runs under bounds the question too: the request\(s\) expire at \S+/u,

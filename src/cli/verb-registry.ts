@@ -173,7 +173,7 @@ function positionals(
 
 const NO_POSITIONALS: JsonSchema = { type: "array", maxItems: 0 };
 
-/** The argv after `--`, for the two verbs that take one. */
+/** The argv after `--`, for the verbs that take one. */
 const TRAILING: JsonSchema = {
   type: "array",
   items: STRING,
@@ -2086,6 +2086,36 @@ const VERBS: VerbSpec[] = [
       flags: { ...JSON_FLAG, ...HELP_FLAGS },
     }),
     output: object({ ok: { const: true }, hash: SHA256 }, ["ok", "hash"]),
+    error: ERROR_SCHEMA,
+    exit_codes: READ_ONLY_EXIT_CODES,
+  },
+
+  {
+    name: "payload",
+    subcommand: "run",
+    purpose:
+      "Print the payload `approval run` will recompute for a command before it spawns it: the argv, the cwd, and — since APRV-401 — the size and SHA-256 of the script that argv names, so a grant over a script binds the SCRIPT'S BYTES and not its path. A script is a known interpreter (the shells, node, python3 and kin) followed by a path operand, or a path at argv[0] the kernel reads a shebang from. With --hash it prints the payload_hash instead, the value a task file's declaration carries. An argv naming no script carries no `script` key and hashes exactly as it did before the rule existed. An inline program is already in the argv; the interpreter itself, a launcher this runtime does not name, whatever the script itself reads or runs, and the window between this hash and the spawn are all outside the binding. Reads that one file and nothing else: no log, no policy, no network, no token, and it executes nothing.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing by construction: it describes a command an agent is about to ask permission for, before any approval exists, and produces no authority of any kind. The bytes it prints are checked at intake and recomputed at execution, so a wrong answer here refuses rather than widens.",
+    input: input({
+      positionals: NO_POSITIONALS,
+      flags: {
+        // Path-typed, and it matters: the value is the directory every relative
+        // argv word is resolved against, so a caller who could name any
+        // directory could ask this verb to digest any file under it.
+        "--cwd": "path",
+        "--hash": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+      trailing: TRAILING,
+    }),
+    // The canonical payload itself on stdout, as `agentmail-draft` does it: the
+    // bytes ARE the result, and an envelope around them would be a second thing
+    // to strip before hashing. `--hash --json` prints {ok, hash}, which is the
+    // one shape here that is a RESULT rather than the payload.
+    output: null,
     error: ERROR_SCHEMA,
     exit_codes: READ_ONLY_EXIT_CODES,
   },

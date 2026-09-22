@@ -1524,6 +1524,24 @@ hash must equal the declared `payload_hash` and it is filed in
 bytes from. Supply it here once and no channel needs `--payload-dir` or
 `--payloads` at all.
 
+For an action `approval run` will execute, produce those bytes with `approval
+payload run -- <cmd…>` rather than by hand. Since APRV-401 the payload carries
+the size and digest of the script the argv names, and a hand-written
+`{"argv":…,"cwd":…}` for a command that names a script is a declaration the
+execution will refuse `payload-mismatch`, correctly, because it describes bytes
+nobody bound:
+
+```
+approval payload run --hash -- bash scripts/install.sh   # the declaration
+approval payload run       -- bash scripts/install.sh \
+  | approval request <task> --action <key> --as agent:<id> --payload -
+```
+
+Material supplied here is checked against the declared hash and never against
+the filesystem: this verb does not know where the run will happen, and the
+guarantee is that `approval run` recomputes the same value from the tree it is
+about to spawn into and refuses on any difference.
+
 When the policy permits an unattended action, supplied material is still checked
 against the registered action's task, class and payload hash and retained before
 `proceed:true` is returned. This creates no approval event and does not require
@@ -1953,9 +1971,23 @@ measurement.
 Content binding (amended SPEC.md §6.2, §10.4): run computes the hash of the argv
 and cwd it is about to spawn, always, and presents that. The command IS the
 action here, and an executor that had to be told what it was running could be
-told wrong. `--payload-hash` is consequently a CHECK and never a substitute
+told wrong.
+
+Since APRV-401 that computation includes THE SCRIPT THE ARGV NAMES. A known
+interpreter followed by a path operand, or a path at `argv[0]`, carries that
+file's size and SHA-256 inside the hashed payload, so a grant over `bash
+install.sh` binds the script's bytes rather than its path: a script edited
+between the declaration and the run hashes differently and is refused
+`payload-mismatch`, with nothing appended and the grant still live for the
+approved bytes. An argv naming no script hashes exactly as it always did.
+`approval payload run` prints the same value, which is how a requester obtains
+the declaration in the first place; `docs/run-payload-binding.md` states the
+rule and the six things it does not reach.
+
+`--payload-hash` is consequently a CHECK and never a substitute
 (APRV-140): a value differing from the recomputed one is refused
-`payload-mismatch` before the child exists and before anything is appended. An
+`payload-mismatch` before the child exists and before anything is appended, and
+the refusal names the script it bound so the repair is visible. An
 action whose payload is content rather than an argv (an email body, a record
 write, a message and its recipients) is executed through the adapter contract of
 §10.4, `approval adapter email`, which hashes those bytes itself; a token for
@@ -4723,6 +4755,57 @@ defined over the canonical VALUE, so non-JSON input has no defined
 could reproduce. Empty input is the same answer. A file that exists but cannot be
 read is exit 4.
 
+## payload run
+
+The payload `approval run` will recompute for a command, printed before any
+approval exists: its argv, the cwd it will run in, and the size and SHA-256 of
+the script that argv names.
+
+```
+approval payload run -- bash scripts/install.sh
+{"argv":["bash","scripts/install.sh"],"cwd":"/repo",
+ "script":{"argv_index":1,"path":"/repo/scripts/install.sh","bytes":412,
+           "sha256":"fef0…"}}
+```
+
+The `script` object is the whole point of the verb (APRV-401). A grant over
+`bash scripts/install.sh` used to bind that STRING, so the bytes behind the path
+were whatever the file held at execution time and the requester controlled the
+file between the request and the grant. The digest is inside the hashed value,
+so a script edited after the declaration is refused `payload-mismatch` before the
+child is spawned and before anything is appended, and the approver's card carries
+the path, the byte count and the digest because the payload does.
+
+The argv names a script in two shapes: a known interpreter (the six shells,
+`node`, `python`/`python3`, `perl`, `ruby`, `deno` — each a name the command
+classifier already knows) followed by a path operand, or a path at `argv[0]` the
+kernel reads a shebang from. An inline program (`bash -c …`, `node -e …`) is
+already a word of the argv and binds no file.
+
+An argv naming no readable script carries no `script` key and hashes exactly as
+it did before the rule existed, which is why every record already in a log and
+every declaration already written into a task file still verifies.
+
+`--hash` prints the `payload_hash` instead of the bytes — the value a task file's
+action declaration carries. `--cwd` states the directory the run will happen in,
+because that directory is inside the hash and every relative argv word resolves
+against it. The two ends must agree, so pass the same `--cwd` the run will use.
+
+What is NOT bound is stated in full in `docs/run-payload-binding.md`: nothing
+resolved through `PATH`, nothing a bound script itself reads or executes, and the
+instant between this hash and the spawn.
+
+This verb reads the one file the argv names as its script and nothing else. No
+log, no policy, no network, no token, and it executes nothing.
+
+It is **local only**: the MCP wrapper and `approval serve` withhold it, because
+the path it digests is one of the command's own words and no transport guard
+confines those the way the store confinement confines `payload hash`'s
+positional. A remote caller could otherwise ask for the digest of any file the
+server process can read (`-- bash /etc/shadow`) and learn that the path exists
+and what its bytes fingerprint to. Compute the binding where the command will
+run, which is the only place the value is true.
+
 ## payload agentmail-draft
 
 An AgentMail draft is mutable server-side state, so an approval of a draft id
@@ -5106,7 +5189,8 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
 `advance-refused`, `dark-session-undetermined`, `anchor-behind`,
-`anchor-reread`, `checkpoint-due`, `draw-unavailable`, `sample-deferred`. A
+`anchor-reread`, `checkpoint-due`, `draw-unavailable`, `sample-deferred`,
+`drift-deferred`. A
 warning never stops the loop, and neither does
 `{"event":"git_evidence_failed","step":"commit",…}`.
 
@@ -5161,6 +5245,33 @@ daemon never runs again.
 Every other append refusal on a sample keeps the `append-refused` form, because
 `validation`, `canonicalization`, `corrupt-tail` and `io` are facts about the
 record or the file that no amount of retrying repairs.
+
+**A drift record that met another writer is deferred too (APRV-403).** The drift
+scan's append is the same compare-and-append against the head it read, and it
+met the same contention: the end-to-end test that holds the append lockfile for
+a whole tick showed the scan printing `append-refused … (lock-timeout)` for an
+`envelope.drift` the next tick went on to write. So the same split applies, from
+the same closed list of transient codes, on both drift reasons:
+
+```
+warning  drift-deferred  envelope.drift for task-042 was deferred (lock-timeout):
+  another writer holds .approval/log/events.jsonl.lock; gave up after 2000ms The
+  record is NOT lost: the disagreement is still there in the log's own terms, and
+  the scan re-derives it and retries on the next tick.
+envelope.drift: task-042 (backlog/tasks/task-042.md) claims state approved, the
+  log says proposed — recorded at seq 12, the retry of the record this run
+  deferred earlier; the file is repaired to match the log later in this tick
+```
+
+The `retry` flag has the same standing as the sample's: it is on the `drift`
+event only when THIS run is the one that deferred the record, it is output
+bookkeeping that no append consults, and a restarted daemon makes the same
+append and claims nothing. Deferring costs nothing because the scan carries no
+state between ticks: it re-reads the folder, re-derives the state from the
+verified log, and `driftAlreadyLogged` keeps a repeat idempotent.
+
+An `envelope.drift` refused for `validation`, `canonicalization`, `corrupt-tail`
+or `io` keeps the `append-refused` form it always had.
 
 **The sweep waits `2000ms` for the lock and no longer, by decision.** The daemon
 is the one writer that could afford a longer wait and deliberately takes the
@@ -6271,6 +6382,14 @@ The probe sends nothing. It is the same SMTP session a send runs — connect, EH
 STARTTLS, AUTH — and then QUIT. It proves the host answers, that the TLS mode is
 the one the server offers, and that the credential is accepted. It does not prove
 delivery, and it puts no message on the wire.
+
+An `smtp.host` that is an IP address is probed without SNI (APRV-416). A server
+name is a name, so there is nothing to send for an address, and Node 26 refuses
+the session outright where earlier versions only warned. The certificate is
+still verified; what it is verified against is the address, which the server's
+certificate has to carry as an IP entry in its subject alternative names. A
+relay whose certificate names only a hostname therefore fails the probe when it
+is configured by address and passes when it is configured by that name.
 
 A failed probe keeps the values. A laptop behind a captive portal is not a reason
 to make you type five things again. The refusal prints the SMTP code and the

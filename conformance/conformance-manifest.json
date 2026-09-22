@@ -5,7 +5,7 @@
     "conformance/run.mjs": "6b1b58c6e190244b0ace06ac7f2ae272b8161c267d8ce2e192f2eab219f19457",
     "conformance/vectors/bridge-decisions.v1.json": "99133576c3e23c58f8d5f81be145a570f49a2616d1485e222c9b32346e224b62",
     "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
-    "conformance/vectors/command-class.v1.json": "9f227834882756328258496df6663b64e0208dcd705e02bd15d7a1688e1780fd",
+    "conformance/vectors/command-class.v1.json": "9c53c7b3435c6e4be01e2fdba502a90dbe579d8b16e84ee236155337ca86d1f6",
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",

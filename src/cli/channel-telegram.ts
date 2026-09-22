@@ -1071,9 +1071,15 @@ export interface PacedState {
   /**
    * Every pending action key, in the order this process will show them.
    *
-   * Seeded from log order (oldest first, which is what `buildPendingQueue`
-   * returns) and rearranged by `/skip` alone. Keys the log no longer calls
-   * pending are dropped on every cycle, and newly pending ones join the back.
+   * Seeded from `orderPending`'s order (live newest first, then stale oldest
+   * first, attestation prompts last — APRV-425; it was log order before that)
+   * and rearranged by `/skip` alone. Keys the log no longer calls pending are
+   * dropped on every cycle, and newly pending ones join the back.
+   *
+   * The ordering reaches this only through the SEEDING, which is the property
+   * that matters for `/skip`: a key already in the list keeps the place the
+   * approver's own navigation gave it, and only keys this process has not seen
+   * before are inserted in the new order.
    */
   order: string[];
   /**
@@ -1553,11 +1559,18 @@ export async function dispatchPending(
     pruned: [],
   };
 
-  const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
-  if (!queue.ok) {
-    result.queueError = { code: queue.code, message: queue.message };
+  const built = buildPendingQueue(setup.logPath, setup.tagOptions, now);
+  if (!built.ok) {
+    result.queueError = { code: built.code, message: built.message };
     return result;
   }
+
+  // APRV-425. One ordering, applied once, so every pass below reads the same
+  // sequence: the annotation sweep, the paced walkthrough's seeding, the
+  // collapse, and the digest grouping. `orderPending` drops nothing and decides
+  // nothing, so the SET this cycle works from is `buildPendingQueue`'s exactly;
+  // what changes is which request an approver meets first.
+  const queue = { ...built, requests: orderPending(built.requests, now) };
 
   // APRV-106 (withdrawal) generalized by APRV-113 (every terminal state),
   // before the sends. A request this process delivered and that the log now
@@ -2019,6 +2032,113 @@ export const COLLAPSE_STALE_AFTER_MS = abandonedAfterMs(
 const COLLAPSE_MIN = 2;
 
 /**
+ * Pending requests a NEWER pending request has superseded (APRV-425).
+ *
+ * Two requests naming the same payload bytes and the same class are two askings
+ * of one question, and only the newer one has an asker. The shape that produces
+ * them is APRV-287's own: a hook whose wait ran out leaves its request open for
+ * the retry grace, the grace runs out, the hook withdraws it on its NEXT
+ * invocation — and if that next invocation never comes while a later session
+ * asks the same thing, both sit in the queue. Dogfooding produced exactly this
+ * complaint (APRV-118): a live prompt buried behind dead ones, and an approver
+ * rejecting the one they wanted.
+ *
+ * Keyed by `(payload_hash, class)` and not by task, because the task id a
+ * harness adapter mints is fresh per tool call (SPEC.md §10.2), so two askings
+ * of one command never share one. The bytes and the class are what a decision
+ * binds to, which is what makes them the right identity here.
+ *
+ * Computed from the pending set alone, which is re-derived from the verified log
+ * every cycle, so this decides nothing and remembers nothing. A superseded
+ * request is COLLAPSED, never closed: it stays pending in the log, listable, and
+ * decidable from any copy already delivered. Only a human's decision or the
+ * requester's own withdrawal ends it.
+ */
+export function supersededPending(requests: ChannelRequest[]): Set<string> {
+  const newest = new Map<string, { key: string; at: number }>();
+  const superseded = new Set<string>();
+  for (const request of requests) {
+    // An attestation prompt is never a duplicate of anything: its identity is
+    // the policy bytes it proposes, two proposals of the same bytes are refused
+    // upstream, and one that reached here is the live one.
+    if (request.policy_diff !== undefined) continue;
+    const identity = JSON.stringify([request.payload_hash.value, request.class.value]);
+    const key = request.action_key.value;
+    const at = Date.parse(request.requested_ts.value);
+    const previous = newest.get(identity);
+    if (previous === undefined) {
+      newest.set(identity, { key, at: Number.isNaN(at) ? 0 : at });
+      continue;
+    }
+    // Later wins, and an unreadable instant loses: a request whose age cannot be
+    // established is not the one to keep in front of an approver. Ties go to the
+    // one later in log order, which is the one the list already put second.
+    if (Number.isNaN(at) || at < previous.at) {
+      superseded.add(key);
+      continue;
+    }
+    superseded.add(previous.key);
+    newest.set(identity, { key, at });
+  }
+  return superseded;
+}
+
+/**
+ * The pending set in the order an approver should meet it (APRV-425).
+ *
+ * Three rules, in this order, and each is a complaint from running the gate:
+ *
+ * 1. **Attestation prompts last.** `buildPendingQueue` puts them there on
+ *    purpose: a policy amendment changes the rules every entry above it was
+ *    routed by, so an approver reading top to bottom answers the questions asked
+ *    under the current policy before changing what the current policy is. That
+ *    placement is not this function's to relitigate, so proposals are lifted
+ *    out, ordered among themselves by nothing at all (log order), and put back
+ *    at the end.
+ * 2. **Live requests first, newest first.** Live means younger than
+ *    {@link COLLAPSE_STALE_AFTER_MS}, the hook's wait plus its retry grace,
+ *    which is the same boundary the collapse uses — one number, one meaning of
+ *    "somebody may still be holding this". Newest first because the newest is
+ *    the one most likely to have a tool call blocked on it right now, and the
+ *    observed failure was a live prompt buried behind dead ones.
+ * 3. **Stale requests after them, oldest first.** They are what the collapse
+ *    takes on a first cycle, and where the collapse does not apply (fewer than
+ *    {@link COLLAPSE_MIN} of them) oldest-first is the order to work through a
+ *    backlog in.
+ *
+ * Stable inside each bucket, so log order breaks every tie and the result is
+ * deterministic for one log and one instant. It is an ORDER and nothing else:
+ * no request is dropped, none is decided, and the set that comes out is the set
+ * that went in.
+ */
+export function orderPending(requests: ChannelRequest[], now: string): ChannelRequest[] {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return requests;
+
+  const proposals: ChannelRequest[] = [];
+  const live: { request: ChannelRequest; at: number; index: number }[] = [];
+  const stale: { request: ChannelRequest; at: number; index: number }[] = [];
+
+  requests.forEach((request, index) => {
+    if (request.policy_diff !== undefined) {
+      proposals.push(request);
+      return;
+    }
+    const parsed = Date.parse(request.requested_ts.value);
+    // An unreadable instant is treated as ancient, which sorts it with the
+    // requests nobody is waiting on. That is the strict side: a request whose
+    // age cannot be established must not displace one whose age is known.
+    const at = Number.isNaN(parsed) ? 0 : parsed;
+    (nowMs - at >= COLLAPSE_STALE_AFTER_MS ? stale : live).push({ request, at, index });
+  });
+
+  live.sort((a, b) => b.at - a.at || a.index - b.index);
+  stale.sort((a, b) => a.at - b.at || a.index - b.index);
+
+  return [...live.map((entry) => entry.request), ...stale.map((entry) => entry.request), ...proposals];
+}
+
+/**
  * A DURATION in words, which is not what {@link ageText} renders.
  *
  * `ageText` says how long ago something happened ("5 min ago"), and these two
@@ -2032,8 +2152,21 @@ function durationText(ms: number): string {
   return `${String(minutes)}m`;
 }
 
-/** The computed lines a collapsed re-delivery leads with (APRV-287). */
-export function staleLines(requests: ChannelRequest[], now: string): string[] {
+/**
+ * The computed lines a collapsed re-delivery leads with (APRV-287).
+ *
+ * `superseded` is the subset a newer pending request replaced (APRV-425), and
+ * the first line states the split rather than claiming every member is old.
+ * Before this the line said "all older than the hook's wait plus its retry
+ * grace", which stopped being true the moment the collapse widened: a message
+ * that overstates what it collapsed is the stale-documentation failure in
+ * message form, and this one is read by the person deciding.
+ */
+export function staleLines(
+  requests: ChannelRequest[],
+  now: string,
+  superseded: ReadonlySet<string> = new Set(),
+): string[] {
   const nowMs = Date.parse(now);
   const ages = requests
     .map((request) => nowMs - Date.parse(request.requested_ts.value))
@@ -2044,19 +2177,27 @@ export function staleLines(requests: ChannelRequest[], now: string): string[] {
     const cls = request.class.value;
     tally.set(cls, (tally.get(cls) ?? 0) + 1);
   }
+  const replaced = requests.filter((request) => superseded.has(request.action_key.value)).length;
+  const abandoned = requests.length - replaced;
+  const why =
+    replaced === 0
+      ? `all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`
+      : abandoned === 0
+        ? "all superseded by a newer pending request for the same bytes and class"
+        : `${String(abandoned)} older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace, ${String(replaced)} superseded by a newer pending request for the same bytes and class`;
   return [
-    `${String(requests.length)} pending requests, all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`,
+    `${String(requests.length)} pending requests, ${why}`,
     `oldest: ${oldest === null ? "unknown age" : ageText(oldest)}`,
     `classes: ${[...tally.entries()]
       .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
       .join(", ")}`,
-    "collapsed into this one message because the tool calls that asked have stopped waiting; a decision on any of them can still authorize an identical retry",
+    "collapsed into this one message because nothing is waiting on them; each one stays pending in the log, and a decision on any of them can still authorize an identical retry",
   ];
 }
 
 /**
  * Put the requests nobody is waiting on into ONE message, and hand back the
- * ones that still get a message each (APRV-287).
+ * ones that still get a message each (APRV-287, widened by APRV-425).
  *
  * Called on a process's first cycle only, which is exactly a daemon start or a
  * listener reconnect. Everything it does is bookkeeping in the sense SPEC.md
@@ -2064,6 +2205,31 @@ export function staleLines(requests: ChannelRequest[], now: string): string[] {
  * so a summary that fails to send, or a process that forgets it sent one,
  * degrades to showing those requests again, and never to a pending request
  * nobody is shown.
+ *
+ * ## Two ways in, one exit (APRV-425)
+ *
+ * A request is collapsed when it is older than the hook's wait plus its retry
+ * grace (nobody is holding it), or when a NEWER pending request names the same
+ * payload bytes and class ({@link supersededPending} — the newer one is the live
+ * asking, whatever the age of either). The second is what answers the observed
+ * complaint that a live prompt arrives buried behind dead ones.
+ *
+ * ## This is where the sent-record is rebuilt from the log (AC3)
+ *
+ * Every collapsed member is written into `state.delivered` and `state.sentAtMs`
+ * below, and the set it is written from is the pending set re-derived from the
+ * verified log. That is the whole of the rebuilding, and it is deliberately not
+ * a second mechanism: the log is the only place the question "what is pending"
+ * is answered.
+ *
+ * What it is NOT is evidence of delivery, and the difference is load-bearing.
+ * Nothing reads this record to conclude that an approver saw anything: a
+ * collapsed request stays pending in the log, is listed by `/queue`, and is
+ * decidable from any copy already delivered, because APRV-196 made
+ * `callback_data` carry a restart-stable action ref so a button on a
+ * pre-restart copy still decides the request. Lose the record and the next
+ * cycle shows the requests again, which is the degradation SPEC.md §10.3
+ * requires and the one this code takes.
  */
 async function collapseStale(
   setup: ListenSetup,
@@ -2079,12 +2245,20 @@ async function collapseStale(
     const at = Date.parse(request.requested_ts.value);
     return Number.isNaN(at) ? 0 : nowMs - at;
   };
-  const stale = undecided.filter((request) => age(request) >= COLLAPSE_STALE_AFTER_MS);
+  // Computed over the WHOLE pending set rather than over `undecided`, so a
+  // request this process has already delivered still supersedes an older twin.
+  const superseded = supersededPending(undecided);
+  const stale = undecided.filter(
+    (request) =>
+      age(request) >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value),
+  );
   if (stale.length < COLLAPSE_MIN) return undecided;
 
   let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;
   try {
-    delivered = await setup.channel.notifyStale(stale, { lines: staleLines(stale, now) });
+    delivered = await setup.channel.notifyStale(stale, {
+      lines: staleLines(stale, now, superseded),
+    });
   } catch (cause) {
     delivered = null;
     streams.err(
@@ -2868,7 +3042,9 @@ export function commandHandlerFor(
       // and `/queue` is the verb that says what that is. Appended rather than
       // interleaved, because the two lists answer different questions: one is
       // what is waiting on the approver, the other what already happened.
-      const lines = queueLines(queue.requests, now, state.paced.current ?? []);
+      // APRV-425: the SAME ordering the dispatch cycle uses, because `/queue` is
+      // the approver asking what is waiting and two orders would be two answers.
+      const lines = queueLines(orderPending(queue.requests, now), now, state.paced.current ?? []);
       const built = openReviewCards(setup.logPath);
       if (built.ok && built.cards.length > 0) lines.push(...reviewSummaryLines(built.cards, now));
       await say(lines);

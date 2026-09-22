@@ -282,6 +282,19 @@ export const HOOK_DENY_CODES = [
    * directory, once. Past the grace the hook withdraws it (reason `timeout`),
    * because a question nothing will adopt is a message on a phone that decides
    * nothing.
+   *
+   * **Who withdraws, stated because the deny text used to imply a scheduler
+   * that does not exist (APRV-410).** This process is over when it denies, so
+   * the withdrawal is made by the NEXT gated tool call this actor makes, from
+   * the sweep at the top of every gated invocation. It cannot be anyone else: a
+   * withdrawal is the requester's own (APRV-106 rule 1, `not-requester`), the
+   * gate refuses a `system:` withdrawal outright, and the event schema binds
+   * the one `system:` withdrawal that exists to `policy-drift` and to nothing
+   * else (APRV-235). So a session that denies here and then makes no further
+   * gated call leaves the question pending until the TTL, and a decision on it
+   * lands as an ordinary grant. What stops that grant authorizing anything is
+   * the other half of APRV-410: a retry past the grace does not carry it
+   * (`findHarnessCarry`), so it asks again.
    */
   "hook-timeout",
   /**
@@ -2063,13 +2076,245 @@ export function refineReadScope(
   return { result: { ok: true, segments, classes }, notes };
 }
 
+// ===========================================================================
+// Write scope, the disk half (APRV-402)
+// ===========================================================================
+
 /**
- * The classifier, its context, and all three impure refinements, in the one
+ * ## Why writes need a second pass too
+ *
+ * Deletes and reads each had one and writes did not, which left the oldest of
+ * the three rules the loosest. `files.write.workspace` was decided on the text
+ * alone: a relative destination is the workspace, said the classifier, and a
+ * relative destination is the workspace only while nothing on the way to it is
+ * a symlink out. `cp x build/y`, `tee build/y`, `mkdir build/y`, and since
+ * APRV-397 `tar -x -C build` and `npm pack --pack-destination build`, were all
+ * autonomous with `build` pointing anywhere at all.
+ *
+ * Not a regression and not new with the packaging rows (APRV-402): the hole is
+ * as old as the workspace-write row, and before APRV-397 every packaging
+ * command was denied as unclassified, so nothing that was refused became
+ * allowed by a symlink. What changed is that the rows now say `workspace` often
+ * enough for the gap to be worth the disk.
+ *
+ * ## The shape is the other two passes' shape
+ *
+ * Resolve the nearest EXISTING ancestor of each destination, re-append the
+ * unresolved tail, and TIGHTEN when the result is outside every root. It can
+ * only ever move a segment toward the stricter class, so a caller that skipped
+ * it is no more permissive than one that runs it, which is what lets
+ * `hook classify` and `hook <harness>` share it without either becoming the
+ * authority.
+ *
+ * ## What it costs, measured before it was written (APRV-402 AC1)
+ *
+ * The walk is 0.10 ms to 0.13 ms per destination on a warm cache (0.07 ms for
+ * an absolute one), over 20k iterations of each shape. A write segment names
+ * one or two destinations, so a write command pays about a fifth of a
+ * millisecond. APRV-209 measured a cold gated invocation at about 371 ms, of
+ * which 116 ms is the module graph and 51 ms is `hook.js` alone; this is under
+ * half a percent of that last term and it is paid only by segments the
+ * classifier already called a workspace write. The delete and read passes pay
+ * the same price per target and have since APRV-267 and APRV-347.
+ */
+
+/** The class an out-of-scope write tightens to, as `core/command-class.ts` spells it. */
+const OUT_OF_SCOPE_WRITE_CLASS = "files.delete.out_of_scope";
+
+/** The rule a write tightened by this pass reports. */
+const WRITE_SCOPE_REJECTED_RULE = "write-out-of-scope-resolved";
+
+/** The class this pass re-reads, and the only one it will touch. */
+const WORKSPACE_WRITE = "files.write.workspace";
+
+/**
+ * The classifier rules whose destinations this pass re-reads.
+ *
+ * Exactly the rows APRV-402 names: the workspace-write row (`mkdir`, `cp`,
+ * `mv`, `touch`, `tee`, `ln`, `chmod`, `truncate`, `rmdir`) and the six
+ * packaging answers APRV-397 added. `rm-workspace` and `redirect-write` reach
+ * the same class by the same text-only reasoning and are deliberately NOT here:
+ * they are the same hole in two more rules and they are their own decision, not
+ * one to take inside this task's diff.
+ */
+const WRITE_SCOPE_RULES: readonly string[] = [
+  "workspace-write",
+  "tar-extract",
+  "tar-create",
+  "gunzip-write",
+  "base64-write",
+  "openssl-digest-out",
+  "npm-pack",
+];
+
+/**
+ * The roots a write may land in, resolved.
+ *
+ * The scratch roots are the ones `resolveScratchRoots` already computes and
+ * already guards, so this rule and the delete rule cannot disagree about where
+ * the agent's own scratch is. The working directory is the other one, and it is
+ * the root the classifier's own text rule already implies: "a relative
+ * destination is the workspace" means the workspace is wherever the command
+ * runs.
+ *
+ * `cwd` is harness-supplied, and reading a root out of it does not offend
+ * SPEC.md §11.1 invariant 4, because this pass only ever narrows. The baseline
+ * it narrows from is no check at all, so a poisoned `cwd` buys back exactly
+ * today's answer and never a looser one. Compare the read pass, which checks
+ * containment against the GATE root: that pass decides whether a read is in
+ * scope at all, so the scope has to be one the subject cannot choose. This one
+ * only takes an allowance away.
+ */
+export function resolveWriteRoots(cwd: string): string[] {
+  const roots = resolveScratchRoots(cwd);
+  const here = resolvedPath(cwd);
+  if (here !== null && !roots.includes(here)) roots.unshift(here);
+  return roots;
+}
+
+/**
+ * Where this destination really is, or `null` when nothing can say.
+ *
+ * The same walk `targetStaysInScratch` and `resolvedReadTarget` do, for the
+ * same reason: the destination usually does NOT exist yet, so the nearest
+ * existing ancestor is resolved and the unresolved tail re-appended. A symlink
+ * anywhere in that chain therefore cannot smuggle a write out of the roots,
+ * which is the escape the pure half cannot see.
+ */
+function resolvedWriteTarget(target: string, cwd: string): string | null {
+  let existing = isAbsolute(target) ? target : resolvePathSegments(cwd, target);
+  const tail: string[] = [];
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (existsSync(existing)) break;
+    const up = dirname(existing);
+    if (up === existing) return null;
+    tail.unshift(basename(existing));
+    existing = up;
+  }
+  const resolved = resolvedPath(existing);
+  if (resolved === null) return null;
+  return tail.length === 0 ? resolved : join(resolved, ...tail);
+}
+
+/**
+ * The words of a write segment that could name a path on disk.
+ *
+ * Every argument that is not spelled as a flag, plus the value half of
+ * `--opt=value`. This is the delete pass's own filter, and it is deliberately
+ * coarser than the classifier's flag table: it reaches `-C dir`, `-o file` and
+ * `--pack-destination dir` without this file holding a second copy of that
+ * table to drift against. It over-includes (a `tar` archive being READ is a
+ * candidate too, and so is `chmod`'s mode), and over-including can only tighten
+ * a segment that would otherwise have been waved through.
+ *
+ * A bare `-` is not a path: it is stdin or stdout, and every binary in these
+ * rows that accepts it means the stream.
+ */
+function writeCandidates(args: readonly string[]): string[] {
+  const candidates: string[] = [];
+  for (const arg of args) {
+    if (arg === "-") continue;
+    if (!arg.startsWith("-")) {
+      candidates.push(arg);
+      continue;
+    }
+    const equals = arg.indexOf("=");
+    if (equals === -1) continue;
+    const value = arg.slice(equals + 1);
+    if (value.length > 0) candidates.push(value);
+  }
+  return candidates;
+}
+
+/**
+ * Tighten a `files.write.workspace` segment to the out-of-scope write class
+ * wherever the disk disagrees with the text.
+ *
+ * IMPURE by design and by contract, exactly as the other two passes are. The
+ * class it tightens to is the one `core/command-class.ts` already answers for
+ * an out-of-scope packaging destination rather than a new name: a class no
+ * policy mentions resolves by `defaults.autonomy` (SPEC.md §7), so minting
+ * `files.write.out_of_scope` here would arrive AUTONOMOUS in every deployment
+ * with permissive defaults, which is the one way a tightening pass could
+ * loosen something.
+ *
+ * `roots` empty means the caller asked for no write scoping, and every segment
+ * comes back untouched: the same "absent yields today's answer" the read pass
+ * promises.
+ */
+export function refineWriteScope(
+  result: CommandClassification,
+  roots: readonly string[],
+  cwd: string,
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  if (roots.length === 0) return { result, notes: [] };
+  if (
+    !result.segments.some(
+      (segment) => segment.class === WORKSPACE_WRITE && WRITE_SCOPE_RULES.includes(segment.rule),
+    )
+  ) {
+    return { result, notes: [] };
+  }
+
+  const notes: string[] = [];
+  const segments = result.segments.map((segment) => {
+    if (segment.class !== WORKSPACE_WRITE) return segment;
+    if (!WRITE_SCOPE_RULES.includes(segment.rule)) return segment;
+    const words = commandSegmentWords(segment.text);
+    const parsed = words === null ? undefined : words[0];
+    // The classifier read this segment a moment ago, so a parse that disagrees
+    // here is two reads of the same bytes disagreeing. Fail closed.
+    if (parsed === undefined) {
+      notes.push(
+        `${WRITE_SCOPE_REJECTED_RULE}: \`${segment.text}\` could not be re-read, so it is ${OUT_OF_SCOPE_WRITE_CLASS}`,
+      );
+      return { ...segment, class: OUT_OF_SCOPE_WRITE_CLASS, rule: WRITE_SCOPE_REJECTED_RULE };
+    }
+
+    const reject = (path: string, detail: string): ClassifiedSegment => {
+      notes.push(`${WRITE_SCOPE_REJECTED_RULE}: ${detail}`);
+      return {
+        ...segment,
+        class: OUT_OF_SCOPE_WRITE_CLASS,
+        rule: WRITE_SCOPE_REJECTED_RULE,
+        path,
+      };
+    };
+
+    for (const candidate of writeCandidates(parsed.args)) {
+      const resolved = resolvedWriteTarget(candidate, cwd);
+      if (resolved === null) {
+        return reject(
+          candidate,
+          `${candidate} does not resolve to any path this hook can see, so \`${segment.text}\` is ${OUT_OF_SCOPE_WRITE_CLASS}`,
+        );
+      }
+      if (!roots.some((root) => resolved === root || isBelow(resolved, root))) {
+        return reject(
+          resolved,
+          `${candidate} resolves to ${resolved}, which is outside the workspace and every scratch root (${roots.join(", ")}), so \`${segment.text}\` is ${OUT_OF_SCOPE_WRITE_CLASS}`,
+        );
+      }
+    }
+    return segment;
+  });
+  if (notes.length === 0) return { result, notes };
+
+  const classes: string[] = [];
+  for (const segment of segments) {
+    if (!classes.includes(segment.class)) classes.push(segment.class);
+  }
+  return { result: { ok: true, segments, classes }, notes };
+}
+
+/**
+ * The classifier, its context, and all four impure refinements, in the one
  * order every caller must use.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are three refinements in the chain.
+ * that stays true now there are four refinements in the chain.
  *
  * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
  * the strict one (APRV-347), so it is passed explicitly at every call site: an
@@ -2091,9 +2336,15 @@ export function classifyForHook(
   const rewritten = refineRewrite(classified, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
   const scoped = refineReadScope(scratched.result, readRoots, cwd);
+  // APRV-402. Its roots are not `readRoots`: a read scope is a read notion and
+  // must not become a write authorization, so this pass asks its own question
+  // of the working directory and the scratch roots. Last in the chain because
+  // it is the narrowest, and because nothing after it would re-read a segment
+  // it has already tightened.
+  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd);
   return {
-    result: scoped.result,
-    notes: [...rewritten.notes, ...scratched.notes, ...scoped.notes],
+    result: written.result,
+    notes: [...rewritten.notes, ...scratched.notes, ...scoped.notes, ...written.notes],
   };
 }
 
@@ -3533,7 +3784,19 @@ export function gateHarnessCall(
   }
 
   const actions: GatedAction[] = classes.map((cls) => {
-    const carry = findHarnessCarry(intake.records, hash, cls, intakeTs, run.ttlMs);
+    // APRV-410: the window this invocation is configured for bounds which
+    // GRANT it may carry, so an answer that landed after the asking process
+    // was gone is not adopted by a later one. The sweep above takes back the
+    // pending questions; this refuses the grants that were written on questions
+    // nobody was holding. The two halves are the same fact from both sides.
+    const carry = findHarnessCarry(
+      intake.records,
+      hash,
+      cls,
+      intakeTs,
+      run.ttlMs,
+      abandonedAfterMs(run.timeoutMs, run.graceMs),
+    );
     if (carry === null) return { cls, actionKey: `${task}:${cls}`, origin: "new" as const };
     return {
       cls,
@@ -3965,7 +4228,7 @@ export function gateHarnessCall(
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -5695,6 +5958,41 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   }
 
   if (floor === null && autonomies.every((autonomy) => autonomy === "autonomous")) {
+    // APRV-410. The sweep that takes back this actor's abandoned questions used
+    // to live only in `gateHarnessCall`, which an autonomous command never
+    // reaches — so a session whose retry classified autonomously left its
+    // expired question standing until the TTL, and a human's tap on it six
+    // minutes past the grace was recorded as a grant nobody held (log seq
+    // 64473, 2026-09-20). The withdrawal has to be made by the REQUESTER, which
+    // is this actor: `withdraw` refuses a `system:` actor in as many words, and
+    // the event schema's cross-rule binds a `system:` withdrawal to
+    // `policy-drift` alone (APRV-235), so the daemon is not a candidate and the
+    // next invocation of the asking actor is the only one there is.
+    //
+    // `windowRecords` is the verified read `lookupWindow` already performed on
+    // this invocation, so the sweep costs one append when there is something to
+    // take back and nothing at all when there is not. `withdraw` re-reads and
+    // compare-and-appends against its own head (SPEC.md §11.1 invariant 5), so
+    // a question decided between that read and this call refuses
+    // `already-decided` and is passed over rather than overwritten.
+    //
+    // `keepHash` is this invocation's own bytes, exactly as the intake sweep
+    // passes it: a sibling hook process waiting on a question about the same
+    // payload is never taken back from under it.
+    if (windowRecords !== null) {
+      const swept = withdrawAbandoned(
+        run,
+        streams,
+        windowRecords,
+        new Date().toISOString(),
+        payloadHash(payload),
+      );
+      if (swept.length > 0) {
+        streams.err(
+          `approval: withdrew ${String(swept.length)} abandoned harness request(s) nothing retried (${swept.join(", ")}); a tap on one of them now authorizes nothing\n`,
+        );
+      }
+    }
     // No approval lifecycle: an autonomous action has none (amended SPEC.md
     // §6.3), so nothing is requested, decided or granted here. What IS appended
     // since APRV-141 is the execution record itself — the moment the policy
