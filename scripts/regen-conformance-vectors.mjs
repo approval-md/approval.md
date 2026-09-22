@@ -2313,7 +2313,32 @@ const SUITES = [
     // so every record and every policy written before them validates exactly as it
     // did, and an implementation that passed 2.6.0 fails this only by not knowing
     // a field and a key that have been added.
-    vectors_version: "2.7.0",
+    // 2.8.0 (APRV-423): a MINOR bump, the same shape 2.1.0 and its successors
+    // were. Five new fixtures for `payload.harness_cap_ms` on
+    // `approval.requested`: one accepted (a hermes hook's 300000, the harness's
+    // documented per-entry ceiling) and four refused, one per way the value can
+    // fail to be a count of milliseconds — zero, a negative, a fraction and a
+    // duration string. No existing expectation moves: the field is OPTIONAL and
+    // additive, so every record written before it validates exactly as it did,
+    // and a request that declares none is bounded by the policy TTL alone as it
+    // always was.
+    //
+    // Pinned here rather than left to the permissive payload because the value
+    // is a DEADLINE. It narrows the TTL that decides whether a tap still
+    // authorizes anything, so a reader that met a fraction or a string would
+    // have to invent a reading for it, and §11.1's validate-at-the-write-boundary
+    // rule says the schema answers that instead. `core/gate.ts` drops an
+    // unusable value before the append, so a record reaching the constraint with
+    // one was written by something else — which is exactly the case a write
+    // boundary exists for, and the reason the four refusals are controls.
+    //
+    // The four are separate vectors rather than one because a second
+    // implementation has to refuse each: zero is a request dead before it was
+    // written, a negative is a deadline behind its own record, a fraction is a
+    // count that is not a count, and a string is a duration in somebody else's
+    // grammar. An implementation that accepted any of them would be carrying a
+    // deadline it could not compute with.
+    vectors_version: "2.8.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

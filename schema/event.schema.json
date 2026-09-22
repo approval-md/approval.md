@@ -1141,6 +1141,35 @@
       }
     },
     {
+      "$comment": "SPEC.md §10.1/§10.2 (amended, APRV-423): `harness_cap_ms` is how long the harness holding this tool call can hold it, in milliseconds, recorded by a harness hook on the request it opens. `core/state.ts` reads it back and narrows this request's TTL to the lesser of the policy's `defaults.approval_ttl` and this value less an implementation-stated margin, so a request lapses before its harness abandons the call and a tap that arrives afterwards is refused instead of granting a call nobody holds. Optional and additive: every record written before it existed validates exactly as it did, and a request that declares none is bounded by the policy TTL alone.\n\nA DURATION and never an instant, which is what keeps it clear of §11.1 invariant 2: the deadline is computed from this record's own `ts`, assigned by the runtime at the write boundary, so a caller states a length of time and never a moment. CLAIMED, and bounded in one direction only — it reaches the TTL through a `min` against the policy's, so it can shorten the window and can never lengthen it (§11.1 invariant 4), and a requester that overstates it gains nothing while one that understates it expires its own question early.\n\nWhat the shape rules out is the reason this is pinned here rather than left to the permissive payload: a deadline is not a field to accept on faith. A positive INTEGER count of milliseconds, so zero (a request dead before it was written), a negative (a deadline behind its own record), a fraction (a millisecond count that is not a count) and a string (a duration in somebody's grammar, unparsed) are each refused at the write boundary rather than read as `null` by every reader that meets them. `core/gate.ts` drops an unusable value before the append, so a record reaching this constraint with one was written by something else, and §11.1's validate-at-the-write-boundary rule is what says the schema must refuse it anyway.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.requested"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "harness_cap_ms": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "description": "SPEC.md §10.2 (APRV-423): milliseconds the requesting harness can hold this tool call. A positive integer; narrows this request's TTL and never extends it."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §5.2/§8 (amended, APRV-127): `reconciliation.required` records the obligation a RETROSPECTIVE DENIAL creates. The runtime cannot undo anything — the action already executed — so what it can do is oblige and record, and this is that record. The actor is `system:` because the obligation is mechanical: it follows from a human's denial by a rule, and an obligation an agent or a human could author by hand is an obligation the party under oversight could word into something it prefers. Every field named here is REQUIRED, because an obligation that does not say which action, under which class, denied by which review, and in which shape is an obligation nobody can discharge or audit.",
       "if": {
         "type": "object",

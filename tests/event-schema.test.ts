@@ -843,3 +843,47 @@ test("execution.completed admits provider_ref and rejects every other shape", ()
     "execution.failed stopped validating",
   );
 });
+
+// ---------------------------------------------------------------------------
+// APRV-423: the harness cap is a count of milliseconds or it is refused
+// ---------------------------------------------------------------------------
+
+test("approval.requested takes a positive integer harness_cap_ms and nothing else", () => {
+  const record = fixture("approval.requested");
+  const withCap = (harness_cap_ms: unknown): Record<string, unknown> => ({
+    ...record,
+    payload: { ...(record["payload"] as Record<string, unknown>), harness_cap_ms },
+  });
+
+  // Optional and additive: the field is what a harness hook records about how
+  // long its harness can hold the call, and a request that declares none is
+  // bounded by the policy TTL exactly as every request was before it existed.
+  assert.equal(validate("event", record).ok, true);
+  assert.equal(validate("event", withCap(300_000)).ok, true, "the documented hermes cap");
+  assert.equal(validate("event", withCap(1)).ok, true, "one millisecond is a count");
+
+  // A deadline is not a field to accept on faith. `core/gate.ts` drops an
+  // unusable value before the append, so a record reaching the write boundary
+  // with one was written by something else — which is what a write boundary is
+  // for (SPEC.md §11.1, validate at the write boundary).
+  for (const bad of [0, -1, -300_000, 299_999.5, 0.5, "300s", "300000", null, true, [300_000], {}]) {
+    assert.equal(
+      validate("event", withCap(bad)).ok,
+      false,
+      `approval.requested accepted harness_cap_ms ${JSON.stringify(bad)}`,
+    );
+  }
+
+  // The constraint is on the REQUEST alone, which is the only record a harness
+  // hook puts it on. This schema says nothing about the name elsewhere, and the
+  // write path never puts one there.
+  assert.equal(
+    validate("event", {
+      ...withCap(300_000),
+      event: "approval.expired",
+      actor: "system:gate",
+    }).ok,
+    true,
+    "the cap constraint leaked onto another event type",
+  );
+});

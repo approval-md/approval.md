@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 01:18'
+updated_date: '2026-09-22 02:07'
 labels:
   - daemon
   - hook
@@ -180,6 +180,70 @@ implementation-stated margin; the declaration may only shorten the window.'
   fail. This one caught a real regression: the new flag pushed HOOK_HELP to 26
   lines against the 25-line cap in tests/cli-long-help.test.ts, so --harness-cap
   was folded into the existing durations line rather than given one of its own.
+
+## Review follow-up: the field is pinned at the write boundary
+
+Raised in review of PR #539: harness_cap_ms rode the approval.requested payload
+and no schema file was in the diff, so it was accepted only because the v0.1
+payload is permissive there. Fixed in a commit of its own on the same branch.
+
+**This touches the validate-at-the-write-boundary invariant** (SPEC 8, and
+CLAUDE.md's 'Validate at the write boundary: every event and envelope passes its
+JSON Schema before append'). Before the pin, the only thing standing between a
+malformed cap and the log was core/gate.ts dropping it — a check in the writer
+rather than at the boundary, which is exactly the arrangement that invariant
+exists to refuse. The reading I had in the original notes ('no schema change:
+the payload is open at v0.1') was wrong in the direction that matters: the
+payload being open is what a permissive default gives you, not a decision that
+this field may be anything. A deadline that narrows the TTL deciding whether a
+tap still authorizes anything is not a field to accept on faith.
+
+schema/event.schema.json gains an allOf conditional keyed on
+event: approval.requested, in the shape the display_hash block (APRV-119) and
+the reconciliation.required block (APRV-127) already use: payload.harness_cap_ms
+is an optional integer with exclusiveMinimum 0. Optional and additive, so every
+record written before it validates exactly as it did, and a request declaring
+none is bounded by the policy TTL alone.
+
+Five fixtures, one accepted and four refused, one per way the value can fail to
+be a count of milliseconds: zero (a request dead before it was written), a
+negative (a deadline behind its own record), a fraction (a count that is not a
+count) and a duration string (somebody else's grammar, unparsed). Each is its own
+fixture because a second implementation has to refuse each one, and an
+implementation that accepted any would be carrying a deadline it could not
+compute with. core/gate.ts still drops an unusable value before the append, so a
+record reaching this constraint with one was written by something else — which is
+the case a write boundary is for.
+
+The conformance schema-validation suite is bumped 2.7.0 -> 2.8.0, a MINOR bump
+in the shape 2.1.0 and its successors used, with the reasoning in the regen
+script's own comment block: five new vectors, no existing expectation moved. The
+suite is generated from the committed fixtures, so the regeneration is what
+carries them.
+
+**A rule this rides against, named rather than quietly ignored.** CLAUDE.md says
+'Schema changes are their own tasks.' This one lands under APRV-423 in a separate
+commit at the reviewer's direction, because it pins a field this task introduced
+and the reviewer made it a condition of arming the merge. I did not file it as a
+follow-up task because the finalization guide says not to create follow-up work
+without approval, and because splitting it would leave the field unpinned on main
+in the meantime, which is the state the review objected to. Flagging it so the
+exception is visible rather than assumed.
+
+## Validation of the follow-up
+
+- npm run build: exit 0. npm run typecheck: exit 0. npm run lint: exit 0.
+- node scripts/regen-conformance-vectors.mjs: exit 0, schema-validation.v1.json
+  213 vectors (125 negative controls), up from 208 (121) — exactly the five
+  fixtures and the four new controls. 11 files pinned in the manifest.
+- node scripts/run-tests.mjs --only event-schema fixtures conformance
+  conformance-regen harness-cap: 306 tests, 306 pass, 0 fail.
+- node conformance/run.mjs: exit 0, 466 vectors, 466 passed, 0 failed, 180
+  controls, schema-validation at vectors_version 2.8.0.
+- tests/event-schema.test.ts gains 'approval.requested takes a positive integer
+  harness_cap_ms and nothing else': the accepted forms, eleven refused ones
+  (including null, true, an array and an object, which the four fixtures do not
+  cover), and that the constraint does not leak onto another event type.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
