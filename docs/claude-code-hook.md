@@ -733,14 +733,36 @@ notion that must not become a write authorization. `tar -xzf pkg.tgz -C build`
 is a workspace write; `tar -xzf pkg.tgz -C /Users/you/project/build` is a
 question. This is exactly the strictness `rm` has had since APRV-267.
 
-**There is no disk pass for a write destination, and that is a limit rather than
-a claim.** The delete rule below and the read rule after it each resolve their
-targets against the filesystem and tighten; a write destination is answered from
-the text alone, here and in the `workspace-write` row above it, so a relative or
-scratch-rooted destination that reaches outside the roots through a SYMLINK
-classifies as the workspace write the text describes. That is the same answer
-`cp x build/y` and `tee build/y` have always had, and APRV-402 is the task for
-the pass that would close it.
+**A write destination gets a disk pass too, since APRV-402.** It used to be the
+one rule of the three answered from the text alone, so a relative or
+scratch-rooted destination that reached outside the roots through a SYMLINK
+classified as the workspace write the text described: `cp x build/y`,
+`tee build/y`, `mkdir build/y`, `tar -x -C build` and
+`npm pack --pack-destination build` were all autonomous with `build` pointing
+anywhere at all. The hook now re-reads each destination the same way it re-reads
+a delete target and tightens:
+
+| the hook finds | class |
+|---|---|
+| the destination's nearest existing ancestor resolves and stays under the working directory or a scratch root | `files.write.workspace`, the rule's own |
+| a symlink in the path resolves the destination out of every root | `files.delete.out_of_scope`, rule `write-out-of-scope-resolved` |
+| nothing on the path resolves, or the segment cannot be re-read | `files.delete.out_of_scope`, rule `write-out-of-scope-resolved` |
+
+The roots are the resolved working directory plus the same scratch roots the
+delete rule uses, so the two rules cannot disagree about where the agent's
+scratch is. The read scope is deliberately NOT among them: a read notion must
+not become a write authorization, which is the same sentence the paragraph above
+makes about the classifier. The pass reads every argument that is not spelled as
+a flag, plus the value half of `--opt=value`, which reaches `-C`, `-o`, `-out`
+and `--pack-destination` without a second copy of the classifier's flag table.
+It covers the `workspace-write` row and the six packaging answers; `rm` of a
+relative path in the workspace and a shell redirect into one still answer from
+the text.
+
+It resolves the argument as written and performs no shell expansion, so
+`cp x ~/Desktop/y` and a glob destination are still the workspace writes the
+text describes. Like the other two passes it can only ever narrow, which is what
+lets `approval hook classify` and the hook itself share it.
 
 `tar` has one more answer of its own: a `tar` whose MODE is not in its words
 (`tar -f pkg.tgz`, with no `-t`, `-x` or `-c` anywhere) is `hook-opaque`. The
