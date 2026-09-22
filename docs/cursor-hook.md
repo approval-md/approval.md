@@ -487,8 +487,9 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
+| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once. Under `--harness-cap` the deny also names the instant the request expires |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
+| `hook-harness-cap-too-short` | `--harness-cap` says the harness kills this hook too soon to leave a human any window (the request must lapse 60s inside that ceiling, APRV-423). Nothing is registered and nothing is requested; raise the harness's own timeout |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. The record IS the authorization on a harness surface, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it (APRV-200) |
 | `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. Re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |

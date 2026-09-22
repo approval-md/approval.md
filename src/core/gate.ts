@@ -37,9 +37,12 @@
  *
  * ## Lazy expiry — the named requirement
  *
- * A request expires when `ts > requestTs + defaults.approval_ttl`, **whether or
- * not** an `approval.expired` event exists. Nothing may depend on a daemon
- * having run: if the expiry sweep is asleep, a late grant must still be refused.
+ * A request expires when `ts > requestTs + effective window`, **whether or
+ * not** an `approval.expired` event exists. The effective window is
+ * `defaults.approval_ttl`, narrowed since APRV-423 by whatever harness ceiling
+ * the requesting hook declared on `payload.harness_cap_ms` (a self-reported
+ * bound that can only shorten; see `core/harness-wait.ts`). Nothing may depend
+ * on a daemon having run: if the expiry sweep is asleep, a late grant must still be refused.
  * {@link requestState} therefore computes expiry two ways — from the event, and
  * lazily from the arithmetic — and treats them as equivalent.
  *
@@ -922,6 +925,21 @@ function ttlOf(load: PolicyLoadResult): number | null {
   return load.ok ? load.durations.approvalTtlMs : null;
 }
 
+/**
+ * The clause a refusal adds when a harness ceiling, rather than the policy,
+ * fixed this request's deadline (APRV-423).
+ *
+ * Empty for every request that declared no cap, which is every request made
+ * outside a harness hook — so the messages a human has been reading since v0.1
+ * are unchanged, and the one new sentence appears exactly where it explains
+ * something the policy alone does not.
+ */
+function cappedBy(derivation: RequestDerivation): string {
+  const cap = derivation.declared.harness_cap_ms;
+  if (cap === null) return "";
+  return ` (shortened from the policy's own TTL: the requesting hook declared a ${String(cap)}ms harness ceiling, and the window ends a margin before it so the expiry is recorded while the harness is still listening)`;
+}
+
 function budgetScopeOf(load: PolicyLoadResult, resolution: Resolution): BudgetScope {
   return {
     classLimits: resolution.limits,
@@ -1452,6 +1470,25 @@ export interface RequestInput {
    * policy's `defaults.approval_ttl` remains the only deadline with authority.
    */
   wait_until?: string;
+  /**
+   * The ceiling the requesting harness imposes on the hook process that is
+   * asking, in milliseconds (APRV-423).
+   *
+   * Recorded as `payload.harness_cap_ms` and read back by `core/state.ts`,
+   * which judges the request against the SHORTER of this minus a fixed margin
+   * and the policy's own `defaults.approval_ttl`. It is the answer to APRV-410:
+   * a harness that kills the hook while the question is still on a phone turns
+   * the tap that follows into a grant on a call nobody holds, so the question
+   * is made to end first and both records say the same thing.
+   *
+   * Claimed, and structurally unable to reduce scrutiny (SPEC.md §11.1
+   * invariant 4): the runtime takes a MINIMUM, so an overstated cap changes
+   * nothing and an understated one only shortens the claimant's own window.
+   * The write boundary constrains it to a positive integer on a request that
+   * also declares `execution: "harness"` — a cap on a token-minting request
+   * would be a question with a shorter life than the authorization it mints.
+   */
+  harnessCapMs?: number;
   /**
    * The caller has established that loop safety floors this action to `manual`
    * for this invocation (APRV-145, amended SPEC.md §10.2).
@@ -2415,6 +2452,12 @@ function attemptRequest(
   // ability to spend a token, and `wait_until` is display text.
   if (input.execution !== undefined) payload["execution"] = input.execution;
   if (input.wait_until !== undefined) payload["wait_until"] = input.wait_until;
+  // APRV-423, on the same terms as the two above: recorded because the log is
+  // the only place a later reader — the daemon's sweep, a channel, the retry
+  // that adopts this question — can learn what bounded it, and it cannot
+  // lengthen anything. `core/state.ts` takes the minimum of this and the
+  // policy's TTL; see `RequestInput.harnessCapMs`.
+  if (input.harnessCapMs !== undefined) payload["harness_cap_ms"] = input.harnessCapMs;
 
   const appended = append(
     logPath,
@@ -2744,7 +2787,7 @@ function attemptDecide(
       if (logged.ok) materialised = logged.record;
     }
     const message = derivation.expiredLazily
-      ? `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(ttlMs)}ms TTL before ${ts}. The lapse is judged from the request's own timestamp, so a decision is refused whether or not an approval.expired event had been observed.`
+      ? `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(derivation.effectiveTtlMs)}ms window before ${ts}${cappedBy(derivation)}. The lapse is judged from the request's own timestamp, so a decision is refused whether or not an approval.expired event had been observed.`
       : `action ${actionKey} expired at ${String(derivation.decisionTs)} (approval.expired, seq ${String(derivation.decisionSeq)}); an expired request is terminal`;
     return refuse(
       "expired",
@@ -3185,7 +3228,7 @@ function attemptWithdraw(
     }
     return refuse(
       "expired",
-      `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(ttlMs)}ms TTL before ${ts}. A lapsed request has already ended; there is nothing left to withdraw.`,
+      `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(derivation.effectiveTtlMs)}ms window before ${ts}${cappedBy(derivation)}. A lapsed request has already ended; there is nothing left to withdraw.`,
       materialised === undefined
         ? { state: derivation.state }
         : { state: derivation.state, record: materialised },
@@ -3288,8 +3331,9 @@ export interface HarnessCarry {
  *    refused at the append in {@link consumeHarnessGrant}. The single-use rule
  *    is the gate's existing one; this only stops the caller from queueing up a
  *    write that would be refused.
- *  - *within the TTL*: state is derived at `ts` with `ttlMs`, so a lapsed
- *    request reads `expired` and carries nothing, whether or not the daemon has
+ *  - *within the TTL*: state is derived at `ts` with `ttlMs`, narrowed by the
+ *    candidate's own declared harness ceiling (APRV-423), so a lapsed request
+ *    reads `expired` and carries nothing, whether or not the daemon has
  *    materialised an `approval.expired` record.
  *
  * PURE, and reads only records the caller verified — the enforcement path never
@@ -3298,7 +3342,7 @@ export interface HarnessCarry {
  * request that came after it, exactly as {@link requestState} treats cycles.
  */
 /**
- * Has a GRANTED request outlived `defaults.approval_ttl`?
+ * Has a GRANTED request outlived the window it was asked under?
  *
  * `requestState` reports a decided request by its decision forever: the TTL
  * bounds the window in which a human may answer, not the answer's shelf life.
@@ -3311,7 +3355,14 @@ export interface HarnessCarry {
  * Unparseable instants read as lapsed, and a policy with no TTL declares no
  * lapse at all — both exactly as `core/token.ts` reads them.
  */
-function grantLapsed(derivation: RequestDerivation, ts: string, ttlMs: number | null): boolean {
+function grantLapsed(derivation: RequestDerivation, ts: string): boolean {
+  // APRV-423: the SAME window the request was judged by, read off the
+  // derivation rather than recomputed from the policy. A grant whose question
+  // was bounded by a harness ceiling keeps that bound; a retry a few seconds
+  // later then asks again instead of carrying an answer the request's own
+  // clock had already run out on. The stricter of the two readings, and the
+  // one that keeps `requestState` the single place the deadline is decided.
+  const ttlMs = derivation.effectiveTtlMs;
   if (ttlMs === null) return false;
   const requestedAt = Date.parse(derivation.requestTs ?? "");
   const asked = Date.parse(ts);
@@ -3414,7 +3465,9 @@ export function findHarnessCarry(
     if (derivation.execution.started !== null) continue;
     if (derivation.state === "granted") {
       // An answer has a shelf life, and it is its request's TTL.
-      if (grantLapsed(derivation, ts, ttlMs)) continue;
+      // APRV-423: judged by the request's own effective window, read off the
+      // derivation, never the raw policy TTL.
+      if (grantLapsed(derivation, ts)) continue;
       // And a question has a life of its own: an answer that landed after the
       // asker was gone authorized nobody (APRV-410).
       if (questionAbandoned(derivation, abandonAfterMs)) continue;
@@ -3708,10 +3761,10 @@ function attemptHarnessConsume(
       { state: derivation.state },
     );
   }
-  if (grantLapsed(derivation, ts, ttlOf(load))) {
+  if (grantLapsed(derivation, ts)) {
     return refuse(
       "expired",
-      `action ${actionKey}'s grant expired: the request at ${String(derivation.requestTs)} lapsed its TTL before ${ts}. There is no separate grant TTL — an approval lives exactly as long as its parent request, which is the rule \`core/token.ts\` applies to a token-bearing grant.`,
+      `action ${actionKey}'s grant expired: the request at ${String(derivation.requestTs)} lapsed its ${String(derivation.effectiveTtlMs)}ms window before ${ts}${cappedBy(derivation)}. There is no separate grant TTL — an approval lives exactly as long as its parent request, which is the rule \`core/token.ts\` applies to a token-bearing grant.`,
       { state: derivation.state },
     );
   }
@@ -4392,8 +4445,18 @@ function appendExpiry(
 ): { ok: true; record: EventRecord } | GateRefusal {
   const payload: Record<string, unknown> = {};
   if (derivation.requestTs !== null) payload["requested_ts"] = derivation.requestTs;
-  const ttlMs = ttlOf(load);
+  // The window this request was ACTUALLY judged by, which is the policy's TTL
+  // narrowed by whatever harness ceiling the requester declared (APRV-423).
+  // Recording the policy's number here while expiring on a shorter one would
+  // leave the record disagreeing with the arithmetic that produced it, and the
+  // reader's obvious check — requested_ts + ttl_ms against ts — would fail on a
+  // correct expiry. The cap rides along beside it so a reader can see WHY the
+  // window was short without holding the request record too.
+  const ttlMs = derivation.effectiveTtlMs;
   if (ttlMs !== null) payload["ttl_ms"] = ttlMs;
+  if (derivation.declared.harness_cap_ms !== null) {
+    payload["harness_cap_ms"] = derivation.declared.harness_cap_ms;
+  }
   const onExpiry = load.ok ? load.policy.defaults?.on_expiry : undefined;
   if (onExpiry !== undefined) payload["on_expiry"] = onExpiry;
   if (derivation.declared.class !== null) payload["class"] = derivation.declared.class;
@@ -4470,9 +4533,9 @@ export function expire(
     }
     return refuse(
       "not-expired",
-      ttlMs === null
-        ? `action ${actionKey} cannot expire: the policy declares no defaults.approval_ttl, so the request is not bounded by a TTL`
-        : `action ${actionKey} has not expired: the request at ${String(derivation.requestTs)} has not lapsed its ${String(ttlMs)}ms TTL as of ${ts}`,
+      derivation.effectiveTtlMs === null
+        ? `action ${actionKey} cannot expire: the policy declares no defaults.approval_ttl and the request declares no harness cap, so it is not bounded by any deadline`
+        : `action ${actionKey} has not expired: the request at ${String(derivation.requestTs)} has not lapsed its ${String(derivation.effectiveTtlMs)}ms window as of ${ts}${cappedBy(derivation)}`,
       { state: derivation.state },
     );
   }

@@ -121,6 +121,9 @@ import {
 } from "../core/harness-version.js";
 import {
   abandonedAfterMs,
+  HARNESS_CAP_MARGIN_MS,
+  harnessCapFitsMargin,
+  harnessCappedTtlMs,
   HOOK_DEFAULT_WAIT,
   HOOK_RETRY_GRACE_MS,
 } from "../core/harness-wait.js";
@@ -154,6 +157,7 @@ import {
 import {
   payloadOf,
   readVerifiedRecords,
+  requestExpiresAt,
   requestState,
   useVerifiedSnapshots,
   type WithdrawReason,
@@ -293,6 +297,21 @@ export const HOOK_DENY_CODES = [
    * (`findHarnessCarry`), so it asks again.
    */
   "hook-timeout",
+  /**
+   * The harness ceiling this hook was told it runs under leaves no window a
+   * human could answer in (APRV-423).
+   *
+   * `--harness-cap` (or the harness's own documented maximum) at or below
+   * `HARNESS_CAP_MARGIN_MS` means the question would lapse at the instant it
+   * was asked: the request must end a margin before the harness kills the
+   * process that opened it, and there is no room left for the asking. Nothing
+   * is registered, nothing is requested and nobody's phone lights up. The
+   * repair is a configuration change — raise the harness entry's timeout, or
+   * state the real one — and it is a refusal rather than a silent widening
+   * because a hook that quietly ignored its own ceiling would be back to
+   * recording grants on calls nobody holds.
+   */
+  "hook-harness-cap-too-short",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
   /**
@@ -560,6 +579,47 @@ interface HarnessAdapter {
    * its shell arm refuses outright; Claude Code has only the top-level one.
    */
   shellCwdKey?: string;
+  /**
+   * The hard ceiling this harness's own contract puts on one hook process, in
+   * milliseconds, or absent when it documents none (APRV-423).
+   *
+   * A CEILING, not a configuration. Hermes states that a `hooks:` entry's
+   * `timeout` may not exceed 300 s, so no Hermes entry can outlive that however
+   * it is written, and this runtime may rely on it. Claude Code, Cursor, Grok,
+   * Muse and Codex document a DEFAULT hook timeout and no maximum, so they
+   * carry none: an adapter that guessed a ceiling would either invent a
+   * deadline the harness never imposed, or — worse, and the direction that
+   * actually costs something — guess high and leave the gap APRV-410 falls
+   * through. The operator states the entry they configured with
+   * `--harness-cap`, and the effective cap is the smaller of the two.
+   */
+  capCeilingMs?: number;
+  /**
+   * The ceiling this harness imposes on a hook process when the operator has
+   * stated none, in milliseconds, or absent when the harness's defaults leave
+   * the process unbounded (APRV-423, second review pass).
+   *
+   * Read ONLY when `--harness-cap` is absent, and then it stands in for the
+   * flag: the operator has said nothing, so the runtime assumes the harness is
+   * running as shipped. It is the STRICTEST bound the harness's own defaults
+   * put on the process, because assuming a looser one is APRV-410 with a
+   * fictional deadline: a request judged against a window the harness will not
+   * keep open. On Hermes that is `plugins.hook_callback_timeout`, which bounds
+   * the whole hook dispatch and defaults to 30 s, well under the margin, so a
+   * Hermes hook with no flag is refused `hook-harness-cap-too-short` until the
+   * operator raises that setting and says so. A stated flag replaces this
+   * value (the operator knows what they configured) and is still clamped by
+   * {@link capCeilingMs}, so a stated cap can only shorten the contractual
+   * maximum, never exceed it.
+   */
+  capDefaultMs?: number;
+  /**
+   * How an operator lifts a `hook-harness-cap-too-short` refusal on this
+   * harness, in the harness's own vocabulary (APRV-423, second review pass).
+   * Appended to the deny so the repair names the setting to change rather than
+   * a generic "raise the timeout". Absent adapters get the generic sentence.
+   */
+  capRepair?: string;
   /**
    * Refuse every tool call when the envelope names a Contributor-tier model
    * (APRV-350).
@@ -840,6 +900,27 @@ const HERMES_ADAPTER: HarnessAdapter = {
   kind: "hermes",
   originApp: "hermes-hook",
   defaultActor: "agent:hermes",
+  // Two numbers, because Hermes bounds the hook twice and the shorter wins.
+  //
+  // The CEILING is 300 s, OBSERVED rather than read off a page: APRV-415's probe
+  // armed a hang and Hermes refused it at exactly 300 s, the per-entry cap. No
+  // entry can outlive it however it is written, so a stated `--harness-cap` is
+  // clamped to it.
+  //
+  // The DEFAULT is 30 s: `plugins.hook_callback_timeout`, which bounds the whole
+  // hook dispatch, fails closed on `pre_tool_call` by itself, and is what a
+  // Hermes install runs with until an operator raises it. The first pass of
+  // APRV-423 assumed the 300 s ceiling whenever the flag was absent, which on a
+  // default install asserted a T+240 s deadline for a hook Hermes kills at 30 s:
+  // APRV-410 again, with a fictional deadline. So with no flag the runtime
+  // assumes the stricter number, which does not clear the margin, and refuses
+  // `hook-harness-cap-too-short` with the repair below. An operator who has
+  // raised `hook_callback_timeout` states the smaller of it and the entry's
+  // `timeout` with `--harness-cap`, and that statement replaces the default.
+  capCeilingMs: 300_000,
+  capDefaultMs: 30_000,
+  capRepair:
+    "On Hermes: raise `plugins.hook_callback_timeout` above the per-entry `timeout` in the harness's config, then pass `--harness-cap <the smaller of the two>` on the hook command, or start `approval serve` with `--hook-harness-cap <the smaller of the two>` for a hosted tenant (for the documented `hook_callback_timeout: 600` with `timeout: 300`, that is 300s). Without the flag this runtime assumes Hermes's 30s default callback timeout, which leaves no room for a human.",
   // `terminal`, carrying `command` and a PER-CALL `workdir`. Hermes's contract
   // has the field Codex's withholds (APRV-310), and the live probe found that
   // having it is not the same as being sent it: the model passed no `workdir` at
@@ -2920,6 +3001,52 @@ interface HookRun {
   graceMs: number;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
+  /**
+   * The ceiling this harness puts on this process, in milliseconds, or `null`
+   * (APRV-423).
+   *
+   * The entry timeout the operator stated with `--harness-cap`, clamped to the
+   * harness's own documented maximum ({@link HarnessAdapter.capCeilingMs}); or,
+   * when no flag was passed, the harness's default bound
+   * ({@link HarnessAdapter.capDefaultMs}, falling back to the ceiling). It is
+   * written onto every request this invocation opens and read back by the gate,
+   * which judges the question against the shorter of it (minus the margin) and
+   * the policy's TTL — so the request ends while this process is still alive to
+   * be told, and the daemon's `approval.expired` lands before the harness gives
+   * up.
+   */
+  harnessCapMs: number | null;
+  /**
+   * Whether {@link harnessCapMs} came from the operator's own `--harness-cap`
+   * (`true`) or was assumed from the adapter's documented defaults (`false`).
+   * A refusal for a cap with no room in it says which, because the repair
+   * differs: a stated cap is a real configuration to raise, an assumed one is
+   * a flag the operator has not passed yet.
+   */
+  harnessCapStated: boolean;
+  /** {@link HarnessAdapter.capRepair}, or `null` for the generic sentence. */
+  harnessCapRepair: string | null;
+  /**
+   * How long THIS invocation actually waits, in milliseconds (APRV-423, third
+   * review pass): `timeoutMs`, clamped to what the harness ceiling leaves after
+   * the margin (`harnessCapMs - HARNESS_CAP_MARGIN_MS`) when there is one, and
+   * never below zero.
+   *
+   * The clamp is what closes the adopted-question gap. The too-short refusal
+   * fires only for a question this invocation would OPEN; an invocation whose
+   * every key is adopted (a retry of bytes an earlier, correctly-capped run
+   * asked about) opens nothing, so under a ceiling with no room in it (a Hermes
+   * hook with no `--harness-cap`, assumed 30 s) it would have sat in its poll
+   * loop for the configured wait, been killed at the ceiling, and let the call
+   * proceed on any harness without `fail_closed`. Bounding the wait itself means
+   * the hook always answers before the harness stops listening: a zero wait
+   * reads the verified log once (so a decision already recorded is still
+   * honoured) and then denies `hook-timeout`, leaving the adopted question open
+   * for the retry grace exactly as a wait that ran out would. The adopted
+   * question's OWN deadline is whatever was recorded when it was opened; this
+   * changes nothing about it.
+   */
+  waitMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -3392,6 +3519,7 @@ function announceWait(
   streams: Streams,
   run: HookRun,
   waiting: readonly GatedAction[],
+  expiryOf: ReadonlyMap<string, string>,
 ): void {
   const where =
     run.channels.length === 0
@@ -3402,8 +3530,26 @@ function announceWait(
       action.origin === "adopted"
         ? " The question was already open for these exact bytes, so this tool call adopts it rather than asking a second time."
         : "";
+    const at = expiryOf.get(action.actionKey);
+    // Second review pass (F7): which of the two ends first decides the sentence.
+    // "Open for a 5m grace" beside "expires at T+240s" was two claims about one
+    // question that could not both hold; the shorter one is the one stated.
+    const holdsOpen =
+      at !== undefined && windowEndsBeforeGrace(run)
+        ? `. The request expires at ${at}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long it stays open for a retry; a decision after it is refused rather than granted.`
+        : ` and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${expiryClause(at)}`;
     streams.err(
-      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${adopted}\n`,
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${waitText(run)} before denying with hook-timeout${holdsOpen}${adopted}\n`,
+    );
+  }
+
+  // APRV-423, third review pass. The wait is CLAMPED to what the ceiling
+  // leaves (see `HookRun.waitMs`), so the runtime acts rather than warns: a
+  // wait the harness would have cut short is shortened here, and the operator
+  // is told once so the configured --timeout is not mistaken for the wait.
+  if (run.harnessCapMs !== null && run.waitMs < run.timeoutMs) {
+    streams.err(
+      `approval: this hook's ${String(run.timeoutMs)}ms --timeout is longer than the ${String(run.harnessCapMs)}ms harness ceiling leaves after the ${String(HARNESS_CAP_MARGIN_MS)}ms margin, so it waits ${String(run.waitMs)}ms instead and answers before the harness stops listening. Lower --timeout, or state the real ceiling with --harness-cap.\n`,
     );
   }
 
@@ -3413,6 +3559,57 @@ function announceWait(
   streams.err(
     `approval: no listener is running for this log (${listener.reason}: ${socket}), so the request above may sit undelivered and a decision may go unconsumed. Start the gate's ambient runtime in the checkout that owns this log: \`eval "$(approval env)" && approval up\`, which runs the daemon loop and every configured channel in one process.\n`,
   );
+}
+
+/**
+ * ` The request expires at <instant> ...`, or `""` when nothing bounds it
+ * (APRV-423).
+ *
+ * One phrasing for the three places that state the deadline — the announce
+ * line, the timeout deny and the expiry deny — so an agent reading two of them
+ * in one session is reading the same sentence about the same moment.
+ */
+function expiryClause(at: string | undefined): string {
+  if (at === undefined) return "";
+  return ` The request expires at ${at}, after which a decision on it is refused rather than granted.`;
+}
+
+/**
+ * Does the window a capped request is judged by close before the retry grace
+ * this invocation would hold the question open for? (APRV-423, second review
+ * pass.)
+ *
+ * Both are durations measured from the `approval.requested` record's own `ts`
+ * (`harnessCappedTtlMs` for the window, `abandonedAfterMs` for the grace), so
+ * the comparison needs no clock. `false` for an uncapped run whatever the
+ * policy's TTL: the uncapped sentences are left byte-for-byte as APRV-287 wrote
+ * them, which `tests/cli-hook.test.ts`'s snapshot case depends on. Computed from
+ * this invocation's own flags, so for an ADOPTED question opened under other
+ * flags it is the current invocation's reading of the two windows.
+ */
+/**
+ * `55000ms wait`, or `0ms wait (a 240000ms --timeout clamped to what the 30000ms
+ * harness ceiling leaves)` when the ceiling shortened it (APRV-423, third
+ * review pass). One spelling for the announce line, the lagging note and the
+ * `hook-timeout` denies, so a reader is never told a wait this process did not
+ * make.
+ */
+function waitText(run: HookRun): string {
+  if (run.waitMs === run.timeoutMs || run.harnessCapMs === null) {
+    return `${String(run.waitMs)}ms wait`;
+  }
+  return `${String(run.waitMs)}ms wait (a ${String(run.timeoutMs)}ms --timeout clamped to what the ${String(run.harnessCapMs)}ms harness ceiling leaves)`;
+}
+
+function windowEndsBeforeGrace(run: HookRun): boolean {
+  if (run.harnessCapMs === null) return false;
+  const window = harnessCappedTtlMs(run.ttlMs, run.harnessCapMs);
+  return window !== null && window <= abandonedAfterMs(run.timeoutMs, run.graceMs);
+}
+
+/** ` (expired at <instant>)`, or `""`. The parenthetical form of the above. */
+function expiryAt(at: string | undefined): string {
+  return at === undefined ? "" : ` (expired at ${at})`;
 }
 
 /**
@@ -3612,6 +3809,63 @@ export function gateHarnessCall(
   const adopted = actions.filter((action) => action.origin === "adopted");
   const carried = actions.filter((action) => action.origin === "carried");
 
+  /**
+   * The window every request this invocation opens will be judged by
+   * (APRV-423): the policy's TTL, narrowed by the harness ceiling this process
+   * runs under. `null` means nothing bounds it, which is a policy with no
+   * `approval_ttl` under a harness that documents no maximum and an operator
+   * who stated none.
+   */
+  const ownTtlMs = harnessCappedTtlMs(run.ttlMs, run.harnessCapMs);
+
+  /**
+   * When each waited-on key lapses, ISO-8601, for the lines this invocation
+   * prints. Filled from the runtime's OWN write-boundary timestamps — the `ts`
+   * on the record `request` returned, and the request record intake already
+   * read for an adopted key — so a deny that names a deadline names the one the
+   * gate will judge by, and no second read of the log pays for the sentence.
+   *
+   * CAPPED REQUESTS ONLY (APRV-423). The sentence exists to state a deadline
+   * its reader cannot work out from the policy: under a harness ceiling the
+   * window is neither `approval_ttl` nor the harness's own timeout, and an
+   * agent told "it lapsed" with no instant has no way to tell a four-minute
+   * window from the hour its policy declares. A request the policy alone bounds
+   * already has its deadline stated where its reader can see it (the approver's
+   * own card, `approval status`, the queue), so the hook's lines are left
+   * exactly as APRV-281 and APRV-287 wrote them — which also keeps every
+   * uncapped deny byte-for-byte reproducible across two invocations, the
+   * property `tests/cli-hook.test.ts` pins when it compares a cold read's
+   * verdict with a snapshot-resumed one.
+   */
+  const expiryOf = new Map<string, string>();
+
+  // APRV-423, and the last thing checked before this invocation opens a
+  // question. A ceiling at or below the margin leaves no window: the request
+  // would have to lapse before the harness kills this process, and there is no
+  // "before" left. Refused rather than widened, because a hook that ignored its
+  // own ceiling is a hook whose question outlives its asker, which is the whole
+  // failure this cap exists to end (APRV-410). Placed here rather than at the
+  // top of the function so it refuses exactly the act it is about: an ADOPTED
+  // question was opened by a process that cleared this check, and a CARRIED
+  // grant is a human's answer that already exists.
+  if (fresh.length > 0 && run.harnessCapMs !== null && !harnessCapFitsMargin(run.harnessCapMs)) {
+    // Second review pass: the deny names the actions it refused for (so a reader
+    // can still see which class routed this call to a human), says whether the
+    // ceiling was stated or assumed, and ends with the harness's own repair
+    // where the adapter has one.
+    const needing = fresh.map((action) => `${action.actionKey} (${action.cls})`).join(", ");
+    const source = run.harnessCapStated
+      ? "stated with --harness-cap"
+      : "assumed from the harness's documented defaults because no --harness-cap was passed";
+    const repair =
+      run.harnessCapRepair ??
+      `Raise the harness entry's timeout past ${String(HARNESS_CAP_MARGIN_MS)}ms and state the real one with --harness-cap, or route this class somewhere a human is not on the critical path.`;
+    return sayDeny(
+      "hook-harness-cap-too-short",
+      `${needing} would need a human, but this hook runs under a ${String(run.harnessCapMs)}ms harness ceiling (${source}), and a request must lapse at least ${String(HARNESS_CAP_MARGIN_MS)}ms before that ceiling so the runtime records the expiry while the harness is still listening. That leaves no window in which a human could answer, so nothing was registered, nothing was requested and no question reached a phone. ${repair}`,
+    );
+  }
+
   // Only the classes that need a new question are registered. A retry whose
   // every class carries or adopts registers no task at all — the envelope it
   // would declare already exists, under the key it is about to wait on.
@@ -3664,6 +3918,12 @@ export function gateHarnessCall(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
+        // APRV-423. The ceiling this process runs under, recorded so the gate,
+        // the daemon's sweep and every channel judge the question by a window
+        // that ends before the harness kills the asker. Omitted entirely when
+        // there is no ceiling to state: an absent field is the pre-APRV-423
+        // shape, and the policy's TTL governs alone.
+        ...(run.harnessCapMs === null ? {} : { harnessCapMs: run.harnessCapMs }),
         ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
       },
       run.actor,
@@ -3681,7 +3941,30 @@ export function gateHarnessCall(
       );
       return sayDeny(`hook-gate-refused:${result.code}`, result.message);
     }
-    if (result.record !== null) ownKeys.push(action.actionKey);
+    if (result.record !== null) {
+      ownKeys.push(action.actionKey);
+      // The deadline in words, from the `ts` the runtime stamped on the record
+      // it just wrote. Never from this process's own clock: a gate-typed event
+      // carries the write boundary's instant (SPEC.md §11.1 invariant 2), and a
+      // deny that named a deadline measured from anything else would be naming
+      // a moment the gate does not judge by.
+      if (ownTtlMs !== null && run.harnessCapMs !== null) {
+        const lapses = Date.parse(result.record.ts);
+        if (!Number.isNaN(lapses)) {
+          expiryOf.set(action.actionKey, new Date(lapses + ownTtlMs).toISOString());
+        }
+      }
+    }
+  }
+
+  // An adopted question was opened by an earlier invocation, under whatever
+  // ceiling THAT one ran under, so its deadline is read off the request record
+  // intake already verified rather than recomputed from this process's flags.
+  for (const action of adopted) {
+    const derivation = requestState(intake.records, action.actionKey, intakeTs, run.ttlMs);
+    if (derivation.declared.harness_cap_ms === null) continue;
+    const at = requestExpiresAt(derivation);
+    if (at !== null) expiryOf.set(action.actionKey, at);
   }
 
   /** Every key that must be granted before this hook says yes. */
@@ -3731,9 +4014,10 @@ export function gateHarnessCall(
     streams,
     run,
     actions.filter((action) => waitKeys.includes(action.actionKey)),
+    expiryOf,
   );
 
-  const deadline = Date.now() + run.timeoutMs;
+  const deadline = Date.now() + run.waitMs;
 
   // A signal arriving mid-wait means the session is going away: nothing will
   // retry this command, so the question this invocation opened is retracted.
@@ -3780,10 +4064,18 @@ export function gateHarnessCall(
       // from the log again would let an empty or foreign result read as
       // "nothing pending" and fall through to allow; the verified log must show
       // every one of these keys granted before the hook says yes.
-      const derived = waitKeys.map((key) => ({
-        key,
-        state: requestState(read.records, key, ts, run.ttlMs).state,
-      }));
+      const derived = waitKeys.map((key) => {
+        const derivation = requestState(read.records, key, ts, run.ttlMs);
+        // APRV-423: the deadline this read judged by, kept beside the state so
+        // the verdict and the sentence that explains it come from one
+        // derivation. A key whose record this view does not carry yet answers
+        // `null`, and the lagging branch below is what handles that.
+        if (derivation.declared.harness_cap_ms !== null) {
+          const at = requestExpiresAt(derivation);
+          if (at !== null) expiryOf.set(key, at);
+        }
+        return { key, state: derivation.state };
+      });
       const states = derived.map((entry) => entry.state);
 
       /**
@@ -3821,7 +4113,7 @@ export function gateHarnessCall(
         streams.err(
           `approval: the verified log does not yet carry ${lagging.join(", ")} (verified head: ${
             read.head === null ? "empty" : `seq ${String(read.head.seq)}`
-          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${String(run.timeoutMs)}ms wait. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
+          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${waitText(run)}. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
         );
       }
 
@@ -3843,7 +4135,20 @@ export function gateHarnessCall(
           );
         }
         if (states.includes("expired")) {
-          return sayDeny("hook-expired", `the request for ${task} lapsed before a decision`);
+          // APRV-423. WHICH deadline it lapsed at, because under a harness
+          // ceiling that is not the policy's TTL and an agent told only "it
+          // lapsed" would read a four-minute window as an hour-long one that
+          // somehow failed. The runtime, not this hook, appends the
+          // `approval.expired` record: `decide` materialises it the moment a
+          // late tap is refused, and the daemon's sweep materialises it on its
+          // own cadence. A hook never writes one.
+          const lapsed = derived
+            .filter((entry) => entry.state === "expired")
+            .map((entry) => `${entry.key}${expiryAt(expiryOf.get(entry.key))}`);
+          return sayDeny(
+            "hook-expired",
+            `the request for ${task} lapsed before a decision (${lapsed.join(", ")}). A decision arriving now is refused rather than granted, and the runtime records the lapse as approval.expired; run the command again to ask the question fresh.`,
+          );
         }
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
@@ -3890,15 +4195,40 @@ export function gateHarnessCall(
           lagging.length === 0
             ? ""
             : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
+        // APRV-423. The deadline the still-open question is under, named in
+        // the same breath as the wait that ran out: the two are different
+        // numbers and the second one is the one that decides whether a retry
+        // can still adopt this question. Under a harness ceiling it is also the
+        // instant the runtime will append `approval.expired` at, which is what
+        // keeps this deny and that record from disagreeing about one request.
+        const deadlines = waitKeys
+          .map((key) => expiryOf.get(key))
+          .filter((at): at is string => at !== undefined);
+        const expiresAt = [...new Set(deadlines)].sort().join(", ");
+        const expiresText =
+          deadlines.length === 0
+            ? ""
+            : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
+          );
+        }
+        // Second review pass (F7). When the capped window closes before the
+        // retry grace would, the grace is not what holds the question open and
+        // the sentence says so; "open for the 5m grace" beside "expires at
+        // T+240s" was two claims about one request that could not both hold.
+        // The other order keeps the APRV-287 sentence and adds the deadline.
+        if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
+          return sayDeny(
+            "hook-timeout",
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
           );
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -4950,6 +5280,7 @@ function runHarnessHook(
     "--timeout": "string",
     "--interval": "string",
     "--retry-grace": "string",
+    "--harness-cap": "string",
   });
   if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
@@ -5013,6 +5344,36 @@ function runHarnessHook(
       `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
   }
+  // APRV-423. The ceiling this process runs under, which the hook cannot
+  // discover for itself: the harness spawns it and tells it nothing. The
+  // OPERATOR states the entry timeout they configured, and the adapter
+  // contributes the harness's own documented maximum where its contract has
+  // one. The smaller wins, because a stated cap above a contractual ceiling is
+  // a statement the harness will not honour, and a cap may only ever shorten
+  // the window (SPEC.md §11.1 invariant 4).
+  const capText = stringFlag(parsed.flags, "--harness-cap");
+  const statedCapMs = capText === null ? null : parseDuration(capText);
+  if (capText !== null && statedCapMs === null) {
+    return configurationError(
+      `--harness-cap expects a duration like 300s, 4m, got ${JSON.stringify(capText)}`,
+    );
+  }
+  // Second review pass. A stated cap is clamped to the contractual ceiling
+  // (Hermes will not honour an entry above 300 s however it is written); an
+  // absent flag takes the harness's DEFAULT bound where the adapter documents
+  // one, and only then falls back to the ceiling. The default is the stricter
+  // number on purpose: an operator who has said nothing is assumed to run the
+  // harness as shipped, and a runtime that assumed the ceiling instead would
+  // assert a deadline the harness will not keep (APRV-410 with a fictional
+  // T+240 s, which is exactly what the first pass did on a default Hermes).
+  const ceilingMs = adapter.capCeilingMs ?? null;
+  const harnessCapMs =
+    statedCapMs === null
+      ? (adapter.capDefaultMs ?? ceilingMs)
+      : ceilingMs === null
+        ? statedCapMs
+        : Math.min(statedCapMs, ceilingMs);
+  const harnessCapStated = statedCapMs !== null;
 
   const parsedInput = parseHookInput(readStdin(), adapter.camelCaseEnvelope === true);
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
@@ -5278,6 +5639,8 @@ function runHarnessHook(
       timeoutMs,
       intervalMs,
       graceMs,
+      harnessCapMs,
+      harnessCapStated,
       codexCommand,
       windowRecords: looked.records,
     }),
@@ -5306,6 +5669,19 @@ export interface DecideInput {
   timeoutMs: number;
   intervalMs: number;
   graceMs: number;
+  /**
+   * The harness's ceiling on this process, in milliseconds, or `null`
+   * (APRV-423). See {@link HookRun.harnessCapMs}. A caller that is not run by a
+   * harness on a timer — `cli/codex-bridge.ts` holds its own connection open —
+   * passes `null` and the policy's TTL governs alone.
+   */
+  harnessCapMs?: number | null;
+  /**
+   * Whether `harnessCapMs` was stated by the operator (`--harness-cap`) rather
+   * than assumed from the adapter's documented defaults (APRV-423, second
+   * review pass). Defaults to `false`; see {@link HookRun.harnessCapStated}.
+   */
+  harnessCapStated?: boolean;
   /** Exact native command bytes a Codex allow must carry back, where there are any. */
   codexCommand?: string | undefined;
   /**
@@ -5350,6 +5726,8 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     codexCommand,
     windowRecords,
   } = decide;
+  const harnessCapMs = decide.harnessCapMs ?? null;
+  const harnessCapStated = decide.harnessCapStated ?? false;
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
@@ -5428,6 +5806,13 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     intervalMs,
     graceMs,
     ttlMs: load.durations.approvalTtlMs,
+    harnessCapMs,
+    harnessCapStated,
+    harnessCapRepair: adapter.capRepair ?? null,
+    waitMs:
+      harnessCapMs === null
+        ? timeoutMs
+        : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

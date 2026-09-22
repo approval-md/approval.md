@@ -288,6 +288,18 @@ export interface ServeOptions {
   port: number;
   /** `--timeout` pinned on every hook call, when the operator chose one. */
   hookTimeout?: string;
+  /**
+   * `--harness-cap` pinned on every hook call, when the operator stated one
+   * (APRV-423).
+   *
+   * Independent of {@link ServeOptions.hookTimeout} and composed with it: that
+   * one bounds how long a call WAITS, this one states the ceiling the harness
+   * on the far side of the call imposes on its own hook process. The request
+   * this server opens is then judged by the shorter of the policy's TTL and
+   * that ceiling minus a margin, so the expiry is recorded while the tenant's
+   * harness is still listening.
+   */
+  hookHarnessCap?: string;
   /** Request lines. The CLI passes stderr; stdout is never written to. */
   notice?: (text: string) => void;
 }
@@ -547,7 +559,10 @@ const PUBLISHED_TOOL_NAMES: ReadonlySet<string> = new Set(
  * arrived by another route (`parseFlags` keeps the last occurrence).
  */
 export function hookArgv(
-  options: Pick<ServeOptions, "actor" | "cwd" | "log" | "policy" | "hookTimeout">,
+  options: Pick<
+    ServeOptions,
+    "actor" | "cwd" | "log" | "policy" | "hookTimeout" | "hookHarnessCap"
+  >,
 ): string[] {
   return [
     "--dir",
@@ -555,6 +570,9 @@ export function hookArgv(
     ...(options.log === undefined ? [] : ["--log", options.log]),
     ...(options.policy === undefined ? [] : ["--policy", options.policy]),
     ...(options.hookTimeout === undefined ? [] : ["--timeout", options.hookTimeout]),
+    ...(options.hookHarnessCap === undefined
+      ? []
+      : ["--harness-cap", options.hookHarnessCap]),
     "--as",
     options.actor,
   ];

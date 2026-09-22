@@ -504,8 +504,13 @@ function manualEvent(kind: HarnessKind, dir: string): string {
 for (const kind of HARNESS_KINDS) {
   test(`a manual-class action through \`hook ${kind}\` registers and asks a human`, () => {
     const dir = ready();
+    // APRV-423 (second pass): Hermes with no `--harness-cap` assumes its 30s
+    // default callback timeout and refuses `hook-harness-cap-too-short` before
+    // it asks anything, which is the right verdict and not the one this case is
+    // about. The documented config states the cap, so this case does too.
+    const cap = kind === "hermes" ? ["--harness-cap", "300s"] : [];
     const run = runCli(
-      ["hook", kind, "--timeout", "1ms", "--interval", "1ms", "--retry-grace", "1ms"],
+      ["hook", kind, "--timeout", "1ms", "--interval", "1ms", "--retry-grace", "1ms", ...cap],
       dir,
       manualEvent(kind, dir),
     );

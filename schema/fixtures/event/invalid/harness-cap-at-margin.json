@@ -1,0 +1,16 @@
+{
+  "seq": 76,
+  "ts": "2026-09-22T08:34:20Z",
+  "event": "approval.requested",
+  "task": "hook:hermes-sess-1:tool-12",
+  "action_key": "hook:hermes-sess-1:tool-12:deps.add",
+  "actor": "agent:hermes",
+  "payload": {
+    "class": "deps.add",
+    "execution": "harness",
+    "harness_cap_ms": 60000
+  },
+  "alg": "sha256/jcs",
+  "prev": "1515151515151515151515151515151515151515151515151515151515151515",
+  "hash": "1616161616161616161616161616161616161616161616161616161616161616"
+}

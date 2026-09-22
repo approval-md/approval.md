@@ -229,6 +229,11 @@ const POLICY = [
  */
 const POLICY_LONG_RUN = POLICY.replace("      daily_actions: 5", "      daily_actions: 500");
 
+/** The same policy with no `defaults.approval_ttl` at all: nothing lapses (APRV-423). */
+const POLICY_NO_TTL = POLICY.split("\n")
+  .filter((line) => !line.includes("approval_ttl"))
+  .join("\n");
+
 /**
  * The same policy with one class's ceiling raised (APRV-235).
  *
@@ -4149,7 +4154,11 @@ test("a digest is swept once every member is settled and the window has passed",
 
 test("with no approval TTL only settled entries are forgotten (APRV-135)", async () => {
   const clock = { ms: 4_000_000 };
-  const world = live(4);
+  // The fixture is coherent since APRV-423's second pass: a request tagged under
+  // a policy WITH a TTL carries its own remaining window, and the sweep reads it,
+  // so "no TTL" has to be true of the policy the requests were opened under and
+  // not only of the channel's configuration.
+  const world = live(4, false, payloadFor, POLICY_NO_TTL);
   const channel = sweepChannel(clock, null);
   channel.onDecision(handlerFor(world, at(3)));
   const requests = queueOf(world, at(3));
@@ -6675,3 +6684,97 @@ async function runReviewCli(
   });
   return { code, out, err };
 }
+
+// ---------------------------------------------------------------------------
+// The sweep reads the request's OWN window (APRV-423, second review pass)
+// ---------------------------------------------------------------------------
+
+test("a capped request's buttons are forgotten when ITS window closes, not the policy's (APRV-423)", async () => {
+  const clock = { ms: 6_000_000 };
+  fixtureCounter += 1;
+  const prefix = `capped${fixtureCounter}`;
+  const unit = newScenario(scratch.root, POLICY);
+  attest(unit, T0);
+  const key = actionKeyFor(prefix, 0);
+  const payload = payloadFor(0);
+  const hash = payloadHash(payload);
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: {
+        origin: { app: "claude-code-hook", created_by: ACTOR },
+        state: "awaiting",
+        actions: [
+          {
+            class: "communicate.email.external",
+            idempotency_key: key,
+            summary: "chase invoice 41",
+            reversible: false,
+            est_cost_usd: "0.02",
+            payload_hash: hash,
+          },
+        ],
+      },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, JSON.stringify(registered));
+  // A harness hook opened this one under Hermes's 300s ceiling, at T0+1m.
+  const requested = request(
+    unit.logPath,
+    {
+      task: TASK,
+      actionKey: key,
+      cls: "communicate.email.external",
+      est_cost_usd: "0.02",
+      reversible: false,
+      summary: "chase invoice 41",
+      payload_hash: hash,
+      payload: { value: payload },
+      execution: "harness",
+      harnessCapMs: 300_000,
+    },
+    at(1),
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(requested.ok, true, JSON.stringify(requested));
+  const world: Live = {
+    unit,
+    keys: [key],
+    payloads: new Map([[key, payload]]),
+    tagOptions: { policy: { file: unit.policyPath }, payload: (k) => (k === key ? payload : undefined) },
+  };
+
+  // Tagged two minutes in, so two of the four minutes the cap leaves remain.
+  const request_ = queueOf(world, at(3))[0] as ChannelRequest;
+  const remaining = request_.ttl_remaining_ms.value;
+  assert.equal(remaining, 300_000 - 60_000 - 2 * 60_000);
+  assert.ok(remaining < TTL_MS, "the fixture's point: the window is far inside the channel's TTL");
+
+  // The channel is configured with the policy's TTL, as the verb configures it.
+  // Before this pass the sweep waited that hour out, holding a dead button armed
+  // for fifty-six minutes after the gate had begun refusing every tap on it.
+  const channel = sweepChannel(clock);
+  channel.onDecision(handlerFor(world, at(3)));
+  await channel.notify(request_);
+  assert.equal(channel.bookkeepingSize().deliveries, 1);
+
+  clock.ms += remaining - 1;
+  assert.deepEqual(channel.sweep(), { deliveries: 0, digests: 0 }, "still answerable, still armed");
+  clock.ms += 1;
+  assert.deepEqual(channel.sweep(), { deliveries: 1, digests: 0 }, "past its own window it goes");
+  assert.equal(channel.bookkeepingSize().deliveries, 0);
+
+  // A digest of the same request takes the same window.
+  const again = await channel.notifyBatch({ requests: [request_, request_] });
+  assert.notEqual(again.digestId, null);
+  clock.ms += remaining - 1;
+  assert.equal(channel.sweep().digests, 0);
+  clock.ms += 1;
+  assert.equal(channel.sweep().digests, 1);
+  assertClean(unit);
+});

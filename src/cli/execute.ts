@@ -966,8 +966,24 @@ interface QueueEntry {
   est_cost_usd: string | null;
   requested_ts: string | null;
   seq: number | null;
-  /** Milliseconds until the TTL lapses, or `null` when the policy sets none. */
+  /**
+   * Milliseconds until the request lapses, or `null` when nothing bounds it.
+   *
+   * Measured against the window the GATE judges by (`RequestDerivation
+   * .effectiveTtlMs`, APRV-423): the policy's TTL narrowed by the harness
+   * ceiling the requesting hook declared. A capped request under a policy with
+   * no `approval_ttl` therefore shows its real remaining window here rather
+   * than "no TTL".
+   */
   ttl_remaining_ms: number | null;
+  /**
+   * The whole window `ttl_remaining_ms` counts down from, or `null` when
+   * nothing bounds the request (APRV-423, second review pass). Additive: the
+   * fraction the TTL column colours by is remaining over THIS, so a four-minute
+   * capped window three minutes in reads as a quarter left rather than as a
+   * sliver of the policy's hour.
+   */
+  ttl_ms: number | null;
 }
 
 /** The live inbox: requests inside their TTL, awaiting a human decision. */
@@ -988,12 +1004,19 @@ function pendingRequests(
   for (const key of keys) {
     const derivation = requestState(records, key, ts, ttlMs);
     if (derivation.state !== "requested") continue;
+    // APRV-423 (second review pass): the window is the derivation's, never a
+    // second copy of the arithmetic here. `requestState` already took the
+    // minimum of the policy's TTL and the declared harness cap less its margin;
+    // reading `ttlMs` again would show a capped request the policy's hour while
+    // the gate refuses it after four minutes, and would show a capped request
+    // under a policy with no TTL as "no TTL" when it has one.
+    const windowMs = derivation.effectiveTtlMs;
     const requestedAt = Date.parse(derivation.requestTs ?? "");
     const asked = Date.parse(ts);
     const remaining =
-      ttlMs === null || Number.isNaN(requestedAt) || Number.isNaN(asked)
+      windowMs === null || Number.isNaN(requestedAt) || Number.isNaN(asked)
         ? null
-        : requestedAt + ttlMs - asked;
+        : requestedAt + windowMs - asked;
     entries.push({
       action_key: key,
       task: derivation.task,
@@ -1002,6 +1025,7 @@ function pendingRequests(
       requested_ts: derivation.requestTs,
       seq: derivation.requestSeq,
       ttl_remaining_ms: remaining,
+      ttl_ms: windowMs,
     });
   }
   return entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
@@ -1055,7 +1079,13 @@ export function renderQueueHuman(
     entry.class ?? "-",
     `$${String(entry.est_cost_usd ?? 0)}`,
     entry.requested_ts ?? "-",
-    { text: ttlText(entry.ttl_remaining_ms), role: ttlRole(entry.ttl_remaining_ms, ttlMs) },
+    // The fraction is of the entry's OWN window (APRV-423): a capped request's
+    // four minutes, or the policy's TTL for one nothing narrowed. The `ttlMs`
+    // parameter stays as the fallback for an entry that carries no window.
+    {
+      text: ttlText(entry.ttl_remaining_ms),
+      role: ttlRole(entry.ttl_remaining_ms, entry.ttl_ms ?? ttlMs),
+    },
   ]);
   return `${table(st, rows, {
     header: ["action", "task", "class", "cost", "requested", "ttl"],

@@ -705,7 +705,12 @@ function tagDerivation(
     );
   }
 
-  const ttlMs = ttlOf(load);
+  // APRV-423: the window the GATE will judge this request by, not the policy's
+  // own number. A request a harness hook opened under a 300s ceiling lapses
+  // before the policy's hour does, and an approver told "expires in an hour"
+  // about a question that dies in four minutes has been told the wrong thing by
+  // the runtime that knows better.
+  const ttlMs = derivation.effectiveTtlMs;
   const requestedAt = Date.parse(derivation.requestTs);
   const nowMs = Date.parse(now);
   const ttlRemaining =

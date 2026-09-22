@@ -2352,11 +2352,16 @@ requested, and how much of the TTL is left.
 {"ok":true,"pending":[{"action_key":"task-042:chaser","task":"task-042",
  "class":"communicate.email.external","est_cost_usd":"0.02",
  "requested_ts":"2026-08-06T10:00:00.000Z","seq":3,
- "ttl_remaining_ms":3599000}]}
+ "ttl_remaining_ms":3599000,"ttl_ms":3600000}]}
 ```
 
-`pending` is `[]` for an empty inbox. `ttl_remaining_ms` is null when the policy
-declares no `defaults.approval_ttl` (no TTL means no lapse).
+`pending` is `[]` for an empty inbox. Both TTL fields are measured against the
+window the gate judges the request by (APRV-423): the policy's
+`defaults.approval_ttl`, narrowed by the harness ceiling the requesting hook
+declared, if any. `ttl_ms` is that whole window and `ttl_remaining_ms` is what is
+left of it; both are null only when nothing bounds the request (no TTL and no
+cap means no lapse). A hook-opened request under a policy with no TTL therefore
+shows its real remaining window here rather than `null`.
 
 ## gate
 
@@ -4316,6 +4321,37 @@ this the first adapter since Claude Code that is a gate rather than a backstop;
 `approval hook hermes --help` prints the YAML; `docs/hermes-hook.md` opens with the
 fail-closed result, the floor, and what a post event does not prove.
 
+**`--harness-cap <duration>` makes the question end before its asker does
+(APRV-423).** Every harness in the table kills the hook at some ceiling (Hermes
+caps a `pre_tool_call` entry at 300s, Claude Code kills it at the `timeout` in
+its settings file), and every one of them reads the killed process as a
+non-blocking error and runs the tool call. Before this flag the request that
+hook had opened stayed pending afterwards, so a tap arriving later was recorded
+as a plain `approval.granted` on a call nobody was holding, and the deny and the
+grant described one request and disagreed about it (APRV-410).
+
+The flag states the ceiling. The hook records it on `approval.requested` as
+`payload.harness_cap_ms`, and the runtime judges the request against the SHORTER
+of the policy's `defaults.approval_ttl` and that ceiling minus a 60s margin
+(`HARNESS_CAP_MARGIN_MS` in `src/core/harness-wait.ts`, two of the daemon's 30s
+sweep intervals, so the `approval.expired` record lands while the harness is
+still listening in the common case; a skipped sweep or a slow intake can put it
+after the kill, and what keeps a late tap safe then is the gate's lazy `expired`
+refusal, which judges the lapse by arithmetic whether or not the record exists).
+A cap can only SHORTEN: the runtime takes a minimum, so a stated ceiling longer
+than the TTL changes nothing, which is SPEC.md §11.1 invariant 4 applied to a
+duration. Without the flag, `hook hermes` assumes **30s**, Hermes's default
+`plugins.hook_callback_timeout`, which does not clear the margin: every
+manual-class call is refused `hook-harness-cap-too-short` until the operator
+raises `plugins.hook_callback_timeout` above the per-entry `timeout` and passes
+`--harness-cap` with the smaller of the two (`--harness-cap 300s` for the
+documented `600` over `300`). A stated cap is still clamped to Hermes's observed
+300s per-entry maximum. No other adapter assumes a ceiling, because no other
+harness documents one. A ceiling at or below the margin leaves no window for a
+human and is refused `hook-harness-cap-too-short` before anything is registered
+or requested. `approval serve` pins the same value on every hook call it makes
+with `--hook-harness-cap`, as it pins `--timeout` with `--hook-timeout`.
+
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
 `PostToolUseFailure` run closes the delegated `execution.started` the
@@ -4420,7 +4456,8 @@ its own flags are not parsed as this verb's.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.
 - `hook-expired` — the TTL lapsed before a decision.
-- `hook-timeout` — no decision inside `--timeout`; the request stays live.
+- `hook-timeout` — no decision inside the wait (`--timeout`, clamped to what
+  `--harness-cap` leaves after the 60s margin; APRV-423); the request stays live.
 - `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
   (`policy-not-attested`, `budget-exceeded`, …).
 - `hook-policy-unavailable` — `APPROVAL.md` could not be loaded.
@@ -6903,6 +6940,25 @@ it.
 A deny is a VERDICT, so its HTTP status is 200; only a refusal by the server
 is not.
 
+**A Hermes tenant needs `--hook-harness-cap`, or every manual class is refused
+(APRV-423).** `approval serve` pins `--harness-cap` on every hook call with
+`--hook-harness-cap`, as it pins `--timeout` with `--hook-timeout`. Without it a
+`POST /hook/hermes` runs as `approval hook hermes` with no flag, which assumes
+Hermes's 30s default `plugins.hook_callback_timeout`; 30s does not clear the 60s
+margin, so every manual-class call answers `hook-harness-cap-too-short` (a
+block, nothing registered or requested, no prompt sent) and a tenant is gated
+shut rather than gated. The repair for a serve operator, who does not own the
+tenant's `$HERMES_HOME`: have the tenant raise `plugins.hook_callback_timeout` in
+the harness's config above the per-entry `timeout`, then start `serve` with
+`--hook-harness-cap <the smaller of the two>` (`--hook-harness-cap 300s` for the
+documented `600` over `300`). The value is per server rather than per tenant, so
+a server fronting several Hermes tenants states the smallest ceiling any of them
+runs under; a stated cap can only shorten a window, never lengthen one. The
+same flag bounds the hook's WAIT on every route: `--hook-timeout` is clamped to
+what the ceiling leaves after the margin, so a hook that adopts an already-open
+question under a ceiling with no room in it answers `hook-timeout` at once
+(question left open for the retry grace) instead of being killed mid-wait.
+
 `GET /log/follow?from=<seq>&cursor_hash=<64hex>&limit=<n>` answers one page of
 verified records and the cursor to ask with next time. The cursor is EXCLUSIVE
 and the subscription is `core/log-subscribe.ts`'s, so SPEC.md §8 holds
@@ -7125,7 +7181,9 @@ The deadline is the policy's `approval_ttl`, not a harness ceiling. Every hook
 adapter answers inside a timeout its harness sets, and the retry grace exists so
 a denial-by-deadline is recoverable; this transport has no timeout at all, so a
 human who answers in eleven minutes is answering rather than arriving too late.
-`--wait` overrides it.
+`--wait` overrides it. The bridge therefore states no `--harness-cap` and the
+window shortening of APRV-423 never applies to it: there is no process here that
+something else will kill, so there is nothing for a cap to keep ahead of.
 
 It answers accept or decline only, in the vocabulary the request advertised
 through `availableDecisions`, matched exactly and never by prefix, so

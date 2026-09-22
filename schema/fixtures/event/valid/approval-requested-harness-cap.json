@@ -1,0 +1,18 @@
+{
+  "seq": 71,
+  "ts": "2026-09-22T08:31:14Z",
+  "event": "approval.requested",
+  "task": "hook:hermes-sess-1:tool-7",
+  "action_key": "hook:hermes-sess-1:tool-7:deps.add",
+  "actor": "agent:hermes",
+  "channel": "telegram",
+  "payload": {
+    "class": "deps.add",
+    "execution": "harness",
+    "harness_cap_ms": 300000,
+    "payload_hash": "5f1c2a6f3e9d4b8a7c0e1d2b3a4958677889aabbccddeeff0011223344556677"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1010101010101010101010101010101010101010101010101010101010101010",
+  "hash": "1111111111111111111111111111111111111111111111111111111111111111"
+}

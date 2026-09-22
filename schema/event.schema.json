@@ -1134,6 +1134,25 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$",
                 "description": "SPEC.md §9/§10.3 (APRV-119): SHA-256 (lowercase hex) over the UTF-8 text of the canonical rendering of this request's payload, as produced by the versioned deterministic renderer named inside that text."
+              },
+              "harness_cap_ms": {
+                "type": "integer",
+                "minimum": 60001,
+                "maximum": 86400000,
+                "description": "SPEC.md §6 (APRV-423): the ceiling, in milliseconds, that the harness running the requesting hook imposes on that hook's own process — Hermes caps a `pre_tool_call` entry at 300 s, Claude Code kills the hook at the `timeout` in its settings file. A BOUNDED INPUT and never a deadline of its own: the runtime judges the request against the SHORTER of this minus a fixed margin and the policy's `defaults.approval_ttl`, so a stated cap can only move the lapse EARLIER (§11.1 invariant 4). The minimum is HARNESS_CAP_MARGIN_MS + 1 (src/core/harness-wait.ts, 60 000 ms; tests/harness-cap-ttl.test.ts pins the two equal): a cap at or below the margin leaves a zero-length window, a question that lapses as it is asked, and the hook refuses such a configuration before it appends, so a record carrying one could only come from a caller that skipped the hook and is refused here. Above 24 h is a number no harness contract states."
+              }
+            },
+            "dependentSchemas": {
+              "harness_cap_ms": {
+                "$comment": "APRV-423. A record carrying a harness ceiling MUST also declare `execution: \"harness\"`. The ceiling shortens the window in which this request may be decided, and a request that mints an execution token would otherwise hold an authorization with a longer shelf life than the question that produced it. A schema sees one record, which is exactly enough to see both fields, so the pairing is refused at the write boundary rather than left to a caller's discipline.",
+                "properties": {
+                  "execution": {
+                    "const": "harness"
+                  }
+                },
+                "required": [
+                  "execution"
+                ]
               }
             }
           }
