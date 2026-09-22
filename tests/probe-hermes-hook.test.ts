@@ -23,6 +23,26 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { HERMES_FAIL_CLOSED_FLOOR, hermesFailClosedSupport } from "../src/core/harness-version.js";
+
+/** One step of the driven matrix (APRV-418). */
+interface MatrixStep {
+  id: string;
+  phase: string;
+  trial: string;
+  failClosed: boolean;
+  prompt: string;
+  artifact: string | null;
+  hang: boolean;
+}
+
+/** The repository root, from `dist/tests/` at runtime. */
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+/** The fake harness the driver tests spawn. See its own header for what it models. */
+const FAKE_HERMES = join(REPO_ROOT, "tests", "fake-hermes.mjs");
 
 // The probe is plain Node ESM on purpose: an operator runs it straight from a
 // checkout, before any build. Its exports are exercised here without adding a
@@ -32,33 +52,53 @@ import * as probe from "../../scripts/probes/hermes-hook.mjs";
 
 const {
   ALL_TRIALS,
+  BASELINE_PROMPTS,
   BLOCK_START,
   DIALECT_TRIALS,
+  FAIL_CLOSED_FLOOR,
   FAIL_TRIALS,
   MODIFY_TARGET_DIR,
   MODIFY_TRIAL,
+  ONE_SHOT_TEMPLATE,
   SYNTHETIC_FILES,
   arm,
   buildConfig,
   conflictingKeys,
   dialectAnswer,
   failClosedVerb,
+  floorVerdict,
+  matrix,
   mixedDenyPayload,
+  oneShotArgv,
   outsideProject,
   record,
   redact,
   report,
+  run,
   setup,
   stripBlock,
   trialArtifact,
+  versionLine,
 } = probe as {
   ALL_TRIALS: string[];
+  BASELINE_PROMPTS: string[];
   BLOCK_START: string;
   DIALECT_TRIALS: string[];
+  FAIL_CLOSED_FLOOR: {
+    upstream: string;
+    date: { year: number; month: number; day: number };
+    statement: string;
+  };
   FAIL_TRIALS: string[];
   MODIFY_TARGET_DIR: string;
   MODIFY_TRIAL: string;
+  ONE_SHOT_TEMPLATE: string;
   SYNTHETIC_FILES: Record<string, string>;
+  floorVerdict: (raw: unknown) => "honours" | "ignores" | "unknown";
+  matrix: () => MatrixStep[];
+  oneShotArgv: (template: string, prompt: string, project: string) => string[] | null;
+  run: (argv: string[], io?: Record<string, unknown>) => number;
+  versionLine: (raw: unknown) => string | null;
   arm: (argv: string[], write?: (text: string) => void) => number;
   buildConfig: (state: string, failClosed: boolean) => string;
   conflictingKeys: (text: string) => string[];
