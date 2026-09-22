@@ -1,0 +1,115 @@
+{
+  "$comment": "Known-failure baseline (APRV-426). A ledger of debt, not a suppression list: nothing here changes an exit code, and a run whose every failure is on this list is still a red run. What the list buys is the sentence a closing note could not previously make honestly, 'these failures and no others'. Ids are written by scripts/ci-failure-ids.mjs as <suite>::<test name path>; the suite half is a run-tests.mjs --only name, so an entry can be rerun on its own. Compare a run with `node scripts/run-tests.mjs --baseline`, or an ids file with `node scripts/ci-baseline.mjs <ids-file>`. Every entry names the task that owns the fix; fixing a failure means deleting its entry in the same pull request. See docs/ci-verdict.md.",
+  "known_failures": [
+    {
+      "id": "adapter-email::a granted send puts exactly the approved bytes on the wire over STARTTLS",
+      "task": "APRV-416",
+      "note": "SMTP mock listens on 127.0.0.1 and the adapter passes it as the TLS servername; Node 26 refuses an IP literal there"
+    },
+    {
+      "id": "adapter-email::implicit TLS is spoken from the first byte, with no STARTTLS",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::AUTH LOGIN is the fallback when the server offers no PLAIN",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::a vault holding no login pair sends unauthenticated",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::an authentication failure is smtp-535 and carries no credential",
+      "task": "APRV-416",
+      "note": "the servername refusal surfaces as smtp-protocol-error before the expected smtp-535"
+    },
+    {
+      "id": "adapter-email::a server that quotes the credential back has it scrubbed from the message",
+      "task": "APRV-416",
+      "note": "the servername refusal surfaces as smtp-protocol-error before the expected smtp-535"
+    },
+    {
+      "id": "adapter-email::a refused recipient is smtp-550 and the message is never handed over",
+      "task": "APRV-416",
+      "note": "the servername refusal surfaces as smtp-protocol-error before the expected smtp-550"
+    },
+    {
+      "id": "adapter-email::a refused end-of-data is reported against the message step",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::a stalling server becomes smtp-timeout rather than a hung execution",
+      "task": "APRV-416",
+      "note": "the servername refusal answers before the timeout the case is asserting"
+    },
+    {
+      "id": "adapter-email::the TLS verification default is strict, and the mock's fixture certificate is refused",
+      "task": "APRV-416",
+      "note": "refused for the servername rather than for the fixture certificate the case is about"
+    },
+    {
+      "id": "adapter-email::a payload the grant did not bind to opens zero connections",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::a consumed token opens zero connections on the replay",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "adapter-email::the email adapter conforms to the adapter contract",
+      "task": "APRV-416",
+      "note": "the contract's send leg cannot complete while the servername is refused"
+    },
+    {
+      "id": "adapter-email::a non-ASCII body is quoted-printable and a non-ASCII subject is an encoded-word",
+      "task": "APRV-416",
+      "note": "TLS servername is the IP literal 127.0.0.1, which Node 26 refuses"
+    },
+    {
+      "id": "smtp-probe::a probe authenticates over STARTTLS, says QUIT, and sends no message",
+      "task": "APRV-416",
+      "note": "probeSmtp passes the IP literal as the TLS servername, which Node 26 refuses"
+    },
+    {
+      "id": "smtp-probe::a probe over implicit TLS is encrypted from the first byte",
+      "task": "APRV-416",
+      "note": "probeSmtp passes the IP literal as the TLS servername, which Node 26 refuses"
+    },
+    {
+      "id": "smtp-probe::a refused AUTH is reported as its own reply code, after AUTH was attempted",
+      "task": "APRV-416",
+      "note": "the servername refusal surfaces as smtp-protocol-error before the expected smtp-535"
+    },
+    {
+      "id": "smtp-probe::a server that quotes the password back has it scrubbed out of the failure",
+      "task": "APRV-416",
+      "note": "the servername refusal surfaces as smtp-protocol-error before the expected smtp-535"
+    },
+    {
+      "id": "cli-setup::setup adapter email: the probe proves the session, sends nothing, and reports the mechanism",
+      "task": "APRV-416",
+      "note": "the setup probe reaches the same SMTP path and the same servername refusal"
+    },
+    {
+      "id": "cli-setup::setup adapter email: a refused probe exits 1, KEEPS the values, and prints the undo",
+      "task": "APRV-416",
+      "note": "the setup probe reaches the same SMTP path and the same servername refusal"
+    },
+    {
+      "id": "cli-setup::setup adapter email: a partial re-run probes the MERGED set through the adapter's own vault read (APRV-99)",
+      "task": "APRV-416",
+      "note": "the setup probe reaches the same SMTP path and the same servername refusal"
+    },
+    {
+      "id": "cli-setup::setup adapter email: an answer that is neither yes nor no asks the probe offer again (APRV-99)",
+      "task": "APRV-416",
+      "note": "the setup probe reaches the same SMTP path and the same servername refusal"
+    }
+  ]
+}

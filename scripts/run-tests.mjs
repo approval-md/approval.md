@@ -21,21 +21,33 @@
  * records tier, APRV-112) and `--shard <k>/<n>` takes one slice of the whole
  * suite for the full gate's parallel matrix (APRV-149).
  *
+ * `--baseline [path]` (APRV-426) adds a second reporter that writes failing
+ * test IDS, and compares them against the committed known-failure list. It
+ * changes nothing about which files run and nothing about the exit code: a red
+ * run stays red whether or not its failures were expected. What it adds is the
+ * distinction a count cannot make, between a failure that was already on the
+ * books and one this run introduced.
+ *
  * The module is importable: everything below is a function, and the CLI runs
  * only when this file is the entry point, so a test can exercise the selectors
  * without spawning the suite it is part of.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
+import { DEFAULT_BASELINE, parseFailureIds, reportFailureIds } from "./ci-baseline.mjs";
+
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const TEST_DIR = join(REPO_ROOT, "dist", "tests");
 
-const USAGE = "run-tests.mjs [--only <name>...] [--shard <k>/<n>]";
+/** The reporter that turns a run into a list of failing ids (APRV-426). */
+const FAILURE_ID_REPORTER = fileURLToPath(new URL("./ci-failure-ids.mjs", import.meta.url));
+
+const USAGE = "run-tests.mjs [--only <name>...] [--shard <k>/<n>] [--baseline [path]]";
 
 // ---------------------------------------------------------------------------
 // Harness binaries are stubbed for the whole suite (APRV-227)
@@ -169,7 +181,7 @@ export function selectShard(files, index, count) {
  * 1..n, `--only` with no names, and the two selectors together.
  */
 export function parseRunnerArgs(argv) {
-  const options = { only: null, shard: null, error: null };
+  const options = { only: null, shard: null, baseline: null, error: null };
   const fail = (message) => {
     if (options.error === null) options.error = message;
   };
@@ -179,6 +191,14 @@ export function parseRunnerArgs(argv) {
     if (arg === "--only") {
       options.only ??= [];
       collectingNames = true;
+    } else if (arg === "--baseline" || arg.startsWith("--baseline=")) {
+      // `--baseline` alone takes the committed list. `--baseline=<path>` names
+      // another one. A bare `--baseline <path>` is deliberately NOT accepted:
+      // the runner's only positional grammar belongs to `--only`, and letting
+      // a path drift into that list is how a run silently becomes smaller.
+      collectingNames = false;
+      options.baseline = arg === "--baseline" ? DEFAULT_BASELINE : arg.slice("--baseline=".length);
+      if (options.baseline.length === 0) fail("--baseline= requires a path");
     } else if (arg === "--shard" || arg.startsWith("--shard=")) {
       collectingNames = false;
       let value;
@@ -296,14 +316,70 @@ function main(argv) {
   // somebody's real registry.
   const stateDir = mkdtempSync(join(tmpdir(), "approval-md-state-"));
 
-  const result = spawnSync(process.execPath, ["--test", ...files], {
+  // APRV-426. Attaching any reporter replaces node's default, so when
+  // `--baseline` is on we name the default explicitly alongside ours: spec on a
+  // terminal, tap otherwise, which is the rule node itself applies. The
+  // observable output of a baselined run is therefore identical to an ordinary
+  // one, plus the comparison printed at the end.
+  const idsPath =
+    options.baseline === null
+      ? null
+      : join(mkdtempSync(join(tmpdir(), "approval-md-failures-")), "failing-ids.txt");
+  // Created empty up front, because node opens a reporter's destination lazily
+  // and a run with nothing to report leaves no file at all. Pre-creating keeps
+  // the two cases apart: an EMPTY file means no test failed, and a MISSING file
+  // means the reporter never ran, which is a problem and is reported as one
+  // rather than read as a green run.
+  if (idsPath !== null) writeFileSync(idsPath, "", "utf8");
+  const reporters =
+    idsPath === null
+      ? []
+      : [
+          `--test-reporter=${process.stdout.isTTY ? "spec" : "tap"}`,
+          "--test-reporter-destination=stdout",
+          `--test-reporter=${pathToFileURL(FAILURE_ID_REPORTER).href}`,
+          `--test-reporter-destination=${idsPath}`,
+        ];
+
+  const result = spawnSync(process.execPath, ["--test", ...reporters, ...files], {
     cwd: REPO_ROOT,
     stdio: "inherit",
     // APRV-227: no test run through this runner reaches a real harness binary.
     env: { ...process.env, PATH: stubHarnessBinaries(), APPROVAL_STATE_DIR: stateDir },
   });
 
-  return result.status ?? 1;
+  const status = result.status ?? 1;
+  if (idsPath === null) return status;
+
+  // The comparison reports; it never decides. A run whose every failure was
+  // already on the list is still a failing run, and a baseline that cannot be
+  // read is an error rather than an empty list quietly compared against
+  // nothing (see scripts/ci-baseline.mjs).
+  let ids;
+  try {
+    ids = parseFailureIds(readFileSync(idsPath, "utf8"));
+  } catch (error) {
+    console.error(
+      `run-tests: --baseline could not read the failing ids the reporter wrote to ${idsPath}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return status === 0 ? 1 : status;
+  }
+  try {
+    const comparison = reportFailureIds(ids, { baselinePath: options.baseline });
+    if (status === 0 && comparison.new.length > 0) {
+      // Belt and braces: the runner exited green while the reporter saw
+      // failures, so something is wrong with one of them. Never report green.
+      console.error(
+        "run-tests: the suite exited 0 while the failure reporter named failing tests; refusing to report success.",
+      );
+      return 1;
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return status === 0 ? 1 : status;
+  }
+  return status;
 }
 
 const invokedDirectly =
