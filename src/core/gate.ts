@@ -1453,6 +1453,24 @@ export interface RequestInput {
    */
   wait_until?: string;
   /**
+   * How long the harness holding this tool call can hold it, in milliseconds
+   * (APRV-423). A DURATION, never an instant.
+   *
+   * The hook is the only caller: it knows its harness, it knows the entry
+   * timeout the operator configured, and `core/harness-wait.ts`'s
+   * {@link harnessCapMs} folds the two. Recorded on `approval.requested` as
+   * `harness_cap_ms`, where `core/state.ts` reads it back and narrows the TTL by
+   * it, so a request expires before the harness stops holding the call and a tap
+   * after that point is refused instead of granting a call nobody holds.
+   *
+   * It can only SHORTEN the window: every use of it goes through
+   * `effectiveRequestTtlMs`'s `min` against the policy TTL, so overstating it is
+   * worth nothing and understating it costs the requester its own question. A
+   * value that is not a finite positive number is dropped here, at the write
+   * boundary, rather than written and re-judged by every reader.
+   */
+  harnessCapMs?: number;
+  /**
    * The caller has established that loop safety floors this action to `manual`
    * for this invocation (APRV-145, amended SPEC.md §10.2).
    *
@@ -2415,6 +2433,17 @@ function attemptRequest(
   // ability to spend a token, and `wait_until` is display text.
   if (input.execution !== undefined) payload["execution"] = input.execution;
   if (input.wait_until !== undefined) payload["wait_until"] = input.wait_until;
+  // APRV-423, and it belongs with those two for the same reason: the log is the
+  // only place the TTL judge can read it from. Written only when it is a usable
+  // duration, so the payload never carries a number no reader would honour, and
+  // narrowing-only by construction (see `RequestInput.harnessCapMs`).
+  if (
+    input.harnessCapMs !== undefined &&
+    Number.isFinite(input.harnessCapMs) &&
+    input.harnessCapMs > 0
+  ) {
+    payload["harness_cap_ms"] = Math.floor(input.harnessCapMs);
+  }
 
   const appended = append(
     logPath,
@@ -4407,11 +4436,20 @@ export function expire(
         { state: derivation.state },
       );
     }
+    // APRV-423: the deadline NAMED here is the one that was judged, which is
+    // the policy's narrowed by any harness cap the request carries. Reporting
+    // `ttlMs` would send an operator to a policy line that is not what refused
+    // them.
+    const effective = derivation.effectiveTtlMs;
     return refuse(
       "not-expired",
-      ttlMs === null
-        ? `action ${actionKey} cannot expire: the policy declares no defaults.approval_ttl, so the request is not bounded by a TTL`
-        : `action ${actionKey} has not expired: the request at ${String(derivation.requestTs)} has not lapsed its ${String(ttlMs)}ms TTL as of ${ts}`,
+      effective === null
+        ? `action ${actionKey} cannot expire: the policy declares no defaults.approval_ttl and the request declares no harness cap, so the request is not bounded by a TTL`
+        : `action ${actionKey} has not expired: the request at ${String(derivation.requestTs)} has not lapsed its ${String(effective)}ms TTL as of ${ts}${
+            derivation.declared.harness_cap_ms === null
+              ? ""
+              : ` (narrowed from the policy's ${ttlMs === null ? "unbounded TTL" : `${String(ttlMs)}ms`} by the request's ${String(derivation.declared.harness_cap_ms)}ms harness cap)`
+          }`,
       { state: derivation.state },
     );
   }

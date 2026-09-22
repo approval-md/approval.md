@@ -4319,7 +4319,8 @@ its own flags are not parsed as this verb's.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.
-- `hook-expired` — the TTL lapsed before a decision.
+- `hook-expired` — the TTL lapsed before a decision. Since APRV-423 the message
+  also names the harness cap where one narrowed the window (below).
 - `hook-timeout` — no decision inside `--timeout`; the request stays live.
 - `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
   (`policy-not-attested`, `budget-exceeded`, …).
@@ -4333,6 +4334,29 @@ its own flags are not parsed as this verb's.
 
 Set `--timeout` (default 55s) BELOW the hook timeout configured in
 `.claude/settings.json`.
+
+**`--harness-cap <d>` — how long your harness can hold one tool call**
+(APRV-423). Optional, and a duration in the SPEC.md §5.2 grammar. It is your
+ENTRY's own timeout (`timeout` in `.claude/settings.json`, `.grok/hooks/*.json`,
+Hermes's `config.yaml`), which this process cannot read for itself. The hook
+folds it with the hard ceiling this project has documented for the harness it is
+speaking for — Hermes alone has one, 300s, because that is a maximum rather than
+a default — and records the smaller of the two on every `approval.requested` it
+opens, as `harness_cap_ms`.
+
+What it does there is narrow that request's TTL to
+`min(defaults.approval_ttl, cap - 60s)`. The 60 seconds are two of the daemon's
+default sweep intervals, so a daemon at the default interval has appended
+`approval.expired` before the harness stops holding the call, and the hook's
+block and the log say the same thing. Without it (and on every harness but
+Hermes) nothing changes: the policy TTL is the only deadline.
+
+It can only ever shorten the window — the value is `min`'d against the policy
+TTL, so overstating it buys nothing (SPEC.md §11.1 invariant 4) — and it is a
+duration rather than an instant, so the deadline is computed from the record's
+own runtime-assigned `ts` (invariant 2). An unreadable duration is a usage error
+rather than a dropped flag: a cap that silently did not take effect is the
+failure this closes.
 
 **Where the policy and the log come from** (they always come from the same
 place, APRV-101). `--policy` and `--log` each win outright for their half.

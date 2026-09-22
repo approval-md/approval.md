@@ -121,6 +121,8 @@ import {
 } from "../core/harness-version.js";
 import {
   abandonedAfterMs,
+  HARNESS_CAP_MARGIN_MS,
+  harnessCapMs as harnessCapMsFor,
   HOOK_DEFAULT_WAIT,
   HOOK_RETRY_GRACE_MS,
 } from "../core/harness-wait.js";
@@ -2669,6 +2671,16 @@ interface HookRun {
   graceMs: number;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
+  /**
+   * How long this harness can hold one tool call, in milliseconds, or `null`
+   * when neither this project nor the operator has stated a ceiling (APRV-423).
+   *
+   * `core/harness-wait.ts`'s {@link harnessCapMs} folds the documented per-
+   * harness ceiling with the operator's own `--harness-cap`. It is recorded on
+   * every `approval.requested` this invocation opens, and it narrows that
+   * request's TTL and nothing else.
+   */
+  harnessCapMs: number | null;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -3401,6 +3413,10 @@ export function gateHarnessCall(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
+        // APRV-423. The duration this harness can hold the call, so the TTL
+        // judge lapses the request before the harness stops holding it and a
+        // late tap is refused rather than granting a call nobody has.
+        ...(run.harnessCapMs === null ? {} : { harnessCapMs: run.harnessCapMs }),
         ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
       },
       run.actor,
@@ -3580,7 +3596,20 @@ export function gateHarnessCall(
           );
         }
         if (states.includes("expired")) {
-          return sayDeny("hook-expired", `the request for ${task} lapsed before a decision`);
+          // APRV-423. WHICH deadline lapsed is the operator's next question, and
+          // the answer changes what they do: a policy TTL is a line they can
+          // raise, and a harness cap is a ceiling their harness imposes on how
+          // long a tool call can be held, which no policy edit moves. Named only
+          // when this invocation is actually carrying a cap, so the sentence
+          // every other deployment reads is unchanged.
+          const capped =
+            run.harnessCapMs === null
+              ? ""
+              : ` The window was the smaller of this policy's TTL and ${String(run.harnessCapMs)}ms (this harness's hold on one tool call) minus a ${String(HARNESS_CAP_MARGIN_MS)}ms margin, so the question was closed before the harness stopped holding the call rather than after: a tap arriving now authorizes nothing. Run the command again to ask it fresh.`;
+          return sayDeny(
+            "hook-expired",
+            `the request for ${task} lapsed before a decision.${capped}`,
+          );
         }
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
@@ -4687,6 +4716,7 @@ function runHarnessHook(
     "--timeout": "string",
     "--interval": "string",
     "--retry-grace": "string",
+    "--harness-cap": "string",
   });
   if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
@@ -4748,6 +4778,20 @@ function runHarnessHook(
   if (graceMs === null) {
     return configurationError(
       `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
+    );
+  }
+  // APRV-423. The operator's OWN entry timeout: the `timeout` beside this
+  // command in `.claude/settings.json`, `.grok/hooks/*.json`, Hermes's
+  // `config.yaml`. The operator is the only party that can read it, this
+  // process cannot see the file that holds it, and it is folded below with the
+  // ceiling the harness itself imposes. A bad duration is a configuration error
+  // rather than a silently dropped flag: a cap the operator meant to set and
+  // that did not take effect is the failure this whole task is about.
+  const capText = stringFlag(parsed.flags, "--harness-cap");
+  const statedCapMs = capText === null ? null : parseDuration(capText);
+  if (capText !== null && statedCapMs === null) {
+    return configurationError(
+      `--harness-cap expects a duration like 300s, 10m, got ${JSON.stringify(capText)}`,
     );
   }
 
@@ -5015,6 +5059,7 @@ function runHarnessHook(
       timeoutMs,
       intervalMs,
       graceMs,
+      operatorCapMs: statedCapMs,
       codexCommand,
       windowRecords: looked.records,
     }),
@@ -5043,6 +5088,16 @@ export interface DecideInput {
   timeoutMs: number;
   intervalMs: number;
   graceMs: number;
+  /**
+   * The entry timeout the OPERATOR declared with `--harness-cap`, in
+   * milliseconds, or `null`/absent when they declared none (APRV-423).
+   *
+   * Folded with this project's own documented ceiling for the harness by
+   * `core/harness-wait.ts`'s `harnessCapMs`, inside {@link decideHarnessCall},
+   * so a second caller that knows nothing about the flag still gets the
+   * documented ceiling for the harness it is speaking for.
+   */
+  operatorCapMs?: number | null;
   /** Exact native command bytes a Codex allow must carry back, where there are any. */
   codexCommand?: string | undefined;
   /**
@@ -5087,6 +5142,11 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     codexCommand,
     windowRecords,
   } = decide;
+  // APRV-423. Folded here rather than at the flag, so every caller of this
+  // function — the hook verb and the Codex bridge both — carries the ceiling
+  // this project documents for its harness whether or not it knows the flag
+  // exists.
+  const harnessCapMs = harnessCapMsFor(adapter.kind, decide.operatorCapMs ?? null);
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
@@ -5165,6 +5225,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     intervalMs,
     graceMs,
     ttlMs: load.durations.approvalTtlMs,
+    harnessCapMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

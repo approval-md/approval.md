@@ -126,6 +126,7 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from
 import { resolve } from "node:path";
 
 import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
+import { effectiveRequestTtlMs } from "./harness-wait.js";
 import { onLogAppended, type EventRecord, type LogHead } from "./log.js";
 import { normalizeUsd } from "./money.js";
 import { isPayloadHash } from "./payload.js";
@@ -1194,6 +1195,23 @@ export interface DeclaredAction {
    */
   wait_until: string | null;
   /**
+   * How long the harness that opened this request can hold the tool call, in
+   * milliseconds, or `null` for a request that declared none (APRV-423).
+   *
+   * A DURATION and never an instant, which is what keeps it clear of SPEC.md
+   * §11.1 invariant 2: the deadline is computed from the `approval.requested`
+   * record's own `ts`, assigned by the runtime at the write boundary, so a caller
+   * states a length of time and never a moment.
+   *
+   * Claimed, and bounded in one direction only. It reaches the TTL through
+   * {@link effectiveRequestTtlMs}, whose `min` means a stated cap can shorten
+   * the window and can never lengthen it — so a requester that overstates it
+   * gains nothing, and one that understates it expires its own question early.
+   * `null` for every record written before the field existed, which is the
+   * pre-APRV-423 reading: the policy's TTL is the only deadline.
+   */
+  harness_cap_ms: number | null;
+  /**
    * The SHA-256 of the attested policy in force when the runtime evaluated the
    * request (APRV-118, amended SPEC.md §5.2), or `null` for a record written
    * before the field existed.
@@ -1235,6 +1253,16 @@ export interface RequestDerivation {
   expiredByEvent: boolean;
   /** The TTL lapsed by arithmetic, with no `approval.expired` record. */
   expiredLazily: boolean;
+  /**
+   * The TTL this derivation actually judged against (APRV-423): the policy's,
+   * narrowed by the request's own `harness_cap_ms` where it carries one.
+   *
+   * Exposed so that a surface reporting a lapse can name the deadline it
+   * applied rather than the policy line an operator would go and read. `null`
+   * means nothing bounded this request, which is the only case in which it
+   * cannot lapse by arithmetic at all.
+   */
+  effectiveTtlMs: number | null;
   declared: DeclaredAction;
   execution: ExecutionFacts;
 }
@@ -1254,6 +1282,7 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const hash = payload["payload_hash"];
   const execution = payload["execution"];
   const waitUntil = payload["wait_until"];
+  const harnessCap = payload["harness_cap_ms"];
   const policySha256 = payload[POLICY_HASH_FIELD];
   return {
     class: typeof cls === "string" ? cls : null,
@@ -1267,6 +1296,14 @@ function declaredFrom(record: EventRecord): DeclaredAction {
     execution: execution === "harness" ? "harness" : null,
     wait_until:
       typeof waitUntil === "string" && !Number.isNaN(Date.parse(waitUntil)) ? waitUntil : null,
+    // APRV-423. A finite positive number of milliseconds or nothing. Anything
+    // else — a string, a negative, an infinity, a NaN that survived JSON — reads
+    // as `null`, which is the pre-field behaviour: the policy's TTL governs
+    // alone. Unreadable input must not become a deadline, in either direction.
+    harness_cap_ms:
+      typeof harnessCap === "number" && Number.isFinite(harnessCap) && harnessCap > 0
+        ? Math.floor(harnessCap)
+        : null,
     // A malformed hash reads as `null`, which is the pre-APRV-118 shape: the
     // grant path then has nothing to compare and proceeds under the current
     // policy. Treating an unreadable value as a mismatch would let a corrupt
@@ -1331,6 +1368,7 @@ export function requestState(
     payload_hash: null,
     execution: null,
     wait_until: null,
+    harness_cap_ms: null,
     policy_sha256: null,
   };
   const execution: ExecutionFacts = { started: null, completed: null, failed: null };
@@ -1397,13 +1435,23 @@ export function requestState(
     }
   }
 
+  // APRV-423. The deadline that governs this request, which is the policy's
+  // narrowed by the harness cap the request itself carries. Computed HERE, in
+  // the lazy judge, rather than in the daemon's sweep, and that placement is the
+  // point: SPEC.md §10.2 says the sweep changes no verdict because TTL is judged
+  // at decision time whether or not an expiry event exists, and a sweep that
+  // expired early against a deadline the gate did not know would break exactly
+  // that. Every caller of this function — the grant path, `expire`,
+  // `lapsedRequests`, the queue renderer, the channel — now reads one answer.
+  const effectiveTtlMs = effectiveRequestTtlMs(ttlMs, declared.harness_cap_ms);
+
   let state: RequestState;
   let expiredLazily = false;
   if (requestSeq === null) {
     state = "none";
   } else if (decision !== null) {
     state = decision;
-  } else if (ttlMs === null) {
+  } else if (effectiveTtlMs === null) {
     // No `defaults.approval_ttl` means the policy declares no lapse. A request
     // stays live until a human decides it; inventing a default TTL here would
     // silently reject approvals a policy author never asked to expire.
@@ -1414,7 +1462,7 @@ export function requestState(
     if (Number.isNaN(requestedAt) || Number.isNaN(now)) {
       state = "expired";
       expiredLazily = true;
-    } else if (now > requestedAt + ttlMs) {
+    } else if (now > requestedAt + effectiveTtlMs) {
       state = "expired";
       expiredLazily = true;
     } else {
@@ -1434,6 +1482,7 @@ export function requestState(
     decisionTs,
     expiredByEvent,
     expiredLazily,
+    effectiveTtlMs,
     declared,
     execution,
   };

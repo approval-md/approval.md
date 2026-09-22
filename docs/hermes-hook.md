@@ -278,6 +278,46 @@ Consequences, in order of how much they cost:
    project's other adapters give an approver, and it is a property of the
    harness rather than a choice made here.
 
+### The effective window (APRV-423)
+
+The 300-second per-entry maximum is the only HARD ceiling any harness this
+project speaks to is known to have: no setting raises it, so no Hermes tool call
+can be held longer than that. The consequence used to be silent. The policy TTL
+is usually hours, so a request stayed grantable long after Hermes had stopped
+holding the call, and a tap in between produced an `approval.granted` for a call
+nobody had.
+
+Since APRV-423 a request this adapter opens carries that ceiling, and the TTL
+that governs it is **the smaller of the policy's TTL and the cap minus a
+60-second margin**. On this harness, with no flag, that is:
+
+```
+min(defaults.approval_ttl, 300s - 60s) = 240s
+```
+
+Four things follow, and the third is a real loss worth stating plainly:
+
+1. **The margin is two daemon sweep intervals** (the default is 30s), so a
+   daemon at that interval has appended `approval.expired` by `cap - 30s` at the
+   latest — strictly before the harness gives up, so the two records agree. A
+   longer `--interval` still lapses before the cap and may record after it.
+2. **It is the ordinary lazy TTL.** The narrowing happens in the same judge every
+   surface uses, so the gate refuses a late tap with or without an expiry record
+   and the sweep still changes no verdict (SPEC.md §10.2).
+3. **The retry grace is gone on this harness.** `--timeout 4m` and a 240s
+   effective TTL are the same instant: when the wait ends, the question is
+   already over, so the APRV-287 carryover that lets a retry adopt a pending
+   question has no room on a harness with a five-minute ceiling. A retry asks
+   fresh. That is the honest arithmetic of a 300-second cap rather than a choice
+   made here, and the remedy is a harness that can hold a call for longer.
+4. **`--harness-cap` narrows it further and never widens it.** Pass your own
+   entry's `timeout` if it is under 300s; a larger value is ignored in favour of
+   the ceiling, because the value is self-reported and SPEC.md §11.1 invariant 4
+   lets such a field raise scrutiny and never lower it.
+
+A block on a request that lapsed this way is the existing `hook-expired`, and
+its message names the cap.
+
 ## What is gated
 
 Tool names and argument keys are Hermes's own, read off its tool registrations:

@@ -192,6 +192,57 @@ A few things about those numbers and paths:
 - The default `--timeout` is 55s, which suits Claude Code's default 60s hook
   timeout. Raise both together if you want a human to have minutes rather than a
   minute.
+- `--harness-cap` is the third number, and it is optional. See
+  [the effective window](#the-effective-window-aprv-423) below.
+
+### The effective window (APRV-423)
+
+Three durations bound one gated tool call, and only the smallest of them decides
+anything:
+
+| number | who sets it | what it bounds |
+| --- | --- | --- |
+| `timeout` in `.claude/settings.json` | you | the hook PROCESS. Claude Code kills it at this point, and the tool call proceeds as a non-blocking error |
+| `--timeout` | you | how long the hook blocks waiting for a human. Must be comfortably under `timeout` |
+| `defaults.approval_ttl` | your policy | how long the REQUEST stays answerable, across every surface |
+
+The failure this closes: the first two are minutes and the third is usually
+hours, so the harness stopped holding the tool call long before the request
+stopped being grantable. A tap that arrived in between produced an
+`approval.granted` for a call nobody was holding.
+
+So the hook now states how long its harness can hold a call, and the TTL that
+governs that request is **the smaller of the policy's TTL and that cap minus a
+60-second margin**. Nothing else changes: it is the ordinary lazy TTL, judged by
+the same code at every surface, so the gate refuses a late tap whether or not
+the daemon has written an `approval.expired` for it yet. The margin is two of
+the daemon's default 30-second sweep intervals, so a daemon at that interval has
+appended the expiry by `cap - 30s` at the latest, strictly before the cap. Run a
+longer `--interval` and the lapse still happens before the cap while the record
+may land after it.
+
+This project documents **no hard ceiling for Claude Code**: `timeout` has a
+default (60s) rather than a maximum, so with no flag a Claude Code request is
+bounded by the policy TTL exactly as it always was. State your own entry's
+`timeout` with `--harness-cap` to get the narrowing:
+
+```
+"command": "approval hook claude-code --dir <primary checkout> --as agent:claude-code --timeout 9m --harness-cap 600s",
+"timeout": 600
+```
+
+Two properties worth naming, because they are what make a self-reported number
+safe to act on (SPEC.md §11.1 invariant 4):
+
+- **It only ever narrows.** The value is `min`'d against the policy TTL, so a
+  larger `--harness-cap` than your policy allows buys nothing.
+- **It is a duration, never an instant.** The deadline is computed from the
+  `approval.requested` record's own runtime-assigned `ts`, so nothing here lets
+  a caller author the clock it is judged by (invariant 2).
+
+A block on a request that lapsed this way is the existing `hook-expired`, and
+its message names the cap so you can tell a policy line you can raise from a
+ceiling your harness imposes.
 
 Install the CLI on `PATH` (`npm link`, or an absolute path in the `command`).
 **A hook whose binary cannot be launched is a non-blocking error in Claude Code,

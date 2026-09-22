@@ -444,6 +444,116 @@ test("a manual-class command is refused rather than asked about, and the log is 
   assert.match(verdict.message, /hook-timeout/u, "it waited on a real decision and got none");
 });
 
+// ---------------------------------------------------------------------------
+// The harness cap the request carries (APRV-423)
+// ---------------------------------------------------------------------------
+
+/** The `approval.requested` payloads in `dir`'s log, in order. */
+function requestedPayloads(dir: string): Record<string, unknown>[] {
+  return rawLog(dir)
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((record) => record["event"] === "approval.requested")
+    .map((record) => (record["payload"] ?? {}) as Record<string, unknown>);
+}
+
+test("a request opened on this harness carries its documented 300s hold", () => {
+  // Hermes is the harness with a HARD ceiling: an entry's `timeout` may not
+  // exceed 300s, which docs/hermes-hook.md's two-timeout table states. The hook
+  // knows which harness it is and needs no flag to say so.
+  const dir = ready();
+  const verdict = verdictOf(
+    hook(dir, shellEvent(dir, "npm install left-pad", dir), [
+      "--timeout",
+      "1ms",
+      "--interval",
+      "1ms",
+      "--retry-grace",
+      "1ms",
+    ]),
+  );
+  assert.equal(verdict.permission, "deny");
+  const payloads = requestedPayloads(dir);
+  assert.equal(payloads.length, 1, rawLog(dir));
+  assert.equal(payloads[0]?.["harness_cap_ms"], 300_000);
+});
+
+test("--harness-cap narrows the hold further and never widens it", () => {
+  const dir = ready();
+  verdictOf(
+    hook(dir, shellEvent(dir, "npm install left-pad", dir), [
+      "--timeout",
+      "1ms",
+      "--interval",
+      "1ms",
+      "--retry-grace",
+      "1ms",
+      // An operator who set `timeout: 120` on their own entry. Smaller than the
+      // harness's own ceiling, so it is the one that bites.
+      "--harness-cap",
+      "2m",
+    ]),
+  );
+  assert.equal(requestedPayloads(dir)[0]?.["harness_cap_ms"], 120_000);
+
+  // And the other direction, which is the invariant-4 half: an operator cannot
+  // buy a longer window than the harness will give, whatever they declare.
+  const wider = ready();
+  verdictOf(
+    hook(wider, shellEvent(wider, "npm install left-pad", wider), [
+      "--timeout",
+      "1ms",
+      "--interval",
+      "1ms",
+      "--retry-grace",
+      "1ms",
+      "--harness-cap",
+      "30m",
+    ]),
+  );
+  assert.equal(requestedPayloads(wider)[0]?.["harness_cap_ms"], 300_000);
+});
+
+test("--harness-cap refuses a duration it cannot read rather than dropping it", () => {
+  // A cap the operator meant to set and that silently did not take effect is
+  // precisely the failure APRV-423 exists to close, so an unreadable one is a
+  // configuration error and not a shrug.
+  const dir = ready();
+  const run = hook(dir, shellEvent(dir, "ls -la", dir), ["--harness-cap", "soon"]);
+  assert.notEqual(run.code, 0);
+  assert.match(run.stderr, /--harness-cap expects a duration/u);
+});
+
+test("a block on a lapsed request names the window that closed it", () => {
+  // `--harness-cap 1ms` is below the margin, so the effective TTL floors at
+  // zero and the request is lapsed the moment after it is written. That is the
+  // fail-closed end of the range, and it is the only way to reach this branch
+  // without a sleep: the harness cannot hold a call long enough for anybody.
+  const dir = ready();
+  const verdict = verdictOf(
+    hook(dir, shellEvent(dir, "npm install left-pad", dir), [
+      "--timeout",
+      "1s",
+      "--interval",
+      "1ms",
+      "--retry-grace",
+      "1ms",
+      "--harness-cap",
+      "1ms",
+    ]),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.message, /hook-expired/u);
+  assert.match(
+    verdict.message,
+    /this harness's hold on one tool call/u,
+    "the block says WHICH deadline closed the question",
+  );
+  // Nothing was granted, which is the whole point of closing the window early.
+  assert.doesNotMatch(rawLog(dir), /approval\.granted/u);
+});
+
 test("a deny reaches a log that does not exist, and says which log", () => {
   // An empty gate root: the policy is there, the log is not. The hook is a
   // WRITER to an existing log and never an initializer, because a log scaffolded

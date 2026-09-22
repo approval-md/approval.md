@@ -1510,7 +1510,7 @@ ${why("quickstart")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor|codex|grok|muse|hermes [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex|grok|muse|hermes [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--harness-cap <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
@@ -1522,7 +1522,7 @@ Commands:
   hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true BLOCKS a broken hook (observed on main 118984d7; default false, and v0.21.3 ignores it silently). \`approval hook hermes --help\` prints the YAML
   classify     print what the classifier makes of a command line and exit
   --as <id>        proposing identity (default agent:<harness>)
-  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
+  --timeout/--interval/--retry-grace/--harness-cap <d>  wait / poll / hold for a retry / your entry's own timeout, which lapses the request before the harness drops the call (9m/1s/5m/none)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
