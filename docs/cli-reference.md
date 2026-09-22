@@ -3737,6 +3737,12 @@ This starts the standalone Telegram component. For normal operation, use
 `up` or another listener polling the same bot, even for a different policy
 project: competing `getUpdates` calls produce Telegram HTTP 409.
 
+A bot whose updates go to a webhook cannot be long-polled at all, so this verb
+and `approval up` refuse `webhook-registered` in the same preflight that asks
+`getMe`, naming the URL that holds it. See
+[`channel telegram webhook`](#channel-telegram-webhook), which is the other
+transport and removes its registration when it exits.
+
 **Delivery is per cycle, not only at startup.** Before every `getUpdates` the
 listener re-derives the pending queue from the verified log and sends whatever
 it has not already sent, so a request appended while this listener is running
@@ -4045,6 +4051,127 @@ rather than a query:
 ```
 
 The raw execution token is never in the JSON stream.
+
+## channel telegram webhook
+
+The same channel, the other arrival (APRV-424). `listen` holds a socket open
+against `getUpdates` for as long as the gate exists, which needs one
+always-running process per bot and forbids a second poller on the same token.
+This registers a URL with `setWebhook` and serves the callback, so Telegram
+posts each update as it happens and a host that sleeps between requests can run
+a gate.
+
+**Only the arrival changes, and that is the whole claim.** The pending queue is
+re-derived from the verified log every cycle by the same `dispatchPending`. The
+handlers are the same four function objects `listen` registers. A tap becomes a
+decision through the same `handleUpdate`, the same `callback_query.from.id`
+reading, the same `approvers.<id>.senders` resolution, the same
+`recordChannelDecision` and the same annotate-after-decision edit. There is no
+second decision path and no second copy of the sender mapping:
+`tests/telegram-webhook.test.ts` drives one callback through both transports and
+compares the records the log ends up holding, field for field.
+
+### The secret, which is the whole of the authentication
+
+`APPROVAL_TG_WEBHOOK_SECRET` is REQUIRED and is read from the launch
+environment, never from a file in the tree (SPEC.md §11.1 invariant 7, the rule
+`approval serve`'s two credentials follow). It is Telegram's own `secret_token`:
+set on `setWebhook`, echoed on every delivery in the
+`X-Telegram-Bot-Api-Secret-Token` header, compared here in constant time over
+SHA-256 digests.
+
+A webhook URL is a public endpoint, and nothing in a request body could tell a
+delivery from a forgery — a self-reported field never reduces scrutiny (§11.1
+invariant 4). So the header is checked FIRST, before the path, the method and
+the body, and a post without the matching value is refused with its own code,
+counted, and reported on stderr. **A refusal is never a decision, and it appends
+nothing to the log.** That is the rule `TELEGRAM_ANOMALY_KINDS` states for
+ignored callbacks, and it binds harder here: an endpoint the internet can reach
+that could append would be an endpoint anyone could use to pad the record a
+human is asked to trust.
+
+The value is refused at startup when it is unset, shorter than 24 characters, or
+holds a character outside Telegram's `A-Z a-z 0-9 _ -`. It appears in no policy,
+no log, no record, no message and no error line: the channel redacts it from
+everything that leaves it, exactly as it redacts the bot token.
+
+| refusal | what happened |
+|---|---|
+| `webhook-secret-mismatch` | no `X-Telegram-Bot-Api-Secret-Token`, or not the registered value |
+| `webhook-duplicate-secret-header` | more than one of that header; malformed, and not resolvable by choosing |
+| `webhook-unknown-path` | a path this process does not serve |
+| `webhook-method-not-allowed` | the right path, the wrong method; Telegram POSTs |
+| `webhook-body-too-large` | over 256 KiB; drained before the refusal is written |
+| `webhook-body-unreadable` | the body could not be read off the socket, or is not JSON |
+| `webhook-not-an-update` | JSON that is not an Update object |
+| `webhook-transport-conflict` | this channel is already receiving updates by long poll |
+| `webhook-handler-failed` | the channel threw; the log is what says what was recorded |
+
+Startup refuses in its own vocabulary before anything binds:
+`webhook-secret-missing`, `webhook-secret-weak`, `webhook-secret-charset`,
+`webhook-url-missing`, `webhook-url-insecure`, `webhook-url-port`,
+`webhook-cycle`, `webhook-registration-failed`, plus every `channel telegram
+listen` refusal, which this verb inherits because it needs the same bot token,
+chat, identity, log and policy.
+
+### The proxy or tunnel is required, and this process holds no certificate
+
+Telegram delivers to HTTPS only, on port 443, 80, 88 or 8443. This process
+terminates no TLS and holds no certificate, exactly as `approval serve` does
+not: `--url` names the PUBLIC address your proxy or tunnel answers on, and
+`--port` / `--listen` names this process's own bind, which is `127.0.0.1:4683`
+unless you say otherwise. A routable bind takes both `--listen <host:port>` and
+`--allow-non-loopback` and prints a banner, because the secret arrives in a
+header and a cleartext hop hands it to whoever is on it.
+
+So a working deployment is a reverse proxy (nginx, Caddy, a cloud load balancer)
+or a tunnel (Cloudflare Tunnel, ngrok, Tailscale Funnel) terminating TLS on a
+name you control and forwarding to the loopback bind. Without one there is
+nothing to register: a plain-HTTP `--url`, or one on another port, is refused
+before any call is made rather than attempted and rejected by the Bot API.
+
+### One transport per bot, refused on both sides
+
+`getUpdates` is refused by the Bot API outright while a webhook is set, so the
+two are alternatives and never a pair. Three checks say so before anything runs:
+
+- `approval channel telegram listen` and `approval up` ask `getWebhookInfo` in
+  the same preflight that asks `getMe`, and refuse `webhook-registered` naming
+  the URL that holds the bot. An unreachable Bot API is not a refusal (a captive
+  portal says nothing about which transport owns a bot); the existing HTTP 409
+  path is the backstop.
+- This verb refuses when a webhook at a DIFFERENT url already holds the bot. Its
+  own url is a restart re-registering, which `setWebhook` is happy to take.
+- Within one process, `TelegramChannel.claimTransport` refuses the second claim.
+
+A clean stop (SIGINT, SIGTERM) removes the webhook, so long polling works again
+afterwards. Pending updates are kept in both directions: a tap that arrived
+while the process was down is the approver's answer, and the gate is what
+decides whether it is still honourable.
+
+### Redelivery, and the cycle
+
+Telegram retries a delivery it did not get a 2xx for, so the same tap can arrive
+twice. Nothing deduplicates it: the second one reaches the gate through the same
+path as the first and is refused `already-decided`, with the first human answer
+standing — the property a button pressed twice has had since the channel
+shipped. Updates are handled one at a time, in arrival order, and the response
+is written after the update has been handled.
+
+`--cycle <duration>` (default 30s) is the dispatch period, the webhook's
+equivalent of the poll loop's per-cycle dispatch: it re-derives the pending
+queue and sends what has not been sent. A cycle also runs immediately after each
+handled update, so a paced listener's next question follows a tap without
+waiting for the timer.
+
+```json
+{"event":"webhook_started","url":"https://gate.example/telegram/webhook",
+ "host":"127.0.0.1","port":4683,"path":"/telegram/webhook","cycle_ms":30000}
+{"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
+ "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
+ "key-mismatch":0},
+ "webhook":{"requests":2,"updates":1,"refusals":{"webhook-secret-mismatch":1}}}
+```
 
 ## channel telegram health
 

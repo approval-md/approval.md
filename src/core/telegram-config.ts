@@ -36,6 +36,34 @@ export const TELEGRAM_TOKEN_ENV = "APPROVAL_TG_TOKEN";
  */
 export const TELEGRAM_CHAT_ENV = "APPROVAL_TG_CHAT";
 
+/**
+ * The environment variable the webhook `secret_token` is read from (APRV-424).
+ *
+ * ## Why this one is conventional and the two above are declared
+ *
+ * `token_env` and `chat_id_env` are policy keys because a machine may run two
+ * gates against two bots, and the policy is where that pair is written down.
+ * This is not that kind of key, for two reasons and in that order:
+ *
+ * 1. `channels.telegram` in `schema/policy.schema.json` is
+ *    `additionalProperties: false`, so declaring a name there is a schema
+ *    amendment, which is its own task. A capability does not get to arrive by
+ *    widening a validated document on the way past.
+ * 2. It is launch configuration in the sense of SPEC.md §11.1 invariant 7,
+ *    which is where the precedent is: `APPROVAL_SENDER_KEY` (APRV-370) and
+ *    `approval serve`'s two bearer credentials (APRV-421) are conventional
+ *    names for the same reason. The host that launches one process per tenant
+ *    sets it, exactly as it sets the bot token and the vault passphrase
+ *    (`design/hosted-daemon-identity.md` §1.2), and two gates on one machine
+ *    already have two environments rather than one.
+ *
+ * The VALUE never appears in a policy, a log, a record or a message. Telegram
+ * constrains it to 1-256 characters of `A-Z a-z 0-9 _ -`; the verb refuses
+ * anything outside that, and anything short enough to have been chosen by a
+ * person rather than generated.
+ */
+export const TELEGRAM_WEBHOOK_SECRET_ENV = "APPROVAL_TG_WEBHOOK_SECRET";
+
 /** The NAME of the variable this policy says the bot token lives in. */
 export function telegramTokenEnvFor(load: PolicyLoadResult): string {
   return declaredEnvName(load, "token_env") ?? TELEGRAM_TOKEN_ENV;

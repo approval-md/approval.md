@@ -401,6 +401,18 @@ export interface ListenSetup {
 export async function claimListenerBot(
   setup: ListenSetup,
   report: (message: string) => void,
+  /**
+   * The webhook URL THIS process is about to register, when it is a webhook
+   * runner rather than a poller (APRV-424).
+   *
+   * Absent for a poller, and then any registered webhook is a refusal. Present
+   * for the webhook verb, and then a registration at that same URL is this
+   * process restarting rather than a competitor: `setWebhook` is idempotent,
+   * so re-registering is how a restart says it is still here. A DIFFERENT URL
+   * is the same refusal a poller gets, because two webhooks on one bot mean
+   * one of them stops receiving.
+   */
+  options: { webhookUrl?: string } = {},
 ): Promise<{ ok: true } | { ok: false; code: ListenRefusalCode; message: string }> {
   let identity: { id: string; username: string };
   try {
@@ -418,6 +430,32 @@ export async function claimListenerBot(
       "approval: telegram getMe answered without a bot id, so no ownership was recorded; starting anyway",
     );
     return { ok: true };
+  }
+
+  // APRV-424, and before the ownership claim: the registry answers "which
+  // process on THIS machine holds this bot", and the Bot API answers "what is
+  // this bot's updates going to at all". A webhook beats both — `getUpdates`
+  // is refused while one is set — so a listener started here would receive
+  // nothing whoever else is or is not running locally.
+  //
+  // An unreachable probe is not a refusal, exactly as an unreachable `getMe`
+  // is not: a captive portal says nothing about which transport owns the bot,
+  // and a transient fault must not take the phone channel down. The existing
+  // 409 path is the backstop when this call could not be made.
+  const hooked = await webhookOwner(setup, report);
+  if (hooked !== null && hooked.url !== options.webhookUrl) {
+    const queued =
+      hooked.pendingUpdateCount === 0
+        ? ""
+        : ` (${String(hooked.pendingUpdateCount)} update(s) are queued for it)`;
+    return {
+      ok: false,
+      code: "webhook-registered",
+      message:
+        options.webhookUrl === undefined
+          ? `telegram ${identity.username} delivers its updates to a webhook at ${hooked.url}, and the Bot API refuses getUpdates while one is set, so this listener would receive no tap at all${queued}. Long polling and a webhook are alternatives per bot: stop the \`approval channel telegram webhook\` process, which removes the webhook as it exits, or give this instance its own bot with \`approval setup channel telegram\``
+          : `telegram ${identity.username} already delivers its updates to a webhook at ${hooked.url}, and this process was asked to register ${options.webhookUrl}${queued}. One bot has one webhook: registering this one would silently take the taps away from whatever is serving that URL. Stop that process first, or give this instance its own bot with \`approval setup channel telegram\``,
+    };
   }
 
   const claim = claimBot(setup.logPath, {
@@ -440,6 +478,36 @@ export async function claimListenerBot(
     `approval: telegram ${identity.username} (bot id ${identity.id}) is this instance's own; no update was consumed by this check`,
   );
   return { ok: true };
+}
+
+/**
+ * The webhook this bot's updates go to, or `null` for "none, or unknown"
+ * (APRV-424).
+ *
+ * Two states collapse into `null` on purpose, and the collapse is the
+ * fail-SOFT direction rather than the fail-closed one. A Bot API that cannot
+ * be reached tells us nothing about the bot's transport, and the alternative —
+ * refusing to start a listener because a probe timed out — would take the
+ * phone channel down over a captive portal. What a missed probe costs is the
+ * clear refusal; the listener then meets the same conflict as an HTTP 409,
+ * which it already reports and retries through.
+ */
+async function webhookOwner(
+  setup: ListenSetup,
+  report: (message: string) => void,
+): Promise<{ url: string; pendingUpdateCount: number } | null> {
+  let info: { url: string; pendingUpdateCount: number };
+  try {
+    info = await setup.channel.webhookInfo();
+  } catch (cause) {
+    report(
+      `approval: telegram getWebhookInfo could not be reached (${
+        cause instanceof Error ? cause.message : String(cause)
+      }), so whether a webhook holds this bot is unknown; starting anyway`,
+    );
+    return null;
+  }
+  return info.url.length === 0 ? null : info;
 }
 
 /**
@@ -521,6 +589,17 @@ export const LISTEN_REFUSAL_CODES = [
    * which two gates are involved instead of an HTTP 409 loop.
    */
   "bot-owned-elsewhere",
+  /**
+   * This bot's updates are being delivered to a webhook (APRV-424).
+   *
+   * The two transports are alternatives per bot: the Bot API refuses
+   * `getUpdates` outright while a webhook is set, so a listener that started
+   * here would print a 409 every few seconds and receive not one tap. Refused
+   * BEFORE the first poll, in the same preflight and for the same reason
+   * `bot-owned-elsewhere` is, so the operator reads which transport owns the
+   * bot instead of a status code.
+   */
+  "webhook-registered",
 ] as const;
 
 export type ListenRefusalCode = (typeof LISTEN_REFUSAL_CODES)[number];
@@ -2341,7 +2420,7 @@ function report(
  * Report a steady-state cycle's problems on stderr. Startup reports its own,
  * as exit codes, in {@link runListener}.
  */
-function reportCycle(result: DispatchResult, streams: Streams): void {
+export function reportCycle(result: DispatchResult, streams: Streams): void {
   if (result.queueError !== undefined) {
     streams.err(
       `approval: telegram cannot read the pending queue (${result.queueError.code}): ${result.queueError.message} — retrying next cycle\n`,
@@ -2956,7 +3035,24 @@ export interface RunningListener {
  * queue from the verified log and re-sends everything still pending, exactly as
  * a restarted process would. A duplicate on the phone, never a silence.
  */
-export function startListener(setup: ListenSetup, streams: Streams): RunningListener {
+/**
+ * Give the channel every handler the runtime answers a gesture with, and hand
+ * back the fresh dispatch bookkeeping (APRV-424).
+ *
+ * Extracted from {@link startListener} so the webhook runner wires the SAME
+ * four handlers rather than a second set that looks like them. This is the
+ * CLI-side half of the property APRV-424 is about: the transport decides where
+ * an update arrives, and nothing else. A tap that arrives by webhook is
+ * recorded by `handlerFor`'s `recordChannelDecision` — the same actor, the
+ * same sender resolution, the same gate — because it is the same function
+ * object, registered here.
+ *
+ * A FRESH {@link DispatchState} per call, which is the whole of the restart
+ * story: a supervisor that restarts a fallen runner re-derives the pending
+ * queue from the verified log and re-sends everything still pending. A
+ * duplicate on the phone, never a silence.
+ */
+export function wireListener(setup: ListenSetup, streams: Streams): DispatchState {
   const { channel } = setup;
   channel.onDecision(handlerFor(setup, streams));
   // APRV-257. Registered unconditionally, because whether a checkpoint is ever
@@ -2989,6 +3085,12 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   if (setup.delivery === "paced") {
     channel.onCommand(commandHandlerFor(setup, streams, state));
   }
+  return state;
+}
+
+export function startListener(setup: ListenSetup, streams: Streams): RunningListener {
+  const { channel } = setup;
+  const state = wireListener(setup, streams);
 
   let stopping = false;
   const stop = (): void => {
@@ -3220,6 +3322,17 @@ export function commandTelegram(
   switch (sub) {
     case "listen":
       return commandTelegramListen(rest, streams, cwd);
+    case "webhook":
+      // APRV-424, and a DYNAMIC import on purpose. The webhook runner reaches
+      // back into this module for `prepareListen`, `wireListener` and
+      // `dispatchPending` — it is the same listener with another arrival — so
+      // a static import here would close the dispatcher/dispatched circle.
+      // An ESM cycle is not a compile error; it is a binding that is
+      // `undefined` in one direction on the day initialisation order changes.
+      // `cli/serve.ts` and `cli/mcp.ts` state the same rule.
+      return import("./channel-telegram-webhook.js").then(({ commandTelegramWebhook }) =>
+        commandTelegramWebhook(rest, streams, cwd),
+      );
     case "health":
       return commandTelegramHealth(rest, streams, cwd);
     default:

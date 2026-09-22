@@ -136,6 +136,17 @@ export interface MockBotApi {
    * defaults to whatever is still queued here.
    */
   setWebhookInfo(info: { url?: string; pendingUpdateCount?: number }): void;
+  /**
+   * What `setWebhook` was last called with, or `null` (APRV-424).
+   *
+   * The registration is real in this mock: `setWebhook` records the url and
+   * the secret and makes `getWebhookInfo` report them, and `deleteWebhook`
+   * clears both. That is what lets a test assert the two things the task turns
+   * on — that the secret this runtime compares is the one it registered, and
+   * that a clean stop leaves the bot pollable again — rather than assuming
+   * them.
+   */
+  webhookRegistration(): { url: string; secretToken: string } | null;
   /** The `callback_data` of the Approve/Reject button delivered for `actionKey`. */
   callbackDataFor(actionKey: string, decision: "grant" | "reject"): string;
   /**
@@ -230,6 +241,7 @@ export async function startMockBotApi(
   let messageId = 500;
   let failure: MockFailure | null = null;
   let webhook: { url?: string; pendingUpdateCount?: number } = {};
+  let registration: { url: string; secretToken: string } | null = null;
   let pollsAnswered = 0;
   let pollHook: ((poll: PollAnswered) => void) | null = null;
   let server: Server;
@@ -333,6 +345,27 @@ export async function startMockBotApi(
           pending_update_count: webhook.pendingUpdateCount ?? queued.length,
         },
       });
+      return;
+    }
+
+    // APRV-424. The two calls the webhook transport makes, behaving as the
+    // real API does in the one respect the runtime depends on: a registered
+    // webhook is what `getWebhookInfo` then reports, and a deleted one is not.
+    if (method === "setWebhook") {
+      const url = typeof body["url"] === "string" ? body["url"] : "";
+      registration = {
+        url,
+        secretToken: typeof body["secret_token"] === "string" ? body["secret_token"] : "",
+      };
+      webhook = { ...webhook, url };
+      send(response, { ok: true, result: true });
+      return;
+    }
+
+    if (method === "deleteWebhook") {
+      registration = null;
+      webhook = { ...webhook, url: "" };
+      send(response, { ok: true, result: true });
       return;
     }
 
@@ -482,6 +515,9 @@ export async function startMockBotApi(
     },
     setWebhookInfo(info) {
       webhook = { ...info };
+    },
+    webhookRegistration() {
+      return registration === null ? null : { ...registration };
     },
     onGetUpdatesAnswered(hook) {
       pollHook = hook;
