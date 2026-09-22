@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-22 00:00'
-updated_date: '2026-09-22 01:20'
+updated_date: '2026-09-22 02:03'
 labels:
   - workflow
   - ci
@@ -61,6 +61,10 @@ DOC (AC4). docs/ci-verdict.md: the lane side (watch to a verdict, read a red sha
 NOT IN THE BASELINE, stated rather than swept in: a full run here also fails 6 cases that CI does not see, and they are environment-bound rather than debt. package-adapters (4) and codex-package (1) pack the tarball and npm install it into a scratch consumer, which cannot fetch ajv without registry access; live-draw (1) is a timing case. The committed list is about what CI sees, so none of them is in it and none is claimed as fixed.
 
 Global invariants: none touched. Nothing here reads or writes the log, computes a verdict, or reaches an enforcement path; the baseline is developer tooling and changes no exit code.
+
+CORRECTION after CI, from PR 540's own evidence. The notes above called the 22-entry list 'about what CI sees'. It is not, and the shard matrix said so: all three Node 22 shards passed green while a local run fails all 22. CI runs the floor on Node 20 and the matrix on Node 22, never Node 26, and every entry on the list is APRV-416, a Node 26 refusal of an IP literal as a TLS servername. So the list is a LOCAL baseline, which is the right thing for it to be: a lane's closing note comes from the lane's own run, and that is where a count was being cited. docs/ci-verdict.md and the baseline file's comment now state the asymmetry, because it is the fact that explains how CI green and a red local run coexist without either being wrong. The six excluded failures are excluded for the same kind of reason rather than the one I first gave: the packaging suites need registry access and a worktree with its own node_modules, which is environment rather than debt.
+
+This is the correction the task's own tooling made possible: the baseline flag names failures, and a named set is what let CI's green shards be read against a local red instead of both being reported as a number.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -62,6 +62,23 @@ node scripts/ci-baseline.mjs <ids-file>
 
 That exits 0 only when no failure is new.
 
+**The list is a LOCAL baseline, and that is the point.** Every one of today's 22
+entries is APRV-416, a Node 26 refusal of an IP literal as a TLS servername. CI
+runs the floor on Node 20 and the shard matrix on Node 22, so all 22 pass there
+and a green shard matrix says nothing about them. That asymmetry is exactly why a
+lane needs both halves of this page: CI is the verdict on the code, and the
+baseline is what lets a lane's own red local run still carry the sentence "these
+failures and no others". A failure that is new locally is new whether or not CI
+has noticed it yet — which is how the conformance regression inside PR #532's
+count of twenty-two would have been caught.
+
+A local run can also fail for reasons that are neither debt nor a regression.
+`package-adapters` and `codex-package` pack the tarball and `npm install` it into
+a scratch consumer, so they need registry access; a worktree with no
+`node_modules` of its own fails them too. Those belong in a lane's report as
+environment, not on this list, and the list stays short enough to read for that
+reason.
+
 Adding an entry means adding an id, the owning `APRV-` task and a one-line note.
 A known failure with nobody's name on it is an unknown failure somebody got
 tired of looking at, so the task id is required and loading fails closed without
