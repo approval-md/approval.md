@@ -52,6 +52,7 @@ import {
   secretMatches,
   serveTelegramWebhook,
   TELEGRAM_SECRET_HEADER,
+  TELEGRAM_WEBHOOK_DEFAULT_HOST,
   TELEGRAM_WEBHOOK_DEFAULT_PATH,
   TELEGRAM_WEBHOOK_DEFAULT_PORT,
   TELEGRAM_WEBHOOK_MAX_BODY_BYTES,
@@ -1389,6 +1390,150 @@ test("the webhook verb refuses every configuration it cannot serve (APRV-424)", 
   });
   assert.equal(unconfigured.ok, false, "a webhook runner was prepared with no bot token at all");
   if (!unconfigured.ok) assert.equal(unconfigured.code, "not-configured");
+});
+
+test("--path must be the path --url names (APRV-424)", () => {
+  // Review finding 3. `--path` was unvalidated and free to disagree with the
+  // url, described as an override for a rewriting proxy. What it bought was a
+  // receiver that registered cleanly, verified the secret on every real
+  // delivery, and then answered all of them 404.
+  const world = live(1, false, "path");
+  process.env["APPROVAL_TG_TOKEN"] = TOKEN;
+  process.env["APPROVAL_TG_CHAT"] = CHAT;
+  try {
+    const cases: [string, string, string, WebhookRefusalCode][] = [
+      [
+        "a path with no leading slash",
+        "https://gate.example/telegram/webhook",
+        "telegram/webhook",
+        "webhook-path-invalid",
+      ],
+      [
+        "a path that climbs out",
+        "https://gate.example/telegram/webhook",
+        "/telegram/../webhook",
+        "webhook-path-invalid",
+      ],
+      [
+        "a trailing slash the url does not have",
+        "https://gate.example/hook",
+        "/hook/",
+        "webhook-path-mismatch",
+      ],
+      [
+        "another path entirely",
+        "https://gate.example/hook",
+        "/elsewhere",
+        "webhook-path-mismatch",
+      ],
+    ];
+    for (const [label, url, path, code] of cases) {
+      const refused = prepareWith(world, { url, path });
+      assert.equal(refused.ok, false, `${label} was accepted, and would have 404'd every delivery`);
+      if (!refused.ok) {
+        assert.equal(refused.code, code, `${label} refused ${refused.code}`);
+        assert.ok(
+          WEBHOOK_REFUSAL_CODES.includes(refused.code as WebhookRefusalCode),
+          `${refused.code} is not in the frozen union`,
+        );
+      }
+    }
+
+    // The good one: `--path` restating the url's own path.
+    const ok = prepareWith(world, { url: "https://gate.example/hook", path: "/hook" });
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    if (ok.ok) assert.equal(ok.setup.path, "/hook");
+
+    // And with no `--path` at all, the served path is still the url's, which is
+    // the only path Telegram will ever post to.
+    const derived = prepareWith(world, { url: "https://gate.example/deep/hook", path: null });
+    assert.equal(derived.ok, true, JSON.stringify(derived));
+    if (derived.ok) assert.equal(derived.setup.path, "/deep/hook");
+  } finally {
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+  }
+});
+
+test("--url with userinfo is refused, and no line prints a url verbatim (APRV-424)", () => {
+  // Review finding 10, both halves: a credential in a url is refused rather
+  // than stripped, and what is printed is the origin plus the path this
+  // process serves.
+  const world = live(1, false, "userinfo");
+  process.env["APPROVAL_TG_TOKEN"] = TOKEN;
+  process.env["APPROVAL_TG_CHAT"] = CHAT;
+  try {
+    const refused = prepareWith(world, { url: "https://user:pw@gate.example/telegram/webhook" });
+    assert.equal(refused.ok, false, "a url carrying a password was registered");
+    if (!refused.ok) {
+      assert.equal(refused.code, "webhook-url-userinfo");
+      assert.ok(
+        !refused.message.includes("pw@") && !refused.message.includes("user:"),
+        `the refusal printed the credential it was refusing: ${refused.message}`,
+      );
+    }
+  } finally {
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+  }
+
+  // The token-in-path pattern a tunnel hands out: the origin identifies the
+  // host, and the rest is the operator's.
+  const served = "/hook/8Xk2xLongRandomValue";
+  assert.equal(
+    redactWebhookUrl(`https://gate.example${served}`, served),
+    `https://gate.example${served}`,
+    "the path this process serves is what it says it serves",
+  );
+  assert.equal(
+    redactWebhookUrl("https://gate.example/hook/8Xk2xLongRandomValue"),
+    "https://gate.example/<path redacted>",
+    "a url whose served path is unknown was printed whole",
+  );
+  assert.equal(redactWebhookUrl("https://user:pw@gate.example/hook"), "https://gate.example/<path redacted>");
+  assert.equal(redactWebhookUrl("not a url at all"), "<not a url>");
+});
+
+test("the bind refuses port 0 and anything outside the port range (APRV-424)", () => {
+  // Review finding 9. `--port 0` bound an ephemeral port while the proxy in
+  // front kept forwarding to 4683, so the receiver came up, registered a
+  // public url, and was never posted to.
+  const zero = resolveWebhookBind(null, "0", false);
+  assert.equal(zero.ok, false, "--port 0 bound an ephemeral port nothing had registered");
+  if (!zero.ok) assert.match(zero.message, /ephemeral/u);
+
+  const zeroListen = resolveWebhookBind("127.0.0.1:0", null, false);
+  assert.equal(zeroListen.ok, false, "--listen reached port 0 by the other door");
+
+  const tooLarge = resolveWebhookBind(null, "70000", false);
+  assert.equal(tooLarge.ok, false);
+  if (!tooLarge.ok) assert.match(tooLarge.message, /port range/u);
+
+  const notANumber = resolveWebhookBind(null, "eight", false);
+  assert.equal(notANumber.ok, false);
+
+  const both = resolveWebhookBind("127.0.0.1:8080", "8080", false);
+  assert.equal(both.ok, false, "--listen and --port were accepted together");
+
+  const routable = resolveWebhookBind("0.0.0.0:8080", null, false);
+  assert.equal(routable.ok, false, "a routable bind needs --allow-non-loopback");
+  const allowed = resolveWebhookBind("0.0.0.0:8080", null, true);
+  assert.equal(allowed.ok, true, JSON.stringify(allowed));
+
+  const good = resolveWebhookBind(null, "8080", false);
+  assert.equal(good.ok, true, JSON.stringify(good));
+  if (good.ok) {
+    assert.equal(good.host, TELEGRAM_WEBHOOK_DEFAULT_HOST);
+    assert.equal(good.port, 8080);
+  }
+
+  // The default is the constant, not a respelling of it.
+  const fallback = resolveWebhookBind(null, null, false);
+  assert.equal(fallback.ok, true);
+  if (fallback.ok) {
+    assert.equal(fallback.host, TELEGRAM_WEBHOOK_DEFAULT_HOST);
+    assert.equal(fallback.port, TELEGRAM_WEBHOOK_DEFAULT_PORT);
+  }
 });
 
 test("the webhook help names the bind, the secret variable and the proxy (APRV-424)", () => {
