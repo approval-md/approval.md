@@ -52,7 +52,17 @@ export type MockFailure =
    * to stop because this one asked again, which is why the listener reports it
    * once instead of printing an identical line every few seconds forever.
    */
-  | "409";
+  | "409"
+  /**
+   * Answer `ok: false` with a description that QUOTES the request's own
+   * `secret_token` (APRV-424).
+   *
+   * Realistic — the Bot API quotes offending parameters back — and it is the
+   * one shape that can prove the channel's redaction rather than assume it: a
+   * failure description is a string the channel puts on an operator's
+   * terminal, so a webhook secret inside one is a credential being printed.
+   */
+  | "echo-secret";
 
 /** One request the mock received, recorded verbatim. */
 export interface MockRequest {
@@ -307,6 +317,15 @@ export async function startMockBotApi(
             "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
         }),
       );
+      return;
+    }
+    if (failure === "echo-secret") {
+      const quoted = typeof body["secret_token"] === "string" ? body["secret_token"] : raw;
+      send(response, {
+        ok: false,
+        error_code: 400,
+        description: `Bad Request: secret_token ${quoted} is invalid`,
+      });
       return;
     }
     if (failure === "timeout") {

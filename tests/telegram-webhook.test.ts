@@ -649,6 +649,69 @@ test("the secret is in no response body and no complaint (APRV-424)", async () =
   }
 });
 
+test("registering carries the secret to setWebhook, and removing it frees the bot (APRV-424)", async () => {
+  const channel = channelFor();
+  // The command handler is what makes the channel read `message` updates, so
+  // the registered `allowed_updates` must be the list the poller would have
+  // asked for. One function answers both, and this asserts the webhook does
+  // not freeze a stale copy of it at registration time.
+  channel.onCommand(() => undefined);
+  const url = "https://gate.example/telegram/webhook";
+
+  await channel.registerWebhook(url, SECRET);
+  assert.deepEqual(
+    mock.webhookRegistration(),
+    { url, secretToken: SECRET },
+    "setWebhook was not called with the url and the secret this runtime compares",
+  );
+  const call = mock.requests.filter((entry) => entry.method === "setWebhook").at(-1);
+  assert.ok(call !== undefined);
+  assert.deepEqual(
+    call.body["allowed_updates"],
+    channel.allowedUpdates(),
+    "the registration asked for update types the poller would not have asked for",
+  );
+  assert.equal(
+    call.body["drop_pending_updates"],
+    false,
+    "registering dropped the taps that arrived while nothing was serving",
+  );
+
+  // The Bot API now reports it, which is what the listener preflight reads in
+  // order to refuse a poller.
+  assert.deepEqual(await channel.webhookInfo(), { url, pendingUpdateCount: 0 });
+
+  // A failure description that quotes the secret reaches the operator
+  // REDACTED. This is the one call that sends the value, so it is the one
+  // place it could be printed.
+  mock.fail("echo-secret");
+  let thrown = "";
+  try {
+    await channel.registerWebhook(url, SECRET);
+  } catch (cause) {
+    thrown = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    mock.fail(null);
+  }
+  assert.ok(thrown.length > 0, "an ok:false setWebhook did not throw");
+  assert.ok(!thrown.includes(SECRET), `the failure printed the secret: ${thrown}`);
+  assert.match(thrown, /<webhook secret redacted>/u);
+
+  await channel.deleteWebhook();
+  assert.equal(mock.webhookRegistration(), null, "deleteWebhook left the registration in place");
+  assert.equal(
+    (await channel.webhookInfo()).url,
+    "",
+    "the bot is still webhook-held after deleteWebhook, so no poller could start",
+  );
+  const removal = mock.requests.filter((entry) => entry.method === "deleteWebhook").at(-1);
+  assert.equal(
+    removal?.body["drop_pending_updates"],
+    false,
+    "removing the webhook dropped the taps that had arrived for it",
+  );
+});
+
 test("secretMatches and secretHeaderOf answer the shapes a request can take", () => {
   assert.equal(secretMatches(SECRET, SECRET), true);
   assert.equal(secretMatches(SECRET, null), false);
