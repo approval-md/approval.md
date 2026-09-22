@@ -56,6 +56,24 @@ to prevent.
    riding the advance's own authorization; the arm is withheld when the
    branch carries anything but the log, `QUEUE.md` and payloads, and
    `--no-auto-merge` (`--no-advance-auto-merge` for the daemon) opts out.
+8. **An armed PR is not shipped until CI returns a verdict.** Arming assumes
+   CI goes green; an armed PR whose CI is red waits forever and reads as
+   shipped from the backlog side. PR #532 sat about twenty hours that way,
+   and every session cut from main in that window branched from a main that
+   did not know the work had landed (APRV-426). So after pushing, the session
+   watches its own PR to a verdict: the app's CI monitor (`bind_pr` plus
+   `set_monitor`) or `gh pr checks <n> --watch`, which exits nonzero on red.
+   A red shard is read with `gh run view <id> --log-failed`, fixed, pushed,
+   and watched again. The session ends on green, or on a failure that is
+   named and filed as a Backlog task, never on pending and never leaving a
+   red PR armed and unattended. A closing note reports failures BY NAME:
+   `scripts/ci-baseline.json` holds the known failures as test ids with the
+   task owning each, `node scripts/run-tests.mjs --baseline` says which of a
+   run's failures are new, and a failure absent from that list is a new
+   failure whatever the total does. A count cannot tell one red from another,
+   which is how #532's new failure hid inside a correct count of twenty-two.
+   Carter sees every stalled arm at once with the `gh pr list` query and the
+   desktop PR bar in `docs/ci-verdict.md`.
 
 ## Model tiers
 

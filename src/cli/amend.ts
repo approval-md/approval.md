@@ -1495,6 +1495,15 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     return refuse(streams, json, read.code, read.message, exitCode);
   }
 
+  /**
+   * The amendment branch's name, `--branch` or the seq-derived default.
+   *
+   * Declared HERE rather than beside the flow selection below (APRV-420): the
+   * no-op path needs it too, because a re-run's whole job is to find the branch
+   * a previous run left standing.
+   */
+  const branchName = (seq: string): string => branchFlag ?? `policy-amend-${seq}`;
+
   const status = checkAttestation(read.records, policyPath);
   const attested =
     status.status === "attested"
@@ -1506,7 +1515,28 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   // (a) Nothing to amend. A no-op ceremony is a SUCCESS, not an error: an
   // operator (or a script) that runs `amend` on an already-attested policy has
   // established exactly what they wanted to establish.
+  //
+  // APRV-420, one exception: an amendment branch already standing on origin.
+  // The live policy does match its attestation, and saying only that leaves the
+  // pull request carrying it open, unmergeable and unarmed, which is the state a
+  // records advance landing first puts it in. So the re-run repairs it, or names
+  // exactly what to run — never "nothing to amend" over a dirty amendment.
   if (status.status === "attested") {
+    const noopRoot = repoRoot(dirname(policyPath));
+    const repair =
+      wantCommit && noopRoot !== null && hasOrigin(noopRoot)
+        ? repairAmendBranch({
+            root: noopRoot,
+            policyPath,
+            logPath,
+            payloadFile,
+            seq: status.seq,
+            branch: branchName(String(status.seq)),
+            // `--dry-run` and `--no-publish` mean the same thing here as
+            // everywhere else in this verb: compute it, print it, run nothing.
+            act: !dryRun && !noPublish,
+          })
+        : null;
     if (json) {
       emitReport(streams, {
         policyPath,
@@ -1520,13 +1550,27 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         noop: true,
         dryRun,
         aborted: false,
+        repair,
       });
-    } else {
+    } else if (repair === null) {
       streams.out(
         `nothing to amend: ${relPath(policyPath, cwd)} already matches its attestation at seq ${status.seq} (sha256 ${shortHash(liveSha256)})\n`,
       );
+    } else {
+      const headline =
+        repair.state === "failed" ? st.glyph("fail") : st.glyph(repair.state === "owed" ? "point" : "ok");
+      streams.out(`${headline} ${repair.branch}: ${repair.message}\n`);
+      for (const step of repair.commands) {
+        streams.err(
+          `  ${step.ok === null ? st.glyph("point") : step.ok ? st.glyph("ok") : st.glyph("fail")} ${step.command}\n`,
+        );
+      }
     }
-    return EXIT_OK;
+    // A repair that BROKE keeps the I/O exit, which is the split the rest of
+    // this verb uses: the exit code speaks to scripts, the text to people.
+    // `owed` is not a failure — it is `--dry-run` or `--no-publish` answering
+    // the question they were asked — and `landed` and `repaired` are successes.
+    return repair !== null && repair.state === "failed" ? EXIT_IO : EXIT_OK;
   }
 
   // (b) The baseline, and only a verifiable one. See the module header.
@@ -1571,7 +1615,6 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   // that cannot reach GitHub answers `unknown`, which used to mean "commit in
   // place"; an operator who typed `--pr` has said what they want either way.
   const useBranch = branchFlag !== null || wantPr || (!forceDirect && onProtectedDefault);
-  const branchName = (seq: string): string => branchFlag ?? `policy-amend-${seq}`;
   // The direct flow's push is about to hit a protected branch. Say so before
   // the human types it, rather than after GitHub says it.
   const pushWarning =
@@ -2195,6 +2238,15 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     );
   };
 
+  /**
+   * Who publishes the log for this amendment (APRV-420).
+   *
+   * Settled at commit-assembly time against the base the commit is parented
+   * on, and reported, so the pull request's file list is never a surprise. The
+   * default is the behaviour that predates the task: this commit carries it.
+   */
+  let carriage: LogCarriage = { carry: true, reason: null, publisher: null };
+
   if (commitPlan !== null && commitBase !== null) {
     // APRV-203. The commit is ASSEMBLED, never checked out: a scratch index is
     // filled from the remote's tree, the two ceremony files are laid over it
@@ -2204,6 +2256,10 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     const message = `Policy: ${summary} (attested seq ${seq})`;
     /** `origin/main abc123`, or `HEAD abc123` where there is no remote. */
     const baseLabel = `${commitBase.remote === null ? "HEAD" : `${commitBase.remote}/${commitBase.branch}`} ${commitBase.sha.slice(0, 12)}`;
+    // APRV-420: who publishes the log. Decided here, from the base this commit
+    // is about to be parented on, so the answer is about the tree the commit
+    // will actually sit against.
+    carriage = decideLogCarriage(commitPlan.root, commitBase, logPath);
     progress.phase(`building the amendment commit on ${baseLabel} (nothing is checked out)`);
     const built = commitOnBase(commitPlan.root, {
       base: commitBase.sha,
@@ -2212,7 +2268,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       // keeps this ceremony from reverting a pins edit somebody else landed.
       paths: [
         commitPlan.policyArg,
-        commitPlan.logArg,
+        // APRV-420: the log joins the commit only when this amendment is the
+        // thing publishing it. When a records advance is, two commits carrying
+        // the same appended records is a conflict on `events.jsonl` whichever
+        // lands first, and the repair is a hand merge of the log.
+        ...(carriage.carry ? [commitPlan.logArg] : []),
         ...(pinsChange === null ? [] : [pinsChange.arg]),
         // APRV-356: the attested policy text, so the commit carrying the
         // binding carries the bytes it binds. Without it the in-force policy is
@@ -2223,6 +2283,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       message,
     });
     progress.done();
+    if (carriage.reason !== null) note(`${st.glyph("ok")} ${carriage.reason}`);
     if (!built.ok) {
       return gitFailed(
         built.step,
@@ -2944,6 +3005,413 @@ function readLogText(path: string): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The amendment and the records advance stop racing for the log (APRV-420)
+// ---------------------------------------------------------------------------
+//
+// On 2026-09-21 `policy amend --pr` opened PR 530 carrying the policy, the log
+// and a payload. Two records advances (PR 529 and PR 531) merged first, and
+// both carried the SAME records: the attestation at seq 65736 and its payload
+// were on main before 530 was looked at. Git does not care that one side's
+// appended lines are a prefix of the other's — two sides appending at the end
+// of `events.jsonl` is a conflict — so 530 went DIRTY, lost its arm, and the
+// repair was a hand merge of the log in a throwaway worktree. Hand-merging the
+// log is precisely the thing every idiom in this codebase exists to remove.
+//
+// The cause is that TWO publishers were carrying the same bytes. The fix is to
+// leave exactly one of them holding the log:
+//
+//   - if the base already carries this attestation's records, the log is
+//     published and the amendment has nothing to add to it;
+//   - if a records advance is live (`records-log-<date>` is open on origin),
+//     that advance publishes the log, so the amendment has nothing to add to
+//     it either. Whether the branch already carries THIS attestation is
+//     checked, not assumed: an advance pushed before the human signed does
+//     not, the next advance does, and the pull request's protected-path guard
+//     holds the policy change until a records branch or main carries the
+//     record. Either way the amendment must not append to `events.jsonl`
+//     beside a branch that is appending to it;
+//   - otherwise the amendment is the only publisher and carries the log, which
+//     is what it has always done.
+//
+// In the first two cases the amendment commit is policy bytes (plus the pins
+// and the payload, where those are not on the base). A commit that does not
+// touch `events.jsonl` cannot conflict on `events.jsonl`, whichever side lands
+// first, and there is nothing left to race over.
+
+/** What the amendment commit does about the log, and the sentence that says why. */
+interface LogCarriage {
+  /** True when the amendment commit carries `events.jsonl`. */
+  carry: boolean;
+  /** One clause naming who publishes the log; `null` when this commit does. */
+  reason: string | null;
+  /** The records branch that publishes it instead, when there is one. */
+  publisher: string | null;
+}
+
+/**
+ * The open records-advance branch on `origin`, or `null`.
+ *
+ * `git ls-remote` rather than `gh`, deliberately: this is a question about refs
+ * and it must answer the same way on a box with no GitHub CLI, no token and no
+ * network beyond the remote itself. `approval log advance` names its branch
+ * `records-log-<YYYY-MM-DD>` and falls back to `records-log-<date>-<n>`
+ * (`cli/log-advance.ts`), and merged branches are deleted by the reconcile
+ * script, so a branch matching that pattern on origin is a live advance.
+ */
+function recordsPublisher(root: string): { name: string; sha: string } | null {
+  const listed = git(["ls-remote", "--heads", "origin", "records-log-*"], root);
+  if (!listed.ok) return null;
+  for (const line of listed.stdout.split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/u);
+    if (ref === undefined || sha === undefined) continue;
+    const name = ref.replace(/^refs\/heads\//u, "");
+    if (name.startsWith("records-log-")) return { name, sha };
+  }
+  return null;
+}
+
+/**
+ * Whether the records branch at `sha` already carries every record of the
+ * working log, this attestation included.
+ *
+ * A branch pushed BEFORE the attestation was appended does not, and that is
+ * the ordinary order (the cadence advance ran, then the human signed), so
+ * saying "this attestation included" of it would be a claim the committed
+ * log contradicts. What publishes the attestation then is the NEXT advance,
+ * and the pull request's protected-path guard holds the policy change until
+ * a records branch or main carries the record. `null` when the branch's log
+ * could not be fetched or read, which the caller reports as unknown rather
+ * than as either answer.
+ */
+function publisherCarriesLog(
+  root: string,
+  sha: string,
+  logArg: string,
+  logPath: string,
+): boolean | null {
+  const fetched = git(["fetch", "--quiet", "origin", sha], root);
+  if (!fetched.ok) return null;
+  const branchLog = showBlob(root, sha, logArg);
+  if (branchLog === null) return null;
+  const compared = compareChains(
+    { label: "the working log", text: readLogText(logPath) },
+    { label: `records branch ${sha.slice(0, 12)}:${logArg}`, text: branchLog.toString("utf8") },
+  );
+  if (!compared.ok) return null;
+  return compared.drift.relation === "equal" || compared.drift.relation === "behind";
+}
+
+/**
+ * Decide who publishes the log for this amendment. See the block above.
+ *
+ * Fails toward CARRYING it: every answer this function cannot establish (a log
+ * that does not verify, a blob it could not read, a remote it could not list)
+ * leaves the amendment holding the log, which is the behaviour that predates
+ * this task. A dirty pull request is a nuisance; an attestation that reaches
+ * `main` in nobody's commit is a policy in force that the committed log does
+ * not record, and between those two there is no contest.
+ */
+function decideLogCarriage(
+  root: string,
+  base: { remote: string | null; branch: string; sha: string },
+  logPath: string,
+): LogCarriage {
+  const logArg = repoPath(root, logPath);
+  const baseLabel = base.remote === null ? base.branch : `${base.remote}/${base.branch}`;
+  const baseLog = showBlob(root, base.sha, logArg);
+  const compared = compareChains(
+    { label: "the working log", text: readLogText(logPath) },
+    { label: `${baseLabel}:${logArg}`, text: baseLog === null ? "" : baseLog.toString("utf8") },
+  );
+  if (compared.ok && (compared.drift.relation === "equal" || compared.drift.relation === "behind")) {
+    return {
+      carry: false,
+      reason: `${baseLabel} already carries every record this attestation added, so this amendment does not touch the log`,
+      publisher: null,
+    };
+  }
+  const publisher = recordsPublisher(root);
+  if (publisher !== null) {
+    const carries = publisherCarriesLog(root, publisher.sha, logArg, logPath);
+    return {
+      carry: false,
+      reason:
+        carries === true
+          ? `the records advance on ${publisher.name} publishes the whole log, this attestation included, so this amendment carries only the policy and cannot conflict with it`
+          : `a records advance is live on ${publisher.name}${
+              carries === null ? " (its log could not be read from here)" : ", pushed before this attestation was appended"
+            }, so this amendment carries only the policy and cannot conflict with it; the attestation record lands with the next advance, and the pull request's protected-path check holds the policy change until a records branch or main carries it`,
+      publisher: publisher.name,
+    };
+  }
+  return { carry: true, reason: null, publisher: null };
+}
+
+/** What a re-run did about an amendment branch already standing on origin. */
+interface RepairReport {
+  branch: string;
+  /**
+   * `landed` — the base already carries the whole amendment; nothing is owed
+   * but closing the pull request. `repaired` — the branch was rebuilt on the
+   * current base and force-updated, so the pull request is mergeable again.
+   * `owed` — the repair was computed and not run (`--dry-run`, `--no-publish`,
+   * or no `gh`), and the commands are printed. `failed` — a step of the repair
+   * itself broke; the commands that are left are printed.
+   */
+  state: "landed" | "repaired" | "owed" | "failed";
+  /** The base the rebuild is parented on. */
+  base: string | null;
+  /** Repo-relative paths the rebuilt commit carries. */
+  carried: string[];
+  commit: string | null;
+  pushed: boolean;
+  autoMerge: "armed" | "refused" | "not-attempted";
+  /** Commands, in order. `ok` is `null` for one that was printed and not run. */
+  commands: { command: string; ok: boolean | null }[];
+  /** One sentence for a human, and the reason behind `state`. */
+  message: string;
+}
+
+/**
+ * Repair the amendment pull request a previous run left standing (APRV-420).
+ *
+ * The second run of a ceremony that already attested reaches "nothing to
+ * amend", which is true and useless: the live policy does match its
+ * attestation, and the pull request carrying that attestation to the trunk is
+ * open, unmergeable and unarmed. On 2026-09-21 the repair was a hand merge of
+ * `events.jsonl` in a throwaway worktree, which is the work every idiom here
+ * exists to remove.
+ *
+ * So the re-run rebuilds. The trunk's log is a superset of the amendment's by
+ * construction — every record the amendment appended reaches the trunk through
+ * a records advance as well — so a commit built fresh on the current trunk,
+ * carrying only what the trunk still LACKS, is the merge without a merge.
+ *
+ * Two things this does not do. It does not check anything out: the rebuild is
+ * `commitOnBase`'s scratch index, exactly as the first run's was, so a live
+ * appender never has the log moved underneath it. And it does not touch a
+ * branch it cannot account for: the remote tip must be a single commit on top
+ * of an ancestor of the base, which is the shape this ceremony creates and
+ * nothing else. Anything else is reported with its commands rather than
+ * force-pushed over.
+ *
+ * Returns `null` when there is nothing standing, which leaves the caller's
+ * "nothing to amend" exactly as it was.
+ */
+function repairAmendBranch(input: {
+  root: string;
+  policyPath: string;
+  logPath: string;
+  payloadFile: string;
+  seq: number;
+  branch: string;
+  /** False under `--dry-run` or `--no-publish`: compute and print, never run. */
+  act: boolean;
+}): RepairReport | null {
+  const { root, policyPath, logPath, payloadFile, seq, branch, act } = input;
+  const listed = git(["ls-remote", "--heads", "origin", branch], root);
+  const tipLine = listed.ok
+    ? listed.stdout.split("\n").find((line) => line.trim().length > 0)
+    : undefined;
+  if (tipLine === undefined) return null;
+
+  const commands: { command: string; ok: boolean | null }[] = [];
+  const stop = (
+    state: RepairReport["state"],
+    message: string,
+    extra: readonly string[] = [],
+  ): RepairReport => {
+    for (const command of extra) commands.push({ command, ok: null });
+    return {
+      branch,
+      state,
+      base: null,
+      carried: [],
+      commit: null,
+      pushed: false,
+      autoMerge: "not-attempted",
+      commands,
+      message,
+    };
+  };
+
+  const probe = probeProtection(root);
+  const baseBranch = probe.defaultBranch ?? probe.currentBranch;
+  if (baseBranch === null) {
+    return stop(
+      "failed",
+      `${branch} is on origin and no branch could be resolved to rebuild it on (${probe.reason})`,
+    );
+  }
+  commands.push({ command: `git fetch origin ${baseBranch}`, ok: null });
+  const fetched = fetchBase(root, "origin", baseBranch);
+  if (!fetched.ok) {
+    commands[commands.length - 1] = { command: `git fetch origin ${baseBranch}`, ok: false };
+    return stop("failed", `${branch} is on origin and ${fetched.message}`);
+  }
+  commands[commands.length - 1] = { command: `git fetch origin ${baseBranch}`, ok: true };
+  const base = { remote: "origin", branch: baseBranch, sha: fetched.sha };
+  const baseLabel = `origin/${baseBranch}`;
+
+  // Fetched rather than read off `ls-remote`, because the count below needs the
+  // tip to be an OBJECT in this repository: a commit somebody else pushed to
+  // the branch has never been near this checkout, and `rev-list` over a sha it
+  // does not have answers nothing at all.
+  commands.push({ command: `git fetch origin ${branch}`, ok: null });
+  const fetchedTip = fetchBase(root, "origin", branch);
+  if (!fetchedTip.ok) {
+    commands[commands.length - 1] = { command: `git fetch origin ${branch}`, ok: false };
+    return stop("failed", `${branch} is on origin and ${fetchedTip.message}`);
+  }
+  commands[commands.length - 1] = { command: `git fetch origin ${branch}`, ok: true };
+  const tipSha = fetchedTip.sha;
+
+  // What the base still lacks. Each answer is read from the base's own tree,
+  // so a record or a payload a records advance already landed is not carried
+  // twice, which is the whole cause of the conflict this repairs.
+  const policyArg = repoPath(root, policyPath);
+  const payloadArg = repoPath(root, payloadFile);
+  const carried: string[] = [];
+  const reasons: string[] = [];
+  const basePolicy = showBlob(root, base.sha, policyArg);
+  const livePolicy = (((): Buffer | null => {
+    try {
+      return readFileSync(policyPath);
+    } catch {
+      return null;
+    }
+  })());
+  if (livePolicy === null) {
+    return stop("failed", `${policyPath} could not be read, so the rebuild has no policy bytes to carry`);
+  }
+  if (basePolicy === null || !basePolicy.equals(livePolicy)) {
+    carried.push(policyArg);
+    reasons.push(`the policy bytes (${baseLabel} does not carry them)`);
+  }
+  if (showBlob(root, base.sha, payloadArg) === null) {
+    carried.push(payloadArg);
+    reasons.push("the attested policy text");
+  }
+  const carriage = decideLogCarriage(root, base, logPath);
+  if (carriage.carry) {
+    carried.push(repoPath(root, logPath));
+    reasons.push("the log, which nothing else is publishing");
+  } else {
+    reasons.push(`NOT the log: ${carriage.reason ?? "it is published elsewhere"}`);
+  }
+  const pins = pinsChangeIn(root, policyPath, base.sha);
+  if (pins !== null) {
+    carried.push(pins.arg);
+    reasons.push(pins.arg);
+  }
+
+  if (carried.length === 0) {
+    return stop(
+      "landed",
+      `the amendment at seq ${seq} is already on ${baseLabel} in full: the policy, its attested text and its records are all there, so ${branch} has nothing left to carry. Close the pull request`,
+      [`gh pr close ${branch} --delete-branch`],
+    );
+  }
+
+  // Only now that a rebuild is actually owed does the branch's SHAPE matter,
+  // and it has to be the one shape this ceremony makes: one commit, on a parent
+  // the base already contains. `rev-list --count base..tip` counts the commits
+  // the tip has that the base does not, so anything above one is work this verb
+  // did not put there and a force-push would lose it. Zero is not checked here,
+  // because a branch the base already contains has nothing left to carry and
+  // left through the `landed` exit above.
+  const countRun = git(["rev-list", "--count", `${base.sha}..${tipSha}`], root);
+  const count = countRun.ok ? Number(countRun.stdout.trim()) : Number.NaN;
+  if (!Number.isInteger(count) || count > 1) {
+    return stop(
+      "failed",
+      `${branch} on origin carries ${Number.isInteger(count) ? String(count) : "an unknown number of"} commits that ${baseLabel} does not. The amendment ceremony builds exactly one, so this branch holds work this verb did not put there and it will not be rebuilt over. Rebase or merge it by hand`,
+      [`git log --oneline ${base.sha.slice(0, 12)}..${tipSha.slice(0, 12)}`],
+    );
+  }
+
+  const subject = git(["log", "-1", "--format=%s", tipSha], root);
+  const message =
+    subject.ok && subject.stdout.trim().length > 0
+      ? subject.stdout.trim()
+      : `Policy: amend ${policyArg} (attested seq ${seq})`;
+  const rebuild = `git push origin +<rebuilt>:refs/heads/${branch}`;
+  const built = commitOnBase(root, { base: base.sha, paths: carried, message });
+  if (!built.ok) {
+    commands.push({ command: rebuild, ok: null });
+    return stop("failed", `${branch} could not be rebuilt on ${baseLabel}: ${built.message}`);
+  }
+  if (built.unchanged) {
+    return stop(
+      "landed",
+      `the amendment at seq ${seq} is already on ${baseLabel}: a commit carrying ${carried.join(", ")} over ${baseLabel} is the same tree. Close the pull request`,
+      [`gh pr close ${branch} --delete-branch`],
+    );
+  }
+  const commitSha = built.sha;
+  const carriedNote = `rebuilt ${commitSha.slice(0, 12)} on ${baseLabel} ${base.sha.slice(0, 12)} carrying ${reasons.join(", ")}`;
+
+  const push = `git push origin +${commitSha.slice(0, 12)}:refs/heads/${branch}`;
+  if (!act) {
+    commands.push({ command: push, ok: null });
+    commands.push({ command: `gh pr merge ${branch} --merge --auto`, ok: null });
+    return {
+      branch,
+      state: "owed",
+      base: base.sha,
+      carried,
+      commit: commitSha,
+      pushed: false,
+      autoMerge: "not-attempted",
+      commands,
+      message: `${carriedNote}; nothing was pushed, so the pull request is unchanged. Run the commands above to finish it`,
+    };
+  }
+
+  // Force, and only here: the branch carries exactly the one commit this
+  // ceremony put on it (checked above), and the whole repair is replacing that
+  // commit with the same amendment parented on a base that has moved.
+  const pushed = git(["push", "origin", `+${commitSha}:refs/heads/${branch}`], root);
+  commands.push({ command: push, ok: pushed.ok });
+  if (!pushed.ok) {
+    commands.push({ command: `gh pr merge ${branch} --merge --auto`, ok: null });
+    return {
+      branch,
+      state: "failed",
+      base: base.sha,
+      carried,
+      commit: commitSha,
+      pushed: false,
+      autoMerge: "not-attempted",
+      commands,
+      message: `${carriedNote}, and \`${push}\` was REJECTED: ${pushFailureText(pushed)}. The commit exists locally; push it and re-arm the merge`,
+    };
+  }
+
+  let autoMerge: RepairReport["autoMerge"] = "not-attempted";
+  if (ghAvailable(root)) {
+    const armed = gh(["pr", "merge", branch, "--merge", "--auto"], root);
+    commands.push({ command: `gh pr merge ${branch} --merge --auto`, ok: armed.ok });
+    autoMerge = armed.ok ? "armed" : "refused";
+  } else {
+    commands.push({ command: `gh pr merge ${branch} --merge --auto`, ok: null });
+  }
+  return {
+    branch,
+    state: "repaired",
+    base: base.sha,
+    carried,
+    commit: commitSha,
+    pushed: true,
+    autoMerge,
+    commands,
+    message: `${carriedNote}, and force-updated ${branch} on origin, so the pull request is mergeable again${
+      autoMerge === "armed" ? " and armed" : ""
+    }`,
+  };
+}
+
 function loadSummary(load: PolicyLoadResult): { ok: boolean; code: string | null; message: string | null } {
   return load.ok
     ? { ok: true, code: null, message: null }
@@ -3036,6 +3504,12 @@ interface Report {
    * a machine reading it can tell the two ceremonies apart without a flag.
    */
   proposal?: { seq: number; sha256: string; diff: DiffSummary; load: LoadAdvisory };
+  /**
+   * What a re-run did about an amendment branch already standing on origin
+   * (APRV-420). Additive and always present: `null` on every run that had an
+   * amendment to make, and on every no-op that found no branch to repair.
+   */
+  repair?: RepairReport | null;
 }
 
 function emitReport(streams: Streams, report: Report): void {
@@ -3063,6 +3537,9 @@ function emitReport(streams: Streams, report: Report): void {
       // APRV-109, additive and always present: `null` says the attestation was
       // performed at this terminal, an object says it was collected as a tap.
       proposal: report.proposal ?? null,
+      // APRV-420, additive and always present: `null` says this run had an
+      // amendment to make, or found no standing branch to repair.
+      repair: report.repair ?? null,
     })}\n`,
   );
 }

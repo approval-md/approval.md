@@ -498,6 +498,11 @@ advance is the one that may carry `log.advance.daemon` instead, and only from
 inside the daemon process: see the `--advance` paragraph under `daemon run`
 (APRV-382).
 
+An advance publishes the WHOLE log, so while its branch is open on origin it is
+the log's publisher and `policy amend` stands aside: an amendment opened in that
+window carries only the policy bytes and cannot conflict with the records. See
+"Who publishes the log" under `policy amend` (APRV-420).
+
 `--co-author "Name <email>"` adds one validated `Co-authored-by` trailer to the
 generated records commit and to the pull request body. When the day's pull
 request already exists, the verb preserves its body and adds the trailer once.
@@ -1034,6 +1039,69 @@ there is no remote), so a pins file the base already carries stays exactly as th
 base carries it, and a pins edit somebody else landed is not reverted by this
 ceremony. The pin deltas print in the semantic diff beside the class deltas, ride
 in the commit subject, and appear in `--json` as `pins`.
+
+**Who publishes the log (APRV-420).** The log is in that file set only when this
+amendment is the thing publishing it. On 2026-09-21 it always was, and PR 530
+paid for it: two records advances merged first carrying the same records (the
+attestation at seq 65736 and its payload reached main through PR 531), and git
+does not care that one side's appended lines are a prefix of the other's, so the
+amendment went DIRTY, lost its arm, and the repair was a hand merge of
+`events.jsonl` in a throwaway worktree.
+
+The cause was two publishers carrying the same bytes, so the ceremony now leaves
+one of them holding it. It asks two questions of the base it is about to commit
+on, in this order:
+
+1. does the base's log already carry every record this attestation added? Then
+   the log is published and the amendment has nothing to add to it.
+2. is a records advance live, meaning origin carries a `records-log-*` branch?
+   That advance publishes the log, so the amendment has nothing to add to it
+   either. Whether the branch already carries THIS attestation is checked
+   rather than assumed: the ceremony fetches the branch and compares chains.
+   An advance pushed before the human signed does not carry it, which is the
+   ordinary order; the ceremony then says so, the next advance publishes the
+   record, and the pull request's protected-path guard holds the policy
+   change until a records branch or main carries it.
+
+Either way the commit is the policy bytes, the attested text and the pins, and a
+commit that does not touch `events.jsonl` cannot conflict on `events.jsonl`,
+whichever side lands first. Otherwise the amendment is the only publisher and
+carries the log, exactly as it always has. The ceremony prints which of the three
+happened, so the pull request's file list is never a surprise.
+
+The question is asked with `git ls-remote`, not `gh`, so it answers the same on a
+box with no GitHub CLI and no token. And it fails toward CARRYING: anything the
+check cannot establish leaves the amendment holding the log. A dirty pull request
+is a nuisance; an attestation that reaches `main` in nobody's commit is a policy
+in force that the committed log does not record.
+
+**A re-run repairs the pull request it finds (APRV-420).** A second run used to
+stop at `nothing to amend`, which is true and useless: the live policy does match
+its attestation, and the pull request carrying that attestation is open,
+unmergeable and unarmed. So when `--commit` or `--pr` is asked for and origin
+already carries the amendment branch, the re-run fetches the default branch and
+computes what it still LACKS — the policy bytes, the attested text, the pins, and
+the log under the rule above — and then:
+
+- nothing lacking: the amendment landed in full. It says so and prints `gh pr
+  close <branch> --delete-branch`.
+- something lacking: it rebuilds that commit on the CURRENT default branch and
+  force-updates the branch, then re-arms `gh pr merge <branch> --merge --auto`.
+  The trunk's log is a superset of the amendment's by construction, so rebuilding
+  on it is the re-merge without a merge.
+
+The rebuild is `commitOnBase`'s scratch index like every other commit this verb
+makes, so nothing is checked out and no live appender has the log moved
+underneath it. The force-push is the one in this codebase, and it is bounded: the
+remote branch must be a single commit on top of a commit the base already
+contains, which is the shape this ceremony creates and nothing else. A branch
+carrying anything more is reported with `git log --oneline <base>..<tip>` and
+left alone. `--dry-run` and `--no-publish` compute the repair, print the
+commands and run none of it. `--json` carries a `repair` object (`branch`,
+`state` of `landed`/`repaired`/`owed`/`failed`, `base`, `carried`, `commit`,
+`pushed`, `autoMerge`, `commands`, `message`), additively and always present:
+`null` on every run that had an amendment to make and on every no-op that found
+no branch standing. Only `failed` is a nonzero exit.
 
 It refuses outside a git repository (`commit-preconditions`), and refuses
 `staged-unrelated` when the index holds staged changes to anything beyond those
