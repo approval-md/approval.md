@@ -73,6 +73,7 @@ import {
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
 import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
+import { SERVE_REFUSAL_CODES } from "../src/serve/server.js";
 import {
   normaliseWebhookUrl,
   redactWebhookUrl,
@@ -828,6 +829,169 @@ test("a valid update whose callback is not ours is ignored, not refused (APRV-42
     assert.equal(answer.body["decisions"], 0);
     assert.equal(channel.anomalyCount("foreign-chat"), 1);
     assert.equal(recordsOf(world.unit.logPath).length, before, "an ignored callback reached the log");
+  } finally {
+    await handle.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Stopping, and what a stop is not allowed to cut off
+// ---------------------------------------------------------------------------
+
+test("a stop waits for the update it is holding (APRV-424)", async () => {
+  // Review finding 2. `close()` used to destroy every socket synchronously and
+  // resolve in about a millisecond, so the caller's `deleteWebhook`, its
+  // "stopped" line and the process's exit all ran while an update was still
+  // being handled: a decision mid-append, a dispatch cycle halfway through a
+  // send, and a caller whose response never arrived.
+  const now = at(2);
+  const world = live(1, false, "drain");
+  const key = world.keys[0] as string;
+  const [pending] = queueOf(world, now);
+  assert.ok(pending !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, now));
+  await channel.notify(pending);
+
+  let entered = false;
+  let dispatchFinished = false;
+  let unblock: () => void = () => undefined;
+  const held = new Promise<void>((settle) => {
+    unblock = settle;
+  });
+  const handle = await receiverFor(channel, {
+    // The dispatch cycle the verb runs after every handled update, held open
+    // for as long as this test likes. It runs inside the receiver's serialize
+    // queue, which is what the drain has to wait on.
+    afterUpdate: async () => {
+      entered = true;
+      await held;
+      dispatchFinished = true;
+    },
+  });
+
+  const posting = post(
+    handle,
+    JSON.stringify({
+      update_id: 9101,
+      ...callbackUpdate({
+        data: mock.callbackDataFor(key, "grant"),
+        chatId: CHAT,
+        fromId: MAPPED_ACCOUNT,
+      }),
+    }),
+  );
+  while (!entered) await new Promise<void>((settle) => setTimeout(settle, 2));
+  assert.equal(handle.inFlight(), 1, "the receiver does not know it is holding a request");
+
+  let stopped = false;
+  const closing = handle.close().then(() => {
+    stopped = true;
+  });
+  await new Promise<void>((settle) => setTimeout(settle, 60));
+  assert.equal(stopped, false, "close() resolved while an update was still being handled");
+  assert.equal(dispatchFinished, false, "the dispatch cycle finished without being let go");
+
+  unblock();
+  await closing;
+  assert.equal(stopped, true);
+  assert.equal(dispatchFinished, true, "the stop cut the dispatch cycle off");
+  assert.equal(handle.inFlight(), 0, "the stop left a request in flight");
+
+  // The caller got its answer rather than a torn socket, and the decision is
+  // in the log: the two things a synchronous destroy took away.
+  const answer = await posting;
+  assert.equal(answer.status, 200, `the held update's response was lost: ${JSON.stringify(answer)}`);
+  const appended = recordsOf(world.unit.logPath).filter(
+    (record) => record.event === "approval.granted",
+  );
+  assert.equal(appended.length, 1, "the decision the stop interrupted is not in the log");
+  assertClean(world.unit);
+
+  // Idempotent: the verb's stop path can be entered by a signal and by the
+  // promise settling, and a second close must not throw or reopen anything.
+  await handle.close();
+});
+
+test("a stop that cannot drain still ends, and says so (APRV-424)", async () => {
+  // The other half of the bound: a handler that never returns must not hold a
+  // stop open forever. The deadline is the receiver's, shortened here.
+  const world = live(1, false, "drain-timeout");
+  const key = world.keys[0] as string;
+  const [pending] = queueOf(world, at(2));
+  assert.ok(pending !== undefined);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(pending);
+
+  let entered = false;
+  const said: string[] = [];
+  const handle = await receiverFor(channel, {
+    closeTimeoutMs: 50,
+    log: (message) => said.push(message),
+    afterUpdate: async () => {
+      entered = true;
+      await new Promise<void>(() => undefined);
+    },
+  });
+  const posting = post(
+    handle,
+    JSON.stringify({
+      update_id: 9102,
+      ...callbackUpdate({
+        data: mock.callbackDataFor(key, "grant"),
+        chatId: CHAT,
+        fromId: MAPPED_ACCOUNT,
+      }),
+    }),
+  );
+  while (!entered) await new Promise<void>((settle) => setTimeout(settle, 2));
+
+  await handle.close();
+  assert.ok(
+    said.some((message) => /still in flight after 50ms/u.test(message)),
+    `the stop dropped a held request without saying so: ${said.join("\n")}`,
+  );
+  // The socket went with it, so the caller sees a transport failure rather
+  // than a hang. That is the deliberate end of a stop that could not drain.
+  await posting.then(
+    () => undefined,
+    () => undefined,
+  );
+});
+
+test("a malformed request and an unknown path are different refusals (APRV-424)", async () => {
+  // Review finding 5. One code answered both, which made "your proxy is
+  // sending something this server cannot parse" (400) and "you are posting to
+  // a path this server does not serve" (404) the same fact with two statuses.
+  const channel = channelFor();
+  channel.onDecision(() => {
+    throw new Error("no decision should be reached by this case");
+  });
+  const handle = await receiverFor(channel);
+  try {
+    // The secret header is carried, because the secret is checked FIRST: this
+    // case is about what the server does with a request it has authenticated
+    // and cannot parse.
+    const malformed = await rawPost(handle, "{}", {
+      [TELEGRAM_SECRET_HEADER]: SECRET,
+      host: "@@@",
+    });
+    assert.equal(malformed.status, 400, JSON.stringify(malformed));
+    assert.equal(refusalCodeOf(malformed), "webhook-malformed-request");
+
+    const unknown = await post(handle, "{}", { path: "/nowhere" });
+    assert.equal(unknown.status, 404, JSON.stringify(unknown));
+    assert.equal(refusalCodeOf(unknown), "webhook-unknown-path");
+
+    const refusals = handle.stats().refusals;
+    assert.equal(refusals["webhook-malformed-request"], 1);
+    assert.equal(refusals["webhook-unknown-path"], 1);
+    // And `src/serve/server.ts` keeps the same split, so the two surfaces
+    // cannot come to different conclusions about one request.
+    assert.ok(SERVE_REFUSAL_CODES.includes("serve-malformed-url"));
+    assert.ok(SERVE_REFUSAL_CODES.includes("serve-unknown-path"));
   } finally {
     await handle.close();
   }

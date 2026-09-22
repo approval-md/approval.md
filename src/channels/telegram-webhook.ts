@@ -621,15 +621,26 @@ export async function serveTelegramWebhook(
    */
   async function drain(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    const giveUp = (): void => {
+      complain(
+        `approval: telegram webhook: ${String(inFlight)} request(s) were still in flight after ${String(timeoutMs)}ms; closing anyway`,
+      );
+    };
     for (;;) {
-      await serialize(async () => undefined);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return giveUp();
+      // The deadline covers the QUEUE WAIT as well, and that is not a detail:
+      // a handler that never returns leaves work on the serialize chain
+      // forever, so a drain that simply awaited the chain would be the hang it
+      // was meant to bound.
+      const quiet = await Promise.race([
+        serialize(async () => true),
+        new Promise<boolean>((settle) => {
+          setTimeout(() => settle(false), remaining).unref?.();
+        }),
+      ]);
+      if (!quiet) return giveUp();
       if (inFlight === 0) return;
-      if (Date.now() >= deadline) {
-        complain(
-          `approval: telegram webhook: ${String(inFlight)} request(s) were still in flight after ${String(timeoutMs)}ms; closing anyway`,
-        );
-        return;
-      }
       await new Promise<void>((settle) => {
         setTimeout(settle, TELEGRAM_WEBHOOK_DRAIN_POLL_MS).unref?.();
       });
