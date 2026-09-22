@@ -421,6 +421,60 @@ test("drift: a file whose state contradicts the log appends envelope.drift", () 
   assertClean(dir);
 });
 
+test("drift: a held lock is one `drift-deferred` warning, and the record lands next tick", () => {
+  // APRV-403, the operator-visible half. `tests/daemon-drift-deferral.test.ts`
+  // owns the in-process properties (the retry marker, the envelope-missing
+  // reason, the non-transient form); what this case establishes is that the code
+  // and the wording reach the JSON an operator's supervisor reads, out of a real
+  // `daemon run --once` process contending for the real lockfile.
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+  const before = records(dir).length;
+
+  const lock = `${logPath(dir)}.lock`;
+  closeSync(openSync(lock, "wx"));
+  let blocked;
+  try {
+    blocked = daemonOnce(dir);
+  } finally {
+    unlinkSync(lock);
+  }
+
+  assert.equal(blocked.run.code, 0, blocked.run.stderr);
+  const deferred = warningsOf(blocked.run).filter((line) => line["code"] === "drift-deferred");
+  assert.equal(deferred.length, 1, `one deferral line: ${blocked.run.stderr}`);
+  const message = String(deferred[0]?.["message"]);
+  assert.match(message, /task-042/u, "the line must name the task key");
+  assert.match(message, /lock-timeout/u);
+  assert.match(message, /retries on the next tick/u);
+  assert.match(message, /NOT lost/u);
+  // The ambiguous line APRV-403 removed. An `append-refused` naming
+  // `envelope.drift` is exactly what an operator read as a lost record.
+  assert.deepEqual(
+    warningsOf(blocked.run)
+      .filter((line) => line["code"] === "append-refused")
+      .map((line) => String(line["message"]))
+      .filter((line) => line.includes("envelope.drift")),
+    [],
+  );
+  assert.equal(blocked.lines.filter((line) => line["event"] === "drift").length, 0);
+  assert.equal(records(dir).length, before, "a deferred drift record wrote to the log");
+  // And the file was NOT repaired, so the retry still has a disagreement to
+  // re-derive: SPEC.md §6.3's order holds under contention too.
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("proposed", dir));
+
+  // The lock is gone. A NEW process, so it makes the append and claims no retry.
+  const settled = daemonOnce(dir);
+  assert.equal(settled.run.code, 0, settled.run.stderr);
+  const drifts = settled.lines.filter((line) => line["event"] === "drift");
+  assert.equal(drifts.length, 1, settled.run.stdout);
+  assert.equal(drifts[0]?.["task"], "task-042");
+  assert.equal(drifts[0]?.["retry"], undefined, "a process cannot retry a promise it never made");
+  assert.equal(eventsOf(dir, "envelope.drift").length, 1);
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting", dir));
+  assertClean(dir);
+});
+
 // ===========================================================================
 // Hosted-daemon identity, end to end (APRV-383)
 // ===========================================================================
@@ -1513,9 +1567,10 @@ test("sampling: a held lock is one `sample-deferred` warning, and the sample lan
   assert.match(message, /lock-timeout/u);
   assert.match(message, /retries it on the next tick/u);
   // Nothing about the SAMPLE reads as a refusal an operator has to act on. The
-  // drift scan's own append meets the same lock in this tick and still reports
-  // `append-refused`, which is APRV-381's scope line: the sweep was the one the
-  // primary daemon's window showed, and every other append is its own task.
+  // filter is per-append rather than global because the drift scan's own append
+  // meets the same lock in this tick; since APRV-403 it too reports a deferral,
+  // and this assertion stays scoped to the sample so it keeps saying only what
+  // APRV-381 was about.
   assert.deepEqual(
     warningsOf(blocked.run)
       .filter((line) => line["code"] === "append-refused")
