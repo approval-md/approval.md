@@ -341,7 +341,15 @@ because this is the harness with the smallest ceiling:
 - **A cap that does not clear 60s is refused** with `hook-harness-cap-too-short`
   before anything is registered or requested, and on this adapter the deny says
   exactly what to do: raise `plugins.hook_callback_timeout` above the per-entry
-  `timeout`, then pass `--harness-cap` with the smaller of the two.
+  `timeout`, then pass `--harness-cap` with the smaller of the two (or start
+  `approval serve` with `--hook-harness-cap` for a hosted tenant).
+- **The wait is clamped to the ceiling too.** `--timeout` is shortened to what
+  the cap leaves after the margin, so a hook that ADOPTS a question an earlier,
+  correctly-capped run opened (a retry of the same bytes, this time with the flag
+  omitted) does not sit in its poll loop past a 30s ceiling and get killed: it
+  reads the log once and answers `hook-timeout` at once, leaving the question
+  open for the retry grace. The refusal above covers a question this run would
+  open; the clamp covers one it only waits on.
 
 ## What is gated
 

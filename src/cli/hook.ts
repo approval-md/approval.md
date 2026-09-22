@@ -907,7 +907,7 @@ const HERMES_ADAPTER: HarnessAdapter = {
   capCeilingMs: 300_000,
   capDefaultMs: 30_000,
   capRepair:
-    "On Hermes: raise `plugins.hook_callback_timeout` above the per-entry `timeout` in $HERMES_HOME/config.yaml, then pass `--harness-cap <the smaller of the two>` on the hook command (for the documented `hook_callback_timeout: 600` with `timeout: 300`, that is `--harness-cap 300s`). Without the flag this runtime assumes Hermes's 30s default callback timeout, which leaves no room for a human.",
+    "On Hermes: raise `plugins.hook_callback_timeout` above the per-entry `timeout` in the harness's config, then pass `--harness-cap <the smaller of the two>` on the hook command, or start `approval serve` with `--hook-harness-cap <the smaller of the two>` for a hosted tenant (for the documented `hook_callback_timeout: 600` with `timeout: 300`, that is 300s). Without the flag this runtime assumes Hermes's 30s default callback timeout, which leaves no room for a human.",
   // `terminal`, carrying `command` and a PER-CALL `workdir`. Hermes's contract
   // has the field Codex's withholds (APRV-310), and the live probe found that
   // having it is not the same as being sent it: the model passed no `workdir` at
@@ -2775,6 +2775,27 @@ interface HookRun {
   harnessCapStated: boolean;
   /** {@link HarnessAdapter.capRepair}, or `null` for the generic sentence. */
   harnessCapRepair: string | null;
+  /**
+   * How long THIS invocation actually waits, in milliseconds (APRV-423, third
+   * review pass): `timeoutMs`, clamped to what the harness ceiling leaves after
+   * the margin (`harnessCapMs - HARNESS_CAP_MARGIN_MS`) when there is one, and
+   * never below zero.
+   *
+   * The clamp is what closes the adopted-question gap. The too-short refusal
+   * fires only for a question this invocation would OPEN; an invocation whose
+   * every key is adopted (a retry of bytes an earlier, correctly-capped run
+   * asked about) opens nothing, so under a ceiling with no room in it (a Hermes
+   * hook with no `--harness-cap`, assumed 30 s) it would have sat in its poll
+   * loop for the configured wait, been killed at the ceiling, and let the call
+   * proceed on any harness without `fail_closed`. Bounding the wait itself means
+   * the hook always answers before the harness stops listening: a zero wait
+   * reads the verified log once (so a decision already recorded is still
+   * honoured) and then denies `hook-timeout`, leaving the adopted question open
+   * for the retry grace exactly as a wait that ran out would. The adopted
+   * question's OWN deadline is whatever was recorded when it was opened; this
+   * changes nothing about it.
+   */
+  waitMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -3267,20 +3288,17 @@ function announceWait(
         ? `. The request expires at ${at}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long it stays open for a retry; a decision after it is refused rather than granted.`
         : ` and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${expiryClause(at)}`;
     streams.err(
-      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout${holdsOpen}${adopted}\n`,
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${waitText(run)} before denying with hook-timeout${holdsOpen}${adopted}\n`,
     );
   }
 
-  // APRV-423, and the check docs/claude-code-hook.md said this runtime could
-  // not make: "the runtime cannot check it because a hook is not told the cap
-  // it runs under". It is told now. A wait that outlives the ceiling ends with
-  // the harness killing this process, which every harness in the table reads as
-  // a non-blocking error and runs the tool call anyway, so the relation is
-  // stated on the stream an operator reads. It is a report and not a verdict:
-  // nothing here shortens the wait the operator configured.
-  if (run.harnessCapMs !== null && run.timeoutMs >= run.harnessCapMs) {
+  // APRV-423, third review pass. The wait is CLAMPED to what the ceiling
+  // leaves (see `HookRun.waitMs`), so the runtime acts rather than warns: a
+  // wait the harness would have cut short is shortened here, and the operator
+  // is told once so the configured --timeout is not mistaken for the wait.
+  if (run.harnessCapMs !== null && run.waitMs < run.timeoutMs) {
     streams.err(
-      `approval: this hook's ${String(run.timeoutMs)}ms wait is not shorter than the ${String(run.harnessCapMs)}ms ceiling the harness runs it under, so the harness may kill this process before the wait ends, and a killed hook is a non-blocking error on every harness this runtime speaks to, which means the tool call proceeds ungated. Lower --timeout below the harness entry's own timeout.\n`,
+      `approval: this hook's ${String(run.timeoutMs)}ms --timeout is longer than the ${String(run.harnessCapMs)}ms harness ceiling leaves after the ${String(HARNESS_CAP_MARGIN_MS)}ms margin, so it waits ${String(run.waitMs)}ms instead and answers before the harness stops listening. Lower --timeout, or state the real ceiling with --harness-cap.\n`,
     );
   }
 
@@ -3318,6 +3336,20 @@ function expiryClause(at: string | undefined): string {
  * this invocation's own flags, so for an ADOPTED question opened under other
  * flags it is the current invocation's reading of the two windows.
  */
+/**
+ * `55000ms wait`, or `0ms wait (a 240000ms --timeout clamped to what the 30000ms
+ * harness ceiling leaves)` when the ceiling shortened it (APRV-423, third
+ * review pass). One spelling for the announce line, the lagging note and the
+ * `hook-timeout` denies, so a reader is never told a wait this process did not
+ * make.
+ */
+function waitText(run: HookRun): string {
+  if (run.waitMs === run.timeoutMs || run.harnessCapMs === null) {
+    return `${String(run.waitMs)}ms wait`;
+  }
+  return `${String(run.waitMs)}ms wait (a ${String(run.timeoutMs)}ms --timeout clamped to what the ${String(run.harnessCapMs)}ms harness ceiling leaves)`;
+}
+
 function windowEndsBeforeGrace(run: HookRun): boolean {
   if (run.harnessCapMs === null) return false;
   const window = harnessCappedTtlMs(run.ttlMs, run.harnessCapMs);
@@ -3722,7 +3754,7 @@ export function gateHarnessCall(
     expiryOf,
   );
 
-  const deadline = Date.now() + run.timeoutMs;
+  const deadline = Date.now() + run.waitMs;
 
   // A signal arriving mid-wait means the session is going away: nothing will
   // retry this command, so the question this invocation opened is retracted.
@@ -3818,7 +3850,7 @@ export function gateHarnessCall(
         streams.err(
           `approval: the verified log does not yet carry ${lagging.join(", ")} (verified head: ${
             read.head === null ? "empty" : `seq ${String(read.head.seq)}`
-          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${String(run.timeoutMs)}ms wait. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
+          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${waitText(run)}. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
         );
       }
 
@@ -3917,7 +3949,7 @@ export function gateHarnessCall(
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
           );
         }
         // Second review pass (F7). When the capped window closes before the
@@ -3928,12 +3960,12 @@ export function gateHarnessCall(
         if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
           return sayDeny(
             "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
           );
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -5514,6 +5546,10 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     harnessCapMs,
     harnessCapStated,
     harnessCapRepair: adapter.capRepair ?? null,
+    waitMs:
+      harnessCapMs === null
+        ? timeoutMs
+        : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

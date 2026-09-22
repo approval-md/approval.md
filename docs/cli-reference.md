@@ -4356,7 +4356,8 @@ its own flags are not parsed as this verb's.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.
 - `hook-expired` — the TTL lapsed before a decision.
-- `hook-timeout` — no decision inside `--timeout`; the request stays live.
+- `hook-timeout` — no decision inside the wait (`--timeout`, clamped to what
+  `--harness-cap` leaves after the 60s margin; APRV-423); the request stays live.
 - `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
   (`policy-not-attested`, `budget-exceeded`, …).
 - `hook-policy-unavailable` — `APPROVAL.md` could not be loaded.
@@ -6751,6 +6752,25 @@ it.
 
 A deny is a VERDICT, so its HTTP status is 200; only a refusal by the server
 is not.
+
+**A Hermes tenant needs `--hook-harness-cap`, or every manual class is refused
+(APRV-423).** `approval serve` pins `--harness-cap` on every hook call with
+`--hook-harness-cap`, as it pins `--timeout` with `--hook-timeout`. Without it a
+`POST /hook/hermes` runs as `approval hook hermes` with no flag, which assumes
+Hermes's 30s default `plugins.hook_callback_timeout`; 30s does not clear the 60s
+margin, so every manual-class call answers `hook-harness-cap-too-short` (a
+block, nothing registered or requested, no prompt sent) and a tenant is gated
+shut rather than gated. The repair for a serve operator, who does not own the
+tenant's `$HERMES_HOME`: have the tenant raise `plugins.hook_callback_timeout` in
+the harness's config above the per-entry `timeout`, then start `serve` with
+`--hook-harness-cap <the smaller of the two>` (`--hook-harness-cap 300s` for the
+documented `600` over `300`). The value is per server rather than per tenant, so
+a server fronting several Hermes tenants states the smallest ceiling any of them
+runs under; a stated cap can only shorten a window, never lengthen one. The
+same flag bounds the hook's WAIT on every route: `--hook-timeout` is clamped to
+what the ceiling leaves after the margin, so a hook that adopts an already-open
+question under a ceiling with no room in it answers `hook-timeout` at once
+(question left open for the retry grace) instead of being killed mid-wait.
 
 `GET /log/follow?from=<seq>&cursor_hash=<64hex>&limit=<n>` answers one page of
 verified records and the cursor to ask with next time. The cursor is EXCLUSIVE

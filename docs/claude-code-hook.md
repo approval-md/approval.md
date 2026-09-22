@@ -1378,10 +1378,13 @@ harness boundary, and none of them is reachable from inside this runtime:
    A killed hook exits non-zero with no JSON, which Claude Code reads as a
    non-blocking error, and the tool call proceeds. This is why `--timeout` MUST
    be comfortably below `timeout`: the relation is a requirement, not a nicety.
-   Since APRV-423 the runtime CAN check it, once `--harness-cap` tells it what
-   the cap is: it prints a line when the wait is not shorter, and it shortens
-   the request's own window so the lapse is recorded before the kill. What it
-   still cannot do is stop the tool call, which is Claude Code's to run.
+   Since APRV-423 the runtime enforces it, once `--harness-cap` tells it what
+   the cap is: the wait is clamped to what the ceiling leaves after the 60s
+   margin (a longer `--timeout` is reported once on stderr and shortened), so
+   the hook answers `hook-timeout` before the kill even when it only adopted a
+   question an earlier run opened, and the request's own window is shortened so
+   the lapse is recorded before the kill. What it still cannot do is stop the
+   tool call once Claude Code has decided to run it.
 2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
    reason; every other non-zero code is a non-blocking error and the tool runs.
    On the PRE-execution event the verb exits 2 only for a misconfigured hook and
