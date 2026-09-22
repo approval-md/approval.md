@@ -68,7 +68,17 @@
  * start.
  */
 
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 
 import { instanceHomeFor } from "./instance.js";
@@ -84,6 +94,49 @@ export const CHANNEL_LEASE_ATTEMPTS = 5;
 
 /** How long a take waits before re-reading a lockfile it could not parse. */
 export const CHANNEL_LEASE_RETRY_MS = 20;
+
+/**
+ * The sibling file that serializes TAKE-OVERS of an existing lockfile.
+ *
+ * The lease itself is taken with `O_EXCL`, which settles the ordinary race by
+ * itself: exactly one of two processes creating a file that is not there wins.
+ * Reclaiming a lockfile that IS there cannot be settled that way, and the
+ * first version of this module proved it. Two processes both read the same
+ * dead holder, the first unlinked it and created its own live lease, and the
+ * second, resuming inside its own read-then-unlink, deleted that live lease
+ * and created its own. Both then believed they held the gate, which is the
+ * exact state this file exists to rule out.
+ *
+ * So a take-over happens inside a critical section of its own, entered with
+ * the same `O_EXCL` primitive, and what happens inside it is a re-read: the
+ * record must still be the very one that was judged dead (same pid, same
+ * `started_at`) or the take-over is abandoned. The loser of that race finds a
+ * LIVE record on its next pass and refuses, which is the right answer.
+ */
+export const CHANNEL_LEASE_RECLAIM_SUFFIX = ".reclaim";
+
+/**
+ * How old a reclaim lock has to be before it is treated as abandoned.
+ *
+ * The critical section is a handful of syscalls, so a reclaim lock that is
+ * seconds old belongs to a process that died inside it. Without this a single
+ * crash in the wrong microsecond would wedge the gate for good, which is the
+ * failure the whole liveness half of this module exists to avoid.
+ */
+export const CHANNEL_LEASE_RECLAIM_STALE_MS = 5_000;
+
+/**
+ * How much later than the lease a process may have started and still be its
+ * holder.
+ *
+ * `started_at` is written just after the holder is running, so the holder's
+ * own start time is at or before it. A pid whose process started AFTER the
+ * lease was written is a pid the operating system handed to somebody else,
+ * which is the case this tolerance exists to detect rather than to forgive.
+ * The slack covers the coarse clock the fallback probe reports (`ps -o
+ * lstart=` has one-second resolution) and small clock adjustments.
+ */
+export const CHANNEL_LEASE_START_TOLERANCE_MS = 2_000;
 
 /**
  * Which transport a holder is running.
@@ -147,8 +200,18 @@ export type ChannelLeaseOutcome =
   | {
       ok: true;
       lease: ChannelLease;
-      /** The dead holder whose lockfile this take reclaimed, when there was one. */
+      /** The holder whose lockfile this take reclaimed, when there was one. */
       reclaimed: ChannelLeaseHolder | null;
+      /**
+       * Why that holder stopped being one.
+       *
+       * Carried beside the record rather than folded into it, because two
+       * callers act on it: the operator's line says which of the three
+       * happened, and `claimListenerBot` reads "a webhook runner in THIS gate
+       * died" as the evidence that lets a restart re-register its own url
+       * without `--reclaim` (APRV-424 review 2, finding 4).
+       */
+      reclaimedBecause: ChannelLeaseReclaimReason | null;
     }
   | {
       ok: false;
@@ -166,10 +229,31 @@ export interface ChannelLeaseOptions {
   /**
    * Is `pid` a running process?
    *
-   * Injectable for the same reason: a test that needs a STALE lockfile cannot
-   * produce one with a real pid without killing something.
+   * The coarse knob, and injectable for the same reason: a test that needs a
+   * STALE lockfile cannot produce one with a real pid without killing
+   * something. When it is given it DECIDES, so a test that wants the reuse and
+   * foreign-owner questions asked passes {@link probe} instead.
    */
   alive?: (pid: number) => boolean;
+  /**
+   * The full pid probe: does it exist, can this process signal it, and when
+   * did it start.
+   *
+   * Defaults to {@link probePid}. Injectable so the reused-pid and
+   * foreign-owner judgements can be driven without arranging for the operating
+   * system to hand out a particular number.
+   */
+  probe?: (pid: number) => PidProbe;
+  /**
+   * Run between judging a holder dead and taking its lockfile over.
+   *
+   * A seam, and it exists for one reason: the interleaving that made this
+   * take-over a critical section can only be reproduced by letting a second
+   * take run in the gap. A test plants a dead lease, starts one take, and runs
+   * the whole of another from inside this callback; exactly one of the two
+   * must come out holding the gate. Nothing in the runtime passes it.
+   */
+  beforeTakeOver?: () => void;
 }
 
 /** The gate's `daemon/` directory for `logPath`, derived and never configured. */
@@ -183,20 +267,143 @@ export function channelLeasePathFor(logPath: string): string {
 }
 
 /**
- * Is `pid` a running process?
+ * What a pid probe found.
  *
- * `ESRCH` is the only answer that means "gone". `EPERM` means it exists and
- * belongs to another user, which is still a pid in use, and anything else is
- * unexpected enough that treating the holder as live is the stricter reading.
+ * Three facts rather than one boolean, because "there is a process with that
+ * number" is not the question. The question is whether that process is the one
+ * that wrote this lease, and a pid on its own cannot answer it: pids are
+ * reused, and a number that belonged to a webhook runner this morning can
+ * belong to a text editor this afternoon.
  */
-export function pidIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+export interface PidProbe {
+  /** Does a process with this number exist at all? */
+  running: boolean;
+  /**
+   * Does it exist but belong to somebody this process cannot signal (`EPERM`)?
+   *
+   * Treated as NOT ours rather than as a live holder. A lease in this gate is
+   * written by a process launched the way this one was, so a pid owned by
+   * another user is a recycled number far more often than it is the holder;
+   * and the alternative reading wedges the gate until a human deletes a file,
+   * which is the outage this module is meant to prevent rather than cause.
+   */
+  foreign: boolean;
+  /** When that process started, when the platform will say. */
+  startedAt: Date | null;
+}
+
+/**
+ * When the process with this pid started, or `null` when it cannot be learned.
+ *
+ * Two sources, in order of cost. On Linux `/proc/<pid>` is created with the
+ * process and carries its start time, which needs no subprocess. Everywhere
+ * else `ps -o lstart=` answers the same question; it costs one short-lived
+ * child, paid once per lease take (which happens once per process start), and
+ * a `ps` that is missing, slow or unhelpful returns `null` rather than
+ * failing.
+ *
+ * `null` is the fail-CLOSED direction here: a holder whose start time cannot
+ * be compared is judged by its pid alone, exactly as before this probe
+ * existed, and a live pid then still refuses.
+ */
+export function processStartedAt(pid: number): Date | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      return statSync(`/proc/${String(pid)}`).mtime;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const run = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 2_000,
+      windowsHide: true,
+    });
+    if (run.status !== 0) return null;
+    const text = (run.stdout ?? "").trim();
+    if (text.length === 0) return null;
+    const when = new Date(text);
+    return Number.isNaN(when.getTime()) ? null : when;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask the operating system about one pid. The default {@link ChannelLeaseOptions.probe}. */
+export function probePid(pid: number): PidProbe {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { running: false, foreign: false, startedAt: null };
+  }
   try {
     process.kill(pid, 0);
-    return true;
   } catch (cause) {
-    return (cause as NodeJS.ErrnoException).code !== "ESRCH";
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return { running: false, foreign: false, startedAt: null };
+    if (code === "EPERM") return { running: true, foreign: true, startedAt: processStartedAt(pid) };
+    // Anything else is unexpected, and the stricter reading of an unexpected
+    // answer is that the holder is there.
+    return { running: true, foreign: false, startedAt: processStartedAt(pid) };
   }
+  return { running: true, foreign: false, startedAt: processStartedAt(pid) };
+}
+
+/**
+ * Is `pid` a running process?
+ *
+ * Kept for the callers that only want the coarse answer. The lease itself asks
+ * {@link probePid}, because a pid alone cannot tell a holder from a number the
+ * operating system has since handed to somebody else.
+ */
+export function pidIsAlive(pid: number): boolean {
+  return probePid(pid).running;
+}
+
+/**
+ * Why a lease stopped being its holder's.
+ *
+ * Three ways, and the operator is told which: the process is gone, the number
+ * now belongs to somebody this process cannot signal, or the number is in use
+ * by a process that started after the lease was written and therefore cannot
+ * be the one that wrote it.
+ */
+export const CHANNEL_LEASE_RECLAIM_REASONS = ["gone", "foreign", "recycled"] as const;
+
+export type ChannelLeaseReclaimReason = (typeof CHANNEL_LEASE_RECLAIM_REASONS)[number];
+
+/** Is this holder still the process that wrote the lease? */
+function judgeHolder(
+  holder: ChannelLeaseHolder,
+  probe: (pid: number) => PidProbe,
+): { held: true } | { held: false; reason: ChannelLeaseReclaimReason } {
+  const found = probe(holder.pid);
+  if (!found.running) return { held: false, reason: "gone" };
+  if (found.foreign) return { held: false, reason: "foreign" };
+  if (found.startedAt !== null) {
+    const wrote = Date.parse(holder.startedAt);
+    if (
+      !Number.isNaN(wrote) &&
+      found.startedAt.getTime() > wrote + CHANNEL_LEASE_START_TOLERANCE_MS
+    ) {
+      return { held: false, reason: "recycled" };
+    }
+  }
+  return { held: true };
+}
+
+/** How a reclaim is reported to the operator. */
+export function reclaimDetail(
+  holder: ChannelLeaseHolder,
+  reason: ChannelLeaseReclaimReason,
+): string {
+  const why =
+    reason === "gone"
+      ? "that process is gone"
+      : reason === "foreign"
+        ? "that pid now belongs to a process this one cannot signal, so it is not the holder"
+        : "that pid belongs to a process that started after the lease was written, so the number has been reused";
+  return `the telegram transport lease was held by pid ${String(holder.pid)} in ${holder.mode} mode since ${holder.startedAt}, and ${why}; reclaimed`;
 }
 
 /** Synchronous sleep with no dependency and no busy-spin. `core/log.ts`'s. */
@@ -301,7 +508,16 @@ export function takeChannelLease(
 ): ChannelLeaseOutcome {
   const pid = options.pid ?? process.pid;
   const now = options.now ?? ((): Date => new Date());
-  const alive = options.alive ?? pidIsAlive;
+  const coarse = options.alive;
+  const probe: (candidate: number) => PidProbe =
+    options.probe ??
+    (coarse === undefined
+      ? probePid
+      : (candidate: number): PidProbe => ({
+          running: coarse(candidate),
+          foreign: false,
+          startedAt: null,
+        }));
   const path = channelLeasePathFor(logPath);
   const instanceHome = instanceHomeFor(resolve(logPath));
 
@@ -319,6 +535,7 @@ export function takeChannelLease(
   }
 
   let reclaimed: ChannelLeaseHolder | null = null;
+  let reclaimedBecause: ChannelLeaseReclaimReason | null = null;
   for (let attempt = 0; attempt < CHANNEL_LEASE_ATTEMPTS; attempt += 1) {
     const body = `${JSON.stringify(
       {
@@ -332,80 +549,194 @@ export function takeChannelLease(
       2,
     )}\n`;
 
-    let created = false;
-    try {
-      const handle = openSync(path, "wx", 0o600);
-      try {
-        writeFileSync(handle, body, { encoding: "utf8" });
-      } finally {
-        closeSync(handle);
-      }
-      created = true;
-    } catch (cause) {
-      const code = (cause as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") {
-        return unavailable(cause instanceof Error ? cause.message : String(cause));
-      }
+    // The ordinary case, and the only one `O_EXCL` can settle on its own:
+    // nothing holds the gate, and exactly one of any number of processes
+    // creating this file wins.
+    const created = createExclusive(path, body);
+    if (created === "created") {
+      return { ok: true, lease: leaseFor(path, mode, pid), reclaimed, reclaimedBecause };
     }
-    if (created) return { ok: true, lease: leaseFor(path, mode, pid), reclaimed };
+    if (created !== "exists") return unavailable(created.detail);
 
     const read = readHolderSettled(path);
     if (read.state === "absent") continue;
-    if (read.state === "torn") {
-      // Unreadable after {@link CHANNEL_LEASE_ATTEMPTS} reads: nobody is
-      // finishing a write, so this is a lockfile a crash left behind and
-      // refusing forever over bytes nobody can read would be an outage with no
-      // fault behind it.
-      try {
-        unlinkSync(path);
-      } catch (cause) {
-        return unavailable(`an unreadable lease could not be removed: ${
-          cause instanceof Error ? cause.message : String(cause)
-        }`);
-      }
-      continue;
-    }
 
-    const { holder } = read;
-    if (holder.pid === pid) {
+    if (read.state === "held" && read.holder.pid === pid) {
       // This process already holds the gate. One process runs one transport,
       // and the in-process guard against two is `claimTransport`; rewriting
       // the record keeps it true rather than making a supervisor fight its own
-      // lockfile across a restart of its channel part.
-      try {
-        writeFileSync(path, body, { encoding: "utf8", mode: 0o600 });
-      } catch (cause) {
-        return unavailable(cause instanceof Error ? cause.message : String(cause));
-      }
-      return { ok: true, lease: leaseFor(path, mode, pid), reclaimed };
-    }
-    if (alive(holder.pid)) {
-      return {
-        ok: false,
-        code: codeFor(holder.mode),
-        holder,
-        message: refusalMessage(holder, mode, path),
-      };
+      // lockfile across a restart of its channel part. Written through a temp
+      // and a rename, so a reader never sees half a record.
+      const rewritten = writeAtomic(path, body, pid);
+      if (rewritten !== null) return unavailable(rewritten);
+      return { ok: true, lease: leaseFor(path, mode, pid), reclaimed, reclaimedBecause };
     }
 
-    // The holder is gone. Reclaimed rather than refused, and reported to the
-    // caller so the operator reads that a dead lease was cleared instead of
-    // wondering why a file appeared.
-    reclaimed = holder;
-    try {
-      unlinkSync(path);
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
-        return unavailable(`a stale lease could not be removed: ${
-          cause instanceof Error ? cause.message : String(cause)
-        }`);
+    if (read.state === "held") {
+      const verdict = judgeHolder(read.holder, probe);
+      if (verdict.held) {
+        return {
+          ok: false,
+          code: codeFor(read.holder.mode),
+          holder: read.holder,
+          message: refusalMessage(read.holder, mode, path),
+        };
       }
+      options.beforeTakeOver?.();
+      const taken = takeOver(path, body, pid, { kind: "holder", holder: read.holder });
+      if (taken === "taken") {
+        reclaimed = read.holder;
+        reclaimedBecause = verdict.reason;
+        return { ok: true, lease: leaseFor(path, mode, pid), reclaimed, reclaimedBecause };
+      }
+      if (taken === "changed" || taken === "busy") {
+        sleepSync(CHANNEL_LEASE_RETRY_MS);
+        continue;
+      }
+      return unavailable(taken.detail);
     }
+
+    // Unreadable after {@link CHANNEL_LEASE_ATTEMPTS} reads: nobody is
+    // finishing a write, so this is a lockfile a crash tore in half, and
+    // refusing forever over bytes nobody can read would be an outage with no
+    // fault behind it. Replaced rather than deleted-then-created, so the path
+    // is never absent and no third process can slip in through the gap.
+    const replaced = takeOver(path, body, pid, { kind: "torn" });
+    if (replaced === "taken") {
+      return { ok: true, lease: leaseFor(path, mode, pid), reclaimed, reclaimedBecause };
+    }
+    if (replaced === "changed" || replaced === "busy") {
+      sleepSync(CHANNEL_LEASE_RETRY_MS);
+      continue;
+    }
+    return unavailable(replaced.detail);
   }
 
   return unavailable(
     `${String(CHANNEL_LEASE_ATTEMPTS)} attempts raced another process taking and releasing it`,
   );
+}
+
+/** `O_EXCL` create, the one race the file system settles by itself. */
+function createExclusive(
+  path: string,
+  body: string,
+): "created" | "exists" | { detail: string } {
+  try {
+    const handle = openSync(path, "wx", 0o600);
+    try {
+      writeFileSync(handle, body, { encoding: "utf8" });
+    } finally {
+      closeSync(handle);
+    }
+    return "created";
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "EEXIST") return "exists";
+    return { detail: cause instanceof Error ? cause.message : String(cause) };
+  }
+}
+
+/**
+ * Write `path` whole, by rename, never leaving it absent or half-written.
+ *
+ * `rename` replaces the destination in one step, so a reader either sees the
+ * old record or the new one. Returns `null` on success and the detail of the
+ * failure otherwise.
+ */
+function writeAtomic(path: string, body: string, pid: number): string | null {
+  temporaryCounter += 1;
+  const temporary = `${path}.${String(pid)}.${String(temporaryCounter)}.${String(Date.now())}.tmp`;
+  try {
+    writeFileSync(temporary, body, { encoding: "utf8", mode: 0o600 });
+    renameSync(temporary, path);
+    return null;
+  } catch (cause) {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      /* the temp may never have been created; its absence is the desired state */
+    }
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+let temporaryCounter = 0;
+
+/** What a take-over must find before it replaces the lockfile. */
+type TakeOverExpectation =
+  | { kind: "holder"; holder: ChannelLeaseHolder }
+  | { kind: "torn" };
+
+/**
+ * Replace a lockfile somebody else wrote, inside a critical section.
+ *
+ * The section is the whole of the fix for the interleaving in APRV-424's
+ * second review: two processes that had both read one dead holder used to take
+ * turns deleting each other's live lease. Inside it the record is read AGAIN
+ * and must still be exactly what was judged (the same pid and the same
+ * `started_at`), so the second reclaimer of a pair abandons its take-over,
+ * finds a live record on the next pass, and refuses.
+ *
+ * `busy` means another process holds the section right now: the caller waits
+ * and comes round again rather than forcing it, because forcing a critical
+ * section is the same as not having one.
+ */
+function takeOver(
+  path: string,
+  body: string,
+  pid: number,
+  expect: TakeOverExpectation,
+): "taken" | "changed" | "busy" | { detail: string } {
+  const lockPath = `${path}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
+  const entered = createExclusive(lockPath, `${JSON.stringify({ pid, at: Date.now() })}\n`);
+  if (entered !== "created") {
+    if (entered !== "exists") return entered;
+    // A reclaim lock older than the handful of syscalls the section takes
+    // belongs to a process that died inside it. One crash must not wedge the
+    // gate for good.
+    let age = 0;
+    try {
+      age = Date.now() - statSync(lockPath).mtimeMs;
+    } catch {
+      return "busy";
+    }
+    if (age < CHANNEL_LEASE_RECLAIM_STALE_MS) return "busy";
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* somebody else cleared it first, which is the same outcome */
+    }
+    return "busy";
+  }
+
+  try {
+    const fresh = readHolderSettled(path);
+    if (fresh.state === "absent") {
+      // The record went away while this process was entering the section: the
+      // holder released it, or another take-over finished. Create rather than
+      // rename, so a fresh taker that got there first is not overwritten.
+      const created = createExclusive(path, body);
+      if (created === "created") return "taken";
+      return created === "exists" ? "changed" : created;
+    }
+    if (expect.kind === "torn") {
+      if (fresh.state !== "torn") return "changed";
+    } else {
+      if (fresh.state !== "held") return "changed";
+      // Identity is the pid AND the instant it wrote, so a reused pid holding
+      // a fresh lease is not mistaken for the dead holder that was judged.
+      if (fresh.holder.pid !== expect.holder.pid) return "changed";
+      if (fresh.holder.startedAt !== expect.holder.startedAt) return "changed";
+    }
+    const written = writeAtomic(path, body, pid);
+    return written === null ? "taken" : { detail: written };
+  } finally {
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* advisory: an abandoned reclaim lock ages out above */
+    }
+  }
 }
 
 function leaseFor(path: string, mode: ChannelLeaseMode, pid: number): ChannelLease {

@@ -18,7 +18,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
@@ -26,12 +26,21 @@ import {
   channelLeaseDirFor,
   channelLeasePathFor,
   pidIsAlive,
+  probePid,
+  processStartedAt,
   readChannelLease,
+  reclaimDetail,
   takeChannelLease,
   CHANNEL_LEASE_FILE,
+  CHANNEL_LEASE_RECLAIM_STALE_MS,
+  CHANNEL_LEASE_RECLAIM_SUFFIX,
   CHANNEL_LEASE_REFUSAL_CODES,
+  CHANNEL_LEASE_START_TOLERANCE_MS,
+  type ChannelLeaseHolder,
   type ChannelLeaseMode,
+  type ChannelLeaseOutcome,
   type ChannelLeaseRefusalCode,
+  type PidProbe,
 } from "../src/core/channel-lease.js";
 import { scratchRoot } from "./scenario.js";
 
@@ -250,4 +259,212 @@ test("an unwritable gate refuses rather than promising exclusion it cannot keep 
     assert.equal(refused.holder, null);
     assert.match(refused.message, /telegram-transport\.lock/u);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The take-over, and who may judge a pid dead (APRV-424, second review)
+// ---------------------------------------------------------------------------
+
+/** A probe that answers from a table, so no real process is needed. */
+function probeTable(live: Record<number, { foreign?: boolean; startedAt?: Date }>) {
+  return (pid: number): PidProbe => {
+    const found = live[pid];
+    if (found === undefined) return { running: false, foreign: false, startedAt: null };
+    return {
+      running: true,
+      foreign: found.foreign ?? false,
+      startedAt: found.startedAt ?? null,
+    };
+  };
+}
+
+/** Plant a lease held by `pid`, without asking whether that pid is real. */
+function plant(logPath: string, pid: number, mode: ChannelLeaseMode, startedAt?: Date): void {
+  const planted = takeChannelLease(logPath, mode, {
+    pid,
+    probe: () => ({ running: true, foreign: false, startedAt: null }),
+    ...(startedAt === undefined ? {} : { now: () => startedAt }),
+  });
+  assert.equal(planted.ok, true, `the fixture could not plant a lease: ${JSON.stringify(planted)}`);
+}
+
+test("two reclaimers of one dead lease cannot both end up holding (APRV-424)", () => {
+  // THE FINDING. Both processes read the same dead holder; the first unlinked
+  // it and created its own live lease; the second, resuming inside its own
+  // read-then-unlink, deleted that live lease and created its own. Both then
+  // held one gate, which is the state the lease exists to rule out.
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "webhook");
+
+  const probe = probeTable({ 4001: {}, 4002: {} });
+  let second: ChannelLeaseOutcome | null = null;
+  const first = takeChannelLease(logPath, "poll", {
+    pid: 4001,
+    probe,
+    // The interleaving, made deliberate: the whole of the other take runs in
+    // the gap between judging the holder dead and replacing its lockfile.
+    beforeTakeOver: () => {
+      second ??= takeChannelLease(logPath, "poll", { pid: 4002, probe });
+    },
+  });
+
+  assert.ok(second !== null, "the interleaved take never ran");
+  const outcomes = [first, second].filter((outcome) => outcome !== null);
+  const holders = outcomes.filter((outcome) => outcome.ok);
+  assert.equal(
+    holders.length,
+    1,
+    `${String(holders.length)} of two interleaved reclaimers hold one gate: ${JSON.stringify(outcomes)}`,
+  );
+
+  // And the loser refuses in the ordinary vocabulary, naming the winner.
+  const loser = outcomes.find((outcome) => !outcome.ok);
+  assert.ok(loser !== undefined && !loser.ok);
+  if (loser !== undefined && !loser.ok) {
+    assert.equal(loser.code, "telegram-poller-running");
+    assert.equal(loser.holder?.pid, 4002);
+  }
+  // The file names exactly one live process, and it is the winner.
+  assert.equal(readChannelLease(logPath)?.pid, 4002);
+});
+
+test("a take-over never leaves the lockfile absent (APRV-424)", () => {
+  // The other half of the same fix: the reclaim used to unlink and then
+  // create, so a third process arriving in that gap found an empty gate. The
+  // replacement is a rename, which is one step.
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "poll");
+  const probe = probeTable({ 5001: {} });
+
+  let sawAbsent = false;
+  const taken = takeChannelLease(logPath, "webhook", {
+    pid: 5001,
+    probe,
+    beforeTakeOver: () => {
+      sawAbsent ||= readChannelLease(logPath) === null;
+    },
+  });
+  assert.equal(taken.ok, true, JSON.stringify(taken));
+  assert.equal(sawAbsent, false, "the lockfile was absent before the take-over");
+  assert.equal(readChannelLease(logPath)?.pid, 5001);
+  assert.equal(existsSync(`${channelLeasePathFor(logPath)}.reclaim`), false, "a reclaim lock was left behind");
+  if (taken.ok) {
+    assert.equal(taken.reclaimed?.pid, DEAD_PID);
+    assert.equal(taken.reclaimedBecause, "gone");
+  }
+});
+
+test("a reused pid does not wedge the gate (APRV-424)", () => {
+  // Review finding 3. `kill(pid, 0)` alone says "a process with that number
+  // exists", which is not the question: a number that belonged to a webhook
+  // runner this morning can belong to a text editor this afternoon, and the
+  // gate was then locked until a human deleted the file.
+  const logPath = gate();
+  const leaseWritten = new Date("2026-09-21T10:00:00Z");
+  plant(logPath, 6001, "webhook", leaseWritten);
+
+  // Same number, a process that started AFTER the lease was written.
+  const probe = probeTable({
+    6001: { startedAt: new Date("2026-09-21T11:00:00Z") },
+    6002: {},
+  });
+  const taken = takeChannelLease(logPath, "poll", { pid: 6002, probe });
+  assert.equal(taken.ok, true, `a recycled pid held the gate shut: ${JSON.stringify(taken)}`);
+  if (taken.ok) {
+    assert.equal(taken.reclaimedBecause, "recycled");
+    assert.equal(taken.reclaimed?.pid, 6001);
+    assert.match(reclaimDetail(taken.reclaimed as ChannelLeaseHolder, "recycled"), /number has been reused/u);
+  }
+});
+
+test("a pid that started before the lease is still its holder (APRV-424)", () => {
+  // The other direction, and the one that must NOT reclaim: a long-running
+  // process took the lease some time after it started, which is the ordinary
+  // shape of every restart.
+  const logPath = gate();
+  const leaseWritten = new Date("2026-09-21T10:00:00Z");
+  plant(logPath, 6101, "poll", leaseWritten);
+  const probe = probeTable({ 6101: { startedAt: new Date("2026-09-21T09:00:00Z") }, 6102: {} });
+  const refused = takeChannelLease(logPath, "webhook", { pid: 6102, probe });
+  assert.equal(refused.ok, false, "a live holder was reclaimed out from under itself");
+  if (!refused.ok) assert.equal(refused.code, "telegram-poller-running");
+
+  // And a holder whose start time cannot be learned at all keeps the gate:
+  // an unanswerable question is answered the strict way.
+  const unknown = takeChannelLease(logPath, "webhook", {
+    pid: 6103,
+    probe: probeTable({ 6101: {}, 6103: {} }),
+  });
+  assert.equal(unknown.ok, false, "an unprobeable start time reclaimed a live holder");
+});
+
+test("a pid this process cannot signal is not this gate's holder (APRV-424)", () => {
+  // EPERM used to read as "alive", so a recycled number owned by another user
+  // wedged the gate until a human deleted the file. A lease in this gate is
+  // written by a process launched as this one was, so a foreign owner is a
+  // reused number far more often than it is the holder.
+  const logPath = gate();
+  plant(logPath, 7001, "webhook");
+  const probe = probeTable({ 7001: { foreign: true }, 7002: {} });
+  const taken = takeChannelLease(logPath, "poll", { pid: 7002, probe });
+  assert.equal(taken.ok, true, `a foreign pid held the gate shut: ${JSON.stringify(taken)}`);
+  if (taken.ok) {
+    assert.equal(taken.reclaimedBecause, "foreign");
+    assert.match(reclaimDetail(taken.reclaimed as ChannelLeaseHolder, "foreign"), /cannot signal/u);
+  }
+});
+
+test("the real probe answers this process and a number nobody holds (APRV-424)", () => {
+  // The default probe, exercised against the two pids a test can be sure
+  // about: this process, and one the operating system has not handed out.
+  const mine = probePid(process.pid);
+  assert.equal(mine.running, true);
+  assert.equal(mine.foreign, false);
+  if (mine.startedAt !== null) {
+    // Where the platform answers, it answers about THIS process, which cannot
+    // have started after the moment this test is running.
+    assert.ok(
+      mine.startedAt.getTime() <= Date.now() + CHANNEL_LEASE_START_TOLERANCE_MS,
+      `the probe put this process's start in the future: ${mine.startedAt.toISOString()}`,
+    );
+  }
+  assert.equal(probePid(DEAD_PID).running, false);
+  assert.equal(pidIsAlive(process.pid), true);
+  assert.equal(pidIsAlive(DEAD_PID), false);
+  assert.equal(pidIsAlive(0), false);
+  assert.equal(processStartedAt(DEAD_PID), null);
+});
+
+test("a lease this process holds is rewritten whole, never half (APRV-424)", () => {
+  // Note 5 from the review: the same-pid rewrite used to write in place, so a
+  // reader could see a record torn across the write. It is a rename now, like
+  // every other write in this module.
+  const logPath = gate();
+  const first = takeChannelLease(logPath, "poll");
+  assert.equal(first.ok, true);
+  const again = takeChannelLease(logPath, "webhook");
+  assert.equal(again.ok, true);
+  const record = readChannelLease(logPath);
+  assert.equal(record?.mode, "webhook");
+  assert.equal(record?.pid, process.pid);
+  // No temp file survives either write.
+  const leftovers = readdirSync(channelLeaseDirFor(logPath)).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(leftovers, [], `a take left temporary files behind: ${leftovers.join(", ")}`);
+  if (again.ok) again.lease.release();
+});
+
+test("an abandoned reclaim lock ages out rather than wedging the gate (APRV-424)", () => {
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "poll");
+  const lockPath = `${channelLeasePathFor(logPath)}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
+  writeFileSync(lockPath, `${JSON.stringify({ pid: DEAD_PID, at: 0 })}\n`, "utf8");
+  // Older than the handful of syscalls the section takes: the process that
+  // entered it died inside.
+  const old = new Date(Date.now() - CHANNEL_LEASE_RECLAIM_STALE_MS * 4);
+  utimesSync(lockPath, old, old);
+
+  const taken = takeChannelLease(logPath, "webhook", { probe: probeTable({}) });
+  assert.equal(taken.ok, true, `an abandoned reclaim lock wedged the gate: ${JSON.stringify(taken)}`);
+  assert.equal(existsSync(lockPath), false, "the abandoned reclaim lock was left in place");
+  if (taken.ok) taken.lease.release();
 });
