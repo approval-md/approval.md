@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 
 import { REDACTION_PLACEHOLDER, redactSecrets } from "../src/adapters/contract.js";
-import { probeSmtp, type SmtpProbeResult } from "../src/adapters/smtp.js";
+import { probeSmtp, tlsServername, type SmtpProbeResult } from "../src/adapters/smtp.js";
 import { assertLoopback, startMockSmtp, type MockSmtp } from "./smtp-mock.js";
 
 /** Distinctive enough to hunt for in any string this suite captured. */
@@ -304,4 +304,63 @@ test("a server that never answers EHLO is smtp-timeout", async () => {
   if (result.ok) return;
   assert.equal(result.code, "smtp-timeout");
   assert.deepEqual(result.transcript, ["greeting 220"]);
+});
+
+// ---------------------------------------------------------------------------
+// 4. The host is an address, not a name (APRV-416)
+// ---------------------------------------------------------------------------
+
+test("tlsServername sends SNI for a name and nothing for an address", () => {
+  assert.equal(tlsServername("smtp.example.com"), "smtp.example.com");
+  assert.equal(tlsServername("SMTP.Example.Com"), "SMTP.Example.Com");
+  assert.equal(tlsServername("localhost"), "localhost");
+  assert.equal(tlsServername("127.0.0.1"), undefined);
+  assert.equal(tlsServername("10.0.0.7"), undefined);
+  assert.equal(tlsServername("::1"), undefined);
+  assert.equal(tlsServername("[::1]"), undefined);
+  assert.equal(tlsServername("2001:db8::25"), undefined);
+});
+
+/**
+ * The regression this task exists for. Under Node 26 an IP-literal
+ * `servername` is a hard error, so before the fix every session against
+ * 127.0.0.1 died at the handshake without ever looking at a certificate.
+ *
+ * Verification is ON here, unlike every other case in this file: the point is
+ * that the handshake now gets far enough to judge the fixture certificate. It
+ * is self-signed and no CA in this process trusts it, so the session still
+ * fails, and WHICH failure is the assertion. A certificate verdict means the
+ * ServerName refusal is gone; the ServerName refusal would mean it is not.
+ */
+test("a STARTTLS probe of an IP host under strict verification fails on the certificate, not on ServerName", async () => {
+  const server = await mock({ tls: "none", user: USER, password: PASSWORD });
+  assert.equal(tlsServername(server.host), undefined, "the mock is not on an IP literal");
+  const result = await probe(server, {
+    user: USER,
+    password: PASSWORD,
+    tlsRejectUnauthorized: true,
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "smtp-tls-failed");
+  assert.match(result.message, /self[- ]signed certificate/iu, result.message);
+  assert.doesNotMatch(result.message, /ServerName/iu, result.message);
+  assert.deepEqual(result.transcript, ["greeting 220", "EHLO 250", "STARTTLS 220"]);
+});
+
+test("an implicit-TLS probe of an IP host under strict verification fails on the certificate, not on ServerName", async () => {
+  const server = await mock({ tls: "implicit", user: USER, password: PASSWORD });
+  assert.equal(tlsServername(server.host), undefined, "the mock is not on an IP literal");
+  const result = await probe(server, {
+    user: USER,
+    password: PASSWORD,
+    tlsRejectUnauthorized: true,
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "smtp-tls-failed");
+  assert.match(result.message, /self[- ]signed certificate/iu, result.message);
+  assert.doesNotMatch(result.message, /ServerName/iu, result.message);
 });

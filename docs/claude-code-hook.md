@@ -733,14 +733,36 @@ notion that must not become a write authorization. `tar -xzf pkg.tgz -C build`
 is a workspace write; `tar -xzf pkg.tgz -C /Users/you/project/build` is a
 question. This is exactly the strictness `rm` has had since APRV-267.
 
-**There is no disk pass for a write destination, and that is a limit rather than
-a claim.** The delete rule below and the read rule after it each resolve their
-targets against the filesystem and tighten; a write destination is answered from
-the text alone, here and in the `workspace-write` row above it, so a relative or
-scratch-rooted destination that reaches outside the roots through a SYMLINK
-classifies as the workspace write the text describes. That is the same answer
-`cp x build/y` and `tee build/y` have always had, and APRV-402 is the task for
-the pass that would close it.
+**A write destination gets a disk pass too, since APRV-402.** It used to be the
+one rule of the three answered from the text alone, so a relative or
+scratch-rooted destination that reached outside the roots through a SYMLINK
+classified as the workspace write the text described: `cp x build/y`,
+`tee build/y`, `mkdir build/y`, `tar -x -C build` and
+`npm pack --pack-destination build` were all autonomous with `build` pointing
+anywhere at all. The hook now re-reads each destination the same way it re-reads
+a delete target and tightens:
+
+| the hook finds | class |
+|---|---|
+| the destination's nearest existing ancestor resolves and stays under the working directory or a scratch root | `files.write.workspace`, the rule's own |
+| a symlink in the path resolves the destination out of every root | `files.delete.out_of_scope`, rule `write-out-of-scope-resolved` |
+| nothing on the path resolves, or the segment cannot be re-read | `files.delete.out_of_scope`, rule `write-out-of-scope-resolved` |
+
+The roots are the resolved working directory plus the same scratch roots the
+delete rule uses, so the two rules cannot disagree about where the agent's
+scratch is. The read scope is deliberately NOT among them: a read notion must
+not become a write authorization, which is the same sentence the paragraph above
+makes about the classifier. The pass reads every argument that is not spelled as
+a flag, plus the value half of `--opt=value`, which reaches `-C`, `-o`, `-out`
+and `--pack-destination` without a second copy of the classifier's flag table.
+It covers the `workspace-write` row and the six packaging answers; `rm` of a
+relative path in the workspace and a shell redirect into one still answer from
+the text.
+
+It resolves the argument as written and performs no shell expansion, so
+`cp x ~/Desktop/y` and a glob destination are still the workspace writes the
+text describes. Like the other two passes it can only ever narrow, which is what
+lets `approval hook classify` and the hook itself share it.
 
 `tar` has one more answer of its own: a `tar` whose MODE is not in its words
 (`tar -f pkg.tgz`, with no `-t`, `-x` or `-c` anywhere) is `hook-opaque`. The
@@ -1021,7 +1043,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
+| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410) |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
@@ -1125,11 +1147,59 @@ record's own timestamp; `core/harness-wait.ts` holds the number and the reasonin
   directory adopts it or carries its grant exactly as APRV-117 describes.
 - **Past the grace** the hook takes it back. The invocation that runs out of both
   its wait and the grace appends `approval.withdrawn` with reason `timeout` for
-  the requests it opened, and any later invocation of the same actor sweeps the
+  the requests it opened, and a later invocation of the same actor sweeps the
   ones earlier tool calls left behind — the requests it is not itself asking
   about, whose grace has run out, and which the verified log still shows as
   pending. Withdrawal stays requester-only, so a hook only ever withdraws
   questions this actor asked.
+
+#### Who withdraws, and what happens when nobody does (APRV-410)
+
+The sentence above says "a later invocation of the same actor", and the word
+doing the work is *later*. The process that denied is over; there is no
+scheduler, and nothing outside the asking actor may take the question back:
+
+- `withdraw` is requester-only (APRV-106 rule 1, `not-requester`), and it
+  refuses a `system:` actor outright, because the runtime's way of ending a
+  request it was not asked to end is the TTL.
+- The event schema allows exactly one `system:` withdrawal and binds it to
+  reason `policy-drift`, in both directions (APRV-235). There is no spelling of
+  a daemon withdrawal under reason `timeout`.
+
+So the daemon cannot do it and the channel cannot do it. Until APRV-410 the
+sweep also ran on fewer invocations than that sentence covers: it sat at the
+intake of the gated path, which only a command carrying a `manual` or
+`supervised` class reaches. A session that denied on a timeout and then retried
+in a form that classified `autonomous` swept nothing, and its question stood
+until the TTL. That is the shape of the 2026-09-20 incident: a request opened at
+18:43:37, a wait expired at 18:52:37, a grace out at 18:57:37, and
+`approval.granted` seq 64473 recorded at 19:03:32 on a question no process was
+holding.
+
+Two things changed, and between them they bound the state rather than remove it:
+
+1. **The sweep now also runs on the autonomous path**, from the verified read
+   that invocation already performs for the open-window lookup. So any gated
+   tool call (autonomous, supervised or manual) takes back this actor's
+   abandoned questions. A **pass-through** allow still sweeps nothing,
+   deliberately: a call the hook answers before it has classes at all (the
+   `approval` CLI itself, a tool whose input names nothing gateable) holds no
+   payload hash, and sweeping with nothing to protect could take back a
+   question a sibling hook process had adopted and was waiting on.
+2. **A grant written past the grace carries nothing.** `findHarnessCarry` bounds
+   a grant by its request's TTL and, now, by the life of the question: when the
+   decision's own timestamp is later than the request's timestamp plus the
+   caller's wait and grace, a retry does not adopt it and asks again. So the
+   answer to "may a retry of that exact command in that directory adopt a late
+   grant" is **no**, definitively, whether or not anyone withdrew.
+
+What is NOT fixed, and is worth knowing before you read a log: a decision that
+lands past the grace on a request nobody withdrew is still recorded as an
+ordinary `approval.granted`, and the approver is still told their tap landed. A
+distinct refusal at the decision surface (the channel telling the sender the
+question expired, and the log carrying that rather than a grant) needs a new
+member of `channel_decision_refusal_codes`, which SPEC.md §11.2 requires a
+registry row for. That is a spec amendment and its own task.
 
 The reason is what a stale request costs. On 2026-09-06 three waits expired
 behind a dead daemon, nothing retried them, and a dozen requests sat live until

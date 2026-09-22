@@ -3428,6 +3428,73 @@ function protectedRank(surface: string): number {
 }
 
 /**
+ * Is this word PROSE that merely spells a protected path, rather than a path?
+ * (APRV-409.)
+ *
+ * The incident: a `backlog task create` whose acceptance-criterion argument
+ * began with the literal text of a workflow path and continued into a sentence
+ * classified `policy.edit.ci`, sat the full hook wait on the gate and was
+ * denied on timeout. The command writes one task file and touches no workflow.
+ * {@link pathSegments} splits on slashes only, so a word whose leading segments
+ * are a protected DIRECTORY run prefix-matches whatever follows those slashes,
+ * sentence included. An exact-file entry does not, because it matches on the
+ * FINAL segment, which is why the same sentence beginning `CLAUDE.md` always
+ * classified as an ordinary workspace write.
+ *
+ * The test drawn here is the narrow one, and it is narrow in a stated way: the
+ * word is prose only when the protected match came ENTIRELY from a
+ * whitespace-free head. Concretely, all three hold:
+ *
+ * 1. the word contains whitespace at all;
+ * 2. the first of its segments carrying whitespace is not the first segment,
+ *    so there is a head in front of it;
+ * 3. that head, on its own, already classifies as the SAME surface the whole
+ *    word did.
+ *
+ * When (3) fails the word is kept, which is the fail-closed direction and is
+ * what keeps the shapes below unmoved:
+ *
+ * - `my notes/CLAUDE.md` and any other exact-file match at any depth: the match
+ *   needs the final segment, the head classifies as nothing, and the word keeps
+ *   `policy.edit`. A real file named with a space therefore stays protected.
+ * - `my notes/.github/workflows/x.yml`: whitespace BEFORE the protected run,
+ *   head `my notes` classifies as nothing, word unmoved.
+ * - every word with no whitespace at all, which is the whole ordinary universe
+ *   of paths: condition (1) fails before anything is computed.
+ *
+ * What does move is the one shape prose and a path share exactly: a
+ * directory-prefix match whose remainder carries whitespace. `cp x
+ * ".approval/my file.txt"` is a real path of that shape and now takes the
+ * command's own class. That is a deliberate trade and not an oversight —
+ * `my file.txt` and `ci.yml should not gate this task` are the same string
+ * shape, and no pure, disk-free rule tells them apart. A threshold on how much
+ * whitespace the remainder carries would have rescued the first, and it is
+ * rejected: a number here is folklore a second implementation has to guess at,
+ * and the conformance suite would be pinning it. The write itself is not
+ * unguarded: `core/protected-path-guard.ts` judges what a commit actually
+ * changed, from the log rather than from a session, and a `.approval/` file
+ * with no authorization record still fails the pull request.
+ *
+ * Pure and disk-free like the rest of this file: no resolution, no stat, no
+ * question about whether anything exists.
+ */
+function proseNamingProtectedPath(
+  word: string,
+  surface: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+): boolean {
+  if (!/\s/u.test(word)) return false;
+  const segments = pathSegments(word);
+  const firstSpaced = segments.findIndex((segment) => /\s/u.test(segment));
+  // `-1` is a word whose whitespace survived no segment (nothing produces it
+  // today) and `0` is whitespace in or before the first segment: both leave no
+  // whitespace-free head to have matched, so both keep the word.
+  if (firstSpaced <= 0) return false;
+  const head = segments.slice(0, firstSpaced).join("/");
+  return protectedPathClass(head, protectedPaths) === surface;
+}
+
+/**
  * The strictest protected surface named by these words, with the word itself.
  *
  * `null` when none of them is protected. The word is returned verbatim, which
@@ -3437,15 +3504,24 @@ function protectedRank(surface: string): number {
  * did and is what keeps a bare-string policy byte-identical: two routed paths
  * in one segment are two equally consequential surfaces, and the segment's
  * class names one of them while `ClassifiedSegment.path` names the word.
+ *
+ * `skipProse` turns on {@link proseNamingProtectedPath} (APRV-409) and is
+ * passed by the POSITIONAL scan alone. The other caller here is the
+ * write-redirection targets, whose words are paths by construction — the shell
+ * is about to create that file — and the same is true of the paths
+ * `core/apply-patch.ts` and the hook's file-tool pass hand to
+ * {@link protectedPathClass} directly. None of them is offered the skip.
  */
 function strictestProtected(
   words: readonly string[],
   protectedPaths: readonly ProtectedPathEntry[],
+  skipProse = false,
 ): { surface: string; path: string } | null {
   let best: { surface: string; path: string } | null = null;
   for (const word of words) {
     const surface = protectedPathClass(word, protectedPaths);
     if (surface === null) continue;
+    if (skipProse && proseNamingProtectedPath(word, surface, protectedPaths)) continue;
     if (best === null || protectedRank(surface) < protectedRank(best.surface)) {
       best = { surface, path: word };
     }
@@ -3876,8 +3952,14 @@ function classifySegment(
   // direction-blind — a copy OUT of the policy directory is as gated as a copy
   // into it, because the classifier cannot tell which argument the binary will
   // treat as the destination and guessing would be the ungated direction.
+  //
+  // This is the ONE scan that skips prose (APRV-409, `skipProse`): a positional
+  // is whatever the author quoted, and an acceptance criterion that opens with
+  // a directory path is a sentence rather than a file. Redirection targets
+  // above, and the apply-patch and file-tool paths elsewhere, are paths by
+  // construction and are not offered the skip.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
-    const named = strictestProtected(positionals, protectedPaths);
+    const named = strictestProtected(positionals, protectedPaths, true);
     if (named !== null) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }

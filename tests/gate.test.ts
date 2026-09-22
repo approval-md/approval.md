@@ -2163,6 +2163,83 @@ test("findHarnessCarry: the bounds are bytes, class, harness, unspent, live", ()
   assertClean(unit);
 });
 
+test("findHarnessCarry: a grant written past the asker's window carries nothing (APRV-410)", () => {
+  // The incident this bound exists for: a hook wait expired, the retry grace
+  // ran out, and a human tapped approve six minutes later on a question no
+  // process was holding (this repository's log, seq 64473, 2026-09-20). The
+  // grant was live, so a retry of the identical command inside the TTL would
+  // have proceeded on it. Two facts decide it, both runtime-assigned and both
+  // read from the verified log: when the question was asked, and when it was
+  // answered.
+  const unit = newCase();
+  // Asked at T0+1m, answered at T0+2m: one minute of asker to answer in.
+  harnessGrant(unit, at(1), at(2));
+  const live = records(unit);
+  const ttl = 3_600_000;
+  const carry = (abandonAfterMs: number | null): unknown =>
+    findHarnessCarry(live, PAYLOAD_HASH, "communicate.email.external", at(3), ttl, abandonAfterMs);
+
+  // A window the answer sits inside: unchanged, and APRV-117's carryover holds.
+  assert.equal((carry(120_000) as { kind?: string } | null)?.kind, "granted");
+  // The boundary is inclusive of the instant itself: an answer AT the end of
+  // the window was still answered to somebody.
+  assert.equal((carry(60_000) as { kind?: string } | null)?.kind, "granted");
+  // One millisecond less and the asker was gone.
+  assert.equal(carry(59_999), null);
+  assert.equal(carry(30_000), null);
+  // A negative window is read as zero rather than as a widening.
+  assert.equal(carry(-1_000_000), null);
+
+  // OPT-IN, which is what makes this strictly stricter: a caller that declares
+  // no window gets exactly the answer it got before this task, both by passing
+  // `null` and by not passing the argument at all.
+  assert.equal((carry(null) as { kind?: string } | null)?.kind, "granted");
+  assert.equal(
+    findHarnessCarry(live, PAYLOAD_HASH, "communicate.email.external", at(3), ttl)?.kind,
+    "granted",
+  );
+  assertClean(unit);
+});
+
+test("findHarnessCarry: the window bounds a GRANT and never a pending question (APRV-410)", () => {
+  // A pending question past its window is the requester's to withdraw, not this
+  // function's to hide: `cli/hook.ts` sweeps it through `withdraw`, which is
+  // requester-only (APRV-106 rule 1). If this bound swallowed pending requests
+  // too, a retry would ask a second question while the first sat unanswered on
+  // a phone, which is the attention APRV-117 exists to save.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  assert.equal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        summary: "Send deposit chaser",
+        execution: "harness",
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ).ok,
+    true,
+  );
+  const carry = findHarnessCarry(
+    records(unit),
+    PAYLOAD_HASH,
+    "communicate.email.external",
+    at(30),
+    3_600_000,
+    1,
+  );
+  assert.equal(carry?.kind, "pending");
+  assert.equal(carry?.actionKey, "task-042:chaser");
+  assertClean(unit);
+});
+
 test("findHarnessCarry ignores a request that is not harness-executed", () => {
   const unit = newCase();
   attest(unit);

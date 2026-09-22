@@ -37,6 +37,20 @@ const TEST_DIR = join(REPO_ROOT, "dist", "tests");
 
 const USAGE = "run-tests.mjs [--only <name>...] [--shard <k>/<n>]";
 
+/**
+ * The module every test-file process loads before its first line (APRV-417).
+ *
+ * It deletes `FORCE_COLOR` and `NO_COLOR`, which `node --test` injects into the
+ * environment of each file it spawns when the runner's own stdout is a
+ * terminal, and which a test then hands to every CLI child it spawns. See the
+ * module's own header for why the scrub cannot live in the environment below
+ * and why one flag here covers every test file.
+ *
+ * Passed as `--import`, before `--test`, because `node --test` copies its own
+ * `execArgv` onto every file process: one flag, one place, all files.
+ */
+export const ENV_SCRUB_URL = new URL("./test-env-scrub.mjs", import.meta.url).href;
+
 // ---------------------------------------------------------------------------
 // Harness binaries are stubbed for the whole suite (APRV-227)
 // ---------------------------------------------------------------------------
@@ -296,7 +310,7 @@ function main(argv) {
   // somebody's real registry.
   const stateDir = mkdtempSync(join(tmpdir(), "approval-md-state-"));
 
-  const result = spawnSync(process.execPath, ["--test", ...files], {
+  const result = spawnSync(process.execPath, ["--import", ENV_SCRUB_URL, "--test", ...files], {
     cwd: REPO_ROOT,
     stdio: "inherit",
     // APRV-227: no test run through this runner reaches a real harness binary.

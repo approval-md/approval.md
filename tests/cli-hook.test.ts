@@ -4403,6 +4403,234 @@ test("APRV-287: three expired waits leave the loop floor closed", () => {
   assertClean(dir);
 });
 
+// ===========================================================================
+// APRV-410: who withdraws past the grace, and what a late grant authorizes
+// ===========================================================================
+
+/**
+ * The incident, from this repository's own log on 2026-09-20.
+ *
+ * `approval.requested` seq 64338 at 18:43:37; the nine-minute wait expired at
+ * 18:52:37 and the tool call was denied with a message promising that past the
+ * five-minute grace the hook would take the question back; no
+ * `approval.withdrawn` was ever appended; Carter tapped approve at 19:03:32 and
+ * `approval.granted` seq 64473 was recorded, six minutes past the grace, on a
+ * request no hook process was waiting for.
+ *
+ * Two facts came out of reading the code, and the cases below pin both.
+ *
+ * **Nobody but the asking actor can withdraw.** `withdraw` is requester-only
+ * and refuses a `system:` actor outright; the event schema binds the one
+ * `system:` withdrawal that exists to reason `policy-drift`, in both directions
+ * (APRV-235). So the daemon is not a candidate and the next gated call of the
+ * asking actor is the only writer there is. The sweep that does it used to sit
+ * at the intake of the GATED path alone, which an autonomous command never
+ * reaches — the gap the incident fell through, since the session's retry
+ * classified autonomously.
+ *
+ * **A grant written past the grace must authorize nothing.** Withdrawal is best
+ * effort by construction (a session can simply stop making calls), so the
+ * property cannot rest on it. `findHarnessCarry` now bounds a granted carry by
+ * the life of the question as well as by the TTL of the answer, so a retry past
+ * the grace asks again instead of proceeding on a tap nobody was holding.
+ *
+ * No phone anywhere in here: every record is written through the real append
+ * path, by the real CLI verbs.
+ */
+
+/** A wait that expires and leaves its question standing, the grace untouched. */
+function timedOutInsideGrace(dir: string, command: string, toolUseId: string): Verdict {
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(command, toolUseId),
+  );
+  return verdictOf(run);
+}
+
+/** A grace short enough that anything already written is past it. */
+const PAST_GRACE = ["--timeout", "1ms", "--retry-grace", "1ms"] as const;
+
+test("APRV-410: an AUTONOMOUS tool call sweeps the question an earlier wait abandoned", () => {
+  const dir = ready();
+  const first = timedOutInsideGrace(dir, "npm install left-pad", "tu-410-a");
+  assert.equal(first.permission, "deny", first.reason);
+  assert.match(first.reason, /NOTHING WAS WITHDRAWN/u);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u);
+
+  // A read: `read.shell`, autonomous under this policy, and before APRV-410 it
+  // reached no sweep at all.
+  const sweeper = verdictOf(
+    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(READ_COMMAND, "tu-410-read")),
+  );
+  assert.equal(sweeper.permission, "allow", sweeper.reason);
+  assert.match(sweeper.reason, /^autonomous: read\.shell/u);
+
+  const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1, JSON.stringify(allRecords(dir).map((r) => r["event"])));
+  const only = withdrawn[0] as Record<string, unknown>;
+  assert.equal(only["action_key"], "hook:sess-1:tu-410-a:deps.add");
+  assert.equal(payloadOf(only)["reason"], "timeout");
+  // The requester took it back, which is the only actor `withdraw` accepts.
+  assert.equal(only["actor"], "agent:claude-code");
+
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.doesNotMatch(queue.stdout, /tu-410-a/u, "nothing is left on the human's queue");
+  assertClean(dir);
+});
+
+test("APRV-410: the same autonomous call inside the grace sweeps nothing", () => {
+  // The control. The sweep is keyed to the abandonment window and not to the
+  // fact that a call happened, so a question still inside its grace keeps its
+  // buttons and the APRV-117 retry can still adopt it.
+  const dir = ready();
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-410-b");
+  const sweeper = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-410-read-2")),
+  );
+  assert.equal(sweeper.permission, "allow", sweeper.reason);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u);
+
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.match(queue.stdout, /tu-410-b/u, "the question is still in front of the human");
+  assertClean(dir);
+});
+
+test("APRV-410: a grant written past the grace is not carried, and the retry asks again", () => {
+  const dir = ready();
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-410-c");
+  const key = "hook:sess-1:tu-410-c:deps.add";
+
+  // The tap, after the asking process has gone. It lands: nothing in this task
+  // stops a decision being recorded, which is AC2's open half.
+  const granted = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+  assert.equal(granted.code, 0, `${granted.stdout}${granted.stderr}`);
+  const grant = allRecords(dir).find((record) => record["event"] === "approval.granted");
+  assert.ok(grant !== undefined, "the late tap was recorded as a grant");
+  assert.equal(grant["action_key"], key);
+
+  // The retry of the IDENTICAL command, under a window the grant is past.
+  const retry = verdictOf(
+    runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "1ms"],
+      dir,
+      bashEvent("npm install left-pad", "tu-410-d"),
+    ),
+  );
+  assert.equal(retry.permission, "deny", retry.reason);
+  assert.match(retry.reason, /^hook-timeout: /u);
+  assert.doesNotMatch(retry.reason, /granted/u, "no grant was carried into this verdict");
+
+  const records = allRecords(dir);
+  // It asked again rather than proceeding, and nothing executed on the grant.
+  assert.equal(
+    records.filter((record) => record["event"] === "approval.requested").length,
+    2,
+    "the retry opened a question of its own",
+  );
+  assert.equal(
+    records.some((record) => record["event"] === "execution.started"),
+    false,
+    "the late grant authorized no execution",
+  );
+  assertClean(dir);
+});
+
+test("APRV-410: a grant written INSIDE the grace is still carried (APRV-117 unbroken)", () => {
+  // The control that says this task narrowed the carryover and did not remove
+  // it. Same sequence, same late tap, and a retry whose window the decision
+  // still sits inside: the grant is spent and the command is allowed.
+  const dir = ready();
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-410-e");
+  const key = "hook:sess-1:tu-410-e:deps.add";
+  const granted = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+  assert.equal(granted.code, 0, `${granted.stdout}${granted.stderr}`);
+
+  const retry = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("npm install left-pad", "tu-410-f")),
+  );
+  assert.equal(retry.permission, "allow", retry.reason);
+  assert.match(retry.reason, /^granted: /u);
+
+  const records = allRecords(dir);
+  assert.equal(
+    records.filter((record) => record["event"] === "approval.requested").length,
+    1,
+    "the retry carried the grant rather than asking again",
+  );
+  const started = records.filter((record) => record["event"] === "execution.started");
+  assert.equal(started.length, 1);
+  assert.equal((started[0] as Record<string, unknown>)["action_key"], key);
+  assertClean(dir);
+});
+
+test("APRV-410: the timeout deny names who withdraws and what a late grant does", () => {
+  // AC3 at the surface an agent actually reads. The old text promised that
+  // "the hook takes the question back" with no subject that exists once the
+  // process has denied, and it said nothing about the grant that may still be
+  // written. Both are now in the sentence.
+  const dir = ready();
+  const verdict = timedOutInsideGrace(dir, "npm install left-pad", "tu-410-g");
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /NEXT GATED TOOL CALL THIS ACTOR \(agent:claude-code\) MAKES/u);
+  assert.match(verdict.reason, /requester's own \(APRV-106\)/u);
+  assert.match(verdict.reason, /no daemon and no channel can do it/u);
+  assert.match(verdict.reason, /authorizes nothing/u);
+  assertClean(dir);
+});
+
+test("APRV-410: the withdrawal has no system: spelling, so no daemon can make it", () => {
+  // The reason the daemon is not the actor, asserted rather than argued. The
+  // runtime refuses a `system:` withdrawal at the first surface that reads the
+  // actor — here the flag parser, which will not construct one — and the gate
+  // refuses `actor-invalid` behind it for a caller that skipped the CLI. The
+  // request stays exactly as it was.
+  const dir = ready();
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-410-h");
+  const key = "hook:sess-1:tu-410-h:deps.add";
+  const attempt = runCli(
+    [
+      "withdraw",
+      "hook:sess-1:tu-410-h",
+      "--action",
+      key,
+      "--reason",
+      "timeout",
+      "--as",
+      "system:daemon",
+      "--json",
+    ],
+    dir,
+  );
+  assert.notEqual(attempt.code, 0, "a system: withdrawal must refuse");
+  assert.match(`${attempt.stdout}${attempt.stderr}`, /human:<id> or agent:<id>/u);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u);
+
+  // And the requester's own spelling of the same withdrawal works, which is
+  // what makes the next gated tool call the writer this task relies on.
+  const asRequester = runCli(
+    [
+      "withdraw",
+      "hook:sess-1:tu-410-h",
+      "--action",
+      key,
+      "--reason",
+      "timeout",
+      "--as",
+      "agent:claude-code",
+      "--json",
+    ],
+    dir,
+  );
+  assert.equal(asRequester.code, 0, `${asRequester.stdout}${asRequester.stderr}`);
+  const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1);
+  assert.equal(payloadOf(withdrawn[0] as Record<string, unknown>)["reason"], "timeout");
+  assertClean(dir);
+});
+
 test("APRV-287: three execution.failed still open the floor", () => {
   // The control for the case above: the streak the escalation exists for is
   // untouched, and three failed side-effecting tool calls still floor a session.

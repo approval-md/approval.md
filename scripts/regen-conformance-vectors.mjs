@@ -1497,6 +1497,129 @@ const commandClassVectors = [
       "the split is an ALLOWLIST of listing flags, so a flag this rule has never heard of is a creation and a future option cannot arrive as a read",
     input: { command: "git tag --unknown-future-flag" },
   },
+  // --- prose that opens with a protected directory path (APRV-409) -----------
+  //
+  // The quoting vectors at the top of this suite pin that a quoted argument is
+  // ONE word. These pin what happens to that word next: the positional scan
+  // splits it on its slashes, and until this it matched a protected directory
+  // run against the front of a sentence. The incident was a task-creation
+  // command whose acceptance criterion opened with a workflow path; it
+  // classified as a CI edit, sat the whole hook wait on the gate and was denied
+  // on timeout, having written one task file and touched no workflow.
+  //
+  // The rule is stated as a positive and a set of unmoved shapes, because this
+  // is a LOOSENING and a second implementation that took only the positive
+  // would loosen further than this one does. A positional word is prose when
+  // its protected match came entirely from a whitespace-FREE head; everything
+  // else keeps the answer it had. The unmoved shapes below are the whole of
+  // "else": a bare path, a path whose match needs its FINAL segment (a real
+  // file named with a space), whitespace before the protected run, a deeper
+  // match than the head answers, a path inside a sentence, and a protected FILE
+  // at the head of a sentence. The last two say where the rule does NOT reach:
+  // a redirection target is a path by construction whatever it spells, and a
+  // read never runs the positional scan at all.
+  //
+  // None of them carries `control`, which in this suite means a vector that
+  // expects a REFUSAL. Every one of these expects an answer; what makes them
+  // controls in the English sense is that the answer is the one from before
+  // this task.
+  //
+  // No policy entries here, like every vector in this suite: the paths are the
+  // built-in ones, so the surfaces are `policy.edit`, `policy.core` and
+  // `log.mutate` rather than any routed sub-class.
+  {
+    id: "prose-opening-with-a-workflow-path-is-a-workspace-write",
+    description:
+      "the incident: a task criterion that opens with the workflows directory path and runs on into a sentence writes one task file, and the protected match came from a directory run the sentence merely begins with",
+    input: {
+      command:
+        'backlog task create x --ac ".github/workflows/pages.yml deploys the built site on push to main with the minimal permissions and no other secret"',
+    },
+  },
+  {
+    id: "prose-opening-with-a-workflow-path-short-form",
+    description:
+      "the shortest form of the same shape: a path, one space, and four words of prose",
+    input: {
+      command: 'backlog task create x --ac ".github/workflows/pages.yml should not gate this"',
+    },
+  },
+  {
+    id: "prose-opening-with-the-log-directory-is-a-workspace-write",
+    description:
+      "the rule is tier-blind: a sentence opening with the log directory is prose too, and the strictest surface in the stack does not buy an exception",
+    input: {
+      command:
+        'backlog task create x --ac ".approval/log/events.jsonl is the live log and is never mutated"',
+    },
+  },
+  {
+    id: "prose-opening-with-a-protected-path-under-cp",
+    description:
+      "the same shape under a different effectful row: cp scans its positionals source and destination alike, and a sentence is neither",
+    input: { command: 'cp a.txt ".github/workflows/pages.yml deploys the site on push"' },
+  },
+  {
+    id: "prose-opening-with-a-protected-path-under-tee",
+    description: "and under tee, whose single positional is the file it would write",
+    input: { command: 'tee ".github/workflows/pages.yml deploys the site on push"' },
+  },
+  {
+    id: "bare-protected-path-is-unmoved",
+    description:
+      "the first of the unmoved shapes: a path with no whitespace in it is decided before the prose test is reached, so the whole ordinary universe of paths is byte-identical",
+    input: { command: "cp a.yml .github/workflows/pages.yml" },
+  },
+  {
+    id: "protected-file-with-an-embedded-space-is-unmoved",
+    description:
+      "a REAL file named with a space keeps its class when the match needs its final segment: an exact-file entry leaves no whitespace-free head to have matched, so the word is still a path",
+    input: { command: 'cp a.md "my notes dir/CLAUDE.md"' },
+  },
+  {
+    id: "whitespace-before-the-protected-run-is-unmoved",
+    description:
+      "whitespace in FRONT of the protected directory run leaves the word a path: the head before the first spaced segment classifies as nothing, so nothing is skipped",
+    input: { command: 'cp a.yml "my notes dir/.github/workflows/pages.yml"' },
+  },
+  {
+    id: "a-deeper-match-than-the-head-is-unmoved",
+    description:
+      "the skip requires the head to answer the SAME surface: here the head is a CI edit and the whole word is the policy file in a directory named with a space, so the match needed a segment the head does not carry and the word is kept",
+    input: { command: 'cp a.md ".github/workflows/sub dir/APPROVAL.md"' },
+  },
+  {
+    id: "a-protected-path-inside-a-sentence-is-unmoved",
+    description:
+      "a path in the MIDDLE of a sentence never matched in the first place, because the first segment carries the whitespace: this vector pins that the fix did not change the answer",
+    input: {
+      command:
+        'backlog task create x --ac "a sentence naming .github/workflows/pages.yml inside it"',
+    },
+  },
+  {
+    id: "a-protected-file-heading-a-sentence-is-unmoved",
+    description:
+      "a protected FILE at the head of a sentence answered a workspace write before this task and answers one after it, for the reason the bug had: an exact-file entry matches the final segment and a sentence is not one",
+    input: {
+      command:
+        'backlog task create x --ac "CLAUDE.md says the merge is armed by the session that opened the pull request"',
+    },
+  },
+  {
+    id: "a-redirection-onto-the-sentence-still-writes-the-protected-path",
+    description:
+      "the rule reaches the positional scan and nothing else: a redirection target is a file the shell is about to create, whatever it spells, so it keeps the protected class and the redirect-protected rule",
+    input: {
+      command: 'echo hi > ".github/workflows/pages.yml deploys the site on push"',
+    },
+  },
+  {
+    id: "a-read-of-the-sentence-is-unmoved",
+    description:
+      "a read never reaches the positional protected-path scan, so this answer is the one it always was and the fix did not widen a read into a write",
+    input: { command: 'cat ".github/workflows/pages.yml deploys the site on push"' },
+  },
 ];
 
 const gateVectors = [
@@ -2460,7 +2583,37 @@ const SUITES = [
     // `gunzip-list-is-a-read` joined the set. Nothing a second implementation
     // has ever been held to moved: 1.3.0 carries no `gunzip` vector at all, and
     // 1.4.0 has not been merged, so the number still names one set.
-    vectors_version: "1.4.0",
+    //
+    // 1.5.0 (APRV-409): a MINOR bump, the same shape a fourth time, and the one
+    // that most needed the question asked, because the behaviour behind it is a
+    // LOOSENING rather than a taxonomy gaining a shape. Thirteen new
+    // `prose-*` / `*-is-unmoved` vectors pin that a positional word whose
+    // protected match came entirely from a whitespace-FREE head is prose, and
+    // eight of the thirteen pin a shape that did NOT move.
+    //
+    // Why MINOR and not MAJOR, asked and answered. No committed expectation in
+    // this file moves. The suite was born with the quoting cases and gained
+    // `git push` (1.1.0), the harness family (1.2.0), the login shell (1.3.0)
+    // and the packaging tools (1.4.0); it has never carried a vector whose
+    // argument spells a protected path, so no implementation that passed 1.4.0
+    // was ever told what the old answer was. The MAJOR precedent in this
+    // repository is `policy-resolution` 2.0.0, where the suite's own
+    // `algorithm` line STATED a general rule a later task made wrong; nothing
+    // in this suite's algorithm or description states a rule about protected
+    // paths in argument text.
+    //
+    // What a second implementation must take from these thirteen, and it is the
+    // reason eight of them pin an unchanged answer: the positive alone is not
+    // the rule. An implementation that skipped every word containing whitespace
+    // would pass the five positives and fail four of the eight, and it would
+    // have stopped protecting a file named with a space. The rule is that the
+    // whitespace-free head must ALREADY answer the same surface the whole word
+    // answered, which is what makes the skip narrow: an exact-file match needs
+    // the final segment, a deeper match answers a different surface, and
+    // whitespace in front of the protected run leaves no head at all. The two
+    // remaining controls say the rule stops at the positional scan: a
+    // redirection target and a read are unmoved.
+    vectors_version: "1.5.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
