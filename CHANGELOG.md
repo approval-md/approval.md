@@ -51,6 +51,36 @@ before a tag.
   produce the one outcome SPEC §10.3 forbids — a pending request nobody is shown.
   The summary is what keeps it legal; the amendment literal zero would need is
   written out in APRV-425's notes and deliberately not applied.
+- **A workspace write is checked against the disk, and some of them are now
+  questions (APRV-402).** `files.write.workspace` used to be decided on the
+  command text alone, so a relative destination was the workspace whatever a
+  symlink on the way to it pointed at. The hook now resolves each destination
+  through its nearest existing ancestor, the same walk the delete and read
+  rules have used since APRV-267 and APRV-347, and tightens to
+  `files.delete.out_of_scope` with the rule string `write-out-of-scope-resolved`
+  when the result lands outside the working directory and every scratch root.
+  **What a live session will feel:** any `cp`, `mv`, `tee`, `mkdir`, `ln`,
+  `chmod`, `truncate` or `rmdir`, and any packaging write (`tar -x -C`,
+  `tar -c -f`, `gunzip`, `base64 -o`, `openssl dgst -out`,
+  `npm pack --pack-destination`), whose destination resolves outside those
+  roots now routes to a human instead of running. That includes an ABSOLUTE
+  destination inside another checkout, which was previously autonomous, and it
+  includes a destination that is under the temp root only through a symlink.
+  The pass can only ever narrow, no new class is minted, and the pure
+  classifier is unchanged. `rm` of a relative path in the workspace and a shell
+  redirect into one still answer from the text.
+- **The SMTP adapter stops sending an address as a server name (APRV-416).**
+  TLS SNI names a virtual host, so a `smtp.host` that is an IP literal is now
+  probed and sent to with no `servername` at all, which Node 26 requires and
+  earlier versions only warned about; verification of an address rests on the
+  certificate's IP SAN entry, and SNI is unchanged for a hostname.
+- **The site version guard binds every version string, and no page claims a
+  publish (APRV-395).** All eight strings across `index.html`,
+  `features/index.html`, `llms.txt` and `llms-full.txt` are now bound to
+  `package.json` and reported in one message, so a bump that moves the package
+  alone is told every file still to move; `llms.txt` states the version this
+  tree carries rather than asserting that it is on npm, which was false for the
+  whole window between a bump merging and the publish run finishing.
 - **The Releases page fills itself from the changelog (APRV-396).** After a
   successful publish, `publish.yml` creates the GitHub Release for the tag with
   the matching changelog section as its body, the title `approval-md X.Y.Z`, and

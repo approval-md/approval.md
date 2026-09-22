@@ -6263,6 +6263,14 @@ STARTTLS, AUTH — and then QUIT. It proves the host answers, that the TLS mode 
 the one the server offers, and that the credential is accepted. It does not prove
 delivery, and it puts no message on the wire.
 
+An `smtp.host` that is an IP address is probed without SNI (APRV-416). A server
+name is a name, so there is nothing to send for an address, and Node 26 refuses
+the session outright where earlier versions only warned. The certificate is
+still verified; what it is verified against is the address, which the server's
+certificate has to carry as an IP entry in its subject alternative names. A
+relay whose certificate names only a hostname therefore fails the probe when it
+is configured by address and passes when it is configured by that name.
+
 A failed probe keeps the values. A laptop behind a captive portal is not a reason
 to make you type five things again. The refusal prints the SMTP code and the
 server's first line, with the credential redacted, and the undo.

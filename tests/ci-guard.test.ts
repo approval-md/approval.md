@@ -354,6 +354,74 @@ test("run-tests --only refuses a name that matches no built test file", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The terminal is scrubbed out of every test-file process (APRV-417)
+// ---------------------------------------------------------------------------
+//
+// `node --test` sets FORCE_COLOR in the environment of each file process it
+// spawns whenever its own stdout is a terminal, and a test that spawns the CLI
+// hands that environment straight to the thing under test. `cli/style.ts` ranks
+// FORCE_COLOR above NO_COLOR and above a piped stdout by design (APRV-102), so
+// roughly twenty-five assertions over plain text found ANSI escapes on a
+// developer's laptop and passed in CI, from identical bytes.
+//
+// `scripts/test-env-scrub.mjs` deletes both variables, and `run-tests.mjs`
+// passes it as `--import`. Two things have to hold for that to be a guarantee
+// rather than a hope, and neither is visible in the diff that would break it:
+// the flag has to be on the spawn, and `node --test` has to carry its own
+// execArgv onto the file processes. Both are asserted here, the second against
+// a real spawn, because it is an assumption about the runtime and a Node
+// upgrade could retire it silently.
+
+test("the runner hands every test file the environment scrub, ahead of --test", () => {
+  const source = readFileSync(RUNNER, "utf8");
+  assert.match(
+    source,
+    /"--import",\s*ENV_SCRUB_URL,\s*"--test"/u,
+    "run-tests.mjs no longer passes scripts/test-env-scrub.mjs as --import before --test. Order matters: the module must be evaluated before the test file, and the flag must be part of the runner's own execArgv for node --test to copy it onto the file processes.",
+  );
+  const scrub = readFileSync(join(REPO_ROOT, "scripts", "test-env-scrub.mjs"), "utf8");
+  for (const name of ["FORCE_COLOR", "NO_COLOR"]) {
+    assert.match(
+      scrub,
+      new RegExp(`delete process\\.env\\.${name}`, "u"),
+      `scripts/test-env-scrub.mjs no longer deletes ${name}; a test would again pin the terminal it was launched from`,
+    );
+  }
+});
+
+test("a test file spawned by node --test sees neither FORCE_COLOR nor NO_COLOR", () => {
+  const dir = mkdtempSync(join(tmpdir(), "approval-md-env-scrub-"));
+  const file = join(dir, "scrubbed.test.mjs");
+  writeFileSync(
+    file,
+    [
+      'import assert from "node:assert/strict";',
+      'import { test } from "node:test";',
+      'test("the terminal did not reach this process", () => {',
+      '  assert.equal(process.env.FORCE_COLOR, undefined);',
+      '  assert.equal(process.env.NO_COLOR, undefined);',
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const scrub = pathToFileURL(join(REPO_ROOT, "scripts", "test-env-scrub.mjs")).href;
+  const result = spawnSync(process.execPath, ["--import", scrub, "--test", file], {
+    encoding: "utf8",
+    // Exactly what a terminal run injects, plus the variable a developer who
+    // dislikes colour exports by hand. Neither may survive into a test body.
+    env: { ...process.env, FORCE_COLOR: "1", NO_COLOR: "1" },
+  });
+
+  assert.equal(
+    result.status,
+    0,
+    `a test file still saw the colour variables:\n${result.stdout}\n${result.stderr}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Shard selection (APRV-149)
 // ---------------------------------------------------------------------------
 //
