@@ -44,12 +44,22 @@
  * things in two different directories, and a binding that ignored the working
  * directory would approve one of them and execute the other.
  *
- * Pure: no I/O, no clock, no randomness.
+ * Since APRV-401 the SCRIPT is inside it too, where the argv names one: an
+ * interpreter this runtime knows followed by a path operand, or a path at
+ * `argv[0]` with a shebang behind it, carries that file's SHA-256 and size, so
+ * a grant over `bash /tmp/install.sh` binds the script's bytes and not its
+ * name. `core/run-payload.ts` owns that rule, states what it does not reach,
+ * and is the one thing in this file's dependency graph that touches a disk.
+ *
+ * {@link payloadHash} is pure: no I/O, no clock, no randomness. {@link
+ * runPayloadHash} reads the one file the argv names as its script, and nothing
+ * else.
  */
 
 import { createHash } from "node:crypto";
 
 import { canonicalize } from "./jcs.js";
+import { runPayloadValue } from "./run-payload.js";
 
 /** The form a `payload_hash` takes everywhere: SHA-256, lowercase hex. */
 export const PAYLOAD_HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -73,13 +83,19 @@ export function payloadHash(value: unknown): string {
 }
 
 /**
- * The `payload_hash` of an `approval run` invocation: the argv array and cwd.
+ * The `payload_hash` of an `approval run` invocation: the argv array, the cwd,
+ * and the digest of the script that argv names (APRV-401).
  *
  * `argv` is the child's argv as it will actually be spawned — the command name
  * first, then its arguments — not the `approval` wrapper's own flags, which
  * have no side effect to bind. `cwd` is the absolute directory the child will
- * run in.
+ * run in, and the directory a relative script path is resolved against.
+ *
+ * Reads that one file, because a binding that did not would bind its name. An
+ * argv naming no readable script hashes exactly as it did before the script was
+ * bound at all, so every record and declaration written earlier still verifies;
+ * see `core/run-payload.ts` for the rule and for what it does not reach.
  */
 export function runPayloadHash(argv: readonly string[], cwd: string): string {
-  return payloadHash({ argv: [...argv], cwd });
+  return payloadHash(runPayloadValue(argv, cwd));
 }

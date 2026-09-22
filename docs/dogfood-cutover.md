@@ -34,17 +34,22 @@ approval register "backlog/tasks/<task file>.md" --as agent:<session>
 
 # 2. Request the action. The class, cost, and reversibility come from the
 #    registered record; the payload is supplied here and filed by hash.
-#    For a command-shaped action the payload is {"argv": [...], "cwd": "..."}.
-approval request <TASK-ID> --action "<idempotency-key>" --as agent:<session> \
-  --payload <payload.json>
+#    For a command-shaped action, `approval payload run` prints those bytes:
+#    the argv, the cwd, and the digest of the script the argv names (APRV-401).
+#    Do not hand-write them — a command naming a script needs that digest, and
+#    a declaration without it is refused at execution.
+approval payload run -- <cmd...> \
+  | approval request <TASK-ID> --action "<idempotency-key>" \
+      --as agent:<session> --payload -
 
 # 3. Block on the decision. Exit code encodes it: 0 granted, and each refusal
 #    shape is its own documented code (approval wait --help).
 approval wait <TASK-ID> --timeout 6h
 
 # 4. On grant, execute through the gate with the token the human's grant
-#    minted. run recomputes the payload hash from the argv+cwd it is about to
-#    spawn; a changed command is refused payload-mismatch.
+#    minted. run recomputes the payload hash from the argv, the cwd and the
+#    files that argv names; a changed command, or a changed script behind an
+#    unchanged command, is refused payload-mismatch.
 approval run "<idempotency-key>" --token <token> --as agent:<session> -- <cmd...>
 ```
 

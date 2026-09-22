@@ -49,6 +49,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runPayloadHash } from "../src/core/payload.js";
+import { runPayloadValue } from "../src/core/run-payload.js";
 import { canonicalRender } from "../src/core/wysiwys.js";
 import {
   assertLocal,
@@ -99,8 +100,16 @@ const DEMO_COMMAND = [
  * The command's text carries `<` and `&` on purpose. §10.4 requires the channel
  * to present the payload, and the demo asserts it arrives verbatim in the
  * rendered region and HTML-escaped on the wire.
+ *
+ * BUILT, NOT WRITTEN OUT (APRV-401). The payload is no longer always
+ * `{argv, cwd}`: where the argv names a script, that script's size and digest
+ * ride inside it. This demo's command is `node -e <source>`, an INLINE program,
+ * so the value is byte-identical to what it always was — and it is derived from
+ * the same function `approval run` will call rather than written out, because a
+ * fixture that hand-assembles the shape is a fixture that silently stops
+ * matching the day the command grows a script operand.
  */
-const PAYLOAD = { argv: DEMO_COMMAND, cwd: demo };
+const PAYLOAD = runPayloadValue(DEMO_COMMAND, demo);
 
 /** The content binding (amended SPEC.md §6.2): SHA-256 over the RFC 8785 form. */
 const PAYLOAD_HASH = runPayloadHash(DEMO_COMMAND, demo);
