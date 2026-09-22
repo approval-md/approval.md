@@ -1,0 +1,1 @@
+{"command":"gh pr diff 535 > /tmp/claude-501/pr535.diff 2>&1; echo \"exit=$?\"; wc -l /tmp/claude-501/pr535.diff","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

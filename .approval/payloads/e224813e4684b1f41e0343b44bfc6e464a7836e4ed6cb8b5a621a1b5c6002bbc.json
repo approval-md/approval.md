@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='{ repository(owner:\"approval-md\", name:\"approval.md\") { pullRequest(number:536) { mergeQueueEntry { state position } mergeStateStatus autoMergeRequest { enabledAt } } } }' --jq '.data.repository.pullRequest'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -127,9 +127,11 @@ import {
   dispatchPending,
   glossWiring,
   newDispatchState,
+  orderPending,
   queueLines,
   reviewHandlerFor,
   summaryLines,
+  supersededPending,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
@@ -919,6 +921,46 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
     undefined,
     "an earlier claimed chunk carried buttons",
   );
+});
+
+test("a gated command's card carries the digest of the script it names (APRV-401)", async () => {
+  // The card is where this task's fix has to land: the payload hash binds the
+  // script's bytes, and an approver who cannot SEE which bytes is back to
+  // approving a path. The run payload has no structural view, so the opaque
+  // view shows it whole — path, byte count and digest included, which is what
+  // the operator's ruling asked the card to carry — and this pins that the
+  // channel passes that block through verbatim rather than summarising it.
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+
+  const digest = "a".repeat(64);
+  const value = {
+    argv: ["bash", "install.sh"],
+    cwd: "/repo",
+    script: { argv_index: 1, path: "/repo/install.sh", bytes: 412, sha256: digest },
+  };
+  const request_: ChannelRequest = {
+    ...base,
+    fullPayload: computed(
+      { value, text: JSON.stringify(value), hash: payloadHash(value), truncated: false },
+      "payload",
+    ),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const whole = sends()
+    .slice(before)
+    .map((message) => message.text)
+    .join("\n");
+  assert.ok(whole.includes(digest), "the approver was not shown the digest the grant binds");
+  assert.ok(whole.includes("/repo/install.sh"), "the approver was not shown which file it binds");
+  assert.ok(whole.includes("argv_index"), "the digest was shown without saying which word it is");
+  assert.ok(whole.includes("412"), "the approver was not shown the script's size");
 });
 
 test("a payload-less request is two messages: computed, then claimed with the buttons", async () => {
@@ -5480,6 +5522,226 @@ test("APRV-287: a collapsed send that fails leaves every request to be shown aga
     again.delivered.map((entry) => entry.action_key).sort(),
     [...old].sort(),
   );
+  assertClean(world.unit);
+});
+
+// ===========================================================================
+// Pending-queue hygiene (APRV-425)
+// ===========================================================================
+
+/**
+ * One synthetic pending request, cloned off {@link healthy} with the fields the
+ * ordering and the dedupe read.
+ *
+ * Synthetic on purpose for the pure cases below: what is under test is a
+ * comparator and a grouping over four fields, and building four logs to vary
+ * two timestamps would test `buildPendingQueue` again instead. The cases that
+ * assert on MESSAGES all go through the real log and the injected fetch.
+ */
+function pendingLike(overrides: {
+  key: string;
+  ts: string;
+  cls?: string;
+  payload?: string;
+  proposal?: boolean;
+}): ChannelRequest {
+  const base = healthy();
+  return {
+    ...base,
+    action_key: computed(overrides.key, "log"),
+    requested_ts: computed(overrides.ts, "log"),
+    ...(overrides.cls === undefined ? {} : { class: computed(overrides.cls, "log") }),
+    ...(overrides.payload === undefined
+      ? {}
+      : { payload_hash: computed(overrides.payload, "log") }),
+    ...(overrides.proposal === true
+      ? { policy_diff: computed("-autonomy: manual\n+autonomy: autonomous", "policy") }
+      : {}),
+  };
+}
+
+test("APRV-425: the order is live newest-first, then stale oldest-first, prompts last", () => {
+  // `at(n)` is minutes, and the live boundary is the hook's 55s wait plus its 5m
+  // retry grace, so anything within ~5.9 minutes of `now` is live. Laid out
+  // deliberately so log order and the right order disagree on every axis.
+  const requests = [
+    pendingLike({ key: "stale-oldest", ts: at(1) }),
+    pendingLike({ key: "live-older", ts: at(96) }),
+    pendingLike({ key: "prompt", ts: at(97), proposal: true }),
+    pendingLike({ key: "stale-newer", ts: at(40) }),
+    pendingLike({ key: "live-newest", ts: at(99) }),
+  ];
+
+  assert.deepEqual(
+    orderPending(requests, at(100)).map((request) => request.action_key.value),
+    ["live-newest", "live-older", "stale-oldest", "stale-newer", "prompt"],
+  );
+
+  // Nothing is dropped and nothing is decided: an order is an order.
+  assert.equal(orderPending(requests, at(100)).length, requests.length);
+
+  // Stable inside a bucket, so log order breaks ties and one log at one instant
+  // has one answer.
+  const tied = [
+    pendingLike({ key: "first", ts: at(99) }),
+    pendingLike({ key: "second", ts: at(99) }),
+  ];
+  assert.deepEqual(
+    orderPending(tied, at(100)).map((request) => request.action_key.value),
+    ["first", "second"],
+  );
+
+  // An unreadable instant sorts with the requests nobody is waiting on, which is
+  // the strict side: it must not displace a request whose age is known.
+  assert.deepEqual(
+    orderPending(
+      [
+        pendingLike({ key: "unreadable", ts: "not a date" }),
+        pendingLike({ key: "live", ts: at(99) }),
+      ],
+      at(100),
+    ).map((request) => request.action_key.value),
+    ["live", "unreadable"],
+  );
+});
+
+test("APRV-425: a newer pending request for the same bytes and class supersedes an older one", () => {
+  const superseded = supersededPending([
+    pendingLike({ key: "old", ts: at(1), payload: "a".repeat(64) }),
+    pendingLike({ key: "new", ts: at(2), payload: "a".repeat(64) }),
+    // Same bytes, different class: two different questions about one payload,
+    // which is what a multi-class tool call looks like. Neither supersedes.
+    pendingLike({ key: "other-class", ts: at(3), payload: "a".repeat(64), cls: "deps.add" }),
+    // Different bytes: unrelated.
+    pendingLike({ key: "other-bytes", ts: at(4), payload: "b".repeat(64) }),
+  ]);
+  assert.deepEqual([...superseded], ["old"]);
+
+  // An attestation prompt is never a duplicate of anything.
+  assert.deepEqual(
+    [
+      ...supersededPending([
+        pendingLike({ key: "p1", ts: at(1), payload: "c".repeat(64), proposal: true }),
+        pendingLike({ key: "p2", ts: at(2), payload: "c".repeat(64), proposal: true }),
+      ]),
+    ],
+    [],
+  );
+
+  // A request whose instant cannot be read loses to one whose can.
+  assert.deepEqual(
+    [
+      ...supersededPending([
+        pendingLike({ key: "dated", ts: at(1), payload: "d".repeat(64) }),
+        pendingLike({ key: "undated", ts: "not a date", payload: "d".repeat(64) }),
+      ]),
+    ],
+    ["undated"],
+  );
+});
+
+test("APRV-425: a restart with every pending request stale sends ONE message and no prompts", async () => {
+  // AC1, against the injected fetch. The flood was N+1 messages: a banner and
+  // one prompt each. It is one now, and the one is a summary rather than a
+  // prompt: no payload, no approve, and every request still pending.
+  const world = staged(4, distinctPayloadFor);
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  const keys = [0, 1, 2, 3].map((index) => requestAt(world, index, at(index + 1)));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(61));
+  const sent = mock.sentTexts().slice(from);
+
+  assert.equal(sent.length, 1, `${String(sent.length)} messages: ${sent.join(" | ")}`);
+  assert.match(sent[0] as string, /4 STALE REQUESTS/u);
+  assert.equal(cycle.banner, undefined, "a banner went out in front of nothing");
+  assert.deepEqual(cycle.digests, [], "a prompt digest was sent");
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key).sort(),
+    [...keys].sort(),
+    "a pending request went unaccounted for",
+  );
+
+  // AC3, first half: the sent-record was rebuilt from the log on start, so the
+  // very next cycle of this process sends nothing at all.
+  const quiet = await dispatchPending(setup, streams, state, at(62));
+  assert.equal(mock.sentTexts().length, from + 1, "the second cycle re-sent something");
+  assert.deepEqual(quiet.delivered, []);
+  assert.deepEqual(quiet.failed, []);
+
+  // AC3, second half: it is NOT evidence of delivery. Every collapsed request is
+  // still pending in the log, and a listener that lost the record shows them
+  // again — the degradation SPEC.md §10.3 requires, rather than a pending
+  // request nobody is shown.
+  assert.deepEqual(
+    queueOf(world, at(62))
+      .map((request) => request.action_key.value)
+      .sort(),
+    [...keys].sort(),
+  );
+  const restarted = await dispatchPending(setup, capture().streams, newDispatchState(), at(63));
+  assert.deepEqual(
+    restarted.delivered.map((entry) => entry.action_key).sort(),
+    [...keys].sort(),
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("APRV-425: a superseded duplicate is collapsed while its newer twin is prompted", async () => {
+  // The dogfooding complaint (APRV-118): a live prompt buried behind dead ones,
+  // and an approver rejecting the one they wanted. Three askings of ONE command
+  // — same payload bytes, same class — of which only the newest has an asker.
+  const world = staged(3, () => payloadFor(0));
+  const setup = setupFor(world, channelFor());
+  const { streams, err } = capture();
+  const older = [requestAt(world, 0, at(96)), requestAt(world, 1, at(97))];
+  const newest = requestAt(world, 2, at(99));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(100));
+  const sent = mock.sentTexts().slice(from);
+
+  assert.notEqual(cycle.collapsed, undefined, "the duplicates were not collapsed");
+  assert.deepEqual(
+    [...(cycle.collapsed as { action_keys: string[] }).action_keys].sort(),
+    [...older].sort(),
+    "the wrong asking was collapsed",
+  );
+
+  // All three are younger than the hook's wait plus its grace, so age collapsed
+  // nothing here: the summary says exactly that rather than claiming they are
+  // old, because a message that overstates what it collapsed is read by the
+  // person deciding.
+  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
+  assert.match(summary, /all superseded by a newer pending request for the same bytes and class/u);
+  assert.doesNotMatch(summary, /older than the hook's/u);
+
+  // The live asking keeps its own card, with its payload and its buttons.
+  assert.equal(
+    sent.some((text) => text.includes(newest)),
+    true,
+    "the live request was not delivered",
+  );
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key).sort(),
+    [...older, newest].sort(),
+    "a pending request went unaccounted for",
+  );
+
+  // Collapsing is not deciding: nothing was granted, rejected or withdrawn.
+  for (const event of ["approval.granted", "approval.rejected", "approval.withdrawn"]) {
+    assert.equal(
+      recordsOf(world.unit.logPath).filter((record) => record.event === event).length,
+      0,
+      `the collapse produced a ${event}`,
+    );
+  }
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
 });
 

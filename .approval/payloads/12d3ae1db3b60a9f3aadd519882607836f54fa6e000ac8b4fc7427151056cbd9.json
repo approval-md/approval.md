@@ -1,0 +1,1 @@
+{"command":"grep -rln \"dispatchPending\" tests/ && echo \"---\" && grep -rn \"collapsed\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

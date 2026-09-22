@@ -1,0 +1,1 @@
+{"command":"FORCE_COLOR=1 node scripts/run-tests.mjs --only cli-style-render 2>&1 | sed -e 's/\\x1b\\[[0-9;]*m//g' | grep -E \"^. (tests|pass|fail) \" | tail -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a2f448129bf591efc"}

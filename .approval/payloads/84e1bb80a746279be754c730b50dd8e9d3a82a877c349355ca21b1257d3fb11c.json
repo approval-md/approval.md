@@ -1,0 +1,1 @@
+{"command":"gh pr merge 530 --merge 2>&1 | tail -1; gh pr view 530 --json autoMergeRequest,state --jq '.state+\" \"+(.autoMergeRequest.enabledAt // \"not-armed\")'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/aprv-415-hermes-observed"}

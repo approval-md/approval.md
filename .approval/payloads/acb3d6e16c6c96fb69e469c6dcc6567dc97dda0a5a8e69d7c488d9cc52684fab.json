@@ -1,0 +1,1 @@
+{"command":"sed -e 's/\\x1b\\[[0-9;]*m//g' /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/350726fa-063d-4cfb-bd06-d817c95a964d/scratchpad/forced.log | grep -E \"^. (tests|pass|fail) \" | tail -5","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a2f448129bf591efc"}

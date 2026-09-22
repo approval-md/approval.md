@@ -15,6 +15,72 @@ before a tag.
 
 ## Unreleased
 
+- **Drift-append contention is reported as deferred and retried (APRV-403).** A
+  `lock-timeout` or `head-moved` on an `envelope.drift` append used to print
+  `append-refused … was not appended`, which is true and reads as a lost record
+  while the next tick quietly re-derives and writes it. It is now a
+  `drift-deferred` warning naming the task and saying the scan retries, and the
+  `drift` line that lands carries `retry` so the pair closes — the same split
+  APRV-381 made for `audit.sampled`, using the same shared classifier so the two
+  sweeps cannot come to disagree about which failures a retry fixes. Both drift
+  reasons take it. Every other append refusal keeps the `append-refused` form,
+  because `validation`, `canonicalization`, `corrupt-tail` and `io` are facts
+  about the record or the file that no retry repairs. **Write-back no longer
+  repairs a file whose drift record was deferred**: it used to rewrite the
+  `state:` line anyway, so the next tick found the file agreeing with the log,
+  the retry had nothing to re-derive, and the deferral resolved into silence — a
+  correction made off the record, which is what SPEC §6.3's append-then-write
+  order exists to prevent.
+- **A listener restart sends one summary and no re-prompts (APRV-425).** The
+  pending queue has a stated order now, shared by the delivery, the paced
+  walkthrough and `/queue`: live requests newest first (live meaning younger than
+  the hook's wait plus its retry grace), then stale ones oldest first, with
+  attestation prompts last where `approval queue` already put them. A pending
+  request whose payload bytes and class a NEWER pending request also names is
+  collapsed whatever its age — two askings of one question, of which only the
+  newer has an asker — so a live prompt no longer arrives buried behind dead
+  ones, and the collapsed summary says which of its members are there for age and
+  which for supersession instead of claiming all of them are old. A restart with
+  N stale pending went from a banner plus N prompts to one summary and zero
+  prompts, with the next cycle of that process sending nothing. Collapsing is
+  still not deciding: every collapsed request stays pending in the log, is listed
+  by `/queue`, and is decidable from any copy already on the phone. **The literal
+  "zero messages" is held for a SPEC decision**: a listener cannot tell a request
+  a previous process delivered from one that arrived while nothing was running,
+  since both predate its start, so withholding a re-delivery on age alone would
+  produce the one outcome SPEC §10.3 forbids — a pending request nobody is shown.
+  The summary is what keeps it legal; the amendment literal zero would need is
+  written out in APRV-425's notes and deliberately not applied.
+- **A workspace write is checked against the disk, and some of them are now
+  questions (APRV-402).** `files.write.workspace` used to be decided on the
+  command text alone, so a relative destination was the workspace whatever a
+  symlink on the way to it pointed at. The hook now resolves each destination
+  through its nearest existing ancestor, the same walk the delete and read
+  rules have used since APRV-267 and APRV-347, and tightens to
+  `files.delete.out_of_scope` with the rule string `write-out-of-scope-resolved`
+  when the result lands outside the working directory and every scratch root.
+  **What a live session will feel:** any `cp`, `mv`, `tee`, `mkdir`, `ln`,
+  `chmod`, `truncate` or `rmdir`, and any packaging write (`tar -x -C`,
+  `tar -c -f`, `gunzip`, `base64 -o`, `openssl dgst -out`,
+  `npm pack --pack-destination`), whose destination resolves outside those
+  roots now routes to a human instead of running. That includes an ABSOLUTE
+  destination inside another checkout, which was previously autonomous, and it
+  includes a destination that is under the temp root only through a symlink.
+  The pass can only ever narrow, no new class is minted, and the pure
+  classifier is unchanged. `rm` of a relative path in the workspace and a shell
+  redirect into one still answer from the text.
+- **The SMTP adapter stops sending an address as a server name (APRV-416).**
+  TLS SNI names a virtual host, so a `smtp.host` that is an IP literal is now
+  probed and sent to with no `servername` at all, which Node 26 requires and
+  earlier versions only warned about; verification of an address rests on the
+  certificate's IP SAN entry, and SNI is unchanged for a hostname.
+- **The site version guard binds every version string, and no page claims a
+  publish (APRV-395).** All eight strings across `index.html`,
+  `features/index.html`, `llms.txt` and `llms-full.txt` are now bound to
+  `package.json` and reported in one message, so a bump that moves the package
+  alone is told every file still to move; `llms.txt` states the version this
+  tree carries rather than asserting that it is on npm, which was false for the
+  whole window between a bump merging and the publish run finishing.
 - **The Releases page fills itself from the changelog (APRV-396).** After a
   successful publish, `publish.yml` creates the GitHub Release for the tag with
   the matching changelog section as its body, the title `approval-md X.Y.Z`, and

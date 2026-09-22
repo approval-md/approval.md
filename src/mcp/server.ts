@@ -103,6 +103,10 @@ export const EXCLUDED_VERBS: ReadonlyMap<string, string> = new Map([
     "internal plumbing: its own purpose says so. `run` wraps it and is published instead, so a client that reached for `consume` would be spending a token outside the verb that records the outcome.",
   ],
   [
+    "payload run",
+    "it digests the script an argv names, and the argv arrives in `trailing`, which no transport guard confines: a remote caller could ask for the SHA-256 of any file this process can read (`-- bash /etc/shadow`) and get existence and a fingerprint back for a path it never had access to. `payload hash` is published because its one host path is a positional the store confinement reaches; this verb's path is a command word, and confining command words is confining the command. A client that needs the binding for a command it is about to ask permission for can compute it where that command will run, which is the only place the value is true anyway (APRV-401).",
+  ],
+  [
     "log follow",
     "it is an unbounded foreground stream. MCP tool calls share a finite request queue and return one finite result, so publishing this verb would occupy that queue indefinitely; MCP clients can poll log verify or use the CLI stream as a separate process.",
   ],

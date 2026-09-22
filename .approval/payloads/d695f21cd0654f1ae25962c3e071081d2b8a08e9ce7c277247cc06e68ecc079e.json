@@ -1,0 +1,1 @@
+{"command":"node scripts/release-notes.mjs --help > /tmp/claude-501/rn.log 2>&1; echo \"exit=$?\"; head -20 /tmp/claude-501/rn.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

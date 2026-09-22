@@ -14,6 +14,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -226,6 +227,109 @@ test("prints the payload_hash a real request and grant record for the same bytes
 
   const verify = runCli(["log", "verify", "--json"], dir);
   assert.equal(verify.code, 0, verify.stderr);
+});
+
+// ===========================================================================
+// `payload run` — the payload a gated command binds to (APRV-401)
+// ===========================================================================
+
+test("payload run prints the argv, the cwd and the digest of the script the argv names", () => {
+  const dir = caseDir();
+  writeFileSync(join(dir, "install.sh"), "echo one\n", "utf8");
+
+  const run = runCli(["payload", "run", "--", "bash", "install.sh"], dir);
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.stderr, "");
+  assert.deepEqual(JSON.parse(run.stdout), {
+    argv: ["bash", "install.sh"],
+    cwd: dir,
+    script: {
+      argv_index: 1,
+      path: join(dir, "install.sh"),
+      bytes: 9,
+      sha256: createHash("sha256").update("echo one\n", "utf8").digest("hex"),
+    },
+  });
+});
+
+test("payload run --hash is the hash of the bytes payload run prints, and the script moves it", () => {
+  const dir = caseDir();
+  writeFileSync(join(dir, "install.sh"), "echo one\n", "utf8");
+
+  const printed = runCli(["payload", "run", "--", "bash", "install.sh"], dir);
+  const hashed = runCli(["payload", "run", "--hash", "--", "bash", "install.sh"], dir);
+  assert.equal(hashed.code, 0, hashed.stderr);
+  assert.equal(hashed.stdout.trim(), payloadHash(JSON.parse(printed.stdout) as JsonValue));
+
+  // The property the verb exists for: edit the script, and the declaration a
+  // requester would have written no longer describes what would run.
+  writeFileSync(join(dir, "install.sh"), "echo two\n", "utf8");
+  const after = runCli(["payload", "run", "--hash", "--", "bash", "install.sh"], dir);
+  assert.notEqual(after.stdout.trim(), hashed.stdout.trim());
+
+  // And the canonical bytes are what `payload hash` would say about them, so
+  // the two verbs cannot disagree about the same payload.
+  const viaHash = runCli(["payload", "hash", "-"], dir, printed.stdout);
+  assert.equal(viaHash.code, 0, viaHash.stderr);
+  assert.equal(viaHash.stdout.trim(), hashed.stdout.trim());
+});
+
+test("payload run --json --hash prints exactly {ok,hash}", () => {
+  const dir = caseDir();
+  const run = runCli(["payload", "run", "--hash", "--json", "--", "npm", "ci"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.equal(parsed["ok"], true);
+  assert.match(String(parsed["hash"]), /^[a-f0-9]{64}$/u);
+});
+
+test("an argv naming no readable script carries no script key", () => {
+  const dir = caseDir();
+  const run = runCli(["payload", "run", "--", "npm", "update", "@types/node"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), {
+    argv: ["npm", "update", "@types/node"],
+    cwd: dir,
+  });
+
+  // And an inline program is already a word of the argv: nothing to read, and
+  // the payload is the value it has always been.
+  writeFileSync(join(dir, "install.sh"), "echo one\n", "utf8");
+  const inline = runCli(["payload", "run", "--", "bash", "-c", "install.sh"], dir);
+  assert.equal(inline.code, 0, inline.stderr);
+  assert.deepEqual(JSON.parse(inline.stdout), {
+    argv: ["bash", "-c", "install.sh"],
+    cwd: dir,
+  });
+});
+
+test("--cwd states the directory the run will happen in, and it is inside the payload", () => {
+  const dir = caseDir();
+  const elsewhere = caseDir();
+  writeFileSync(join(elsewhere, "install.sh"), "echo one\n", "utf8");
+
+  const run = runCli(["payload", "run", "--cwd", elsewhere, "--", "bash", "install.sh"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const payload = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.equal(payload["cwd"], elsewhere);
+  assert.equal(
+    (payload["script"] as Record<string, unknown>)["path"],
+    join(elsewhere, "install.sh"),
+    "the argv resolved against the wrong directory",
+  );
+});
+
+test("payload run without a command, and with a stray positional, each exit 2", () => {
+  const dir = caseDir();
+
+  const missing = runCli(["payload", "run"], dir);
+  assert.equal(missing.code, 2);
+  assert.match(missing.stderr, /missing command/u);
+
+  const stray = runCli(["payload", "run", "install.sh"], dir);
+  assert.equal(stray.code, 2);
+  assert.match(stray.stderr, /after/u);
 });
 
 // ===========================================================================

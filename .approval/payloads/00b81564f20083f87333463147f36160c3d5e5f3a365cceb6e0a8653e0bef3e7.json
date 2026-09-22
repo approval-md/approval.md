@@ -1,0 +1,1 @@
+{"command":"ls .github/workflows && grep -n \"name:\\|shard\" .github/workflows/*.yml | head -30","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5184ab73bc90995c"}

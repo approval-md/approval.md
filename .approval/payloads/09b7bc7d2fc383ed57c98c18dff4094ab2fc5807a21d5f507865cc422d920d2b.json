@@ -1,0 +1,1 @@
+{"command":"gh pr edit 541 --body-file /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/350726fa-063d-4cfb-bd06-d817c95a964d/scratchpad/pr-body.md 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a62ef0e6d38a7d62c"}

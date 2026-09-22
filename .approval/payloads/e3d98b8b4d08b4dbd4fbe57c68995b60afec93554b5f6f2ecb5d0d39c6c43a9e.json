@@ -1,0 +1,1 @@
+{"command":"gh pr comment 543 --body-file /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-open-source-licensing-658620/350726fa-063d-4cfb-bd06-d817c95a964d/scratchpad/pr-comment-aprv401.md 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5184ab73bc90995c"}

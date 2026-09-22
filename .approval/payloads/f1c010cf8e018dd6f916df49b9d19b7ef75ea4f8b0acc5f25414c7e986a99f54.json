@@ -1,0 +1,1 @@
+{"command":"grep -rn \"HarnessKind\" src/core/harness-version.ts | head -20 && echo \"---\" && grep -n \"HARNESS_KINDS\\|export type HarnessKind\\|isHarnessKind\" src/core/*.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

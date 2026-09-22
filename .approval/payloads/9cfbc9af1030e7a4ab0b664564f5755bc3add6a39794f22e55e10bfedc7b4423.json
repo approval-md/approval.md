@@ -1,0 +1,1 @@
+{"command":"gh pr checks 539 --watch --fail-fast > /tmp/claude-501/ci2.log 2>&1; echo \"watch exit=$?\"; cat /tmp/claude-501/ci2.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

@@ -94,10 +94,14 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 import { writeQueue } from "../channels/render-queue.js";
+// APRV-403. The classifier is APRV-381's, shared rather than copied: one closed
+// list of transient append codes means the drift scan and the sampling sweep
+// cannot come to disagree about which failures a retry fixes.
+import { isTransientAppendError } from "../core/audit.js";
 import { tick as readClock, type Clock } from "../core/clock.js";
 import { parseFrontmatter, readTaskFile } from "../core/frontmatter.js";
 import { expire, type GateOptions } from "../core/gate.js";
-import { appendEvent, type EventRecord } from "../core/log.js";
+import { appendEvent, type AppendError, type EventRecord } from "../core/log.js";
 import { loopEscalation } from "../core/loop.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "../core/policy-load.js";
@@ -155,6 +159,7 @@ import {
   latestRegistration,
   taskEnvelopeState,
   type DriftFacts,
+  type DriftReason,
 } from "./projection.js";
 
 /**
@@ -167,6 +172,66 @@ export const DAEMON_ACTOR = "system:daemon";
 
 /** Backlog.md's conventional task folder, relative to the working directory. */
 export { DEFAULT_TASKS_DIR } from "../core/registration.js";
+
+// ---------------------------------------------------------------------------
+// The drift scan's deferral memory (APRV-403)
+// ---------------------------------------------------------------------------
+
+/**
+ * `envelope.drift` records this PROCESS deferred and has not yet seen appended,
+ * keyed by log path, task and drift reason.
+ *
+ * Exactly the standing `daemon/audit.ts` gives its own deferral memory, and
+ * deliberately the same shape: process-lifetime, memory-only, and a
+ * de-duplicator for OUTPUT. Nothing here is consulted before an append, and
+ * nothing is gated or suppressed by it. The RETRY needs no memory to happen,
+ * because the drift scan re-derives the whole question from the verified log on
+ * every tick; what this buys is the word "retry" on one line, so an operator can
+ * pair the deferral they read with the record that resolved it.
+ *
+ * It is consulted in exactly one other place, and that one is not cosmetic: the
+ * write-back pass skips a file whose drift record this tick could not append, so
+ * the file is not repaired off the record (SPEC.md §6.3's fixed order). Losing
+ * the memory there costs a repair one tick, never a lost record.
+ *
+ * Keyed by log path as well as task, because one process can be pointed at more
+ * than one gate over its lifetime and a task id is only unique inside one.
+ * Bounded, so a long run cannot accumulate entries for a file that drifts, is
+ * deferred, and is then deleted.
+ */
+const driftDeferrals = new Set<string>();
+
+/** How many deferred drift records one process remembers for the retry wording. */
+const DRIFT_DEFERRAL_LIMIT = 256;
+
+function driftDeferralKey(logPath: string, task: string, reason: DriftReason): string {
+  return JSON.stringify([logPath, task, reason]);
+}
+
+function rememberDriftDeferral(logPath: string, task: string, reason: DriftReason): void {
+  const key = driftDeferralKey(logPath, task, reason);
+  if (driftDeferrals.has(key)) return;
+  // A `Set` iterates in insertion order, so "the oldest" needs no timestamp.
+  if (driftDeferrals.size >= DRIFT_DEFERRAL_LIMIT) {
+    const oldest = driftDeferrals.values().next();
+    if (!oldest.done) driftDeferrals.delete(oldest.value);
+  }
+  driftDeferrals.add(key);
+}
+
+/** Whether this process deferred this record, consuming the memory of it. */
+function takeDriftDeferral(logPath: string, task: string, reason: DriftReason): boolean {
+  return driftDeferrals.delete(driftDeferralKey(logPath, task, reason));
+}
+
+/**
+ * Forget every deferral. Exported for tests, used nowhere else: the memory is
+ * output bookkeeping, so a suite that shares a process needs to be able to start
+ * from nothing and to exercise what a restarted daemon does.
+ */
+export function resetDriftDeferrals(): void {
+  driftDeferrals.clear();
+}
 
 /** How often the daemon looks, absent any watcher event. */
 export const DEFAULT_INTERVAL_MS = 30_000;
@@ -317,6 +382,18 @@ export type DaemonEvent =
        * appeared on all of them would change a shape supervisors already parse.
        */
       reason?: "envelope-missing";
+      /**
+       * This append is the one an earlier tick of THIS run deferred (APRV-403).
+       * Present only when it is true, so the shape a supervisor already parses is
+       * unchanged for every other drift record.
+       *
+       * It closes a `drift-deferred` warning, exactly as `sampled.retry` closes a
+       * `sample-deferred` one: the pair is what tells an operator that the
+       * transient failure they read resolved, and which record resolved it. A
+       * fresh process makes the same append and claims no retry, because this
+       * loop says only what it witnessed.
+       */
+      retry?: true;
     }
   | {
       /**
@@ -711,6 +788,26 @@ export const DAEMON_WARNING_CODES = [
    * `retry`.
    */
   "sample-deferred",
+  /**
+   * An `envelope.drift` append met a held lock or a moved head, so the record was
+   * postponed to the next tick (APRV-403). Appended to this union, so no existing
+   * entry changed meaning.
+   *
+   * The same split APRV-381 made for `audit.sampled`, for the same reason and
+   * from the same closed list of transient codes. Found while landing that task:
+   * the end-to-end test that holds the append lockfile for a whole tick showed
+   * the drift scan printing `append-refused … (lock-timeout)`, which is true and
+   * reads as a lost record, while the next tick re-derived the drift from the
+   * verified log and appended it. An operator's next move differs between the
+   * two: `append-refused` on a drift record is a fact about the record or the
+   * file and wants a person, and this is contention between writers that the
+   * scan resolves by itself.
+   *
+   * Still a warning rather than a silence: a scan that keeps deferring is a log
+   * under contention, which is a thing to know. The `drift` line that closes it
+   * carries `retry`.
+   */
+  "drift-deferred",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -2222,6 +2319,29 @@ export class Daemon {
    * malformed file is not a *contradiction* of the log, it is a file the runtime
    * cannot read a claim out of at all, and inventing a `declared_state` for it
    * would put a fact in the log that nobody wrote.
+   *
+   * ## A deferred drift record is not a lost one (APRV-403)
+   *
+   * An append here can fail two ways that call for different things. A held
+   * lockfile or a head that moved under the compare-and-append means the log was
+   * not written and nothing about the file changed; the next tick re-reads the
+   * folder, re-derives the disagreement from the verified log, and appends it.
+   * A validation refusal, a canonicalization failure, a corrupt tail or an I/O
+   * error is a fact about the record or the file that no retry repairs.
+   *
+   * Both used to read as `append-refused … was not appended`, which for the
+   * first is true and reads as a loss. So the transient half now goes out as
+   * {@link deferDrift}'s own `drift-deferred` line, naming the task and saying
+   * that the scan retries, and the `drift` record that closes it carries
+   * `retry`. Everything else keeps the form it had.
+   *
+   * Nothing about the APPEND changed, which is the part that matters for
+   * SPEC.md §11.1 invariant 5: the record is still placed by `appendEvent`
+   * against the `expectedHead` of a read taken immediately before it, and the
+   * whole decision is still remade against that read. A `head-moved` here IS
+   * compare-and-append working — another writer landed a record between this
+   * scan's read and its append — and deferring is the only answer that does not
+   * either write against a head this scan never saw or lose the observation.
    */
   private scanForDrift(): { appended: number; stop: DaemonOutcome | null } {
     // ONE verified read for the whole scan (APRV-211). The scan asks the same
@@ -2246,6 +2366,28 @@ export class Daemon {
       if (outcome.appended) appended += 1;
     }
     return { appended, stop: null };
+  }
+
+  /**
+   * Say that an `envelope.drift` append did not happen YET, and remember it
+   * (APRV-403).
+   *
+   * Two things this line has to do that `append-refused` did not. It names the
+   * TASK KEY, so an operator can match the deferral to the record that closes
+   * it, and it says in words that the next tick retries — because the sentence
+   * it replaced ended at "was not appended", which is true and reads as a loss.
+   *
+   * The claim is safe to make because the scan carries nothing between ticks:
+   * the next one re-reads the folder, re-derives the state from the verified
+   * log, and finds the same disagreement, so the retry is a property of how the
+   * scan is written rather than a promise this method is keeping.
+   */
+  private deferDrift(task: string, reason: DriftReason, error: AppendError): void {
+    rememberDriftDeferral(this.options.logPath, task, reason);
+    this.warn(
+      "drift-deferred",
+      `envelope.drift${reason === "state-mismatch" ? "" : ` (${reason})`} for ${task} was deferred (${error.code}): ${error.message} The record is NOT lost: the disagreement is still there in the log's own terms, and the scan re-derives it and retries on the next tick.`,
+    );
   }
 
   /** Every `*.md` under the task folder, sorted, non-recursive. */
@@ -2407,14 +2549,25 @@ export class Daemon {
       },
     );
     if (!result.ok) {
-      this.warn(
-        "append-refused",
-        `envelope.drift for ${id} was not appended (${result.error.code}): ${result.error.message}`,
-      );
+      // APRV-403. A held lock or a moved head says the log was not written and
+      // nothing about this file changed, which is a different fact from a record
+      // the write boundary will never take; the scan re-derives and retries the
+      // first, and only a person repairs the second. `isTransientAppendError`
+      // and its closed list are `core/audit.ts`'s, shared rather than copied, so
+      // the two sweeps cannot disagree about what transient means.
+      if (isTransientAppendError(result.error)) {
+        this.deferDrift(id, "state-mismatch", result.error);
+      } else {
+        this.warn(
+          "append-refused",
+          `envelope.drift for ${id} was not appended (${result.error.code}): ${result.error.message}`,
+        );
+      }
       return { appended: false, stop: null };
     }
 
     this.drifts += 1;
+    const retried = takeDriftDeferral(this.options.logPath, id, "state-mismatch");
     this.emit({
       event: "drift",
       task: id,
@@ -2422,6 +2575,7 @@ export class Daemon {
       declared_state: declaredState,
       derived_state: facts.derivedState,
       seq: result.record.seq,
+      ...(retried ? { retry: true as const } : {}),
     });
     return { appended: true, stop: null };
   }
@@ -2505,14 +2659,23 @@ export class Daemon {
       },
     );
     if (!result.ok) {
-      this.warn(
-        "append-refused",
-        `envelope.drift (envelope-missing) for ${task} was not appended (${result.error.code}): ${result.error.message}`,
-      );
+      // The same split as the mismatch path above (APRV-403). Both sites take
+      // it, because contention does not care which reason the record carries and
+      // an operator reading a deferral for one and a refusal for the other would
+      // be reading two answers to one question.
+      if (isTransientAppendError(result.error)) {
+        this.deferDrift(task, "envelope-missing", result.error);
+      } else {
+        this.warn(
+          "append-refused",
+          `envelope.drift (envelope-missing) for ${task} was not appended (${result.error.code}): ${result.error.message}`,
+        );
+      }
       return { appended: false, stop: null };
     }
 
     this.drifts += 1;
+    const retried = takeDriftDeferral(this.options.logPath, task, "envelope-missing");
     this.emit({
       event: "drift",
       task,
@@ -2521,6 +2684,7 @@ export class Daemon {
       derived_state: facts.derivedState,
       seq: result.record.seq,
       reason: "envelope-missing",
+      ...(retried ? { retry: true as const } : {}),
     });
     return { appended: true, stop: null };
   }
@@ -2645,7 +2809,7 @@ export class Daemon {
    * log, and produces bytes only through `core/task-file.ts`. A file can no more
    * teach the log a state than a screenshot can teach a database a row.
    *
-   * Four rules, each of which is a way of not making things worse:
+   * Five rules, each of which is a way of not making things worse:
    *
    * 1. **Only files that already have an envelope.** `set-state` refuses
    *    `no-envelope`, and that refusal is honoured silently: a task with no
@@ -2667,6 +2831,11 @@ export class Daemon {
    *    envelope: each was warned about a few milliseconds ago by
    *    {@link scanForDrift} over the same folder. Repeating it here would double
    *    every line an operator reads without adding a fact.
+   * 5. **No repair for a drift record that was deferred** (APRV-403). See the
+   *    check inside the loop: a file whose `envelope.drift` this tick could not
+   *    append is left exactly as it is, because repairing it would correct the
+   *    disagreement off the record and erase what the retry is supposed to
+   *    re-derive.
    *
    * Loop safety comes from the comparison, not from a remembered flag: the next
    * tick derives the same state from the same log, finds the file already
@@ -2720,6 +2889,20 @@ export class Daemon {
       const declaredState = typeof declaredRaw === "string" ? declaredRaw : null;
       const derived = taskEnvelopeState(records.records, id, ts, ttlMs).state;
       if (declaredState === derived) continue;
+
+      // APRV-403, and it is rule 5 of this list. The drift scan earlier in this
+      // tick DEFERRED the record for this task, so the disagreement has not been
+      // written down yet. Repairing the file now would correct it off the record
+      // and, worse, remove the evidence: the next tick would find the file
+      // agreeing with the log, the retry would have nothing to re-derive, and
+      // the deferral an operator was told about would resolve into silence.
+      //
+      // SPEC.md §6.3 fixes the order — the event is appended first and the file
+      // is updated second, never the reverse — and a transient append failure is
+      // exactly the case where "never the reverse" has to be enforced rather
+      // than assumed. So the file waits for the record, and the tick that lands
+      // the record repairs the file after it.
+      if (driftDeferrals.has(driftDeferralKey(this.options.logPath, id, "state-mismatch"))) continue;
 
       const rewritten = rewriteTaskFile(text, { kind: "set-state", state: derived }, rewriteOptions);
       if (!rewritten.ok) {
