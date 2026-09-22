@@ -1005,7 +1005,11 @@ test("run drives the WHOLE matrix through a fake harness, with no human input", 
   process.env["FAKE_HERMES_VERSION"] = AT_FLOOR;
   // The real per-entry cap is 300s and no test may wait for it; the fake's hook
   // timeout stands in for it, so the `hang` trials still measure a timeout.
-  process.env["FAKE_HERMES_HOOK_TIMEOUT_MS"] = "2000";
+  // Generous on purpose: only the two `hang` steps ever wait this long, and a
+  // value tight enough to be exceeded by node's own startup on a loaded CI
+  // runner would turn an ordinary trial into a fake timeout and fail this suite
+  // for a reason that has nothing to do with the driver.
+  process.env["FAKE_HERMES_HOOK_TIMEOUT_MS"] = "8000";
   try {
     const { code, out } = runDriver(["--step-timeout", "30000", "--hang-timeout", "30000"]);
     assert.equal(code, 0, out);

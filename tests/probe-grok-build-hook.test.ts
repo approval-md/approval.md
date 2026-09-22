@@ -476,7 +476,10 @@ test("run refuses an UNREADABLE version and writes nothing, and the override is 
 
 test("run drives every trial through a fake harness, and reads the three answers", () => {
   process.env["FAKE_GROK_VERSION"] = "grok 0.9.0 (fake)";
-  process.env["FAKE_GROK_HOOK_TIMEOUT_MS"] = "2000";
+  // Generous on purpose: no trial here waits out a timeout, so this only has to
+  // be longer than node's own startup on a loaded CI runner. A tight value would
+  // turn an ordinary trial into a fake timeout.
+  process.env["FAKE_GROK_HOOK_TIMEOUT_MS"] = "8000";
   try {
     const { code, out } = runDriver(["--step-timeout", "30000"]);
     assert.equal(code, 0, out);
@@ -543,7 +546,10 @@ test("run drives every trial through a fake harness, and reads the three answers
 
 test("a harness that ignores the Claude settings file reads as the hazard NOT firing", () => {
   process.env["FAKE_GROK_VERSION"] = "grok 0.9.0 (fake)";
-  process.env["FAKE_GROK_HOOK_TIMEOUT_MS"] = "2000";
+  // Generous on purpose: no trial here waits out a timeout, so this only has to
+  // be longer than node's own startup on a loaded CI runner. A tight value would
+  // turn an ordinary trial into a fake timeout.
+  process.env["FAKE_GROK_HOOK_TIMEOUT_MS"] = "8000";
   process.env["FAKE_GROK_IGNORE_CLAUDE_SETTINGS"] = "1";
   try {
     const { code, out } = runDriver(["--step-timeout", "30000"]);
