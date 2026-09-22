@@ -31,6 +31,7 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { after, before, test } from "node:test";
 
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
@@ -66,7 +67,11 @@ import {
   WEBHOOK_REFUSAL_CODES,
   type WebhookRefusalCode,
 } from "../src/cli/channel-telegram-webhook.js";
-import { claimListenerBot, prepareListen } from "../src/cli/channel-telegram.js";
+import {
+  claimListenerBot,
+  prepareListen,
+  type ListenSetup,
+} from "../src/cli/channel-telegram.js";
 import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
 import {
   normaliseWebhookUrl,
@@ -864,8 +869,21 @@ test("a channel already polling refuses to serve a webhook, and the reverse (APR
   }
 });
 
-test("a listener refuses to start against a bot a webhook holds (APRV-424)", async () => {
-  const world = live(1, false, "exclusive");
+/**
+ * A listener setup built through the real `prepareListen`, for the preflight.
+ *
+ * The bot credentials are read from the process environment by `prepareListen`
+ * itself (nothing under `channels/` reads one), so they are set for the call
+ * and removed afterwards.
+ *
+ * `allowCrossInstance` is on because this suite deliberately builds a fresh
+ * gate per case against ONE mock bot, which is the shape the per-machine
+ * ownership registry refuses (APRV-390, and rightly). What these cases are
+ * about is the transport exclusion that sits in front of that refusal, so the
+ * ownership half is waved through out loud, exactly as an operator running two
+ * gates on one bot would have to.
+ */
+function listenSetupFor(world: Live): ListenSetup {
   process.env["APPROVAL_TG_TOKEN"] = TOKEN;
   process.env["APPROVAL_TG_CHAT"] = CHAT;
   process.env["APPROVAL_HUMAN"] = LAUNCH_HUMAN;
@@ -879,43 +897,222 @@ test("a listener refuses to start against a bot a webhook holds (APRV-424)", asy
       pollTimeout: null,
       once: true,
       json: false,
+      allowCrossInstance: true,
       log: (message) => complaints.push(message),
     });
     assert.equal(prepared.ok, true, JSON.stringify(prepared));
-    if (!prepared.ok) return;
+    if (!prepared.ok) assert.fail("prepareListen refused a complete configuration");
+    return prepared.setup;
+  } finally {
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+    delete process.env["APPROVAL_HUMAN"];
+  }
+}
 
+/** A pid that is not this process and is running: init, on every platform. */
+const FOREIGN_LIVE_PID = 1;
+
+test("a poller already running in this gate refuses the webhook verb (APRV-424)", async () => {
+  // THE FINDING, reproduced. Nothing is registered (a poller registers
+  // nothing), and the ownership registry compares instance ids, which are
+  // equal because this IS the same instance. Before the lease both processes
+  // started, both ran their own dispatch cycle against one log, and every
+  // prompt reached the phone twice under two nonces.
+  const world = live(1, false, "lease-poll-first");
+  const setup = listenSetupFor(world);
+  mock.setWebhookInfo({ url: "" });
+
+  const poller = takeChannelLease(world.unit.logPath, "poll", { pid: FOREIGN_LIVE_PID });
+  assert.equal(poller.ok, true, JSON.stringify(poller));
+  try {
+    const refused = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: "https://gate.example/telegram/webhook",
+      mode: "webhook",
+    });
+    assert.equal(refused.ok, false, "a webhook runner started beside a live poller in one gate");
+    if (!refused.ok) {
+      assert.equal(refused.code, "telegram-poller-running");
+      assert.match(refused.message, new RegExp(`pid ${String(FOREIGN_LIVE_PID)}`, "u"));
+      assert.match(refused.message, /poll mode/u);
+    }
+    // The refused start took nothing: the poller still holds the gate.
+    assert.equal(readChannelLease(world.unit.logPath)?.pid, FOREIGN_LIVE_PID);
+  } finally {
+    if (poller.ok) poller.lease.release();
+  }
+});
+
+test("a webhook already running in this gate refuses a poller (APRV-424)", async () => {
+  const world = live(1, false, "lease-webhook-first");
+  const setup = listenSetupFor(world);
+  // Deliberately BEFORE the registration exists: a webhook runner holds the
+  // lease from its preflight onward, so the window between "the verb started"
+  // and "setWebhook returned" is covered too.
+  mock.setWebhookInfo({ url: "" });
+
+  const hooked = takeChannelLease(world.unit.logPath, "webhook", { pid: FOREIGN_LIVE_PID });
+  assert.equal(hooked.ok, true, JSON.stringify(hooked));
+  try {
+    const refused = await claimListenerBot(setup, (message) => complaints.push(message));
+    assert.equal(refused.ok, false, "a poller started beside a live webhook runner in one gate");
+    if (!refused.ok) {
+      // The same code the Bot API probe produces, because the repair is the
+      // same: stop the webhook runner, which removes its registration too.
+      assert.equal(refused.code, "webhook-registered");
+      assert.match(refused.message, new RegExp(`pid ${String(FOREIGN_LIVE_PID)}`, "u"));
+      assert.match(refused.message, /webhook mode/u);
+    }
+  } finally {
+    if (hooked.ok) hooked.lease.release();
+  }
+});
+
+test("the preflight releases the lease when a later check refuses (APRV-424)", async () => {
+  const world = live(1, false, "lease-released-on-refusal");
+  const setup = listenSetupFor(world);
+  // A registration a poller cannot live with: the lease is taken first, and
+  // the refusal that follows must not leave it behind for the next process to
+  // reclaim.
+  mock.setWebhookInfo({ url: "https://gate.example/telegram/webhook", pendingUpdateCount: 1 });
+  try {
+    const refused = await claimListenerBot(setup, (message) => complaints.push(message));
+    assert.equal(refused.ok, false);
+    assert.equal(
+      readChannelLease(world.unit.logPath),
+      null,
+      "a refused start left its transport lease behind",
+    );
+    assert.equal(existsSync(channelLeasePathFor(world.unit.logPath)), false);
+  } finally {
+    mock.setWebhookInfo({ url: "" });
+  }
+});
+
+test("a successful preflight holds the lease until it is released (APRV-424)", async () => {
+  const world = live(1, false, "lease-held");
+  const setup = listenSetupFor(world);
+  mock.setWebhookInfo({ url: "" });
+
+  const claimed = await claimListenerBot(setup, (message) => complaints.push(message));
+  assert.equal(claimed.ok, true, JSON.stringify(claimed));
+  if (!claimed.ok) return;
+  const held = readChannelLease(world.unit.logPath);
+  assert.equal(held?.pid, process.pid, "the preflight took no lease");
+  assert.equal(held?.mode, "poll", "a poller's preflight took the wrong mode");
+
+  claimed.lease.release();
+  assert.equal(
+    readChannelLease(world.unit.logPath),
+    null,
+    "a clean stop left the gate's transport lease behind",
+  );
+});
+
+test("a registration refuses the webhook verb unless --reclaim (APRV-424)", async () => {
+  // Review finding 6. "Same URL means it is me" was a bare string compare, so
+  // two hosts running one configuration both read the other's registration as
+  // their own restart: the second overwrote the first's secret_token, and from
+  // then on every real tap arrived at the first host as a forgery.
+  const world = live(1, false, "reclaim");
+  const setup = listenSetupFor(world);
+  const mine = "https://gate.example/telegram/webhook";
+  try {
+    mock.setWebhookInfo({ url: mine, pendingUpdateCount: 2 });
+
+    const sameUrl = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: mine,
+      mode: "webhook",
+    });
+    assert.equal(sameUrl.ok, false, "a webhook registered at this url was waved through as a restart");
+    if (!sameUrl.ok) {
+      assert.equal(sameUrl.code, "webhook-registered");
+      assert.match(sameUrl.message, /--reclaim/u);
+      assert.match(sameUrl.message, /one webhook per bot/u);
+      assert.match(sameUrl.message, /take the taps|takes the taps|forgery/u);
+    }
+
+    const otherUrl = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: "https://other.example/telegram/webhook",
+      mode: "webhook",
+    });
+    assert.equal(otherUrl.ok, false);
+    if (!otherUrl.ok) assert.equal(otherUrl.code, "webhook-registered");
+
+    // Neither refusal held the gate.
+    assert.equal(readChannelLease(world.unit.logPath), null);
+
+    // --reclaim is how an operator takes it deliberately, at the same url and
+    // at a different one, and the normalised compare is what decides which
+    // sentence they read: a trailing slash and an upper-case host are the same
+    // endpoint.
+    for (const [label, url] of [
+      ["the same url", mine],
+      ["the same url spelled differently", "https://GATE.example/telegram/webhook/"],
+      ["a different url", "https://second.example/telegram/webhook"],
+    ] as const) {
+      const before = complaints.length;
+      const reclaimed = await claimListenerBot(setup, (message) => complaints.push(message), {
+        webhookUrl: url,
+        reclaim: true,
+        mode: "webhook",
+      });
+      assert.equal(reclaimed.ok, true, `--reclaim refused ${label}: ${JSON.stringify(reclaimed)}`);
+      if (reclaimed.ok) reclaimed.lease.release();
+      const said = complaints.slice(before).join("\n");
+      assert.match(said, /--reclaim/u, `${label} reclaimed silently`);
+      assert.match(
+        said,
+        label === "a different url" ? /stops being posted to/u : /re-registering/u,
+        `${label} was reported as the wrong kind of reclaim: ${said}`,
+      );
+    }
+
+    assert.equal(
+      normaliseWebhookUrl("https://GATE.example/telegram/webhook/"),
+      normaliseWebhookUrl(mine),
+      "two spellings of one endpoint do not compare equal",
+    );
+    assert.notEqual(
+      normaliseWebhookUrl("https://gate.example/telegram/Webhook"),
+      normaliseWebhookUrl(mine),
+      "a path's case was folded, and a webhook path is often a random token",
+    );
+  } finally {
+    mock.setWebhookInfo({ url: "" });
+  }
+});
+
+test("a listener refuses to start against a bot a webhook holds (APRV-424)", async () => {
+  const world = live(1, false, "exclusive");
+  const setup = listenSetupFor(world);
+  try {
     // No webhook: the preflight lets it through (the ownership claim may or
     // may not succeed on a shared machine, so only the webhook code is
     // asserted about).
     mock.setWebhookInfo({ url: "" });
-    const clear = await claimListenerBot(prepared.setup, (message) => complaints.push(message));
+    const clear = await claimListenerBot(setup, (message) => complaints.push(message));
     if (!clear.ok) assert.notEqual(clear.code, "webhook-registered");
+    else clear.lease.release();
 
     mock.setWebhookInfo({ url: "https://gate.example/telegram/webhook", pendingUpdateCount: 3 });
-    const blocked = await claimListenerBot(prepared.setup, (message) => complaints.push(message));
+    const blocked = await claimListenerBot(setup, (message) => complaints.push(message));
     assert.equal(blocked.ok, false, "a listener started against a bot a webhook holds");
     if (!blocked.ok) {
       assert.equal(blocked.code, "webhook-registered");
       assert.match(blocked.message, /gate\.example/u);
       assert.match(blocked.message, /3 update\(s\)/u);
+      // Origin and a redacted path, never the registered url as spelled: this
+      // is another host's registration and its path may be a bearer value
+      // (review finding 10).
+      assert.ok(
+        !blocked.message.includes("/telegram/webhook"),
+        `the refusal quoted another host's webhook path: ${blocked.message}`,
+      );
+      assert.match(blocked.message, /path redacted/u);
     }
-
-    // The webhook runner's own preflight: its OWN url is a restart, a
-    // different one is the same refusal.
-    const mine = await claimListenerBot(prepared.setup, (message) => complaints.push(message), {
-      webhookUrl: "https://gate.example/telegram/webhook",
-    });
-    if (!mine.ok) assert.notEqual(mine.code, "webhook-registered");
-    const theirs = await claimListenerBot(prepared.setup, (message) => complaints.push(message), {
-      webhookUrl: "https://other.example/telegram/webhook",
-    });
-    assert.equal(theirs.ok, false);
-    if (!theirs.ok) assert.equal(theirs.code, "webhook-registered");
   } finally {
     mock.setWebhookInfo({ url: "" });
-    delete process.env["APPROVAL_TG_TOKEN"];
-    delete process.env["APPROVAL_TG_CHAT"];
-    delete process.env["APPROVAL_HUMAN"];
   }
 });
 
