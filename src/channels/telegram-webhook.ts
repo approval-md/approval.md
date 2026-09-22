@@ -480,9 +480,13 @@ export async function serveTelegramWebhook(
           // happened, so this says where to look rather than what happened —
           // the wording `TELEGRAM_HANDLER_FAILED` uses, for the same reason.
           const message = cause instanceof Error ? cause.message : String(cause);
+          // `in` rather than a property read, so a thrown null or a thrown
+          // string cannot turn this diagnostic into a second failure.
           const conflict =
-            typeof (cause as { code?: unknown }).code === "string" &&
-            (cause as { code: string }).code === "transport-conflict";
+            typeof cause === "object" &&
+            cause !== null &&
+            "code" in cause &&
+            (cause as { code: unknown }).code === "transport-conflict";
           refuse(
             res,
             conflict ? 409 : 500,
