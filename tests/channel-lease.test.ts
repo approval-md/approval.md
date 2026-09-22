@@ -18,7 +18,15 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
@@ -453,18 +461,158 @@ test("a lease this process holds is rewritten whole, never half (APRV-424)", () 
   if (again.ok) again.lease.release();
 });
 
-test("an abandoned reclaim lock ages out rather than wedging the gate (APRV-424)", () => {
+test("a reclaim lock nobody can read refuses rather than being forced (APRV-424)", () => {
+  // A reclaim lock this build cannot read names no process, so there is no
+  // liveness question to ask about it, and age alone may not answer one
+  // (third review, finding 1). The take therefore refuses, naming the file: a
+  // refusal an operator clears in one command beats forcing a critical
+  // section this process cannot see into.
   const logPath = gate();
   plant(logPath, DEAD_PID, "poll");
   const lockPath = `${channelLeasePathFor(logPath)}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
-  writeFileSync(lockPath, `${JSON.stringify({ pid: DEAD_PID, at: 0 })}\n`, "utf8");
-  // Older than the handful of syscalls the section takes: the process that
-  // entered it died inside.
-  const old = new Date(Date.now() - CHANNEL_LEASE_RECLAIM_STALE_MS * 4);
+  writeFileSync(lockPath, "{ half a lo", "utf8");
+  const old = new Date(Date.now() - CHANNEL_LEASE_RECLAIM_STALE_MS * 10);
   utimesSync(lockPath, old, old);
 
+  const refused = takeChannelLease(logPath, "webhook", { probe: probeTable({}) });
+  assert.equal(refused.ok, false, "an unreadable reclaim lock was forced");
+  if (!refused.ok) {
+    assert.equal(refused.code, "telegram-lease-unavailable");
+    assert.match(refused.message, /\.reclaim/u, "the refusal does not name the file to remove");
+  }
+  assert.equal(existsSync(lockPath), true, "an unreadable lock was removed on age alone");
+
+  // Removed, as the refusal says: the gate is takeable again at once.
+  unlinkSync(lockPath);
   const taken = takeChannelLease(logPath, "webhook", { probe: probeTable({}) });
-  assert.equal(taken.ok, true, `an abandoned reclaim lock wedged the gate: ${JSON.stringify(taken)}`);
-  assert.equal(existsSync(lockPath), false, "the abandoned reclaim lock was left in place");
+  assert.equal(taken.ok, true, JSON.stringify(taken));
+  if (taken.ok) taken.lease.release();
+});
+
+test("a reclaimer that stalls out of the section does not overwrite the lease that replaced it (APRV-424)", () => {
+  // THIRD REVIEW, finding 1. The section used to be given away on age alone
+  // and taken back unconditionally: A enters, re-reads, stalls; B ages A's
+  // lock out, reclaims, renames its own lease in; A resumes, renames over B's
+  // live lease, and A's `finally` deletes B's reclaim lock. Two holders.
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "webhook");
+
+  // A (9001) looks GONE to the probe, which is what lets B evict its lock:
+  // that is the only eviction the fix still allows, and the interleaving has
+  // to get through it to be worth testing.
+  const probe = probeTable({ 9002: {} });
+  let second: ChannelLeaseOutcome | null = null;
+  const first = takeChannelLease(logPath, "poll", {
+    pid: 9001,
+    probe,
+    // Inside the section, after its re-read, before its rename.
+    insideTakeOver: () => {
+      second ??= takeChannelLease(logPath, "webhook", { pid: 9002, probe });
+    },
+  });
+
+  // Cast rather than annotate: `second` is only ever assigned inside the
+  // callback above, which the compiler's control flow does not follow, so it
+  // would otherwise be narrowed to `null` here.
+  const interleaved = second as ChannelLeaseOutcome | null;
+  assert.ok(interleaved !== null, "the interleaved take never ran");
+  const outcomes = [first, interleaved].filter((outcome) => outcome !== null);
+  const holders = outcomes.filter((outcome) => outcome.ok);
+  assert.equal(
+    holders.length,
+    1,
+    `${String(holders.length)} of two processes hold one gate after a stalled reclaim: ${JSON.stringify(outcomes)}`,
+  );
+  // B is the one that finished, so B holds, and the record on disk is B's.
+  assert.equal(
+    interleaved?.ok,
+    true,
+    `the process that finished its section does not hold: ${JSON.stringify(interleaved)}`,
+  );
+  assert.equal(readChannelLease(logPath)?.pid, 9002);
+  assert.equal(readChannelLease(logPath)?.mode, "webhook");
+  // A abandoned rather than renaming over it, and refuses on the way out.
+  assert.equal(first.ok, false, "the stalled reclaimer wrote its lease over the new holder's");
+  if (!first.ok) {
+    assert.ok(
+      first.code === "webhook-registered" || first.code === "telegram-lease-unavailable",
+      `the stalled reclaimer refused ${first.code}`,
+    );
+  }
+  // And A's `finally` did not take B's section away with it.
+  assert.equal(
+    existsSync(`${channelLeasePathFor(logPath)}${CHANNEL_LEASE_RECLAIM_SUFFIX}`),
+    false,
+    "a reclaim lock was left behind, or one process removed another's",
+  );
+});
+
+test("a reclaimer neither writes nor unlinks once the section is somebody else's (APRV-424)", () => {
+  // The same fix, asserted directly: what a process that lost the section
+  // must not do is rename its lease in, and must not remove the lock that
+  // replaced its own.
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "poll");
+  const lockPath = `${channelLeasePathFor(logPath)}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
+  const foreign = `${JSON.stringify({ pid: 9101, nonce: "not-this-entry", at: Date.now() })}\n`;
+
+  const refused = takeChannelLease(logPath, "webhook", {
+    pid: 9102,
+    // 9101 is alive, so its section is never evictable; 9102 is this take.
+    probe: probeTable({ 9101: {}, 9102: {} }),
+    insideTakeOver: () => {
+      // Somebody else now holds the section: the lock names another pid and
+      // another entry.
+      writeFileSync(lockPath, foreign, "utf8");
+    },
+  });
+
+  assert.equal(refused.ok, false, "a process that lost the section took the gate anyway");
+  if (!refused.ok) assert.equal(refused.code, "telegram-lease-unavailable");
+  assert.equal(
+    readChannelLease(logPath)?.pid,
+    DEAD_PID,
+    "the lease was renamed over by a process that no longer held the section",
+  );
+  assert.equal(readFileSync(lockPath, "utf8"), foreign, "another entry's reclaim lock was removed");
+  unlinkSync(lockPath);
+});
+
+test("a reclaim lock is evicted for a dead process, never for its age (APRV-424)", () => {
+  // Age decides nothing now: an old lock whose process is alive is a slow
+  // reclaim, and evicting it is how two holders happen.
+  const logPath = gate();
+  plant(logPath, DEAD_PID, "poll");
+  const lockPath = `${channelLeasePathFor(logPath)}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
+  const ancient = new Date(Date.now() - CHANNEL_LEASE_RECLAIM_STALE_MS * 10);
+
+  writeFileSync(
+    lockPath,
+    `${JSON.stringify({ pid: 9201, nonce: "held", at: ancient.getTime() })}\n`,
+    "utf8",
+  );
+  utimesSync(lockPath, ancient, ancient);
+  const waited = takeChannelLease(logPath, "webhook", {
+    pid: 9202,
+    probe: probeTable({ 9201: {}, 9202: {} }),
+  });
+  assert.equal(waited.ok, false, "an old reclaim lock with a live process behind it was forced");
+  if (!waited.ok) assert.equal(waited.code, "telegram-lease-unavailable");
+  assert.equal(existsSync(lockPath), true, "a live process's section was evicted on age");
+
+  // The same lock, with its process gone: evicted, and said out loud with the
+  // age the eviction did not turn on.
+  const said: string[] = [];
+  const taken = takeChannelLease(logPath, "webhook", {
+    pid: 9202,
+    probe: probeTable({ 9202: {} }),
+    note: (message) => said.push(message),
+  });
+  assert.equal(taken.ok, true, `a dead process's section wedged the gate: ${JSON.stringify(taken)}`);
+  assert.equal(existsSync(lockPath), false, "the dead reclaimer's lock was left in place");
+  assert.ok(
+    said.some((message) => /reclaim lock left by pid 9201/u.test(message) && /ms ago/u.test(message)),
+    `the eviction was silent: ${said.join("\n")}`,
+  );
   if (taken.ok) taken.lease.release();
 });

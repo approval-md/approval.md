@@ -69,6 +69,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   closeSync,
   mkdirSync,
@@ -116,12 +117,15 @@ export const CHANNEL_LEASE_RETRY_MS = 20;
 export const CHANNEL_LEASE_RECLAIM_SUFFIX = ".reclaim";
 
 /**
- * How old a reclaim lock has to be before it is treated as abandoned.
+ * How old a reclaim lock has to be before its age is worth saying out loud.
  *
- * The critical section is a handful of syscalls, so a reclaim lock that is
- * seconds old belongs to a process that died inside it. Without this a single
- * crash in the wrong microsecond would wedge the gate for good, which is the
- * failure the whole liveness half of this module exists to avoid.
+ * It DECIDES NOTHING, and that is the third review's first finding. An earlier
+ * version evicted a reclaim lock on age alone, which handed the section to a
+ * second process while the first was still inside it: the first then renamed
+ * its lease over the second's and deleted the second's lock on its way out.
+ * What decides an eviction now is the same liveness probe a lease holder is
+ * judged by, because "five seconds have passed" says nothing about whether
+ * anybody is still in the room.
  */
 export const CHANNEL_LEASE_RECLAIM_STALE_MS = 5_000;
 
@@ -254,6 +258,24 @@ export interface ChannelLeaseOptions {
    * must come out holding the gate. Nothing in the runtime passes it.
    */
   beforeTakeOver?: () => void;
+  /**
+   * Run INSIDE the reclaim section, after its re-read and before its rename.
+   *
+   * The second seam, for the second interleaving (third review, finding 1): a
+   * process that stalls in there long enough to lose the section must not go
+   * on to rename its lease over the one that replaced it. Nothing in the
+   * runtime passes this either.
+   */
+  insideTakeOver?: () => void;
+  /**
+   * Where a note about the lease goes: an evicted reclaim lock, and nothing
+   * else so far.
+   *
+   * Separate from the refusal messages because it is not a refusal. The
+   * listener preflight passes its own reporter, so the line lands wherever
+   * that verb's complaints land.
+   */
+  note?: (message: string) => void;
 }
 
 /** The gate's `daemon/` directory for `logPath`, derived and never configured. */
@@ -583,7 +605,10 @@ export function takeChannelLease(
         };
       }
       options.beforeTakeOver?.();
-      const taken = takeOver(path, body, pid, { kind: "holder", holder: read.holder });
+      const taken = takeOver(path, body, pid, { kind: "holder", holder: read.holder }, probe, {
+        ...(options.note === undefined ? {} : { note: options.note }),
+        ...(options.insideTakeOver === undefined ? {} : { inside: options.insideTakeOver }),
+      });
       if (taken === "taken") {
         reclaimed = read.holder;
         reclaimedBecause = verdict.reason;
@@ -601,7 +626,10 @@ export function takeChannelLease(
     // refusing forever over bytes nobody can read would be an outage with no
     // fault behind it. Replaced rather than deleted-then-created, so the path
     // is never absent and no third process can slip in through the gap.
-    const replaced = takeOver(path, body, pid, { kind: "torn" });
+    const replaced = takeOver(path, body, pid, { kind: "torn" }, probe, {
+      ...(options.note === undefined ? {} : { note: options.note }),
+      ...(options.insideTakeOver === undefined ? {} : { inside: options.insideTakeOver }),
+    });
     if (replaced === "taken") {
       return { ok: true, lease: leaseFor(path, mode, pid), reclaimed, reclaimedBecause };
     }
@@ -613,7 +641,7 @@ export function takeChannelLease(
   }
 
   return unavailable(
-    `${String(CHANNEL_LEASE_ATTEMPTS)} attempts raced another process taking and releasing it`,
+    `${String(CHANNEL_LEASE_ATTEMPTS)} attempts raced another process taking it over. Something else is reclaiming this gate's transport lease and has not finished: ${path}${CHANNEL_LEASE_RECLAIM_SUFFIX} is that take-over in progress. This process refuses rather than force it, because forcing a critical section is how two transports end up running at once; if that file has no process behind it and this keeps happening, remove it`,
   );
 }
 
@@ -667,6 +695,51 @@ type TakeOverExpectation =
   | { kind: "holder"; holder: ChannelLeaseHolder }
   | { kind: "torn" };
 
+/** What a reclaim lock says: who holds the section, and which entry it is. */
+interface ReclaimLock {
+  pid: number;
+  /**
+   * One entry's own name.
+   *
+   * The pid alone cannot tell two entries apart, and the third review's
+   * interleaving is exactly two entries by two processes: without a nonce a
+   * process that had lost the section could still recognise the lock as
+   * "mine" and act on it.
+   */
+  nonce: string;
+  /** When the section was entered. Reported, never a decision. */
+  at: number;
+}
+
+function readReclaimLock(lockPath: string): ReclaimLock | null {
+  let raw: string;
+  try {
+    raw = readFileSync(lockPath, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  const pid = record["pid"];
+  const nonce = record["nonce"];
+  const at = record["at"];
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
+  if (typeof nonce !== "string" || nonce.length === 0) return null;
+  return { pid, nonce, at: typeof at === "number" ? at : 0 };
+}
+
+/** Does the lock on disk still name this entry? */
+function holdsSection(lockPath: string, pid: number, nonce: string): boolean {
+  const lock = readReclaimLock(lockPath);
+  return lock !== null && lock.pid === pid && lock.nonce === nonce;
+}
+
 /**
  * Replace a lockfile somebody else wrote, inside a critical section.
  *
@@ -677,6 +750,31 @@ type TakeOverExpectation =
  * `started_at`), so the second reclaimer of a pair abandons its take-over,
  * finds a live record on the next pass, and refuses.
  *
+ * ## The section is owned, not merely occupied (third review, finding 1)
+ *
+ * Holding the section is not enough; a process has to still be holding it at
+ * the moment it acts. The first version aged a reclaim lock out after five
+ * seconds and unlinked it on the way out unconditionally, which gave the
+ * section away and then took somebody else's:
+ *
+ * A enters, re-reads, and stalls. B ages A's lock out, enters, reclaims, and
+ * renames its own lease in. A resumes and renames over B's live lease, and
+ * A's `finally` deletes B's reclaim lock for good measure. Two holders, again.
+ *
+ * Three changes close it, and all three are about identity:
+ *
+ * - The lock carries this process's pid AND a nonce, so one entry can be told
+ *   from another by the same process.
+ * - The ownership is re-checked immediately before the rename. A process that
+ *   lost the section abandons the take-over (`busy`) and meets the new
+ *   holder's live record on its next pass.
+ * - The `finally` removes the lock only while it still names this entry.
+ *
+ * And the age-out is no longer a decision: a reclaim lock is evicted only when
+ * its own process is GONE, judged by the same probe a lease holder is judged
+ * by. The age is reported and nothing more, because "five seconds have passed"
+ * says nothing about whether anybody is still in the room.
+ *
  * `busy` means another process holds the section right now: the caller waits
  * and comes round again rather than forcing it, because forcing a critical
  * section is the same as not having one.
@@ -686,21 +784,37 @@ function takeOver(
   body: string,
   pid: number,
   expect: TakeOverExpectation,
+  probe: (candidate: number) => PidProbe,
+  options: { note?: (message: string) => void; inside?: () => void } = {},
 ): "taken" | "changed" | "busy" | { detail: string } {
   const lockPath = `${path}${CHANNEL_LEASE_RECLAIM_SUFFIX}`;
-  const entered = createExclusive(lockPath, `${JSON.stringify({ pid, at: Date.now() })}\n`);
+  const nonce = randomBytes(8).toString("hex");
+  const entered = createExclusive(
+    lockPath,
+    `${JSON.stringify({ pid, nonce, at: Date.now() })}\n`,
+  );
   if (entered !== "created") {
     if (entered !== "exists") return entered;
-    // A reclaim lock older than the handful of syscalls the section takes
-    // belongs to a process that died inside it. One crash must not wedge the
-    // gate for good.
-    let age = 0;
-    try {
-      age = Date.now() - statSync(lockPath).mtimeMs;
-    } catch {
+    const held = readReclaimLock(lockPath);
+    if (held === null) {
+      // Unreadable or half written: it may be a lock being entered right now,
+      // and it names no process, so there is no liveness question to ask about
+      // it. Age may not answer one either (see the constant above), so waiting
+      // is the only safe answer; the attempt budget bounds it and the refusal
+      // names the file.
       return "busy";
     }
-    if (age < CHANNEL_LEASE_RECLAIM_STALE_MS) return "busy";
+    if (probe(held.pid).running) return "busy";
+    // Its process is gone, so it died inside the section. The age says how
+    // long ago that was and decides nothing: a lock five seconds old whose
+    // process is alive is a slow reclaim, and evicting it is how two holders
+    // happen.
+    const age = Date.now() - held.at;
+    options.note?.(
+      `a telegram transport reclaim lock left by pid ${String(held.pid)} ${String(
+        Math.max(age, 0),
+      )}ms ago has no process behind it; evicted`,
+    );
     try {
       unlinkSync(lockPath);
     } catch {
@@ -728,13 +842,22 @@ function takeOver(
       if (fresh.holder.pid !== expect.holder.pid) return "changed";
       if (fresh.holder.startedAt !== expect.holder.startedAt) return "changed";
     }
+    options.inside?.();
+    // The last thing before the write: is this entry still the one that holds
+    // the section? A process that stalled long enough to be evicted must not
+    // rename over the lease that replaced it.
+    if (!holdsSection(lockPath, pid, nonce)) return "busy";
     const written = writeAtomic(path, body, pid);
     return written === null ? "taken" : { detail: written };
   } finally {
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      /* advisory: an abandoned reclaim lock ages out above */
+    // Only ours, and only while it is still ours: unlinking unconditionally is
+    // how a stalled process hands the next holder's section to a third.
+    if (holdsSection(lockPath, pid, nonce)) {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* advisory: a lock whose process is gone is evicted by the next taker */
+      }
     }
   }
 }
