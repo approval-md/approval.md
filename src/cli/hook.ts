@@ -278,6 +278,19 @@ export const HOOK_DENY_CODES = [
    * directory, once. Past the grace the hook withdraws it (reason `timeout`),
    * because a question nothing will adopt is a message on a phone that decides
    * nothing.
+   *
+   * **Who withdraws, stated because the deny text used to imply a scheduler
+   * that does not exist (APRV-410).** This process is over when it denies, so
+   * the withdrawal is made by the NEXT gated tool call this actor makes, from
+   * the sweep at the top of every gated invocation. It cannot be anyone else: a
+   * withdrawal is the requester's own (APRV-106 rule 1, `not-requester`), the
+   * gate refuses a `system:` withdrawal outright, and the event schema binds
+   * the one `system:` withdrawal that exists to `policy-drift` and to nothing
+   * else (APRV-235). So a session that denies here and then makes no further
+   * gated call leaves the question pending until the TTL, and a decision on it
+   * lands as an ordinary grant. What stops that grant authorizing anything is
+   * the other half of APRV-410: a retry past the grace does not carry it
+   * (`findHarnessCarry`), so it asks again.
    */
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
@@ -3336,7 +3349,19 @@ export function gateHarnessCall(
   }
 
   const actions: GatedAction[] = classes.map((cls) => {
-    const carry = findHarnessCarry(intake.records, hash, cls, intakeTs, run.ttlMs);
+    // APRV-410: the window this invocation is configured for bounds which
+    // GRANT it may carry, so an answer that landed after the asking process
+    // was gone is not adopted by a later one. The sweep above takes back the
+    // pending questions; this refuses the grants that were written on questions
+    // nobody was holding. The two halves are the same fact from both sides.
+    const carry = findHarnessCarry(
+      intake.records,
+      hash,
+      cls,
+      intakeTs,
+      run.ttlMs,
+      abandonedAfterMs(run.timeoutMs, run.graceMs),
+    );
     if (carry === null) return { cls, actionKey: `${task}:${cls}`, origin: "new" as const };
     return {
       cls,
@@ -3635,7 +3660,7 @@ export function gateHarnessCall(
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -5310,6 +5335,41 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   }
 
   if (floor === null && autonomies.every((autonomy) => autonomy === "autonomous")) {
+    // APRV-410. The sweep that takes back this actor's abandoned questions used
+    // to live only in `gateHarnessCall`, which an autonomous command never
+    // reaches — so a session whose retry classified autonomously left its
+    // expired question standing until the TTL, and a human's tap on it six
+    // minutes past the grace was recorded as a grant nobody held (log seq
+    // 64473, 2026-09-20). The withdrawal has to be made by the REQUESTER, which
+    // is this actor: `withdraw` refuses a `system:` actor in as many words, and
+    // the event schema's cross-rule binds a `system:` withdrawal to
+    // `policy-drift` alone (APRV-235), so the daemon is not a candidate and the
+    // next invocation of the asking actor is the only one there is.
+    //
+    // `windowRecords` is the verified read `lookupWindow` already performed on
+    // this invocation, so the sweep costs one append when there is something to
+    // take back and nothing at all when there is not. `withdraw` re-reads and
+    // compare-and-appends against its own head (SPEC.md §11.1 invariant 5), so
+    // a question decided between that read and this call refuses
+    // `already-decided` and is passed over rather than overwritten.
+    //
+    // `keepHash` is this invocation's own bytes, exactly as the intake sweep
+    // passes it: a sibling hook process waiting on a question about the same
+    // payload is never taken back from under it.
+    if (windowRecords !== null) {
+      const swept = withdrawAbandoned(
+        run,
+        streams,
+        windowRecords,
+        new Date().toISOString(),
+        payloadHash(payload),
+      );
+      if (swept.length > 0) {
+        streams.err(
+          `approval: withdrew ${String(swept.length)} abandoned harness request(s) nothing retried (${swept.join(", ")}); a tap on one of them now authorizes nothing\n`,
+        );
+      }
+    }
     // No approval lifecycle: an autonomous action has none (amended SPEC.md
     // §6.3), so nothing is requested, decided or granted here. What IS appended
     // since APRV-141 is the execution record itself — the moment the policy
