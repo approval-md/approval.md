@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 02:07'
+updated_date: '2026-09-22 02:12'
 labels:
   - daemon
   - hook
@@ -244,6 +244,109 @@ exception is visible rather than assumed.
   harness_cap_ms and nothing else': the accepted forms, eleven refused ones
   (including null, true, an array and an object, which the four fixtures do not
   cover), and that the constraint does not leak onto another event type.
+
+## Duplicate work: this branch's 1c09b1b vs PR #535 (lane/aprv-423)
+
+PR #535 implements the same task from another session, opened 2026-09-22T00:41Z,
+CI green, 26 files, +2224/-93. This lane's is 1c09b1b (plus a9048e3, the schema
+pin added under review) on PR #539. Read `gh pr diff 535` before deciding.
+Comparison, on the five points the review asked about plus what else differs.
+
+### Where the two AGREE
+
+Both put the seam in the same place, which is the decision that matters most:
+core/state.ts's requestState reads harness_cap_ms off the request's own
+declaration and narrows the lapse arithmetic there, so every downstream reader
+(decide, expire, lapsedRequests, findHarnessCarry, the queue, the channels)
+inherits one answer and SPEC 10.2's 'the sweep changes no verdict' survives.
+Both use HARNESS_CAP_MARGIN_MS = 60_000, justified identically as two of the
+daemon's 30s DEFAULT_INTERVAL_MS. Both take the cap as a min against the policy
+TTL, so it can only shorten (invariant 4). Both add --harness-cap and record the
+value as a duration, never an instant (invariant 2). Both leave SPEC unedited and
+propose the hunk in their notes.
+
+### What #535 has that 1c09b1b LACKS
+
+1. **grantLapsed is not bounded in mine, and that is a correctness gap.**
+   core/gate.ts:3343's grantLapsed takes the raw policy ttlMs, and
+   findHarnessCarry calls it at :3388 beside the requestState call my change does
+   bound. So a carried GRANT for a capped request is judged against the policy's
+   hour rather than the capped window: a retry could adopt and spend a grant past
+   the point the harness abandoned the call, which is the hole this task exists to
+   close, on the carry path. #535 states grantLapsed takes the effective window.
+   This alone is enough to prefer #535.
+2. **The Hermes default is wrong in mine, and #535's F2 names it a design
+   defect.** I assumed the 300s per-entry CEILING when no flag is passed, giving a
+   240s window. But plugins.hook_callback_timeout defaults to 30s and fails closed
+   on pre_tool_call, so on a default Hermes install my implementation asserts a
+   T+240s deadline for a hook the harness kills at 30s — APRV-410's shape again
+   with a fictional deadline, which is the failure this task was filed against.
+   #535 carries capCeilingMs (a clamp on a stated flag) and capDefaultMs (30_000,
+   the assumed value), and refuses until the operator states one.
+3. **A distinct refusal for a cap with no room for a human.**
+   hook-harness-cap-too-short, denied before anything is registered or requested,
+   with the adapter's own repair sentence and the classes it refused for. Mine
+   floors the effective TTL at 0 instead, which opens a question that lapses as it
+   is asked: fail-closed, but it spends a log record and an operator's attention
+   to say what a deny could have said for free.
+4. **A stricter schema pin.** #535 pairs harness_cap_ms with
+   execution: "harness" through dependentSchemas (a cap on a token-minting
+   request would be a window shorter than the token's shelf life) and floors it at
+   HARNESS_CAP_MARGIN_MS + 1 = 60001, pinned equal to the constant by a test, so a
+   caller that skips the hook cannot open a zero-length window at the write
+   boundary. a9048e3 pins only 'optional positive integer'. #535's is the better
+   constraint and I would not try to merge the two.
+5. **Reach beyond the gate.** #535 also fixes what a capped request LOOKS like:
+   cli/execute.ts's pendingRequests reads derivation.effectiveTtlMs so
+   `approval queue` shows the real remaining window (and a number rather than
+   'no TTL' for a capped request under a policy that declares none), QueueEntry
+   gains ttl_ms, and channels/telegram.ts gives every Delivery a per-request
+   windowMs so buttons are forgotten when THAT request's window closes rather than
+   the policy's. Mine touches none of this, so on my branch a 4-minute question
+   renders as a sliver of the policy's hour.
+6. **appendExpiry records the effective ttl_ms and the cap that shortened it**, so
+   the expiry record says why its window was short. Mine records neither.
+7. Serve integration (cli/serve.ts, serve/server.ts), docs/cursor-hook.md, and
+   the queue verb's --json schema in verb-registry.ts. All absent from mine.
+
+### What 1c09b1b has that #535 appears to LACK
+
+Very little, and nothing I would hold the decision for.
+
+- A HARNESS_PROCESS_CAP_MS table covering all six HarnessKinds explicitly (null
+  for the five with no documented ceiling), which reads as a checklist a future
+  adapter has to answer. #535 puts the numbers on the adapter instead, which is
+  the better home — the adapter is already where originApp and defaultActor live.
+- A test that the cap constraint does not LEAK onto another event type, and eleven
+  refused shapes in tests/event-schema.test.ts including null, true, an array and
+  an object, which the fixture set alone does not cover. Worth porting onto #535
+  if its schema test does not already assert the same; a cheap addition either way.
+
+### Recommendation
+
+**Keep #535 and drop both 1c09b1b and a9048e3.** #535 is a strict superset on
+behaviour, it closes the grantLapsed gap and the Hermes-default defect that make
+mine unsafe on exactly the harness the task was filed about, and its schema
+constraint is the stronger one. Trying to keep any part of mine costs a merge of
+two different constraints on one field and two different vector bumps for no
+behaviour that #535 does not already have.
+
+**They cannot both land.** Both edit schema/event.schema.json's approval.requested
+block, both edit scripts/regen-conformance-vectors.mjs, and the vector versions
+disagree (mine bumps schema-validation 2.7.0 -> 2.8.0; #535 bumps refusal-unions
+21.0.0 -> 22.0.0 for the new deny code and regenerates schema-validation from its
+own fixtures). Both also edit docs/hermes-hook.md, docs/claude-code-hook.md,
+docs/cli-reference.md, src/cli/help.ts, src/cli/hook.ts, src/core/gate.ts,
+src/core/harness-wait.ts and src/core/state.ts.
+
+**APRV-403 and APRV-425 do not depend on either.** Neither touches harness-cap
+code: 403 is daemon/daemon.ts, cli/daemon.ts and the drift tests, 425 is
+cli/channel-telegram.ts and the telegram tests, and 425's COLLAPSE_STALE_AFTER_MS
+reads pre-existing constants. Dropping 1c09b1b and a9048e3 and rebasing 403 and
+425 onto main is a clean operation; the only likely conflicts are textual, in
+docs/cli-reference.md and docs/claude-code-hook.md, where #535 edits sections
+near the ones 403 and 425 added. The changelog commit on this branch already
+carries no APRV-423 entry, so it needs no change either way.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
