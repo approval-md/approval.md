@@ -28,7 +28,7 @@ import {
   type ClassifiedSegment,
   type CommandClassification,
 } from "../src/core/command-class.js";
-import { refineWriteScope, resolveWriteRoots } from "../src/cli/hook.js";
+import { refineWriteScope, resolveScratchRoots, resolveWriteRoots } from "../src/cli/hook.js";
 
 /** dist/tests/cli-hook-write-scope.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -250,12 +250,25 @@ test("a class that is not a workspace write is never touched", () => {
 // 3. The roots, and the end-to-end agreement
 // ---------------------------------------------------------------------------
 
+/**
+ * The property is agreement, and it is stated as agreement rather than as a
+ * list of directory names, because the names differ per platform and a test
+ * that spells them is a test about the machine. CI taught this one: the suite's
+ * temp base IS `/tmp` on Linux, so `resolveScratchRoots` discards `/tmp` for
+ * containing the working directory (its own guard, and the right one) and the
+ * surviving root is `/var/tmp`, while on macOS the base sits under
+ * `/var/folders/…` and `/tmp` survives. What must hold everywhere is that the
+ * write rule carries exactly the roots the DELETE rule computes, with the
+ * working directory in front, so the two can never disagree about where the
+ * agent's scratch is.
+ */
 test("resolveWriteRoots carries the working directory and the scratch roots", () => {
   const roots = resolveWriteRoots(workspace);
   assert.equal(roots[0], workspace, "the working directory is not the first root");
-  assert.ok(
-    roots.some((root) => root === realpathSync(tmpdir()) || root === "/tmp" || root === "/private/tmp"),
-    `no temp root among ${JSON.stringify(roots)}; the write rule and the delete rule must agree about where scratch is`,
+  assert.deepEqual(
+    roots,
+    [workspace, ...resolveScratchRoots(workspace)],
+    "the write roots are not the working directory plus the delete rule's own roots",
   );
 });
 

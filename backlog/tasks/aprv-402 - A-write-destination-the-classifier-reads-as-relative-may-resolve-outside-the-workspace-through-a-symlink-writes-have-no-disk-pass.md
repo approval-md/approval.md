@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-lane-d'
 created_date: '2026-09-20 11:25'
-updated_date: '2026-09-22 01:20'
+updated_date: '2026-09-22 01:43'
 labels:
   - classifier
   - hook
@@ -81,6 +81,12 @@ OVERLAP WITH APRV-409/410. Another lane is editing src/cli/hook.ts and src/core/
 STALE DOC CORRECTED IN THE SAME DIFF. docs/claude-code-hook.md carried a paragraph headed 'There is no disk pass for a write destination, and that is a limit rather than a claim', naming this very task as the one that would close it. It is now the write pass's own section, with the same three-row table the delete rule has, the roots it uses, why the read scope is not among them, and the shell-expansion limit stated plainly.
 
 VALIDATION. cli-hook-write-scope 10 tests, 10 pass, 0 fail (the new suite). cli-hook 142 tests, 142 pass, 0 fail. cli-hook-scope, cli-hook-scratch, cli-hook-read-scope, cli-hook-rewrite, command-class, command-class-routing and command-class-quoting together: 621 tests, 621 pass, 0 fail. conformance, conformance-regen, policy-vocabulary, layering and hook-module-graph: 55 tests, 55 pass, 0 fail. node conformance/run.mjs: 458 vectors, 458 passed, 0 failed, 176 controls, 0 controls passed wrongly, exit 0. build, typecheck and lint each exit 0.
+
+CI CAUGHT ONE THING AND IT WAS THE TEST, NOT THE PASS. Shard 3/3 of the first full-gate run failed one assertion, 'resolveWriteRoots carries the working directory and the scratch roots', with roots ["/tmp/approval-md-write-scope-awneGo/workspace","/var/tmp"]. The pass behaved correctly; the assertion was macOS-shaped. The suite builds its world under os.tmpdir(), which IS /tmp on a Linux runner, so resolveScratchRoots discards /tmp for containing the working directory (its own guard, and the right one) and the surviving temp root is /var/tmp, which the assertion's list of acceptable names did not include. On macOS the base sits under /var/folders and /tmp survives, so it passed locally.
+
+The assertion now states the property as agreement rather than as a list of directory names: resolveWriteRoots(cwd) deepEquals [cwd, ...resolveScratchRoots(cwd)]. That is the thing that has to hold on every platform, and it is the thing worth pinning, that the write rule and the delete rule cannot disagree about where scratch is. Verified both ways locally: 10 of 10 under the ordinary layout and 10 of 10 with TMPDIR=/tmp, which reproduces the runner's shape exactly.
+
+Worth knowing rather than buried: on a machine where the session's cwd sits under the temp root, /tmp is not a write root, so a write into it is a question. The delete rule has had that property since APRV-267 and this pass inherits it by sharing the function.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
