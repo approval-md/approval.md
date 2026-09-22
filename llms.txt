@@ -2,7 +2,7 @@
 
 > Human approval for agent actions. A harness-agnostic, open-source framework for approving agent actions with a human in the loop.
 
-approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 code and a CC0 specification and schemas. Version 0.3.0 is published on npm and runs on Node 20 or newer, and the feature index describes that published release. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are scoped to adapter execution, with single-use tokens on paths that require a human grant.
+approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 code and a CC0 specification and schemas. The current version is 0.3.0, it runs on Node 20 or newer, and the feature index describes it; the runtime installs from npm as `approval-md`. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are scoped to adapter execution, with single-use tokens on paths that require a human grant.
 
 ## Start here
 
@@ -10,7 +10,7 @@ approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 
 - [Extended guide](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/README-extended.md): the product tour and operating detail, from the policy file to the phone prompt, the vault and the credential boundary.
 - [Landing page as markdown](https://approval.md/llms-full.txt): this site's whole content, including the 70-entry feature index with claims and links.
 - [SPEC.md](https://raw.githubusercontent.com/approval-md/approval.md/main/SPEC.md): the specification and the source of truth for design decisions, including section 11 on the security posture and section 11.1 on the global invariants.
-- [npm package](https://www.npmjs.com/package/approval-md): published version 0.3.0 of the TypeScript reference runtime.
+- [npm package](https://www.npmjs.com/package/approval-md): the TypeScript reference runtime, installed as `approval-md`. The current version is 0.3.0.
 
 ## Reference
 
