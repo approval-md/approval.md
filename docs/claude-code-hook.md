@@ -1250,7 +1250,9 @@ Two things changed, and between them they bound the state rather than remove it:
    payload hash, and sweeping with nothing to protect could take back a
    question a sibling hook process had adopted and was waiting on.
 2. **A grant written past the grace carries nothing.** `findHarnessCarry` bounds
-   a grant by its request's TTL and, now, by the life of the question: when the
+   a grant by its request's effective window (the policy TTL, narrowed by a
+   recorded harness cap minus the 60s margin, APRV-423) and, now, by the life
+   of the question: when the
    decision's own timestamp is later than the request's timestamp plus the
    caller's wait and grace, a retry does not adopt it and asks again. So the
    answer to "may a retry of that exact command in that directory adopt a late
