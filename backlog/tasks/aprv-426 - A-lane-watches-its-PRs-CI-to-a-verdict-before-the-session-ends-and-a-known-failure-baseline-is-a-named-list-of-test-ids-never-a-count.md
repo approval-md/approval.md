@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-22 00:00'
-updated_date: '2026-09-22 02:03'
+updated_date: '2026-09-22 02:18'
 labels:
   - workflow
   - ci
@@ -65,6 +65,10 @@ Global invariants: none touched. Nothing here reads or writes the log, computes 
 CORRECTION after CI, from PR 540's own evidence. The notes above called the 22-entry list 'about what CI sees'. It is not, and the shard matrix said so: all three Node 22 shards passed green while a local run fails all 22. CI runs the floor on Node 20 and the matrix on Node 22, never Node 26, and every entry on the list is APRV-416, a Node 26 refusal of an IP literal as a TLS servername. So the list is a LOCAL baseline, which is the right thing for it to be: a lane's closing note comes from the lane's own run, and that is where a count was being cited. docs/ci-verdict.md and the baseline file's comment now state the asymmetry, because it is the fact that explains how CI green and a red local run coexist without either being wrong. The six excluded failures are excluded for the same kind of reason rather than the one I first gave: the packaging suites need registry access and a worktree with its own node_modules, which is environment rather than debt.
 
 This is the correction the task's own tooling made possible: the baseline flag names failures, and a named set is what let CI's green shards be read against a local red instead of both being reported as a number.
+
+One more thing CI's verdict surfaced, and it was a trap in this task's own test. The first draft of tests/ci-baseline.test.ts asserted the committed list was NON-EMPTY, reasoning that APRV-416's SMTP failures are why the file exists. That would have turned the day APRV-416 lands and its 22 entries are correctly deleted into a red suite: the test would have punished the fix. PR 536 was open with that exact fix while this was being written, so the trap was about a week from firing. An empty list is now legal and is the goal; what the case holds to is that every entry present is well formed and owned. How many there are is the debt, not the contract.
+
+Also verified live rather than asserted on paper: both jq queries in docs/ci-verdict.md run as written against this repository, and the first one immediately found PR 523 armed and BLOCKED, which is the failure mode this task was filed about, sitting there right now. The runbook is not hypothetical.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

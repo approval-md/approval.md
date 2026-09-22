@@ -106,10 +106,14 @@ test("the committed baseline loads and every entry owns its debt", async () => {
   const { loadBaseline, DEFAULT_BASELINE } = await baselineModule();
   assert.equal(DEFAULT_BASELINE, BASELINE_FILE);
   const baseline = loadBaseline();
-  assert.ok(
-    baseline.known.length > 0,
-    "scripts/ci-baseline.json is empty. It is allowed to be, once the debt is paid, but the SMTP failures of APRV-416 are the reason it exists (APRV-426 AC3); an empty list here means they were dropped rather than fixed.",
-  );
+  // An EMPTY list is legal and is the goal. An earlier draft of this case
+  // asserted the list was non-empty, on the reasoning that APRV-416's SMTP
+  // failures are why the file exists — which would have turned the day APRV-416
+  // lands and its entries are correctly deleted into a red suite, punishing the
+  // fix. PR #536 was open with that fix while this was being written, so the
+  // trap was about a week from firing. What is held to here is that every entry
+  // present is well formed and owned; how many there are is the debt, not the
+  // contract.
   for (const entry of baseline.known) {
     assert.match(entry.task, /^APRV-\d+$/u, `${entry.id} names ${entry.task}, which is not a task id`);
     assert.ok(entry.note.length > 0, `${entry.id} carries no note saying why it fails`);
