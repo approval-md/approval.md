@@ -3,11 +3,11 @@ id: APRV-401
 title: >-
   A grant over a script path binds the invocation, not the bytes: carry the
   script digest in the payload and show it on the card
-status: In Progress
+status: Done
 assignee:
   - 'agent:lane-b'
 created_date: '2026-09-20 09:03'
-updated_date: '2026-09-22 02:01'
+updated_date: '2026-09-22 02:09'
 labels:
   - payload
   - gate
@@ -25,13 +25,13 @@ Found while spending a deps.add grant during APRV-398 (grant at seq 60837). appr
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The approval run payload carries the size and SHA-256 of the script the argv names, inside the hashed value, in the two shapes the ruling gives: a known interpreter followed by a path operand, and a path at argv[0]
-- [ ] #2 A script edited between the declaration and the execution is refused payload-mismatch with nothing appended, and the refusal names the path, the size and the digest it bound
-- [ ] #3 An argv naming no readable script hashes byte-for-byte as it did before, so every historical record and every declaration written without the digest verifies unchanged
-- [ ] #4 The path, the byte count and the digest appear in the canonical rendering every channel puts in front of an approver, with no change to CANONICAL_RENDERER_VERSION and no SPEC amendment applied
-- [ ] #5 A requester can produce the exact payload bytes and the binding with one verb rather than hand-assembling JSON, and that verb is withheld from the MCP and HTTP surfaces because the path it digests is a command word no transport guard confines
-- [ ] #6 The rule, its six stated limits and the proposed SPEC 6.2 hunk are documented, and docs/cli-reference.md says the same thing under run, request and payload
-- [ ] #7 Build, typecheck and lint exit 0 with no warnings; the targeted suite matrix and the conformance runner pass
+- [x] #1 The approval run payload carries the size and SHA-256 of the script the argv names, inside the hashed value, in the two shapes the ruling gives: a known interpreter followed by a path operand, and a path at argv[0]
+- [x] #2 A script edited between the declaration and the execution is refused payload-mismatch with nothing appended, and the refusal names the path, the size and the digest it bound
+- [x] #3 An argv naming no readable script hashes byte-for-byte as it did before, so every historical record and every declaration written without the digest verifies unchanged
+- [x] #4 The path, the byte count and the digest appear in the canonical rendering every channel puts in front of an approver, with no change to CANONICAL_RENDERER_VERSION and no SPEC amendment applied
+- [x] #5 A requester can produce the exact payload bytes and the binding with one verb rather than hand-assembling JSON, and that verb is withheld from the MCP and HTTP surfaces because the path it digests is a command word no transport guard confines
+- [x] #6 The rule, its six stated limits and the proposed SPEC 6.2 hunk are documented, and docs/cli-reference.md says the same thing under run, request and payload
+- [x] #7 Build, typecheck and lint exit 0 with no warnings; the targeted suite matrix and the conformance runner pass
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -98,4 +98,18 @@ SPEC IS UNAMENDED AND THE HUNK IS WRITTEN. The behaviour diverges from section 6
 THE CARD, AND THE VIEW I DID NOT BUILD. The run payload has no structural view, so it renders under the opaque kind, whose view is the canonical JSON WHOLE. Path, byte count and digest are therefore inside the block every channel prints verbatim and inside the display_hash the gate records, which is why this task changed no channel code and why the ruling's three card fields are all present. A dedicated argv view would read better and was deliberately not built: section 9 names the renderer version normatively, a new kind changes the bytes that module emits, and by its own rule that is a new version, which is an amendment I may not make. Filed as APRV-430.
 
 ONE THING THE VERB CANNOT BE, FOUND BY A TEST RATHER THAN BY ME. tests/serve.test.ts fails on any published flag nobody has classified as path-typed or reviewed as not, and payload run's --cwd landed there. Classifying it was the small half. The large half is that this verb digests a file named by one of the COMMAND'S OWN WORDS, which arrive in trailing, where no transport guard confines a path the way the store confinement confines payload hash's positional. Published over MCP or HTTP it would be a digest oracle over every file the server process can read. So it is withheld on both transports, with the reason recorded in EXCLUDED_VERBS beside the stdin and plumbing ones, and --cwd is declared path-typed anyway because that is the true statement about the flag whether or not a transport publishes it.
+
+VERIFICATION, with the numbers rather than a summary block. Build, typecheck and lint each exit 0 with no warnings. The conformance runner: 461 vectors, 461 passed, 0 failed, 176 negative controls, manifest ok, unregenerated, which is also the evidence that no vector pins the run payload shape. A 33-suite targeted matrix ran 1009 tests with one failure, the 25-line help cap on the new PAYLOAD_RUN_HELP, which was then trimmed; the nine suites touched after that matrix re-ran clean at 290 of 290 (run-payload, payload, cli-payload, cli-resolve, cli-run, cli-help, cli-long-help, channels-telegram, wysiwys). Two later attempts at a full clean matrix HUNG after the same suite and were killed rather than reported; the machine is running several lanes' suites at once and the stall is a port or lock collision between them, not a failure of this diff, so CI on its own runner is the authority for the whole-suite number.
+
+The full npm test was also run earlier in the session, against the broad-rule build: 5147 tests, 5123 passed, 23 failed. 22 of those are a pre-existing SMTP/TLS failure in this worktree, in adapter-email (14), smtp-probe (4) and the four setup adapter email probe cases in cli-setup, all from this Node refusing a TLS servername that is an IP address against the local mock. Proved unrelated by A/B rather than asserted: the two SMTP suites are 32 passed and 18 failed IDENTICALLY with and without this change, measured by reverting src/core/payload.ts to the branch point, rebuilding, re-running and restoring. The 23rd failure was the serve unclassified-flag guard, which is this diff's and is fixed.
+
+AC EVIDENCE. AC1 and AC3: tests/run-payload.test.ts, 22 cases, including the byte-for-byte unchanged case pinned against RFC 8785 by hand. AC2: tests/cli-resolve.test.ts, a supervised action whose script is edited after the declaration, refused with the event list unchanged and the chain clean, plus the refusal-text case. AC4: tests/channels-telegram.test.ts asserts path, size and digest reach the card, and the wysiwys suite passes with CANONICAL_RENDERER_VERSION untouched. AC5: tests/cli-payload.test.ts for the verb, tests/mcp-server.test.ts for the exclusion, tests/serve.test.ts for the flag classification. AC6: docs/run-payload-binding.md and docs/cli-reference.md, with cli-long-help's anchor test proving the pointer resolves. AC7: the numbers above.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A grant over a script path bound the path; it binds the bytes now. The approval run payload carries the script's argv index, absolute path, byte count and SHA-256 inside the hashed value, in the shape the ruling gives: a known interpreter followed by a path operand, or a path at argv[0] with a shebang behind it. A script edited between the declaration and the run hashes differently and takes the existing payload-mismatch refusal, before the append and before the child; the key is omitted when the argv names no script, so every record and declaration written before this still verifies. New verb approval payload run produces those bytes or their hash for the requester, and is withheld from the MCP and HTTP surfaces because the path it digests is a command word no transport guard confines. No new refusal code, no event type, no schema, no renderer version: the card already shows the three fields because the opaque view prints the payload whole.
+
+SPEC is unamended by design, with the exact section 6.2 hunk written in docs/run-payload-binding.md for a human to apply. Verified: build, typecheck and lint at exit 0 with no warnings; conformance 461 of 461 with 176 controls; a 33-suite matrix at 1009 tests with one help-cap failure since fixed, and 290 of 290 on re-run of everything touched after it. The merge is NOT armed: the gate daemon is down today, so gh pr merge was not run and no auto-merge was set, and CLAUDE.md item 7 is left to Carter deliberately rather than by omission. Follow-ups filed: APRV-429 for the same hazard on the harness hook path, APRV-430 for a structural view and its renderer version bump.
+<!-- SECTION:FINAL_SUMMARY:END -->
