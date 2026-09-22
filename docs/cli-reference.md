@@ -4135,10 +4135,14 @@ succeed and then not work:
   kernel for an ephemeral port, and this transport is a fixed public url
   forwarded to a fixed local address: a receiver on a port nobody registered
   verifies nothing and answers nothing.
-- **Every line that prints the url prints its origin and the served path**, in
-  the start-up banner, in `webhook_started` and in refusals. A tunnel that
-  hands out `https://host/hook/<random>` puts a bearer value in a path, and
-  this runtime does not copy it into three more places.
+- **Every line that prints the url prints its origin and a redacted path**, in
+  the start-up banner, in `webhook_started` and in refusals: the first path
+  segment is kept and the rest becomes `<path redacted>`, and a query string
+  becomes `<query redacted>`. A tunnel that hands out
+  `https://host/hook/<random>` puts a bearer value in a path, and this runtime
+  does not copy it into three more places. The local bind line is redacted the
+  same way, because it carries the same path. The operator has the whole of it
+  already: they typed it into `--url`.
 
 ### The proxy or tunnel is required, and this process holds no certificate
 
@@ -4166,13 +4170,31 @@ and they are in that order because the first needs no network:
   this verb take a lockfile in the gate's own derived state directory,
   `.approval/daemon/telegram-transport.lock`, holding the holder's pid, which
   transport it is running and when it started. It is created with `O_EXCL`, so
-  two processes racing cannot both believe they took it, and a holder whose pid
-  is gone is reclaimed automatically (a crash must not lock a gate out of its
-  own channel). A second taker refuses `telegram-poller-running` when a poller
-  holds it and `webhook-registered` when a webhook does, naming the pid and the
-  mode; a directory the lease cannot be written in refuses
+  two processes racing cannot both believe they took it, and a holder that is
+  no longer running is reclaimed automatically (a crash must not lock a gate
+  out of its own channel). A second taker refuses `telegram-poller-running`
+  when a poller holds it and `webhook-registered` when a webhook does, naming
+  the pid and the mode; a directory the lease cannot be written in refuses
   `telegram-lease-unavailable`, because this file is the only thing keeping one
   gate from running two transports. Both transports release it on a clean stop.
+
+  **A holder is a process, not a number.** Pids are reused, so the probe asks
+  three questions: does a process with that number exist, can this process
+  signal it, and did it start before the lease was written. A number that is
+  gone, one owned by a process this one cannot signal, and one belonging to a
+  process that started *after* the lease are all reclaimed, and the line says
+  which of the three it was. Only a process that is running, signalable and
+  older than its own lease keeps the gate. Where the platform will not report a
+  start time, a running pid keeps the gate, which is the stricter reading.
+
+  **Taking a lease over is a critical section.** Reclaiming happens inside a
+  sibling `O_EXCL` lock, and inside it the record must still be exactly the one
+  that was judged (same pid, same `started_at`) or the take-over is abandoned.
+  Without that, two processes that had both read one dead holder took turns
+  deleting each other's live lease and both ended up holding the gate. The
+  replacement is a rename, so the lockfile is never absent and never half
+  written, and a reclaim lock left behind by a crash ages out after five
+  seconds.
 
   This is the check the other three cannot make. Two processes started in the
   SAME project — one `approval up` long-polling, one `approval channel telegram
@@ -4197,6 +4219,16 @@ and they are in that order because the first needs no network:
   registered one (host lowercased, trailing slash dropped) is reported as a
   re-registration and anything else as a takeover that stops the other receiver
   being posted to.
+
+  **One case needs no flag: this gate's own runner was killed.** A `SIGKILL`
+  leaves the registration in place, because the dead process never reached
+  `deleteWebhook`, and a restart that refused every time would teach operators
+  to put `--reclaim` in the unit file, which retires the protection above for
+  good in exchange for a crash recovery. So a restart may re-register the SAME
+  normalised url without the flag when the lease it just reclaimed was this
+  gate's own, written by a webhook runner, and its process is gone. A dead
+  poller's lease does not count, a different url does not count, and a gate
+  with no such lease does not count: those keep the refusal.
 - Within one process, `TelegramChannel.claimTransport` refuses the second claim.
 
 A clean stop (SIGINT, SIGTERM) removes the webhook, so long polling works again
@@ -4224,11 +4256,14 @@ accepting, then drains: an update mid-append keeps its socket, finishes its
 decision and writes its response, and only then is `deleteWebhook` called and
 the stopped line printed. A second Ctrl-C during the drain is absorbed rather
 than killing the process, and a request that never finishes is dropped after ten
-seconds, because a stop has to end.
+seconds, because a stop has to end. `deleteWebhook` on that path is given five
+seconds rather than the channel's usual thirty, for the same reason: a stop an
+operator has asked for twice should not sit behind an unreachable Bot API, and
+a removal that does not land is reported as a webhook still registered.
 
 ```json
-{"event":"webhook_started","url":"https://gate.example/telegram/webhook",
- "host":"127.0.0.1","port":4683,"path":"/telegram/webhook","cycle_ms":30000}
+{"event":"webhook_started","url":"https://gate.example/telegram/<path redacted>",
+ "host":"127.0.0.1","port":4683,"path":"/telegram/<path redacted>","cycle_ms":30000}
 {"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
  "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
  "key-mismatch":0},

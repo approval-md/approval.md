@@ -171,6 +171,7 @@ import {
   type TelegramDelivery,
 } from "../core/telegram-config.js";
 import {
+  reclaimDetail,
   takeChannelLease,
   type ChannelLease,
   type ChannelLeaseMode,
@@ -478,13 +479,25 @@ export async function claimListenerBot(
       message: leased.message,
     };
   }
-  if (leased.reclaimed !== null) {
-    report(
-      `approval: the telegram transport lease was held by pid ${String(
-        leased.reclaimed.pid,
-      )} in ${leased.reclaimed.mode} mode since ${leased.reclaimed.startedAt}, and that process is gone; reclaimed`,
-    );
+  if (leased.reclaimed !== null && leased.reclaimedBecause !== null) {
+    report(`approval: ${reclaimDetail(leased.reclaimed, leased.reclaimedBecause)}`);
   }
+  /**
+   * Did THIS gate's own webhook runner die without removing its registration?
+   *
+   * The evidence is the lease this take just reclaimed: a record in this
+   * gate's own lockfile, written by a webhook runner, whose process is no
+   * longer the one holding it. A SIGKILL leaves exactly that, plus a
+   * registration at the url the dead process had registered, and without this
+   * every restart would refuse `webhook-registered` until an operator baked
+   * `--reclaim` into the unit file — which would retire finding 6's protection
+   * for good, in exchange for a crash recovery.
+   *
+   * It is deliberately narrow. Same gate (it is the same lockfile), same
+   * transport (a dead poller proves nothing about a registration), and the
+   * url still has to match after normalisation. Anything else keeps refusing.
+   */
+  const ownWebhookDied = leased.reclaimed !== null && leased.reclaimed.mode === "webhook";
   const release = (): void => leased.lease.release();
   const refuse = (code: ListenRefusalCode, message: string): ClaimedListenerBot => {
     release();
@@ -556,10 +569,19 @@ export async function claimListenerBot(
         `telegram ${identity.username} delivers its updates to a webhook at ${shown}, and the Bot API refuses getUpdates while one is set, so this listener would receive no tap at all${queued}. Long polling and a webhook are alternatives per bot: stop the \`approval channel telegram webhook\` process, which removes the webhook as it exits, or give this instance its own bot with \`approval setup channel telegram\``,
       );
     }
-    if (options.reclaim !== true) {
-      const mine = normaliseWebhookUrl(options.webhookUrl);
-      const theirs = normaliseWebhookUrl(hooked.url);
-      const same = mine !== null && theirs !== null && mine === theirs;
+    const mine = normaliseWebhookUrl(options.webhookUrl);
+    const theirs = normaliseWebhookUrl(hooked.url);
+    const same = mine !== null && theirs !== null && mine === theirs;
+    if (same && ownWebhookDied) {
+      // The restart case, and the only one that needs no flag: this gate's own
+      // webhook runner was killed without the chance to call `deleteWebhook`,
+      // and what is registered is the url it left behind.
+      report(
+        `approval: the webhook at ${shown} is the one this gate's own runner registered before it died (its lease was reclaimed from pid ${String(
+          leased.reclaimed?.pid ?? 0,
+        )}); re-registering the same url, which needs no --reclaim`,
+      );
+    } else if (options.reclaim !== true) {
       return refuse(
         "webhook-registered",
         `telegram ${identity.username} already delivers its updates to a webhook at ${shown}${queued}. ${
@@ -568,14 +590,13 @@ export async function claimListenerBot(
             : "This process was asked to register a different url, and a bot has exactly one webhook: registering would silently take the taps away from whatever is serving that one"
         }. Telegram allows one webhook per bot and keeps the last registration. Stop the other process, or pass --reclaim to register over it deliberately`,
       );
+    } else {
+      report(
+        same
+          ? `approval: --reclaim: re-registering ${shown}, which is the url already registered for ${identity.username}`
+          : `approval: --reclaim: registering over the webhook at ${shown}; whatever is serving it stops being posted to, because Telegram keeps only the last registration for ${identity.username}`,
+      );
     }
-    const mine = normaliseWebhookUrl(options.webhookUrl);
-    const theirs = normaliseWebhookUrl(hooked.url);
-    report(
-      mine !== null && theirs !== null && mine === theirs
-        ? `approval: --reclaim: re-registering ${shown}, which is the url already registered for ${identity.username}`
-        : `approval: --reclaim: registering over the webhook at ${shown}; whatever is serving it stops being posted to, because Telegram keeps only the last registration for ${identity.username}`,
-    );
   }
 
   const claim = claimBot(setup.logPath, {

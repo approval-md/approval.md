@@ -57,6 +57,7 @@ import {
   type TelegramWebhookHandle,
 } from "../channels/telegram-webhook.js";
 import {
+  redactWebhookPath,
   redactWebhookUrl,
   TELEGRAM_WEBHOOK_SECRET_ENV,
 } from "../core/telegram-config.js";
@@ -132,6 +133,18 @@ const TELEGRAM_WEBHOOK_PORTS = new Set([443, 80, 88, 8443]);
 
 /** How often the dispatch cycle runs when the operator names no period. */
 export const WEBHOOK_DEFAULT_CYCLE_MS = 30_000;
+
+/**
+ * How long the stop path waits for `deleteWebhook` (APRV-424, second review,
+ * note 6).
+ *
+ * The channel's ordinary request timeout is thirty seconds, which is right for
+ * a delivery and wrong for a stop: on top of the receiver's drain it made a
+ * second Ctrl-C look swallowed for the better part of a minute. A removal that
+ * does not land in five seconds is reported, and the operator is told the
+ * webhook is still registered, which is a sentence they can act on.
+ */
+export const WEBHOOK_STOP_DELETE_TIMEOUT_MS = 5_000;
 
 /**
  * Why a webhook runner could not be built. A closed union, distinct per
@@ -551,8 +564,16 @@ export function webhookNonLoopbackBanner(host: string, port: number): string {
 export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise<number> {
   const { listen } = setup;
   const json = listen.json;
-  /** The url as it may be printed: origin plus the path this process serves. */
-  const shownUrl = redactWebhookUrl(setup.url, setup.path);
+  /** The url as it may be printed: origin plus a redacted path. */
+  const shownUrl = redactWebhookUrl(setup.url);
+  /**
+   * The bind, as it may be printed.
+   *
+   * The local address carries the SAME path as the public url, so printing it
+   * whole beside a redacted url would hand back what the redaction removed
+   * (APRV-424, second review, finding 2).
+   */
+  const shownPath = redactWebhookPath(setup.path);
 
   for (const finding of listen.crossInstance) {
     streams.err(`approval: --allow-cross-instance: starting anyway — ${finding.detail}\n`);
@@ -651,7 +672,7 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
     if (!isLoopbackHost(handle.host)) {
       streams.err(webhookNonLoopbackBanner(handle.host, handle.port));
     }
-    const started = `approval: telegram webhook registered ${shownUrl} and bound http://${handle.host}:${String(handle.port)}${handle.path} as ${listen.actor}. Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
+    const started = `approval: telegram webhook registered ${shownUrl} and bound http://${handle.host}:${String(handle.port)}${shownPath} as ${listen.actor}. Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
     if (json) {
       streams.out(
         `${JSON.stringify({
@@ -662,7 +683,9 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
           url: shownUrl,
           host: handle.host,
           port: handle.port,
-          path: handle.path,
+          // Redacted for the url's reason: this is the same path, and a
+          // line that printed it here would undo the line above.
+          path: shownPath,
           cycle_ms: setup.cycleMs,
         })}\n`,
       );
@@ -708,7 +731,7 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
           // registered is a bot no poller can start against, which is exactly
           // the refusal this task added.
           try {
-            await listen.channel.deleteWebhook();
+            await listen.channel.deleteWebhook(WEBHOOK_STOP_DELETE_TIMEOUT_MS);
           } catch (cause) {
             streams.err(
               `approval: telegram deleteWebhook failed (${

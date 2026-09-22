@@ -94,34 +94,49 @@ export function normaliseWebhookUrl(raw: string): string | null {
 }
 
 /**
- * A webhook URL as it may be PRINTED (APRV-424, review finding 10).
+ * A webhook PATH as it may be printed (APRV-424, reviews 1 and 2).
  *
- * A webhook URL is not a credential and is not treated as one, but two things
- * travel inside one often enough that echoing it verbatim is a habit worth
- * dropping. The first is userinfo (`https://user:pw@host/hook`), which the
- * webhook verb refuses outright before it registers anything. The second is
- * the token-in-path pattern: a tunnel that hands out
- * `https://host/hook/8Xk2-a-long-random-value` puts a bearer value in a path,
- * and a runtime that copied that path into a start-up banner, a `--json` line
- * and a refusal has written it into three places the operator did not choose.
+ * The first segment is kept and everything after it is replaced. A tunnel that
+ * hands out `https://host/hook/8Xk2-a-long-random-value` puts a bearer value
+ * in a path, and `/hook` is enough for an operator to recognise their own
+ * endpoint in a log line. The rest is theirs, and they already have it: they
+ * typed it into `--url`.
  *
- * So what is printed is the ORIGIN, which carries no userinfo by
- * construction, plus the path this process actually serves. A path that is not
- * the served one is reported as redacted rather than quoted: the origin is
- * what tells one host from another, and the rest is the operator's.
+ * The second review found the first version of this printing the served path
+ * verbatim, on the argument that a path this process serves is a path the
+ * operator chose. That argument is right about the operator and wrong about
+ * everyone else who reads a terminal, a log aggregator or a pasted banner.
  */
-export function redactWebhookUrl(raw: string, servedPath?: string): string {
+export function redactWebhookPath(path: string): string {
+  const segments = path.replace(/^\/+/u, "").split("/");
+  const first = segments[0];
+  if (first === undefined || first === "") return "/";
+  const rest = segments.slice(1).filter((segment) => segment.length > 0);
+  return rest.length === 0 ? `/${first}` : `/${first}/<path redacted>`;
+}
+
+/**
+ * A webhook URL as it may be printed (APRV-424, review finding 10).
+ *
+ * The origin, which carries no userinfo by construction, plus
+ * {@link redactWebhookPath}'s reading of the path. Used by every line this
+ * runtime writes about a webhook url: the start-up banner, the
+ * `webhook_started` object, the registration refusal and the listener's
+ * `webhook-registered` message, whether the url is this process's own or
+ * another host's.
+ *
+ * A url carrying userinfo is refused at startup rather than printed; this is
+ * the belt on that brace, because the origin never contains it.
+ */
+export function redactWebhookUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
     return "<not a url>";
   }
-  if (servedPath !== undefined && url.pathname === servedPath && url.search === "") {
-    return `${url.origin}${servedPath}`;
-  }
-  const hasPath = url.pathname !== "" && url.pathname !== "/";
-  return hasPath || url.search !== "" ? `${url.origin}/<path redacted>` : url.origin;
+  const query = url.search === "" ? "" : "?<query redacted>";
+  return `${url.origin}${redactWebhookPath(url.pathname)}${query}`;
 }
 
 /** The NAME of the variable this policy says the bot token lives in. */

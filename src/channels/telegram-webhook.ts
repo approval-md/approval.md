@@ -628,6 +628,11 @@ export async function serveTelegramWebhook(
     };
     for (;;) {
       const remaining = deadline - Date.now();
+      // Giving up leaves a pending handler where it is. Nothing holds the
+      // event loop open for it (the sockets are destroyed below, and both
+      // timers here are unref'd), and `cli.js` sets `process.exitCode` rather
+      // than calling `process.exit()`, so the process ends by the normal path
+      // once the loop drains rather than being cut off mid-write.
       if (remaining <= 0) return giveUp();
       // The deadline covers the QUEUE WAIT as well, and that is not a detail:
       // a handler that never returns leaves work on the serialize chain

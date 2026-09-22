@@ -3564,9 +3564,20 @@ export class TelegramChannel implements TestableChannel {
    * Called on a clean stop of the webhook runner. Pending updates are kept for
    * {@link registerWebhook}'s reason: the next process to start — a poller or
    * another webhook — is entitled to the taps that arrived in between.
+   *
+   * `timeoutMs` is what the stop path passes, and it is shorter than this
+   * channel's ordinary request timeout on purpose (APRV-424, second review,
+   * note 6). A stop already waits for the receiver to drain, and an operator
+   * pressing Ctrl-C a second time is asking for the process to end: half a
+   * minute of an unreachable Bot API on top of that reads as a hang, and the
+   * webhook it failed to remove is reported rather than silently retried.
    */
-  async deleteWebhook(): Promise<void> {
-    await this.call("deleteWebhook", { drop_pending_updates: false });
+  async deleteWebhook(timeoutMs?: number): Promise<void> {
+    await this.call(
+      "deleteWebhook",
+      { drop_pending_updates: false },
+      ...(timeoutMs === undefined ? [] : [timeoutMs]),
+    );
   }
 
   /**

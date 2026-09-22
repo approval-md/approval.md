@@ -77,6 +77,7 @@ import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
 import { SERVE_REFUSAL_CODES } from "../src/serve/server.js";
 import {
   normaliseWebhookUrl,
+  redactWebhookPath,
   redactWebhookUrl,
   TELEGRAM_WEBHOOK_SECRET_ENV,
 } from "../src/core/telegram-config.js";
@@ -1075,8 +1076,29 @@ function listenSetupFor(world: Live): ListenSetup {
   }
 }
 
-/** A pid that is not this process and is running: init, on every platform. */
-const FOREIGN_LIVE_PID = 1;
+/**
+ * A second process, really running, for the cases about a live holder.
+ *
+ * A real child rather than a borrowed number, because the lease's liveness
+ * probe now asks more than "does a process with that number exist": a pid it
+ * cannot signal, or one whose process started after the lease was written, is
+ * a recycled number and is reclaimed (second review, finding 3). `pid 1` is
+ * exactly that shape, so it no longer stands in for a peer.
+ */
+async function sleeper(): Promise<{ pid: number; stop: () => void }> {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+    stdio: "ignore",
+  });
+  const pid = child.pid;
+  assert.ok(pid !== undefined, "the fixture could not start a second process");
+  return {
+    pid,
+    stop: () => {
+      child.kill("SIGKILL");
+    },
+  };
+}
 
 test("a poller already running in this gate refuses the webhook verb (APRV-424)", async () => {
   // THE FINDING, reproduced. Nothing is registered (a poller registers
@@ -1088,7 +1110,8 @@ test("a poller already running in this gate refuses the webhook verb (APRV-424)"
   const setup = listenSetupFor(world);
   mock.setWebhookInfo({ url: "" });
 
-  const poller = takeChannelLease(world.unit.logPath, "poll", { pid: FOREIGN_LIVE_PID });
+  const peer = await sleeper();
+  const poller = takeChannelLease(world.unit.logPath, "poll", { pid: peer.pid });
   assert.equal(poller.ok, true, JSON.stringify(poller));
   try {
     const refused = await claimListenerBot(setup, (message) => complaints.push(message), {
@@ -1098,13 +1121,14 @@ test("a poller already running in this gate refuses the webhook verb (APRV-424)"
     assert.equal(refused.ok, false, "a webhook runner started beside a live poller in one gate");
     if (!refused.ok) {
       assert.equal(refused.code, "telegram-poller-running");
-      assert.match(refused.message, new RegExp(`pid ${String(FOREIGN_LIVE_PID)}`, "u"));
+      assert.match(refused.message, new RegExp(`pid ${String(peer.pid)}`, "u"));
       assert.match(refused.message, /poll mode/u);
     }
     // The refused start took nothing: the poller still holds the gate.
-    assert.equal(readChannelLease(world.unit.logPath)?.pid, FOREIGN_LIVE_PID);
+    assert.equal(readChannelLease(world.unit.logPath)?.pid, peer.pid);
   } finally {
     if (poller.ok) poller.lease.release();
+    peer.stop();
   }
 });
 
@@ -1116,7 +1140,8 @@ test("a webhook already running in this gate refuses a poller (APRV-424)", async
   // and "setWebhook returned" is covered too.
   mock.setWebhookInfo({ url: "" });
 
-  const hooked = takeChannelLease(world.unit.logPath, "webhook", { pid: FOREIGN_LIVE_PID });
+  const peer = await sleeper();
+  const hooked = takeChannelLease(world.unit.logPath, "webhook", { pid: peer.pid });
   assert.equal(hooked.ok, true, JSON.stringify(hooked));
   try {
     const refused = await claimListenerBot(setup, (message) => complaints.push(message));
@@ -1125,11 +1150,12 @@ test("a webhook already running in this gate refuses a poller (APRV-424)", async
       // The same code the Bot API probe produces, because the repair is the
       // same: stop the webhook runner, which removes its registration too.
       assert.equal(refused.code, "webhook-registered");
-      assert.match(refused.message, new RegExp(`pid ${String(FOREIGN_LIVE_PID)}`, "u"));
+      assert.match(refused.message, new RegExp(`pid ${String(peer.pid)}`, "u"));
       assert.match(refused.message, /webhook mode/u);
     }
   } finally {
     if (hooked.ok) hooked.lease.release();
+    peer.stop();
   }
 });
 
@@ -1243,6 +1269,87 @@ test("a registration refuses the webhook verb unless --reclaim (APRV-424)", asyn
       normaliseWebhookUrl(mine),
       "a path's case was folded, and a webhook path is often a random token",
     );
+  } finally {
+    mock.setWebhookInfo({ url: "" });
+  }
+});
+
+test("a restart after a killed webhook runner re-registers its own url (APRV-424)", async () => {
+  // Second review, finding 4. After a SIGKILL the registration survives (the
+  // dead process never reached `deleteWebhook`), so every restart refused
+  // `webhook-registered` and the repair an operator reaches for is baking
+  // `--reclaim` into the unit file — which retires finding 6's protection for
+  // good in exchange for a crash recovery.
+  //
+  // The evidence that makes this safe is evidence this gate already holds: a
+  // lease in ITS OWN lockfile, written by a webhook runner, whose process is
+  // gone. Same gate, same transport, same normalised url, and nothing else.
+  const world = live(1, false, "sigkill-restart");
+  const setup = listenSetupFor(world);
+  const url = "https://gate.example/telegram/webhook";
+  try {
+    mock.setWebhookInfo({ url, pendingUpdateCount: 1 });
+
+    // What a killed runner leaves: a lease naming a process that is gone.
+    const killed = await sleeper();
+    const crashed = takeChannelLease(world.unit.logPath, "webhook", { pid: killed.pid });
+    assert.equal(crashed.ok, true, JSON.stringify(crashed));
+    killed.stop();
+    // Wait for the child to actually be reaped, so the probe sees it gone.
+    await new Promise<void>((settle) => setTimeout(settle, 150));
+
+    const before = complaints.length;
+    const restart = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: url,
+      mode: "webhook",
+    });
+    assert.equal(
+      restart.ok,
+      true,
+      `a restart could not re-register the url its own dead runner left: ${JSON.stringify(restart)}`,
+    );
+    if (restart.ok) restart.lease.release();
+    const said = complaints.slice(before).join("\n");
+    assert.match(said, /its lease was reclaimed/u, "the restart was allowed silently");
+    assert.match(said, /needs no --reclaim/u);
+
+    // AND THE THREE CASES THAT STILL REFUSE.
+
+    // 1. No such evidence: a gate whose lease is simply free.
+    const fresh = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: url,
+      mode: "webhook",
+    });
+    assert.equal(fresh.ok, false, "a registration was waved through with no dead runner behind it");
+    if (!fresh.ok) assert.equal(fresh.code, "webhook-registered");
+
+    // 2. The dead lease was a POLLER's: a dead poller says nothing about who
+    //    registered the webhook that is there.
+    const deadPoller = await sleeper();
+    const polled = takeChannelLease(world.unit.logPath, "poll", { pid: deadPoller.pid });
+    assert.equal(polled.ok, true);
+    deadPoller.stop();
+    await new Promise<void>((settle) => setTimeout(settle, 150));
+    const afterPoller = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: url,
+      mode: "webhook",
+    });
+    assert.equal(afterPoller.ok, false, "a dead poller's lease excused a foreign registration");
+    if (!afterPoller.ok) assert.equal(afterPoller.code, "webhook-registered");
+
+    // 3. The dead runner's url is not the one this process would register:
+    //    that is a second host, and it keeps the refusal.
+    const deadWebhook = await sleeper();
+    const hooked = takeChannelLease(world.unit.logPath, "webhook", { pid: deadWebhook.pid });
+    assert.equal(hooked.ok, true);
+    deadWebhook.stop();
+    await new Promise<void>((settle) => setTimeout(settle, 150));
+    const elsewhere = await claimListenerBot(setup, (message) => complaints.push(message), {
+      webhookUrl: "https://second.example/telegram/webhook",
+      mode: "webhook",
+    });
+    assert.equal(elsewhere.ok, false, "a dead runner's lease excused registering a different url");
+    if (!elsewhere.ok) assert.equal(elsewhere.code, "webhook-registered");
   } finally {
     mock.setWebhookInfo({ url: "" });
   }
@@ -1636,21 +1743,34 @@ test("--url with userinfo is refused, and no line prints a url verbatim (APRV-42
     delete process.env["APPROVAL_TG_CHAT"];
   }
 
-  // The token-in-path pattern a tunnel hands out: the origin identifies the
-  // host, and the rest is the operator's.
-  const served = "/hook/8Xk2xLongRandomValue";
-  assert.equal(
-    redactWebhookUrl(`https://gate.example${served}`, served),
-    `https://gate.example${served}`,
-    "the path this process serves is what it says it serves",
-  );
+  // The token-in-path pattern a tunnel hands out. The first segment is enough
+  // for an operator to recognise their own endpoint; the rest is a bearer
+  // value, and it is theirs rather than the terminal's. The second review
+  // found this printing the SERVED path verbatim on the argument that the
+  // operator chose it, which is right about the operator and wrong about
+  // everyone else who reads a log line.
   assert.equal(
     redactWebhookUrl("https://gate.example/hook/8Xk2xLongRandomValue"),
-    "https://gate.example/<path redacted>",
-    "a url whose served path is unknown was printed whole",
+    "https://gate.example/hook/<path redacted>",
   );
-  assert.equal(redactWebhookUrl("https://user:pw@gate.example/hook"), "https://gate.example/<path redacted>");
+  assert.equal(
+    redactWebhookUrl("https://gate.example/telegram/webhook"),
+    "https://gate.example/telegram/<path redacted>",
+  );
+  assert.equal(redactWebhookUrl("https://gate.example/hook"), "https://gate.example/hook");
+  assert.equal(redactWebhookUrl("https://gate.example/"), "https://gate.example/");
+  assert.equal(
+    redactWebhookUrl("https://user:pw@gate.example/hook/secret"),
+    "https://gate.example/hook/<path redacted>",
+  );
+  assert.equal(
+    redactWebhookUrl("https://gate.example/hook?token=abc"),
+    "https://gate.example/hook?<query redacted>",
+  );
   assert.equal(redactWebhookUrl("not a url at all"), "<not a url>");
+  assert.equal(redactWebhookPath("/telegram/webhook"), "/telegram/<path redacted>");
+  assert.equal(redactWebhookPath("/hook/"), "/hook");
+  assert.equal(redactWebhookPath("/"), "/");
 });
 
 test("the bind refuses port 0 and anything outside the port range (APRV-424)", () => {
