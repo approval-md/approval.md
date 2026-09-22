@@ -1043,7 +1043,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
+| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410) |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
@@ -1147,11 +1147,59 @@ record's own timestamp; `core/harness-wait.ts` holds the number and the reasonin
   directory adopts it or carries its grant exactly as APRV-117 describes.
 - **Past the grace** the hook takes it back. The invocation that runs out of both
   its wait and the grace appends `approval.withdrawn` with reason `timeout` for
-  the requests it opened, and any later invocation of the same actor sweeps the
+  the requests it opened, and a later invocation of the same actor sweeps the
   ones earlier tool calls left behind — the requests it is not itself asking
   about, whose grace has run out, and which the verified log still shows as
   pending. Withdrawal stays requester-only, so a hook only ever withdraws
   questions this actor asked.
+
+#### Who withdraws, and what happens when nobody does (APRV-410)
+
+The sentence above says "a later invocation of the same actor", and the word
+doing the work is *later*. The process that denied is over; there is no
+scheduler, and nothing outside the asking actor may take the question back:
+
+- `withdraw` is requester-only (APRV-106 rule 1, `not-requester`), and it
+  refuses a `system:` actor outright, because the runtime's way of ending a
+  request it was not asked to end is the TTL.
+- The event schema allows exactly one `system:` withdrawal and binds it to
+  reason `policy-drift`, in both directions (APRV-235). There is no spelling of
+  a daemon withdrawal under reason `timeout`.
+
+So the daemon cannot do it and the channel cannot do it. Until APRV-410 the
+sweep also ran on fewer invocations than that sentence covers: it sat at the
+intake of the gated path, which only a command carrying a `manual` or
+`supervised` class reaches. A session that denied on a timeout and then retried
+in a form that classified `autonomous` swept nothing, and its question stood
+until the TTL. That is the shape of the 2026-09-20 incident: a request opened at
+18:43:37, a wait expired at 18:52:37, a grace out at 18:57:37, and
+`approval.granted` seq 64473 recorded at 19:03:32 on a question no process was
+holding.
+
+Two things changed, and between them they bound the state rather than remove it:
+
+1. **The sweep now also runs on the autonomous path**, from the verified read
+   that invocation already performs for the open-window lookup. So any gated
+   tool call (autonomous, supervised or manual) takes back this actor's
+   abandoned questions. A **pass-through** allow still sweeps nothing,
+   deliberately: a call the hook answers before it has classes at all (the
+   `approval` CLI itself, a tool whose input names nothing gateable) holds no
+   payload hash, and sweeping with nothing to protect could take back a
+   question a sibling hook process had adopted and was waiting on.
+2. **A grant written past the grace carries nothing.** `findHarnessCarry` bounds
+   a grant by its request's TTL and, now, by the life of the question: when the
+   decision's own timestamp is later than the request's timestamp plus the
+   caller's wait and grace, a retry does not adopt it and asks again. So the
+   answer to "may a retry of that exact command in that directory adopt a late
+   grant" is **no**, definitively, whether or not anyone withdrew.
+
+What is NOT fixed, and is worth knowing before you read a log: a decision that
+lands past the grace on a request nobody withdrew is still recorded as an
+ordinary `approval.granted`, and the approver is still told their tap landed. A
+distinct refusal at the decision surface (the channel telling the sender the
+question expired, and the log carrying that rather than a grant) needs a new
+member of `channel_decision_refusal_codes`, which SPEC.md §11.2 requires a
+registry row for. That is a spec amendment and its own task.
 
 The reason is what a stale request costs. On 2026-09-06 three waits expired
 behind a dead daemon, nothing retried them, and a dozen requests sat live until
