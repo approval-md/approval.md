@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-424'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 03:23'
+updated_date: '2026-09-22 03:50'
 labels:
   - telegram
   - channels
@@ -148,4 +148,33 @@ VALIDATION
 build, typecheck, lint: clean.
 Targeted matrix (telegram-webhook, channel-lease, channels-telegram, channels-cli, channels-contract, channels-web, conformance, conformance-regen, daemon and the daemon suites, cli-up-preflight, layering, cli-help, cli-long-help, docs-guard): 486 tests, 486 pass.
 Full `npm test`: 5164 tests, 5140 pass, 23 fail, 1 skipped. 22 are the pre-existing Node 26 SMTP set (APRV-416): adapter-email 14, cli-setup 4, smtp-probe 4, every one the same `options.servername` TLS change, in files this diff does not touch. The 23rd is gloss-codex's "Codex runner kills the process group on timeout and removes its empty cwd", a timing-sensitive subprocess case that failed at 802ms under the full run's load and passes on its own at 2437ms; this diff touches no gloss, codex or spawn path.
+
+SECOND REVIEW PASS (fixer): four seams and four notes
+
+1 (BLOCKING) The reclaim was read-then-unlink, so two processes that had both read one dead holder took turns: the first unlinked and created its own live lease, the second resumed inside its own read-then-unlink, deleted that live lease and created its own, and both held one gate. Take-overs now happen inside a critical section of their own, entered with the same `O_EXCL` primitive on a sibling file (`telegram-transport.lock.reclaim`), and inside it the record is re-read and must still be exactly the one that was judged: same pid AND same `started_at`, or the take-over is abandoned. The loser of that race meets a LIVE record on its next pass and refuses, which is the right answer. The replacement itself is a temp file renamed onto the path, so the lockfile is never absent (no third process can slip in through a gap) and never half written. A reclaim lock a crash left behind is treated as abandoned after `CHANNEL_LEASE_RECLAIM_STALE_MS` (5s), because one crash in the wrong microsecond must not wedge a gate for good. A test seam (`beforeTakeOver`, documented as such and passed by nothing in the runtime) runs the whole of a second take in the gap. Tests: "two reclaimers of one dead lease cannot both end up holding" (asserts exactly one of the two holds, that the loser refuses `telegram-poller-running` naming the winner, and that the file names the winner), "a take-over never leaves the lockfile absent", "an abandoned reclaim lock ages out rather than wedging the gate".
+
+2 `redactWebhookUrl` returned origin plus the served path verbatim and the verb printed the bind's path beside it, so a token-in-path url reached the banner and `webhook_started` whole. New `redactWebhookPath` keeps the FIRST path segment and replaces the rest with `<path redacted>` (a query string becomes `<query redacted>`), and every operator-facing line goes through it: the start-up banner's url and its local bind line, the `webhook_started` object's `url` and `path`, the registration refusal, and the listener's `webhook-registered` message. The `servedPath` parameter is gone, so there is no call shape that prints a path in full. The operator loses nothing: they typed the url into `--url`. Test: "--url with userinfo is refused, and no line prints a url verbatim", extended with the segment rule, the trailing slash, the query string and the userinfo case.
+
+3 Liveness was `kill(pid, 0)` alone, which answers "some process has that number". The probe now answers three things: running, signalable, and started before its own lease. `processStartedAt` reads `/proc/<pid>` on Linux and falls back to `ps -o lstart=` (one short-lived child, paid once per process start, and a `ps` that is missing or slow returns null). A pid that is gone, one that answers `EPERM` (not ours), and one whose process started after the lease was written plus `CHANNEL_LEASE_START_TOLERANCE_MS` (2s, for `lstart`'s one-second resolution) are all reclaimed, and `reclaimDetail` says which of the three. A start time that cannot be learned keeps the strict reading: the running pid holds the gate. Tests: "a reused pid does not wedge the gate", "a pid that started before the lease is still its holder" (both directions, including the unprobeable case), "a pid this process cannot signal is not this gate's holder", "the real probe answers this process and a number nobody holds".
+
+4 After a SIGKILL the registration survives, so every restart refused `webhook-registered` and the repair an operator reaches for is `--reclaim` in the unit file, which retires finding 6's protection permanently in exchange for a crash recovery. A restart may now re-register the SAME normalised url with no flag when the lease this take just reclaimed was this gate's own (it is the same lockfile), was written by a webhook runner, and its process is gone: `takeChannelLease` already returns that record, and it now returns `reclaimedBecause` beside it. The allowance is reported rather than silent. A dead POLLER's lease, a different url, and a gate with no such lease all keep the refusal. Test: "a restart after a killed webhook runner re-registers its own url", which drives the allowance and all three refusing cases against real child processes that are killed and reaped.
+
+NOTES
+
+5 Done as code, in finding 1's commit: the torn-lease replacement and the same-pid rewrite both go through temp-plus-rename now, so neither leaves the path absent or half written. Asserted by "a lease this process holds is rewritten whole, never half", which also checks that no `.tmp` file survives a take.
+
+6 Done as code: `deleteWebhook` takes an optional timeout and the stop path passes `WEBHOOK_STOP_DELETE_TIMEOUT_MS` (5s) instead of the channel's 30s request timeout. Worst case for a second Ctrl-C is now the drain (10s) plus five, and a removal that does not land is reported as a webhook still registered.
+
+7 Stated in a comment on the drain's give-up branch: a handler abandoned at the deadline is left pending, nothing holds the event loop open for it (the sockets are destroyed and both timers are unref'd), and `cli.js` sets `process.exitCode` rather than calling `process.exit()`, so the process ends by the normal path rather than being cut off mid-write.
+
+8 The lease follows `--log`, not `--dir`. `channelLeaseDirFor` derives it from the log path through `instanceHomeFor`, which is the same answer `channel-owner.ts` and `live-draw.ts` use, so two processes pointed at one gate by different `--dir` values still meet on one lockfile, and two gates that share a directory but not a log do not. An operator who points `--log` somewhere else gets a different gate in every other respect too, which is the property this inherits rather than a rule of its own.
+
+RESIDUAL, recorded rather than fixed: a path whose FIRST segment is itself the bearer value (`https://host/<random>`, no second segment) is printed whole, because "keep the first segment" is the rule the review asked for and a length heuristic would be this module inventing a policy about what a secret looks like.
+
+VALIDATION (second pass)
+
+build, typecheck, lint: clean.
+tests/channel-lease.test.ts: 19 tests (was 11). tests/telegram-webhook.test.ts: 29 tests (was 28).
+Targeted matrix (telegram-webhook, channel-lease, channels-*, conformance, conformance-regen, daemon suites, cli-up-preflight, layering, cli-help, cli-long-help, docs-guard): 495 tests, 495 pass.
+Full `npm test`: 5173 tests, 5150 pass, 22 fail, 1 skipped. The 22 are exactly the pre-existing Node 26 SMTP set (APRV-416): adapter-email 14, cli-setup 4, smtp-probe 4. The gloss-codex timing flake reported in the first pass did not recur.
 <!-- SECTION:NOTES:END -->
