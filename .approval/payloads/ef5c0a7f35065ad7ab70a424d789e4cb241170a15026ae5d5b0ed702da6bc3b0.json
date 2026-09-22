@@ -1,0 +1,1 @@
+{"command":"ls eslint* .eslintrc* 2>/dev/null; cat eslint.config.js 2>/dev/null | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a62ef0e6d38a7d62c"}

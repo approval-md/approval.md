@@ -1,0 +1,1 @@
+{"command":"grep -rln \"schema/fixtures\\|schemaFixtures\\|fixturesRoot\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

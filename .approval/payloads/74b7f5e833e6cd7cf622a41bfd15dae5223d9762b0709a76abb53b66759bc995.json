@@ -1,0 +1,1 @@
+{"command":"grep -n \"^+\" /tmp/claude-501/pr535.diff | grep -i \"harness_cap_ms\\|HARNESS_CAP\\|capMs\\|margin\\|MARGIN\\|too-short\\|tooShort\" | head -50","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

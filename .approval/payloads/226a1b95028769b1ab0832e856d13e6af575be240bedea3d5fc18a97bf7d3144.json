@@ -1,0 +1,1 @@
+{"command":"npm run typecheck > /tmp/claude-501/mtc.log 2>&1; echo \"typecheck exit=$?\"; npm run lint > /tmp/claude-501/ml.log 2>&1; echo \"lint exit=$?\"; cat /tmp/claude-501/ml.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

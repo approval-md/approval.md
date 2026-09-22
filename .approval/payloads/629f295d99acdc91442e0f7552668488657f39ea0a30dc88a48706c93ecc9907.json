@@ -1,0 +1,1 @@
+{"command":"node scripts/run-tests.mjs --only daemon > /tmp/claude-501/dmn.log 2>&1; echo \"exit=$?\"; grep -c \"^✔\" /tmp/claude-501/dmn.log; tail -30 /tmp/claude-501/dmn.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

@@ -1,0 +1,1 @@
+{"command":"grep -rn \"fixtures/event/invalid\\|fixtures\\b\" tests/*.test.ts | head -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

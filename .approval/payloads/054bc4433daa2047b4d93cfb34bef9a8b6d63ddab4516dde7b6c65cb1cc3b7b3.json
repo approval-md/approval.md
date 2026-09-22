@@ -1,0 +1,1 @@
+{"command":"ls dist/tests/*.test.js | sed -e 's#dist/tests/##' -e 's#\\.test\\.js##' | tr '\\n' ' '","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a2f448129bf591efc"}

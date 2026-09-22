@@ -1,0 +1,1 @@
+{"command":"grep -n \"drift-deferred\\|DaemonEvent union is frozen\" /tmp/claude-501/dmn.log | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

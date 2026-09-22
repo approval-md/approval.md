@@ -1,0 +1,1 @@
+{"command":"grep -rln \"claude-code-hook.md\" tests/*.ts | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a2f448129bf591efc"}

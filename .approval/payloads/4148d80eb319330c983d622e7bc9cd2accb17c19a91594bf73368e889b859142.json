@@ -1,0 +1,1 @@
+{"command":"npm run build > /tmp/claude-501/b.log 2>&1; echo \"build exit=$?\"; node scripts/regen-conformance-vectors.mjs > /tmp/claude-501/regen.log 2>&1; echo \"regen exit=$?\"; tail -20 /tmp/claude-501/regen.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

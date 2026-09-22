@@ -1,0 +1,1 @@
+{"command":"wc -l scripts/probes/*.mjs tests/probe-*.test.ts docs/hermes-hook.md docs/grok-hook.md docs/integrations-considered.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a62ef0e6d38a7d62c"}

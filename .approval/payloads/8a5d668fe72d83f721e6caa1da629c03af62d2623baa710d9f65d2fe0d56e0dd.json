@@ -1,0 +1,1 @@
+{"command":"grep -rn -- \"one-shot\\|hermes -z\\|--accept-hooks\\|HERMES_ACCEPT_HOOKS\\|\\-\\-dir\" docs/ src/ scripts/ backlog/tasks/aprv-415*.md 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a62ef0e6d38a7d62c"}

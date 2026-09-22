@@ -1,0 +1,1 @@
+{"command":"node scripts/run-tests.mjs --only daemon-drift-deferral > /tmp/claude-501/dd.log 2>&1; echo \"exit=$?\"; tail -60 /tmp/claude-501/dd.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}

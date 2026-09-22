@@ -1,0 +1,1 @@
+{"command":"gh run watch 35679525871 --exit-status > /tmp/claude-501/run544.log 2>&1; echo \"run exit=$?\"; tail -4 /tmp/claude-501/run544.log","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-ae6dd87c3cbb01931"}
