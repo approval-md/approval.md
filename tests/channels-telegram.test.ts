@@ -923,6 +923,46 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
   );
 });
 
+test("a gated command's card carries the digest of the script it names (APRV-401)", async () => {
+  // The card is where this task's fix has to land: the payload hash binds the
+  // script's bytes, and an approver who cannot SEE which bytes is back to
+  // approving a path. The run payload has no structural view, so the opaque
+  // view shows it whole — path, byte count and digest included, which is what
+  // the operator's ruling asked the card to carry — and this pins that the
+  // channel passes that block through verbatim rather than summarising it.
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+
+  const digest = "a".repeat(64);
+  const value = {
+    argv: ["bash", "install.sh"],
+    cwd: "/repo",
+    script: { argv_index: 1, path: "/repo/install.sh", bytes: 412, sha256: digest },
+  };
+  const request_: ChannelRequest = {
+    ...base,
+    fullPayload: computed(
+      { value, text: JSON.stringify(value), hash: payloadHash(value), truncated: false },
+      "payload",
+    ),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const whole = sends()
+    .slice(before)
+    .map((message) => message.text)
+    .join("\n");
+  assert.ok(whole.includes(digest), "the approver was not shown the digest the grant binds");
+  assert.ok(whole.includes("/repo/install.sh"), "the approver was not shown which file it binds");
+  assert.ok(whole.includes("argv_index"), "the digest was shown without saying which word it is");
+  assert.ok(whole.includes("412"), "the approver was not shown the script's size");
+});
+
 test("a payload-less request is two messages: computed, then claimed with the buttons", async () => {
   const world = live(1);
   const [base] = queueOf(world, at(2));

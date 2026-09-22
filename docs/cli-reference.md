@@ -1524,6 +1524,24 @@ hash must equal the declared `payload_hash` and it is filed in
 bytes from. Supply it here once and no channel needs `--payload-dir` or
 `--payloads` at all.
 
+For an action `approval run` will execute, produce those bytes with `approval
+payload run -- <cmd…>` rather than by hand. Since APRV-401 the payload carries
+the size and digest of the script the argv names, and a hand-written
+`{"argv":…,"cwd":…}` for a command that names a script is a declaration the
+execution will refuse `payload-mismatch`, correctly, because it describes bytes
+nobody bound:
+
+```
+approval payload run --hash -- bash scripts/install.sh   # the declaration
+approval payload run       -- bash scripts/install.sh \
+  | approval request <task> --action <key> --as agent:<id> --payload -
+```
+
+Material supplied here is checked against the declared hash and never against
+the filesystem: this verb does not know where the run will happen, and the
+guarantee is that `approval run` recomputes the same value from the tree it is
+about to spawn into and refuses on any difference.
+
 When the policy permits an unattended action, supplied material is still checked
 against the registered action's task, class and payload hash and retained before
 `proceed:true` is returned. This creates no approval event and does not require
@@ -1953,9 +1971,23 @@ measurement.
 Content binding (amended SPEC.md §6.2, §10.4): run computes the hash of the argv
 and cwd it is about to spawn, always, and presents that. The command IS the
 action here, and an executor that had to be told what it was running could be
-told wrong. `--payload-hash` is consequently a CHECK and never a substitute
+told wrong.
+
+Since APRV-401 that computation includes THE SCRIPT THE ARGV NAMES. A known
+interpreter followed by a path operand, or a path at `argv[0]`, carries that
+file's size and SHA-256 inside the hashed payload, so a grant over `bash
+install.sh` binds the script's bytes rather than its path: a script edited
+between the declaration and the run hashes differently and is refused
+`payload-mismatch`, with nothing appended and the grant still live for the
+approved bytes. An argv naming no script hashes exactly as it always did.
+`approval payload run` prints the same value, which is how a requester obtains
+the declaration in the first place; `docs/run-payload-binding.md` states the
+rule and the six things it does not reach.
+
+`--payload-hash` is consequently a CHECK and never a substitute
 (APRV-140): a value differing from the recomputed one is refused
-`payload-mismatch` before the child exists and before anything is appended. An
+`payload-mismatch` before the child exists and before anything is appended, and
+the refusal names the script it bound so the repair is visible. An
 action whose payload is content rather than an argv (an email body, a record
 write, a message and its recipients) is executed through the adapter contract of
 §10.4, `approval adapter email`, which hashes those bytes itself; a token for
@@ -4685,6 +4717,57 @@ defined over the canonical VALUE, so non-JSON input has no defined
 `payload_hash`, and printing one would invent a binding no other implementation
 could reproduce. Empty input is the same answer. A file that exists but cannot be
 read is exit 4.
+
+## payload run
+
+The payload `approval run` will recompute for a command, printed before any
+approval exists: its argv, the cwd it will run in, and the size and SHA-256 of
+the script that argv names.
+
+```
+approval payload run -- bash scripts/install.sh
+{"argv":["bash","scripts/install.sh"],"cwd":"/repo",
+ "script":{"argv_index":1,"path":"/repo/scripts/install.sh","bytes":412,
+           "sha256":"fef0…"}}
+```
+
+The `script` object is the whole point of the verb (APRV-401). A grant over
+`bash scripts/install.sh` used to bind that STRING, so the bytes behind the path
+were whatever the file held at execution time and the requester controlled the
+file between the request and the grant. The digest is inside the hashed value,
+so a script edited after the declaration is refused `payload-mismatch` before the
+child is spawned and before anything is appended, and the approver's card carries
+the path, the byte count and the digest because the payload does.
+
+The argv names a script in two shapes: a known interpreter (the six shells,
+`node`, `python`/`python3`, `perl`, `ruby`, `deno` — each a name the command
+classifier already knows) followed by a path operand, or a path at `argv[0]` the
+kernel reads a shebang from. An inline program (`bash -c …`, `node -e …`) is
+already a word of the argv and binds no file.
+
+An argv naming no readable script carries no `script` key and hashes exactly as
+it did before the rule existed, which is why every record already in a log and
+every declaration already written into a task file still verifies.
+
+`--hash` prints the `payload_hash` instead of the bytes — the value a task file's
+action declaration carries. `--cwd` states the directory the run will happen in,
+because that directory is inside the hash and every relative argv word resolves
+against it. The two ends must agree, so pass the same `--cwd` the run will use.
+
+What is NOT bound is stated in full in `docs/run-payload-binding.md`: nothing
+resolved through `PATH`, nothing a bound script itself reads or executes, and the
+instant between this hash and the spawn.
+
+This verb reads the one file the argv names as its script and nothing else. No
+log, no policy, no network, no token, and it executes nothing.
+
+It is **local only**: the MCP wrapper and `approval serve` withhold it, because
+the path it digests is one of the command's own words and no transport guard
+confines those the way the store confinement confines `payload hash`'s
+positional. A remote caller could otherwise ask for the digest of any file the
+server process can read (`-- bash /etc/shadow`) and learn that the path exists
+and what its bytes fingerprint to. Compute the binding where the command will
+run, which is the only place the value is true.
 
 ## payload agentmail-draft
 
