@@ -30,7 +30,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, commandSegmentWords } from "../src/core/command-class.js";
+import {
+  classifyCommand,
+  commandSegmentWords,
+  type ProtectedPathEntry,
+} from "../src/core/command-class.js";
 
 /** The note text from the incident: every construct that was misread, at once. */
 const INCIDENT_NOTE =
@@ -314,4 +318,187 @@ test("every printable ASCII character the shell does not expand is inert inside 
       note,
     ], `char ${JSON.stringify(ch)}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Criterion 5: a quoted sentence that OPENS with a protected directory path
+// (APRV-409)
+// ---------------------------------------------------------------------------
+
+/**
+ * The second incident, and the same lesson arriving one layer later.
+ *
+ * On 2026-09-20 a `backlog task create` whose acceptance-criterion argument
+ * opened with the literal text of a workflow path and ran on into a sentence
+ * classified `policy.edit.ci` by rule `protected-path`, sat the full
+ * nine-minute hook wait on the gate and was denied on timeout. The command
+ * writes one task file and touches no workflow. The shell had already done its
+ * job: the sentence was ONE word. The positional scan then split that word on
+ * its slashes and matched a protected directory run against the front of it.
+ *
+ * The rule the fix draws: a positional word is prose when its protected match
+ * came entirely from a whitespace-FREE head. One shape moves — a
+ * directory-prefix match followed by whitespace — and the four shapes below it
+ * do not: a bare path, a path with a real embedded space whose match needs its
+ * final segment, a path inside a sentence, and a protected FILE at the head of
+ * a sentence.
+ *
+ * The negative controls matter as much as the positives. This is a loosening,
+ * in the file that answers "may this run".
+ */
+
+/** This repository's own routing, so the CI sub-class is the answer under test. */
+const ROUTED_PATHS: readonly ProtectedPathEntry[] = [
+  { path: ".github/workflows/", class: "policy.edit.ci" },
+  { path: "design/", class: "policy.edit.design" },
+  "SPEC.md",
+];
+
+/** `classifyCommand` over one segment, with the policy's entries and the bound path. */
+function onePathSegment(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+): { class: string; rule: string; path?: string } {
+  const result = classifyCommand(command, protectedPaths);
+  assert.equal(
+    result.ok,
+    true,
+    `expected ${JSON.stringify(command)} to classify, got ${
+      result.ok ? "" : `${result.code}: ${result.detail}`
+    }`,
+  );
+  if (!result.ok) throw new Error("unreachable");
+  assert.equal(result.segments.length, 1, `expected one segment for ${JSON.stringify(command)}`);
+  return result.segments[0] as { class: string; rule: string; path?: string };
+}
+
+/** The argument from the incident, verbatim apart from the task id. */
+const CI_SENTENCE =
+  ".github/workflows/pages.yml deploys _site/ on push to main with the minimal permissions" +
+  " (contents read, pages write, id-token write) and no other secret";
+
+test("the incident: a task criterion opening with the workflows path is a workspace write", () => {
+  const segment = onePathSegment(`backlog task create x --ac "${CI_SENTENCE}"`, ROUTED_PATHS);
+  assert.equal(segment.class, "files.write.workspace");
+  assert.equal(segment.rule, "workspace-tool");
+  assert.equal(segment.path, undefined);
+});
+
+test("the same sentence with no routing answers the same, so the fix is not about the sub-class", () => {
+  assert.equal(
+    onePathSegment(`backlog task create x --ac "${CI_SENTENCE}"`).class,
+    "files.write.workspace",
+  );
+});
+
+test("the shortest form of the shape: a path, a space, and four words", () => {
+  const segment = onePathSegment(
+    `backlog task create x --ac ".github/workflows/pages.yml should not gate this"`,
+    ROUTED_PATHS,
+  );
+  assert.equal(segment.class, "files.write.workspace");
+});
+
+test("the same shape under the other effectful rows", () => {
+  for (const command of [
+    `cp a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
+    `tee ".github/workflows/pages.yml deploys the site on push to main"`,
+    `mv a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
+  ]) {
+    const segment = onePathSegment(command, ROUTED_PATHS);
+    assert.notEqual(segment.rule, "protected-path", command);
+    assert.ok(segment.class.startsWith("files."), `${command} -> ${segment.class}`);
+  }
+});
+
+test("the log directory in a sentence is prose by the same rule, at the strictest tier", () => {
+  assert.equal(
+    onePathSegment(
+      `backlog task create x --ac ".approval/log/events.jsonl is the live log and is never mutated"`,
+    ).class,
+    "files.write.workspace",
+  );
+});
+
+test("a bare protected path is unmoved: no whitespace, nothing to decide", () => {
+  for (const [command, expected] of [
+    [`cp a.yml .github/workflows/pages.yml`, "policy.edit.ci"],
+    [`cp a.md design/notes.md`, "policy.edit.design"],
+    [`cp a.md SPEC.md`, "policy.edit"],
+    [`cp a.md APPROVAL.md`, "policy.core"],
+    [`cp a.jsonl .approval/log/events.jsonl`, "log.mutate"],
+  ] as const) {
+    const segment = onePathSegment(command, ROUTED_PATHS);
+    assert.equal(segment.class, expected, command);
+    assert.equal(segment.rule, "protected-path", command);
+  }
+});
+
+test("a path with a real embedded space is unmoved when its match needs the final segment", () => {
+  for (const [command, expected] of [
+    [`cp a.md "my notes dir/CLAUDE.md"`, "policy.edit"],
+    [`cp a.md "my notes dir/APPROVAL.md"`, "policy.core"],
+    [`cp a.md "my notes dir/SPEC.md"`, "policy.edit"],
+  ] as const) {
+    const segment = onePathSegment(command, ROUTED_PATHS);
+    assert.equal(segment.class, expected, command);
+    assert.equal(segment.rule, "protected-path", command);
+  }
+});
+
+test("whitespace BEFORE the protected run leaves the word a path: the head classifies as nothing", () => {
+  const segment = onePathSegment(
+    `cp a.yml "my notes dir/.github/workflows/pages.yml"`,
+    ROUTED_PATHS,
+  );
+  assert.equal(segment.class, "policy.edit.ci");
+  assert.equal(segment.rule, "protected-path");
+  assert.equal(segment.path, "my notes dir/.github/workflows/pages.yml");
+});
+
+test("the skip needs the head to answer the SAME surface, so a deeper match is kept", () => {
+  // The head `.github/workflows` answers `policy.edit.ci`; the whole word
+  // answers `policy.core`, because its FINAL segment is the policy file. The
+  // match therefore needed a segment the head does not carry, and the word
+  // stays a path — which is the policy file itself, in a directory named with
+  // a space.
+  const segment = onePathSegment(`cp a.md ".github/workflows/sub dir/APPROVAL.md"`, ROUTED_PATHS);
+  assert.equal(segment.class, "policy.core");
+  assert.equal(segment.rule, "protected-path");
+});
+
+test("a path inside a sentence rather than at its head is unmoved: it never matched", () => {
+  assert.equal(
+    onePathSegment(
+      `backlog task create x --ac "a sentence naming .github/workflows/pages.yml inside it"`,
+      ROUTED_PATHS,
+    ).class,
+    "files.write.workspace",
+  );
+});
+
+test("a protected FILE at the head of a sentence is unmoved: it never matched either", () => {
+  for (const head of ["CLAUDE.md", "APPROVAL.md", "AGENTS.md"]) {
+    const command = `backlog task create x --ac "${head} says the merge is armed by the session"`;
+    assert.equal(onePathSegment(command, ROUTED_PATHS).class, "files.write.workspace", command);
+  }
+});
+
+test("a write REDIRECTION onto the same sentence still takes the protected class", () => {
+  const segment = onePathSegment(
+    `echo hi > ".github/workflows/pages.yml deploys the site on push to main"`,
+    ROUTED_PATHS,
+  );
+  assert.equal(segment.class, "policy.edit.ci");
+  assert.equal(segment.rule, "redirect-protected");
+});
+
+test("a read of the sentence is unmoved, because the positional scan never runs on a read", () => {
+  assert.equal(
+    onePathSegment(
+      `cat ".github/workflows/pages.yml deploys the site on push to main"`,
+      ROUTED_PATHS,
+    ).class,
+    "read.shell",
+  );
 });
