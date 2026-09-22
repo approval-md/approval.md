@@ -3,11 +3,11 @@ id: APRV-423
 title: >-
   Daemon TTL below the harness cap: approval.expired lands before the harness
   blocks on its own timeout
-status: In Progress
+status: Done
 assignee:
   - '@opus-423'
 created_date: '2026-09-21 06:42'
-updated_date: '2026-09-22 02:18'
+updated_date: '2026-09-22 02:24'
 labels:
   - daemon
   - hook
@@ -234,10 +234,12 @@ Validation: build, typecheck, lint clean; cli-hook-hermes, harness-cap-ttl, cli-
 Its `harness_cap_ms` schema cases are kept here, adjusted to this branch's floor (60001) and `dependentSchemas` pairing. `tests/event-schema.test.ts` gained "approval.requested takes a harness_cap_ms that is an integer above the margin, and nothing else": accepts 300000, 60001 and 86400000 on a harness request; refuses 0, 1, 60000, -1, -300000, 299999.5, 0.5, 86400001, "300s", "300000", null, true, an array and an object; refuses a cap with no `execution` and a cap beside `execution: "token"`; and asserts the constraint does not leak onto `approval.expired`, where `appendExpiry` legitimately records the cap that shortened the window. Fixtures under `schema/fixtures/event/`: `valid/approval-requested-harness-cap.json` (ported), `invalid/harness-cap-{zero,negative,fractional,string}.json` (ported), and two new for this branch's rules, `invalid/harness-cap-at-margin.json` (60000) and `invalid/harness-cap-without-harness-execution.json`. `tests/fixtures.test.ts` proves each as filed. PR #539's `withCap(1)` acceptance was dropped on purpose: under this branch 1 ms is below the margin and is refused. event-schema, fixtures, harness-cap-ttl: 276/276.
 
 The seven fixtures reach `conformance/vectors/schema-validation.v1.json`, which is generated from `schema/fixtures`, so `scripts/regen-conformance-vectors.mjs` bumps that suite to **2.8.0** (a MINOR: new vectors, no existing expectation moves; rationale beside the earlier bumps in the script) and the vectors and `conformance-manifest.json` are regenerated. conformance, conformance-regen, fixtures: 265/265.
+
+Orchestrator review (Fable, 2026-09-22). Conformance pass, then adversarial refutation by a fresh Fable subagent (Opus unavailable at the time) given only the diff, the AC and the spec: first pass seven findings (SPEC section 5.2 contradiction, Hermes default ceiling 300 s while hook_callback_timeout defaults to 30 s, a second copy of the window arithmetic in approval queue and Telegram retention, a bundling artefact of the refuter's older base, margin argument overstated, schema floor of 1, contradictory hook-timeout sentence); all code findings fixed with reproducing tests. Recheck found one more: a run whose keys are all adopted waited its full timeout past the cap and only warned; fixed by clamping the wait to what the ceiling leaves, denying at zero after one verified read. Final narrow recheck: no findings; one note that waitMs is clamped to the cap rather than the effective window, harmless because each poll derives expiry first. Ported PR #539's schema refusal cases (schema-validation vectors 2.8.0). Duplicate implementation in PR #539 withdrawn by agreement with the other session. SPEC hunks (sections 5.2 and 6) are proposed in these notes and will ride one attestation batch with 383, 421 and 422 for Carter; SPEC.md is untouched here by design (protected path, human-applied).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-A hook-originated request now carries the ceiling its harness kills the hook at (`--harness-cap`, recorded as `payload.harness_cap_ms`), and every reader judges the request against the SHORTER of the policy's approval_ttl and that ceiling less a documented 60s margin (HARNESS_CAP_MARGIN_MS in src/core/harness-wait.ts, two of the daemon's 30s sweep intervals). The cap is a bounded input taken through one minimum in one place, so it can only move the lapse earlier; the derivation lives in requestState, so the gate, the daemon's sweep, the carry lookup and the channels cannot disagree about when a question ended. approval.expired stays the runtime's record, a late tap keeps the gate's existing `expired` refusal and never becomes a grant, and a ceiling with no room for a human is denied `hook-harness-cap-too-short` before anything is written. Verified by tests/harness-cap-ttl.test.ts (14 cases on a fake clock: the expiry lands a full margin inside the cap, nothing lapses a millisecond early, a late grant is refused with zero approval.granted, the schema pairing is refused at the write boundary) plus a spawned-CLI case proving the hook's block message names the expiry instant; build, typecheck, lint clean; npm test 5116/5139 with the 22 pre-existing APRV-416 SMTP failures and nothing else.
+The hook states the harness ceiling (--harness-cap; Hermes assumes 30 s unless stated, clamped at its 300 s maximum), records it as harness_cap_ms on approval.requested, and one derivation in core/state.ts judges every lapse against min(policy TTL, cap minus a 60 s margin), so the gate, sweep, carry lookup, queue and channels agree; the hook's own wait is clamped to what the ceiling leaves; a cap with no room for a human is denied hook-harness-cap-too-short; approval serve gains --hook-harness-cap. Verified by 5167-test full runs (22 pre-existing APRV-416 SMTP failures only), targeted suites after each pass, conformance vectors regenerated, and three adversarial passes ending with no findings.
 <!-- SECTION:FINAL_SUMMARY:END -->
