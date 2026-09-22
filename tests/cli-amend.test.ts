@@ -624,7 +624,11 @@ test("the no-op --json report carries every frozen key", () => {
     // from. `null` on every human-identity run, which is what this one is.
     "proposal",
     "publishing",
+    // APRV-420, additive: what a re-run did about an amendment branch already
+    // standing on origin. `null` here, where there is no repository at all.
+    "repair",
   ]);
+  assert.equal(parsed["repair"], null);
   // `attested` still means the attestation this amendment moved FROM. The new
   // boolean is `ceremony.attested`, and a no-op ceremony attested nothing.
   assert.deepEqual(parsed["ceremony"], { attested: false, seq: null });
