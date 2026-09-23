@@ -131,6 +131,7 @@ Usage:
   approval serve      --as agent:<id> [--dir <path>] [--log <path>]
                       [--policy <path>] [--port <n> | --listen <host:port>]
                       [--allow-non-loopback]               (HTTP; foreground)
+  approval muse       [--dir <path>] [--port <n>]  (local prototype; foreground)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -2648,6 +2649,21 @@ SERIALLY, THIS SERVER READS NO .approval/env. POST-V1: tasks/elicitation.
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
 ${JSON_ERRORS}
 ${why("mcp-serve")}`;
+
+export const MUSE_HELP = `approval muse — local synthetic Muse consumer prototype (FOREGROUND)
+
+Usage:
+  approval muse [--dir <path>] [--port <n>]
+
+APPROVAL_MUSE_TENANT identifies one tenant per process. Distinct
+APPROVAL_MUSE_READ_TOKEN and APPROVAL_MUSE_PROPOSE_TOKEN (24+ characters) are
+required in the launch environment. Listens only on 127.0.0.1, port 4683 by
+default. This is a local prototype, not a verified native Muse protocol.
+Human decisions use the already configured Telegram listener. No decision,
+execution, export, or generic verb endpoint exists here.
+
+${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
+${why("muse")}`;
 
 export const SERVE_HELP = `approval serve — the agent-facing surface over HTTP (FOREGROUND)
 

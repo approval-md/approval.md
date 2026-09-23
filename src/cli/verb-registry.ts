@@ -3191,6 +3191,22 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "muse",
+    purpose:
+      "Start the single-tenant local Muse consumer prototype. It exposes bounded register and request proposals plus a verified pending inbox, status and canonical request detail, with distinct read and proposal launch credentials. It has no human decision, token, execution, export or generic verb route; the configured Telegram channel remains the human decision path.",
+    human_only: true,
+    human_only_note: "An operator launches this credential-holding listener and pins its tenant and store before accepting calls.",
+    input: input({ flags: { "--dir": "path", "--port": "string", ...HELP_FLAGS } }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the local listener was interrupted and closed cleanly" },
+      USAGE,
+      { code: 4, meaning: "the local listener could not bind" },
+    ],
+  },
+
+  {
     name: "reindex",
     purpose:
       "Rebuild the SQLite index projection from the log. The database is a cache and the log is the truth: the index is rebuilt from scratch at a temporary path and renamed into place. A corrupt log is refused outright and a torn tail is refused without --force. The log is never written to.",
