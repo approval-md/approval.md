@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-22 06:44'
-updated_date: '2026-09-23 00:25'
+updated_date: '2026-09-23 00:38'
 labels: []
 dependencies: []
 priority: high
@@ -44,4 +44,6 @@ Pause checkpoint 2026-09-22: user requested stop at next natural point and hando
 Resumed on explicit user instruction. Baseline origin/main remains c88a6be; primary checkout preserved. Original unused probe token expired; identical scratch scripts and canonical payload were verified and a renewed bounded action aprv434-native-probe-20260922-renewed:run was requested at seq72890. Awaiting human decision; no native probe has run.
 
 Continuation checkpoint: owned decision worker and cooperative cancellation implemented; focused bridge 65/65, shared hook 148/148, conformance 481 vectors/182 controls passed. Full CI was blocked by shared SQLite ABI mismatch; own Node24 pinned dependencies now installed. Independent Astra review found blocking file-item snapshot invalidation during approval, lifecycle timer rearming during human wait, and missing-thread completion acceptance. Fixes and explicit race regressions are in progress under gpt-6-sol. Native capture remains unrun: renewed primary request aprv434-native-probe-20260922-renewed:run is pending; accepted execution outcomes remain unknown.
+
+Integrated main at 5f23824 (Muse merge 6b74ca7). All independent review findings corrected, including notification alias bypass; Astra cleared local contract snapshot 483821f3d72ca3e51677bb0351e5cef76b117169104dd3edba984828f7f439bc with independent malformed-identity/control reproductions. Fourteen added targeted regressions passed across sequence/cancellation, completion/request aliases and notification aliases. Typecheck and conformance 481/481 vectors plus 182 controls exit 0. Full integrated local CI now running on isolated Node24 dependencies; earlier run intentionally interrupted exit 130 for the final correction. Correctness and interactive source/tests are materially coupled, so APRV-434/435 use one coherent implementation commit and PR group. Native capture/outcome closure remains unimplemented and blocked on pending renewed gate request; draft delivery must not claim original plan complete.
 <!-- SECTION:NOTES:END -->
