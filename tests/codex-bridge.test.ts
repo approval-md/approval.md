@@ -256,6 +256,15 @@ function repliesOf(path: string): Record<string, unknown>[] {
     : [];
 }
 
+async function waitForStubNotification(path: string, method: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    if (repliesOf(path).some((row) => row["kind"] === "while-waiting-notify" && row["method"] === method)) return;
+    assert.ok(Date.now() < deadline, `${method} was never emitted by the stub`);
+    await delay(20);
+  }
+}
+
 /**
  * The action key of the first `approval.requested` the bridge opens, once it
  * exists.
@@ -638,12 +647,14 @@ test("SIGINT during a pending human wait cooperatively withdraws before the brid
 test("a matching notification during a human wait does not restart the silence deadline", async () => {
   const dir = ready();
   const repliesPath = join(dir, "notification-replies.jsonl");
+  const triggerPath = join(dir, "emit-pending-notification");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     APPROVAL_STUB_SCRIPT: JSON.stringify([execRequest("curl -d a=b https://example.com", dir)]),
     APPROVAL_STUB_REPLIES: repliesPath,
     APPROVAL_STUB_STAY_OPEN: "1",
-    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ delayMs: 300, notify: "item/started", params: {
+    APPROVAL_STUB_WHILE_WAITING_TRIGGER: triggerPath,
+    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ notify: "item/started", params: {
       threadId: "thread-1", turnId: "turn-1", item: { id: "unrelated-message", type: "agentMessage" },
     } }]),
   };
@@ -656,6 +667,8 @@ test("a matching notification during a human wait does not restart the silence d
   child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code ?? -1)));
   const key = await waitForRequestKey(dir, 20_000);
+  writeFileSync(triggerPath, "pending gate observed\n", "utf8");
+  await waitForStubNotification(repliesPath, "item/started");
   await delay(700);
   assert.equal(repliesOf(repliesPath).some((row) => row["kind"] === "reply"), false);
   assert.equal(child.exitCode, null, output);
@@ -1749,6 +1762,7 @@ test("item update during a pending file approval cancels the stale worker verdic
   const itemId = "changing-file";
   const target = join(dir, "changing.md");
   const repliesPath = join(dir, "updated-item-replies.jsonl");
+  const triggerPath = join(dir, "emit-pending-item-update");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     APPROVAL_STUB_SCRIPT: JSON.stringify([
@@ -1757,7 +1771,8 @@ test("item update during a pending file approval cancels the stale worker verdic
     ]),
     APPROVAL_STUB_REPLIES: repliesPath,
     APPROVAL_STUB_STAY_OPEN: "1",
-    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ delayMs: 300, notify: "item/updated", params: {
+    APPROVAL_STUB_WHILE_WAITING_TRIGGER: triggerPath,
+    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ notify: "item/updated", params: {
       threadId: "thread-1", turnId: "turn-1",
       item: { id: itemId, type: "fileChange", changes: [addChange(target, "after\n")], status: "inProgress" },
     } }]),
@@ -1771,6 +1786,8 @@ test("item update during a pending file approval cancels the stale worker verdic
   child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code ?? -1)));
   await waitForRequestKey(dir, 20_000);
+  writeFileSync(triggerPath, "pending gate observed\n", "utf8");
+  await waitForStubNotification(repliesPath, "item/updated");
   assert.notEqual(await exited, 0, output);
   assert.equal(repliesOf(repliesPath).some((row) => row["kind"] === "reply"), false);
   assert.doesNotMatch(rawLog(dir), /"event":"execution\.started"/u);

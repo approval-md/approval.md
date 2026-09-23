@@ -60,7 +60,7 @@
  *                else answered the question before this client saw it.
  */
 
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 
 const script = JSON.parse(process.env["APPROVAL_STUB_SCRIPT"] ?? "[]");
 const turnScripts = JSON.parse(process.env["APPROVAL_STUB_TURN_SCRIPTS"] ?? "null");
@@ -72,6 +72,7 @@ const ignoreSigterm = process.env["APPROVAL_STUB_IGNORE_SIGTERM"] === "1";
 const pidPath = process.env["APPROVAL_STUB_PID_PATH"] ?? null;
 const endWhileWaiting = process.env["APPROVAL_STUB_END_WHILE_WAITING"] === "1";
 const whileWaiting = JSON.parse(process.env["APPROVAL_STUB_WHILE_WAITING"] ?? "[]");
+const whileWaitingTrigger = process.env["APPROVAL_STUB_WHILE_WAITING_TRIGGER"] ?? null;
 const duplicateResponse = process.env["APPROVAL_STUB_DUPLICATE_RESPONSE"] ?? "";
 const silenceAfterScript = process.env["APPROVAL_STUB_SILENCE_AFTER_SCRIPT"] === "1";
 const repliesPath = process.env["APPROVAL_STUB_REPLIES"] ?? null;
@@ -136,10 +137,20 @@ function advance() {
   nextId += 1;
   write({ id, method: entry.method, params: entry.params ?? {} });
   for (const scheduled of whileWaiting) {
-    setTimeout(() => {
+    const emit = () => {
+      record({ kind: "while-waiting-notify", method: scheduled.notify ?? null });
       if (typeof scheduled.raw === "string") process.stdout.write(`${scheduled.raw}\n`);
       else write({ method: scheduled.notify, params: scheduled.params ?? {} });
-    }, scheduled.delayMs ?? 50);
+    };
+    if (whileWaitingTrigger === null) {
+      setTimeout(emit, scheduled.delayMs ?? 50);
+    } else {
+      const poll = setInterval(() => {
+        if (!existsSync(whileWaitingTrigger)) return;
+        clearInterval(poll);
+        emit();
+      }, 10);
+    }
   }
   if (endWhileWaiting) {
     setTimeout(() => write({ method: "turn/completed", params: {

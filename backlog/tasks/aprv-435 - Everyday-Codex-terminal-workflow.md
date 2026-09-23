@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-22 06:44'
-updated_date: '2026-09-23 00:39'
+updated_date: '2026-09-23 00:51'
 labels: []
 dependencies:
   - APRV-434
@@ -39,4 +39,6 @@ Implement the approved continuing terminal bridge using one owned app-server chi
 Continuation checkpoint: terminal lifecycle/output/runbook implemented and focused-tested, including one thread across turns, signals, child failure and silence. Independent review reproduced initial idle-prompt timeout from the remaining preflight timer; correction and regression are in progress. Exact rejection-then-new-approval sequence regression is being added. Full integrated CI and native acceptance remain outstanding; task stays In Progress.
 
 Local integrated contract reviewed by independent Astra after correcting idle preflight timer, pending-wait silence, duplicate handshake responses, stale item snapshots and conflicting identities. Fourteen new targeted regressions passed. Typecheck/conformance passed; full integrated local CI running. Implementation commit is coupled with APRV-434 because bridge source and regression fixtures jointly enforce continuing-session correctness. Native real-session acceptance remains pending; draft PR only until that evidence exists.
+
+Validation checkpoint: continuing bridge is in draft PR549 with local contract review cleared. All local full-suite shards passed across initial run and isolated retry of an existing daemon timing failure; typecheck/conformance/lint passed. Two pending-notification regressions now use an explicit marker handshake after observed gate intake, eliminating a Linux CI scheduling race. Native end-to-end acceptance is still blocked on the renewed primary request; no merge or desktop-activation claim.
 <!-- SECTION:NOTES:END -->
