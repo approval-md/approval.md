@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-22 06:44'
-updated_date: '2026-09-22 06:45'
+updated_date: '2026-09-23 00:26'
 labels: []
 dependencies:
   - APRV-434
@@ -32,3 +32,9 @@ Implement the approved continuing terminal bridge using one owned app-server chi
 <!-- SECTION:PLAN:BEGIN -->
 1. Preserve one-shot mode and add explicit interactive TTY mode, refusing JSON. 2. Keep one owned app-server child and thread with one preflight and sequential turn starts. 3. Render agent output and approval progress; make EOF, quit and interruption honest. 4. Add multi-turn and lifecycle fixtures/tests, help and onboarding; validate and parent review.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Continuation checkpoint: terminal lifecycle/output/runbook implemented and focused-tested, including one thread across turns, signals, child failure and silence. Independent review reproduced initial idle-prompt timeout from the remaining preflight timer; correction and regression are in progress. Exact rejection-then-new-approval sequence regression is being added. Full integrated CI and native acceptance remain outstanding; task stays In Progress.
+<!-- SECTION:NOTES:END -->

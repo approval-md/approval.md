@@ -364,11 +364,11 @@ const unionVectors = [
   ],
   [
     "bridge_refusal_codes",
-    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, a command string that names no argv it can bind, an item-based file change whose content it cannot produce from the `item/started` frame that item id names, one whose item had already completed when the question arrived, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
+    "every way `approval codex bridge` can decline an app-server approval request on its own, before or instead of asking the gate: a request whose command, directory or call identity is missing, one whose thread or turn mismatches or whose call identity repeats, a command string that names no argv it can bind, an item-based file change whose content it cannot produce from the `item/started` frame that item id names, one whose item had already completed when the question arrived, and a server request it has no reading for. It is NOT the verb's whole vocabulary: `bridge_stop_codes` carries the ways it ends a session instead of answering a request",
   ],
   [
     "bridge_stop_codes",
-    "every way `approval codex bridge` STOPS a session rather than declining one request: a refused `thread/start`, a server reporting an effective approval policy that is not the pinned one, a preflight turn that ran no command so nothing was established, and a harness auto-reviewer notification saying something else answered a question before this client was asked. Separate from `bridge_refusal_codes` because the two boundaries differ: a decline answers one approval request and the turn carries on, a stop ends the run. A second implementation answers BOTH unions or has left a door open",
+    "every way `approval codex bridge` STOPS a session rather than declining one request: a refused `thread/start`, a server reporting an effective approval policy that is not the pinned one, a preflight turn that ran no command so nothing was established, a harness auto-reviewer notification saying something else answered a question before this client was asked, a failed turn, or an app-server exit before completion. Separate from `bridge_refusal_codes` because the two boundaries differ: a decline answers one approval request and the turn carries on, a stop ends the run. A second implementation answers BOTH unions or has left a door open",
   ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
@@ -2302,7 +2302,9 @@ const SUITES = [
     // harness's own timeout rather than anything about this command or this
     // approver. A caller that collapsed it into either neighbour would retry a
     // command that cannot be answered under this configuration, forever.
-    vectors_version: "22.0.0",
+    // 23.0.0 (APRV-434): bridge request mismatches and failed/exited sessions
+    // gain explicit codes; both closed unions change, so the version is major.
+    vectors_version: "23.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

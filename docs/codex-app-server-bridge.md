@@ -538,8 +538,11 @@ answer is decline, recorded with the failing evidence exactly as APRV-325 did.
 
 ## Using it (APRV-361)
 
-The bridge landed as `approval codex bridge`. It starts `codex app-server`,
-runs one turn, and answers every approval request that turn raises.
+The bridge landed as `approval codex bridge`. Its one-shot mode starts
+`codex app-server`, runs one operator turn after preflight, and answers every
+approval request that turn raises. `--interactive` keeps the same owned child
+and thread open for sequential turns after one preflight. See
+[`docs/codex-terminal.md`](codex-terminal.md) for the terminal workflow.
 
 ```
 approval codex bridge --prompt "refactor the parser" --workspace ~/dev/scratch
@@ -549,9 +552,18 @@ Flags: `--workspace` is the thread's directory (default the cwd), `--as` the
 acting identity (default `agent:codex`), `--dir`/`--policy`/`--log` resolve the
 policy and the log exactly as the hook resolves them, `--wait` overrides the
 deadline (default the policy's `approval_ttl`), `--interval` is how often the
-verified view is re-read, and `--json` prints one object carrying every answer.
+verified view is re-read, `--lifecycle-timeout` bounds app-server protocol
+silence separately from a human decision wait, and `--json` prints one object
+carrying every answer and per-turn `{id,status,answers}` rows.
 A command after `--` replaces `codex app-server`, which is how the tests drive a
-stub that speaks the shape recorded above.
+stub that speaks the shape recorded above. `--interactive` requires terminal
+stdin, refuses `--json`, and takes prompts until `/quit` or EOF. Failed turns
+and unexpected child exits return nonzero even after approvals were answered.
+SIGINT and SIGTERM terminate the owned child, escalating when it ignores
+SIGTERM. Agent output is rendered only from notifications that explicitly name
+the active thread and turn.
+An accepted reply is recorded as authorization with execution outcome
+`unknown`; a turn completion does not establish each tool's outcome.
 
 What happens per request: the `command` and `cwd` on the frame become the hook's
 own input, and the decision comes from `cli/hook.ts`'s `decideHarnessCall` — the

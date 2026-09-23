@@ -3047,6 +3047,10 @@ interface HookRun {
    * changes nothing about it.
    */
   waitMs: number;
+  /** Cooperative cancellation owned by an embedding transport, when present. */
+  cancelled?: () => boolean;
+  /** A wakeable replacement for the synchronous poll sleep. */
+  pause?: (ms: number) => void;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -3762,11 +3766,27 @@ export function gateHarnessCall(
         ? detail
         : `${detail} This tool call was routed to a human by loop safety rather than by policy — loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls (amended SPEC.md §10.2). ${loopClearance(floor.scope, floor.key)}`,
   });
+  const isCancelled = (): boolean => run.cancelled?.() === true;
+  const cancelVerdict = (owned: string[] = []): HarnessVerdict => {
+    if (owned.length > 0) {
+      withdrawPending(
+        run,
+        streams,
+        owned,
+        "the requesting bridge session ended while this gate call was active; only requests opened by this invocation are withdrawn",
+      );
+    }
+    return sayDeny(
+      "hook-withdrawn",
+      "the requesting bridge session ended before this gate call could return authority to a live tool call",
+    );
+  };
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
   // from unverified bytes would be a grant invented by whoever could write the
   // file.
+  if (isCancelled()) return cancelVerdict();
   const intake = readVerifiedRecords(run.logPath);
   if (!intake.ok) return sayDeny("hook-io", intake.message);
   const intakeTs = new Date().toISOString();
@@ -3908,6 +3928,7 @@ export function gateHarnessCall(
   // HH:MM UTC", the policy's TTL — which is now exactly the truth.
   const ownKeys: string[] = [];
   for (const action of fresh) {
+    if (isCancelled()) return cancelVerdict(ownKeys);
     const result = request(
       run.logPath,
       {
@@ -3955,6 +3976,7 @@ export function gateHarnessCall(
         }
       }
     }
+    if (isCancelled()) return cancelVerdict(ownKeys);
   }
 
   // An adopted question was opened by an earlier invocation, under whatever
@@ -3985,22 +4007,26 @@ export function gateHarnessCall(
       // What there is, since APRV-141, is something to charge: the start event
       // is this execution's authorization, and the registration `fresh` just
       // wrote is what makes it a sampleable one.
+      if (isCancelled()) return cancelVerdict(ownKeys);
       const charged = recordUnattended(run, task, classes, hash);
       if (charged !== null) {
         return sayDeny(`hook-gate-refused:${charged.code}`, charged.message);
       }
+      if (isCancelled()) return cancelVerdict(ownKeys);
       return sayAllow(
         `granted: ${classes.join(", ")} needs no approval under this policy${note}`,
       );
     }
     // Every gated class carried an unspent grant: a human already answered this
     // exact question about these exact bytes, and nobody is asked again.
+    if (isCancelled()) return cancelVerdict(ownKeys);
     const failed = consumeGrants(run, spendKeys, hash, task);
     if (failed !== null) {
       return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
     }
     const unverified = verifySpent(run, spendKeys);
     if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
+    if (isCancelled()) return cancelVerdict(ownKeys);
     return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
 
@@ -4048,6 +4074,7 @@ export function gateHarnessCall(
 
   try {
     for (;;) {
+      if (isCancelled()) return cancelVerdict(ownKeys);
       const read = readVerifiedRecords(run.logPath);
       if (!read.ok) {
         withdrawPending(
@@ -4153,12 +4180,14 @@ export function gateHarnessCall(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
+          if (isCancelled()) return cancelVerdict(ownKeys);
           const failed = consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
           }
           const unverified = verifySpent(run, spendKeys);
           if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
+          if (isCancelled()) return cancelVerdict(ownKeys);
           return sayAllow(`granted: ${task} (${classes.join(", ")})${provenance}${note}`);
         }
         // Not a wait outcome: the log disagrees with itself about keys this
@@ -4231,7 +4260,8 @@ export function gateHarnessCall(
           `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
         );
       }
-      sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+      const pauseMs = Math.min(run.intervalMs, Math.max(0, deadline - Date.now()));
+      (run.pause ?? sleepSync)(pauseMs);
     }
   } catch (cause) {
     // The thrown path. `commandHarnessHook` turns this into an ordinary
@@ -5692,6 +5722,10 @@ export interface DecideInput {
    * lookup passes `null`, and both of them read the log themselves.
    */
   windowRecords: EventRecord[] | null;
+  /** Cooperative cancellation for an embedding transport such as the Codex bridge. */
+  cancelled?: () => boolean;
+  /** A wakeable pause paired with `cancelled`; defaults to the ordinary sync sleep. */
+  pause?: (ms: number) => void;
 }
 
 /**
@@ -5728,6 +5762,9 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   } = decide;
   const harnessCapMs = decide.harnessCapMs ?? null;
   const harnessCapStated = decide.harnessCapStated ?? false;
+  if (decide.cancelled?.() === true) {
+    return { permission: "deny", code: "hook-withdrawn", detail: "the requesting bridge session ended before gate intake" };
+  }
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
@@ -5813,6 +5850,8 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
       harnessCapMs === null
         ? timeoutMs
         : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
+    ...(decide.cancelled === undefined ? {} : { cancelled: decide.cancelled }),
+    ...(decide.pause === undefined ? {} : { pause: decide.pause }),
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

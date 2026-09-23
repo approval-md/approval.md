@@ -39,6 +39,7 @@ import {
   DECLINE_WORDS,
   advertisedDecisions,
   chooseDecision,
+  decideExecRequest,
   effectiveApprovalPolicy,
   encodeDecision,
   isAutoReviewNotification,
@@ -126,11 +127,16 @@ function ready(policyText: string = POLICY): string {
  */
 type ScriptEntry =
   | { method: string; params?: Record<string, unknown> }
-  | { notify: string; params?: Record<string, unknown> };
+  | { notify: string; params?: Record<string, unknown> }
+  | { raw: string };
 
 interface BridgeAnswerRow {
   method: string;
+  threadId: string | null;
+  turnId: string | null;
+  itemId: string | null;
   outcome: "accept" | "decline";
+  executionOutcome: "unknown" | "not-authorized";
   decision: string;
   decisionSource: "advertised" | "fallback";
   code: string | null;
@@ -163,6 +169,7 @@ interface BridgeReport {
   code?: string;
   thread: BridgeThreadRow;
   preflight: BridgePreflightRow;
+  turns: { id: string | null; status: string; answers: number }[];
   answers: BridgeAnswerRow[];
 }
 
@@ -278,6 +285,20 @@ function assertVerifies(dir: string): void {
   assert.equal((JSON.parse(verify.stdout) as Record<string, unknown>)["status"], "clean");
 }
 
+function logRecords(dir: string): Record<string, unknown>[] {
+  return rawLog(dir).split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+async function waitForRequestCount(dir: string, count: number): Promise<Record<string, unknown>[]> {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const requests = logRecords(dir).filter((record) => record["event"] === "approval.requested");
+    if (requests.length >= count) return requests;
+    assert.ok(Date.now() < deadline, `only ${String(requests.length)} request(s) appeared`);
+    await delay(50);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AC1 + AC4 — a turn runs, and the answers are accept or decline only
 // ---------------------------------------------------------------------------
@@ -291,6 +312,12 @@ test("a turn against the stub is answered accept, in the server's own word", () 
   assert.equal(report.answers.length, 1);
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "accept");
+  assert.equal(answer.executionOutcome, "unknown");
+  assert.equal(answer.threadId, "thread-1");
+  assert.equal(answer.turnId, "turn-1");
+  assert.equal(report.turns[0]?.id, "turn-1");
+  assert.equal(report.turns[0]?.status, "completed");
+  assert.equal(report.turns[0]?.answers, 1);
   // AC4: the word came off `availableDecisions`, and it is the one the server
   // advertised rather than one this runtime pinned.
   assert.equal(answer.decision, "accept");
@@ -353,6 +380,7 @@ test("a manual class is registered and requested, and the answer waits for the d
 
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "decline");
+  assert.equal(answer.executionOutcome, "not-authorized");
   assert.equal(answer.code, "hook-timeout", answer.detail);
 
   const grown = rawLog(dir).slice(before.length);
@@ -439,6 +467,221 @@ test("the accept is sent only after a human's grant reaches the verified view", 
   assertVerifies(dir);
 });
 
+test("a rejected call and newly granted retry stay separate in one bridge session", async () => {
+  const dir = ready();
+  const repliesPath = join(dir, "retry-replies.jsonl");
+  const command = "curl -d a=b https://example.com";
+  const first = execRequest(command, dir) as { method: string; params: Record<string, unknown> };
+  const second = execRequest(command, dir) as { method: string; params: Record<string, unknown> };
+  first.params["itemId"] = "rejected-call";
+  second.params["itemId"] = "approved-retry";
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: JSON.stringify([first, second]),
+    APPROVAL_STUB_REPLIES: repliesPath,
+  };
+  delete env.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "retry",
+    "--dir", dir, "--wait", "30s", "--interval", "100ms", "--json",
+    "--", process.execPath, STUB], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code ?? -1)));
+
+  const firstRequests = await waitForRequestCount(dir, 1);
+  const firstKey = firstRequests[0]?.["action_key"];
+  assert.ok(typeof firstKey === "string");
+  assert.equal(repliesOf(repliesPath).some((row) => row["kind"] === "reply"), false);
+  const rejected = runCli(["reject", firstKey, "--as", "human:alice"], dir);
+  assert.equal(rejected.code, 0, rejected.stderr);
+
+  const requests = await waitForRequestCount(dir, 2);
+  const secondKey = requests[1]?.["action_key"];
+  assert.ok(typeof secondKey === "string");
+  assert.notEqual(secondKey, firstKey);
+  const beforeGrant = repliesOf(repliesPath).filter((row) => row["kind"] === "reply");
+  assert.equal(beforeGrant.length, 1, "the retry received a stale rejection or grant");
+  assert.deepEqual(beforeGrant[0]?.["result"], { decision: "decline" });
+  const granted = runCli(["grant", secondKey, "--as", "human:alice"], dir);
+  assert.equal(granted.code, 0, granted.stderr);
+
+  assert.equal(await exited, 0, output);
+  const replies = repliesOf(repliesPath).filter((row) => row["kind"] === "reply");
+  assert.deepEqual(replies.map((row) => row["result"]), [{ decision: "decline" }, { decision: "accept" }]);
+  const starts = logRecords(dir).filter((row) => row["event"] === "execution.started");
+  assert.deepEqual(starts.map((row) => row["action_key"]), [secondKey]);
+  assertVerifies(dir);
+});
+
+test("cancelling a mixed adopted and new multi-class call withdraws only its new request", () => {
+  const dir = ready();
+  const command = "curl -d a=b https://example.com && npm install left-pad";
+  const plan = {
+    logPath: join(dir, LOG), root: dir, options: { policy: { dir } },
+    actor: "agent:codex-bridge", workspace: dir, waitMs: 1, intervalMs: 1,
+  };
+  const streams = { out: (_value: string) => {}, err: (_value: string) => {} };
+  const params = (itemId: string) => ({
+    threadId: "thread-mixed", turnId: "turn-1", itemId, command, cwd: dir,
+  });
+  const first = decideExecRequest(streams, plan, params("first-call"));
+  assert.equal(first.verdict.permission, "deny");
+  const opened = logRecords(dir).filter((row) => row["event"] === "approval.requested");
+  assert.equal(opened.length, 2, "fixture must exercise two manual classes");
+  const adoptedKey = opened[0]?.["action_key"];
+  const withdrawnKey = opened[1]?.["action_key"];
+  assert.ok(typeof adoptedKey === "string" && typeof withdrawnKey === "string");
+  assert.notEqual(adoptedKey, withdrawnKey);
+  const task = opened[1]?.["task"];
+  assert.ok(typeof task === "string");
+  const withdrawn = runCli(["withdraw", task, "--action", withdrawnKey, "--as", plan.actor,
+    "--reason", "cancelled"], dir);
+  assert.equal(withdrawn.code, 0, withdrawn.stderr);
+
+  const second = decideExecRequest(streams, { ...plan, waitMs: 30_000 }, params("second-call"), {
+    cancelled: () => logRecords(dir).filter((row) => row["event"] === "approval.requested").length >= 3,
+    pause: (_ms: number) => {},
+  });
+  assert.equal(second.verdict.permission, "deny");
+  if (second.verdict.permission === "deny") assert.equal(second.verdict.code, "hook-withdrawn");
+  const records = logRecords(dir);
+  const requests = records.filter((row) => row["event"] === "approval.requested");
+  assert.equal(requests.length, 3);
+  const newKey = requests[2]?.["action_key"];
+  assert.ok(typeof newKey === "string");
+  assert.notEqual(newKey, adoptedKey);
+  assert.notEqual(newKey, withdrawnKey);
+  const withdrawals = records.filter((row) => row["event"] === "approval.withdrawn");
+  assert.deepEqual(withdrawals.map((row) => row["action_key"]).sort(), [newKey, withdrawnKey].sort());
+  assert.equal(withdrawals.some((row) => row["action_key"] === adoptedKey), false);
+  const humanGrant = runCli(["grant", adoptedKey, "--as", "human:alice"], dir);
+  assert.equal(humanGrant.code, 0, humanGrant.stderr);
+  const staleGrant = runCli(["grant", newKey, "--as", "human:alice"], dir);
+  assert.notEqual(staleGrant.code, 0);
+  assert.match(staleGrant.stderr + staleGrant.stdout, /request-withdrawn/u);
+  assert.equal(existsSync(join(dir, `${LOG}.lock`)), false);
+  assertVerifies(dir);
+});
+
+test("an app-server exit cancels a pending human wait, withdraws its own request and wakes a long poll", async () => {
+  const dir = ready();
+  const repliesPath = join(dir, "cancel-replies.jsonl");
+  const pidPath = join(dir, "cancel-stub.pid");
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: JSON.stringify([execRequest("curl -d a=b https://example.com", dir)]),
+    APPROVAL_STUB_REPLIES: repliesPath,
+    APPROVAL_STUB_PID_PATH: pidPath,
+    APPROVAL_STUB_STAY_OPEN: "1",
+  };
+  delete childEnv.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "wait",
+    "--dir", dir, "--wait", "30s", "--interval", "30s", "--json",
+    "--", process.execPath, STUB], { cwd: dir, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  await waitForRequestKey(dir, 20_000);
+  const stubPid = Number(readFileSync(pidPath, "utf8").trim());
+  const stoppedAt = Date.now();
+  process.kill(stubPid, "SIGKILL");
+  const result = await exited;
+  assert.equal(result.signal, null, output);
+  assert.notEqual(result.code, 0, output);
+  assert.ok(Date.now() - stoppedAt < 5_000, `cancellation did not wake the 30s poll:\n${output}`);
+  assert.match(output, /bridge-server-exited/u);
+  assert.equal(repliesOf(repliesPath).some((entry) => entry["kind"] === "reply"), false,
+    "a gate result was sent after the app-server exited");
+  assert.match(rawLog(dir), /"event":"approval\.withdrawn"/u);
+  assert.doesNotMatch(rawLog(dir), /"event":"execution\.started"/u);
+  assert.equal(existsSync(join(dir, `${LOG}.lock`)), false, "cooperative cancellation left an append lock");
+  assertVerifies(dir);
+});
+
+test("SIGINT during a pending human wait cooperatively withdraws before the bridge exits", async () => {
+  const dir = ready();
+  const repliesPath = join(dir, "signal-replies.jsonl");
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: JSON.stringify([execRequest("curl -d a=b https://example.com", dir)]),
+    APPROVAL_STUB_REPLIES: repliesPath,
+    APPROVAL_STUB_STAY_OPEN: "1",
+  };
+  delete childEnv.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "wait",
+    "--dir", dir, "--wait", "30s", "--interval", "30s", "--json",
+    "--", process.execPath, STUB], { cwd: dir, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  await waitForRequestKey(dir, 20_000);
+  const stoppedAt = Date.now();
+  child.kill("SIGINT");
+  const result = await exited;
+  assert.equal(result.signal, null, output);
+  assert.notEqual(result.code, 0, output);
+  assert.ok(Date.now() - stoppedAt < 5_000, `SIGINT did not wake the 30s poll:\n${output}`);
+  assert.match(output, /interrupted by SIGINT/u);
+  assert.equal(repliesOf(repliesPath).some((entry) => entry["kind"] === "reply"), false);
+  assert.match(rawLog(dir), /"event":"approval\.withdrawn"/u);
+  assert.equal(existsSync(join(dir, `${LOG}.lock`)), false);
+  assertVerifies(dir);
+});
+
+test("a matching notification during a human wait does not restart the silence deadline", async () => {
+  const dir = ready();
+  const repliesPath = join(dir, "notification-replies.jsonl");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: JSON.stringify([execRequest("curl -d a=b https://example.com", dir)]),
+    APPROVAL_STUB_REPLIES: repliesPath,
+    APPROVAL_STUB_STAY_OPEN: "1",
+    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ delayMs: 300, notify: "item/started", params: {
+      threadId: "thread-1", turnId: "turn-1", item: { id: "unrelated-message", type: "agentMessage" },
+    } }]),
+  };
+  delete env.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "wait",
+    "--dir", dir, "--wait", "30s", "--interval", "100ms", "--lifecycle-timeout", "200ms", "--json",
+    "--", process.execPath, STUB], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code ?? -1)));
+  const key = await waitForRequestKey(dir, 20_000);
+  await delay(700);
+  assert.equal(repliesOf(repliesPath).some((row) => row["kind"] === "reply"), false);
+  assert.equal(child.exitCode, null, output);
+  const grant = runCli(["grant", key, "--as", "human:alice"], dir);
+  assert.equal(grant.code, 0, grant.stderr);
+  assert.equal(await exited, 0, output);
+  assert.deepEqual(repliesOf(repliesPath).find((row) => row["kind"] === "reply")?.["result"], { decision: "accept" });
+  assertVerifies(dir);
+});
+
+test("a turn ending while its gate worker is active cancels the worker and sends no late answer", () => {
+  const dir = ready();
+  const { run, report, replies } = bridge(
+    dir,
+    [execRequest("curl -d a=b https://example.com", dir)],
+    ["--interval", "30s"],
+    { APPROVAL_STUB_END_WHILE_WAITING: "1", APPROVAL_STUB_STAY_OPEN: "1" },
+  );
+  assert.notEqual(run.code, 0, run.stdout + run.stderr);
+  assert.equal(report.code, "bridge-turn-failed");
+  assert.equal(replies.some((entry) => entry["kind"] === "reply"), false);
+  assert.doesNotMatch(rawLog(dir), /"event":"execution\.(completed|failed|indeterminate)"/u);
+  assert.equal(existsSync(join(dir, `${LOG}.lock`)), false);
+  assertVerifies(dir);
+});
+
 test("an autonomous class appends its execution record and answers without asking", () => {
   const dir = ready();
   const before = rawLog(dir);
@@ -478,7 +721,7 @@ test("an exec request missing cwd or command is declined bridge-request-unbound"
   const { report } = bridge(dir, [
     {
       method: "item/commandExecution/requestApproval",
-      params: { threadId: "thread-1", itemId: "item-1", command: "cat README.md" },
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-1", command: "cat README.md" },
     },
   ]);
 
@@ -518,6 +761,7 @@ function legacyPatchRequest(
     method: "applyPatchApproval",
     params: {
       conversationId: "thread-1",
+      turnId: "turn-1",
       callId: "call-7",
       fileChanges: changes,
       reason: null,
@@ -804,8 +1048,8 @@ test("APRV-379: a request naming another thread than the frame is unbound", () =
 
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "decline");
-  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
-  assert.match(answer.detail, /disagree about which conversation/u);
+  assert.equal(answer.code, "bridge-request-mismatch", answer.detail);
+  assert.match(answer.detail, /active thread and turn/u);
   assert.equal(rawLog(dir), before);
 });
 
@@ -819,8 +1063,8 @@ test("APRV-379: a request naming another turn than the frame is unbound", () => 
 
   const answer = report.answers[0] as BridgeAnswerRow;
   assert.equal(answer.outcome, "decline");
-  assert.equal(answer.code, "bridge-file-change-unbound", answer.detail);
-  assert.match(answer.detail, /disagree about which turn/u);
+  assert.equal(answer.code, "bridge-request-mismatch", answer.detail);
+  assert.match(answer.detail, /active thread and turn/u);
   assert.equal(rawLog(dir), before);
 });
 
@@ -961,6 +1205,7 @@ test("APRV-362: a legacy argv array is rendered word by word, never concatenated
       method: "execCommandApproval",
       params: {
         conversationId: "thread-1",
+        turnId: "turn-1",
         callId: "call-9",
         command: ["curl", "-d", "a=b c", "https://example.com"],
         cwd: dir,
@@ -1140,7 +1385,10 @@ test("APRV-366: the stop codes are their own closed vocabulary, disjoint from th
     "bridge-approval-policy-mismatch",
     "bridge-auto-reviewer-active",
     "bridge-preflight-void",
+    "bridge-server-exited",
+    "bridge-server-silent",
     "bridge-thread-start-refused",
+    "bridge-turn-failed",
   ]);
   assert.equal(new Set(BRIDGE_STOP_CODES).size, BRIDGE_STOP_CODES.length);
   // Disjoint on purpose: a decline is an answer to one approval request and the
@@ -1421,8 +1669,400 @@ test("the refusal codes are a closed, distinct vocabulary", () => {
     "bridge-command-unbound",
     "bridge-file-change-already-completed",
     "bridge-file-change-unbound",
+    "bridge-request-mismatch",
     "bridge-request-unbound",
     "bridge-unknown-request",
   ]);
   assert.equal(new Set(BRIDGE_REFUSAL_CODES).size, BRIDGE_REFUSAL_CODES.length);
+});
+
+test("failed turn and child exit after an answer both report failure", () => {
+  for (const end of ["failed", "exit"]) {
+    const dir = ready();
+    const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+      APPROVAL_STUB_LIVE_END: end,
+    });
+    assert.notEqual(run.code, 0, end);
+    assert.equal(report.ok, false);
+    assert.equal(report.code, end === "failed" ? "bridge-turn-failed" : "bridge-server-exited");
+    assert.equal(report.answers.length, 1);
+    assertVerifies(dir);
+  }
+});
+
+test("turn/completed carrying failed status cannot report success", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+    APPROVAL_STUB_COMPLETED_STATUS: "failed",
+  });
+  assert.notEqual(run.code, 0);
+  assert.equal(report.ok, false);
+  assert.equal(report.code, "bridge-turn-failed");
+  assert.equal(report.answers[0]?.executionOutcome, "unknown");
+  assertVerifies(dir);
+});
+
+test("stale and duplicate approval questions never enter the gate", () => {
+  const dir = ready();
+  const good = execRequest("cat README.md", dir);
+  const stale = execRequest("cat stale.md", dir);
+  if ("params" in stale) stale.params = { ...stale.params, turnId: "turn-preflight" };
+  const { report } = bridge(dir, [good, good, stale]);
+  assert.equal(report.answers[0]?.outcome, "accept");
+  assert.equal(report.answers[1]?.code, "bridge-request-mismatch");
+  assert.equal(report.answers[2]?.code, "bridge-request-mismatch");
+  const starts = rawLog(dir).split("\n").filter((line) => line.includes('"event":"execution.started"'));
+  assert.equal(starts.length, 1);
+  assertVerifies(dir);
+});
+
+test("duplicate item starts cannot substitute file-change content", () => {
+  const dir = ready();
+  const target = join(dir, "notes.md");
+  const { report } = bridge(dir, [
+    itemStarted("duplicate-file", [addChange(target, "first\n")]),
+    itemStarted("duplicate-file", [addChange(target, "second\n")]),
+    itemFileChangeRequest("duplicate-file"),
+  ]);
+  assert.equal(report.answers[0]?.code, "bridge-file-change-unbound");
+  assert.match(report.answers[0]?.detail ?? "", /started more than once/u);
+  assertVerifies(dir);
+});
+
+test("conflicting thread aliases on item/started cannot supply file approval content", () => {
+  const dir = ready();
+  const target = join(dir, "conflicted-start.md");
+  const { report, replies } = bridge(dir, [
+    itemStarted("conflicted-file", [addChange(target)], { conversationId: "foreign-thread" }),
+    itemFileChangeRequest("conflicted-file"),
+  ]);
+  assert.equal(report.answers.length, 1);
+  assert.equal(report.answers[0]?.outcome, "decline");
+  assert.equal(report.answers[0]?.code, "bridge-file-change-unbound");
+  assert.deepEqual(replies.find((row) => row["kind"] === "reply")?.["result"], { decision: "decline" });
+  assert.equal(logRecords(dir).some((row) => row["event"] === "execution.started"), false);
+  assertVerifies(dir);
+});
+
+test("item update during a pending file approval cancels the stale worker verdict", async () => {
+  const dir = ready(POLICY.replace("files.write.workspace:\n    autonomy: autonomous", "files.write.workspace:\n    autonomy: manual"));
+  const itemId = "changing-file";
+  const target = join(dir, "changing.md");
+  const repliesPath = join(dir, "updated-item-replies.jsonl");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: JSON.stringify([
+      itemStarted(itemId, [addChange(target, "before\n")]),
+      itemFileChangeRequest(itemId),
+    ]),
+    APPROVAL_STUB_REPLIES: repliesPath,
+    APPROVAL_STUB_STAY_OPEN: "1",
+    APPROVAL_STUB_WHILE_WAITING: JSON.stringify([{ delayMs: 300, notify: "item/updated", params: {
+      threadId: "thread-1", turnId: "turn-1",
+      item: { id: itemId, type: "fileChange", changes: [addChange(target, "after\n")], status: "inProgress" },
+    } }]),
+  };
+  delete env.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "edit",
+    "--dir", dir, "--wait", "30s", "--interval", "30s", "--json",
+    "--", process.execPath, STUB], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code ?? -1)));
+  await waitForRequestKey(dir, 20_000);
+  assert.notEqual(await exited, 0, output);
+  assert.equal(repliesOf(repliesPath).some((row) => row["kind"] === "reply"), false);
+  assert.doesNotMatch(rawLog(dir), /"event":"execution\.started"/u);
+  assert.equal(existsSync(join(dir, `${LOG}.lock`)), false);
+  assertVerifies(dir);
+});
+
+test("a missing thread on turn completion cannot end the owned turn successfully", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [
+    { notify: "turn/completed", params: { turnId: "turn-1", turn: { id: "turn-1", status: "completed" } } },
+  ], ["--lifecycle-timeout", "100ms"], {
+    APPROVAL_STUB_SILENCE_AFTER_SCRIPT: "1", APPROVAL_STUB_STAY_OPEN: "1",
+  });
+  assert.notEqual(run.code, 0, run.stdout + run.stderr);
+  assert.equal(report.ok, false);
+  assert.equal(report.turns[0]?.status, "interrupted");
+  assertVerifies(dir);
+});
+
+test("conflicting thread aliases cannot complete the owned turn", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [
+    { notify: "turn/completed", params: { threadId: "thread-1", conversationId: "foreign-thread",
+      turnId: "turn-1", turn: { id: "turn-1", status: "completed" } } },
+  ], ["--lifecycle-timeout", "100ms"], {
+    APPROVAL_STUB_SILENCE_AFTER_SCRIPT: "1", APPROVAL_STUB_STAY_OPEN: "1",
+  });
+  assert.notEqual(run.code, 0, run.stdout + run.stderr);
+  assert.equal(report.ok, false);
+  assert.notEqual(report.turns[0]?.status, "completed");
+  assertVerifies(dir);
+});
+
+test("conflicting thread aliases on agent output never render that message", () => {
+  const dir = ready();
+  const script = [
+    { notify: "item/completed", params: { threadId: "thread-1", conversationId: "foreign-thread",
+      turnId: "turn-1", item: { id: "conflicted-message", type: "agentMessage",
+        text: "forbidden conflicted message" } } },
+    { notify: "item/completed", params: { threadId: "thread-1", turnId: "turn-1",
+      item: { id: "owned-message", type: "agentMessage", text: "visible owned message" } } },
+  ];
+  const run = runCli(["codex", "bridge", "--prompt", "render", "--dir", dir,
+    "--", process.execPath, STUB], dir, { APPROVAL_STUB_SCRIPT: JSON.stringify(script) });
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  assert.doesNotMatch(run.stdout, /forbidden conflicted message/u);
+  assert.match(run.stdout, /visible owned message/u);
+  assertVerifies(dir);
+});
+
+for (const [name, params] of [
+  ["nested turn id", { threadId: "thread-1", turnId: "turn-1",
+    turn: { id: "foreign-turn", status: "completed" } }],
+  ["turn_id alias", { threadId: "thread-1", turnId: "turn-1", turn_id: "foreign-turn",
+    turn: { id: "turn-1", status: "completed" } }],
+] as const) {
+  test(`conflicting ${name} cannot complete the owned turn`, () => {
+    const dir = ready();
+    const { run, report } = bridge(dir, [
+      { notify: "turn/completed", params },
+    ], ["--lifecycle-timeout", "100ms"], {
+      APPROVAL_STUB_SILENCE_AFTER_SCRIPT: "1", APPROVAL_STUB_STAY_OPEN: "1",
+    });
+    assert.notEqual(run.code, 0, run.stdout + run.stderr);
+    assert.equal(report.ok, false);
+    assert.notEqual(report.turns[0]?.status, "completed");
+    assertVerifies(dir);
+  });
+}
+
+test("conflicting approval request thread aliases are declined before gate intake", () => {
+  const dir = ready();
+  const request = execRequest("curl -d a=b https://example.com", dir);
+  assert.ok("params" in request);
+  request.params = { ...request.params, conversationId: "foreign-thread" };
+  const { report, replies } = bridge(dir, [request]);
+  assert.equal(report.answers.length, 1);
+  assert.equal(report.answers[0]?.outcome, "decline");
+  assert.equal(report.answers[0]?.code, "bridge-request-mismatch");
+  assert.deepEqual(replies.find((row) => row["kind"] === "reply")?.["result"], { decision: "decline" });
+  assert.equal(logRecords(dir).filter((row) => row["event"] === "approval.requested").length, 0);
+  assertVerifies(dir);
+});
+
+for (const duplicate of ["initialize", "thread/start"]) {
+  test(`duplicate ${duplicate} response cannot replay bridge startup`, () => {
+    const dir = ready();
+    const { run, replies } = bridge(dir, [execRequest("cat README.md", dir)], [], {
+      APPROVAL_STUB_DUPLICATE_RESPONSE: duplicate,
+    });
+    assert.notEqual(run.code, 0, run.stdout + run.stderr);
+    assert.equal(replies.filter((row) => row["kind"] === "thread/start").length, 1);
+    assert.equal(replies.filter((row) => row["turn"] === "preflight").length, duplicate === "initialize" ? 0 : 1);
+    assert.equal(replies.filter((row) => row["turn"] === "live").length, 0);
+    assertVerifies(dir);
+  });
+}
+
+test("malformed app-server stdout fails closed", () => {
+  const dir = ready();
+  const { run, report } = bridge(dir, [{ raw: "{broken-json" }, execRequest("cat README.md", dir)]);
+  assert.notEqual(run.code, 0);
+  assert.equal(report.ok, false);
+  assert.match(report.reason, /invalid JSON frame/u);
+  assert.equal(report.answers.length, 0);
+  assertVerifies(dir);
+});
+
+test("initialize, thread, preflight and live-turn silence are bounded", () => {
+  for (const stage of ["initialize", "thread", "preflight", "live"]) {
+    const dir = ready();
+    const { run, report } = bridge(dir, [], ["--lifecycle-timeout", "50ms"], {
+      APPROVAL_STUB_SILENCE: stage,
+      APPROVAL_STUB_STAY_OPEN: "1",
+    });
+    assert.notEqual(run.code, 0, stage);
+    assert.equal(report.ok, false, stage);
+    assert.equal(report.code, "bridge-server-silent", stage);
+    assert.match(report.reason, /was silent/u, stage);
+    assertVerifies(dir);
+  }
+});
+
+test("interactive mode requires terminal stdin and refuses JSON", () => {
+  const dir = ready();
+  const tty = runCli(["codex", "bridge", "--interactive", "--dir", dir], dir);
+  assert.notEqual(tty.code, 0);
+  assert.match(tty.stderr, /requires a terminal/u);
+  const json = runCli(["codex", "bridge", "--interactive", "--json", "--dir", dir], dir);
+  assert.notEqual(json.code, 0);
+  assert.match(json.stderr, /cannot be combined/u);
+});
+
+test("interactive terminal reuses one thread and preflight across two turns", () => {
+  const dir = ready();
+  const repliesPath = join(dir, "interactive-replies.jsonl");
+  const turnScripts = [1, 2].map((number) => [
+    { notify: "item/completed", params: { turnId: `turn-${number}`,
+      item: { id: `missing-thread-${number}`, type: "agentMessage", text: `leak missing ${number}` } } },
+    { notify: "item/completed", params: { threadId: "thread-other", turnId: `turn-${number}`,
+      item: { id: `wrong-thread-${number}`, type: "agentMessage", text: `leak wrong ${number}` } } },
+    { notify: "item/completed", params: { threadId: "thread-1", turnId: `turn-${number}`,
+      item: { id: `answer-${number}`, type: "agentMessage", text: `answer ${number}` } } },
+  ]);
+  const ptyDriver = [
+    "import os,pty,select,subprocess,sys,time",
+    "master,slave=pty.openpty()",
+    "child=subprocess.Popen(sys.argv[1:],stdin=slave,stdout=slave,stderr=slave)",
+    "os.close(slave)",
+    "seen=b''; sent=0; deadline=time.monotonic()+10",
+    "while time.monotonic()<deadline:",
+    "  readable,_,_=select.select([master],[],[],0.1)",
+    "  if readable:",
+    "    try: chunk=os.read(master,65536)",
+    "    except OSError: break",
+    "    if not chunk: break",
+    "    seen+=chunk",
+    "    while seen.count(b'codex> ')>sent:",
+    "      sent+=1",
+    "      os.write(master,[b'first\\n',b'second\\n',b'/quit\\n'][min(sent-1,2)])",
+    "  if child.poll() is not None: break",
+    "if child.poll() is None: child.kill()",
+    "print(seen.decode('utf8','replace'))",
+    "sys.exit(child.wait())",
+  ].join("\n");
+  const run = spawnSync("python3", ["-c", ptyDriver, process.execPath, CLI_ENTRY,
+    "codex", "bridge", "--interactive", "--dir", dir, "--wait", "2s", "--interval", "200ms",
+    "--", process.execPath, STUB], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, APPROVAL_STUB_TURN_SCRIPTS: JSON.stringify(turnScripts),
+      APPROVAL_STUB_STAY_OPEN: "1", APPROVAL_STUB_REPLIES: repliesPath },
+  });
+  const output = run.stdout + run.stderr;
+  assert.equal(run.status, 0, output);
+  assert.match(output, /answer 1/u);
+  assert.match(output, /answer 2/u);
+  assert.doesNotMatch(output, /leak missing/u);
+  assert.doesNotMatch(output, /leak wrong/u);
+  const replies = repliesOf(repliesPath);
+  assert.equal(replies.filter((entry) => entry["kind"] === "thread/start").length, 1);
+  assert.equal(replies.filter((entry) => entry["turn"] === "preflight").length, 1);
+  const live = replies.filter((entry) => entry["turn"] === "live");
+  assert.equal(live.length, 2);
+  assert.ok(live[0] !== undefined && live[1] !== undefined);
+  assert.equal((live[0]["params"] as Record<string, unknown>)["threadId"], "thread-1");
+  assert.equal((live[1]["params"] as Record<string, unknown>)["threadId"], "thread-1");
+  assertVerifies(dir);
+});
+
+test("initial interactive prompt stays idle beyond the server silence deadline", () => {
+  const dir = ready();
+  const driver = [
+    "import os,pty,select,subprocess,sys,time",
+    "master,slave=pty.openpty()",
+    "child=subprocess.Popen(sys.argv[1:],stdin=slave,stdout=slave,stderr=slave)",
+    "os.close(slave)",
+    "seen=b''; prompted=None; sent=False; deadline=time.monotonic()+8",
+    "while time.monotonic()<deadline:",
+    "  readable,_,_=select.select([master],[],[],0.05)",
+    "  if readable:",
+    "    try: seen+=os.read(master,65536)",
+    "    except OSError: break",
+    "  if b'codex> ' in seen and prompted is None: prompted=time.monotonic()",
+    "  if prompted is not None and not sent and time.monotonic()-prompted>0.6:",
+    "    os.write(master,b'/quit\\n'); sent=True",
+    "  if child.poll() is not None: break",
+    "if child.poll() is None: child.kill()",
+    "print(seen.decode('utf8','replace'))",
+    "sys.exit(child.wait())",
+  ].join("\n");
+  const run = spawnSync("python3", ["-c", driver, process.execPath, CLI_ENTRY,
+    "codex", "bridge", "--interactive", "--dir", dir, "--lifecycle-timeout", "200ms",
+    "--", process.execPath, STUB], {
+    cwd: dir, encoding: "utf8", env: { ...process.env, APPROVAL_STUB_STAY_OPEN: "1" },
+  });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /interactive session ended after 0 turn\(s\)/u);
+  assertVerifies(dir);
+});
+
+test("SIGTERM cleans up an owned child that ignores graceful termination", async () => {
+  const dir = ready();
+  const pidPath = join(dir, "stub.pid");
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    APPROVAL_STUB_SCRIPT: "[]",
+    APPROVAL_STUB_SILENCE: "live",
+    APPROVAL_STUB_STAY_OPEN: "1",
+    APPROVAL_STUB_IGNORE_SIGTERM: "1",
+    APPROVAL_STUB_PID_PATH: pidPath,
+  };
+  delete childEnv.APPROVAL_HUMAN;
+  const child = spawn(process.execPath, [CLI_ENTRY, "codex", "bridge", "--prompt", "wait",
+    "--dir", dir, "--wait", "2s", "--interval", "200ms", "--lifecycle-timeout", "5s",
+    "--", process.execPath, STUB], { cwd: dir, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(pidPath) && Date.now() < deadline) await delay(20);
+  assert.equal(existsSync(pidPath), true, output);
+  const stubPid = Number(readFileSync(pidPath, "utf8").trim());
+  child.kill("SIGTERM");
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  assert.equal(result.signal, null, output);
+  assert.notEqual(result.code, 0, output);
+  assert.match(output, /interrupted by SIGTERM/u);
+  await delay(50);
+  let childGone = false;
+  try {
+    process.kill(stubPid, 0);
+  } catch (cause) {
+    childGone = (cause as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  assert.equal(childGone, true, "the SIGTERM-ignoring app-server survived its owner");
+  assertVerifies(dir);
+});
+
+test("EOF at an idle interactive prompt closes the owned child cleanly", () => {
+  const dir = ready();
+  const driver = [
+    "import os,pty,select,subprocess,sys,time",
+    "master,slave=pty.openpty()",
+    "child=subprocess.Popen(sys.argv[1:],stdin=slave,stdout=slave,stderr=slave)",
+    "os.close(slave)",
+    "seen=b''; sent=False; deadline=time.monotonic()+10",
+    "while time.monotonic()<deadline:",
+    "  readable,_,_=select.select([master],[],[],0.1)",
+    "  if readable:",
+    "    try: chunk=os.read(master,65536)",
+    "    except OSError: break",
+    "    if not chunk: break",
+    "    seen+=chunk",
+    "    if b'codex> ' in seen and not sent:",
+    "      os.write(master,b'\\x04'); sent=True",
+    "  if child.poll() is not None: break",
+    "if child.poll() is None: child.kill()",
+    "print(seen.decode('utf8','replace'))",
+    "sys.exit(child.wait())",
+  ].join("\n");
+  const run = spawnSync("python3", ["-c", driver, process.execPath, CLI_ENTRY,
+    "codex", "bridge", "--interactive", "--dir", dir, "--wait", "2s", "--interval", "200ms",
+    "--", process.execPath, STUB], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, APPROVAL_STUB_STAY_OPEN: "1" },
+  });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /interactive session ended after 0 turn\(s\)/u);
+  assertVerifies(dir);
 });
