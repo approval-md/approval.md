@@ -1368,6 +1368,10 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandServe } = await import("./serve.js");
       return settle(commandServe(rest, streams, cwd), streams, "serve failed");
     }
+    case "muse": {
+      const { commandMuse } = await import("./muse.js");
+      return settle(commandMuse(rest, streams, cwd), streams, "muse failed");
+    }
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and

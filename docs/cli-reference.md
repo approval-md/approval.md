@@ -7279,6 +7279,20 @@ transport gives (`wait` blocks the event loop, `run` spawns synchronously), and
 appends still go through the same lockfile and compare-and-append every
 `approval` process uses. It reads no `.approval/env`.
 
+## muse
+
+`approval muse` starts a local, single-tenant synthetic consumer facade. The
+operator fixes the tenant and distinct read/propose credentials in the launch
+environment and the store root with `--dir` before the listener binds to
+loopback. The proposal
+scope can register an in-memory envelope and request its declared action. The
+read scope sees status, pending requests and the canonical rendering of a live
+request. Both scopes are narrow: the listener has no grant, reject, execution,
+token, generic verb or export route. Human decisions use the separately
+configured Telegram listener. A pending request does not prove delivery to
+Telegram. See `docs/muse-connector.md` for the local HTTP contract, native
+evidence limits and prerequisites.
+
 ## Constrained Codex preparation
 
 approval codex prepare is an artifact generator. It writes one fresh review
