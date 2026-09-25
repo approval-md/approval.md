@@ -52,7 +52,7 @@
 import { parentPort } from "node:worker_threads";
 
 import { commandHook, type HookWaitSeam } from "../cli/hook.js";
-import { readVerifiedRecords, useVerifiedSnapshots } from "../core/state.js";
+import { processReadCache, readVerifiedRecords, useVerifiedSnapshots } from "../core/state.js";
 
 /** One hook call, as the listener hands it over. */
 export interface HookJob {
@@ -74,7 +74,18 @@ export interface HookJob {
 export type HookWorkerMessage =
   | { type: "wait" }
   | { type: "resume" }
-  | { type: "done"; code: number; stdout: string; stderr: string }
+  | {
+      type: "done";
+      code: number;
+      stdout: string;
+      stderr: string;
+      /**
+       * Verified reads from genesis this call made while holding the store
+       * lock. Zero is the property the warm read exists for; the listener
+       * sums it into its diagnostics so a test can assert it without timing.
+       */
+      coldReadsInLock: number;
+    }
   | { type: "failed"; message: string };
 
 const port = parentPort;
@@ -92,13 +103,22 @@ useVerifiedSnapshots(true);
 port.on("message", (job: HookJob) => {
   const flag = new Int32Array(job.flag);
   const post = (message: HookWorkerMessage): void => port.postMessage(message);
+  // Cold reads (cache misses) made inside a locked section, counted section
+  // by section: `mark` is taken when the lock arrives and settled when it goes.
+  let coldReadsInLock = 0;
+  let mark = 0;
+  const settle = (): void => {
+    coldReadsInLock += processReadCache.stats.misses - mark;
+  };
   /** Block until the main thread has taken the store lock for this thread. */
   const held = (): void => {
     while (Atomics.load(flag, 0) !== 1) Atomics.wait(flag, 0, 0);
+    mark = processReadCache.stats.misses;
   };
 
   const seam: HookWaitSeam = {
     enterWait: () => {
+      settle();
       Atomics.store(flag, 0, 0);
       post({ type: "wait" });
     },
@@ -125,7 +145,8 @@ port.on("message", (job: HookJob) => {
       () => job.body,
       seam,
     );
-    post({ type: "done", code, stdout: out.join(""), stderr: err.join("") });
+    settle();
+    post({ type: "done", code, stdout: out.join(""), stderr: err.join(""), coldReadsInLock });
   } catch (cause) {
     // `commandHook` already turns a throw inside the harness path into an
     // ordinary deny, so reaching this is a failure of the thread itself. It is

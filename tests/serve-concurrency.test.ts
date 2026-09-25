@@ -587,7 +587,7 @@ test("review 3: a tail that stays torn past the retries is still withdrawn and d
 /** Records in the mature log below: the size at which a cold walk is costly. */
 const MATURE_RECORDS = 50_000;
 
-test("review 2: five new hook threads on a mature log do not hold /status past 2 s", async (t) => {
+test("review 2: five new hook threads on a mature log walk it outside the lock, and do not hold /status", async (t) => {
   const { dir, logPath } = await ready();
   // A mature tenant log, every line through the real append path.
   for (let index = 0; index < MATURE_RECORDS; index += 1) {
@@ -603,30 +603,42 @@ test("review 2: five new hook threads on a mature log do not hold /status past 2
   }
   const server = await listener(dir);
   const tenant = { authorization: `Bearer ${TENANT_TOKEN}` };
+  const timeStatus = async (): Promise<number> => {
+    const started = performance.now();
+    const status = await fetch(url(server, "/status"), { headers: tenant });
+    await status.text();
+    assert.equal(status.status, 200);
+    return performance.now() - started;
+  };
   try {
-    // The listener's own thread walks the log once, here, so what is timed
-    // below is the wait for the lock and not this thread's first read.
-    const warm = await fetch(url(server, "/status"), { headers: tenant });
-    await warm.text();
+    // The listener's own thread walks the log once, here; the second call is
+    // what /status costs on this machine with nothing else running.
+    await timeStatus();
+    const alone = await timeStatus();
 
     // Five calls at once, each on a thread that has never read this log.
     const calls = ["tu-c1", "tu-c2", "tu-c3", "tu-c4", "tu-c5"].map((id) =>
       hook(server, bash(dir, id, `mkdir build-${id}`)),
     );
     await new Promise((settle) => setTimeout(settle, 50));
-    const started = performance.now();
-    const status = await fetch(url(server, "/status"), { headers: tenant });
-    await status.text();
-    const elapsed = performance.now() - started;
-    t.diagnostic(`/status answered in ${elapsed.toFixed(0)} ms`);
-    assert.equal(status.status, 200);
-    assert.ok(
-      elapsed < 2_000,
-      `/status took ${elapsed.toFixed(0)} ms behind five new hook threads on a ${String(MATURE_RECORDS)}-record log`,
-    );
+    const behind = await timeStatus();
     for (const verdict of await Promise.all(calls)) {
       assert.equal(verdict.permission, "allow", verdict.reason);
     }
+    t.diagnostic(`/status alone ${alone.toFixed(0)} ms, behind five new threads ${behind.toFixed(0)} ms`);
+
+    // The property, without a clock: no thread walked the log from genesis
+    // while it held the store lock. Every cold walk was the warm read, made
+    // before the thread asked for the lock.
+    assert.equal(server.hookThreads().coldReadsInLock, 0, "a hook thread walked the log cold inside the store lock");
+    // And its effect, as a DELAY against this machine's own baseline: five
+    // cold walks inside the lock would add seconds here. Measured against the
+    // baseline because a CI runner running other test files at once is slower
+    // at everything, and that is not what this test is about.
+    assert.ok(
+      behind - alone < 2_000,
+      `/status was delayed ${(behind - alone).toFixed(0)} ms (alone ${alone.toFixed(0)} ms, behind ${behind.toFixed(0)} ms) by five new hook threads on a ${String(MATURE_RECORDS)}-record log`,
+    );
   } finally {
     await server.close();
   }

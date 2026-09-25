@@ -97,6 +97,11 @@ export interface HookThreadStats {
   queued: number;
   /** The most threads that ever existed at once. */
   peakThreads: number;
+  /**
+   * Verified reads from genesis made while a thread held the store lock, over
+   * every call this pool has finished. The warm read keeps it at zero.
+   */
+  coldReadsInLock: number;
 }
 
 /** The store lock, as `mcp/server.ts`'s `serializer()` shapes one. */
@@ -149,6 +154,7 @@ export function hookThreads(
   /** The cancel word of every call running on a thread. */
   const running = new Set<Int32Array>();
   let peakThreads = 0;
+  let coldReadsInLock = 0;
 
   /**
    * Take a slot, waiting in line for one if every slot is held, or refuse.
@@ -309,6 +315,7 @@ export function hookThreads(
             enter();
             return;
           case "done":
+            coldReadsInLock += message.coldReadsInLock;
             finish();
             give(worker);
             settle({ code: message.code, stdout: message.stdout, stderr: message.stderr });
@@ -337,7 +344,7 @@ export function hookThreads(
 
   return {
     run,
-    stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads }),
+    stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads, coldReadsInLock }),
     close: async () => {
       closed = true;
       // Every running call stops at its next poll tick without spending or
