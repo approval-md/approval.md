@@ -1,11 +1,11 @@
 ---
 id: APRV-428
 title: wait on an unregistered task answers granted with no actions; it must refuse
-status: In Progress
+status: Done
 assignee:
   - '@opus-428'
 created_date: '2026-09-22 01:27'
-updated_date: '2026-09-25 04:29'
+updated_date: '2026-09-25 04:54'
 labels:
   - wait
   - gate
@@ -61,10 +61,12 @@ Refutation follow-up (behaviour clean; three items):
 1. Agent-facing text that still read exit 0 as granted is updated: src/cli/instructions.ts (the sequence's step 3), src/cli/help.ts (root verb list), docs/dogfood-cutover.md (step 3). Each now says exit 0 is granted OR nothing-to-wait-for, exit 1 includes not-registered, and only --json status "granted" (an unspent grant) means proceed to run. Suites: cli-instructions, cli-help, cli-long-help, docs-guard, cli-run, mcp-server 115 pass / 0 fail; typecheck and oxlint clean.
 2. Proposed SPEC §11.2 amendment, NOT applied (rides Carter's attestation batch): in the gate_refusal_codes preamble, change "every way register, request, decide, withdraw, expire, the policy-amendment ceremony, and harness-grant consumption can refuse" to also name wait, e.g. "... expire, wait (not-registered and the log-read codes; APRV-428), the policy-amendment ceremony, ...". Union membership and every code's condition row are unchanged, so no vector bump.
 3. Residual raised by the refuter: a verified view that is behind this process's own appends (log-sync or daemon-restart lag, the case SPEC §11.1 invariant 1's APRV-294 scope note covers) used to answer granted [] and now answers not-registered at exit 1 on the first pass. This is the safer direction: the lagging view now yields a refusal where it used to yield a success, so nothing proceeds on a registration the verified chain does not carry, and waiting again is harmless. If it ever needs the keep-waiting treatment, hook.ts's APRV-294 handling is the model: keep polling inside the existing --timeout bound and report that the view lags, never reading unverified bytes. Not implemented here because a plain CLI wait has no record of its own earlier appends to tell lag from a typo.
+
+Orchestrator review (Fable, 2026-09-25). Conformance pass, then a narrow adversarial recheck by a fresh Fable subagent (diff and spec only): no behavioural findings; three items fixed (agent-facing text that still equated exit 0 with granted in instructions, help and the dogfood runbook; the §11.2 clause naming wait among the verbs that emit gate codes, recorded here for Carter's attestation batch; the lagging-view residual noted with hook.ts's APRV-294 handling as the model). Merge armed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-approval wait now refuses a task with no task.registered record with the existing gate code not-registered (exit 1, same refusal and exit as approval request; passes through approval serve unchanged). A registered task with nothing a wait can resolve (no requests, or every grant already spent by an execution) answers status nothing-to-wait-for at exit 0 instead of the old vacuous granted; a genuine unspent grant is byte-identical. No refusal union changed membership, so conformance vectors are untouched. Registry, --help and docs/cli-reference.md#wait updated. Verified by new cli-run and serve tests, targeted suites and a full baseline run.
+approval wait refuses not-registered (exit 1) on a task the log never registered and answers nothing-to-wait-for (exit 0) on a registered task with no requests or with every grant already spent; granted now means an unspent grant exists and its output is byte-identical; taskRegistration() in core/gate.ts is the single raiser of not-registered; the refusal passes through approval serve unchanged. Verified by new cli-run and serve tests, targeted suites, a full run with no new failures, and a narrow adversarial recheck.
 <!-- SECTION:FINAL_SUMMARY:END -->
