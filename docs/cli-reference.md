@@ -7292,11 +7292,28 @@ of work that may append to the store or must read it as one snapshot:
 
 So one hook call waiting on a human holds nothing. While it polls, the tenant's
 `status`, `queue` and follow answer, and a second hook call opens its own
-question and waits beside the first; N gated calls from one sandbox wait in
-parallel. A hook call runs on a worker thread of this process, because a hook's
-wait is a synchronous sleep and on the listener's own thread it would stop the
-listener; the verdict, its bytes and its exit code are `approval hook
-<harness>`'s, exactly as before. Verb calls still run one at a time, in the
+question and waits beside the first. A hook call runs on a worker thread of
+this process, because a hook's wait is a synchronous sleep and on the
+listener's own thread it would stop the listener; the verdict, its bytes and
+its exit code are `approval hook <harness>`'s, exactly as before. A new thread
+reads the log once BEFORE it asks for the store lock, so the cold walk of a
+mature log (hundreds of milliseconds) happens in parallel and never inside the
+lock; its reads under the lock are then warm.
+
+**The pool is bounded, because each thread holds its own copy of the log**
+(about 26 MB idle, plus roughly 84 MB once it has read a 73k-record log). At
+most `--hook-threads` hook calls run at once, 16 by default, and no more
+threads than that ever exist. Up to `--hook-queue` further calls, 64 by
+default, wait for a slot in arrival order; a queued call has registered and
+requested nothing yet. A call that finds every slot and every place in line
+taken is refused at once with `serve-hook-saturated` (HTTP 503), carrying the
+harness's own block directive in `stdout` and `exit_code: 2`, and nothing is
+appended for it. Four finished threads are kept warm for the next call.
+
+A torn read in a hook's poll (another writer's line caught half-landed, which a
+filesystem that grows a file a page at a time can show a reader) is read again
+on the next tick, up to five ticks in a row, before the hook treats the log as
+unreadable. This holds for the stdin form too, beside the daemon. Verb calls still run one at a time, in the
 order they arrive, because some of them are synchronous and blocking too (`run`
 spawns, and `wait` sleeps on the listener's thread, so an agent's `POST
 /verb/wait` still holds the listener for its own timeout; the hook route is the

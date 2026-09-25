@@ -23,10 +23,22 @@
  * thread pays once: loading the CLI's modules, and proving the verified log
  * from genesis on its first read (each thread has its own read cache, as each
  * `approval hook` process does). Idle threads are kept up to
- * {@link HOOK_THREADS_IDLE}; beyond that a finished thread is terminated. The
- * number BUSY at once is not capped here: a hook call is already bounded by its
- * own wait, and a cap would bring back exactly the queueing this file exists to
- * remove.
+ * {@link HOOK_THREADS_IDLE}; beyond that a finished thread is terminated.
+ *
+ * ## Bounded, because each thread is a copy of the log (APRV-427 review)
+ *
+ * A thread carries its own parsed log in its read cache: about 26 MB for an
+ * idle thread and another 84 MB once it has proved a 73k-record log. An
+ * uncapped pool let thirty concurrent gated calls, or one harness retrying
+ * faster than its hook timeout, grow the facade until the kernel killed it, and
+ * a kill that lands inside an append leaves the log's lockfile behind with
+ * nothing to recover it. So at most {@link HookThreadLimits.threads} calls run
+ * at once (default {@link DEFAULT_HOOK_THREADS}); up to
+ * {@link HookThreadLimits.queue} more wait for a slot in arrival order (default
+ * {@link DEFAULT_HOOK_QUEUE}); and a call past both is refused at once with
+ * {@link HookSaturatedError}, which the listener answers as a block
+ * (`serve-hook-saturated`). A queued call has opened nothing yet, so the wait
+ * costs the tenant nothing but time.
  *
  * Reusing a thread is what the listener did before this file existed: every
  * hook call ran in the one main thread, one after another, with whatever
@@ -39,6 +51,42 @@ import type { HookJob, HookWorkerMessage } from "./hook-worker.js";
 
 /** How many finished hook threads are kept warm for the next call. */
 export const HOOK_THREADS_IDLE = 4;
+
+/** Hook calls that may run at once, and so threads that may exist, by default. */
+export const DEFAULT_HOOK_THREADS = 16;
+
+/** Hook calls that may wait for a thread, by default, before one is refused. */
+export const DEFAULT_HOOK_QUEUE = 64;
+
+/** The two bounds on the pool. */
+export interface HookThreadLimits {
+  /** Calls running at once, and the most threads that ever exist. At least 1. */
+  threads: number;
+  /** Calls waiting for a slot. Zero refuses whatever finds every slot taken. */
+  queue: number;
+}
+
+/** A call refused because every slot and every place in the queue is taken. */
+export class HookSaturatedError extends Error {
+  constructor(limits: HookThreadLimits) {
+    super(
+      `every hook slot is busy (${String(limits.threads)} running, ${String(limits.queue)} queued); nothing was registered or requested. Retry the tool call later; the operator raises the bounds with --hook-threads and --hook-queue`,
+    );
+    this.name = "HookSaturatedError";
+  }
+}
+
+/** The pool's state, for diagnostics and the tests that bound it. */
+export interface HookThreadStats {
+  /** Threads that exist (running or idle), not counting ones being terminated. */
+  threads: number;
+  /** Calls running on a thread. */
+  busy: number;
+  /** Calls waiting for a slot. */
+  queued: number;
+  /** The most threads that ever existed at once. */
+  peakThreads: number;
+}
 
 /** The store lock, as `mcp/server.ts`'s `serializer()` shapes one. */
 export type StoreLock = <T>(work: () => Promise<T>) => Promise<T>;
@@ -58,12 +106,49 @@ export interface HookThreads {
    * call in flight rejects.
    */
   close(): Promise<void>;
+  /** The pool's state now. */
+  stats(): HookThreadStats;
 }
 
-export function hookThreads(lock: StoreLock): HookThreads {
+export function hookThreads(
+  lock: StoreLock,
+  limits: HookThreadLimits = { threads: DEFAULT_HOOK_THREADS, queue: DEFAULT_HOOK_QUEUE },
+): HookThreads {
   const idle: Worker[] = [];
   const all = new Set<Worker>();
   let closed = false;
+  /** Calls holding a slot. Never more than `limits.threads`. */
+  let busy = 0;
+  /** Calls waiting for a slot, oldest first. */
+  const waiting: Array<() => void> = [];
+  let peakThreads = 0;
+
+  /**
+   * Take a slot, waiting in line for one if every slot is held, or refuse.
+   *
+   * A thread is only ever spawned by a call holding a slot and finding no idle
+   * thread, so the threads that exist never outnumber the slots.
+   */
+  async function slot(): Promise<void> {
+    if (busy < limits.threads) {
+      busy += 1;
+      return;
+    }
+    if (waiting.length >= limits.queue) throw new HookSaturatedError(limits);
+    // The slot is handed over by `freeSlot`, so `busy` is unchanged by it.
+    await new Promise<void>((granted) => waiting.push(granted));
+  }
+
+  function freeSlot(): void {
+    const next = waiting.shift();
+    if (next !== undefined) next();
+    else busy -= 1;
+  }
+
+  function retire(worker: Worker): void {
+    all.delete(worker);
+    void worker.terminate();
+  }
 
   function spawn(): Worker {
     const worker = new Worker(new URL("./hook-worker.js", import.meta.url), {
@@ -77,6 +162,7 @@ export function hookThreads(lock: StoreLock): HookThreads {
     // the listener does that, and a closed listener leaves nothing behind.
     worker.unref();
     all.add(worker);
+    peakThreads = Math.max(peakThreads, all.size);
     // A thread that dies while idle must not take the process with it through
     // an unhandled `error`, nor be handed the next call.
     worker.on("error", () => undefined);
@@ -90,10 +176,25 @@ export function hookThreads(lock: StoreLock): HookThreads {
 
   function give(worker: Worker): void {
     if (!closed && idle.length < HOOK_THREADS_IDLE) idle.push(worker);
-    else void worker.terminate();
+    else retire(worker);
   }
 
   async function run(argv: string[], cwd: string, logPath: string, body: string): Promise<HookOutcome> {
+    if (closed) throw new Error("the listener is closing");
+    await slot();
+    try {
+      return await runOnThread(argv, cwd, logPath, body);
+    } finally {
+      freeSlot();
+    }
+  }
+
+  async function runOnThread(
+    argv: string[],
+    cwd: string,
+    logPath: string,
+    body: string,
+  ): Promise<HookOutcome> {
     if (closed) throw new Error("the listener is closing");
     const worker = idle.pop() ?? spawn();
     const shared = new SharedArrayBuffer(4);
@@ -170,6 +271,7 @@ export function hookThreads(lock: StoreLock): HookThreads {
 
   return {
     run,
+    stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads }),
     close: async () => {
       closed = true;
       const resting = idle.splice(0);

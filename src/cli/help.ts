@@ -2674,9 +2674,9 @@ Usage:
 Flags:
   --as agent:<id>  the identity EVERY call is recorded under, or APPROVAL_AGENT
   --dir/--log/--policy <p>   the store root, and the log and policy pinned
-  --port <n>=4682  loopback. --listen <host:port> widens, and a non-loopback
-                   host ALSO needs --allow-non-loopback
+  --port <n>=4682  loopback. --listen <host:port> widens, non-loopback ALSO needs --allow-non-loopback
   --hook-timeout/--hook-harness-cap <d>  pinned on every hook call, as the stdin form's --timeout and --harness-cap (the CALLER's own kill timeout)
+  --hook-threads <n>=16 / --hook-queue <n>=64  hook calls running at once (a thread each) / waiting; past both, refused serve-hook-saturated
 
 For a harness in a sandbox with no local log and no policy. THE VERBS ARE mcp
 serve's: the registry less human_only, --as absent from every schema, the

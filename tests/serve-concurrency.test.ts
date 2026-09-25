@@ -39,7 +39,14 @@ import { main } from "../src/cli/main.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { readVerifiedRecords, type ReadRecordsResult } from "../src/core/state.js";
 import { resolveServeCredentials } from "../src/serve/credentials.js";
-import { hookArgv, serveApproval, storeLock, type ServeHandle } from "../src/serve/server.js";
+import { DEFAULT_HOOK_QUEUE, DEFAULT_HOOK_THREADS } from "../src/serve/hook-thread.js";
+import {
+  hookArgv,
+  serveApproval,
+  storeLock,
+  type ServeHandle,
+  type ServeOptions,
+} from "../src/serve/server.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -91,7 +98,10 @@ async function ready(): Promise<{ dir: string; logPath: string }> {
   return { dir, logPath: join(dir, LOG) };
 }
 
-async function listener(dir: string): Promise<ServeHandle> {
+async function listener(
+  dir: string,
+  extra: Partial<Pick<ServeOptions, "hookThreads" | "hookQueue">> = {},
+): Promise<ServeHandle> {
   const credentials = resolveServeCredentials({
     APPROVAL_SERVE_AGENT_TOKEN: AGENT_TOKEN,
     APPROVAL_SERVE_TENANT_TOKEN: TENANT_TOKEN,
@@ -107,6 +117,7 @@ async function listener(dir: string): Promise<ServeHandle> {
     // The hold the acceptance criterion names: a hook nobody answers waits
     // this long. Every test below ends its holds with a decision instead.
     hookTimeout: "60s",
+    ...extra,
   });
 }
 
@@ -610,6 +621,105 @@ test("review 2: five new hook threads on a mature log do not hold /status past 2
     for (const verdict of await Promise.all(calls)) {
       assert.equal(verdict.permission, "allow", verdict.reason);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review 1: the pool is bounded, and past its bounds a call is refused as a block
+// ---------------------------------------------------------------------------
+
+/**
+ * Reject every open request in `ids` until each call has answered. The calls
+ * that were queued open their requests only once a slot frees, so this keeps
+ * answering whatever has newly appeared.
+ */
+async function rejectUntilAnswered(
+  dir: string,
+  logPath: string,
+  ids: readonly string[],
+  settled: () => boolean,
+): Promise<void> {
+  const decided = new Set<string>();
+  const deadline = Date.now() + 60_000;
+  while (!settled()) {
+    if (Date.now() >= deadline) assert.fail("the calls did not all answer");
+    const open = requestedKeys(logPath).filter(
+      (key) => ids.some((id) => keyOf(id) === key) && !decided.has(key),
+    );
+    for (const key of open) {
+      await decide(dir, "reject", key);
+      decided.add(key);
+    }
+    await new Promise((settle) => setTimeout(settle, 25));
+  }
+}
+
+test("review 1: forty concurrent hook calls never run on more than sixteen threads", async () => {
+  assert.equal(DEFAULT_HOOK_THREADS, 16);
+  assert.equal(DEFAULT_HOOK_QUEUE, 64);
+  const { dir, logPath } = await ready();
+  const server = await listener(dir);
+  const ids = Array.from({ length: 40 }, (_unused, index) => `tu-p${String(index)}`);
+  try {
+    const calls = ids.map((id) => tracked(hook(server, bash(dir, id, manual(id)))));
+    // Sixteen are running (each has opened its question and waits on it) and
+    // the other twenty-four are in line, having opened nothing.
+    await until("sixteen running and twenty-four queued", () => {
+      const stats = server.hookThreads();
+      return stats.busy === 16 && stats.queued === 24;
+    });
+    await until("sixteen open questions", () => requestedKeys(logPath).length === 16);
+    assert.equal(server.hookThreads().threads, 16);
+    assert.equal(calls.filter((call) => call.settled()).length, 0, "a call was refused inside the bounds");
+
+    await rejectUntilAnswered(dir, logPath, ids, () => calls.every((call) => call.settled()));
+    for (const call of calls) {
+      const verdict = await call.promise;
+      assert.equal(verdict.permission, "deny");
+      assert.match(verdict.reason, /^hook-rejected/u);
+    }
+    assert.ok(server.hookThreads().peakThreads <= 16, `peak ${String(server.hookThreads().peakThreads)} threads`);
+    assert.equal(requestedKeys(logPath).length, 40, "every call asked exactly once");
+  } finally {
+    await server.close();
+  }
+});
+
+test("review 1: a call past the running and queued bounds is refused serve-hook-saturated, as a block", async () => {
+  const { dir, logPath } = await ready();
+  const server = await listener(dir, { hookThreads: 2, hookQueue: 3 });
+  const ids = ["tu-s1", "tu-s2", "tu-s3", "tu-s4", "tu-s5"];
+  try {
+    const admitted = ids.map((id) => tracked(hook(server, bash(dir, id, manual(id)))));
+    await until("two running and three queued", () => {
+      const stats = server.hookThreads();
+      return stats.busy === 2 && stats.queued === 3;
+    });
+
+    const before = records(logPath).length;
+    const refused = await fetch(url(server, "/hook/claude-code"), {
+      method: "POST",
+      headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+      body: JSON.stringify(bash(dir, "tu-s6", manual("tu-s6"))),
+    });
+    assert.equal(refused.status, 503);
+    const body = (await refused.json()) as { error: { code: string }; exit_code: number; stdout: string };
+    assert.equal(body.error.code, "serve-hook-saturated");
+    assert.notEqual(body.exit_code, 0);
+    // In the harness's own words, so a client that writes stdout and exits
+    // exit_code blocks.
+    const nested = (JSON.parse(body.stdout) as Record<string, unknown>)["hookSpecificOutput"] as Record<
+      string,
+      unknown
+    >;
+    assert.equal(nested["permissionDecision"], "deny");
+    assert.equal(records(logPath).length, before, "a refused call appended");
+    assert.ok(server.hookThreads().peakThreads <= 2);
+
+    await rejectUntilAnswered(dir, logPath, ids, () => admitted.every((call) => call.settled()));
+    for (const call of admitted) assert.equal((await call.promise).permission, "deny");
   } finally {
     await server.close();
   }

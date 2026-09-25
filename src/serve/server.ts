@@ -97,7 +97,14 @@ import {
 } from "../mcp/server.js";
 import { buildStoreArchive, ExportHardLinkError, ExportSymlinkError } from "./archive.js";
 import { checkVerbArguments } from "./arguments.js";
-import { hookThreads, type StoreLock } from "./hook-thread.js";
+import {
+  DEFAULT_HOOK_QUEUE,
+  DEFAULT_HOOK_THREADS,
+  HookSaturatedError,
+  hookThreads,
+  type HookThreadStats,
+  type StoreLock,
+} from "./hook-thread.js";
 
 /**
  * Identity is resolved by the MCP server's own function, re-exported here so
@@ -279,6 +286,7 @@ export const SERVE_REFUSAL_CODES = [
   "serve-export-hardlink",
   "serve-export-failed",
   "serve-hook-failed",
+  "serve-hook-saturated",
 ] as const;
 
 export type ServeRefusalCode = (typeof SERVE_REFUSAL_CODES)[number];
@@ -318,6 +326,16 @@ export interface ServeOptions {
    * harness is still listening.
    */
   hookHarnessCap?: string;
+  /**
+   * Hook calls that may run at once, each on its own thread (APRV-427 review).
+   * Defaults to {@link DEFAULT_HOOK_THREADS}. See `serve/hook-thread.ts`.
+   */
+  hookThreads?: number;
+  /**
+   * Hook calls that may wait for a thread before one is refused
+   * `serve-hook-saturated`. Defaults to {@link DEFAULT_HOOK_QUEUE}.
+   */
+  hookQueue?: number;
   /** Request lines. The CLI passes stderr; stdout is never written to. */
   notice?: (text: string) => void;
 }
@@ -327,6 +345,8 @@ export interface ServeHandle {
   readonly port: number;
   /** How many requests this listener has answered. Diagnostics and tests. */
   requests(): number;
+  /** The hook thread pool's state now. Diagnostics and tests. */
+  hookThreads(): HookThreadStats;
   close(): Promise<void>;
 }
 
@@ -686,7 +706,10 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   const serialize = storeLock(paths.log ?? logPathOf(options.cwd), options.cwd);
   // Hook calls run on worker threads, because a hook's wait is a synchronous
   // `Atomics.wait` and on this thread it would stop the listener itself.
-  const hooks = hookThreads(serialize);
+  const hooks = hookThreads(serialize, {
+    threads: options.hookThreads ?? DEFAULT_HOOK_THREADS,
+    queue: options.hookQueue ?? DEFAULT_HOOK_QUEUE,
+  });
 
   const byName = new Map(publishedVerbs().map((spec) => [toolName(spec), spec]));
   const sockets = new Set<Socket>();
@@ -733,6 +756,14 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         body,
       );
     } catch (cause) {
+      if (cause instanceof HookSaturatedError) {
+        // Every slot and every place in line is taken. Refused at once rather
+        // than queued without bound, because each running call is a thread
+        // holding its own copy of the log; answered as a block, so the harness
+        // does not proceed on a question nobody asked.
+        refuseHook(res, 503, harness, "serve-hook-saturated", cause.message);
+        return;
+      }
       // The THREAD failed (it was terminated, or it died), which is not a
       // verdict. Answered as a refusal in the harness's own dialect, so a
       // client that writes `stdout` and exits `exit_code` blocks.
@@ -1143,6 +1174,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     host: boundHost,
     port: boundPort,
     requests: () => requests,
+    hookThreads: () => hooks.stats(),
     close: async () => {
       if (closing) return;
       closing = true;
