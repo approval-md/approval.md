@@ -21,8 +21,9 @@
  * writer in the process takes it there. This thread holds it BY PROXY: the
  * main thread acquires it on this thread's behalf and flips a shared flag.
  *
- * - A job arrives with the flag at 0 and the main thread already queued for the
- *   lock. This thread blocks on the flag before it runs a line of the hook, so
+ * - A job arrives with the flag at 0. This thread first reads the verified log
+ *   ONCE, outside the lock, to warm its own read cache (below), then posts
+ *   `resume` and blocks on the flag before it runs a line of the hook, so
  *   intake, the sweep, register and request all happen under the lock.
  * - `enterWait` clears the flag FIRST and then posts `wait`: the main thread
  *   releases the lock, and a later `leaveWait` cannot be satisfied by the grant
@@ -33,17 +34,33 @@
  *
  * A blocked `Atomics.wait` here costs this thread and nothing else, which is
  * the point of the thread.
+ *
+ * ## The warm read, outside the lock (APRV-427 review)
+ *
+ * A new thread's cache is empty, and its first verified read walks the whole
+ * chain: 633 ms on a mature tenant log. Taken inside the lock, five threads
+ * arriving together serialised five cold walks and held the tenant's `status`
+ * behind all of them. So the cold walk happens here, before the lock is asked
+ * for, and in parallel with every other thread's. The hook's own reads under
+ * the lock are then warm: a hash over the prefix this thread already proved,
+ * plus a walk of whatever was appended since. Nothing is decided from the warm
+ * read itself, and nothing is appended on the strength of it; every append
+ * inside the lock is still compare-and-append against a head read inside the
+ * lock (SPEC.md §11.1 invariant 5).
  */
 
 import { parentPort } from "node:worker_threads";
 
 import { commandHook, type HookWaitSeam } from "../cli/hook.js";
+import { readVerifiedRecords, useVerifiedSnapshots } from "../core/state.js";
 
 /** One hook call, as the listener hands it over. */
 export interface HookJob {
   argv: string[];
   cwd: string;
   body: string;
+  /** The store's log, for the warm read before the lock. */
+  logPath: string;
   /** One `Int32`: 1 while this thread holds the store lock by proxy, else 0. */
   flag: SharedArrayBuffer;
 }
@@ -59,6 +76,13 @@ const port = parentPort;
 if (port === null) {
   throw new Error("serve/hook-worker.ts runs as a worker thread and was loaded on the main thread");
 }
+
+// This thread is an `approval hook` process in every way that matters to a
+// read, so it makes the same opt-in the hook makes on its gated path (APRV-188):
+// a read may resume behind the daemon's published snapshot, admitted only
+// against a hash this thread computes itself. Set once, before the warm read,
+// so the warm read and the hook's own reads are one cache under one proof.
+useVerifiedSnapshots(true);
 
 port.on("message", (job: HookJob) => {
   const flag = new Int32Array(job.flag);
@@ -82,6 +106,11 @@ port.on("message", (job: HookJob) => {
   const out: string[] = [];
   const err: string[] = [];
   try {
+    // Outside the lock, and its answer is thrown away: its only effect is the
+    // proved prefix this thread's cache now holds. A read that fails here is
+    // the hook's to meet and report, inside the lock, in its own words.
+    readVerifiedRecords(job.logPath);
+    post({ type: "resume" });
     held();
     const code = commandHook(
       job.argv,

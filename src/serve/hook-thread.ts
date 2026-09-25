@@ -52,7 +52,7 @@ export interface HookOutcome {
 
 export interface HookThreads {
   /** Run `approval hook <argv>` with `body` as its stdin, under `lock`'s sections. */
-  run(argv: string[], cwd: string, body: string): Promise<HookOutcome>;
+  run(argv: string[], cwd: string, logPath: string, body: string): Promise<HookOutcome>;
   /**
    * Terminate every thread, busy or idle, never inside a mutation section. A
    * call in flight rejects.
@@ -93,7 +93,7 @@ export function hookThreads(lock: StoreLock): HookThreads {
     else void worker.terminate();
   }
 
-  async function run(argv: string[], cwd: string, body: string): Promise<HookOutcome> {
+  async function run(argv: string[], cwd: string, logPath: string, body: string): Promise<HookOutcome> {
     if (closed) throw new Error("the listener is closing");
     const worker = idle.pop() ?? spawn();
     const shared = new SharedArrayBuffer(4);
@@ -160,10 +160,11 @@ export function hookThreads(lock: StoreLock): HookThreads {
 
       worker.on("message", onMessage);
       worker.once("exit", onExit);
-      const job: HookJob = { argv, cwd, body, flag: shared };
+      const job: HookJob = { argv, cwd, body, logPath, flag: shared };
+      // The thread warms its read cache first and then asks for its first
+      // section with `resume`, so no cold walk of the log is ever made inside
+      // the lock (see `hook-worker.ts`).
       worker.postMessage(job);
-      // The first section: the thread blocks on the flag until this lands.
-      enter();
     });
   }
 

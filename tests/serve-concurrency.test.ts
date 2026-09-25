@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { commandHook, TORN_TAIL_RETRIES } from "../src/cli/hook.js";
 import { main } from "../src/cli/main.js";
-import type { EventRecord } from "../src/core/log.js";
+import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { readVerifiedRecords, type ReadRecordsResult } from "../src/core/state.js";
 import { resolveServeCredentials } from "../src/serve/credentials.js";
 import { hookArgv, serveApproval, storeLock, type ServeHandle } from "../src/serve/server.js";
@@ -561,4 +561,56 @@ test("review 3: a tail that stays torn past the retries is still withdrawn and d
     (record) => record.event === "approval.withdrawn" && record.action_key === keyOf("tu-stuck"),
   );
   assert.equal(withdrawn.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Review 2: a new thread's cold walk of a mature log happens outside the lock
+// ---------------------------------------------------------------------------
+
+/** Records in the mature log below: the size at which a cold walk is costly. */
+const MATURE_RECORDS = 50_000;
+
+test("review 2: five new hook threads on a mature log do not hold /status past 2 s", async (t) => {
+  const { dir, logPath } = await ready();
+  // A mature tenant log, every line through the real append path.
+  for (let index = 0; index < MATURE_RECORDS; index += 1) {
+    const result = appendEvent(logPath, {
+      ts: "2026-09-20T12:00:00Z",
+      event: "task.registered",
+      actor: "agent:bulk",
+      task: `bulk-${String(index)}`,
+      channel: "cli",
+      payload: { title: `Bulk ${String(index)}` },
+    });
+    if (!result.ok) assert.fail(result.error.message);
+  }
+  const server = await listener(dir);
+  const tenant = { authorization: `Bearer ${TENANT_TOKEN}` };
+  try {
+    // The listener's own thread walks the log once, here, so what is timed
+    // below is the wait for the lock and not this thread's first read.
+    const warm = await fetch(url(server, "/status"), { headers: tenant });
+    await warm.text();
+
+    // Five calls at once, each on a thread that has never read this log.
+    const calls = ["tu-c1", "tu-c2", "tu-c3", "tu-c4", "tu-c5"].map((id) =>
+      hook(server, bash(dir, id, `mkdir build-${id}`)),
+    );
+    await new Promise((settle) => setTimeout(settle, 50));
+    const started = performance.now();
+    const status = await fetch(url(server, "/status"), { headers: tenant });
+    await status.text();
+    const elapsed = performance.now() - started;
+    t.diagnostic(`/status answered in ${elapsed.toFixed(0)} ms`);
+    assert.equal(status.status, 200);
+    assert.ok(
+      elapsed < 2_000,
+      `/status took ${elapsed.toFixed(0)} ms behind five new hook threads on a ${String(MATURE_RECORDS)}-record log`,
+    );
+    for (const verdict of await Promise.all(calls)) {
+      assert.equal(verdict.permission, "allow", verdict.reason);
+    }
+  } finally {
+    await server.close();
+  }
 });

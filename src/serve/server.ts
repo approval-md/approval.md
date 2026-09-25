@@ -726,7 +726,12 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     // of it hold the store lock, and nothing about what it answers.
     let outcome;
     try {
-      outcome = await hooks.run([harness, ...hookArgv(options)], options.cwd, body);
+      outcome = await hooks.run(
+        [harness, ...hookArgv(options)],
+        options.cwd,
+        paths.log ?? logPathOf(options.cwd),
+        body,
+      );
     } catch (cause) {
       // The THREAD failed (it was terminated, or it died), which is not a
       // verdict. Answered as a refusal in the harness's own dialect, so a
