@@ -631,12 +631,16 @@ test("review 2: five new hook threads on a mature log walk it outside the lock, 
     // while it held the store lock. Every cold walk was the warm read, made
     // before the thread asked for the lock.
     assert.equal(server.hookThreads().coldReadsInLock, 0, "a hook thread walked the log cold inside the store lock");
-    // And its effect, as a DELAY against this machine's own baseline: five
-    // cold walks inside the lock would add seconds here. Measured against the
-    // baseline because a CI runner running other test files at once is slower
-    // at everything, and that is not what this test is about.
+    // Its effect, reported rather than bounded tightly. On a quiet machine the
+    // delay is a few tens of ms (locally: alone 222 ms, behind 281 ms), and
+    // with the cold walks back inside the lock it is seconds. But on a CI
+    // runner with two cores, five 50k-record walks running in parallel starve
+    // the listener's own thread of CPU whatever the lock does (a shard saw
+    // alone 963 ms, behind 3465 ms, with the count above at zero), so a tight
+    // wall-clock bound there measures the runner. The count is the binding
+    // assertion; this bound only catches a gross regression.
     assert.ok(
-      behind - alone < 2_000,
+      behind - alone < 10_000,
       `/status was delayed ${(behind - alone).toFixed(0)} ms (alone ${alone.toFixed(0)} ms, behind ${behind.toFixed(0)} ms) by five new hook threads on a ${String(MATURE_RECORDS)}-record log`,
     );
   } finally {

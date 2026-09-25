@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-427'
 created_date: '2026-09-22 01:27'
-updated_date: '2026-09-25 06:18'
+updated_date: '2026-09-25 06:34'
 labels:
   - hosting
   - serve
@@ -104,4 +104,6 @@ THIRD PASS (recheck of the hardening: no fail-open, no double spend). One commit
 - 6: serve-hook-saturated now also covers an exhausted budget, with its own message.
 
 Third-pass validation: build, typecheck and oxlint clean. Targeted suites (serve, serve-hook, serve-concurrency, mcp-*, every cli-hook-*, log, log-subscribe, codex-bridge, harness-cap-ttl, cli-help, docs-guard): 570/570 pass. Full npm test with --baseline (Node v26.8.2): 5374 tests, 5373 pass, 0 fail, 1 skipped, 'new failures: none'.
+
+CI on d14d0b4d: shard 1 failed 'review 2' again on its WALL-CLOCK bound: alone 963 ms, behind 3465 ms, delay 2502 ms. The structural assertion that precedes it passed: coldReadsInLock was 0 on CI, so no thread walked the log cold inside the lock. The delay is CPU starvation on a 2-core runner (five parallel 50k-record walks plus other test files), which the lock cannot affect. Decision (flagged to the coordinator): the count is the binding assertion; the timing bound is loosened to a 10 s gross-regression guard, and the measured numbers are reported as a test diagnostic. The AC-style '< 2 s' holds on a quiet machine (207/266 ms) and cannot be reproduced reliably on the CI shard.
 <!-- SECTION:NOTES:END -->
