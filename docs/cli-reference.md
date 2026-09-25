@@ -7274,10 +7274,44 @@ supported deployment is a loopback bind behind a proxy the operator owns.
 It appends no record on its own account. Every event in the log under it was
 written by a verb a caller asked for, under the identity the operator fixed at
 launch, and the daemon id on the started line is the one those records carry.
-Verb and hook calls run serially in this process, for the reason the MCP
-transport gives (`wait` blocks the event loop, `run` spawns synchronously), and
-appends still go through the same lockfile and compare-and-append every
-`approval` process uses. It reads no `.approval/env`.
+It reads no `.approval/env`.
+
+### What it serialises, and what it does not (APRV-427)
+
+One lock per store, held inside this process. It is the lock for every stretch
+of work that may append to the store or must read it as one snapshot:
+
+| work | holds the store lock |
+|---|---|
+| `POST /verb/<name>`, including `GET /status` | for the whole call |
+| `GET /log/follow` | for the page, so no append this process makes lands under a verified read |
+| `GET /export` | for the whole snapshot, and the log's append lockfile as well, so no other process appends during it either |
+| `POST /hook/<harness>` | for its MUTATION sections only: everything up to its poll loop (intake, the abandoned-question sweep, register, request) and everything after it (the spend, a withdrawal) |
+| a hook call's WAIT | never |
+| `GET /verbs` | never |
+
+So one hook call waiting on a human holds nothing. While it polls, the tenant's
+`status`, `queue` and follow answer, and a second hook call opens its own
+question and waits beside the first; N gated calls from one sandbox wait in
+parallel. A hook call runs on a worker thread of this process, because a hook's
+wait is a synchronous sleep and on the listener's own thread it would stop the
+listener; the verdict, its bytes and its exit code are `approval hook
+<harness>`'s, exactly as before. Verb calls still run one at a time, in the
+order they arrive, because some of them are synchronous and blocking too (`run`
+spawns, and `wait` sleeps on the listener's thread, so an agent's `POST
+/verb/wait` still holds the listener for its own timeout; the hook route is the
+one a harness waits on).
+
+Two appends never interleave. Inside this process the store lock is the
+reason: every append is inside one of the sections above, and the sections run
+one at a time. Across processes (a daemon, a CLI run beside this server) the
+reason is the one every `approval` process relies on: each append takes the
+log's lockfile and compares-and-appends against the head it read. Closing the
+listener stops a hook call that is still waiting, never one in a mutation
+section, so no append lockfile is left behind; the question it opened stays
+open for the retry grace, exactly as for an `approval hook` process that was
+killed mid-wait. A hook call whose thread fails answers a refusal,
+`serve-hook-failed`, with the harness's own block directive in `stdout`.
 
 ## muse
 

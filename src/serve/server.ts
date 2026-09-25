@@ -45,10 +45,25 @@
  * - **No record of its own.** This server appends nothing on its own account.
  *   Every event in the log under it was written by a verb a caller asked for,
  *   under the identity the operator fixed at launch.
- * - **No state a restart loses.** The only thing held between requests is the
- *   serialization queue, which is a property of the process rather than of any
- *   caller. Follow cursors belong to the caller, so a host that sleeps and
- *   wakes serves the same next page it would have served before.
+ * - **No state a restart loses.** The only things held between requests are
+ *   the store lock and a few warm hook threads, which are properties of the
+ *   process rather than of any caller. Follow cursors belong to the caller, so
+ *   a host that sleeps and wakes serves the same next page it would have served
+ *   before.
+ *
+ * ## What is serialised, and what is not (APRV-427)
+ *
+ * One lock per store ({@link storeLock}). It covers every stretch of work in
+ * this process that may append to the store or must read it as one snapshot:
+ * a verb call, a follow page, the export, and a hook call's MUTATION sections
+ * (everything up to its poll loop, and everything after it). It does not cover
+ * a hook call's WAIT: the call runs on a worker thread (`serve/hook-thread.ts`)
+ * and hands the lock back for as long as it polls, so one question waiting on
+ * a human no longer holds the tenant's `status`, `queue` and follow, or the
+ * next hook call's own question, until the human answers. The catalog takes no
+ * lock at all. Across processes the guarantee is unchanged and is not this
+ * lock's: every append goes through `core/log.ts`'s lockfile and
+ * compare-and-append.
  * - **No `.approval/env`.** SPEC.md §11.1 invariant 7, inherited verbatim from
  *   the MCP server: the environment a gate operation runs under is the one the
  *   host launched this process with.
@@ -62,10 +77,10 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 
+import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-import { commandHook, harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
-import type { Streams } from "../cli/main.js";
+import { harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
 import { type VerbSpec } from "../cli/verb-registry.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
@@ -81,6 +96,7 @@ import {
 } from "../mcp/server.js";
 import { buildStoreArchive, ExportHardLinkError, ExportSymlinkError } from "./archive.js";
 import { checkVerbArguments } from "./arguments.js";
+import { hookThreads, type StoreLock } from "./hook-thread.js";
 
 /**
  * Identity is resolved by the MCP server's own function, re-exported here so
@@ -261,6 +277,7 @@ export const SERVE_REFUSAL_CODES = [
   "serve-export-symlink",
   "serve-export-hardlink",
   "serve-export-failed",
+  "serve-hook-failed",
 ] as const;
 
 export type ServeRefusalCode = (typeof SERVE_REFUSAL_CODES)[number];
@@ -496,17 +513,6 @@ function streamsBody(result: { code: number; stdout: string; stderr: string }): 
   });
 }
 
-/** A collector shaped like the CLI's stream sink. */
-function collector(): { streams: Streams; out: () => string; err: () => string } {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    streams: { out: (text) => out.push(text), err: (text) => err.push(text) },
-    out: () => out.join(""),
-    err: () => err.join(""),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
@@ -672,11 +678,14 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     ...(options.policy === undefined ? {} : { policy: options.policy }),
   };
 
-  // ONE queue for everything that runs CLI code, for `mcp/http.ts`'s reason:
-  // `wait` blocks the event loop with `Atomics.wait` and `run` spawns
-  // synchronously, both of which are facts about this process rather than about
-  // a connection. Reads that touch no verb (`log/follow`, `export`) stay off it.
-  const serialize = serializer();
+  // The store's lock (APRV-427): every verb call, follow page and export takes
+  // it whole, and a hook call takes it for its mutation sections only. See the
+  // header's "What is serialised" for the scope, and `storeLock` for why it is
+  // keyed by store.
+  const serialize = storeLock(paths.log ?? logPathOf(options.cwd), options.cwd);
+  // Hook calls run on worker threads, because a hook's wait is a synchronous
+  // `Atomics.wait` and on this thread it would stop the listener itself.
+  const hooks = hookThreads(serialize);
 
   const byName = new Map(publishedVerbs().map((spec) => [toolName(spec), spec]));
   const sockets = new Set<Socket>();
@@ -708,25 +717,34 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     send(res, 200, streamsBody(result), { "content-type": "application/json" });
   }
 
-  function handleHook(res: ServerResponse, harness: HarnessKind, body: string): void {
-    const sink = collector();
-    // The same function `main()` dispatches to, with the request body as the
-    // stdin the verb would have read. The verdict object, its dialect, its
-    // reason and its exit code are decided entirely inside it.
-    const code = commandHook(
-      [harness, ...hookArgv(options)],
-      sink.streams,
-      options.cwd,
-      () => body,
-    );
+  async function handleHook(res: ServerResponse, harness: HarnessKind, body: string): Promise<void> {
+    // The same function `main()` dispatches to (`commandHook`, on a worker
+    // thread), with the request body as the stdin the verb would have read.
+    // The verdict object, its dialect, its reason and its exit code are decided
+    // entirely inside it; the thread changes where it runs and which stretches
+    // of it hold the store lock, and nothing about what it answers.
+    let outcome;
+    try {
+      outcome = await hooks.run([harness, ...hookArgv(options)], options.cwd, body);
+    } catch (cause) {
+      // The THREAD failed (it was terminated, or it died), which is not a
+      // verdict. Answered as a refusal in the harness's own dialect, so a
+      // client that writes `stdout` and exits `exit_code` blocks.
+      refuseHook(
+        res,
+        500,
+        harness,
+        "serve-hook-failed",
+        `the hook call did not complete: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return;
+    }
     // `stdout` is BYTE-FOR-BYTE what `approval hook <harness>` printed, and
     // `exit_code` is the code it exited. Both travel in the body, because a
     // header is a thing a refusal can forget to set and an exit code that can
     // go missing is an allow waiting to happen. `stderr` rides along because
     // Hermes's ALLOW is `{}` and carries its reason there and nowhere else.
-    send(res, 200, streamsBody({ code, stdout: sink.out(), stderr: sink.err() }), {
-      "content-type": "application/json",
-    });
+    send(res, 200, streamsBody(outcome), { "content-type": "application/json" });
   }
 
   async function handleFollow(res: ServerResponse, url: URL): Promise<void> {
@@ -803,10 +821,11 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     }
 
     const cursor: FollowCursor = { seq: from, hash: hashText };
-    // Serialized with the verbs, for the reason they are serialized with each
-    // other: this process has one event loop, a verified read walks the whole
-    // chain, and an append landing underneath one is a torn read this endpoint
-    // would report as an integrity failure of the tenant's own log.
+    // Under the store lock, so no append THIS process makes lands underneath a
+    // page: a verified read walks the whole chain, and an append landing under
+    // one is a torn read this endpoint would report as an integrity failure of
+    // the tenant's own log. A hook call in its wait holds no lock and appends
+    // nothing, so it does not delay a page (APRV-427).
     const result = await serialize(() =>
       followPage(options.log ?? logPathOf(options.cwd), cursor, limit),
     );
@@ -833,11 +852,12 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   }
 
   async function handleExport(res: ServerResponse): Promise<void> {
-    // Serialized with the verbs AND taken under the append lock.
+    // Under the store lock AND the append lock.
     //
-    // The queue is about this process: `gzipSync` blocks the event loop for as
-    // long as the store is large, and a hook call waiting behind it is a
-    // session waiting. The LOCK is about every other process — a daemon, a CLI
+    // The store lock is about this process: no verb and no hook's mutation
+    // section appends while the snapshot is taken, and `gzipSync` blocks the
+    // event loop for as long as the store is large. The APPEND lock is about
+    // every other process — a daemon, a CLI
     // run beside this server — because the walk reads the log and the payload
     // store as one snapshot, and an append landing between the two copies a
     // record whose payload bytes are not there yet. `withAppendLock` is the
@@ -1040,11 +1060,9 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         }
 
         if (harness !== null) {
-          // Serialized with the verbs: a hook call registers, requests and
-          // WAITS, and the wait blocks this process exactly as `wait` does.
-          await serialize(async () => {
-            handleHook(res, harness, body.text);
-          });
+          // NOT wrapped in the store lock: a hook call takes it for its own
+          // mutation sections and releases it while it waits (APRV-427).
+          await handleHook(res, harness, body.text);
           return;
         }
 
@@ -1127,8 +1145,42 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         for (const socket of sockets) socket.destroy();
         sockets.clear();
       });
+      // A hook call still waiting is abandoned exactly as a killed `approval
+      // hook` process is: its question stays open for the retry grace.
+      await hooks.close();
     },
   };
+}
+
+/**
+ * One lock per store this process serves, keyed by the store's log path
+ * (APRV-427).
+ *
+ * A listener serves one store today (`--dir`, `--log` and `--policy` are pinned
+ * at launch), so each listener finds exactly one entry here. The map is what
+ * makes the lock a property of the STORE rather than of a listener: two
+ * listeners in one process over one store (a test, or a future multi-tenant
+ * host) share a lock, and a host serving several stores gets one lock each, so
+ * one tenant's writes never wait on another's. It lives for the process and
+ * holds one closure per store, which is the whole of its cost.
+ */
+const STORE_LOCKS = new Map<string, StoreLock>();
+
+/**
+ * The lock for the store whose log is `logPath` (resolved against `root`).
+ *
+ * Exported so a test can hold the SAME lock the listener takes and watch what
+ * waits on it: that is how the suite shows a hook call's appends are inside
+ * the lock and its wait is outside it, rather than inferring it from timing.
+ */
+export function storeLock(logPath: string, root: string): StoreLock {
+  const key = resolve(root, logPath);
+  let lock = STORE_LOCKS.get(key);
+  if (lock === undefined) {
+    lock = serializer();
+    STORE_LOCKS.set(key, lock);
+  }
+  return lock;
 }
 
 /** The default log under a store root, from the CLI's own constant. */

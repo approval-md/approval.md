@@ -2985,7 +2985,42 @@ function fileTierNote(gated: FileGate): string {
   return `${gated.rule}: ${gated.file} is the LIVE checkout's copy`;
 }
 
+/**
+ * Where a hook invocation stops appending and starts waiting, for a caller that
+ * shares one store with other work in the same process (APRV-427).
+ *
+ * `approval serve` runs many hook calls, verbs and log reads against one store
+ * from one process. Its per-store lock has to cover every stretch in which a
+ * hook call APPENDS (intake, the abandoned-question sweep, register, request,
+ * the spend, the withdrawals) so that no other in-process writer lands between
+ * a check and its append; and it must NOT cover the poll loop, where the hook
+ * only reads the verified log and sleeps, or one question waiting on a human
+ * holds the tenant's whole facade for as long as the human takes.
+ *
+ * So the loop says where it begins and ends. `enterWait` is called once, right
+ * before the first poll, and after it nothing is appended until `leaveWait`
+ * returns. `leaveWait` is called before every append the loop can reach (the
+ * spend on a grant, a withdrawal on a failed read, at the deadline, on a throw
+ * or a signal) and once more when the loop is left by any route, and it may
+ * BLOCK until the caller's lock is held again. Both are idempotent pairs: the
+ * hook never calls `leaveWait` without a matching `enterWait` before it.
+ *
+ * Absent (the CLI, the Codex bridge), both are no-ops and the invocation is
+ * byte-for-byte what it was. The seam decides nothing: no verdict, record or
+ * line depends on it, and the appends it brackets are compare-and-append
+ * either way (SPEC.md §11.1 invariant 5). It only tells an embedding caller
+ * which stretch of the call is safe to run beside other writers.
+ */
+export interface HookWaitSeam {
+  /** The poll loop is about to start: nothing is appended until {@link leaveWait}. */
+  enterWait(): void;
+  /** An append follows, or the loop is over. May block until the caller's lock is held. */
+  leaveWait(): void;
+}
+
 interface HookRun {
+  /** APRV-427: the embedding caller's wait seam, or `null` from the CLI. */
+  waitSeam: HookWaitSeam | null;
   logPath: string;
   options: GateOptions;
   actor: string;
@@ -4019,12 +4054,25 @@ export function gateHarnessCall(
 
   const deadline = Date.now() + run.waitMs;
 
+  // APRV-427. From the first poll to the last this invocation only READS the
+  // verified log and sleeps, so an embedding caller (`approval serve`) may let
+  // other work on the same store run meanwhile. `leaveWait` hands the stretch
+  // back before anything below appends, and once more whichever way the loop
+  // is left; it is a no-op from the CLI, where there is no seam.
+  let waiting = false;
+  const leaveWait = (): void => {
+    if (!waiting) return;
+    waiting = false;
+    run.waitSeam?.leaveWait();
+  };
+
   // A signal arriving mid-wait means the session is going away: nothing will
   // retry this command, so the question this invocation opened is retracted.
   // `process.exit` is deliberate and immediate: the default disposition for
   // these signals is to die, and a handler that only withdrew would leave the
   // hook wedged in its poll loop with the harness waiting on it.
   const onSignal = (signal: NodeJS.Signals): void => {
+    leaveWait();
     withdrawPending(
       run,
       streams,
@@ -4046,10 +4094,13 @@ export function gateHarnessCall(
    */
   let saidLagging = false;
 
+  run.waitSeam?.enterWait();
+  waiting = true;
   try {
     for (;;) {
       const read = readVerifiedRecords(run.logPath);
       if (!read.ok) {
+        leaveWait();
         withdrawPending(
           run,
           streams,
@@ -4153,6 +4204,7 @@ export function gateHarnessCall(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
+          leaveWait();
           const failed = consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
@@ -4185,6 +4237,7 @@ export function gateHarnessCall(
         // Past the grace nobody is coming back for it, and a question nothing
         // will adopt is taken back rather than left for a restarted listener to
         // re-deliver.
+        leaveWait();
         const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
         // APRV-294: a wait that ends with the view still short of its own
         // requests says so. The deny is the same deny — the wait ran out — and
@@ -4238,6 +4291,7 @@ export function gateHarnessCall(
     // deny. Unlike the timeout, this process cannot say what state it left
     // behind, so the question it opened is retracted rather than left standing
     // on a failure nobody diagnosed.
+    leaveWait();
     withdrawPending(
       run,
       streams,
@@ -4246,6 +4300,7 @@ export function gateHarnessCall(
     );
     throw cause;
   } finally {
+    leaveWait();
     process.off("SIGTERM", onTerm);
     process.off("SIGINT", onInt);
   }
@@ -5269,6 +5324,7 @@ function runHarnessHook(
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
+  waitSeam: HookWaitSeam | null,
 ): number {
   const configurationError = (message: string): number =>
     adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
@@ -5643,6 +5699,7 @@ function runHarnessHook(
       harnessCapStated,
       codexCommand,
       windowRecords: looked.records,
+      waitSeam,
     }),
   );
 }
@@ -5692,6 +5749,12 @@ export interface DecideInput {
    * lookup passes `null`, and both of them read the log themselves.
    */
   windowRecords: EventRecord[] | null;
+  /**
+   * Where the wait begins and ends, for a caller that runs this beside other
+   * writers in one process (APRV-427; see {@link HookWaitSeam}). Omitted by
+   * every CLI route, where it is a no-op.
+   */
+  waitSeam?: HookWaitSeam | null;
 }
 
 /**
@@ -5799,6 +5862,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
       : `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
   const run: HookRun = {
+    waitSeam: decide.waitSeam ?? null,
     logPath,
     options,
     actor,
@@ -6033,9 +6097,10 @@ function commandHarnessHook(
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
+  waitSeam: HookWaitSeam | null,
 ): number {
   try {
-    return runHarnessHook(argv, streams, cwd, readStdin, adapter);
+    return runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
   } catch (cause) {
     // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
@@ -6064,6 +6129,12 @@ export function commandHook(
   streams: Streams,
   cwd: string,
   readStdin: () => string = defaultStdin,
+  /**
+   * APRV-427: where a harness hook's wait begins and ends, for `approval serve`,
+   * which runs the call off its main thread and releases its store lock while
+   * the call polls. Every CLI route omits it. See {@link HookWaitSeam}.
+   */
+  waitSeam: HookWaitSeam | null = null,
 ): number {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -6080,7 +6151,7 @@ export function commandHook(
   // boundary and doctor use, so a kind that can be recorded is a kind that can
   // be invoked, and neither can be added without the other.
   if (isHarnessKind(sub)) {
-    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub]);
+    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
   }
   if (sub === "classify") return commandClassify(rest, streams, cwd);
   return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
