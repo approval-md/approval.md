@@ -1528,6 +1528,38 @@ test("a verb refusal keeps the CLI's own code rather than a transport one", asyn
   }
 });
 
+test("wait on a task the log never registered carries not-registered through serve", async () => {
+  // APRV-428, the observed call exactly: POST /verb/wait for a task id the log
+  // has never seen answered {ok:true,status:"granted",actions:[]}.
+  const { dir, logPath } = await ready();
+  const before = digestOf(logPath);
+  const server = await listener(dir);
+  try {
+    const response = await post(server, "/verb/wait", AGENT_TOKEN, {
+      positionals: ["req-does-not-exist"],
+      flags: { "--timeout": "5s" },
+    });
+    assert.equal(response.status, 200, "a verb's refusal is an ANSWER, not a transport failure");
+    const parsed = (await response.json()) as {
+      exit_code: number;
+      stdout: string;
+      stderr: string;
+    };
+    assert.equal(parsed.exit_code, 1, parsed.stderr);
+    assert.equal(parsed.stdout, "", "a refused wait printed an answer object");
+    const refusal = JSON.parse(parsed.stderr.trim()) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    assert.equal(refusal.ok, false);
+    assert.equal(refusal.error.code, "not-registered");
+    assert.match(refusal.error.message, /req-does-not-exist/u);
+  } finally {
+    await server.close();
+  }
+  assert.equal(digestOf(logPath), before, "a refused wait moved the log");
+});
+
 test("the server appends no record on its own account", async () => {
   const { dir, logPath } = await ready();
   append(logPath, 1);

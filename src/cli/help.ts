@@ -215,7 +215,9 @@ Ask — an agent declares an action and acts on the answer:
             draft the agent composed, refused if the draft changed after the
             snapshot a human approved
   wait      block until a task's requests are decided; the exit code IS the
-            decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
+            decision (0 granted or nothing-to-wait-for, 1 rejected/revoked/
+            withdrawn/not-registered, 3 expired, 6 timeout); run only on
+            --json status "granted", which means an unspent grant
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
             terminal, requester-only, and a late grant then authorizes nothing
   hook      put the gate in front of an agent HARNESS. "hook claude-code" and
@@ -1082,12 +1084,12 @@ Flags:
   --json           machine-readable output;  -h, --help   this text
 
 Polls until every approval.requested of the task has a decision, or the timeout
-elapses. WRITES NOTHING unless --withdraw-on-timeout. Only the MANUAL path
-produces requests to wait for; a task with none returns at once, exit 0.
+elapses. WRITES NOTHING unless --withdraw-on-timeout. Only the MANUAL path makes
+requests; none left to wait on is exit 0, nothing-to-wait-for, never granted.
 
 JSON shape: docs/cli-reference.md#wait
-${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted, 1 rejected, revoked
-or withdrawn (--json status says which), 3 expired, 4 I/O, and
+${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted or nothing-to-wait-for,
+1 rejected/revoked/withdrawn/not-registered (--json says which), 3 expired, 4 I/O, and
   6  TIMEOUT — the wait elapsed with request(s) still undecided.
 ${JSON_ERRORS}
 ${why("wait")}`;

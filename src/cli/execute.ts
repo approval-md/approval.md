@@ -99,7 +99,7 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { boundScript, describeBoundScript } from "../core/run-payload.js";
-import { withdraw } from "../core/gate.js";
+import { taskRegistration, withdraw, type GateRefusal } from "../core/gate.js";
 import { openGateWindow } from "../core/gate-window.js";
 import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
@@ -728,9 +728,31 @@ interface WaitedAction {
  */
 function stateRole(state: string): Role {
   if (state === "granted") return "ok";
-  if (state === "expired" || state === "requested" || state === "withdrawn") return "warn";
+  if (
+    state === "expired" ||
+    state === "requested" ||
+    state === "withdrawn" ||
+    state === NOTHING_TO_WAIT_FOR
+  ) {
+    return "warn";
+  }
   return "fail";
 }
+
+/**
+ * `approval wait`'s status for a REGISTERED task that holds nothing a wait could
+ * resolve (APRV-428): no `approval.requested` at all (no action was declared,
+ * none reached the manual path, or none has been requested yet), or every
+ * granted action has already started executing, so its grant is spent.
+ *
+ * Exit 0, because the wait contract has always returned at once and at 0 for a
+ * task with no requests, and the supervised path tells an agent its
+ * `proceed: true` needs no wait at all. What changes is the WORD: before
+ * APRV-428 this was `granted`, and a caller that branched on `status` saw a
+ * grant nobody made. Nothing is minted either way, since `approval run` still
+ * needs a token on the manual path.
+ */
+const NOTHING_TO_WAIT_FOR = "nothing-to-wait-for";
 
 /**
  * `approval wait`'s human answer: the verdict, then one aligned row per action.
@@ -745,7 +767,11 @@ export function renderWaitHuman(
   st: Style = style(),
 ): string {
   const glyph =
-    status === "granted" ? "ok" : status === "expired" || status === "withdrawn" ? "skip" : "fail";
+    status === "granted"
+      ? "ok"
+      : status === "expired" || status === "withdrawn" || status === NOTHING_TO_WAIT_FOR
+        ? "skip"
+        : "fail";
   const head = `${st.glyph(glyph)} ${st.key(task)}  ${st.paint(stateRole(status), status)}`;
   if (actions.length === 0) return `${head}\n`;
   const rows: TableRow[] = actions.map((action) => ({
@@ -754,6 +780,27 @@ export function renderWaitHuman(
     plainLeft: true,
   }));
   return `${head}\n${st.table(rows, { indent: 2 })}\n`;
+}
+
+/**
+ * `approval wait`'s refusal of a task the log has never registered (APRV-428).
+ *
+ * The frozen `{ok:false,error:{code,message}}` shape on stderr, like every other
+ * refusal this verb prints, and exit 1: the same code `approval request` exits
+ * for the same `not-registered`, and the meaning wait's exit 1 already carries
+ * (not authorized, and waiting again will not change that). A separate writer
+ * because the verb's other refusals are the execute union's log-read codes,
+ * and `not-registered` is a member of the gate union only.
+ */
+function emitWaitRefusal(streams: Streams, json: boolean, refusal: GateRefusal): number {
+  if (json) {
+    streams.err(
+      `${JSON.stringify({ ok: false, error: { code: refusal.code, message: refusal.message } })}\n`,
+    );
+  } else {
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
+  }
+  return EXIT_INTEGRITY;
 }
 
 /** Every action key of `task` that ever carried an `approval.requested`. */
@@ -849,9 +896,22 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
       });
     }
 
+    // APRV-428. A task the log has never registered is refused, not answered.
+    // Before this check the loop below found no requests and reported the task
+    // `granted` with no actions: a typo read as a grant, and a shim polling
+    // until granted would have proceeded on a request it never opened. Checked
+    // on every pass rather than once, because it costs one walk of records
+    // already in hand and a registration cannot disappear from an append-only
+    // log, so the answer only ever moves from refusal to not.
+    const registered = taskRegistration(read.records, task);
+    if (!registered.ok) return emitWaitRefusal(streams, json, registered);
+
     const ts = now();
     const actions: WaitedAction[] = [];
     let pending = false;
+    // A granted action whose grant nothing has spent yet: the one thing a
+    // `granted` status can honestly promise (APRV-428).
+    let unspentGrant = false;
     for (const key of requestedKeysOf(read.records, task)) {
       const derivation = requestState(read.records, key, ts, ttlMs);
       // APRV-105. The token, when this machine can open it: the grant sealed it
@@ -871,12 +931,17 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
         ...(token === null ? {} : { token }),
       });
       if (derivation.state === "requested") pending = true;
+      if (derivation.state === "granted" && derivation.execution.started === null) {
+        unspentGrant = true;
+      }
     }
 
     if (!pending) {
       // Precedence, documented in --help: a human's "no" outranks a lapse, and
-      // both outrank "everything was granted". A task with no requests at all
-      // has nothing to wait for and is granted vacuously.
+      // both outrank "everything was granted". A registered task with no
+      // requests at all, or whose every grant has already been spent by an
+      // execution, has nothing to wait for and says so (APRV-428); it was
+      // "granted vacuously" before, which is a grant nobody made.
       //
       // APRV-106 puts `withdrawn` between the two, and REUSES exit 1 rather
       // than adding a code. The table in `cli/exit-codes.ts` is frozen public
@@ -897,7 +962,9 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
           ? "withdrawn"
           : expired
             ? "expired"
-            : "granted";
+            : unspentGrant
+              ? "granted"
+              : NOTHING_TO_WAIT_FOR;
       const code = rejected || withdrawn ? EXIT_INTEGRITY : expired ? EXIT_TORN_TAIL : EXIT_OK;
       if (json) emitJson(streams, { ok: true, task, status, actions });
       else streams.out(renderWaitHuman(task, status, actions, style({ json })));
