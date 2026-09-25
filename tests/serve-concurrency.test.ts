@@ -829,3 +829,47 @@ test("review pass 3: a torn read on the deadline tick takes the timeout path and
     assert.ok(log.some((record) => record.event === "approval.requested" && record.action_key === keyOf(id)));
   }
 });
+
+test("review pass 2: a client that leaves while its call waits for the lock opens nothing", async () => {
+  const { dir, logPath } = await ready();
+  const server = await listener(dir);
+  const lock = storeLock(logPath, dir);
+  const task = `hook:${SESSION}:tu-lockgone`;
+  try {
+    let release = (): void => undefined;
+    const holding = lock(
+      async () =>
+        await new Promise<void>((settle) => {
+          release = settle;
+        }),
+    );
+    const client = new AbortController();
+    const call = fetch(url(server, "/hook/claude-code"), {
+      method: "POST",
+      headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+      body: JSON.stringify(bash(dir, "tu-lockgone", manual("tu-lockgone"))),
+      signal: client.signal,
+    }).then(
+      () => "answered",
+      () => "aborted",
+    );
+    // The thread has warmed its cache and is asking for the lock the test holds.
+    await until("the call to wait for the store lock", () => server.hookThreads().awaitingLock === 1);
+    client.abort();
+    assert.equal(await call, "aborted");
+    // Let the listener see the connection close before the lock frees.
+    await new Promise((settle) => setTimeout(settle, 200));
+    release();
+    await holding;
+    await until("the call to give its thread back", () => server.hookThreads().busy === 0);
+
+    const mine = records(logPath).filter((record) => record.task === task);
+    assert.deepEqual(
+      mine.map((record) => record.event),
+      [],
+      "a call whose caller had left registered or requested anyway",
+    );
+  } finally {
+    await server.close();
+  }
+});

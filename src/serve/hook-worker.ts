@@ -86,7 +86,9 @@ export type HookWorkerMessage =
        */
       coldReadsInLock: number;
     }
-  | { type: "failed"; message: string };
+  | { type: "failed"; message: string }
+  /** The caller went away before the hook began: nothing was run or appended. */
+  | { type: "cancelled" };
 
 const port = parentPort;
 if (port === null) {
@@ -128,6 +130,7 @@ port.on("message", (job: HookJob) => {
     },
     cancelled: () => Atomics.load(flag, 1) === 1,
   };
+  const gone = (): boolean => Atomics.load(flag, 1) === 1;
 
   const out: string[] = [];
   const err: string[] = [];
@@ -135,9 +138,29 @@ port.on("message", (job: HookJob) => {
     // Outside the lock, and its answer is thrown away: its only effect is the
     // proved prefix this thread's cache now holds. A read that fails here is
     // the hook's to meet and report, inside the lock, in its own words.
+    //
+    // A caller that went away before the hook began is owed nothing and has
+    // asked nothing yet (APRV-427 review), so the call ends without running a
+    // line of the hook: looked at before the warm read, after it, and once
+    // more when the lock arrives, because the wait for the lock is where a
+    // queue of busy sections makes a client give up. Past this point the
+    // hook's own poll is what notices.
+    if (gone()) {
+      post({ type: "cancelled" });
+      return;
+    }
     readVerifiedRecords(job.logPath);
+    if (gone()) {
+      post({ type: "cancelled" });
+      return;
+    }
     post({ type: "resume" });
     held();
+    if (gone()) {
+      settle();
+      post({ type: "cancelled" });
+      return;
+    }
     const code = commandHook(
       job.argv,
       { out: (text) => out.push(text), err: (text) => err.push(text) },

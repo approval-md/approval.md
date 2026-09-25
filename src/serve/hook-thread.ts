@@ -97,6 +97,8 @@ export interface HookThreadStats {
   queued: number;
   /** The most threads that ever existed at once. */
   peakThreads: number;
+  /** Calls whose thread has asked for the store lock and not yet been given it. */
+  awaitingLock: number;
   /**
    * Verified reads from genesis made while a thread held the store lock, over
    * every call this pool has finished. The warm read keeps it at zero.
@@ -155,6 +157,7 @@ export function hookThreads(
   const running = new Set<Int32Array>();
   let peakThreads = 0;
   let coldReadsInLock = 0;
+  let awaitingLock = 0;
 
   /**
    * Take a slot, waiting in line for one if every slot is held, or refuse.
@@ -277,9 +280,11 @@ export function hookThreads(
 
       /** Take the store lock on the thread's behalf, then let it proceed. */
       const enter = (): void => {
+        awaitingLock += 1;
         void lock(
           async () =>
             await new Promise<void>((done) => {
+              awaitingLock -= 1;
               // The thread died while this was queued: nothing to hand over.
               if (finished) {
                 done();
@@ -325,6 +330,11 @@ export function hookThreads(
             give(worker);
             fail(new Error(message.message));
             return;
+          case "cancelled":
+            finish();
+            give(worker);
+            fail(new HookCancelledError("the caller went away before its hook call began"));
+            return;
         }
       }
       function onExit(code: number): void {
@@ -344,7 +354,7 @@ export function hookThreads(
 
   return {
     run,
-    stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads, coldReadsInLock }),
+    stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads, coldReadsInLock, awaitingLock }),
     close: async () => {
       closed = true;
       // Every running call stops at its next poll tick without spending or
