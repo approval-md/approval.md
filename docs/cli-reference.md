@@ -2263,8 +2263,26 @@ For `approval wait` the exit code IS the decision (SPEC.md §10.1). The
 overloading of 1 (integrity / rejected) and 3 (torn tail / expired) is
 deliberate: wait appends nothing and cannot fail a chain verification of its
 own, and `--json` names the outcome exactly (`granted | rejected | withdrawn |
-expired | timeout`) for callers that need more than a number. Flagged for human
-review.
+expired | nothing-to-wait-for | timeout`) for callers that need more than a
+number. Flagged for human review.
+
+**Nothing to wait for, and nothing registered** (APRV-428). Exit 0 has always
+answered at once for a task with no requests, because only the manual path
+produces requests and the supervised path tells an agent its `proceed: true`
+needs no wait. Its `status` is `nothing-to-wait-for`, never `granted`: a
+registered task with no `approval.requested` at all (no action declared, none
+reached the manual path, or none requested yet), or one whose every granted
+action has already started executing, so every grant is spent. `granted` means
+at least one granted action has not executed yet, and only that. The per-action
+rows are unchanged; an executed grant still reads `granted` there.
+
+A task with no `task.registered` record is refused before anything is derived:
+`not-registered`, the gate union's code for exactly that condition (SPEC.md
+§11.2), at exit 1, the code `approval request` exits for the same refusal.
+Before APRV-428 such a wait answered `{"ok":true,"status":"granted","actions":[]}`,
+so a typo read as a grant. Through `approval serve` the verb's refusal passes
+through unchanged: the body's `stderr` carries the same object and `exit_code`
+is 1.
 
 `withdrawn` (APRV-106) reuses exit **1** rather than claiming a new number. The
 exit table in `src/cli/exit-codes.ts` is frozen public API and agents already
@@ -2292,10 +2310,11 @@ itself fails is reported on stderr and leaves the request live; the exit code is
 
 ```
 decided  {"ok":true,"task":"task-042",
-          "status":"granted"|"rejected"|"withdrawn"|"expired",
+          "status":"granted"|"rejected"|"withdrawn"|"expired"|"nothing-to-wait-for",
           "actions":[{"action_key":"...","state":"granted","seq":4}]}
 timeout  {"ok":false,"task":"task-042","status":"timeout",
           "actions":[{"action_key":"...","state":"requested","seq":3}]}
+refused  {"ok":false,"error":{"code":"not-registered","message":"..."}}   (stderr, exit 1)
 ```
 
 **Sealed token delivery** (APRV-105). Under policy `defaults.token_delivery:
@@ -2327,8 +2346,8 @@ so the paste path is preserved rather than replaced.
 passed, listing the keys actually retracted; the default shape is unchanged.
 
 `state` is the per-action derived state; `status` is the whole task's outcome,
-with rejected/revoked outranking withdrawn, withdrawn outranking expired, and
-expired outranking granted. `--timeout` and `--interval` take the SPEC.md §5.2
+with rejected/revoked outranking withdrawn, withdrawn outranking expired,
+expired outranking granted, and granted outranking nothing-to-wait-for. `--timeout` and `--interval` take the SPEC.md §5.2
 duration grammar, `<positive integer><ms|s|m|h|d|w>`.
 
 ## queue

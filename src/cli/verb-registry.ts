@@ -1481,7 +1481,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "wait",
     purpose:
-      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted, 1 rejected, revoked or withdrawn, 3 expired, 6 timeout. It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a task with none returns immediately at exit 0. Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
+      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted (or nothing-to-wait-for, which `status` names and which is no grant), 1 rejected, revoked, withdrawn or not-registered, 3 expired, 6 timeout. It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a registered task with none, or whose every grant an execution has already spent, returns immediately at exit 0 with status nothing-to-wait-for, NEVER granted; a task the log has never registered is refused not-registered at exit 1 (APRV-428). Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "task", description: "the task id" }], 1),
@@ -1500,7 +1500,9 @@ const VERBS: VerbSpec[] = [
       {
         ok: BOOLEAN,
         task: STRING,
-        status: { enum: ["granted", "rejected", "withdrawn", "expired", "timeout"] },
+        status: {
+          enum: ["granted", "rejected", "withdrawn", "expired", "nothing-to-wait-for", "timeout"],
+        },
         actions: arrayOf(
           object(
             {
@@ -1521,11 +1523,15 @@ const VERBS: VerbSpec[] = [
     ),
     error: ERROR_SCHEMA,
     exit_codes: [
-      { code: 0, meaning: "granted (a task with no requests is granted vacuously)" },
+      {
+        code: 0,
+        meaning:
+          "granted; or nothing-to-wait-for, a registered task with no requests or whose every grant is already spent. `status` says which, and only `granted` is a grant",
+      },
       {
         code: 1,
         meaning:
-          "NOT AUTHORIZED and terminal — a human said no (rejected/revoked), or the requester withdrew the request; or the log is corrupt. `status` says which",
+          "NOT AUTHORIZED and terminal — a human said no (rejected/revoked), or the requester withdrew the request (`status` says which); or the task has no task.registered record (refusal `not-registered`); or the log is corrupt",
       },
       USAGE,
       { code: 3, meaning: "EXPIRED — the TTL lapsed before a decision landed; or a torn tail" },

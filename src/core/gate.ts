@@ -1371,6 +1371,34 @@ function attemptRegister(
 }
 
 /**
+ * The `task.registered` record for `task`, or the `not-registered` refusal.
+ *
+ * The one raise site for SPEC.md §11.2's `not-registered` ("no task.registered
+ * record exists for the task id"). `request` reaches it through
+ * {@link registeredAction}; `approval wait` calls it directly (APRV-428), so a
+ * wait on a task the log has never seen is refused in the same words rather
+ * than answered as a vacuous grant. The latest registration wins, as it always
+ * has for `registeredAction`; the register path refuses a second one, so a log
+ * carrying two was written by something else.
+ */
+export function taskRegistration(
+  records: EventRecord[],
+  task: string,
+): { ok: true; record: EventRecord } | GateRefusal {
+  let registration: EventRecord | null = null;
+  for (const record of records) {
+    if (record.event === "task.registered" && record.task === task) registration = record;
+  }
+  if (registration === null) {
+    return refuse(
+      "not-registered",
+      `task ${task} has no task.registered record; run \`approval register <task-file>\` first`,
+    );
+  }
+  return { ok: true, record: registration };
+}
+
+/**
  * The declared action for `(task, actionKey)`, as registered in the log.
  *
  * SPEC.md §7: "an action's class MUST be declared before an execution token can
@@ -1382,16 +1410,9 @@ export function registeredAction(
   task: string,
   actionKey: string,
 ): { ok: true; action: RegisteredAction } | GateRefusal {
-  let registration: EventRecord | null = null;
-  for (const record of records) {
-    if (record.event === "task.registered" && record.task === task) registration = record;
-  }
-  if (registration === null) {
-    return refuse(
-      "not-registered",
-      `task ${task} has no task.registered record; run \`approval register <task-file>\` first`,
-    );
-  }
+  const registered = taskRegistration(records, task);
+  if (!registered.ok) return registered;
+  const registration = registered.record;
   const declared = payloadOf(registration)["actions"];
   const actions = Array.isArray(declared) ? declared : [];
   for (const entry of actions) {
