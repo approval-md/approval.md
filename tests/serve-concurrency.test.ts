@@ -27,7 +27,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -451,4 +451,18 @@ test("closing the listener while a hook call waits leaves the store writable", a
   assert.deepEqual(readdirSync(join(dir, ".approval", "log")).filter((name) => name.endsWith(".lock")), []);
   await decide(dir, "reject", key);
   assert.ok(records(logPath).some((record) => record.event === "approval.rejected" && record.action_key === key));
+});
+
+test("one store has one lock whatever path spells it", async () => {
+  const { dir, logPath } = await ready();
+  const alias = join(scratch, `alias-${String(counter)}`);
+  symlinkSync(dir, alias);
+  // A symlinked root and the real one are the same store, so they must share
+  // the lock: two locks for one log would let two listeners' mutation
+  // sections run at once.
+  assert.equal(storeLock(join(alias, LOG), alias), storeLock(logPath, dir));
+  assert.equal(storeLock(LOG, alias), storeLock(LOG, dir));
+  // And a different store gets a different one.
+  const other = await ready();
+  assert.notEqual(storeLock(other.logPath, other.dir), storeLock(logPath, dir));
 });

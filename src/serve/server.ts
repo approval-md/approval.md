@@ -77,7 +77,8 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
@@ -1174,13 +1175,29 @@ const STORE_LOCKS = new Map<string, StoreLock>();
  * the lock and its wait is outside it, rather than inferring it from timing.
  */
 export function storeLock(logPath: string, root: string): StoreLock {
-  const key = resolve(root, logPath);
+  const key = storeKey(resolve(root, logPath));
   let lock = STORE_LOCKS.get(key);
   if (lock === undefined) {
     lock = serializer();
     STORE_LOCKS.set(key, lock);
   }
   return lock;
+}
+
+/**
+ * The key a store's lock is filed under: the log path with its DIRECTORY
+ * resolved through `realpath`, so two spellings of one store (a symlinked
+ * root, `/tmp` against `/private/tmp`) share one lock instead of each getting
+ * their own. The directory rather than the file, because a store whose log has
+ * not been written yet has no file to resolve; where even the directory is
+ * missing, the resolved spelling is the best key there is.
+ */
+function storeKey(logPath: string): string {
+  try {
+    return resolve(realpathSync(dirname(logPath)), basename(logPath));
+  } catch {
+    return logPath;
+  }
 }
 
 /** The default log under a store root, from the CLI's own constant. */
