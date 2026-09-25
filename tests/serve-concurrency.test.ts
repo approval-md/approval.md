@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { commandHook, TORN_TAIL_RETRIES } from "../src/cli/hook.js";
+import { commandHook, TORN_TAIL_RETRIES, type HookWaitSeam } from "../src/cli/hook.js";
 import { main } from "../src/cli/main.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { readVerifiedRecords, type ReadRecordsResult } from "../src/core/state.js";
@@ -501,14 +501,23 @@ function hookWithReader(
   dir: string,
   toolUseId: string,
   pollRead: (logPath: string) => ReadRecordsResult,
-  timing: { timeout: string; interval: string } = { timeout: "30s", interval: "20ms" },
+  timing: { timeout: string; interval: string; harnessCap?: string } = {
+    timeout: "30s",
+    interval: "20ms",
+  },
+  seamExtra: Partial<HookWaitSeam> = {},
 ): { verdict: { permission: string; reason: string }; err: string } {
   let out = "";
   let err = "";
   commandHook(
     [
       "claude-code",
-      ...hookArgv({ actor: ACTOR, cwd: dir, hookTimeout: timing.timeout }),
+      ...hookArgv({
+        actor: ACTOR,
+        cwd: dir,
+        hookTimeout: timing.timeout,
+        ...(timing.harnessCap === undefined ? {} : { hookHarnessCap: timing.harnessCap }),
+      }),
       "--interval",
       timing.interval,
     ],
@@ -522,7 +531,7 @@ function hookWithReader(
     },
     dir,
     () => JSON.stringify(bash(dir, toolUseId, manual(toolUseId))),
-    { enterWait: () => undefined, leaveWait: () => undefined, pollRead },
+    { enterWait: () => undefined, leaveWait: () => undefined, pollRead, ...seamExtra },
   );
   const nested = (JSON.parse(out) as Record<string, unknown>)["hookSpecificOutput"] as Record<string, unknown>;
   return {
@@ -866,6 +875,7 @@ test("review pass 2: a client that leaves while its call waits for the lock open
     release();
     await holding;
     await until("the call to give its thread back", () => server.hookThreads().busy === 0);
+    assert.equal(server.hookThreads().awaitingLock, 0, "a cancelled call is still counted as waiting for the lock");
 
     const mine = records(logPath).filter((record) => record.task === task);
     assert.deepEqual(
@@ -923,6 +933,7 @@ test("review pass 1: a call whose harness budget runs out in line is refused sat
       ] as Record<string, unknown>;
       assert.equal(nested["permissionDecision"], "deny");
     }
+    assert.equal(server.hookThreads().awaitingLock, 0, "a refused call is still counted as waiting for the lock");
     // No question was opened that the harness would kill its asker before.
     const opened = records(logPath).filter(
       (record) =>
@@ -968,4 +979,67 @@ test("review pass 1: the cap a call records is charged from its arrival", async 
   } finally {
     await server.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fourth pass: one remainder, named honestly, and one timeout sentence
+// ---------------------------------------------------------------------------
+
+/** A reader that never gets a clean line: the wait ends on its deadline. */
+const alwaysTorn = (): ReadRecordsResult => TORN;
+
+test("fourth pass 1: the hook runs on the exact remainder it was admitted with", async () => {
+  const { dir, logPath } = await ready();
+  // A few ms above the margin, as a call admitted at the edge would carry.
+  // Re-measured inside the hook it could fall under the margin and be refused
+  // hook-harness-cap-too-short; handed through, it is the window recorded.
+  const admitted = 60_005;
+  const id = "tu-edge";
+  const { verdict } = hookWithReader(
+    dir,
+    id,
+    (path) => readVerifiedRecords(path),
+    { timeout: "150ms", interval: "50ms", harnessCap: "300s" },
+    { remainingCapMs: admitted },
+  );
+  assert.doesNotMatch(verdict.reason, /hook-harness-cap-too-short/u, verdict.reason);
+  const requested = records(logPath).find(
+    (record) => record.event === "approval.requested" && record.action_key === keyOf(id),
+  );
+  assert.ok(requested !== undefined, `no question was opened: ${verdict.reason}`);
+  assert.equal(
+    (requested.payload as { harness_cap_ms?: number }).harness_cap_ms,
+    admitted,
+    "the hook recorded a cap other than the remainder it was admitted with",
+  );
+});
+
+test("fourth pass 2: a charged ceiling is named as what is left of the operator's number", async () => {
+  const { dir } = await ready();
+  const { verdict } = hookWithReader(
+    dir,
+    "tu-label",
+    (path) => readVerifiedRecords(path),
+    { timeout: "150ms", interval: "50ms", harnessCap: "300s" },
+    { remainingCapMs: 30_000 },
+  );
+  assert.match(verdict.reason, /^hook-harness-cap-too-short/u);
+  assert.match(verdict.reason, /~30000ms left of the 300000ms ceiling stated with --harness-cap/u);
+  assert.doesNotMatch(verdict.reason, /30000ms harness ceiling \(stated with --harness-cap\)/u);
+});
+
+test("fourth pass 3: a torn deadline tick with no clean read names an expiry that comes before the grace", async () => {
+  const { dir, logPath } = await ready();
+  // A 61 s ceiling leaves a 1 s window, far shorter than the retry grace, so
+  // the question is bounded by its expiry and the deny must say so.
+  const { verdict } = hookWithReader(dir, "tu-dl-cap", alwaysTorn, {
+    timeout: "150ms",
+    interval: "50ms",
+    harnessCap: "61s",
+  });
+  assert.match(verdict.reason, /^hook-timeout/u, verdict.reason);
+  assert.match(verdict.reason, /NOTHING WAS WITHDRAWN/u);
+  assert.match(verdict.reason, /expire at \S+, which comes before the .* retry grace would run out/u, verdict.reason);
+  assert.doesNotMatch(verdict.reason, /stay open for the .* retry grace/u);
+  assert.equal(records(logPath).filter((record) => record.event === "approval.withdrawn").length, 0);
 });

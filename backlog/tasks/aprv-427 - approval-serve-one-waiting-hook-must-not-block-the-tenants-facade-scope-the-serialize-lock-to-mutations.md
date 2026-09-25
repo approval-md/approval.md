@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-427'
 created_date: '2026-09-22 01:27'
-updated_date: '2026-09-25 06:34'
+updated_date: '2026-09-25 07:03'
 labels:
   - hosting
   - serve
@@ -106,4 +106,12 @@ THIRD PASS (recheck of the hardening: no fail-open, no double spend). One commit
 Third-pass validation: build, typecheck and oxlint clean. Targeted suites (serve, serve-hook, serve-concurrency, mcp-*, every cli-hook-*, log, log-subscribe, codex-bridge, harness-cap-ttl, cli-help, docs-guard): 570/570 pass. Full npm test with --baseline (Node v26.8.2): 5374 tests, 5373 pass, 0 fail, 1 skipped, 'new failures: none'.
 
 CI on d14d0b4d: shard 1 failed 'review 2' again on its WALL-CLOCK bound: alone 963 ms, behind 3465 ms, delay 2502 ms. The structural assertion that precedes it passed: coldReadsInLock was 0 on CI, so no thread walked the log cold inside the lock. The delay is CPU starvation on a 2-core runner (five parallel 50k-record walks plus other test files), which the lock cannot affect. Decision (flagged to the coordinator): the count is the binding assertion; the timing bound is loosened to a 10 s gross-regression guard, and the measured numbers are reported as a test diagnostic. The AC-style '< 2 s' holds on a quiet machine (207/266 ms) and cannot be reproduced reliably on the CI shard.
+
+FOURTH PASS (narrow recheck of the third round: safety held; three low-severity slips fixed):
+- 1: the worker measures the remainder ONCE, when the lock arrives, and uses it both to decide admission and as HookWaitSeam.remainingCapMs; this replaces arrivedAt, and the hook no longer re-measures. The hook's harnessCapMs is min(ceiling, remainder), so an admitted call can no longer be refused hook-harness-cap-too-short a few ms later. Recording the remainder as harness_cap_ms is deliberate: it is the window the question actually honours. gate.ts cappedBy is unchanged, since it reports what the hook declared, which is exactly that recorded number.
+- 2: when a remainder was charged, the too-short refusal reads "~Xms left of the Yms ceiling stated with --harness-cap" (or the assumed-default wording) plus where the rest went. It is carried as harnessCapCeilingMs through DecideInput and HookRun, for wording only.
+- 3: the no-clean-read deny at the deadline now goes through the same builder as the normal timeout path (keptOpen: grace, or an expiry that comes before the grace). The normal path's bytes are unchanged.
+- awaitingLock is asserted back at 0 after the cancel test and the budget-saturated test.
+Tests: "fourth pass 1: the hook runs on the exact remainder it was admitted with" (remainder 60005 ms under a 300 s cap is recorded as 60005, no too-short; fails with the pass-through removed), "fourth pass 2: a charged ceiling is named as what is left of the operator's number", "fourth pass 3: a torn deadline tick with no clean read names an expiry that comes before the grace".
+Validation: typecheck and oxlint clean; targeted suites (serve*, mcp-*, every cli-hook-*, log, log-subscribe, codex-bridge, harness-cap-ttl, cli-help, docs-guard) 573/573 pass.
 <!-- SECTION:NOTES:END -->

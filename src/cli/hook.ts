@@ -3072,20 +3072,21 @@ export interface HookWaitSeam {
    */
   cancelled?: () => boolean;
   /**
-   * When the call this invocation answers ARRIVED, in epoch milliseconds on
-   * this process's clock (APRV-427 review).
+   * What is LEFT of the harness's ceiling when this invocation begins, in
+   * milliseconds, as the embedding caller measured it (APRV-427 review).
    *
    * The harness's ceiling runs from the moment the harness sent the call, not
    * from the moment this invocation began. `approval serve` may hold a call in
    * line for a thread, and for the store lock, before the hook's first line
-   * runs; that time is spent out of the same budget. So the ceiling this
-   * invocation judges by, waits by, and records on the request is the stated
-   * (or assumed) one LESS the time since arrival, and a question it opens
-   * lapses at arrival + ceiling - margin, while the harness is still
-   * listening. Omitted by the CLI, where the process starts when the harness
-   * calls.
+   * runs; that time is spent out of the same budget. The caller computes the
+   * remainder ONCE, admits the call on it, and hands the same number here, so
+   * the hook judges, waits by and records on the request exactly what the
+   * caller admitted: a call the caller let through never meets
+   * `hook-harness-cap-too-short` a few milliseconds later. It can only
+   * shorten the ceiling the flags give (never lengthen it), and it is omitted
+   * by the CLI, where the process starts when the harness calls.
    */
-  arrivedAt?: number;
+  remainingCapMs?: number;
 }
 
 interface HookRun {
@@ -3129,6 +3130,11 @@ interface HookRun {
    * a flag the operator has not passed yet.
    */
   harnessCapStated: boolean;
+  /**
+   * The ceiling {@link harnessCapMs} was charged down from, or `null` where
+   * nothing was charged (APRV-427 review). Wording only.
+   */
+  harnessCapCeilingMs: number | null;
   /** {@link HarnessAdapter.capRepair}, or `null` for the generic sentence. */
   harnessCapRepair: string | null;
   /**
@@ -3959,9 +3965,16 @@ export function gateHarnessCall(
     // ceiling was stated or assumed, and ends with the harness's own repair
     // where the adapter has one.
     const needing = fresh.map((action) => `${action.actionKey} (${action.cls})`).join(", ");
-    const source = run.harnessCapStated
+    const origin = run.harnessCapStated
       ? "stated with --harness-cap"
       : "assumed from the harness's documented defaults because no --harness-cap was passed";
+    // APRV-427 review: where time spent before this invocation was charged,
+    // the operator's number is named as theirs and the remainder as what is
+    // left of it, rather than reporting the remainder as what they stated.
+    const source =
+      run.harnessCapCeilingMs === null
+        ? origin
+        : `~${String(run.harnessCapMs)}ms left of the ${String(run.harnessCapCeilingMs)}ms ceiling ${origin}; the rest was spent before this hook began, waiting in approval serve's queue or for its store lock`;
     const repair =
       run.harnessCapRepair ??
       `Raise the harness entry's timeout past ${String(HARNESS_CAP_MARGIN_MS)}ms and state the real one with --harness-cap, or route this class somewhere a human is not on the critical path.`;
@@ -4177,6 +4190,41 @@ export function gateHarnessCall(
   const pollRead =
     run.waitSeam?.pollRead ?? ((path: string): ReadRecordsResult => readVerifiedRecords(path));
 
+  /**
+   * The deny for a wait that ran out with the question left OPEN, after
+   * `lead` (APRV-427 review: one builder, so every route to it says the same
+   * thing). Two forms, as the second review pass (F7) fixed them: where the
+   * capped window closes before the retry grace would, the sentence names the
+   * expiry as what bounds the question; otherwise it names the grace and adds
+   * the expiry where there is one.
+   */
+  const keptOpen = (lead: string, stillLagging: string): HarnessVerdict => {
+    // APRV-423. The deadline the still-open question is under, named in the
+    // same breath as the wait that ran out: the two are different numbers and
+    // the second one is the one that decides whether a retry can still adopt
+    // this question. Under a harness ceiling it is also the instant the runtime
+    // will append `approval.expired` at, which is what keeps this deny and that
+    // record from disagreeing about one request.
+    const deadlines = waitKeys
+      .map((key) => expiryOf.get(key))
+      .filter((at): at is string => at !== undefined);
+    const expiresAt = [...new Set(deadlines)].sort().join(", ");
+    if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
+      return sayDeny(
+        "hook-timeout",
+        `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
+      );
+    }
+    const expiresText =
+      deadlines.length === 0
+        ? ""
+        : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
+    return sayDeny(
+      "hook-timeout",
+      `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+    );
+  };
+
   run.waitSeam?.enterWait();
   waiting = true;
   try {
@@ -4204,9 +4252,9 @@ export function gateHarnessCall(
         // torn past the retries, a write nobody is going to finish, still
         // withdraws and denies.
         if (lastClean === null) {
-          return sayDeny(
-            "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the log's last line was incomplete when the wait ended (another writer mid-append). This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.`,
+          return keptOpen(
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the log's last line was incomplete when the wait ended (another writer mid-append).`,
+            "",
           );
         }
         read = lastClean;
@@ -4366,40 +4414,15 @@ export function gateHarnessCall(
           lagging.length === 0
             ? ""
             : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
-        // APRV-423. The deadline the still-open question is under, named in
-        // the same breath as the wait that ran out: the two are different
-        // numbers and the second one is the one that decides whether a retry
-        // can still adopt this question. Under a harness ceiling it is also the
-        // instant the runtime will append `approval.expired` at, which is what
-        // keeps this deny and that record from disagreeing about one request.
-        const deadlines = waitKeys
-          .map((key) => expiryOf.get(key))
-          .filter((at): at is string => at !== undefined);
-        const expiresAt = [...new Set(deadlines)].sort().join(", ");
-        const expiresText =
-          deadlines.length === 0
-            ? ""
-            : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
             `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
           );
         }
-        // Second review pass (F7). When the capped window closes before the
-        // retry grace would, the grace is not what holds the question open and
-        // the sentence says so; "open for the 5m grace" beside "expires at
-        // T+240s" was two claims about one request that could not both hold.
-        // The other order keeps the APRV-287 sentence and adds the deadline.
-        if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
-          return sayDeny(
-            "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
-          );
-        }
-        return sayDeny(
-          "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+        return keptOpen(
+          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}.`,
+          stillLagging,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -5542,12 +5565,13 @@ function runHarnessHook(
   // T+240 s, which is exactly what the first pass did on a default Hermes).
   const capMs = effectiveHarnessCapMs(adapter, statedCapMs);
   // APRV-427 review: charged for the time the call spent before this line,
-  // where an embedding caller says when it arrived. See HookWaitSeam.arrivedAt.
-  const arrivedAt = waitSeam?.arrivedAt;
+  // using the remainder the embedding caller admitted it on, unchanged. See
+  // HookWaitSeam.remainingCapMs.
+  const remainingCapMs = waitSeam?.remainingCapMs;
   const harnessCapMs =
-    capMs === null || arrivedAt === undefined
+    capMs === null || remainingCapMs === undefined
       ? capMs
-      : Math.max(0, capMs - Math.max(0, Date.now() - arrivedAt));
+      : Math.max(0, Math.min(capMs, remainingCapMs));
   const harnessCapStated = statedCapMs !== null;
 
   const parsedInput = parseHookInput(readStdin(), adapter.camelCaseEnvelope === true);
@@ -5816,6 +5840,9 @@ function runHarnessHook(
       graceMs,
       harnessCapMs,
       harnessCapStated,
+      // The ceiling before the time in line was charged, for the refusal's
+      // wording only: the charged number is the one everything is judged by.
+      ...(harnessCapMs !== capMs && capMs !== null ? { harnessCapCeilingMs: capMs } : {}),
       codexCommand,
       windowRecords: looked.records,
       waitSeam,
@@ -5858,6 +5885,13 @@ export interface DecideInput {
    * review pass). Defaults to `false`; see {@link HookRun.harnessCapStated}.
    */
   harnessCapStated?: boolean;
+  /**
+   * The ceiling `harnessCapMs` was charged down from, where an embedding
+   * caller charged time spent before this invocation began (APRV-427 review).
+   * Wording only: a refusal names both, so the operator's stated number is
+   * not reported as the remainder.
+   */
+  harnessCapCeilingMs?: number;
   /** Exact native command bytes a Codex allow must carry back, where there are any. */
   codexCommand?: string | undefined;
   /**
@@ -5910,6 +5944,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   } = decide;
   const harnessCapMs = decide.harnessCapMs ?? null;
   const harnessCapStated = decide.harnessCapStated ?? false;
+  const harnessCapCeilingMs = decide.harnessCapCeilingMs ?? null;
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
@@ -5991,6 +6026,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     ttlMs: load.durations.approvalTtlMs,
     harnessCapMs,
     harnessCapStated,
+    harnessCapCeilingMs,
     harnessCapRepair: adapter.capRepair ?? null,
     waitMs:
       harnessCapMs === null

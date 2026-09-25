@@ -65,7 +65,8 @@ export interface HookJob {
   /**
    * When the call arrived (epoch ms, the listener's clock, which is this
    * thread's too) and the harness ceiling it arrived under, or `null` where
-   * the harness has none. The hook charges its budget from `arrivedAt`.
+   * the harness has none. The remainder is computed ONCE, when the lock
+   * arrives, and the hook is handed that exact number.
    */
   budget: { arrivedAt: number; capMs: number | null };
   /**
@@ -141,7 +142,6 @@ port.on("message", (job: HookJob) => {
       held();
     },
     cancelled: () => Atomics.load(flag, 1) === 1,
-    arrivedAt: job.budget.arrivedAt,
   };
   const gone = (): boolean => Atomics.load(flag, 1) === 1;
 
@@ -178,14 +178,20 @@ port.on("message", (job: HookJob) => {
     // a call that had room when it arrived and spent it waiting in line or for
     // the lock would open a question the harness kills its asker before
     // anyone can answer. Refused as saturation instead, appending nothing.
+    //
+    // Measured ONCE, and the same number is what the hook judges by, waits by
+    // and records: a remainder re-measured inside the hook a few milliseconds
+    // later could fall under the margin after this check had admitted it, and
+    // turn an admitted call into `hook-harness-cap-too-short`.
     const { arrivedAt, capMs } = job.budget;
-    if (capMs !== null && harnessCapFitsMargin(capMs)) {
-      const remainingMs = capMs - Math.max(0, Date.now() - arrivedAt);
-      if (!harnessCapFitsMargin(remainingMs)) {
+    if (capMs !== null) {
+      const remainingMs = Math.max(0, capMs - Math.max(0, Date.now() - arrivedAt));
+      if (harnessCapFitsMargin(capMs) && !harnessCapFitsMargin(remainingMs)) {
         settle();
         post({ type: "saturated", remainingMs });
         return;
       }
+      seam.remainingCapMs = remainingMs;
     }
     const code = commandHook(
       job.argv,
