@@ -52,6 +52,7 @@
 import { parentPort } from "node:worker_threads";
 
 import { commandHook, type HookWaitSeam } from "../cli/hook.js";
+import { harnessCapFitsMargin } from "../core/harness-wait.js";
 import { processReadCache, readVerifiedRecords, useVerifiedSnapshots } from "../core/state.js";
 
 /** One hook call, as the listener hands it over. */
@@ -61,6 +62,12 @@ export interface HookJob {
   body: string;
   /** The store's log, for the warm read before the lock. */
   logPath: string;
+  /**
+   * When the call arrived (epoch ms, the listener's clock, which is this
+   * thread's too) and the harness ceiling it arrived under, or `null` where
+   * the harness has none. The hook charges its budget from `arrivedAt`.
+   */
+  budget: { arrivedAt: number; capMs: number | null };
   /**
    * Two `Int32`s. `[0]` is 1 while this thread holds the store lock by proxy,
    * else 0. `[1]` is set to 1 by the listener when the HTTP client that asked
@@ -88,7 +95,12 @@ export type HookWorkerMessage =
     }
   | { type: "failed"; message: string }
   /** The caller went away before the hook began: nothing was run or appended. */
-  | { type: "cancelled" };
+  | { type: "cancelled" }
+  /**
+   * The call's harness budget ran below the margin while it waited for the
+   * lock, so no question it opened could be held: nothing was run or appended.
+   */
+  | { type: "saturated"; remainingMs: number };
 
 const port = parentPort;
 if (port === null) {
@@ -129,6 +141,7 @@ port.on("message", (job: HookJob) => {
       held();
     },
     cancelled: () => Atomics.load(flag, 1) === 1,
+    arrivedAt: job.budget.arrivedAt,
   };
   const gone = (): boolean => Atomics.load(flag, 1) === 1;
 
@@ -160,6 +173,19 @@ port.on("message", (job: HookJob) => {
       settle();
       post({ type: "cancelled" });
       return;
+    }
+    // The budget, looked at once more now the lock is here (APRV-427 review):
+    // a call that had room when it arrived and spent it waiting in line or for
+    // the lock would open a question the harness kills its asker before
+    // anyone can answer. Refused as saturation instead, appending nothing.
+    const { arrivedAt, capMs } = job.budget;
+    if (capMs !== null && harnessCapFitsMargin(capMs)) {
+      const remainingMs = capMs - Math.max(0, Date.now() - arrivedAt);
+      if (!harnessCapFitsMargin(remainingMs)) {
+        settle();
+        post({ type: "saturated", remainingMs });
+        return;
+      }
     }
     const code = commandHook(
       job.argv,

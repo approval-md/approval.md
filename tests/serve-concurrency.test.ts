@@ -100,7 +100,7 @@ async function ready(): Promise<{ dir: string; logPath: string }> {
 
 async function listener(
   dir: string,
-  extra: Partial<Pick<ServeOptions, "hookThreads" | "hookQueue">> = {},
+  extra: Partial<Pick<ServeOptions, "hookThreads" | "hookQueue" | "hookHarnessCap">> = {},
 ): Promise<ServeHandle> {
   const credentials = resolveServeCredentials({
     APPROVAL_SERVE_AGENT_TOKEN: AGENT_TOKEN,
@@ -869,6 +869,98 @@ test("review pass 2: a client that leaves while its call waits for the lock open
       [],
       "a call whose caller had left registered or requested anyway",
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("review pass 1: a call whose harness budget runs out in line is refused saturated and opens nothing", async () => {
+  const { dir, logPath } = await ready();
+  // A 61 s ceiling leaves 1 s of window past the 60 s margin, measured from
+  // when each call ARRIVED. The test holds the store lock for longer than that,
+  // as a long verb would, so every call spends its budget waiting.
+  const server = await listener(dir, { hookHarnessCap: "61s" });
+  const lock = storeLock(logPath, dir);
+  const ids = Array.from({ length: 17 }, (_unused, index) => `tu-b${String(index)}`);
+  try {
+    let release = (): void => undefined;
+    const holding = lock(
+      async () =>
+        await new Promise<void>((settle) => {
+          release = settle;
+        }),
+    );
+    const answers = ids.map(async (id) => {
+      const response = await fetch(url(server, "/hook/claude-code"), {
+        method: "POST",
+        headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+        body: JSON.stringify(bash(dir, id, manual(id))),
+      });
+      return {
+        status: response.status,
+        body: (await response.json()) as { error?: { code: string }; exit_code: number; stdout: string },
+      };
+    });
+    // Sixteen on threads waiting for the lock, the seventeenth in line.
+    await until("sixteen waiting for the lock and one in line", () => {
+      const stats = server.hookThreads();
+      return stats.awaitingLock === 16 && stats.queued === 1;
+    });
+    await new Promise((settle) => setTimeout(settle, 1_300));
+    release();
+    await holding;
+
+    for (const [index, answer] of (await Promise.all(answers)).entries()) {
+      assert.equal(answer.status, 503, `${ids[index] as string}: ${JSON.stringify(answer.body)}`);
+      assert.equal(answer.body.error?.code, "serve-hook-saturated");
+      assert.notEqual(answer.body.exit_code, 0);
+      const nested = (JSON.parse(answer.body.stdout) as Record<string, unknown>)[
+        "hookSpecificOutput"
+      ] as Record<string, unknown>;
+      assert.equal(nested["permissionDecision"], "deny");
+    }
+    // No question was opened that the harness would kill its asker before.
+    const opened = records(logPath).filter(
+      (record) =>
+        (record.event === "task.registered" || record.event === "approval.requested") &&
+        ids.some((id) => record.task === `hook:${SESSION}:${id}`),
+    );
+    assert.deepEqual(opened, [], "a call past its budget registered or requested");
+  } finally {
+    await server.close();
+  }
+});
+
+test("review pass 1: the cap a call records is charged from its arrival", async () => {
+  const { dir, logPath } = await ready();
+  // 90 s of ceiling: plenty of room, so the call proceeds, and the window it
+  // records must be measured from arrival rather than from when it ran.
+  const server = await listener(dir, { hookHarnessCap: "90s" });
+  const lock = storeLock(logPath, dir);
+  try {
+    let release = (): void => undefined;
+    const holding = lock(
+      async () =>
+        await new Promise<void>((settle) => {
+          release = settle;
+        }),
+    );
+    const call = tracked(hook(server, bash(dir, "tu-charged", manual("tu-charged"))));
+    await until("the call to wait for the lock", () => server.hookThreads().awaitingLock === 1);
+    await new Promise((settle) => setTimeout(settle, 1_000));
+    release();
+    await holding;
+    const key = keyOf("tu-charged");
+    await until("the request", () => requestedKeys(logPath).includes(key));
+    const requested = records(logPath).find(
+      (record) => record.event === "approval.requested" && record.action_key === key,
+    );
+    const cap = (requested?.payload as { harness_cap_ms?: number } | undefined)?.harness_cap_ms;
+    assert.ok(typeof cap === "number", "the request records no harness_cap_ms");
+    assert.ok(cap <= 89_000, `recorded ${String(cap)} ms: the second spent waiting for the lock was not charged`);
+    assert.ok(cap > 60_000);
+    await decide(dir, "reject", key);
+    assert.equal((await call.promise).permission, "deny");
   } finally {
     await server.close();
   }

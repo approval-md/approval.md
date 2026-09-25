@@ -7310,6 +7310,19 @@ taken is refused at once with `serve-hook-saturated` (HTTP 503), carrying the
 harness's own block directive in `stdout` and `exit_code: 2`, and nothing is
 appended for it. Four finished threads are kept warm for the next call.
 
+**Time in line is charged to the harness's ceiling.** The ceiling a harness
+puts on its hook (`--hook-harness-cap`, or the adapter's documented default)
+runs from the moment the call ARRIVED at this server. A call that waits for a
+slot or for the store lock spends that budget, and the hook judges, waits by
+and records on its request the ceiling less that wait, so any question it
+opens lapses at arrival plus ceiling minus the 60s margin, while the harness
+is still listening. A call that arrived with room and has less than the
+margin left when its slot or the lock arrives is refused
+`serve-hook-saturated` instead, appending nothing: a question opened then
+would still be on the approver's phone when the harness kills its asker. A
+ceiling that never had room is the hook's own `hook-harness-cap-too-short`,
+as before.
+
 A torn read in a hook's poll (another writer's line caught half-landed, which a
 filesystem that grows a file a page at a time can show a reader) is read again
 on the next tick, up to five ticks in a row, before the hook treats the log as
@@ -7340,9 +7353,14 @@ ones leave the line); terminate the hook threads from inside the store lock,
 which also waits out any verb or mutation section still running, so no thread
 is killed while holding the log's append lockfile; and only then destroy the
 remaining sockets. A question a cancelled call opened stays open for the retry
-grace, exactly as for an `approval hook` process that was killed mid-wait. A
-hook call whose thread fails answers a refusal, `serve-hook-failed`, with the
-harness's own block directive in `stdout`.
+grace, exactly as for an `approval hook` process that was killed mid-wait.
+Shutdown therefore takes as long as the longest work already holding the store
+lock (a `POST /verb/wait` runs to its own timeout), so a platform that kills
+the process a fixed time after SIGTERM (a container's stop timeout, a
+supervisor's kill timeout) should allow more than that, or the kill lands on
+work the lock was protecting. A hook call whose thread fails answers a
+refusal, `serve-hook-failed`, with the harness's own block directive in
+`stdout`.
 
 ## muse
 

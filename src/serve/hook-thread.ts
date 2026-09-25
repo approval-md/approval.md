@@ -47,6 +47,7 @@
 
 import { SHARE_ENV, Worker } from "node:worker_threads";
 
+import { HARNESS_CAP_MARGIN_MS, harnessCapFitsMargin } from "../core/harness-wait.js";
 import type { HookJob, HookWorkerMessage } from "./hook-worker.js";
 
 /** How many finished hook threads are kept warm for the next call. */
@@ -74,6 +75,22 @@ export class HookSaturatedError extends Error {
     );
     this.name = "HookSaturatedError";
   }
+
+  /**
+   * The call waited so long for a slot, or for the lock, that the harness's
+   * ceiling leaves no window a human could answer in (APRV-427 review).
+   */
+  static outOfBudget(capMs: number, remainingMs: number): HookSaturatedError {
+    const error = new HookSaturatedError({ threads: 0, queue: 0 });
+    error.message = `this call waited for a hook slot until only ${String(Math.max(0, remainingMs))}ms of its ${String(capMs)}ms harness ceiling was left, which does not clear the ${String(HARNESS_CAP_MARGIN_MS)}ms margin: a question opened now would still be pending when the harness kills the call. Nothing was registered or requested. Retry the tool call; the operator raises --hook-threads if calls queue this long`;
+    return error;
+  }
+}
+
+/** When a call arrived and the harness ceiling it arrived under, or `null`. */
+export interface HookBudget {
+  arrivedAt: number;
+  capMs: number | null;
 }
 
 /**
@@ -130,6 +147,7 @@ export interface HookThreads {
     logPath: string,
     body: string,
     signal?: AbortSignal,
+    budget?: HookBudget,
   ): Promise<HookOutcome>;
   /**
    * Shut the pool down: cancel every running call and every queued one, then
@@ -242,12 +260,25 @@ export function hookThreads(
     logPath: string,
     body: string,
     signal?: AbortSignal,
+    budget: HookBudget = { arrivedAt: Date.now(), capMs: null },
   ): Promise<HookOutcome> {
     if (closed) throw new HookCancelledError("the listener is closing");
     if (signal?.aborted === true) throw new HookCancelledError("the caller went away");
     await slot(signal);
     try {
-      return await runOnThread(argv, cwd, logPath, body, signal);
+      // The time in line is spent out of the harness's budget (APRV-427
+      // review). A call that arrived with room and has none left is refused
+      // here, before a thread is spent on it. A ceiling that never had room is
+      // the hook's own refusal to make (`hook-harness-cap-too-short`), and an
+      // autonomous call under it is still answered.
+      const { capMs } = budget;
+      if (capMs !== null && harnessCapFitsMargin(capMs)) {
+        const remainingMs = capMs - Math.max(0, Date.now() - budget.arrivedAt);
+        if (!harnessCapFitsMargin(remainingMs)) {
+          throw HookSaturatedError.outOfBudget(capMs, remainingMs);
+        }
+      }
+      return await runOnThread(argv, cwd, logPath, body, signal, budget);
     } finally {
       freeSlot();
     }
@@ -259,6 +290,7 @@ export function hookThreads(
     logPath: string,
     body: string,
     signal: AbortSignal | undefined,
+    budget: HookBudget,
   ): Promise<HookOutcome> {
     if (closed) throw new HookCancelledError("the listener is closing");
     if (signal?.aborted === true) throw new HookCancelledError("the caller went away");
@@ -330,6 +362,11 @@ export function hookThreads(
             give(worker);
             fail(new Error(message.message));
             return;
+          case "saturated":
+            finish();
+            give(worker);
+            fail(HookSaturatedError.outOfBudget(budget.capMs ?? 0, message.remainingMs));
+            return;
           case "cancelled":
             finish();
             give(worker);
@@ -344,7 +381,7 @@ export function hookThreads(
 
       worker.on("message", onMessage);
       worker.once("exit", onExit);
-      const job: HookJob = { argv, cwd, body, logPath, flag: shared };
+      const job: HookJob = { argv, cwd, body, logPath, budget, flag: shared };
       // The thread warms its read cache first and then asks for its first
       // section with `resume`, so no cold walk of the log is ever made inside
       // the lock (see `hook-worker.ts`).

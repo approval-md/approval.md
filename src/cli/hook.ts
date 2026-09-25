@@ -546,6 +546,25 @@ type Permission = "allow" | "deny";
  * binary name for, and two copies of it would be two lists to drift.
  */
 
+/**
+ * The ceiling a harness puts on its hook process, in milliseconds, or `null`
+ * (APRV-423): the operator's stated `--harness-cap` clamped to the adapter's
+ * contractual maximum, or, with nothing stated, the adapter's documented
+ * default, falling back to that maximum.
+ *
+ * Exported so `approval serve` computes the same number the hook will before
+ * it hands the call to a thread (APRV-427 review): the budget a queued call
+ * has left is this less the time it has waited.
+ */
+export function effectiveHarnessCapMs(
+  adapter: Pick<HarnessAdapter, "capCeilingMs" | "capDefaultMs">,
+  statedCapMs: number | null,
+): number | null {
+  const ceilingMs = adapter.capCeilingMs ?? null;
+  if (statedCapMs === null) return adapter.capDefaultMs ?? ceilingMs;
+  return ceilingMs === null ? statedCapMs : Math.min(statedCapMs, ceilingMs);
+}
+
 interface HarnessAdapter {
   kind: HarnessKind;
   originApp: string;
@@ -3052,6 +3071,21 @@ export interface HookWaitSeam {
    * precedes the spend, and nothing after it looks again.
    */
   cancelled?: () => boolean;
+  /**
+   * When the call this invocation answers ARRIVED, in epoch milliseconds on
+   * this process's clock (APRV-427 review).
+   *
+   * The harness's ceiling runs from the moment the harness sent the call, not
+   * from the moment this invocation began. `approval serve` may hold a call in
+   * line for a thread, and for the store lock, before the hook's first line
+   * runs; that time is spent out of the same budget. So the ceiling this
+   * invocation judges by, waits by, and records on the request is the stated
+   * (or assumed) one LESS the time since arrival, and a question it opens
+   * lapses at arrival + ceiling - margin, while the harness is still
+   * listening. Omitted by the CLI, where the process starts when the harness
+   * calls.
+   */
+  arrivedAt?: number;
 }
 
 interface HookRun {
@@ -5506,13 +5540,14 @@ function runHarnessHook(
   // harness as shipped, and a runtime that assumed the ceiling instead would
   // assert a deadline the harness will not keep (APRV-410 with a fictional
   // T+240 s, which is exactly what the first pass did on a default Hermes).
-  const ceilingMs = adapter.capCeilingMs ?? null;
+  const capMs = effectiveHarnessCapMs(adapter, statedCapMs);
+  // APRV-427 review: charged for the time the call spent before this line,
+  // where an embedding caller says when it arrived. See HookWaitSeam.arrivedAt.
+  const arrivedAt = waitSeam?.arrivedAt;
   const harnessCapMs =
-    statedCapMs === null
-      ? (adapter.capDefaultMs ?? ceilingMs)
-      : ceilingMs === null
-        ? statedCapMs
-        : Math.min(statedCapMs, ceilingMs);
+    capMs === null || arrivedAt === undefined
+      ? capMs
+      : Math.max(0, capMs - Math.max(0, Date.now() - arrivedAt));
   const harnessCapStated = statedCapMs !== null;
 
   const parsedInput = parseHookInput(readStdin(), adapter.camelCaseEnvelope === true);

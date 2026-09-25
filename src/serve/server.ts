@@ -81,11 +81,12 @@ import { realpathSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-import { harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
+import { effectiveHarnessCapMs, harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
 import { type VerbSpec } from "../cli/verb-registry.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
 import { withAppendLock } from "../core/log.js";
+import { parseDuration } from "../core/policy-load.js";
 import {
   buildArgv,
   invokeVerb,
@@ -742,7 +743,16 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     send(res, 200, streamsBody(result), { "content-type": "application/json" });
   }
 
-  async function handleHook(res: ServerResponse, harness: HarnessKind, body: string): Promise<void> {
+  /** `--hook-harness-cap`, parsed once; the CLI has already refused a bad one. */
+  const statedHookCapMs =
+    options.hookHarnessCap === undefined ? null : parseDuration(options.hookHarnessCap);
+
+  async function handleHook(
+    res: ServerResponse,
+    harness: HarnessKind,
+    body: string,
+    arrivedAt: number,
+  ): Promise<void> {
     // The same function `main()` dispatches to (`commandHook`, on a worker
     // thread), with the request body as the stdin the verb would have read.
     // The verdict object, its dialect, its reason and its exit code are decided
@@ -767,6 +777,10 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         paths.log ?? logPathOf(options.cwd),
         body,
         gone.signal,
+        // The harness's ceiling runs from ARRIVAL, so the time this call
+        // spends in line and waiting for the lock is charged to it (APRV-427
+        // review), with the same ceiling the hook itself will compute.
+        { arrivedAt, capMs: effectiveHarnessCapMs(HARNESS_ADAPTERS[harness], statedHookCapMs) },
       );
     } catch (cause) {
       if (cause instanceof HookCancelledError || gone.signal.aborted || closing) return;
@@ -956,6 +970,8 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   }
 
   const http: HttpServer = createServer((req, res) => {
+    // When the call arrived: a hook call's harness budget is charged from here.
+    const arrivedAt = Date.now();
     void (async () => {
       requests += 1;
       try {
@@ -1114,7 +1130,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         if (harness !== null) {
           // NOT wrapped in the store lock: a hook call takes it for its own
           // mutation sections and releases it while it waits (APRV-427).
-          await handleHook(res, harness, body.text);
+          await handleHook(res, harness, body.text, arrivedAt);
           return;
         }
 
