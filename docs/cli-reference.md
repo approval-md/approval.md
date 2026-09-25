@@ -7293,10 +7293,93 @@ supported deployment is a loopback bind behind a proxy the operator owns.
 It appends no record on its own account. Every event in the log under it was
 written by a verb a caller asked for, under the identity the operator fixed at
 launch, and the daemon id on the started line is the one those records carry.
-Verb and hook calls run serially in this process, for the reason the MCP
-transport gives (`wait` blocks the event loop, `run` spawns synchronously), and
-appends still go through the same lockfile and compare-and-append every
-`approval` process uses. It reads no `.approval/env`.
+It reads no `.approval/env`.
+
+### What it serialises, and what it does not (APRV-427)
+
+One lock per store, held inside this process. It is the lock for every stretch
+of work that may append to the store or must read it as one snapshot:
+
+| work | holds the store lock |
+|---|---|
+| `POST /verb/<name>`, including `GET /status` | for the whole call |
+| `GET /log/follow` | for the page, so no append this process makes lands under a verified read |
+| `GET /export` | for the whole snapshot, and the log's append lockfile as well, so no other process appends during it either |
+| `POST /hook/<harness>` | for its MUTATION sections only: everything up to its poll loop (intake, the abandoned-question sweep, register, request) and everything after it (the spend, a withdrawal) |
+| a hook call's WAIT | never |
+| `GET /verbs` | never |
+
+So one hook call waiting on a human holds nothing. While it polls, the tenant's
+`status`, `queue` and follow answer, and a second hook call opens its own
+question and waits beside the first. A hook call runs on a worker thread of
+this process, because a hook's wait is a synchronous sleep and on the
+listener's own thread it would stop the listener; the verdict, its bytes and
+its exit code are `approval hook <harness>`'s, exactly as before. A new thread
+reads the log once BEFORE it asks for the store lock, so the cold walk of a
+mature log (hundreds of milliseconds) happens in parallel and never inside the
+lock; its reads under the lock are then warm.
+
+**The pool is bounded, because each thread holds its own copy of the log**
+(about 26 MB idle, plus roughly 84 MB once it has read a 73k-record log). At
+most `--hook-threads` hook calls run at once, 16 by default, and no more
+threads than that ever exist. Up to `--hook-queue` further calls, 64 by
+default, wait for a slot in arrival order; a queued call has registered and
+requested nothing yet. A call that finds every slot and every place in line
+taken is refused at once with `serve-hook-saturated` (HTTP 503), carrying the
+harness's own block directive in `stdout` and `exit_code: 2`, and nothing is
+appended for it. Four finished threads are kept warm for the next call.
+
+**Time in line is charged to the harness's ceiling.** The ceiling a harness
+puts on its hook (`--hook-harness-cap`, or the adapter's documented default)
+runs from the moment the call ARRIVED at this server. A call that waits for a
+slot or for the store lock spends that budget, and the hook judges, waits by
+and records on its request the ceiling less that wait, so any question it
+opens lapses at arrival plus ceiling minus the 60s margin, while the harness
+is still listening. A call that arrived with room and has less than the
+margin left when its slot or the lock arrives is refused
+`serve-hook-saturated` instead, appending nothing: a question opened then
+would still be on the approver's phone when the harness kills its asker. A
+ceiling that never had room is the hook's own `hook-harness-cap-too-short`,
+as before.
+
+A torn read in a hook's poll (another writer's line caught half-landed, which a
+filesystem that grows a file a page at a time can show a reader) is read again
+on the next tick, up to five ticks in a row, before the hook treats the log as
+unreadable. This holds for the stdin form too, beside the daemon. Verb calls still run one at a time, in the
+order they arrive, because some of them are synchronous and blocking too (`run`
+spawns, and `wait` sleeps on the listener's thread, so an agent's `POST
+/verb/wait` still holds the listener for its own timeout; the hook route is the
+one a harness waits on).
+
+Two appends never interleave. Inside this process the store lock is the
+reason: every append is inside one of the sections above, and the sections run
+one at a time. Across processes (a daemon, a CLI run beside this server) the
+reason is the one every `approval` process relies on: each append takes the
+log's lockfile and compares-and-appends against the head it read.
+
+**A client that goes away is not answered, and does not spend.** When the HTTP
+connection of a waiting hook call closes before its answer, the call stops at
+its next poll tick without spending a grant and without withdrawing its
+question, and nothing is sent. A grant that lands afterwards is left for the
+harness's retry of the same command, which carries it and spends it once; an
+undecided question is adopted by that retry. A call still in line for a
+thread simply leaves the line. A grant already spent before the connection
+closed stays spent.
+
+Closing the listener runs in this order: stop accepting connections; cancel
+every hook call the same way (waiting calls stop at their next tick, queued
+ones leave the line); terminate the hook threads from inside the store lock,
+which also waits out any verb or mutation section still running, so no thread
+is killed while holding the log's append lockfile; and only then destroy the
+remaining sockets. A question a cancelled call opened stays open for the retry
+grace, exactly as for an `approval hook` process that was killed mid-wait.
+Shutdown therefore takes as long as the longest work already holding the store
+lock (a `POST /verb/wait` runs to its own timeout), so a platform that kills
+the process a fixed time after SIGTERM (a container's stop timeout, a
+supervisor's kill timeout) should allow more than that, or the kill lands on
+work the lock was protecting. A hook call whose thread fails answers a
+refusal, `serve-hook-failed`, with the harness's own block directive in
+`stdout`.
 
 ## muse
 

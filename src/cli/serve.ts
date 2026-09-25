@@ -21,7 +21,7 @@
  * and refused afterwards is a server something had already spoken to.
  */
 
-import { boolFlag, parseFlags, stringFlag } from "./args.js";
+import { boolFlag, parseFlags, stringFlag, type ParsedFlags } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { SERVE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
@@ -41,6 +41,19 @@ function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
   else streams.err(usageErrorText(message, SERVE_HELP));
   return EXIT_USAGE;
+}
+
+/**
+ * A whole-number flag at or above `min`: the value, `null` when the flag is
+ * absent, or the usage message (a string) when it is not a whole number.
+ */
+function countFlag(flags: ParsedFlags, name: string, min: number): number | null | string {
+  const text = stringFlag(flags, name);
+  if (text === null) return null;
+  if (!/^\d+$/u.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < min) {
+    return `${name} expects a whole number of at least ${String(min)}, got ${JSON.stringify(text)}`;
+  }
+  return Number(text);
 }
 
 /**
@@ -85,6 +98,8 @@ export async function commandServe(
     "--allow-non-loopback": "boolean",
     "--hook-timeout": "string",
     "--hook-harness-cap": "string",
+    "--hook-threads": "string",
+    "--hook-queue": "string",
     "--json": "boolean",
     "--help": "boolean",
     "-h": "boolean",
@@ -159,6 +174,13 @@ export async function commandServe(
     );
   }
 
+  // APRV-427 review: the hook thread pool's two bounds. Whole numbers only, so
+  // a typo is a usage error rather than a silently different pool.
+  const hookThreads = countFlag(parsed.flags, "--hook-threads", 1);
+  if (typeof hookThreads === "string") return usageError(streams, json, hookThreads);
+  const hookQueue = countFlag(parsed.flags, "--hook-queue", 0);
+  if (typeof hookQueue === "string") return usageError(streams, json, hookQueue);
+
   const dir = stringFlag(parsed.flags, "--dir");
   const root = dir === null ? cwd : resolvePath(dir, ".", cwd);
   const logFlag = stringFlag(parsed.flags, "--log");
@@ -201,6 +223,8 @@ export async function commandServe(
       ...(policyFlag === null ? {} : { policy: resolvePath(policyFlag, ".", cwd) }),
       ...(hookTimeout === null ? {} : { hookTimeout }),
       ...(hookHarnessCap === null ? {} : { hookHarnessCap }),
+      ...(hookThreads === null ? {} : { hookThreads }),
+      ...(hookQueue === null ? {} : { hookQueue }),
       notice: () => undefined,
     });
   } catch (cause) {

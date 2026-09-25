@@ -160,6 +160,7 @@ import {
   requestExpiresAt,
   requestState,
   useVerifiedSnapshots,
+  type ReadRecordsResult,
   type WithdrawReason,
 } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -192,6 +193,23 @@ const DEFAULT_TIMEOUT = HOOK_DEFAULT_WAIT;
 
 /** Poll interval for the decision wait. */
 const DEFAULT_INTERVAL_MS = 1_000;
+
+/**
+ * How many CONSECUTIVE torn-tail reads the decision wait reads past before it
+ * treats the log as unreadable (APRV-427 review).
+ *
+ * The poll reads the log while other writers append to it: the daemon beside
+ * a CLI hook, and every other hook call beside one run by `approval serve`. An
+ * append is one write on an O_APPEND handle, but a reader on a filesystem that
+ * grows a file a page at a time can see the front of a line before its end, and
+ * the verified read calls that a torn tail. It is a moment in someone else's
+ * write, and the next tick reads the whole line. Treating it as terminal
+ * withdrew a live question and denied `hook-io` because a DIFFERENT call was
+ * mid-append. So a torn read is read again next tick, like a view that lags;
+ * only a tail that stays torn for this many ticks in a row (a crashed write,
+ * which nobody is going to finish) takes the old withdraw-and-deny path.
+ */
+export const TORN_TAIL_RETRIES = 5;
 
 /**
  * How much of the command line goes in the (claimed) summary field.
@@ -527,6 +545,25 @@ type Permission = "allow" | "deny";
  * harnesses this runtime speaks a protocol for is the same set it knows a
  * binary name for, and two copies of it would be two lists to drift.
  */
+
+/**
+ * The ceiling a harness puts on its hook process, in milliseconds, or `null`
+ * (APRV-423): the operator's stated `--harness-cap` clamped to the adapter's
+ * contractual maximum, or, with nothing stated, the adapter's documented
+ * default, falling back to that maximum.
+ *
+ * Exported so `approval serve` computes the same number the hook will before
+ * it hands the call to a thread (APRV-427 review): the budget a queued call
+ * has left is this less the time it has waited.
+ */
+export function effectiveHarnessCapMs(
+  adapter: Pick<HarnessAdapter, "capCeilingMs" | "capDefaultMs">,
+  statedCapMs: number | null,
+): number | null {
+  const ceilingMs = adapter.capCeilingMs ?? null;
+  if (statedCapMs === null) return adapter.capDefaultMs ?? ceilingMs;
+  return ceilingMs === null ? statedCapMs : Math.min(statedCapMs, ceilingMs);
+}
 
 interface HarnessAdapter {
   kind: HarnessKind;
@@ -2985,7 +3022,76 @@ function fileTierNote(gated: FileGate): string {
   return `${gated.rule}: ${gated.file} is the LIVE checkout's copy`;
 }
 
+/**
+ * Where a hook invocation stops appending and starts waiting, for a caller that
+ * shares one store with other work in the same process (APRV-427).
+ *
+ * `approval serve` runs many hook calls, verbs and log reads against one store
+ * from one process. Its per-store lock has to cover every stretch in which a
+ * hook call APPENDS (intake, the abandoned-question sweep, register, request,
+ * the spend, the withdrawals) so that no other in-process writer lands between
+ * a check and its append; and it must NOT cover the poll loop, where the hook
+ * only reads the verified log and sleeps, or one question waiting on a human
+ * holds the tenant's whole facade for as long as the human takes.
+ *
+ * So the loop says where it begins and ends. `enterWait` is called once, right
+ * before the first poll, and after it nothing is appended until `leaveWait`
+ * returns. `leaveWait` is called before every append the loop can reach (the
+ * spend on a grant, a withdrawal on a failed read, at the deadline, on a throw
+ * or a signal) and once more when the loop is left by any route, and it may
+ * BLOCK until the caller's lock is held again. Both are idempotent pairs: the
+ * hook never calls `leaveWait` without a matching `enterWait` before it.
+ *
+ * Absent (the CLI, the Codex bridge), both are no-ops and the invocation is
+ * byte-for-byte what it was. The seam decides nothing: no verdict, record or
+ * line depends on it, and the appends it brackets are compare-and-append
+ * either way (SPEC.md §11.1 invariant 5). It only tells an embedding caller
+ * which stretch of the call is safe to run beside other writers.
+ */
+export interface HookWaitSeam {
+  /** The poll loop is about to start: nothing is appended until {@link leaveWait}. */
+  enterWait(): void;
+  /** An append follows, or the loop is over. May block until the caller's lock is held. */
+  leaveWait(): void;
+  /**
+   * The read each poll tick makes. Omitted by every real caller, which gets
+   * `readVerifiedRecords`; it exists so a test can put a torn read in front of
+   * the loop without writing a torn line into a log.
+   */
+  pollRead?: (logPath: string) => ReadRecordsResult;
+  /**
+   * Whether the party this invocation answers has gone away (APRV-427 review).
+   *
+   * `approval serve` sets it when the HTTP client that asked disconnects. Read
+   * on every poll tick, and once more after the lock is re-taken and before a
+   * grant is spent: while it is set, the invocation stops waiting WITHOUT
+   * spending and WITHOUT withdrawing, so the question (or its grant) is left
+   * exactly as a hook-timeout inside the retry grace leaves it, for the
+   * harness's retry to adopt. A grant already spent is not affected: the check
+   * precedes the spend, and nothing after it looks again.
+   */
+  cancelled?: () => boolean;
+  /**
+   * What is LEFT of the harness's ceiling when this invocation begins, in
+   * milliseconds, as the embedding caller measured it (APRV-427 review).
+   *
+   * The harness's ceiling runs from the moment the harness sent the call, not
+   * from the moment this invocation began. `approval serve` may hold a call in
+   * line for a thread, and for the store lock, before the hook's first line
+   * runs; that time is spent out of the same budget. The caller computes the
+   * remainder ONCE, admits the call on it, and hands the same number here, so
+   * the hook judges, waits by and records on the request exactly what the
+   * caller admitted: a call the caller let through never meets
+   * `hook-harness-cap-too-short` a few milliseconds later. It can only
+   * shorten the ceiling the flags give (never lengthen it), and it is omitted
+   * by the CLI, where the process starts when the harness calls.
+   */
+  remainingCapMs?: number;
+}
+
 interface HookRun {
+  /** APRV-427: the embedding caller's wait seam, or `null` from the CLI. */
+  waitSeam: HookWaitSeam | null;
   logPath: string;
   options: GateOptions;
   actor: string;
@@ -3024,6 +3130,11 @@ interface HookRun {
    * a flag the operator has not passed yet.
    */
   harnessCapStated: boolean;
+  /**
+   * The ceiling {@link harnessCapMs} was charged down from, or `null` where
+   * nothing was charged (APRV-427 review). Wording only.
+   */
+  harnessCapCeilingMs: number | null;
   /** {@link HarnessAdapter.capRepair}, or `null` for the generic sentence. */
   harnessCapRepair: string | null;
   /**
@@ -3854,9 +3965,16 @@ export function gateHarnessCall(
     // ceiling was stated or assumed, and ends with the harness's own repair
     // where the adapter has one.
     const needing = fresh.map((action) => `${action.actionKey} (${action.cls})`).join(", ");
-    const source = run.harnessCapStated
+    const origin = run.harnessCapStated
       ? "stated with --harness-cap"
       : "assumed from the harness's documented defaults because no --harness-cap was passed";
+    // APRV-427 review: where time spent before this invocation was charged,
+    // the operator's number is named as theirs and the remainder as what is
+    // left of it, rather than reporting the remainder as what they stated.
+    const source =
+      run.harnessCapCeilingMs === null
+        ? origin
+        : `~${String(run.harnessCapMs)}ms left of the ${String(run.harnessCapCeilingMs)}ms ceiling ${origin}; the rest was spent before this hook began, waiting in approval serve's queue or for its store lock`;
     const repair =
       run.harnessCapRepair ??
       `Raise the harness entry's timeout past ${String(HARNESS_CAP_MARGIN_MS)}ms and state the real one with --harness-cap, or route this class somewhere a human is not on the critical path.`;
@@ -4019,12 +4137,25 @@ export function gateHarnessCall(
 
   const deadline = Date.now() + run.waitMs;
 
+  // APRV-427. From the first poll to the last this invocation only READS the
+  // verified log and sleeps, so an embedding caller (`approval serve`) may let
+  // other work on the same store run meanwhile. `leaveWait` hands the stretch
+  // back before anything below appends, and once more whichever way the loop
+  // is left; it is a no-op from the CLI, where there is no seam.
+  let waiting = false;
+  const leaveWait = (): void => {
+    if (!waiting) return;
+    waiting = false;
+    run.waitSeam?.leaveWait();
+  };
+
   // A signal arriving mid-wait means the session is going away: nothing will
   // retry this command, so the question this invocation opened is retracted.
   // `process.exit` is deliberate and immediate: the default disposition for
   // these signals is to die, and a handler that only withdrew would leave the
   // hook wedged in its poll loop with the harness waiting on it.
   const onSignal = (signal: NodeJS.Signals): void => {
+    leaveWait();
     withdrawPending(
       run,
       streams,
@@ -4045,11 +4176,91 @@ export function gateHarnessCall(
    * matters under sixty copies of itself.
    */
   let saidLagging = false;
+  /** Consecutive torn-tail reads, for {@link TORN_TAIL_RETRIES}. */
+  let tornReads = 0;
+  /** The last whole verified view this wait read, for a torn read at the deadline. */
+  let lastClean: Extract<ReadRecordsResult, { ok: true }> | null = null;
+  const callerGone = (): boolean => run.waitSeam?.cancelled?.() === true;
+  /** The verdict for a caller that went away: nothing spent, nothing withdrawn. */
+  const sayGone = (): HarnessVerdict =>
+    sayDeny(
+      "hook-timeout",
+      `the caller that asked went away before ${waitKeys.join(", ")} could be answered to it. NOTHING WAS SPENT AND NOTHING WAS WITHDRAWN: the question, or a grant already recorded on it, is left for a retry of this exact command in this exact directory to adopt within the ${minutesText(run.graceMs)} retry grace.`,
+    );
+  const pollRead =
+    run.waitSeam?.pollRead ?? ((path: string): ReadRecordsResult => readVerifiedRecords(path));
 
+  /**
+   * The deny for a wait that ran out with the question left OPEN, after
+   * `lead` (APRV-427 review: one builder, so every route to it says the same
+   * thing). Two forms, as the second review pass (F7) fixed them: where the
+   * capped window closes before the retry grace would, the sentence names the
+   * expiry as what bounds the question; otherwise it names the grace and adds
+   * the expiry where there is one.
+   */
+  const keptOpen = (lead: string, stillLagging: string): HarnessVerdict => {
+    // APRV-423. The deadline the still-open question is under, named in the
+    // same breath as the wait that ran out: the two are different numbers and
+    // the second one is the one that decides whether a retry can still adopt
+    // this question. Under a harness ceiling it is also the instant the runtime
+    // will append `approval.expired` at, which is what keeps this deny and that
+    // record from disagreeing about one request.
+    const deadlines = waitKeys
+      .map((key) => expiryOf.get(key))
+      .filter((at): at is string => at !== undefined);
+    const expiresAt = [...new Set(deadlines)].sort().join(", ");
+    if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
+      return sayDeny(
+        "hook-timeout",
+        `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
+      );
+    }
+    const expiresText =
+      deadlines.length === 0
+        ? ""
+        : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
+    return sayDeny(
+      "hook-timeout",
+      `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+    );
+  };
+
+  run.waitSeam?.enterWait();
+  waiting = true;
   try {
     for (;;) {
-      const read = readVerifiedRecords(run.logPath);
+      if (callerGone()) return sayGone();
+      let read = pollRead(run.logPath);
+      if (!read.ok && read.code === "log-torn-tail" && tornReads < TORN_TAIL_RETRIES) {
+        if (Date.now() < deadline) {
+          // Another writer's line, caught half-landed. Read again next tick;
+          // see TORN_TAIL_RETRIES. Said once, like the lagging view below.
+          if (tornReads === 0) {
+            streams.err(
+              `approval: the log's last line was incomplete when this hook read it (another writer mid-append); reading again rather than giving up on ${task}\n`,
+            );
+          }
+          tornReads += 1;
+          sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+          continue;
+        }
+        // AT the deadline (APRV-427 review). A clean read at this tick would
+        // take the timeout path and leave the question open for the retry
+        // grace; someone else's half-written line must not turn that into a
+        // withdrawal. So the tick is judged by the last whole view this wait
+        // read, and the timeout path below runs on it. Only a tail that stays
+        // torn past the retries, a write nobody is going to finish, still
+        // withdraws and denies.
+        if (lastClean === null) {
+          return keptOpen(
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the log's last line was incomplete when the wait ended (another writer mid-append).`,
+            "",
+          );
+        }
+        read = lastClean;
+      }
       if (!read.ok) {
+        leaveWait();
         withdrawPending(
           run,
           streams,
@@ -4058,6 +4269,8 @@ export function gateHarnessCall(
         );
         return sayDeny("hook-io", read.message);
       }
+      tornReads = 0;
+      lastClean = read;
 
       const ts = new Date().toISOString();
       // Only the keys this invocation is waiting on count. Deriving the set
@@ -4153,6 +4366,11 @@ export function gateHarnessCall(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
+          leaveWait();
+          // Looked at again now the lock is held: re-taking it may have waited,
+          // and a caller that left meanwhile must not have its grant spent on a
+          // verdict nobody will receive. The retry is who spends it.
+          if (callerGone()) return sayGone();
           const failed = consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
@@ -4185,6 +4403,7 @@ export function gateHarnessCall(
         // Past the grace nobody is coming back for it, and a question nothing
         // will adopt is taken back rather than left for a restarted listener to
         // re-deliver.
+        leaveWait();
         const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
         // APRV-294: a wait that ends with the view still short of its own
         // requests says so. The deny is the same deny — the wait ran out — and
@@ -4195,40 +4414,15 @@ export function gateHarnessCall(
           lagging.length === 0
             ? ""
             : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
-        // APRV-423. The deadline the still-open question is under, named in
-        // the same breath as the wait that ran out: the two are different
-        // numbers and the second one is the one that decides whether a retry
-        // can still adopt this question. Under a harness ceiling it is also the
-        // instant the runtime will append `approval.expired` at, which is what
-        // keeps this deny and that record from disagreeing about one request.
-        const deadlines = waitKeys
-          .map((key) => expiryOf.get(key))
-          .filter((at): at is string => at !== undefined);
-        const expiresAt = [...new Set(deadlines)].sort().join(", ");
-        const expiresText =
-          deadlines.length === 0
-            ? ""
-            : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
             `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
           );
         }
-        // Second review pass (F7). When the capped window closes before the
-        // retry grace would, the grace is not what holds the question open and
-        // the sentence says so; "open for the 5m grace" beside "expires at
-        // T+240s" was two claims about one request that could not both hold.
-        // The other order keeps the APRV-287 sentence and adds the deadline.
-        if (deadlines.length > 0 && windowEndsBeforeGrace(run)) {
-          return sayDeny(
-            "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the harness ceiling this hook runs under bounds the question, and the request(s) expire at ${expiresAt}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long they stay open. A decision inside that window authorizes a retry of this exact command in this exact directory, once; retry it after the approver answers, and the retry adopts the same question rather than asking a second one. A decision after ${expiresAt} is refused rather than granted, the runtime records the lapse as approval.expired, and a retry then asks the question fresh.${stillLagging}`,
-          );
-        }
-        return sayDeny(
-          "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+        return keptOpen(
+          `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}.`,
+          stillLagging,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -4238,6 +4432,7 @@ export function gateHarnessCall(
     // deny. Unlike the timeout, this process cannot say what state it left
     // behind, so the question it opened is retracted rather than left standing
     // on a failure nobody diagnosed.
+    leaveWait();
     withdrawPending(
       run,
       streams,
@@ -4246,6 +4441,7 @@ export function gateHarnessCall(
     );
     throw cause;
   } finally {
+    leaveWait();
     process.off("SIGTERM", onTerm);
     process.off("SIGINT", onInt);
   }
@@ -5269,6 +5465,7 @@ function runHarnessHook(
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
+  waitSeam: HookWaitSeam | null,
 ): number {
   const configurationError = (message: string): number =>
     adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
@@ -5366,13 +5563,15 @@ function runHarnessHook(
   // harness as shipped, and a runtime that assumed the ceiling instead would
   // assert a deadline the harness will not keep (APRV-410 with a fictional
   // T+240 s, which is exactly what the first pass did on a default Hermes).
-  const ceilingMs = adapter.capCeilingMs ?? null;
+  const capMs = effectiveHarnessCapMs(adapter, statedCapMs);
+  // APRV-427 review: charged for the time the call spent before this line,
+  // using the remainder the embedding caller admitted it on, unchanged. See
+  // HookWaitSeam.remainingCapMs.
+  const remainingCapMs = waitSeam?.remainingCapMs;
   const harnessCapMs =
-    statedCapMs === null
-      ? (adapter.capDefaultMs ?? ceilingMs)
-      : ceilingMs === null
-        ? statedCapMs
-        : Math.min(statedCapMs, ceilingMs);
+    capMs === null || remainingCapMs === undefined
+      ? capMs
+      : Math.max(0, Math.min(capMs, remainingCapMs));
   const harnessCapStated = statedCapMs !== null;
 
   const parsedInput = parseHookInput(readStdin(), adapter.camelCaseEnvelope === true);
@@ -5641,8 +5840,12 @@ function runHarnessHook(
       graceMs,
       harnessCapMs,
       harnessCapStated,
+      // The ceiling before the time in line was charged, for the refusal's
+      // wording only: the charged number is the one everything is judged by.
+      ...(harnessCapMs !== capMs && capMs !== null ? { harnessCapCeilingMs: capMs } : {}),
       codexCommand,
       windowRecords: looked.records,
+      waitSeam,
     }),
   );
 }
@@ -5682,6 +5885,13 @@ export interface DecideInput {
    * review pass). Defaults to `false`; see {@link HookRun.harnessCapStated}.
    */
   harnessCapStated?: boolean;
+  /**
+   * The ceiling `harnessCapMs` was charged down from, where an embedding
+   * caller charged time spent before this invocation began (APRV-427 review).
+   * Wording only: a refusal names both, so the operator's stated number is
+   * not reported as the remainder.
+   */
+  harnessCapCeilingMs?: number;
   /** Exact native command bytes a Codex allow must carry back, where there are any. */
   codexCommand?: string | undefined;
   /**
@@ -5692,6 +5902,12 @@ export interface DecideInput {
    * lookup passes `null`, and both of them read the log themselves.
    */
   windowRecords: EventRecord[] | null;
+  /**
+   * Where the wait begins and ends, for a caller that runs this beside other
+   * writers in one process (APRV-427; see {@link HookWaitSeam}). Omitted by
+   * every CLI route, where it is a no-op.
+   */
+  waitSeam?: HookWaitSeam | null;
 }
 
 /**
@@ -5728,6 +5944,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   } = decide;
   const harnessCapMs = decide.harnessCapMs ?? null;
   const harnessCapStated = decide.harnessCapStated ?? false;
+  const harnessCapCeilingMs = decide.harnessCapCeilingMs ?? null;
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
@@ -5799,6 +6016,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
       : `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
   const run: HookRun = {
+    waitSeam: decide.waitSeam ?? null,
     logPath,
     options,
     actor,
@@ -5808,6 +6026,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     ttlMs: load.durations.approvalTtlMs,
     harnessCapMs,
     harnessCapStated,
+    harnessCapCeilingMs,
     harnessCapRepair: adapter.capRepair ?? null,
     waitMs:
       harnessCapMs === null
@@ -6033,9 +6252,10 @@ function commandHarnessHook(
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
+  waitSeam: HookWaitSeam | null,
 ): number {
   try {
-    return runHarnessHook(argv, streams, cwd, readStdin, adapter);
+    return runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
   } catch (cause) {
     // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
@@ -6064,6 +6284,12 @@ export function commandHook(
   streams: Streams,
   cwd: string,
   readStdin: () => string = defaultStdin,
+  /**
+   * APRV-427: where a harness hook's wait begins and ends, for `approval serve`,
+   * which runs the call off its main thread and releases its store lock while
+   * the call polls. Every CLI route omits it. See {@link HookWaitSeam}.
+   */
+  waitSeam: HookWaitSeam | null = null,
 ): number {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -6080,7 +6306,7 @@ export function commandHook(
   // boundary and doctor use, so a kind that can be recorded is a kind that can
   // be invoked, and neither can be added without the other.
   if (isHarnessKind(sub)) {
-    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub]);
+    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
   }
   if (sub === "classify") return commandClassify(rest, streams, cwd);
   return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);

@@ -3181,6 +3181,8 @@ const VERBS: VerbSpec[] = [
         "--allow-non-loopback": "boolean",
         "--hook-timeout": "string",
         "--hook-harness-cap": "string",
+        "--hook-threads": "string",
+        "--hook-queue": "string",
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         ...JSON_FLAG,
