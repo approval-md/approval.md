@@ -27,16 +27,21 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
+import { commandHook, TORN_TAIL_RETRIES } from "../src/cli/hook.js";
 import { main } from "../src/cli/main.js";
 import type { EventRecord } from "../src/core/log.js";
-import { readVerifiedRecords } from "../src/core/state.js";
+import { readVerifiedRecords, type ReadRecordsResult } from "../src/core/state.js";
 import { resolveServeCredentials } from "../src/serve/credentials.js";
-import { serveApproval, storeLock, type ServeHandle } from "../src/serve/server.js";
+import { hookArgv, serveApproval, storeLock, type ServeHandle } from "../src/serve/server.js";
+
+const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
 const AGENT_TOKEN = "agent-token-for-the-serve-suite-0000";
 const TENANT_TOKEN = "tenant-token-for-the-serve-suite-000";
@@ -465,4 +470,95 @@ test("one store has one lock whatever path spells it", async () => {
   // And a different store gets a different one.
   const other = await ready();
   assert.notEqual(storeLock(other.logPath, other.dir), storeLock(logPath, dir));
+});
+
+// ---------------------------------------------------------------------------
+// Review 3: a torn read in the poll is another writer's moment, not the end
+// ---------------------------------------------------------------------------
+
+const TORN: ReadRecordsResult = {
+  ok: false,
+  code: "log-torn-tail",
+  message: "log ends without a newline (injected: another writer is mid-append)",
+};
+
+/**
+ * Run one hook call in THIS process with an injected poll reader. The seam's
+ * lock half is a no-op here: nothing else runs beside it.
+ */
+function hookWithReader(
+  dir: string,
+  toolUseId: string,
+  pollRead: (logPath: string) => ReadRecordsResult,
+): { verdict: { permission: string; reason: string }; err: string } {
+  let out = "";
+  let err = "";
+  commandHook(
+    ["claude-code", ...hookArgv({ actor: ACTOR, cwd: dir, hookTimeout: "30s" }), "--interval", "20ms"],
+    {
+      out: (text) => {
+        out += text;
+      },
+      err: (text) => {
+        err += text;
+      },
+    },
+    dir,
+    () => JSON.stringify(bash(dir, toolUseId, manual(toolUseId))),
+    { enterWait: () => undefined, leaveWait: () => undefined, pollRead },
+  );
+  const nested = (JSON.parse(out) as Record<string, unknown>)["hookSpecificOutput"] as Record<string, unknown>;
+  return {
+    verdict: {
+      permission: String(nested["permissionDecision"]),
+      reason: String(nested["permissionDecisionReason"]),
+    },
+    err,
+  };
+}
+
+test("review 3: two torn reads then a clean one keep the question and honour the decision", async () => {
+  const { dir, logPath } = await ready();
+  const key = keyOf("tu-torn");
+  let reads = 0;
+  const { verdict, err } = hookWithReader(dir, "tu-torn", (path) => {
+    reads += 1;
+    if (reads <= 2) return TORN;
+    if (reads === 3) {
+      // The human answers while the hook is polling, through the real CLI in
+      // its own process, as a phone tap would land through a channel.
+      const run = spawnSync(process.execPath, [CLI_ENTRY, "reject", key, "--as", "human:alice"], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      assert.equal(run.status, 0, run.stderr);
+    }
+    return readVerifiedRecords(path);
+  });
+  assert.ok(reads >= 3);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-rejected/u, "a torn read ended the wait instead of the human's answer");
+  assert.match(err, /another writer mid-append/u);
+  const log = records(logPath);
+  assert.equal(
+    log.filter((record) => record.event === "approval.withdrawn").length,
+    0,
+    "a transient torn read withdrew a live question",
+  );
+});
+
+test("review 3: a tail that stays torn past the retries is still withdrawn and denied hook-io", async () => {
+  const { dir, logPath } = await ready();
+  let reads = 0;
+  const { verdict } = hookWithReader(dir, "tu-stuck", () => {
+    reads += 1;
+    return TORN;
+  });
+  assert.equal(reads, TORN_TAIL_RETRIES + 1, "the poll read past more (or fewer) torn tails than it says");
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-io/u);
+  const withdrawn = records(logPath).filter(
+    (record) => record.event === "approval.withdrawn" && record.action_key === keyOf("tu-stuck"),
+  );
+  assert.equal(withdrawn.length, 1);
 });

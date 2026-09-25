@@ -160,6 +160,7 @@ import {
   requestExpiresAt,
   requestState,
   useVerifiedSnapshots,
+  type ReadRecordsResult,
   type WithdrawReason,
 } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -192,6 +193,23 @@ const DEFAULT_TIMEOUT = HOOK_DEFAULT_WAIT;
 
 /** Poll interval for the decision wait. */
 const DEFAULT_INTERVAL_MS = 1_000;
+
+/**
+ * How many CONSECUTIVE torn-tail reads the decision wait reads past before it
+ * treats the log as unreadable (APRV-427 review).
+ *
+ * The poll reads the log while other writers append to it: the daemon beside
+ * a CLI hook, and every other hook call beside one run by `approval serve`. An
+ * append is one write on an O_APPEND handle, but a reader on a filesystem that
+ * grows a file a page at a time can see the front of a line before its end, and
+ * the verified read calls that a torn tail. It is a moment in someone else's
+ * write, and the next tick reads the whole line. Treating it as terminal
+ * withdrew a live question and denied `hook-io` because a DIFFERENT call was
+ * mid-append. So a torn read is read again next tick, like a view that lags;
+ * only a tail that stays torn for this many ticks in a row (a crashed write,
+ * which nobody is going to finish) takes the old withdraw-and-deny path.
+ */
+export const TORN_TAIL_RETRIES = 5;
 
 /**
  * How much of the command line goes in the (claimed) summary field.
@@ -3016,6 +3034,12 @@ export interface HookWaitSeam {
   enterWait(): void;
   /** An append follows, or the loop is over. May block until the caller's lock is held. */
   leaveWait(): void;
+  /**
+   * The read each poll tick makes. Omitted by every real caller, which gets
+   * `readVerifiedRecords`; it exists so a test can put a torn read in front of
+   * the loop without writing a torn line into a log.
+   */
+  pollRead?: (logPath: string) => ReadRecordsResult;
 }
 
 interface HookRun {
@@ -4093,12 +4117,33 @@ export function gateHarnessCall(
    * matters under sixty copies of itself.
    */
   let saidLagging = false;
+  /** Consecutive torn-tail reads, for {@link TORN_TAIL_RETRIES}. */
+  let tornReads = 0;
+  const pollRead =
+    run.waitSeam?.pollRead ?? ((path: string): ReadRecordsResult => readVerifiedRecords(path));
 
   run.waitSeam?.enterWait();
   waiting = true;
   try {
     for (;;) {
-      const read = readVerifiedRecords(run.logPath);
+      const read = pollRead(run.logPath);
+      if (
+        !read.ok &&
+        read.code === "log-torn-tail" &&
+        tornReads < TORN_TAIL_RETRIES &&
+        Date.now() < deadline
+      ) {
+        // Another writer's line, caught half-landed. Read again next tick; see
+        // TORN_TAIL_RETRIES. Said once, like the lagging view below.
+        if (tornReads === 0) {
+          streams.err(
+            `approval: the log's last line was incomplete when this hook read it (another writer mid-append); reading again rather than giving up on ${task}\n`,
+          );
+        }
+        tornReads += 1;
+        sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+        continue;
+      }
       if (!read.ok) {
         leaveWait();
         withdrawPending(
@@ -4109,6 +4154,7 @@ export function gateHarnessCall(
         );
         return sayDeny("hook-io", read.message);
       }
+      tornReads = 0;
 
       const ts = new Date().toISOString();
       // Only the keys this invocation is waiting on count. Deriving the set
