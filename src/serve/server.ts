@@ -100,6 +100,7 @@ import { checkVerbArguments } from "./arguments.js";
 import {
   DEFAULT_HOOK_QUEUE,
   DEFAULT_HOOK_THREADS,
+  HookCancelledError,
   HookSaturatedError,
   hookThreads,
   type HookThreadStats,
@@ -747,6 +748,17 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     // The verdict object, its dialect, its reason and its exit code are decided
     // entirely inside it; the thread changes where it runs and which stretches
     // of it hold the store lock, and nothing about what it answers.
+    //
+    // A client that goes away before its answer (APRV-427 review) aborts the
+    // call: in line it leaves the line, and on its thread it stops at the next
+    // poll tick WITHOUT spending a grant or withdrawing the question, so the
+    // harness's retry adopts one or the other. Nothing is sent after that,
+    // and nothing is sent once the listener is closing either: the socket is
+    // about to be destroyed, and a caller with no answer blocks.
+    const gone = new AbortController();
+    res.once("close", () => {
+      if (!res.writableFinished) gone.abort();
+    });
     let outcome;
     try {
       outcome = await hooks.run(
@@ -754,8 +766,10 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         options.cwd,
         paths.log ?? logPathOf(options.cwd),
         body,
+        gone.signal,
       );
     } catch (cause) {
+      if (cause instanceof HookCancelledError || gone.signal.aborted || closing) return;
       if (cause instanceof HookSaturatedError) {
         // Every slot and every place in line is taken. Refused at once rather
         // than queued without bound, because each running call is a thread
@@ -781,6 +795,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     // header is a thing a refusal can forget to set and an exit code that can
     // go missing is an allow waiting to happen. `stderr` rides along because
     // Hermes's ALLOW is `{}` and carries its reason there and nowhere else.
+    if (gone.signal.aborted || closing) return;
     send(res, 200, streamsBody(outcome), { "content-type": "application/json" });
   }
 
@@ -1178,14 +1193,18 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     close: async () => {
       if (closing) return;
       closing = true;
-      await new Promise<void>((settle) => {
-        http.close(() => settle());
-        for (const socket of sockets) socket.destroy();
-        sockets.clear();
-      });
-      // A hook call still waiting is abandoned exactly as a killed `approval
-      // hook` process is: its question stays open for the retry grace.
+      // In this order (APRV-427 review). Stop accepting first. Then cancel
+      // every hook call, which stops each waiting one at its next tick with
+      // nothing spent and nothing withdrawn (its question stays open for the
+      // retry grace, as for a killed `approval hook` process), and terminate
+      // the threads from inside the store lock, which also waits out any verb
+      // or mutation section still running. Only then are the sockets
+      // destroyed, so no in-flight append is cut off by its connection going.
+      const stopped = new Promise<void>((settle) => http.close(() => settle()));
       await hooks.close();
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await stopped;
     },
   };
 }

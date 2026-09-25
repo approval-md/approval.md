@@ -724,3 +724,56 @@ test("review 1: a call past the running and queued bounds is refused serve-hook-
     await server.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Review 4: a caller that went away does not spend the grant its retry needs
+// ---------------------------------------------------------------------------
+
+test("review 4: a client that disconnects mid-wait leaves its question for the retry, which spends it once", async () => {
+  const { dir, logPath } = await ready();
+  const server = await listener(dir);
+  const command = manual("tu-gone");
+  const key = keyOf("tu-gone");
+  try {
+    const client = new AbortController();
+    const first = fetch(url(server, "/hook/claude-code"), {
+      method: "POST",
+      headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+      body: JSON.stringify(bash(dir, "tu-gone", command)),
+      signal: client.signal,
+    }).then(
+      () => "answered",
+      () => "aborted",
+    );
+    await until("the first call's request", () => requestedKeys(logPath).includes(key));
+    client.abort();
+    assert.equal(await first, "aborted");
+    // The call stops at its next poll tick and gives its thread back.
+    await until("the abandoned call to leave its thread", () => server.hookThreads().busy === 0);
+
+    // The human answers AFTER the asker left. Nothing may have been spent or
+    // withdrawn on the abandoned call's account.
+    await decide(dir, "grant", key);
+    const spentBefore = records(logPath).filter(
+      (record) => record.action_key === key && record.event === "execution.started",
+    );
+    assert.equal(spentBefore.length, 0, "the abandoned call spent the grant");
+    assert.equal(
+      records(logPath).filter((record) => record.event === "approval.withdrawn").length,
+      0,
+      "the abandoned call withdrew its question",
+    );
+
+    // The harness retries the same command from a new client: it carries the
+    // grant and spends it, once.
+    const retry = await hook(server, bash(dir, "tu-retry", command));
+    assert.equal(retry.permission, "allow", retry.reason);
+    assert.match(retry.reason, new RegExp(`carried: ${key.replaceAll(".", "\\.")}`, "u"));
+    const spent = records(logPath).filter(
+      (record) => record.action_key === key && record.event === "execution.started",
+    );
+    assert.equal(spent.length, 1, `the grant was spent ${String(spent.length)} times`);
+  } finally {
+    await server.close();
+  }
+});

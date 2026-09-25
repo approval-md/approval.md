@@ -3040,6 +3040,18 @@ export interface HookWaitSeam {
    * the loop without writing a torn line into a log.
    */
   pollRead?: (logPath: string) => ReadRecordsResult;
+  /**
+   * Whether the party this invocation answers has gone away (APRV-427 review).
+   *
+   * `approval serve` sets it when the HTTP client that asked disconnects. Read
+   * on every poll tick, and once more after the lock is re-taken and before a
+   * grant is spent: while it is set, the invocation stops waiting WITHOUT
+   * spending and WITHOUT withdrawing, so the question (or its grant) is left
+   * exactly as a hook-timeout inside the retry grace leaves it, for the
+   * harness's retry to adopt. A grant already spent is not affected: the check
+   * precedes the spend, and nothing after it looks again.
+   */
+  cancelled?: () => boolean;
 }
 
 interface HookRun {
@@ -4119,6 +4131,13 @@ export function gateHarnessCall(
   let saidLagging = false;
   /** Consecutive torn-tail reads, for {@link TORN_TAIL_RETRIES}. */
   let tornReads = 0;
+  const callerGone = (): boolean => run.waitSeam?.cancelled?.() === true;
+  /** The verdict for a caller that went away: nothing spent, nothing withdrawn. */
+  const sayGone = (): HarnessVerdict =>
+    sayDeny(
+      "hook-timeout",
+      `the caller that asked went away before ${waitKeys.join(", ")} could be answered to it. NOTHING WAS SPENT AND NOTHING WAS WITHDRAWN: the question, or a grant already recorded on it, is left for a retry of this exact command in this exact directory to adopt within the ${minutesText(run.graceMs)} retry grace.`,
+    );
   const pollRead =
     run.waitSeam?.pollRead ?? ((path: string): ReadRecordsResult => readVerifiedRecords(path));
 
@@ -4126,6 +4145,7 @@ export function gateHarnessCall(
   waiting = true;
   try {
     for (;;) {
+      if (callerGone()) return sayGone();
       const read = pollRead(run.logPath);
       if (
         !read.ok &&
@@ -4251,6 +4271,10 @@ export function gateHarnessCall(
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
           leaveWait();
+          // Looked at again now the lock is held: re-taking it may have waited,
+          // and a caller that left meanwhile must not have its grant spent on a
+          // verdict nobody will receive. The retry is who spends it.
+          if (callerGone()) return sayGone();
           const failed = consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);

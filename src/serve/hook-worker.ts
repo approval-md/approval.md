@@ -61,7 +61,12 @@ export interface HookJob {
   body: string;
   /** The store's log, for the warm read before the lock. */
   logPath: string;
-  /** One `Int32`: 1 while this thread holds the store lock by proxy, else 0. */
+  /**
+   * Two `Int32`s. `[0]` is 1 while this thread holds the store lock by proxy,
+   * else 0. `[1]` is set to 1 by the listener when the HTTP client that asked
+   * has gone away (or the listener is closing), and read by the hook's poll as
+   * {@link HookWaitSeam.cancelled}.
+   */
   flag: SharedArrayBuffer;
 }
 
@@ -101,6 +106,7 @@ port.on("message", (job: HookJob) => {
       post({ type: "resume" });
       held();
     },
+    cancelled: () => Atomics.load(flag, 1) === 1,
   };
 
   const out: string[] = [];

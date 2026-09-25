@@ -7323,12 +7323,26 @@ Two appends never interleave. Inside this process the store lock is the
 reason: every append is inside one of the sections above, and the sections run
 one at a time. Across processes (a daemon, a CLI run beside this server) the
 reason is the one every `approval` process relies on: each append takes the
-log's lockfile and compares-and-appends against the head it read. Closing the
-listener stops a hook call that is still waiting, never one in a mutation
-section, so no append lockfile is left behind; the question it opened stays
-open for the retry grace, exactly as for an `approval hook` process that was
-killed mid-wait. A hook call whose thread fails answers a refusal,
-`serve-hook-failed`, with the harness's own block directive in `stdout`.
+log's lockfile and compares-and-appends against the head it read.
+
+**A client that goes away is not answered, and does not spend.** When the HTTP
+connection of a waiting hook call closes before its answer, the call stops at
+its next poll tick without spending a grant and without withdrawing its
+question, and nothing is sent. A grant that lands afterwards is left for the
+harness's retry of the same command, which carries it and spends it once; an
+undecided question is adopted by that retry. A call still in line for a
+thread simply leaves the line. A grant already spent before the connection
+closed stays spent.
+
+Closing the listener runs in this order: stop accepting connections; cancel
+every hook call the same way (waiting calls stop at their next tick, queued
+ones leave the line); terminate the hook threads from inside the store lock,
+which also waits out any verb or mutation section still running, so no thread
+is killed while holding the log's append lockfile; and only then destroy the
+remaining sockets. A question a cancelled call opened stays open for the retry
+grace, exactly as for an `approval hook` process that was killed mid-wait. A
+hook call whose thread fails answers a refusal, `serve-hook-failed`, with the
+harness's own block directive in `stdout`.
 
 ## muse
 

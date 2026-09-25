@@ -76,6 +76,17 @@ export class HookSaturatedError extends Error {
   }
 }
 
+/**
+ * A call that will never be answered, because its client went away or the
+ * listener is closing. Nothing is sent for it.
+ */
+export class HookCancelledError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "HookCancelledError";
+  }
+}
+
 /** The pool's state, for diagnostics and the tests that bound it. */
 export interface HookThreadStats {
   /** Threads that exist (running or idle), not counting ones being terminated. */
@@ -99,11 +110,25 @@ export interface HookOutcome {
 }
 
 export interface HookThreads {
-  /** Run `approval hook <argv>` with `body` as its stdin, under `lock`'s sections. */
-  run(argv: string[], cwd: string, logPath: string, body: string): Promise<HookOutcome>;
   /**
-   * Terminate every thread, busy or idle, never inside a mutation section. A
-   * call in flight rejects.
+   * Run `approval hook <argv>` with `body` as its stdin, under `lock`'s
+   * sections. `signal` aborts when the caller has gone away: a queued call
+   * leaves the line, and a running one stops at its next poll tick without
+   * spending or withdrawing (see `HookWaitSeam.cancelled`). Either way the
+   * promise may still settle with the hook's own output, which nobody is owed.
+   */
+  run(
+    argv: string[],
+    cwd: string,
+    logPath: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<HookOutcome>;
+  /**
+   * Shut the pool down: cancel every running call and every queued one, then
+   * terminate every thread, busy or idle, from inside the store lock so that
+   * none is killed in a mutation section. A call in flight rejects or settles
+   * with output nobody is owed.
    */
   close(): Promise<void>;
   /** The pool's state now. */
@@ -120,7 +145,9 @@ export function hookThreads(
   /** Calls holding a slot. Never more than `limits.threads`. */
   let busy = 0;
   /** Calls waiting for a slot, oldest first. */
-  const waiting: Array<() => void> = [];
+  const waiting: Array<{ grant: () => void; drop: (cause: Error) => void }> = [];
+  /** The cancel word of every call running on a thread. */
+  const running = new Set<Int32Array>();
   let peakThreads = 0;
 
   /**
@@ -129,19 +156,40 @@ export function hookThreads(
    * A thread is only ever spawned by a call holding a slot and finding no idle
    * thread, so the threads that exist never outnumber the slots.
    */
-  async function slot(): Promise<void> {
+  async function slot(signal: AbortSignal | undefined): Promise<void> {
     if (busy < limits.threads) {
       busy += 1;
       return;
     }
     if (waiting.length >= limits.queue) throw new HookSaturatedError(limits);
-    // The slot is handed over by `freeSlot`, so `busy` is unchanged by it.
-    await new Promise<void>((granted) => waiting.push(granted));
+    // The slot is handed over by `freeSlot`, so `busy` is unchanged by it. A
+    // caller that leaves while in line leaves the line: it has opened nothing,
+    // and a slot spent on it would be a slot a caller who is still there waits
+    // for.
+    await new Promise<void>((granted, dropped) => {
+      const entry = {
+        grant: () => {
+          signal?.removeEventListener("abort", leave);
+          granted();
+        },
+        drop: (cause: Error) => {
+          signal?.removeEventListener("abort", leave);
+          dropped(cause);
+        },
+      };
+      function leave(): void {
+        const at = waiting.indexOf(entry);
+        if (at !== -1) waiting.splice(at, 1);
+        entry.drop(new HookCancelledError("the caller went away while its hook call was queued"));
+      }
+      waiting.push(entry);
+      signal?.addEventListener("abort", leave, { once: true });
+    });
   }
 
   function freeSlot(): void {
     const next = waiting.shift();
-    if (next !== undefined) next();
+    if (next !== undefined) next.grant();
     else busy -= 1;
   }
 
@@ -179,11 +227,18 @@ export function hookThreads(
     else retire(worker);
   }
 
-  async function run(argv: string[], cwd: string, logPath: string, body: string): Promise<HookOutcome> {
-    if (closed) throw new Error("the listener is closing");
-    await slot();
+  async function run(
+    argv: string[],
+    cwd: string,
+    logPath: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<HookOutcome> {
+    if (closed) throw new HookCancelledError("the listener is closing");
+    if (signal?.aborted === true) throw new HookCancelledError("the caller went away");
+    await slot(signal);
     try {
-      return await runOnThread(argv, cwd, logPath, body);
+      return await runOnThread(argv, cwd, logPath, body, signal);
     } finally {
       freeSlot();
     }
@@ -194,11 +249,20 @@ export function hookThreads(
     cwd: string,
     logPath: string,
     body: string,
+    signal: AbortSignal | undefined,
   ): Promise<HookOutcome> {
-    if (closed) throw new Error("the listener is closing");
+    if (closed) throw new HookCancelledError("the listener is closing");
+    if (signal?.aborted === true) throw new HookCancelledError("the caller went away");
     const worker = idle.pop() ?? spawn();
-    const shared = new SharedArrayBuffer(4);
+    const shared = new SharedArrayBuffer(8);
     const flag = new Int32Array(shared);
+    // The cancel word the hook's poll reads every tick. Set, never cleared: a
+    // call whose caller left is over whatever happens next.
+    const cancel = (): void => {
+      Atomics.store(flag, 1, 1);
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    running.add(flag);
 
     return await new Promise<HookOutcome>((settle, fail) => {
       /** Ends the section the thread is in, when it is in one. */
@@ -230,6 +294,8 @@ export function hookThreads(
       const finish = (): void => {
         finished = true;
         leave();
+        running.delete(flag);
+        signal?.removeEventListener("abort", cancel);
         worker.off("message", onMessage);
         worker.off("exit", onExit);
       };
@@ -274,6 +340,13 @@ export function hookThreads(
     stats: () => ({ threads: all.size, busy, queued: waiting.length, peakThreads }),
     close: async () => {
       closed = true;
+      // Every running call stops at its next poll tick without spending or
+      // withdrawing, exactly as for a client that went away; nobody in line
+      // will be served.
+      for (const flag of running) Atomics.store(flag, 1, 1);
+      for (const entry of waiting.splice(0)) {
+        entry.drop(new HookCancelledError("the listener is closing"));
+      }
       const resting = idle.splice(0);
       await Promise.all(resting.map(async (worker) => await worker.terminate()));
       // A busy thread is terminated only from INSIDE the store lock. Holding it
