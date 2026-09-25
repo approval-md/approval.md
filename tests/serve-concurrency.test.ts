@@ -501,11 +501,17 @@ function hookWithReader(
   dir: string,
   toolUseId: string,
   pollRead: (logPath: string) => ReadRecordsResult,
+  timing: { timeout: string; interval: string } = { timeout: "30s", interval: "20ms" },
 ): { verdict: { permission: string; reason: string }; err: string } {
   let out = "";
   let err = "";
   commandHook(
-    ["claude-code", ...hookArgv({ actor: ACTOR, cwd: dir, hookTimeout: "30s" }), "--interval", "20ms"],
+    [
+      "claude-code",
+      ...hookArgv({ actor: ACTOR, cwd: dir, hookTimeout: timing.timeout }),
+      "--interval",
+      timing.interval,
+    ],
     {
       out: (text) => {
         out += text;
@@ -775,5 +781,39 @@ test("review 4: a client that disconnects mid-wait leaves its question for the r
     assert.equal(spent.length, 1, `the grant was spent ${String(spent.length)} times`);
   } finally {
     await server.close();
+  }
+});
+
+test("review pass 3: a torn read on the deadline tick takes the timeout path and leaves the question open", async () => {
+  for (const [label, cleanFirst] of [
+    ["after a clean read", true],
+    ["with no clean read at all", false],
+  ] as const) {
+    const { dir, logPath } = await ready();
+    const id = cleanFirst ? "tu-dl-clean" : "tu-dl-torn";
+    let reads = 0;
+    // A 150 ms wait polled every 50 ms: three torn reads fit before the
+    // deadline, well inside TORN_TAIL_RETRIES, so the tick that crosses the
+    // deadline is itself torn and is the case under test.
+    const { verdict } = hookWithReader(
+      dir,
+      id,
+      (path) => {
+        reads += 1;
+        return cleanFirst && reads === 1 ? readVerifiedRecords(path) : TORN;
+      },
+      { timeout: "150ms", interval: "50ms" },
+    );
+    assert.ok(reads <= TORN_TAIL_RETRIES, `${label}: ${String(reads)} reads, so the retries ran out first`);
+    assert.equal(verdict.permission, "deny", label);
+    assert.match(verdict.reason, /^hook-timeout/u, `${label}: ${verdict.reason}`);
+    assert.match(verdict.reason, /NOTHING WAS WITHDRAWN/u, label);
+    const log = records(logPath);
+    assert.equal(
+      log.filter((record) => record.event === "approval.withdrawn").length,
+      0,
+      `${label}: a torn read on the deadline withdrew the question`,
+    );
+    assert.ok(log.some((record) => record.event === "approval.requested" && record.action_key === keyOf(id)));
   }
 });

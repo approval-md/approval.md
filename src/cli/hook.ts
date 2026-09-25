@@ -4131,6 +4131,8 @@ export function gateHarnessCall(
   let saidLagging = false;
   /** Consecutive torn-tail reads, for {@link TORN_TAIL_RETRIES}. */
   let tornReads = 0;
+  /** The last whole verified view this wait read, for a torn read at the deadline. */
+  let lastClean: Extract<ReadRecordsResult, { ok: true }> | null = null;
   const callerGone = (): boolean => run.waitSeam?.cancelled?.() === true;
   /** The verdict for a caller that went away: nothing spent, nothing withdrawn. */
   const sayGone = (): HarnessVerdict =>
@@ -4146,23 +4148,34 @@ export function gateHarnessCall(
   try {
     for (;;) {
       if (callerGone()) return sayGone();
-      const read = pollRead(run.logPath);
-      if (
-        !read.ok &&
-        read.code === "log-torn-tail" &&
-        tornReads < TORN_TAIL_RETRIES &&
-        Date.now() < deadline
-      ) {
-        // Another writer's line, caught half-landed. Read again next tick; see
-        // TORN_TAIL_RETRIES. Said once, like the lagging view below.
-        if (tornReads === 0) {
-          streams.err(
-            `approval: the log's last line was incomplete when this hook read it (another writer mid-append); reading again rather than giving up on ${task}\n`,
+      let read = pollRead(run.logPath);
+      if (!read.ok && read.code === "log-torn-tail" && tornReads < TORN_TAIL_RETRIES) {
+        if (Date.now() < deadline) {
+          // Another writer's line, caught half-landed. Read again next tick;
+          // see TORN_TAIL_RETRIES. Said once, like the lagging view below.
+          if (tornReads === 0) {
+            streams.err(
+              `approval: the log's last line was incomplete when this hook read it (another writer mid-append); reading again rather than giving up on ${task}\n`,
+            );
+          }
+          tornReads += 1;
+          sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+          continue;
+        }
+        // AT the deadline (APRV-427 review). A clean read at this tick would
+        // take the timeout path and leave the question open for the retry
+        // grace; someone else's half-written line must not turn that into a
+        // withdrawal. So the tick is judged by the last whole view this wait
+        // read, and the timeout path below runs on it. Only a tail that stays
+        // torn past the retries, a write nobody is going to finish, still
+        // withdraws and denies.
+        if (lastClean === null) {
+          return sayDeny(
+            "hook-timeout",
+            `no decision on ${waitKeys.join(", ")} within the hook's ${waitText(run)}, and the log's last line was incomplete when the wait ended (another writer mid-append). This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.`,
           );
         }
-        tornReads += 1;
-        sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
-        continue;
+        read = lastClean;
       }
       if (!read.ok) {
         leaveWait();
@@ -4175,6 +4188,7 @@ export function gateHarnessCall(
         return sayDeny("hook-io", read.message);
       }
       tornReads = 0;
+      lastClean = read;
 
       const ts = new Date().toISOString();
       // Only the keys this invocation is waiting on count. Deriving the set
