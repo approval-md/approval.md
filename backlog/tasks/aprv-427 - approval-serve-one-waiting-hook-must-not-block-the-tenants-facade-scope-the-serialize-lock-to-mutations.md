@@ -3,11 +3,11 @@ id: APRV-427
 title: >-
   approval serve: one waiting hook must not block the tenant's facade; scope the
   serialize lock to mutations
-status: In Progress
+status: Done
 assignee:
   - '@opus-427'
 created_date: '2026-09-22 01:27'
-updated_date: '2026-09-25 07:03'
+updated_date: '2026-09-25 07:17'
 labels:
   - hosting
   - serve
@@ -114,4 +114,12 @@ FOURTH PASS (narrow recheck of the third round: safety held; three low-severity 
 - awaitingLock is asserted back at 0 after the cancel test and the budget-saturated test.
 Tests: "fourth pass 1: the hook runs on the exact remainder it was admitted with" (remainder 60005 ms under a 300 s cap is recorded as 60005, no too-short; fails with the pass-through removed), "fourth pass 2: a charged ceiling is named as what is left of the operator's number", "fourth pass 3: a torn deadline tick with no clean read names an expiry that comes before the grace".
 Validation: typecheck and oxlint clean; targeted suites (serve*, mcp-*, every cli-hook-*, log, log-subscribe, codex-bridge, harness-cap-ttl, cli-help, docs-guard) 573/573 pass.
+
+REVIEW OUTCOME (coordinator, 2026-09-25): adversarial refutation ran in three rounds on PR #553 (full diff, then two impact-scoped rechecks of the changed seams). Every finding is fixed above with a test that fails without the fix, or recorded as a note with the reason it is accepted (note 4 realpath before the directory exists; note 5 shutdown wait; POST /verb/wait on the listener thread is APRV-441). Last narrow recheck (arrival-time budget, cancel before intake, torn read at the deadline) found no safety defect: nothing spent, withdrawn or appended for a caller that left, lock never leaked, null or never-fitting caps never refused as saturated. Merged with CI green on 542f96a5.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval serve no longer stalls the tenant's facade while a hook call waits for a human. Hook calls run on a bounded pool of worker threads (--hook-threads 16, --hook-queue 64) that take the per-store lock only for mutation sections and release it during the poll; verbs, /status, /log/follow and /export keep the lock as before. Hardening from three review rounds: torn-tail reads retried then judged on the last verified view; warm read outside the lock; saturation refused as serve-hook-saturated (503, hook-dialect block, nothing appended), including a harness-cap budget charged from the call's arrival and admitted once on the exact remainder; disconnected callers stop without spending; shutdown cancels before it destroys. Verified by tests/serve-concurrency.test.ts (AC1 to AC3 plus one test per review finding, mutation-checked), docs/cli-reference.md serve section (AC4), targeted suites 573/573, full npm test 5373 pass with no new failures, CI green on 542f96a5.
+<!-- SECTION:FINAL_SUMMARY:END -->
