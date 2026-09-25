@@ -99,9 +99,13 @@ THE SEQUENCE.
      that will never come.
   3. approval wait <task> --timeout <duration>
      Blocks until every request of the task is decided. THE EXIT CODE IS THE
-     DECISION: 0 granted, 1 rejected, revoked or withdrawn (--json status says
-     which), 3 expired, 6 timeout. A timeout is not an answer: the request is
-     still live and waiting again is legitimate.
+     DECISION: 0 granted or nothing-to-wait-for, 1 rejected, revoked, withdrawn
+     or not-registered (a task the log never registered), 3 expired, 6 timeout.
+     Exit 0 alone is not a grant: proceed to run only on --json status
+     "granted", which means a granted action whose grant is not yet spent.
+     nothing-to-wait-for means no request is open or every grant is already
+     used. A timeout is not an answer: the request is still live and waiting
+     again is legitimate.
   3b. approval withdraw <task> --action <key> --reason timeout
      IF YOU STOP WAITING, SAY SO. A pending request you can no longer act on is
      a question a person will still be asked, and their attention is the scarce

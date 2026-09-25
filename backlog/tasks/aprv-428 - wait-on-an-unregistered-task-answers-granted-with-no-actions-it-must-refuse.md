@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-428'
 created_date: '2026-09-22 01:27'
-updated_date: '2026-09-25 04:11'
+updated_date: '2026-09-25 04:29'
 labels:
   - wait
   - gate
@@ -56,6 +56,11 @@ Implementation (APRV-428):
 - Not done (flag for human): SPEC §11.2's gate_refusal_codes preamble enumerates register/request/decide/withdraw/expire as the union's emitters; wait now also emits not-registered (it already emitted log-unreadable/log-torn-tail, which are members too). A one-clause SPEC amendment naming wait would make that explicit; left out because SPEC edits are policy.edit and the code's condition row is unchanged.
 
 Validation: cli-run 32/32 (new: 'wait on a task the log never registered refuses not-registered at exit 1', 'wait on an empty log refuses not-registered too, rather than granting', 'wait after the only grant was spent answers nothing-to-wait-for, not granted', 'wait with one grant spent and one still unspent answers granted'; rewritten: 'wait on a task with no requests returns immediately with 0, and never says granted', which had asserted the old vacuous grant). serve 45/45 incl. new 'wait on a task the log never registered carries not-registered through serve' (exit_code 1, stderr error.code not-registered, log digest unchanged). Existing genuine-grant wait tests (cli-run 'wait exits 0 when a grant lands mid-wait', sealed-delivery wait cases) pass unmodified. Targeted gate/cli-gate/conformance/conformance-regen/sealed-delivery/mcp-*/help/instructions: 343 pass, 0 fail. conformance/run.mjs clean; refusal-unions.v1.json unchanged (no code added). typecheck + oxlint clean. Full npm test --baseline: 5360 pass, 2 fail, SMTP/APRV-416 failures 0 of the 22 baselined. The 2 non-baseline failures (cli-quickstart 'Telegram preflight uses the selected local API...', demo-provision '--check reports the instance's doctor...') were doctor build-freshness: I edited verb-registry.ts mid-run, which made dist stale; both pass on a fresh build in isolation.
+
+Refutation follow-up (behaviour clean; three items):
+1. Agent-facing text that still read exit 0 as granted is updated: src/cli/instructions.ts (the sequence's step 3), src/cli/help.ts (root verb list), docs/dogfood-cutover.md (step 3). Each now says exit 0 is granted OR nothing-to-wait-for, exit 1 includes not-registered, and only --json status "granted" (an unspent grant) means proceed to run. Suites: cli-instructions, cli-help, cli-long-help, docs-guard, cli-run, mcp-server 115 pass / 0 fail; typecheck and oxlint clean.
+2. Proposed SPEC §11.2 amendment, NOT applied (rides Carter's attestation batch): in the gate_refusal_codes preamble, change "every way register, request, decide, withdraw, expire, the policy-amendment ceremony, and harness-grant consumption can refuse" to also name wait, e.g. "... expire, wait (not-registered and the log-read codes; APRV-428), the policy-amendment ceremony, ...". Union membership and every code's condition row are unchanged, so no vector bump.
+3. Residual raised by the refuter: a verified view that is behind this process's own appends (log-sync or daemon-restart lag, the case SPEC §11.1 invariant 1's APRV-294 scope note covers) used to answer granted [] and now answers not-registered at exit 1 on the first pass. This is the safer direction: the lagging view now yields a refusal where it used to yield a success, so nothing proceeds on a registration the verified chain does not carry, and waiting again is harmless. If it ever needs the keep-waiting treatment, hook.ts's APRV-294 handling is the model: keep polling inside the existing --timeout bound and report that the view lags, never reading unverified bytes. Not implemented here because a plain CLI wait has no record of its own earlier appends to tell lag from a typo.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
