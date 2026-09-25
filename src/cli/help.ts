@@ -2601,7 +2601,6 @@ ${why("setup-service")}`;
 // ---------------------------------------------------------------------------
 
 export const CODEX_HELP = `approval codex — prepare a constrained Codex host and broker its workspace writes
-
 Usage:
   approval codex prepare --instance <id> --workspace <abs> --primary <abs>
       --install-root <abs> --output <new-dir> --codex <abs> --node <abs> [--json]
@@ -2611,6 +2610,7 @@ Usage:
       [--token <class>=<token>]... [--require-exclusive-custody]
   approval codex serve|recover --manifest <abs> [--json]
   approval codex start --manifest <abs> [--timeout <dur>] [--json] [-- <cmd>...]
+  approval codex bridge (--prompt <text>|--interactive) [--workspace <dir>] [--json]
 
 prepare, setup --check and doctor are the inert half: a review bundle, its exact
 file set and hashes, and host custody, executing no manifest binary. apply is the
@@ -2620,7 +2620,6 @@ and applied under a workspace lock; the MANIFEST supplies actor, root, policy an
 log. recover READS a retained journal, repairing nothing. serve is EXACTLY ONE MCP
 tool, separate from \`approval mcp serve\`. start CONFINES a shell: one disposable
 writable path, read-only gate and workspace, no credentials, no egress, NO OPT-OUT.
-
 ${EXIT_CODES_POINTER} (1: the boundary is absent, invalid, or the workspace mixed)
 ${JSON_ERRORS}
 why: docs/cli-reference.md#constrained-codex-preparation`;

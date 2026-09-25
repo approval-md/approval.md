@@ -60,9 +60,21 @@
  *                else answered the question before this client saw it.
  */
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 
 const script = JSON.parse(process.env["APPROVAL_STUB_SCRIPT"] ?? "[]");
+const turnScripts = JSON.parse(process.env["APPROVAL_STUB_TURN_SCRIPTS"] ?? "null");
+const liveEnd = process.env["APPROVAL_STUB_LIVE_END"] ?? "completed";
+const completedStatus = process.env["APPROVAL_STUB_COMPLETED_STATUS"] ?? "completed";
+const stayOpen = process.env["APPROVAL_STUB_STAY_OPEN"] === "1";
+const silence = process.env["APPROVAL_STUB_SILENCE"] ?? "";
+const ignoreSigterm = process.env["APPROVAL_STUB_IGNORE_SIGTERM"] === "1";
+const pidPath = process.env["APPROVAL_STUB_PID_PATH"] ?? null;
+const endWhileWaiting = process.env["APPROVAL_STUB_END_WHILE_WAITING"] === "1";
+const whileWaiting = JSON.parse(process.env["APPROVAL_STUB_WHILE_WAITING"] ?? "[]");
+const whileWaitingTrigger = process.env["APPROVAL_STUB_WHILE_WAITING_TRIGGER"] ?? null;
+const duplicateResponse = process.env["APPROVAL_STUB_DUPLICATE_RESPONSE"] ?? "";
+const silenceAfterScript = process.env["APPROVAL_STUB_SILENCE_AFTER_SCRIPT"] === "1";
 const repliesPath = process.env["APPROVAL_STUB_REPLIES"] ?? null;
 const threadError = JSON.parse(process.env["APPROVAL_STUB_THREAD_ERROR"] ?? "null");
 const threadResult = JSON.parse(process.env["APPROVAL_STUB_THREAD_RESULT"] ?? "null");
@@ -74,9 +86,13 @@ let next = 0;
 let nextId = 1000;
 /** Which turn the next `turn/start` is: the probe, then the real one. */
 let turns = 0;
+let liveTurn = 0;
 const PREFLIGHT_TURN = "turn-preflight";
 /** The id of the probe's own approval request, so its reply is not a script reply. */
 let probeRequestId = null;
+
+if (pidPath !== null) writeFileSync(pidPath, `${String(process.pid)}\n`, "utf8");
+if (ignoreSigterm) process.on("SIGTERM", () => {});
 
 function write(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -89,16 +105,20 @@ function record(frame) {
 
 /** Send the next scripted request, or end the turn when the script runs out. */
 function advance() {
-  if (next >= script.length) {
-    write({ method: "turn/completed", params: { turnId: "turn-1" } });
+  const activeScript = turnScripts?.[liveTurn - 1] ?? script;
+  if (next >= activeScript.length) {
+    if (silenceAfterScript) return;
+    if (liveEnd === "exit") process.exit(7);
+    write({ method: liveEnd === "failed" ? "turn/failed" : "turn/completed", params: {
+      threadId: "thread-1", turnId: `turn-${liveTurn}`,
+      turn: { id: `turn-${liveTurn}`, status: liveEnd === "failed" ? "failed" : completedStatus },
+    } });
     // The real server stays alive; this one has nothing left to say, and a
     // process that lingered would make every test wait out a kill.
-    setTimeout(() => {
-      process.exit(0);
-    }, 50);
+    if (!stayOpen) setTimeout(() => process.exit(0), 50);
     return;
   }
-  const entry = script[next];
+  const entry = activeScript[next];
   next += 1;
   // A NOTIFICATION: sent with no id, so nothing is waiting for a reply and the
   // script continues immediately (APRV-379). The recursion is the script's own
@@ -108,9 +128,36 @@ function advance() {
     advance();
     return;
   }
+  if (typeof entry.raw === "string") {
+    process.stdout.write(`${entry.raw}\n`);
+    advance();
+    return;
+  }
   const id = nextId;
   nextId += 1;
   write({ id, method: entry.method, params: entry.params ?? {} });
+  for (const scheduled of whileWaiting) {
+    const emit = () => {
+      record({ kind: "while-waiting-notify", method: scheduled.notify ?? null });
+      if (typeof scheduled.raw === "string") process.stdout.write(`${scheduled.raw}\n`);
+      else write({ method: scheduled.notify, params: scheduled.params ?? {} });
+    };
+    if (whileWaitingTrigger === null) {
+      setTimeout(emit, scheduled.delayMs ?? 50);
+    } else {
+      const poll = setInterval(() => {
+        if (!existsSync(whileWaitingTrigger)) return;
+        clearInterval(poll);
+        emit();
+      }, 10);
+    }
+  }
+  if (endWhileWaiting) {
+    setTimeout(() => write({ method: "turn/completed", params: {
+      threadId: "thread-1", turnId: `turn-${liveTurn}`,
+      turn: { id: `turn-${liveTurn}`, status: "completed" },
+    } }), 50);
+  }
 }
 
 /** The probe turn, in whichever of the four shapes the case asked for. */
@@ -149,7 +196,7 @@ function runPreflight() {
         item: { id: "item-preflight", type: "commandExecution", command: "true", exitCode: 0 },
       },
     });
-    write({ method: "turn/completed", params: { turnId: PREFLIGHT_TURN } });
+    write({ method: "turn/completed", params: { threadId: "thread-1", turnId: PREFLIGHT_TURN, turn: { id: PREFLIGHT_TURN, status: "completed" } } });
     return;
   }
   if (preflight === "auto-review") {
@@ -163,7 +210,7 @@ function runPreflight() {
         source: "agent",
       },
     });
-    write({ method: "turn/completed", params: { turnId: PREFLIGHT_TURN } });
+    write({ method: "turn/completed", params: { threadId: "thread-1", turnId: PREFLIGHT_TURN, turn: { id: PREFLIGHT_TURN, status: "completed" } } });
     return;
   }
   // `void`: the model answered in prose and ran nothing.
@@ -175,7 +222,7 @@ function runPreflight() {
       item: { id: "item-prose", type: "agentMessage", text: "nothing to run" },
     },
   });
-  write({ method: "turn/completed", params: { turnId: PREFLIGHT_TURN } });
+  write({ method: "turn/completed", params: { threadId: "thread-1", turnId: PREFLIGHT_TURN, turn: { id: PREFLIGHT_TURN, status: "completed" } } });
 }
 
 process.stdin.on("data", (chunk) => {
@@ -194,17 +241,23 @@ process.stdin.on("data", (chunk) => {
     }
 
     if (frame.method === "initialize") {
-      write({ id: frame.id, result: { userAgent: "codex-app-server-stub" } });
+      if (silence === "initialize") continue;
+      const response = { id: frame.id, result: { userAgent: "codex-app-server-stub" } };
+      write(response);
+      if (duplicateResponse === "initialize") write(response);
       continue;
     }
     if (frame.method === "initialized") continue;
     if (frame.method === "thread/start") {
       record({ kind: "thread/start", params: frame.params ?? {} });
+      if (silence === "thread") continue;
       if (threadError !== null) {
         write({ id: frame.id, error: threadError });
         continue;
       }
-      write({ id: frame.id, result: { threadId: "thread-1", ...threadResult } });
+      const response = { id: frame.id, result: { threadId: "thread-1", ...threadResult } };
+      write(response);
+      if (duplicateResponse === "thread/start") write(response);
       if (threadStarted !== null) write({ method: "thread/started", params: threadStarted });
       continue;
     }
@@ -212,12 +265,16 @@ process.stdin.on("data", (chunk) => {
       turns += 1;
       if (turns === 1) {
         record({ kind: "turn/start", turn: "preflight", params: frame.params ?? {} });
+        if (silence === "preflight") continue;
         write({ id: frame.id, result: { turnId: PREFLIGHT_TURN } });
         runPreflight();
         continue;
       }
       record({ kind: "turn/start", turn: "live", params: frame.params ?? {} });
-      write({ id: frame.id, result: { turnId: "turn-1" } });
+      if (silence === "live") continue;
+      liveTurn += 1;
+      next = 0;
+      write({ id: frame.id, result: { turnId: `turn-${liveTurn}` } });
       advance();
       continue;
     }
@@ -231,7 +288,7 @@ process.stdin.on("data", (chunk) => {
         // The probe was answered, so the probe turn is over. The real turn is
         // the bridge's to start.
         probeRequestId = null;
-        write({ method: "turn/completed", params: { turnId: PREFLIGHT_TURN } });
+        write({ method: "turn/completed", params: { threadId: "thread-1", turnId: PREFLIGHT_TURN, turn: { id: PREFLIGHT_TURN, status: "completed" } } });
         continue;
       }
       record({ kind: "reply", id: frame.id, result: frame.result ?? null });

@@ -202,6 +202,8 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
+import { createInterface, type Interface } from "node:readline";
+import { Worker } from "node:worker_threads";
 
 import { boolFlag, parseFlags, stringFlag } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -240,6 +242,10 @@ export const SANDBOX = "read-only";
 
 /** Polling interval for the gate's verified read, in milliseconds. */
 const DEFAULT_INTERVAL_MS = 2000;
+/** Bound app-server protocol silence independently from a human approval wait. */
+const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30_000;
+/** Give an owned child a short graceful stop before making cleanup definite. */
+const CHILD_TERMINATION_GRACE_MS = 250;
 
 /**
  * The decision words this verb will send, most literal first.
@@ -356,6 +362,8 @@ export const BRIDGE_REFUSAL_CODES = [
   "bridge-command-unbound",
   /** An exec request carrying no command string, or no cwd. */
   "bridge-request-unbound",
+  /** A question names another thread or turn, or repeats an answered call. */
+  "bridge-request-mismatch",
 ] as const;
 
 export type BridgeRefusalCode = (typeof BRIDGE_REFUSAL_CODES)[number];
@@ -428,6 +436,11 @@ export const BRIDGE_STOP_CODES = [
    * verbatim, and nothing is retried: an operator runs the verb again.
    */
   "bridge-preflight-void",
+  /** A turn failed or the owned app-server disappeared before its completion. */
+  "bridge-turn-failed",
+  "bridge-server-exited",
+  /** The owned server stopped answering during setup or an active turn. */
+  "bridge-server-silent",
 ] as const;
 
 export type BridgeStopCode = (typeof BRIDGE_STOP_CODES)[number];
@@ -577,8 +590,13 @@ export interface BridgeAnswer {
   method: string;
   /** The server's own id for the request, echoed on the reply. */
   id: unknown;
+  threadId: string | null;
+  turnId: string | null;
+  itemId: string | null;
   /** `accept` or `decline`, as this verb decided it. */
   outcome: BridgeOutcome;
+  /** A decision is not proof that the child actually completed the action. */
+  executionOutcome: "unknown" | "not-authorized";
   /**
    * The word actually sent: one of the eight this runtime names, chosen to
    * match what the request advertised (APRV-367). Its TYPE is the vocabulary,
@@ -661,6 +679,23 @@ function stringField(source: unknown, key: string): string | null {
   if (source === null || typeof source !== "object") return null;
   const value = (source as Record<string, unknown>)[key];
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function completedTurnStatus(params: unknown): { ok: true } | { ok: false; detail: string } {
+  if (params === null || typeof params !== "object") return { ok: false, detail: "missing turn data" };
+  const top = params as Record<string, unknown>;
+  const nested = top["turn"];
+  const turn = nested !== null && typeof nested === "object" ? nested as Record<string, unknown> : top;
+  const namedTurn = turnIdOf(top);
+  const nestedTurn = stringField(turn, "id");
+  if (nestedTurn !== null && (namedTurn === null || nestedTurn !== namedTurn)) {
+    return { ok: false, detail: "nested turn identity conflicts with the notification" };
+  }
+  const status = stringField(turn, "status") ?? stringField(top, "status");
+  if (status !== "completed") return { ok: false, detail: `turn status is ${JSON.stringify(status)}` };
+  const error = turn["error"] ?? top["error"];
+  if (error !== undefined && error !== null) return { ok: false, detail: `turn error is ${JSON.stringify(error)}` };
+  return { ok: true };
 }
 
 /**
@@ -759,11 +794,27 @@ export function bindCommand(params: unknown): BoundCommand | null {
  * the task id is derived from.
  */
 function callIdOf(params: unknown): string | null {
+  const itemId = stringField(params, "itemId");
+  const callId = stringField(params, "callId");
+  if (itemId !== null && callId !== null && itemId !== callId) return null;
   return (
-    stringField(params, "itemId") ??
-    stringField(params, "callId") ??
+    itemId ??
+    callId ??
     stringField(params, "approvalId")
   );
+}
+
+function threadIdOf(params: unknown): string | null {
+  const threadId = stringField(params, "threadId");
+  const conversationId = stringField(params, "conversationId");
+  if (threadId !== null && conversationId !== null && threadId !== conversationId) return null;
+  return threadId ?? conversationId;
+}
+
+/** Notifications that bind an owned turn or item must name threadId itself. */
+function explicitThreadIdOf(params: unknown): string | null {
+  const explicit = stringField(params, "threadId");
+  return explicit !== null && threadIdOf(params) === explicit ? explicit : null;
 }
 
 /**
@@ -776,7 +827,10 @@ function callIdOf(params: unknown): string | null {
  * which of two phases a frame belongs to.
  */
 export function turnIdOf(params: unknown): string | null {
-  return stringField(params, "turnId") ?? stringField(params, "turn_id");
+  const turnId = stringField(params, "turnId");
+  const alternate = stringField(params, "turn_id");
+  if (turnId !== null && alternate !== null && turnId !== alternate) return null;
+  return turnId ?? alternate;
 }
 
 /**
@@ -860,6 +914,7 @@ class Connection {
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
     private readonly onFrame: (frame: Frame) => void,
+    private readonly onMalformed: (detail: string) => void,
   ) {
     this.child.stdout.on("data", (chunk: Buffer) => {
       this.absorb(chunk);
@@ -877,8 +932,8 @@ class Connection {
         const header = this.buffer.subarray(0, end).toString("utf8");
         const match = /Content-Length:\s*(\d+)/iu.exec(header);
         if (match === null) {
-          this.buffer = this.buffer.subarray(end + 4);
-          continue;
+          this.onMalformed("invalid Content-Length header");
+          return;
         }
         const length = Number(match[1]);
         if (this.buffer.length < end + 4 + length) return;
@@ -900,11 +955,11 @@ class Connection {
     try {
       frame = JSON.parse(text);
     } catch {
-      // Not JSON. A client that threw here would take the server down with it;
-      // an unreadable line is noise on a stream that also carries logs.
+      this.onMalformed("invalid JSON frame on app-server stdout");
       return;
     }
-    if (frame !== null && typeof frame === "object") this.onFrame(frame as Frame);
+    if (frame !== null && typeof frame === "object" && !Array.isArray(frame)) this.onFrame(frame as Frame);
+    else this.onMalformed("non-object app-server frame");
   }
 
   private write(value: unknown): void {
@@ -935,15 +990,20 @@ class Connection {
 }
 
 /** What the verb was asked to do, once the flags are read. */
-interface BridgePlan {
+export interface BridgeDecisionPlan {
   logPath: string;
   root: string;
   options: ReturnType<typeof hookScope>["options"];
   actor: string;
   workspace: string;
-  prompt: string;
   waitMs: number;
   intervalMs: number;
+}
+
+interface BridgePlan extends BridgeDecisionPlan {
+  prompt: string;
+  interactive: boolean;
+  lifecycleTimeoutMs: number;
   serverCommand: string;
   serverArgs: string[];
   json: boolean;
@@ -963,13 +1023,14 @@ function usage(streams: Streams, json: boolean, message: string): number {
  */
 export function decideExecRequest(
   streams: Streams,
-  plan: BridgePlan,
+  plan: BridgeDecisionPlan,
   params: unknown,
+  cancellation?: { cancelled: () => boolean; pause: (ms: number) => void },
 ): { verdict: HarnessVerdict; threadId: string | null } {
   const bound = bindCommand(params);
   const cwd = stringField(params, "cwd");
   const callId = callIdOf(params);
-  const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
+  const threadId = threadIdOf(params);
   if (bound === null || cwd === null || callId === null) {
     // The three fields a decision needs. Missing any one of them, there is
     // nothing to bind and nothing to classify, and the answer is no.
@@ -1038,6 +1099,7 @@ export function decideExecRequest(
       timeoutMs: plan.waitMs,
       intervalMs: plan.intervalMs,
       graceMs: HOOK_RETRY_GRACE_MS,
+      ...cancellation,
       // No open-window lookup was performed, so nothing is carried; the floor
       // and the unattended guard read the log themselves. See the module header
       // for why a window is not honoured here.
@@ -1065,6 +1127,8 @@ export interface RecordedItem {
   turnId: string | null;
   /** Has `item/completed` for this item already arrived? */
   completed: boolean;
+  /** A second start with this id makes its content ambiguous. */
+  conflicted?: boolean;
 }
 
 /**
@@ -1097,7 +1161,7 @@ export function itemChanges(item: Record<string, unknown>): readonly unknown[] |
 }
 
 /**
- * Record what an `item/started` or `item/completed` notification says
+ * Record what an `item/started`, `item/updated` or `item/completed` notification says
  * (APRV-379).
  *
  * `item/started` writes the entry, `item/completed` marks it completed and
@@ -1107,7 +1171,7 @@ export function itemChanges(item: Record<string, unknown>): readonly unknown[] |
  * client decides against is the one it was holding when the question arrived.
  */
 export function recordItemFrame(index: ItemIndex, method: string, params: unknown): void {
-  if (method !== "item/started" && method !== "item/completed") return;
+  if (method !== "item/started" && method !== "item/updated" && method !== "item/completed") return;
   if (params === null || typeof params !== "object") return;
   const holder = (params as Record<string, unknown>)["item"];
   if (holder === null || typeof holder !== "object" || Array.isArray(holder)) return;
@@ -1115,16 +1179,38 @@ export function recordItemFrame(index: ItemIndex, method: string, params: unknow
   const id = typeof item["id"] === "string" ? (item["id"] as string) : null;
   if (id === null || id.length === 0) return;
   const existing = index.get(id);
-  if (method === "item/completed") {
-    if (existing !== undefined) index.set(id, { ...existing, completed: true });
+  if (method === "item/updated") {
+    // An update may replace the bytes the worker was given. No update contract
+    // is verified here, so the original snapshot must not authorize it.
+    index.set(id, existing === undefined ? {
+      id, type: null, changes: null, threadId: null, turnId: null,
+      completed: false, conflicted: true,
+    } : { ...existing, conflicted: true });
     return;
   }
-  if (existing !== undefined) return;
+  if (method === "item/completed") {
+    if (existing === undefined) {
+      index.set(id, {
+        id, type: null, changes: null, threadId: null, turnId: null,
+        completed: true, conflicted: true,
+      });
+    } else index.set(id, {
+      ...existing,
+      completed: true,
+      conflicted: existing.conflicted === true || existing.threadId === null || existing.turnId === null ||
+        explicitThreadIdOf(params) !== existing.threadId || turnIdOf(params) !== existing.turnId,
+    });
+    return;
+  }
+  if (existing !== undefined) {
+    index.set(id, { ...existing, conflicted: true });
+    return;
+  }
   index.set(id, {
     id,
     type: typeof item["type"] === "string" ? (item["type"] as string) : null,
     changes: itemChanges(item),
-    threadId: stringField(params, "threadId"),
+    threadId: explicitThreadIdOf(params),
     turnId: turnIdOf(params),
     completed: false,
   });
@@ -1165,6 +1251,14 @@ export type Correlation =
  */
 export function correlateFileChange(index: ItemIndex, params: unknown): Correlation {
   const itemId = stringField(params, "itemId") ?? stringField(params, "callId");
+  if (stringField(params, "itemId") !== null && stringField(params, "callId") !== null &&
+      stringField(params, "itemId") !== stringField(params, "callId")) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: "the file-change request names conflicting item and call identities; nothing was appended",
+    };
+  }
   if (itemId === null) {
     return {
       ok: false,
@@ -1188,6 +1282,13 @@ export function correlateFileChange(index: ItemIndex, params: unknown): Correlat
       detail: `the file-change request names item ${JSON.stringify(itemId)}, which this client recorded as ${JSON.stringify(item.type)} and not a fileChange; a change set cannot be produced from it, so it is declined and nothing was appended`,
     };
   }
+  if (item.conflicted === true) {
+    return {
+      ok: false,
+      code: "bridge-file-change-unbound",
+      detail: `item ${JSON.stringify(itemId)} was started more than once, so its content is ambiguous; nothing was appended`,
+    };
+  }
   if (item.changes === null) {
     return {
       ok: false,
@@ -1195,8 +1296,8 @@ export function correlateFileChange(index: ItemIndex, params: unknown): Correlat
       detail: `the file-change request names item ${JSON.stringify(itemId)}, whose item/started carried no change set this client could read; there are no bytes to classify, so it is declined and nothing was appended`,
     };
   }
-  const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
-  if (threadId !== null && item.threadId !== null && threadId !== item.threadId) {
+  const threadId = threadIdOf(params);
+  if (threadId === null || item.threadId === null || threadId !== item.threadId) {
     return {
       ok: false,
       code: "bridge-file-change-unbound",
@@ -1204,7 +1305,7 @@ export function correlateFileChange(index: ItemIndex, params: unknown): Correlat
     };
   }
   const turnId = turnIdOf(params);
-  if (turnId !== null && item.turnId !== null && turnId !== item.turnId) {
+  if (turnId === null || item.turnId === null || turnId !== item.turnId) {
     return {
       ok: false,
       code: "bridge-file-change-unbound",
@@ -1268,13 +1369,14 @@ export function inlineFileChanges(params: unknown): Record<string, unknown> | nu
  */
 export function decideFileChangeRequest(
   streams: Streams,
-  plan: BridgePlan,
+  plan: BridgeDecisionPlan,
   params: unknown,
   items: ItemIndex,
+  cancellation?: { cancelled: () => boolean; pause: (ms: number) => void },
 ): { verdict: HarnessVerdict; threadId: string | null } {
   const inline = inlineFileChanges(params);
   const callId = callIdOf(params);
-  const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
+  const threadId = threadIdOf(params);
   const named = stringField(params, "cwd") ?? stringField(params, "grantRoot");
   let changes: Record<string, unknown> | readonly unknown[];
   let cwd: string;
@@ -1358,6 +1460,7 @@ export function decideFileChangeRequest(
       timeoutMs: plan.waitMs,
       intervalMs: plan.intervalMs,
       graceMs: HOOK_RETRY_GRACE_MS,
+      ...cancellation,
       windowRecords: null,
     }),
   };
@@ -1378,7 +1481,9 @@ export async function runCodexBridge(
     "--prompt": "string",
     "--wait": "string",
     "--interval": "string",
+    "--lifecycle-timeout": "string",
     "--json": "boolean",
+    "--interactive": "boolean",
     "--help": "boolean",
     "-h": "boolean",
   });
@@ -1389,7 +1494,12 @@ export async function runCodexBridge(
   }
 
   const prompt = stringFlag(parsed.flags, "--prompt") ?? "";
-  if (prompt.trim().length === 0) {
+  const interactive = boolFlag(parsed.flags, "--interactive");
+  if (interactive && json) return usage(streams, json, "--interactive cannot be combined with --json");
+  if (interactive && process.stdin.isTTY !== true) {
+    return usage(streams, json, "--interactive requires a terminal on stdin");
+  }
+  if (!interactive && prompt.trim().length === 0) {
     return usage(streams, json, "bridge requires a prompt: `approval codex bridge --prompt <text>`");
   }
   /**
@@ -1435,6 +1545,14 @@ export async function runCodexBridge(
   if (intervalMs === null || intervalMs <= 0) {
     return usage(streams, json, `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`);
   }
+  const lifecycleText = stringFlag(parsed.flags, "--lifecycle-timeout");
+  const lifecycleTimeoutMs = lifecycleText === null
+    ? DEFAULT_LIFECYCLE_TIMEOUT_MS
+    : parseDuration(lifecycleText);
+  if (lifecycleTimeoutMs === null || lifecycleTimeoutMs <= 0) {
+    return usage(streams, json,
+      `--lifecycle-timeout expects a duration like 30s or 2m, got ${JSON.stringify(lifecycleText)}`);
+  }
 
   const plan: BridgePlan = {
     logPath: scope.logPath,
@@ -1443,8 +1561,10 @@ export async function runCodexBridge(
     actor: stringFlag(parsed.flags, "--as") ?? ADAPTER.defaultActor,
     workspace,
     prompt,
+    interactive,
     waitMs,
     intervalMs,
+    lifecycleTimeoutMs,
     serverCommand: server[0] as string,
     serverArgs: server.slice(1),
     json,
@@ -1503,6 +1623,28 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     const preflightFrames: unknown[] = [];
     /** Which turn is running: the probe's, or the operator's. */
     let phase: "preflight" | "live" = "preflight";
+    let terminal: Interface | null = null;
+    let pendingPrompt = plan.prompt.trim().length > 0 ? plan.prompt : null;
+    let liveTurns = 0;
+    let turnActive = false;
+    const turns: { id: string | null; status: "started" | "completed" | "failed" | "interrupted"; answers: number }[] = [];
+    const streamedMessages = new Set<string>();
+    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminationTimer: ReturnType<typeof setTimeout> | null = null;
+    let finishCode: number | null = null;
+    let childStopped = false;
+    let decisionEpoch = 0;
+    let activeDecision: {
+      worker: Worker;
+      flag: Int32Array;
+      epoch: number;
+      requestId: string;
+      threadId: string;
+      turnId: string;
+      itemId: string | null;
+      item: RecordedItem | null;
+      itemSnapshot: string | null;
+    } | null = null;
 
     /** How the pin was confirmed, in words, for the human report. */
     const pinLine = (): string => {
@@ -1516,14 +1658,20 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     const finish = (code: number, reason: string, stop: BridgeStopCode | null = null): void => {
       if (settled) return;
       settled = true;
-      child.kill("SIGTERM");
+      finishCode = code;
+      if (silenceTimer !== null) clearTimeout(silenceTimer);
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      const activeReport = turns.at(-1);
+      if (activeReport?.status === "started") activeReport.status = "interrupted";
+      terminal?.close();
       // The frames ride only on the void stop, where they are the evidence for
       // a fact that could not be established. See `BridgePreflightRecord`.
       const preflightReport: BridgePreflightRecord =
         stop === "bridge-preflight-void" ? { ...preflight, frames: preflightFrames } : preflight;
       if (plan.json) {
         streams.out(
-          `${JSON.stringify({ ok: code === EXIT_OK, reason, ...(stop === null ? {} : { code: stop }), thread, preflight: preflightReport, answers })}\n`,
+          `${JSON.stringify({ ok: code === EXIT_OK, reason, ...(stop === null ? {} : { code: stop }), thread, preflight: preflightReport, turns, answers })}\n`,
         );
       } else {
         streams.out(`${stop === null ? reason : `${stop}: ${reason}`}\n`);
@@ -1538,11 +1686,60 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
         for (const answer of answers) {
           streams.out(
             `  ${answer.outcome === "accept" ? "granted" : "declined"}  ${answer.decision}` +
-              ` (${answer.decisionSource})  ${answer.code ?? "-"}  ${answer.detail}\n`,
+              ` (${answer.decisionSource})  ${answer.code ?? "-"}  ${answer.detail}` +
+              `  execution ${answer.executionOutcome}\n`,
           );
         }
       }
-      done(code);
+      if (activeDecision !== null) {
+        Atomics.store(activeDecision.flag, 0, 1);
+        Atomics.notify(activeDecision.flag, 0);
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        childStopped = true;
+      } else {
+        child.kill("SIGTERM");
+        terminationTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, CHILD_TERMINATION_GRACE_MS);
+      }
+      maybeDone();
+    };
+
+    const maybeDone = (): void => {
+      if (!settled || finishCode === null || !childStopped || activeDecision !== null) return;
+      if (terminationTimer !== null) clearTimeout(terminationTimer);
+      done(finishCode);
+    };
+
+    const onInterrupt = (): void => {
+      finish(EXIT_IO, "bridge interrupted by SIGINT; the owned app-server was terminated");
+    };
+    const onTerminate = (): void => {
+      finish(EXIT_IO, "bridge interrupted by SIGTERM; the owned app-server was terminated");
+    };
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+
+    const suspendSilence = (): void => {
+      if (silenceTimer !== null) clearTimeout(silenceTimer);
+      silenceTimer = null;
+    };
+
+    const armSilence = (stage: string): void => {
+      // Human gate waits and an idle interactive prompt are governed by their
+      // own lifetimes. Notifications received during either must not restart
+      // an app-server deadline.
+      if (activeDecision !== null || (plan.interactive && phase === "live" && !turnActive)) {
+        suspendSilence();
+        return;
+      }
+      suspendSilence();
+      silenceTimer = setTimeout(() => {
+        finish(EXIT_IO,
+          `the app-server was silent for ${String(plan.lifecycleTimeoutMs)}ms during ${stage}`,
+          "bridge-server-silent");
+      }, plan.lifecycleTimeoutMs);
     };
 
     /**
@@ -1578,6 +1775,59 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
     /** The `turn/start` this client sent for the probe, and for the real turn. */
     let preflightStartId = -1;
     let liveStartId = -1;
+    let liveTurnId: string | null = null;
+    const answeredCalls = new Set<string>();
+    const seenRequestIds = new Set<string>();
+    const consumedResponseIds = new Set<string>();
+
+    const startTurn = (prompt: string): void => {
+      liveTurnId = null;
+      turnActive = true;
+      liveTurns += 1;
+      turns.push({ id: null, status: "started", answers: 0 });
+      streams.err(`approval: starting turn ${String(liveTurns)} on thread ${threadId ?? "(none)"}\n`);
+      liveStartId = connection.request("turn/start", {
+        threadId,
+        input: [{ type: "text", text: prompt }],
+      });
+      armSilence(`turn ${String(liveTurns)} start`);
+    };
+
+    const nextPrompt = (): void => {
+      if (!plan.interactive) {
+        if (pendingPrompt !== null) startTurn(pendingPrompt);
+        pendingPrompt = null;
+        return;
+      }
+      if (pendingPrompt !== null) {
+        const prompt = pendingPrompt;
+        pendingPrompt = null;
+        startTurn(prompt);
+        return;
+      }
+      suspendSilence();
+      if (terminal === null) {
+        terminal = createInterface({ input: process.stdin, output: process.stdout });
+        terminal.on("close", () => {
+          if (!settled) finish(turnActive ? EXIT_IO : EXIT_OK,
+            turnActive ? "terminal input closed while a turn was still running" :
+              `interactive session ended after ${String(liveTurns)} turn(s)`);
+        });
+        terminal.on("SIGINT", () => {
+          finish(EXIT_IO, "interactive session interrupted before another turn completed");
+        });
+      }
+      terminal.question("codex> ", (line) => {
+        const prompt = line.trim();
+        if (prompt === "/quit" || prompt === "/exit") {
+          finish(EXIT_OK, `interactive session ended after ${String(liveTurns)} turn(s)`);
+        } else if (prompt.length === 0) {
+          nextPrompt();
+        } else {
+          startTurn(line);
+        }
+      });
+    };
 
     /**
      * Every item this thread has announced, for the thread's life (APRV-379).
@@ -1614,8 +1864,140 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       // cannot name is no. Unreachable while the types hold, which is why it
       // carries no code of its own.
       const encoded = encodeDecision(chosen.decision) ?? { decision: DECLINE_WORDS[0] };
-      answers.push({ method, id, outcome, ...chosen, decision: encoded.decision, code, detail });
+      const answerTurn = turnIdOf(params);
+      answers.push({ method, id, outcome,
+        threadId: threadIdOf(params),
+        turnId: answerTurn,
+        itemId: callIdOf(params),
+        executionOutcome: outcome === "accept" ? "unknown" : "not-authorized",
+        ...chosen, decision: encoded.decision, code, detail });
+      const activeReport = turns.at(-1);
+      if (activeReport !== undefined && activeReport.id === answerTurn) activeReport.answers += 1;
       connection.respond(id, encoded);
+      // `decideHarnessCall` may have synchronously waited for a human. That
+      // interval is governed by --wait, not by protocol silence. Start a fresh
+      // app-server deadline only after its question has been answered.
+      if (!settled) armSilence(phase === "preflight" ? "preflight turn" : `turn ${String(liveTurns)}`);
+    };
+
+    const startGateDecision = (
+      kind: "exec" | "file",
+      id: unknown,
+      method: string,
+      params: unknown,
+    ): void => {
+      if (activeDecision !== null) {
+        finish(EXIT_IO, "the app-server raised a second approval request while the first gate decision was still active");
+        return;
+      }
+      const boundThread = threadIdOf(params);
+      const boundTurn = turnIdOf(params);
+      const requestId = JSON.stringify(id);
+      if (boundThread === null || boundTurn === null) {
+        answer(id, method, "decline", "bridge-request-mismatch",
+          "the approval request did not carry the identity required to start a gate decision", params);
+        return;
+      }
+      suspendSilence();
+      decisionEpoch += 1;
+      const epoch = decisionEpoch;
+      const cancellation = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+      const flag = new Int32Array(cancellation);
+      const itemId = callIdOf(params);
+      const recordedItem = itemId === null ? null : (items.get(itemId) ?? null);
+      const itemSnapshot = recordedItem === null ? null : canonicalize(recordedItem);
+      const policy = plan.options.policy === undefined
+        ? null
+        : {
+            ...(plan.options.policy.dir === undefined ? {} : { dir: plan.options.policy.dir }),
+            ...(plan.options.policy.file === undefined ? {} : { file: plan.options.policy.file }),
+          };
+      const worker = new Worker(new URL("./codex-bridge-worker.js", import.meta.url), {
+        workerData: {
+          kind,
+          params,
+          item: recordedItem,
+          plan: {
+            logPath: plan.logPath,
+            root: plan.root,
+            actor: plan.actor,
+            workspace: plan.workspace,
+            waitMs: plan.waitMs,
+            intervalMs: plan.intervalMs,
+            policy,
+          },
+          cancellation,
+        },
+      });
+      activeDecision = {
+        worker, flag, epoch, requestId, threadId: boundThread, turnId: boundTurn,
+        itemId, item: recordedItem, itemSnapshot,
+      };
+      let acknowledged = false;
+      worker.on("message", (message: unknown) => {
+        if (message === null || typeof message !== "object") return;
+        const row = message as Record<string, unknown>;
+        if (row["type"] === "stderr" && typeof row["value"] === "string") {
+          streams.err(row["value"]);
+          return;
+        }
+        if (row["type"] === "stdout" && typeof row["value"] === "string") {
+          streams.out(row["value"]);
+          return;
+        }
+        if (row["type"] !== "result" && row["type"] !== "error") return;
+        acknowledged = true;
+        const current = activeDecision;
+        if (current?.epoch !== epoch) return;
+        activeDecision = null;
+        if (settled) {
+          maybeDone();
+          return;
+        }
+        if (row["type"] === "error") {
+          finish(EXIT_IO, `the bridge gate worker failed: ${String(row["message"] ?? "unknown failure")}`);
+          return;
+        }
+        const result = row["result"] as { verdict?: HarnessVerdict } | undefined;
+        const verdict = result?.verdict;
+        const stillBound =
+          child.exitCode === null && child.signalCode === null &&
+          phase === "live" && turnActive && liveTurnId === boundTurn && threadId === boundThread &&
+          current.requestId === requestId && current.threadId === boundThread && current.turnId === boundTurn;
+        if (!stillBound || verdict === undefined) {
+          finish(EXIT_IO, "the gate decision returned after its active request identity was no longer held");
+          return;
+        }
+        // The worker received a copy of this item. Its verdict only applies to
+        // the exact live item it classified, including the change bytes. A
+        // completion or duplicate start during the wait invalidates the reply.
+        const liveItem = itemId === null ? null : (items.get(itemId) ?? null);
+        const itemRequired = kind === "file" && inlineFileChanges(params) === null;
+        if ((itemRequired && recordedItem === null && verdict.permission === "allow") ||
+            (recordedItem !== null &&
+              (liveItem !== recordedItem || canonicalize(liveItem) !== itemSnapshot))) {
+          finish(EXIT_IO, "the item changed while its approval request was awaiting a gate verdict; no decision was sent");
+          return;
+        }
+        if (verdict.permission === "allow") {
+          answer(id, method, "accept", null, verdict.reason, params);
+        } else {
+          answer(id, method, "decline", verdict.code, verdict.detail, params);
+        }
+      });
+      worker.once("error", (cause: unknown) => {
+        if (activeDecision?.epoch !== epoch) return;
+        acknowledged = true;
+        activeDecision = null;
+        if (settled) maybeDone();
+        else finish(EXIT_IO, `the bridge gate worker failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      });
+      worker.once("exit", (code) => {
+        if (activeDecision?.epoch !== epoch || acknowledged) return;
+        activeDecision = null;
+        if (settled) maybeDone();
+        else finish(EXIT_IO, `the bridge gate worker exited before returning a verdict (code ${String(code)})`);
+      });
     };
 
     /**
@@ -1652,10 +2034,21 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
         );
       }
       connection.respond(id, encoded);
+      if (!settled) armSilence("preflight turn");
     };
 
     const connection = new Connection(child, (frame) => {
+      if (settled) return;
       const method = typeof frame.method === "string" ? frame.method : null;
+      const frameThread = explicitThreadIdOf(frame.params);
+      const frameTurn = turnIdOf(frame.params);
+      if (phase === "preflight" && preflight.turnId !== null &&
+          frameThread === threadId && frameTurn === preflight.turnId) {
+        armSilence("preflight turn");
+      } else if (phase === "live" && turnActive && liveTurnId !== null &&
+          frameThread === threadId && frameTurn === liveTurnId) {
+        armSilence(`turn ${String(liveTurns)}`);
+      }
 
       // Codex's own reviewer answered something before this client saw it. It
       // ends the run wherever it appears, because from here a resolved question
@@ -1671,9 +2064,9 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
             source: "codex-auto-reviewer",
             id: callIdOf(frame.params) ?? "",
             method,
-            ...(stringField(frame.params, "threadId") === null
+            ...(explicitThreadIdOf(frame.params) === null
               ? {}
-              : { thread: stringField(frame.params, "threadId") as string }),
+              : { thread: explicitThreadIdOf(frame.params) as string }),
             ...(turnIdOf(frame.params) === null ? {} : { turn: turnIdOf(frame.params) as string }),
             ...(autoReviewVerdict(frame.params) === null
               ? {}
@@ -1705,24 +2098,54 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       // judgement about whether two frames are about one change is made at
       // correlation time by `correlateFileChange`.
       if (method !== null && frame.id === undefined) recordItemFrame(items, method, frame.params);
+      if (activeDecision !== null && activeDecision.itemId !== null &&
+          (method === "item/started" || method === "item/updated" || method === "item/completed") && frame.id === undefined &&
+          activeDecision.itemId === stringField(
+            (frame.params as Record<string, unknown> | null)?.["item"], "id") &&
+          activeDecision.item !== items.get(activeDecision.itemId)) {
+        finish(EXIT_IO, "the item changed while its approval request was awaiting a gate verdict; no decision was sent");
+        return;
+      }
 
       // A server REQUEST: it carries both a method and an id, and it is waiting.
       if (method !== null && frame.id !== undefined) {
+        const requestId = JSON.stringify(frame.id);
+        if (seenRequestIds.has(requestId)) {
+          finish(EXIT_IO, `the app-server reused request id ${requestId}; the reply could not be bound to one question`);
+          return;
+        }
+        seenRequestIds.add(requestId);
         // An approval question raised by the PROBE turn is observed and
         // declined here, above every gate path below it (APRV-364).
         const execApproval = (EXEC_APPROVAL_METHODS as readonly string[]).includes(method);
         const fileApproval = (FILE_CHANGE_APPROVAL_METHODS as readonly string[]).includes(method);
+        if (execApproval || fileApproval) {
+          const reportedThread = threadIdOf(frame.params);
+          const reportedTurn = turnIdOf(frame.params);
+          const expectedTurn = phase === "preflight" ? preflight.turnId : liveTurnId;
+          const callId = callIdOf(frame.params);
+          const identity = `${reportedThread ?? ""}:${callId ?? ""}`;
+          if (
+            threadId === null || expectedTurn === null ||
+            reportedThread !== threadId || reportedTurn !== expectedTurn ||
+            (stringField(frame.params, "itemId") !== null &&
+              stringField(frame.params, "callId") !== null &&
+              stringField(frame.params, "itemId") !== stringField(frame.params, "callId")) ||
+            (callId !== null && answeredCalls.has(identity))
+          ) {
+            answer(frame.id, method, "decline", "bridge-request-mismatch",
+              `the approval request did not name the active thread and turn with a fresh call identity; no gate decision was made`, frame.params);
+            return;
+          }
+          if (callId !== null) answeredCalls.add(identity);
+          streams.err(`approval: deciding ${method} for ${callId ?? "unidentified call"}\n`);
+        }
         if ((execApproval || fileApproval) && isPreflightFrame(frame.params)) {
           observeProbe(frame.id, frame.params, execApproval);
           return;
         }
         if (execApproval) {
-          const decided = decideExecRequest(streams, plan, frame.params);
-          if (decided.verdict.permission === "allow") {
-            answer(frame.id, method, "accept", null, decided.verdict.reason, frame.params);
-          } else {
-            answer(frame.id, method, "decline", decided.verdict.code, decided.verdict.detail, frame.params);
-          }
+          startGateDecision("exec", frame.id, method, frame.params);
           return;
         }
         if (fileApproval) {
@@ -1730,12 +2153,7 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           // one that is an identifier is correlated to the `item/started` frame
           // this client recorded and decided against THAT (APRV-379), or
           // declined when the correlation cannot be established.
-          const decided = decideFileChangeRequest(streams, plan, frame.params, items);
-          if (decided.verdict.permission === "allow") {
-            answer(frame.id, method, "accept", null, decided.verdict.reason, frame.params);
-          } else {
-            answer(frame.id, method, "decline", decided.verdict.code, decided.verdict.detail, frame.params);
-          }
+          startGateDecision("file", frame.id, method, frame.params);
           return;
         }
         // A question with no reading. Declining it is the same rule the file
@@ -1753,6 +2171,19 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       }
 
       // A reply to one of this client's own requests.
+      if (frame.id !== undefined && method === null) {
+        const responseId = JSON.stringify(frame.id);
+        if (consumedResponseIds.has(responseId)) {
+          finish(EXIT_IO, `the app-server repeated response id ${responseId}; a protocol transition cannot run twice`);
+          return;
+        }
+        if ((frame.id === initializeId && initializeId !== -1) ||
+            (frame.id === threadStartId && threadStartId !== -1) ||
+            (frame.id === preflightStartId && preflightStartId !== -1) ||
+            (frame.id === liveStartId && liveStartId !== -1)) {
+          consumedResponseIds.add(responseId);
+        }
+      }
       if (frame.id === initializeId && initializeId !== -1) {
         if (frame.error !== undefined) {
           finish(EXIT_IO, `the app-server refused initialize: ${JSON.stringify(frame.error)}`);
@@ -1764,6 +2195,7 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           approvalPolicy: APPROVAL_POLICY,
           sandbox: SANDBOX,
         });
+        armSilence("thread start");
         return;
       }
       if (frame.id === threadStartId && threadStartId !== -1) {
@@ -1779,9 +2211,15 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           return;
         }
         if (pinnedOrStop(frame.result, "thread/start")) return;
-        threadId =
-          stringField(frame.result, "threadId") ??
-          stringField((frame.result as Record<string, unknown> | undefined)?.["thread"], "id");
+        const topThread = stringField(frame.result, "threadId");
+        const nestedThread = stringField((frame.result as Record<string, unknown> | undefined)?.["thread"], "id");
+        if ((topThread !== null && threadIdOf(frame.result) !== topThread) ||
+            (nestedThread !== null && threadIdOf(frame.result) !== null &&
+              threadIdOf(frame.result) !== nestedThread)) {
+          finish(EXIT_IO, "thread/start returned conflicting thread identities");
+          return;
+        }
+        threadId = topThread ?? nestedThread;
         if (threadId === null) {
           finish(EXIT_IO, "thread/start succeeded and named no thread this client could find");
           return;
@@ -1797,6 +2235,7 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           threadId,
           input: [{ type: "text", text: PROBE_PROMPT }],
         });
+        armSilence("preflight start");
         return;
       }
       if (frame.id === preflightStartId && preflightStartId !== -1) {
@@ -1810,10 +2249,21 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           return;
         }
         preflight.turnId = turnIdOf(frame.result);
+        if (preflight.turnId === null) finish(EXIT_IO, "preflight turn/start named no turn");
+        else armSilence("preflight turn");
         return;
       }
-      if (frame.id === liveStartId && liveStartId !== -1 && frame.error !== undefined) {
-        finish(EXIT_IO, `the app-server refused turn/start: ${JSON.stringify(frame.error)}`);
+      if (frame.id === liveStartId && liveStartId !== -1) {
+        if (frame.error !== undefined) {
+          finish(EXIT_IO, `the app-server refused turn/start: ${JSON.stringify(frame.error)}`);
+          return;
+        }
+        liveTurnId = turnIdOf(frame.result);
+        if (liveTurnId === null) finish(EXIT_IO, "turn/start named no turn");
+        else {
+          if (turns.at(-1) !== undefined) (turns.at(-1) as (typeof turns)[number]).id = liveTurnId;
+          armSilence(`turn ${String(liveTurns)}`);
+        }
         return;
       }
 
@@ -1825,6 +2275,26 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
       // kind of session the verb will sit in front of at all.
       if (method === "thread/started" || method === "thread/status/changed") {
         if (pinnedOrStop(frame.params, method)) return;
+      }
+      if (phase === "live" && !plan.json && liveTurnId !== null &&
+          turnIdOf(frame.params) === liveTurnId &&
+          explicitThreadIdOf(frame.params) === threadId) {
+        if (method === "item/agentMessage/delta") {
+          const delta = stringField(frame.params, "delta");
+          const itemId = stringField(frame.params, "itemId");
+          if (delta !== null) {
+            streams.out(delta);
+            if (itemId !== null) streamedMessages.add(itemId);
+          }
+        } else if (method === "item/completed") {
+          const holder = (frame.params as Record<string, unknown> | null)?.["item"];
+          if (holder !== null && typeof holder === "object") {
+            const item = holder as Record<string, unknown>;
+            const text = stringField(item, "text");
+            if (item["type"] === "agentMessage" && text !== null &&
+                !streamedMessages.has(stringField(item, "id") ?? "")) streams.out(`${text}\n`);
+          }
+        }
       }
       // A command item in the PROBE turn. It is read for one purpose: to tell a
       // probe that ran without asking from a probe that never ran (APRV-364).
@@ -1838,16 +2308,30 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
         preflight.outcome = "executed";
       }
       if (method === "turn/completed" || method === "turn/failed") {
+        const endedTurn = turnIdOf(frame.params);
+        const activeTurn = phase === "preflight" ? preflight.turnId : liveTurnId;
+        if (activeTurn === null || endedTurn !== activeTurn) return;
+        const endedThread = explicitThreadIdOf(frame.params);
+        if (endedThread === null || endedThread !== threadId) return;
+        if (phase === "live" && activeDecision !== null) {
+          finish(EXIT_IO, "the app-server ended a turn while one of its approval requests was still awaiting a gate verdict", "bridge-turn-failed");
+          return;
+        }
+        const completion = method === "turn/completed" ? completedTurnStatus(frame.params) :
+          { ok: false as const, detail: "turn/failed notification" };
+        if (!completion.ok) {
+          if (phase === "preflight") preflight.error = frame.params ?? null;
+          const activeReport = turns.at(-1);
+          if (phase === "live" && activeReport !== undefined) activeReport.status = "failed";
+          finish(EXIT_IO, `the ${phase} turn failed or has no verified completed status: ${completion.detail}; ${JSON.stringify(frame.params ?? null)}`, "bridge-turn-failed");
+          return;
+        }
         if (phase === "preflight" && isPreflightFrame(frame.params)) {
-          if (method === "turn/failed") preflight.error = frame.params ?? null;
           if (preflight.outcome === "asked") {
             // The only way past here. One question reached this client, so the
             // operator's own turn runs.
             phase = "live";
-            liveStartId = connection.request("turn/start", {
-              threadId,
-              input: [{ type: "text", text: plan.prompt }],
-            });
+            nextPrompt();
             return;
           }
           if (preflight.outcome === "executed") {
@@ -1866,51 +2350,73 @@ function driveSession(streams: Streams, plan: BridgePlan): Promise<number> {
           );
           return;
         }
-        finish(
-          EXIT_OK,
-          `turn ${method === "turn/completed" ? "completed" : "failed"}: ${String(answers.length)} approval request(s) answered`,
-        );
+        const activeReport = turns.at(-1);
+        if (activeReport !== undefined) activeReport.status = "completed";
+        if (plan.interactive) {
+          streams.err(`approval: turn ${String(liveTurns)} completed; ${String(activeReport?.answers ?? 0)} approval request(s) answered\n`);
+          turnActive = false;
+          liveTurnId = null;
+          if (silenceTimer !== null) clearTimeout(silenceTimer);
+          silenceTimer = null;
+          nextPrompt();
+        } else {
+          finish(EXIT_OK, `turn completed: ${String(answers.length)} approval request(s) answered`);
+        }
       }
-    });
+    }, (detail) => finish(EXIT_IO, detail));
 
     child.stderr.on("data", (chunk: Buffer) => {
       streams.err(chunk.toString("utf8"));
     });
     child.on("error", (cause) => {
+      childStopped = child.pid === undefined;
       finish(EXIT_IO, `the app-server could not be started: ${cause.message}`);
     });
     child.on("exit", (code) => {
-      finish(
-        answers.length > 0 ? EXIT_OK : EXIT_IO,
-        `the app-server exited (code ${String(code)}): ${String(answers.length)} approval request(s) answered`,
-      );
+      childStopped = true;
+      if (settled) maybeDone();
+      else {
+        finish(
+          EXIT_IO,
+          `the app-server exited (code ${String(code)}): ${String(answers.length)} approval request(s) answered`,
+          "bridge-server-exited",
+        );
+      }
     });
 
     initializeId = connection.request("initialize", {
       clientInfo: { name: "approval.md", title: "approval.md codex bridge", version: "0" },
       capabilities: {},
     });
+    armSilence("initialize handshake");
   });
 }
 
 /** The help text, printed by `approval codex bridge --help`. */
 export const CODEX_BRIDGE_HELP = [
   "approval codex bridge --prompt <text> [--workspace <dir>] [-- <server command>]",
+  "approval codex bridge --interactive [--workspace <dir>] [-- <server command>]",
   "",
   "Start `codex app-server` and answer every approval request it raises through",
   "the policy and the log: classify {command, cwd}, register, request, wait on the",
   "verified view, then reply accept or decline in the server's own vocabulary.",
   "",
-  "  --prompt <text>       the turn to run (required)",
+  "  --prompt <text>       the first turn (required in one-shot mode)",
+  "  --interactive         continue prompting in this terminal after one preflight",
   "  --workspace <dir>     the thread's working directory (default: cwd)",
   "  --as <agent:id>       the acting identity (default: agent:codex)",
   "  --dir/--policy/--log  where the policy and the log are, as the hook resolves them",
   "  --wait <duration>     the deadline (default: the policy's approval_ttl)",
   "  --interval <duration> how often the verified view is re-read (default: 2s)",
-  "  --json                one object: {ok, reason, code?, thread, preflight, answers[]}",
+  "  --lifecycle-timeout <duration> fail closed after app-server silence (default: 30s)",
+  "  --json                one object: {ok, reason, code?, thread, preflight, answers[]}; one-shot only",
   "  -- <command...>       the app-server to start (default: codex app-server)",
   "",
   "It answers accept or decline only, never acceptForSession, cancel or abort.",
+  "An accept is an authorization, not a verified execution result. Its outcome",
+  "remains unknown unless a correlated native completion contract proves it.",
+  "Interactive mode needs terminal stdin; /quit or EOF ends an idle session,",
+  "and interruption or a failed turn exits nonzero.",
   "A file-change request on the item-based API carries an item id and no bytes;",
   "the change set is taken from the item/started frame that id names, and the",
   "request is declined (bridge-file-change-unbound) when that frame was never",
