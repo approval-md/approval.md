@@ -54,8 +54,8 @@
   header p{margin:0;color:var(--muted);max-width:64ch}
   header code{color:var(--fg)}
   main{display:grid;grid-template-columns:minmax(320px,5fr) minmax(320px,6fr);gap:28px}
-  @media (max-width:860px){main{grid-template-columns:1fr}}
-  .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px 20px 22px}
+  @media (max-width:860px){main{grid-template-columns:minmax(0,1fr)}}
+  .panel{min-width:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px 20px 22px}
   .eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
   label{display:block;margin:14px 0 6px;font-size:12px;color:var(--muted)}
   label:first-of-type{margin-top:0}
@@ -69,19 +69,26 @@
   button.primary:hover{opacity:.92;background:var(--btn-bg)}
   .fixed{color:var(--muted);padding:7px 0}
   .fixed b{color:var(--fg);font-weight:500}
-  table{width:100%;border-collapse:collapse;margin-top:4px}
-  th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 8px 8px 0}
-  td{padding:3px 8px 3px 0;vertical-align:middle}
-  td.act{width:36px;padding-right:0}
-  td.act button{padding:5px 0;width:32px;color:var(--muted);background:transparent;border-color:transparent;font-size:16px;line-height:1}
-  td.act button:hover{color:var(--fg);border-color:var(--border-strong)}
+  .class-rule{position:relative;margin:10px 0;padding:12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--raised)}
+  .class-fields,.rate-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .class-fields{padding-right:34px}
+  .class-rule label{margin:0 0 4px}
+  .class-rule input,.class-rule select{min-width:0}
+  .rate-fields{margin-top:10px}
+  .rate-fields[hidden],.rate-field[hidden]{display:none}
+  .rate-field small{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.4}
+  .class-rule .remove{position:absolute;top:11px;right:10px;padding:3px 8px;color:var(--muted);background:transparent;font-size:17px}
+  .error{margin:12px 0 0;color:#ef8b79;font-size:12px}
+  .error[hidden]{display:none}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  @media(max-width:560px){.class-fields,.rate-fields{grid-template-columns:minmax(0,1fr)}}
   .row{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
   .hint{color:var(--muted);font-size:12px;margin:16px 0 0;line-height:1.55}
   .hint code{color:var(--fg)}
   .out-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
   .out-head .eyebrow{margin:0}
   .out-head .row{margin:0}
-  pre{margin:0;background:var(--page);border:1px solid var(--border);border-radius:8px;padding:16px 18px;overflow:auto;max-height:72vh;font:12.5px/1.6 var(--mono);white-space:pre;color:var(--fg)}
+  pre{min-width:0;max-width:100%;margin:0;background:var(--page);border:1px solid var(--border);border-radius:8px;padding:16px 18px;overflow:auto;max-height:72vh;font:12.5px/1.6 var(--mono);white-space:pre;color:var(--fg)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:8px;vertical-align:middle}
   footer{margin-top:28px;color:var(--muted);font-size:12px;border-top:1px solid var(--border);padding-top:16px}
   footer code{color:var(--fg)}
@@ -113,16 +120,18 @@
     <label for="ttl">Approval TTL</label>
     <input id="ttl" value="2h" spellcheck="false">
 
+    <label for="auditRate">Global retrospective audit (%)</label>
+    <input id="auditRate" type="number" min="0" max="100" step="any" value="10" inputmode="decimal">
+    <p class="hint">0 turns retrospective sampling off. A class override replaces this rate. The draft names <code>APPROVAL_SAMPLING_SECRET</code>; the operator must supply that secret outside this page. Without it, retro sampling is off and live sampling gates every action.</p>
+
     <label>Channel</label>
     <div class="fixed"><span class="dot"></span><b>telegram</b>, the tenant's own bot</div>
 
     <label>Classes</label>
-    <table>
-      <thead><tr><th>Class</th><th>Autonomy</th><th></th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
+    <div id="rows"></div>
     <div class="row"><button id="add">+ Add class</button></div>
-    <p class="hint">Strictest first: <code>human-only</code>, <code>manual</code>, <code>supervised-retro</code>, <code>autonomous</code>. <code>supervised-live</code> is left out because it needs a <code>live_rate</code> this form does not collect.</p>
+    <p class="hint">Strictest first: <code>human-only</code>, <code>manual</code>, <code>supervised-live</code>, <code>supervised-retro</code>, <code>autonomous</code>. Irreversible actions still have a manual floor unless the operator separately permits otherwise; this builder does not set that override.</p>
+    <p class="error" id="error" role="alert" hidden></p>
   </section>
 
   <section class="panel">
@@ -140,7 +149,7 @@
 </div>
 <script>
 "use strict";
-var LEVELS = ["human-only", "manual", "supervised-retro", "autonomous"];
+var LEVELS = ["human-only", "manual", "supervised-live", "supervised-retro", "autonomous"];
 var SEED = [
   ["read.*", "autonomous"],
   ["files.write.workspace", "autonomous"],
@@ -153,17 +162,38 @@ var SEED = [
 
 var rowsEl = document.getElementById("rows");
 var outEl = document.getElementById("out");
+var errorEl = document.getElementById("error");
+
+function percentage(value, label, allowZero) {
+  var raw = String(value == null ? "" : value).trim();
+  if (!/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw)) throw new RangeError(label + " must be a decimal percentage.");
+  var number = raw === "" ? NaN : Number(raw);
+  if (number === 0 && /[1-9]/.test(raw.split(/[eE]/)[0])) throw new RangeError(label + " is too small to represent.");
+  if (!Number.isFinite(number) || number > 100 || (allowZero ? number < 0 : number <= 0)) {
+    throw new RangeError(label + " must be " + (allowZero ? "0–100" : "more than 0 and at most 100") + "%.");
+  }
+  var rate = Number((number / 100).toPrecision(15));
+  if (number > 0 && rate === 0) throw new RangeError(label + " is too small to represent.");
+  return rate;
+}
 
 function addRow(name, level) {
-  var tr = document.createElement("tr");
-
-  var tdName = document.createElement("td");
+  var card = document.createElement("div");
+  card.className = "class-rule";
+  var fields = document.createElement("div");
+  fields.className = "class-fields";
+  var nameField = document.createElement("div");
+  var nameLabel = document.createElement("label");
+  nameLabel.textContent = "Class";
   var nameInput = document.createElement("input");
   nameInput.value = name || "";
   nameInput.placeholder = "class.pattern";
-  tdName.appendChild(nameInput);
-
-  var tdLevel = document.createElement("td");
+  nameLabel.appendChild(nameInput);
+  nameField.appendChild(nameLabel);
+  fields.appendChild(nameField);
+  var levelField = document.createElement("div");
+  var levelLabel = document.createElement("label");
+  levelLabel.textContent = "Autonomy";
   var sel = document.createElement("select");
   LEVELS.forEach(function (value) {
     var opt = document.createElement("option");
@@ -172,30 +202,69 @@ function addRow(name, level) {
     if (value === level) opt.selected = true;
     sel.appendChild(opt);
   });
-  tdLevel.appendChild(sel);
+  levelLabel.appendChild(sel);
+  levelField.appendChild(levelLabel);
+  fields.appendChild(levelField);
+  card.appendChild(fields);
 
-  var tdAct = document.createElement("td");
-  tdAct.className = "act";
+  var rates = document.createElement("div");
+  rates.className = "rate-fields";
+  function rateField(labelText, help, value) {
+    var wrapper = document.createElement("div");
+    wrapper.className = "rate-field";
+    var label = document.createElement("label");
+    label.textContent = labelText;
+    var input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100";
+    input.step = "any";
+    input.inputMode = "decimal";
+    input.value = value;
+    label.appendChild(input);
+    wrapper.appendChild(label);
+    var note = document.createElement("small");
+    note.textContent = help;
+    wrapper.appendChild(note);
+    rates.appendChild(wrapper);
+    input.addEventListener("input", render);
+    return { wrapper: wrapper, input: input };
+  }
+  var live = rateField("Stop before action (%)", "Required in live mode; more than 0, up to 100.", "10");
+  var retro = rateField("Retrospective audit (%)", "Optional override; blank uses global rate.", "");
+  card.appendChild(rates);
+
   var rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "remove";
   rm.textContent = "×";
   rm.title = "Remove this row";
-  rm.addEventListener("click", function () { tr.remove(); render(); });
-  tdAct.appendChild(rm);
+  rm.setAttribute("aria-label", "Remove class row");
+  rm.addEventListener("click", function () { card.remove(); render(); });
+  card.appendChild(rm);
+  rowsEl.appendChild(card);
 
-  tr.appendChild(tdName);
-  tr.appendChild(tdLevel);
-  tr.appendChild(tdAct);
-  rowsEl.appendChild(tr);
+  function showRates() {
+    live.wrapper.hidden = sel.value !== "supervised-live";
+    retro.wrapper.hidden = sel.value !== "supervised-live" && sel.value !== "supervised-retro";
+    rates.hidden = live.wrapper.hidden && retro.wrapper.hidden;
+    render();
+  }
 
   nameInput.addEventListener("input", render);
-  sel.addEventListener("change", render);
+  sel.addEventListener("change", showRates);
+  showRates();
 }
 
 function classRows() {
   var out = [];
-  Array.prototype.forEach.call(rowsEl.querySelectorAll("tr"), function (tr) {
-    var name = tr.querySelector("input").value.trim();
-    if (name) out.push([name, tr.querySelector("select").value]);
+  Array.prototype.forEach.call(rowsEl.querySelectorAll(".class-rule"), function (card) {
+    var name = card.querySelector(".class-fields input").value.trim();
+    var mode = card.querySelector("select").value;
+    var rateInputs = card.querySelectorAll(".rate-field input");
+    if (name) out.push({ name: name, mode: mode,
+      livePercent: mode === "supervised-live" ? rateInputs[0].value : null,
+      retroPercent: mode === "supervised-live" || mode === "supervised-retro" ? rateInputs[1].value : null });
   });
   return out;
 }
@@ -203,10 +272,18 @@ function classRows() {
 // YAML-quote anything that is not a plain scalar, so a class pattern with a
 // colon or an id with a leading zero survives the round trip.
 function scalar(value) {
-  return /^[A-Za-z0-9_.*\/-]+$/.test(value) ? value : JSON.stringify(String(value));
+  return /^[A-Za-z0-9_.*\/-]+$/.test(value) && !String(value).startsWith("*") ? value : JSON.stringify(String(value));
 }
 
 function build(cfg) {
+  var seenClasses = new Set();
+  cfg.classes.forEach(function (row) {
+    if (!/^(?:[a-z0-9][a-z0-9_-]*|\*)(?:\.(?:[a-z0-9][a-z0-9_-]*|\*))*$/.test(row.name)) {
+      throw new TypeError("Invalid class pattern: " + row.name);
+    }
+    if (seenClasses.has(row.name)) throw new TypeError("Duplicate class pattern: " + row.name);
+    seenClasses.add(row.name);
+  });
   var lines = [];
   lines.push("# Approval policy — " + cfg.approver);
   lines.push("");
@@ -231,12 +308,23 @@ function build(cfg) {
     lines.push('      telegram: "' + String(cfg.sender).replace(/"/g, "") + '"');
   }
   lines.push("");
+  lines.push("audit:");
+  lines.push("  supervised_sample_rate: " + percentage(cfg.auditPercent, "Global retrospective audit", true));
+  lines.push("  sampling_secret_env: APPROVAL_SAMPLING_SECRET");
+  lines.push("");
   lines.push("classes:");
   if (cfg.classes.length === 0) {
     lines.push("  read.*: { autonomy: autonomous }");
   } else {
     cfg.classes.forEach(function (row) {
-      lines.push("  " + scalar(row[0]) + ": { autonomy: " + row[1] + " }");
+      lines.push("  " + JSON.stringify(row.name) + ":");
+      lines.push("    autonomy: " + row.mode);
+      if (row.mode === "supervised-live") {
+        lines.push("    live_rate: " + percentage(row.livePercent, row.name + " live sampling", false));
+      }
+      if ((row.mode === "supervised-live" || row.mode === "supervised-retro") && row.retroPercent != null && String(row.retroPercent).trim() !== "") {
+        lines.push("    retro_rate: " + percentage(row.retroPercent, row.name + " retrospective audit", false));
+      }
     });
   }
   lines.push("");
@@ -258,18 +346,36 @@ function current() {
     sender: document.getElementById("sender").value.trim(),
     defaultAutonomy: document.getElementById("defaultAutonomy").value,
     ttl: document.getElementById("ttl").value.trim() || "2h",
+    auditPercent: document.getElementById("auditRate").value,
     classes: classRows()
   };
 }
 
-function render() { outEl.textContent = build(current()); }
+function render() {
+  try {
+    outEl.textContent = build(current());
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+    document.getElementById("copy").disabled = false;
+    document.getElementById("download").disabled = false;
+  } catch (error) {
+    outEl.textContent = "Fix the sampling value to generate APPROVAL.md.";
+    errorEl.textContent = error.message;
+    errorEl.hidden = false;
+    document.getElementById("copy").disabled = true;
+    document.getElementById("download").disabled = true;
+  }
+}
 
 document.getElementById("add").addEventListener("click", function () { addRow("", "manual"); render(); });
 document.getElementById("copy").addEventListener("click", function () {
   var btn = this;
-  navigator.clipboard.writeText(outEl.textContent).then(function () {
+  Promise.resolve().then(function () { return navigator.clipboard.writeText(outEl.textContent); }).then(function () {
     btn.textContent = "Copied";
     setTimeout(function () { btn.textContent = "Copy"; }, 1200);
+  }).catch(function () {
+    errorEl.textContent = "Clipboard unavailable; select the policy text or download it.";
+    errorEl.hidden = false;
   });
 });
 document.getElementById("download").addEventListener("click", function () {
@@ -277,10 +383,14 @@ document.getElementById("download").addEventListener("click", function () {
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "APPROVAL.md";
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  a.remove();
+  var url = a.href;
+  setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
 });
-["approver", "sender", "defaultAutonomy", "ttl"].forEach(function (id) {
+["approver", "sender", "defaultAutonomy", "ttl", "auditRate"].forEach(function (id) {
   var el = document.getElementById(id);
   el.addEventListener("input", render);
   el.addEventListener("change", render);
