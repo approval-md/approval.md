@@ -14,10 +14,13 @@ function harness() {
   const windowHandlers: Record<string, (event: Record<string, unknown>) => void> = {};
   const buttonHandlers: Record<string, () => void> = {};
   const source = {};
+  const scrolls: { top: number; behavior: string }[] = [];
+  const rect = { top: 100, height: 1200 };
   const frame = {
     contentWindow: source,
     style: { height: "" },
     src: "",
+    getBoundingClientRect() { return rect; },
     focus() {},
     removeAttribute(name: string) {
       if (name === "src") this.src = "";
@@ -40,9 +43,11 @@ function harness() {
   runInNewContext(script!, {
     URL,
     document: { getElementById: (id: string) => elements[id] },
-    window: { addEventListener: (name: string, cb: (event: Record<string, unknown>) => void) => { windowHandlers[name] = cb; } },
+    window: { innerHeight: 844, scrollY: 1000,
+      scrollTo(options: { top: number; behavior: string }) { scrolls.push(options); },
+      addEventListener: (name: string, cb: (event: Record<string, unknown>) => void) => { windowHandlers[name] = cb; } },
   });
-  return { frame, embed, button, newTab, source, message: windowHandlers.message!, click: buttonHandlers.click! };
+  return { frame, embed, button, newTab, source, rect, scrolls, message: windowHandlers.message!, click: buttonHandlers.click! };
 }
 
 test("Get Approved accepts only current gateway height messages", () => {
@@ -68,6 +73,27 @@ test("Get Approved accepts only current gateway height messages", () => {
   assert.equal(h.frame.style.height, "");
   send("https://approved-demo-gateway.vercel.app", h.source, 1200);
   assert.equal(h.frame.style.height, "");
+});
+
+test("policy reveal scrolls only the active trusted iframe header into view", () => {
+  const h = harness();
+  h.click();
+  const send = (origin: string, source: unknown, y: unknown) =>
+    h.message({ origin, source, data: { type: "approved-demo-policy-reveal-v1", y } });
+  send("https://evil.example", h.source, 300);
+  send("https://approved-demo-gateway.vercel.app.evil.example", h.source, 300);
+  send("https://approved-demo-gateway.vercel.app", {}, 300);
+  for (const y of [Number.NaN, Infinity, -1, 1201, 30001, "300"]) send("https://approved-demo-gateway.vercel.app", h.source, y);
+  assert.equal(h.scrolls.length, 0);
+  send("https://approved-demo-gateway.vercel.app", h.source, 100);
+  assert.equal(h.scrolls.length, 0, "visible header does not move the page");
+  h.rect.top = -500;
+  send("https://approved-demo-gateway.vercel.app", h.source, 300);
+  assert.equal(h.scrolls.length, 1);
+  assert.equal(h.scrolls[0]?.top, 776);
+  h.click();
+  send("https://approved-demo-gateway.vercel.app", h.source, 300);
+  assert.equal(h.scrolls.length, 1, "closed iframe ignores old messages");
 });
 
 test("Get Approved stays wide without changing deck and policy builder links", () => {

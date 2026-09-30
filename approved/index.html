@@ -312,8 +312,18 @@ make demo    # the whole flow in Docker, offline; tap Approve or Reject at http:
         window.addEventListener('message', (event) => {
           if (embed.hidden || event.origin !== new URL(gateway).origin || event.source !== frame.contentWindow) return;
           const data = event.data;
-          if (!data || data.type !== 'approved-demo-height-v1' || typeof data.height !== 'number' || !Number.isFinite(data.height) || data.height <= 0) return;
-          frame.style.height = Math.min(30000, Math.max(520, Math.ceil(data.height) + 4)) + 'px';
+          if (!data) return;
+          if (data.type === 'approved-demo-height-v1') {
+            if (typeof data.height !== 'number' || !Number.isFinite(data.height) || data.height <= 0) return;
+            frame.style.height = Math.min(30000, Math.max(520, Math.ceil(data.height) + 4)) + 'px';
+          } else if (data.type === 'approved-demo-policy-reveal-v1') {
+            const rect = frame.getBoundingClientRect();
+            if (typeof data.y !== 'number' || !Number.isFinite(data.y) || data.y < 0 || data.y > 30000 || data.y > rect.height) return;
+            const headerY = rect.top + data.y;
+            if (headerY < 24 || headerY > window.innerHeight - 100) {
+              window.scrollTo({ top: Math.max(0, window.scrollY + headerY - 24), behavior: 'auto' });
+            }
+          }
         });
         button.addEventListener('click', () => {
           if (embed.hidden) {
