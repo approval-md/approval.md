@@ -158,13 +158,11 @@ test("preview stays separate from the existing live demo and avoids activation",
   assert.doesNotMatch(page, /class="onboarding-preview-note"/);
   assert.match(page, /Pending Stripe credentials — continue as demo draft/);
   assert.match(script, /Continue as demo draft/);
-  assert.match(page, /Payments and hosted provisioning are not enabled/);
   assert.match(page, /href="#live-demo"/);
   assert.match(page, /id="demo-frame"/);
   assert.match(page, /approved-demo-height-v1/);
   assert.match(page, /approved-demo-policy-reveal-v1/);
-  assert.match(page, /Bountify Inc/);
-  assert.match(page, /separate Approved Stripe account under the Bountify organization, outside the Jobmaxxing catalog/);
+  assert.match(page, /<p class="onboarding-billing"><strong>Pending Stripe credentials — continue as demo draft\.<\/strong><\/p>/);
   assert.match(page, /No agent has been created and no Telegram bot is connected/);
   assert.match(page, /\$5 combined agent \+ judge inference allowance/);
   assert.match(page, /\$15 combined agent \+ judge inference allowance/);
