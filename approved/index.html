@@ -308,6 +308,7 @@ make demo    # the whole flow in Docker, offline; tap Approve or Reject at http:
         const embed = document.getElementById('demo-embed');
         const frame = document.getElementById('demo-frame');
         const newTab = document.getElementById('demo-new-tab');
+        const previousOverflowAnchor = document.documentElement.style.overflowAnchor;
         newTab.href = new URL('?auto=1', gateway).href;
         window.addEventListener('message', (event) => {
           if (embed.hidden || event.origin !== new URL(gateway).origin || event.source !== frame.contentWindow) return;
@@ -327,6 +328,7 @@ make demo    # the whole flow in Docker, offline; tap Approve or Reject at http:
         });
         button.addEventListener('click', () => {
           if (embed.hidden) {
+            document.documentElement.style.overflowAnchor = 'none';
             frame.style.height = '';
             frame.src = new URL('?auto=1', gateway).href;
             embed.hidden = false;
@@ -337,6 +339,7 @@ make demo    # the whole flow in Docker, offline; tap Approve or Reject at http:
             embed.hidden = true;
             frame.removeAttribute('src');
             frame.style.height = '';
+            document.documentElement.style.overflowAnchor = previousOverflowAnchor;
             button.setAttribute('aria-expanded', 'false');
             button.textContent = 'Get Approved';
             button.focus();
