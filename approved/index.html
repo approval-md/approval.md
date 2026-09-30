@@ -16,6 +16,7 @@
       href="https://fonts.googleapis.com/css2?family=Anton&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap"
     />
     <link rel="stylesheet" href="assets/brand.css" />
+    <link rel="stylesheet" href="assets/onboarding.css" />
     <style>
       * { box-sizing: border-box; }
       body {
@@ -165,7 +166,76 @@
         </section>
 
         <section class="get-approved" id="get-approved" aria-labelledby="get-approved-title">
-          <div class="get-approved-panel">
+          <div class="onboarding" aria-labelledby="onboarding-title">
+            <div class="onboarding-intro">
+              <p class="onboarding-preview-note"><strong>Preview only</strong> — nothing here creates an account, provisions a server, connects Telegram, or charges you.</p>
+              <h2 id="onboarding-title">Shape your approval setup.</h2>
+              <p>Pick an agent, set the rules it would follow, review a proposed plan, and see who would receive each request. Your draft stays in this browser until you download it.</p>
+            </div>
+            <nav class="onboarding-steps" aria-label="Preview steps">
+              <button type="button" data-onboarding-step="0" aria-current="step"><span>1</span> Agent</button>
+              <button type="button" data-onboarding-step="1" disabled><span>2</span> Policy</button>
+              <button type="button" data-onboarding-step="2" disabled><span>3</span> Plan</button>
+              <button type="button" data-onboarding-step="3" disabled><span>4</span> Telegram</button>
+            </nav>
+            <div class="onboarding-body">
+              <p class="onboarding-position" id="onboarding-position">Step 1 of 4</p>
+              <div class="onboarding-panel" data-onboarding-panel="0">
+                <h3 tabindex="-1">Choose an agent</h3>
+                <p>Hermes is the preview path. Other agent integrations are planned; selecting one here would imply setup that does not exist yet.</p>
+                <div class="onboarding-agents">
+                  <div class="onboarding-agent selected"><strong>Hermes</strong><span>Selected for this preview</span><small>Policy hook planned for hosted onboarding</small></div>
+                  <div class="onboarding-agent planned"><strong>Codex</strong><span>Planned</span><small>Not selectable in this preview</small></div>
+                  <div class="onboarding-agent planned"><strong>Claude</strong><span>Planned</span><small>Not selectable in this preview</small></div>
+                </div>
+              </div>
+              <div class="onboarding-panel" data-onboarding-panel="1" hidden>
+                <h3 tabindex="-1">Decide what needs you</h3>
+                <p>Unknown actions default to manual review. These choices produce a real, parseable <code>APPROVAL.md</code> draft; they do not activate a gate.</p>
+                <div class="onboarding-policy-grid">
+                  <div class="onboarding-controls">
+                    <label for="onboarding-push">Push to main</label>
+                    <select id="onboarding-push" data-policy-class="vcs.push.main"><option value="manual">Ask me first</option><option value="human-only">Only I may do it</option></select>
+                    <label for="onboarding-email">Send external email</label>
+                    <select id="onboarding-email" data-policy-class="communicate.email.external"><option value="manual">Ask me first</option><option value="human-only">Only I may do it</option></select>
+                    <label for="onboarding-spend">Spend money</label>
+                    <select id="onboarding-spend" data-policy-class="financial.spend"><option value="manual">Ask me first</option><option value="human-only">Only I may do it</option></select>
+                    <p class="onboarding-policy-note">Read actions are allowed in this draft. Workspace writes and every unnamed class still ask first. “Only I may do it” means no agent request or execution for that class.</p>
+                  </div>
+                  <div class="onboarding-draft">
+                    <div class="onboarding-draft-head"><strong>APPROVAL.md</strong><span>Draft · not activated</span></div>
+                    <pre id="onboarding-policy-text" aria-label="Draft APPROVAL.md"></pre>
+                    <div class="onboarding-draft-actions"><button class="btn" id="onboarding-download" type="button">Download draft APPROVAL.md</button><button class="btn" id="onboarding-copy" type="button">Copy draft</button></div>
+                    <p class="onboarding-copy-status" id="onboarding-copy-status" role="status" aria-live="polite"></p>
+                  </div>
+                </div>
+              </div>
+              <div class="onboarding-panel" data-onboarding-panel="2" hidden>
+                <h3 tabindex="-1">Review a proposed plan</h3>
+                <p>These are illustrative monthly plans for a future hosted product. Choosing one here does not start checkout, accept terms, reserve capacity, or use paid inference.</p>
+                <div class="onboarding-plans" role="radiogroup" aria-label="Proposed plan">
+                  <label class="onboarding-plan"><input type="radio" name="onboarding-plan" value="standard" checked><span><strong>Standard</strong><b>$99<span>/month</span></b><small>1 VM · $5 combined agent + judge inference allowance</small></span></label>
+                  <label class="onboarding-plan"><input type="radio" name="onboarding-plan" value="premium"><span><strong>Premium</strong><b>$299<span>/month</span></b><small>3 VMs · $15 combined agent + judge inference allowance</small></span></label>
+                </div>
+                <p class="onboarding-billing">Proposed merchant: Bountify Inc. Approved would use its own Stripe account under the Bountify organization, separate from the Jobmaxxing product catalog. No payment is collected in this preview.</p>
+              </div>
+              <div class="onboarding-panel" data-onboarding-panel="3" hidden>
+                <h3 tabindex="-1">Preview the Telegram handoff</h3>
+                <p>In a provisioned setup, these three roles would exchange a request and a decision. None is connected for your preview.</p>
+                <p class="onboarding-selection" id="onboarding-selection" aria-live="polite"></p>
+                <ol class="onboarding-roles">
+                  <li><strong>Hermes agent</strong><span>Proposes an action under your draft policy</span><em>Not connected</em></li>
+                  <li><strong>Approval bot</strong><span>Would deliver the held request to a human on Telegram</span><em>Not connected</em></li>
+                  <li><strong>Advisory judge</strong><span>Would add advice; it cannot approve for you</span><em>Not connected</em></li>
+                </ol>
+                <p class="onboarding-final-note">The preview ends here. To see a real gate, judge, and human decision, use the separate live demo below. Its browser chat emulates Telegram transport.</p>
+                <a class="btn primary" href="#live-demo">Go to the live demo below</a>
+              </div>
+              <div class="onboarding-actions"><button class="btn" id="onboarding-back" type="button" hidden>Back</button><button class="btn primary" id="onboarding-next" type="button">Continue to policy</button></div>
+            </div>
+            <noscript><p class="onboarding-noscript">The interactive preview needs JavaScript. The live demo below remains available.</p></noscript>
+          </div>
+          <div class="get-approved-panel" id="live-demo">
             <div class="get-approved-head"><h2 id="get-approved-title">Try the full approval loop</h2><button class="btn primary" id="get-approved-button" type="button" aria-expanded="false" aria-controls="demo-embed">Get Approved</button></div>
             <p>Run a scripted agent through the real approval.md gate. A live AI judge gives advice; you decide each held action here and see what the gate actually did. The chat in this demo emulates Telegram transport, so there is no account or bot setup.</p>
             <p class="fine">A private browser session starts when you open it. Prompts may take up to 30 seconds to arrive.</p>
@@ -301,6 +371,7 @@ make demo    # the whole flow in Docker, offline; tap Approve or Reject at http:
         an advisory AI and never an approval. Hackathon entry: CoreWeave × W&amp;B Fully Connected, part 2.
       </footer>
     </div>
+    <script type="module" src="assets/onboarding.js"></script>
     <script>
       (() => {
         const gateway = 'https://approved-demo-gateway.vercel.app/';
