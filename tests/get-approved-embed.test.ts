@@ -34,6 +34,7 @@ function harness() {
     focus() {},
   };
   const newTab = { href: "" };
+  const rootStyle = { overflowAnchor: "auto" };
   const elements: Record<string, unknown> = {
     "get-approved-button": button,
     "demo-embed": embed,
@@ -42,12 +43,12 @@ function harness() {
   };
   runInNewContext(script!, {
     URL,
-    document: { getElementById: (id: string) => elements[id] },
+    document: { documentElement: { style: rootStyle }, getElementById: (id: string) => elements[id] },
     window: { innerHeight: 844, scrollY: 1000,
       scrollTo(options: { top: number; behavior: string }) { scrolls.push(options); },
       addEventListener: (name: string, cb: (event: Record<string, unknown>) => void) => { windowHandlers[name] = cb; } },
   });
-  return { frame, embed, button, newTab, source, rect, scrolls, message: windowHandlers.message!, click: buttonHandlers.click! };
+  return { frame, embed, button, newTab, rootStyle, source, rect, scrolls, message: windowHandlers.message!, click: buttonHandlers.click! };
 }
 
 test("Get Approved accepts only current gateway height messages", () => {
@@ -55,6 +56,7 @@ test("Get Approved accepts only current gateway height messages", () => {
   assert.equal(h.newTab.href, "https://approved-demo-gateway.vercel.app/?auto=1");
   h.click();
   assert.equal(h.embed.hidden, false);
+  assert.equal(h.rootStyle.overflowAnchor, "none");
   const send = (origin: string, source: unknown, height: unknown, type = "approved-demo-height-v1") =>
     h.message({ origin, source, data: { type, height } });
   send("https://evil.example", h.source, 1800);
@@ -69,6 +71,7 @@ test("Get Approved accepts only current gateway height messages", () => {
   assert.equal(h.frame.style.height, "9004px");
   h.click();
   assert.equal(h.embed.hidden, true);
+  assert.equal(h.rootStyle.overflowAnchor, "auto");
   assert.equal(h.frame.src, "");
   assert.equal(h.frame.style.height, "");
   send("https://approved-demo-gateway.vercel.app", h.source, 1200);
@@ -91,6 +94,10 @@ test("policy reveal scrolls only the active trusted iframe header into view", ()
   send("https://approved-demo-gateway.vercel.app", h.source, 300);
   assert.equal(h.scrolls.length, 1);
   assert.equal(h.scrolls[0]?.top, 776);
+  h.message({ origin: "https://approved-demo-gateway.vercel.app", source: h.source,
+    data: { type: "approved-demo-height-v1", height: 5000 } });
+  assert.equal(h.rootStyle.overflowAnchor, "none");
+  assert.equal(h.scrolls.length, 1, "chat-driven iframe growth does not reset policy reading position");
   h.click();
   send("https://approved-demo-gateway.vercel.app", h.source, 300);
   assert.equal(h.scrolls.length, 1, "closed iframe ignores old messages");
