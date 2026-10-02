@@ -5171,14 +5171,17 @@ function describeToolCall(
  *   write-argument positions of the binaries whose writes are known (L-e):
  *   never the binary, never a word that is merely an argument. A written path
  *   resolving to an organ takes its class; one carrying a glob or a variable
- *   this hook cannot expand, written from a directory under `.hermes` or
- *   `.approval`, is `policy.core` (it may be any file there); an unexpanded
- *   `$HERMES_HOME` in a written path is `policy.core` wherever it is written
- *   from, since it names the home by definition.
- * - READ paths (a read segment's arguments, a copy's sources) that resolve to a
- *   credential take `account.credential`, and so does a directory under
- *   `.hermes` or `.approval` handed to a binary that reads directories
- *   recursively (`grep -r`, `rg`, `find`, `tar`, ...).
+ *   this hook cannot expand is `policy.core` when it lands in one of the gate's
+ *   own directories ({@link gateRootKind}) or a pattern in it could name the
+ *   home or an organ (recheck 3); an unexpanded `$HERMES_HOME` in a written
+ *   path is `policy.core` wherever it is written from. A copy into a directory
+ *   writes `<dir>/<source name>`; an extraction writes into its directory.
+ * - READ paths (a read segment's arguments, `<` targets, a copy's sources) that
+ *   resolve to a credential take `account.credential`, and so does a directory
+ *   that holds credentials ({@link holdsCredentials}) handed to a binary that
+ *   reads directories recursively (`grep -r`, `rg`, `find`, `tar`, ...).
+ * - After a `cd` this hook cannot resolve, every later relative write is
+ *   `policy.core` and every later relative read `account.credential`.
  * - `cd` moves the directory for the segments after it. Like the Codex arm, a
  *   `cd` may or may not have run (`||`, a failed `cd`), so the directories
  *   before and after it are both kept and every later path is judged from each.
