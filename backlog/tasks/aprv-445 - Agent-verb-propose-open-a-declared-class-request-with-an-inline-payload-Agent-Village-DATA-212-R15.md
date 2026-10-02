@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-02 20:41'
+updated_date: '2026-10-02 22:09'
 labels: []
 dependencies: []
 references:
@@ -58,10 +58,17 @@ Found while testing: (1) the hook's abandoned-question sweep (APRV-287) and find
 
 Validation: npm test (tsc + run-tests.mjs) exit 0, 5398 tests, 5397 pass, 0 fail, 1 skipped (baseline at 6b74ca72: 5358 / 5357 / 0 / 1, exit 0). tsc --noEmit exit 0; npm run lint exit 0. New suites: tests/cli-propose.test.ts (15), tests/serve-propose.test.ts (5), tests/cli-hook-hermes-rules.test.ts (13); additions in policy-load, policy-match, policy-explain, payload-store, serve, cli-instructions, cli-policy, cli-init, gate. Conformance refusal-unions regenerated at 23.0.0 (gate union gained two codes). Mutation check: with the propose-task exclusion removed from the hook's abandoned sweep, the sweep test fails (the proposal is withdrawn).
 Decisions for the human: (a) init now gitignores .approval/payloads/, reversing the documented tracked-by-default stance (brief ruling A5); (b) SPEC.md amendments are marked (Amended APRV-445, pending sign-off.); (c) a new agent verb start was added to close the A4 gap (no agent-credential path recorded execution.started for a non-hook action); (d) .hermes/.env stays account.credential (both human-only), not policy.core as the brief's table said.
+
+Refutation round (2026-10-03). CORRECTION to the note above: '.hermes/.env stays account.credential (both human-only)' was false for writes. The credential tier is consulted for reads only, so write_file/patch/>>/sed -i/tee onto $HERMES_HOME/.env classified files.write.workspace and ran unattended. Writes to .hermes/.env, .env.*, auth.json are now policy.core; reads stay account.credential, now through read_file too. A Hermes terminal call's relative words and redirect targets are also judged against its workdir (L10).
+B1: requestStanding() in core/gate.ts. wait reports expired (exit 3) for a grant whose window lapsed, and void (new EXIT_VOID = 7) for a grant or pending request pinned to a re-attested policy or withdrawn by the runtime for policy-drift. propose re-files in those cases; a drifted pending request is withdrawn first (reason superseded).
+S1 task-is-proposal (plain request; task file in the propose: namespace). S2 proposals excluded from telegram supersededPending/orderPending stale bucket/collapse (collapsibleStale extracted). S3 cli.js bootstrap blocks hook hermes on missing dist or a throwing import. S4 key-class-mismatch. S5 only a pending or granted-unspent request binds start to the grant path.
+L1 --withdraw-on-timeout with --timeout 0 refused. L2 stale socket unlinked only on ECONNREFUSED/ENOENT. L3 other-writable socket dir refused, 0666 only in an owner-only dir. L4 agentRequest.humanOnly, explain says refused: human-only. L5 a racing identical registration answers idempotently. L6 key ≤1024 B, summary ≤4096 B, lone surrogates and non-finite numbers exit 2. L7 state executed. L8 README-extended/doctor wording, and init re-run says it appended. L9 task-not-proposal. L11 documented.
+Conformance refusal-unions 24.0.0.
+Validation: npm test exit 0, 5418 tests, 5417 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the agent verbs propose (register + request in one call, payload inline as --payload-json, class bounded by an exact policy key opened with the new per-class agent_may_request) and start (requester-only execution.started through the existing harness-grant and policy-start spenders), wait --timeout 0, owner-only payload store files, init gitignoring payloads, serve --listen unix:<path>, Hermes classifier rows for its own side-effecting tools and .hermes paths, and a Hermes fail-closed wrapper. Proposals are excluded from the hook's abandoned sweep and carry. Verified by npm test exit 0 (5398 tests), typecheck and lint.
+Added the agent verbs propose and start, the policy key agent_may_request, wait --timeout 0 and the void standing (exit 7), owner-only payload store files, init gitignoring payloads, serve --listen unix:<path>, and Hermes classifier rows. Added a Hermes fail-closed path at three levels (adapter, main, cli.js). Writes to the Hermes home's secrets are now policy.core. Proposals are excluded from the hook's sweep and carry and from the Telegram stale collapse. Refutation findings B1, B2, S1-S5 and L1-L11 are addressed. Verified: npm test exit 0 (5418 tests), tsc and lint clean.
 <!-- SECTION:FINAL_SUMMARY:END -->
