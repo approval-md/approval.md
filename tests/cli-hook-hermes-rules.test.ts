@@ -497,3 +497,69 @@ test("the hook's abandoned-question sweep takes back its own stale question and 
   assert.ok(withdrawn[0]?.startsWith("hook:") === true, withdrawn[0] ?? "");
   assert.equal(withdrawn.includes(key), false, "the sweep withdrew a proposal");
 });
+
+// ---------------------------------------------------------------------------
+// B2 (APRV-445 refutation): writes to the Hermes home's secrets are organs
+// ---------------------------------------------------------------------------
+
+test("every write shape onto .hermes/.env, auth.json or config.yaml is policy.core; reads stay account.credential", () => {
+  const dir = ready();
+  const home = join(dir, ".hermes");
+  mkdirSync(home, { recursive: true });
+  const env = join(home, ".env");
+  const writes: Array<[string, Record<string, unknown>]> = [
+    ["write_file", { path: env, content: "HERMES_ACCEPT_HOOKS=0" }],
+    ["patch", { path: env, old_string: "1", new_string: "0" }],
+    ["write_file", { path: join(home, ".env.local"), content: "X=1" }],
+    ["write_file", { path: join(home, "auth.json"), content: "{}" }],
+    ["write_file", { path: join(home, "config.yaml"), content: "hooks: {}" }],
+    ["terminal", { command: `echo X=1 > ${env}`, workdir: dir }],
+    ["terminal", { command: `echo X=1 >> ${env}`, workdir: dir }],
+    ["terminal", { command: `sed -i s/1/0/ ${env}`, workdir: dir }],
+    ["terminal", { command: `echo X | tee -a ${env}`, workdir: dir }],
+    // L10: relative writes from a `.hermes` workdir.
+    ["terminal", { command: "echo X=1 >> .env", workdir: home }],
+    ["terminal", { command: "sed -i s/a/b/ config.yaml", workdir: home }],
+    ["terminal", { command: "cp /tmp/x .env", workdir: home }],
+    ["terminal", { command: "echo {} > auth.json", workdir: home }],
+  ];
+  for (const [tool, input] of writes) {
+    const verdict = verdictOf(hook(dir, event(dir, { tool_name: tool, tool_input: input })));
+    assert.equal(verdict.permission, "deny", `${tool} ${JSON.stringify(input)}`);
+    assert.ok(verdict.message.includes("policy.core"), `${tool} ${JSON.stringify(input)}: ${verdict.message}`);
+  }
+  // `cp` is direction-blind to the classifier (APRV-198): a copy naming the
+  // credential file may be a copy OUT of it, so it takes the credential class,
+  // which is human-only exactly as policy.core is. Either way it is refused.
+  const copy = verdictOf(
+    hook(dir, event(dir, { tool_name: "terminal", tool_input: { command: `cp /tmp/x ${env}`, workdir: dir } })),
+  );
+  assert.equal(copy.permission, "deny");
+  assert.match(copy.message, /policy\.core|account\.credential/u);
+  // L10, the scheduler's directory, relative.
+  const cron = verdictOf(
+    hook(dir, event(dir, { tool_name: "terminal", tool_input: { command: "echo x > scripts/job.sh", workdir: home } })),
+  );
+  assert.ok(cron.message.includes("cron.manage"), cron.message);
+
+  const reads: Array<[string, Record<string, unknown>]> = [
+    ["terminal", { command: `cat ${env}`, workdir: dir }],
+    ["terminal", { command: "cat .env", workdir: home }],
+    ["read_file", { path: env }],
+    ["read_file", { path: join(home, "auth.json") }],
+  ];
+  for (const [tool, input] of reads) {
+    const verdict = verdictOf(hook(dir, event(dir, { tool_name: tool, tool_input: input })));
+    assert.equal(verdict.permission, "deny", `${tool} ${JSON.stringify(input)}`);
+    assert.ok(verdict.message.includes("account.credential"), `${tool}: ${verdict.message}`);
+    assert.equal(verdict.message.includes("policy.core"), false, `${tool}: a read is not an organ write`);
+  }
+
+  // Ordinary work in the home is still ordinary.
+  const notes = verdictOf(
+    hook(dir, event(dir, { tool_name: "terminal", tool_input: { command: "touch notes.txt", workdir: home } })),
+  );
+  assert.equal(notes.permission, "allow");
+  assert.equal(protectedPathClass("/data/.hermes/.env", []), "policy.core");
+  assert.equal(protectedPathClass("/data/.hermes/auth.json", []), "policy.core");
+});

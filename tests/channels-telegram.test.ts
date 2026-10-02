@@ -127,6 +127,7 @@ import {
   dispatchPending,
   glossWiring,
   newDispatchState,
+  collapsibleStale,
   orderPending,
   queueLines,
   reviewHandlerFor,
@@ -5553,10 +5554,12 @@ function pendingLike(overrides: {
   cls?: string;
   payload?: string;
   proposal?: boolean;
+  task?: string;
 }): ChannelRequest {
   const base = healthy();
   return {
     ...base,
+    ...(overrides.task === undefined ? {} : { task: computed(overrides.task, "log") }),
     action_key: computed(overrides.key, "log"),
     requested_ts: computed(overrides.ts, "log"),
     ...(overrides.cls === undefined ? {} : { class: computed(overrides.cls, "log") }),
@@ -6777,4 +6780,27 @@ test("a capped request's buttons are forgotten when ITS window closes, not the p
   clock.ms += 1;
   assert.equal(channel.sweep().digests, 1);
   assertClean(unit);
+});
+
+test("APRV-445: a proposal is never stale, never superseded and never collapsed", () => {
+  // Two old proposals over identical bytes and class, and two old hook-style
+  // requests over identical bytes: the hook pair collapses, the proposals keep
+  // their own cards, in the live bucket, because their askers poll for days.
+  const requests = [
+    pendingLike({ key: "prop-old", ts: at(1), payload: "a".repeat(64), task: "propose:" + "1".repeat(32) }),
+    pendingLike({ key: "prop-newer", ts: at(2), payload: "a".repeat(64), task: "propose:" + "2".repeat(32) }),
+    pendingLike({ key: "hook-old", ts: at(3), payload: "b".repeat(64) }),
+    pendingLike({ key: "hook-newer", ts: at(4), payload: "b".repeat(64) }),
+  ];
+  const superseded = supersededPending(requests);
+  assert.deepEqual([...superseded], ["hook-old"]);
+  assert.deepEqual(
+    collapsibleStale(requests, at(100)).map((request) => request.action_key.value),
+    ["hook-old", "hook-newer"],
+  );
+  // Proposals sort with the live requests (newest first), the stale hooks after.
+  assert.deepEqual(
+    orderPending(requests, at(100)).map((request) => request.action_key.value),
+    ["prop-newer", "prop-old", "hook-old", "hook-newer"],
+  );
 });

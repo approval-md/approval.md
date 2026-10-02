@@ -396,3 +396,27 @@ test("explain reports agentRequest, with a decision-path line only when some key
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("L4: a human-only member under an open family is reported refused: human-only, and the diff agrees", async () => {
+  const { diffPolicies } = await import("../src/core/policy-diff.js");
+  const dir = mkdtempSync(join(tmpdir(), "approval-md-amr-human-"));
+  try {
+    const block = (flag: string): string =>
+      `\`\`\`yaml approval-policy\nversion: "0.1"\ndefaults:\n  autonomy: manual\nclasses:\n  intent.*: { autonomy: manual${flag} }\n  intent.secret: { autonomy: human-only }\n\`\`\`\n`;
+    const before = join(dir, "before.md");
+    const after = join(dir, "after.md");
+    writeFileSync(before, block(""));
+    writeFileSync(after, block(", agent_may_request: true"));
+    const load = loadPolicy({ file: after });
+    const explained = explain(load, "intent.secret");
+    assert.deepEqual(explained.agentRequest, { allowed: false, explicit: true, pattern: "intent.*", humanOnly: true });
+    assert.ok(
+      explained.decisionPath.some((line) => line.startsWith("agent requests: refused: human-only")),
+      explained.decisionPath.join("\n"),
+    );
+    const diff = diffPolicies(loadPolicy({ file: before }), load);
+    assert.equal(diff.classes.find((entry) => entry.class === "intent.secret")?.agentRequest, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

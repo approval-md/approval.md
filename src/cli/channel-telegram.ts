@@ -2523,6 +2523,27 @@ export function staleLines(
  * cycle shows the requests again, which is the degradation SPEC.md §10.3
  * requires and the one this code takes.
  */
+/**
+ * The members a first-cycle collapse would put into one message: stale or
+ * superseded, and never a proposal (APRV-445 refutation, S2). Proposals are
+ * long-lived by design, so after a six-minute outage every one of them would
+ * otherwise land in one digest whose only bulk answer is reject-all.
+ */
+export function collapsibleStale(
+  undecided: readonly ChannelRequest[],
+  now: string,
+  superseded: ReadonlySet<string> = supersededPending([...undecided]),
+): ChannelRequest[] {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return [];
+  return undecided.filter((request) => {
+    if (isProposalTask(request.task.value)) return false;
+    const at = Date.parse(request.requested_ts.value);
+    const age = Number.isNaN(at) ? 0 : nowMs - at;
+    return age >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value);
+  });
+}
+
 async function collapseStale(
   setup: ListenSetup,
   streams: Streams,
@@ -2540,14 +2561,7 @@ async function collapseStale(
   // Computed over the WHOLE pending set rather than over `undecided`, so a
   // request this process has already delivered still supersedes an older twin.
   const superseded = supersededPending(undecided);
-  // APRV-445 refutation (S2): proposals are never collapsed. They are
-  // long-lived by design, so after a six-minute outage every one of them would
-  // otherwise land in one digest whose only bulk answer is reject-all.
-  const stale = undecided.filter(
-    (request) =>
-      !isProposalTask(request.task.value) &&
-      (age(request) >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value)),
-  );
+  const stale = collapsibleStale(undecided, now, superseded);
   if (stale.length < COLLAPSE_MIN) return undecided;
 
   let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;

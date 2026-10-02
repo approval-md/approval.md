@@ -844,14 +844,14 @@ Usage:
 Flags:
   --class <c>          an EXACT key of the policy's classes, opened to agents by
                        agent_may_request: true on it or a <prefix>.* family
-  --key <k>            the idempotency key, recorded verbatim as action_key
+  --key <k>            "<class>:<id>", recorded verbatim as action_key (≤1 KiB)
   --summary <text>     the line the approver reads (in the log, in cleartext)
   --payload-json <j>   the payload, a JSON object of at most 262144 bytes
   --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
 
-decision "requested": poll \`approval wait <task> --timeout 0\`. "autonomous" or
-"supervised": act, then \`approval start\`. The same class, key and payload
-again appends nothing and answers idempotent:true.
+decision "requested": poll \`approval wait <task> --timeout 0\` (7 void or 3
+expired: propose again). "autonomous"/"supervised": act, then \`approval start\`.
+A retry appends nothing (idempotent:true) unless the answer can't be used.
 
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}

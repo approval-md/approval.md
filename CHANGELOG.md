@@ -15,6 +15,22 @@ before a tag.
 
 ## Unreleased
 
+- **Proposals after review (APRV-445).** `approval wait` reports what a request
+  still authorizes: a grant whose window lapsed is `expired` (exit 3), and a
+  grant or pending request pinned to a re-attested policy is `void`, a new exit
+  code 7 meaning "ask again". `propose` re-files in exactly those cases instead
+  of answering a dead grant idempotently, and answers `state: executed` after
+  `start`. New refusals `task-is-proposal`, `task-not-proposal` and
+  `key-class-mismatch` (the key must begin with `<class>:`); key and summary
+  caps; lone surrogates and non-finite numbers are usage errors. Proposals are
+  never collapsed, superseded or ordered as stale by the Telegram channel.
+  `cli.js` itself answers `approval hook hermes` with the block directive when
+  the runtime cannot load. Writes to `.hermes/.env`, `.env.*` and `auth.json`
+  are `policy.core` (reads stay `account.credential`, now through `read_file`
+  too), and a Hermes `terminal` call's relative words are also judged against its
+  `workdir`. The unix socket refuses an other-writable directory and only
+  unlinks a socket a connect proves dead.
+
 - **An agent can declare and ask in one call, with the payload inline
   (APRV-445).** `approval propose --class <c> --key <k> --summary <s>
   --payload-json <json>` registers a one-action envelope and requests it,

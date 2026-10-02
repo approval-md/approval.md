@@ -1673,6 +1673,19 @@ classes:
   intent.publish.stated.index: { autonomy: autonomous }
 ```
 
+**The key** must begin with `<class>:` and name something after it (refused
+`key-class-mismatch`, exit 2): `intent.publish.inferred.index:<intention id>`.
+It is recorded verbatim as `action_key`, and a consumer reads the class from the
+record rather than parsing it back out of the key. The key is at most 1024 bytes
+and `--summary` at most 4096; a lone UTF-16 surrogate in either or anywhere in
+the payload, and a number JSON parses to Infinity (`1e400`), are usage errors. An
+integer beyond 2^53 is hashed as the double it parses to, so send large ids as
+strings.
+
+**Do not open a `supervised-live` class to agents.** The live draw would decide,
+per proposal, whether a human is asked at all, which the requester can neither
+predict nor explain to the person whose words it is proposing.
+
 **The task id** is `propose:` and the first 32 hex digits of the SHA-256 over
 the RFC 8785 canonical JSON of `[actor, class, key]`. The actor is the tenant
 half: one `approval serve` process is one store and one fixed `agent:<id>`. Two
@@ -1693,12 +1706,18 @@ can never read back. Set `payload_retention` so the daemon prunes bytes whose
 action has finished.
 
 **Idempotency.** The same class, key and bytes append nothing and answer the
-request's current state with `idempotent: true`, whether it is pending or
-decided. A withdrawn or expired request (a re-attestation voids pending
-requests as `policy-drift`) is asked again by the same call, under the same
-registration. The same key with different bytes refuses `duplicate-request`
-while a request is live and `payload-mismatch` otherwise: a key is bound to the
-bytes it was first proposed with.
+request's standing with `idempotent: true` while it still means something:
+pending, granted and spendable, rejected, revoked, or executed (`state:
+"executed"`, after `start`). The same call ASKS AGAIN, under the same
+registration, when the request can no longer be answered usefully: withdrawn,
+expired, a grant whose request window lapsed (a grant has no window of its own,
+so a tap at hour 71 of 72 authorizes nothing at hour 73), or a grant or pending
+request pinned to a policy that has since been re-attested (a pending one is
+first withdrawn, reason `superseded`). Two identical calls racing to register
+are one proposal. The same key with different bytes refuses
+`duplicate-request` while a request is live and `payload-mismatch` otherwise: a
+key is bound to the bytes it was first proposed with. A plain `approval request`
+on a `propose:` task is refused `task-is-proposal`.
 
 **Off the manual path.** A class that resolves `autonomous` or `supervised` is
 registered and answered at once with `decision: "autonomous"` (or
@@ -1720,16 +1739,18 @@ Poll a `requested` proposal with `approval wait <task> --timeout 0`.
 
 `approval start <task> --action <key> --payload-json <json>` appends the one
 `execution.started` for an action its requester is about to carry out itself,
-outside any harness hook (APRV-445). REQUESTER-ONLY: the caller must be the actor
+outside any harness hook (APRV-445). Proposals only: any other task is refused
+`task-not-proposal`. REQUESTER-ONLY: the caller must be the actor
 that registered the task (`not-requester`). The bytes presented must hash to the
 registered `payload_hash` (`payload-mismatch`), so what is done is what was
 proposed.
 
 It writes through the two existing harness spenders and nothing else. A key
-that carries a request spends its harness grant: refused `not-granted` while
+whose request is pending or granted and unspent spends its harness grant: refused `not-granted` while
 pending or after a rejection, `expired` after the window, `policy-drift` under
-a re-attested policy. A key with no request is recorded as authorized by the
-policy itself: refused `not-granted` for a manual class and `class-human-only`
+a re-attested policy. A key with no such request (none, or one withdrawn,
+expired, rejected or revoked, which binds nothing) is recorded as authorized by
+the policy itself: refused `not-granted` for a manual class and `class-human-only`
 for a human-only one, and charged against the budgets. A second start of one key
 is `already-executed`. The record carries `execution: "harness"`, which is why no
 `execution.completed` ever follows it.
@@ -2025,6 +2046,11 @@ to decide whether to fix itself, stop retrying, or ask a human.
   registered or appended; the repair is a policy edit and a human attestation.
 - `payload-too-large` (exit 2) — a `propose` or `start` payload over 262144
   bytes of UTF-8. Refused before it is parsed; nothing is stored.
+- `task-is-proposal` — a plain `request` on a task `propose` registered, or a
+  task file claiming an id in the `propose:` namespace. Nothing is appended.
+- `task-not-proposal` — `start` on a task `propose` did not register.
+- `key-class-mismatch` (exit 2) — a `propose` key that does not begin with
+  `<class>:` and an identifier.
 - `append-failed` — the append itself failed; the exit code follows the cause.
   `head-moved` means the log grew between this command's read and its write, so
   nothing was written. Since APRV-236 you see it only after the command has
@@ -2376,7 +2402,19 @@ costs, and the carve-outs.
 decided one answers as it always would. Use it to poll through `approval serve`,
 which runs every verb and every hook call through one queue, so a wait that
 sleeps there holds the tenant's hook traffic for as long as it sleeps. The
-duration grammar has no zero anywhere else.
+duration grammar has no zero anywhere else. `--withdraw-on-timeout` is refused
+beside it (exit 2): a status read that withdrew would retract every question it
+looked at.
+
+**What a waiter is told is what the request still authorizes** (APRV-445). A
+grant whose request window has lapsed reads `expired` (exit 3), not `granted`. A
+grant or pending request pinned to a policy hash that is no longer the attested
+one, or a request the runtime withdrew for `policy-drift`, reads `void`, **exit
+7**: the answer can never be used, and the repair is to ask again (for a
+proposal, the same `propose` call re-files). Precedence: rejected > withdrawn >
+void > expired > granted. A task with no requests at all, an unknown task id
+included, is granted vacuously at exit 0, so poll the task id `propose`
+returned.
 
 Polls the log and writes nothing — not even the `approval.expired` event it may
 derive: expiry is judged lazily from the request's own timestamp, and
@@ -7402,10 +7440,16 @@ same machine running as a different uid. The path must be absolute, inside an
 existing directory OWNED BY THE SERVING UID: that directory is the access
 control, so a directory somebody else owns is refused at startup (exit 2). The
 socket itself is opened `0666` once bound, and who may reach it is decided by
-the directory's mode, group or ACL. A socket file nothing answers on is a stale
-one and is replaced; a live one (another server answers) is refused rather than
-taken over, and anything at the path that is not a socket is refused rather
-than destroyed. Clients speak plain HTTP over the socket, with the same two
+the directory's mode, group or ACL. An other-writable directory (`/tmp`) is
+refused, since anyone could swap the socket. The widening to `0666` happens only
+in a directory nobody but the serving uid can write; in a group-writable one the
+socket keeps the umask's mode (a notice says so). The residual: between the bind
+and the chmod the socket carries the umask's narrower mode, which fails closed.
+A socket file is stale, and replaced, only when a connect to it is refused
+(`ECONNREFUSED`) or it vanished (`ENOENT`); a live one (another server answers)
+is refused rather than taken over, one whose probe fails any other way
+(`EACCES`, a full backlog) is left in place and refused, and anything at the
+path that is not a socket is refused rather than destroyed. Clients speak plain HTTP over the socket, with the same two
 bearer credentials. `--allow-non-loopback` has nothing to say about it.
 
 ### What it never does

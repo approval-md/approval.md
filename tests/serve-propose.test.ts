@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -319,4 +320,47 @@ test("a socket directory the serving uid does not own is refused, by the CLI bef
   assert.equal(byEnv, 2, err);
   assert.match(err, /is owned by uid/u);
   assert.equal(existsSync(target), false);
+});
+
+test("L2: a socket file whose probe does not prove it dead is left alone and refused", async () => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;
+  const dir = await ready();
+  const socketPath = join(dir, "unprovable.sock");
+  const child = spawn(
+    process.execPath,
+    ["-e", `require("node:net").createServer().listen(${JSON.stringify(socketPath)}, () => process.stdout.write("up"))`],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  await new Promise<void>((settle) => child.stdout.once("data", () => settle()));
+  const exited = new Promise<void>((settle) => child.on("exit", () => settle()));
+  child.kill("SIGKILL");
+  await exited;
+  // A socket nobody may connect to answers EACCES, which proves nothing about
+  // whether something listens.
+  chmodSync(socketPath, 0o000);
+  await assert.rejects(listener(dir, { socketPath }), /does not prove nothing listens/u);
+  assert.ok(lstatSync(socketPath).isSocket(), "an unprovable socket was unlinked");
+});
+
+test("L3: an other-writable directory is refused; a group-writable one binds without widening the socket", async () => {
+  const dir = await ready();
+  const open = join(dir, "open");
+  mkdirSync(open);
+  chmodSync(open, 0o777);
+  const refused = checkUnixSocketTarget(join(open, "s.sock"));
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.match(refused.message, /writable by every user/u);
+
+  const group = join(dir, "group");
+  mkdirSync(group);
+  chmodSync(group, 0o770);
+  const socketPath = join(group, "s.sock");
+  const server = await listener(dir, { socketPath });
+  try {
+    assert.notEqual(statSync(socketPath).mode & 0o777, UNIX_SOCKET_MODE);
+    assert.equal(statSync(socketPath).mode & 0o002, 0, "the socket was opened to other users");
+  } finally {
+    await server.close();
+  }
 });
