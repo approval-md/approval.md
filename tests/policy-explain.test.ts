@@ -348,3 +348,51 @@ test("isActionClass accepts concrete classes and rejects patterns and junk", () 
     assert.equal(isActionClass(value), false, JSON.stringify(value));
   }
 });
+
+// ---------------------------------------------------------------------------
+// agent_may_request (APRV-445): explain names it, and the amendment diff sees it
+// ---------------------------------------------------------------------------
+
+test("explain reports agentRequest, with a decision-path line only when some key states the flag", async () => {
+  const { DEFAULT_SCHEMA_DIR } = await import("../src/core/validate.js");
+  const { diffPolicies, renderDiff } = await import("../src/core/policy-diff.js");
+  const fixture = join(DEFAULT_SCHEMA_DIR, "fixtures", "policy-md", "valid", "agent-may-request.md");
+  const load = loadPolicy({ file: fixture });
+
+  const open = explain(load, "intent.publish.inferred.index");
+  assert.deepEqual(open.agentRequest, { allowed: true, explicit: true, pattern: "intent.publish.*" });
+  assert.ok(open.decisionPath.some((line) => line.startsWith("agent requests: allowed")), open.decisionPath.join("\n"));
+
+  const wildcardOnly = explain(load, "intent.publish.other");
+  assert.equal(wildcardOnly.agentRequest.allowed, false);
+  assert.ok(wildcardOnly.decisionPath.some((line) => /is not a key of `classes`/u.test(line)));
+
+  const silent = explain(load, "communicate.email.external");
+  assert.deepEqual(silent.agentRequest, { allowed: false, explicit: true, pattern: null });
+  assert.equal(silent.decisionPath.some((line) => line.startsWith("agent requests")), false);
+
+  // An amendment that only adds the flag is a semantic change, not "no change".
+  const dir = mkdtempSync(join(tmpdir(), "approval-md-amr-diff-"));
+  try {
+    const before = join(dir, "before.md");
+    writeFileSync(
+      before,
+      '```yaml approval-policy\nversion: "0.1"\ndefaults:\n  autonomy: manual\nclasses:\n  intent.publish.inferred.index: { autonomy: manual }\n```\n',
+    );
+    const after = join(dir, "after.md");
+    writeFileSync(
+      after,
+      '```yaml approval-policy\nversion: "0.1"\ndefaults:\n  autonomy: manual\nclasses:\n  intent.publish.inferred.index: { autonomy: manual, agent_may_request: true }\n```\n',
+    );
+    const diff = diffPolicies(loadPolicy({ file: before }), loadPolicy({ file: after }));
+    assert.equal(diff.unchanged, false);
+    const change = diff.classes.find((entry) => entry.class === "intent.publish.inferred.index");
+    assert.deepEqual(change?.agentRequest, { before: false, after: true });
+    assert.ok(
+      renderDiff(diff).includes("  intent.publish.inferred.index (agent may propose): no -> yes"),
+      renderDiff(diff).join("\n"),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -2439,6 +2439,10 @@ test("the refusal-code union is frozen public API", () => {
     // nothing. Distinct from every other code here because the repair belongs
     // to the filesystem rather than to the requester.
     "token-delivery-unavailable",
+    // APRV-445: `approval propose` named a class the policy has not opened to
+    // agents by name, and a proposal payload over the documented size.
+    "class-not-agent-requestable",
+    "payload-too-large",
   ]);
 });
 

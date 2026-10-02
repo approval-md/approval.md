@@ -15,6 +15,50 @@ before a tag.
 
 ## Unreleased
 
+- **An agent can declare and ask in one call, with the payload inline
+  (APRV-445).** `approval propose --class <c> --key <k> --summary <s>
+  --payload-json <json>` registers a one-action envelope and requests it,
+  for a requester with no file on the gate's machine (an agent behind
+  `approval serve`, which refuses every path flag). The class must be an exact
+  key of the policy's `classes`, opened to agents with the new per-class key
+  `agent_may_request: true` on itself or on a declared `<prefix>.*` family;
+  anything else refuses the new code `class-not-agent-requestable` and registers
+  nothing. The task id is derived from the actor, class and key, so a retry with
+  the same bytes appends nothing (`idempotent: true`). `approval start <task>
+  --action <k> --payload-json <json>` records the `execution.started` for a
+  proposed action its requester carries out, requester-only and bound to the
+  proposed bytes, through the existing harness-grant and policy-start paths.
+  Both are on the serve agent surface. `policy check` reports `agentRequest`,
+  and `policy amend`'s diff reports a change in it. Payloads over 256 KiB refuse
+  `payload-too-large` (exit 2).
+- **`approval wait --timeout 0` reads the current state and never sleeps
+  (APRV-445),** so a poller through `approval serve`, which runs every call
+  through one queue, no longer holds the tenant's hook traffic for the length of
+  a wait.
+- **The payload store is owner-only (APRV-445).** Every file under
+  `.approval/payloads/` is written 0600 inside a directory narrowed to 0700 on
+  every write, whatever the umask or the directory's earlier mode. `approval
+  init` now lists `.approval/payloads/` in the `.gitignore` lines it writes
+  (it was tracked by default before); remove the line to keep the bytes in
+  history.
+- **`approval serve --listen unix:<path>` (APRV-445),** also
+  `APPROVAL_SERVE_LISTEN`: a unix-domain socket, opened 0666 in a directory the
+  serving uid must own (the directory is the access control). A stale socket is
+  replaced, a live one or a non-socket file is refused.
+- **The Hermes adapter classifies the tools it used to wave through
+  (APRV-445).** `cronjob_manage` (and `cronjob`) actions that change the
+  schedule are `cron.manage`, `process_manage` (and `process`) writes are
+  `process.write`, every `browser_*` is `browser.exec`, `skill_manage` is
+  `skill.manage`, `delegate_task` is `agent.delegate`, `send_message` is
+  `message.send`; list/poll/log/wait actions stay reads. Writes under
+  `.hermes/scripts/` are `cron.manage`, and `.hermes/approval/` and the
+  allowlist's `.lock` sidecar join the `policy.core` organs.
+- **The Hermes hook blocks on every error path (APRV-445).** A pre-event answer
+  is either the adapter's own `{}` allow or a `{"action":"block"}` directive at
+  exit 2: a misconfigured hook entry, a throw, a signal mid-wait, a path that
+  reached no verdict, and a module that fails to load all print the directive.
+  Hermes reads any other non-zero exit with an empty stdout as an allow.
+
 - **A harness probe drives its own matrix, so an operator runs one command
   instead of typing thirty prompts (APRV-418).**
   `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human

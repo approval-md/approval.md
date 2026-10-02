@@ -674,8 +674,17 @@ channel; policy-authorized execution is never represented as a human grant.
                 "autonomy":"autonomous","winner":true,
                 "tieBreak":"specificity"|"strictest-autonomy"|
                            "lexicographic"|"tied-specificity"}],
+ "agentRequest":{"allowed":false,"explicit":true,"pattern":null},
  "decisionPath":["...","..."]}
 ```
+
+`agentRequest` (APRV-445) answers whether `approval propose` would admit this
+class: `explicit` is whether the class is an exact key of `classes`, `pattern`
+is the key whose `agent_may_request` decided (the exact key, or the most
+specific declared `<prefix>.*` family that states one), and `allowed` is both.
+It is read without the resolution above, because a wildcard match never makes a
+class proposable. A `decisionPath` line appears only when some key states the
+flag for this class.
 
 `specificity` is [literalSegments, wildcardSegments, totalSegments] (SPEC §5.2).
 `overridden.pattern` is null when the floor overrode `defaults.autonomy` rather
@@ -1631,6 +1640,107 @@ refusal     {"ok":false,"error":{"code":"...","message":"...",
 The refusal goes to stderr, and `seq` is the `budget.exceeded` record that WAS
 appended.
 
+## propose
+
+`approval propose --class <c> --key <k> --summary <s> --payload-json <json>`
+registers one action and requests it in one call (APRV-445, amended SPEC.md
+§10.1). It exists for a requester that holds its payload in memory and has no
+file on the gate's machine: an agent in a sandbox reaching `approval serve`
+with the agent credential, which refuses every path flag. `--payload-json` is
+the payload as the flag's VALUE, a JSON object of at most 262144 bytes of UTF-8
+as sent; an array, string, number or `null` is a usage error, and a larger
+payload is refused `payload-too-large` at exit 2 before it is parsed.
+
+**Why this verb may name its class.** `request` never does, so that an agent
+cannot call a `financial.spend` a `read.web`. Here the agent is also the
+registrant, so the bound is the operator's: the class must be an EXACT key of
+the policy's `classes` (a wildcard rule that happens to match does not count),
+and that key or a declared `<prefix>.*` family of it must set
+`agent_may_request: true` (SPEC.md §5.2). Anything else refuses
+`class-not-agent-requestable` and registers nothing. A `human-only` member
+under an open family refuses `class-human-only`, also before anything is
+registered. The check runs again inside the request's own read-check-append
+cycle, so a re-attestation in between cannot slip a closed class through. What
+the agent picks AMONG the opened classes is still its own statement: an
+operator who opens a manual class and an autonomous one under the same family
+is trusting the agent to pick the right one, and the record names the class it
+picked.
+
+```yaml approval-policy
+classes:
+  intent.publish.*: { autonomy: manual, agent_may_request: true }
+  intent.publish.inferred.index: { autonomy: manual }
+  intent.publish.stated.index: { autonomy: autonomous }
+```
+
+**The task id** is `propose:` and the first 32 hex digits of the SHA-256 over
+the RFC 8785 canonical JSON of `[actor, class, key]`. The actor is the tenant
+half: one `approval serve` process is one store and one fixed `agent:<id>`. Two
+actors proposing one key derive two tasks, and the second registration is
+refused `task-already-registered` because the key is already declared under the
+first.
+
+**Records.** One `task.registered` (actor = the caller, envelope `origin.app:
+approval-propose`, one action: the class, the summary, `idempotency_key` = the
+key, `payload_hash`) and one `approval.requested` exactly as `request` writes it,
+with `action_key` = the key verbatim, `summary`, `payload_hash`, `display_hash`,
+`policy_sha256` and `execution: "harness"` (a grant mints no token; the
+requester proceeds on the grant and records it with `start`). The summary is in
+the log in cleartext, twice; the payload is never in the log, only in the
+payload store (`.approval/payloads/<hash>.json`, mode 0600 in a 0700 directory),
+which the tenant credential's `GET /export` includes and the agent credential
+can never read back. Set `payload_retention` so the daemon prunes bytes whose
+action has finished.
+
+**Idempotency.** The same class, key and bytes append nothing and answer the
+request's current state with `idempotent: true`, whether it is pending or
+decided. A withdrawn or expired request (a re-attestation voids pending
+requests as `policy-drift`) is asked again by the same call, under the same
+registration. The same key with different bytes refuses `duplicate-request`
+while a request is live and `payload-mismatch` otherwise: a key is bound to the
+bytes it was first proposed with.
+
+**Off the manual path.** A class that resolves `autonomous` or `supervised` is
+registered and answered at once with `decision: "autonomous"` (or
+`"supervised"`) and no approval record. Act, then record it with `start`.
+
+**`--json`** (one object on stdout):
+
+```
+manual      {"ok":true,"task":"propose:<32 hex>","action_key":"<k>","class":"<c>",
+             "payload_hash":"<64 hex>","decision":"requested","state":"requested",
+             "seq":7,"idempotent":false}
+retry       {...,"state":"granted","seq":9,"idempotent":true}
+autonomous  {...,"decision":"autonomous","state":null,"seq":null,"idempotent":false}
+```
+
+Poll a `requested` proposal with `approval wait <task> --timeout 0`.
+
+## start
+
+`approval start <task> --action <key> --payload-json <json>` appends the one
+`execution.started` for an action its requester is about to carry out itself,
+outside any harness hook (APRV-445). REQUESTER-ONLY: the caller must be the actor
+that registered the task (`not-requester`). The bytes presented must hash to the
+registered `payload_hash` (`payload-mismatch`), so what is done is what was
+proposed.
+
+It writes through the two existing harness spenders and nothing else. A key
+that carries a request spends its harness grant: refused `not-granted` while
+pending or after a rejection, `expired` after the window, `policy-drift` under
+a re-attested policy. A key with no request is recorded as authorized by the
+policy itself: refused `not-granted` for a manual class and `class-human-only`
+for a human-only one, and charged against the budgets. A second start of one key
+is `already-executed`. The record carries `execution: "harness"`, which is why no
+`execution.completed` ever follows it.
+
+**`--json`**:
+
+```
+{"ok":true,"task":"propose:<32 hex>","action_key":"<k>","class":"<c>",
+ "authorization":"grant"|"policy","seq":12}
+```
+
 ## grant
 
 Legal only on a request that is awaiting a decision. A second decision is
@@ -1805,8 +1915,8 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"..."}}
 
 ## gate refusal codes
 
-The vocabulary every gate verb (register, request, grant, reject, revoke,
-withdraw, expire) returns in `error.code` with `--json`. Frozen public API: an agent branches on it
+The vocabulary every gate verb (register, request, propose, start, grant,
+reject, revoke, withdraw, expire) returns in `error.code` with `--json`. Frozen public API: an agent branches on it
 to decide whether to fix itself, stop retrying, or ask a human.
 
 - `policy-not-attested` — policy unattested or its bytes changed since
@@ -1870,7 +1980,8 @@ to decide whether to fix itself, stop retrying, or ask a human.
   it, or is withdrawing one it already withdrew. Distinct from `already-decided`:
   nobody answered, and nobody can now. Request the action again.
 - `not-requester` — a withdrawal was attempted by an actor other than the one
-  that opened the request. Only the party that asked may take the question back;
+  that opened the request, or a `start` by an actor other than the one that
+  registered the task. Only the party that asked may take the question back;
   anyone else who wants it gone rejects it.
 - `expired` — the TTL lapsed, judged from the request's own `ts`.
 - `not-expired` — expire was called before the TTL lapsed, or the policy declares
@@ -1908,6 +2019,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
   at the verb (exit 2) rather than a member of this union.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   nothing is authorized from a log that does not verify.
+- `class-not-agent-requestable` — `propose` named a class the policy has not
+  opened to agents: not an exact key of `classes`, or neither that key nor a
+  declared `<prefix>.*` family sets `agent_may_request: true`. Nothing is
+  registered or appended; the repair is a policy edit and a human attestation.
+- `payload-too-large` (exit 2) — a `propose` or `start` payload over 262144
+  bytes of UTF-8. Refused before it is parsed; nothing is stored.
 - `append-failed` — the append itself failed; the exit code follows the cause.
   `head-moved` means the log grew between this command's read and its write, so
   nothing was written. Since APRV-236 you see it only after the command has
@@ -2253,6 +2370,13 @@ See `docs/sandboxed-exec.md` for the profile, the survey of what egress denial
 costs, and the carve-outs.
 
 ## wait
+
+`--timeout 0` (also `0s`, `0ms`) reads the current state once and never sleeps
+(APRV-445): an undecided request answers `timeout`, exit 6, at once, and a
+decided one answers as it always would. Use it to poll through `approval serve`,
+which runs every verb and every hook call through one queue, so a wait that
+sleeps there holds the tenant's hook traffic for as long as it sleeps. The
+duration grammar has no zero anywhere else.
 
 Polls the log and writes nothing — not even the `approval.expired` event it may
 derive: expiry is judged lazily from the request's own timestamp, and
@@ -4457,17 +4581,20 @@ code. A re-run in a scaffolded directory writes nothing and exits 0. A directory
 carrying `APPROVALS.md` (the SPEC.md §5 fallback filename) already has a policy:
 init reports `policy-exists` and writes no `APPROVAL.md` beside it.
 
-Payloads are tracked. `.approval/payloads/` is deliberately not ignored: those
-bytes are what each approval bound to, and evidence belongs in the history. To
-ignore them instead, add `.approval/payloads/` yourself — the log keeps every
-`payload_hash`, but the bytes behind them stop being rebuildable.
+Payloads are ignored (APRV-445; they were tracked before it). `.approval/payloads/`
+holds the exact bytes each approval bound to, and for a proposal those are a
+person's own words, so the merged block lists it. To keep the bytes in history
+as evidence instead, remove that line yourself; the log keeps every
+`payload_hash` either way. Files in the store are written 0600 in a 0700
+directory whatever the umask.
 
 Keys are not. The merged block ignores `.approval/*.sqlite` (a projection),
 `.approval/vault.enc`, `.approval/env`, `.approval/keys/`, `.approval/**/*.tmp-*`
 and `.approval-journal/`. `.approval/keys/` is the one that matters most and is
 easiest to miss: it holds the X25519 private halves of sealed token delivery, and
-because the payload store beside it is tracked on purpose, `.approval/` is a
-directory people `git add` from. A key committed there opens that action's
+because the payload store beside it was tracked by default before APRV-445 (and
+still is wherever an operator chose that), `.approval/` is a directory people
+`git add` from. A key committed there opens that action's
 `token_sealed` for everyone holding the log. The line is written whether or not
 your policy has opted into `token_delivery: sealed`, and `approval doctor`'s
 `sealed-keys` row reports a key that is tracked or in a store no line covers.
@@ -7268,6 +7395,18 @@ flags, because the credentials here are bearer values and a cleartext hop hands
 them to whoever is on it. A widened bind prints a banner on stderr saying
 exactly that. This process terminates no TLS and holds no certificate; the
 supported deployment is a loopback bind behind a proxy the operator owns.
+
+`--listen unix:<path>` (or `APPROVAL_SERVE_LISTEN=unix:<path>`, which the flag
+overrides) binds a unix-domain socket instead (APRV-445), for a sandbox on the
+same machine running as a different uid. The path must be absolute, inside an
+existing directory OWNED BY THE SERVING UID: that directory is the access
+control, so a directory somebody else owns is refused at startup (exit 2). The
+socket itself is opened `0666` once bound, and who may reach it is decided by
+the directory's mode, group or ACL. A socket file nothing answers on is a stale
+one and is replaced; a live one (another server answers) is refused rather than
+taken over, and anything at the path that is not a socket is refused rather
+than destroyed. Clients speak plain HTTP over the socket, with the same two
+bearer credentials. `--allow-non-loopback` has nothing to say about it.
 
 ### What it never does
 

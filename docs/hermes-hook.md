@@ -364,6 +364,29 @@ Tool names and argument keys are Hermes's own, read off its tool registrations:
 | `search_files` | read | `path`; its `target` enum selects a grep or a name search |
 | `execute_code` | **refused outright** | nothing — see below |
 
+**Hermes's own side-effecting tools have classes of their own (APRV-445).** They
+were allowed as "not a gated tool" until the Agent Village survey of v2026.9.24
+listed what they do. The class is the classifier's; what happens to it is the
+policy's, so each takes an ordinary `classes:` line. The payload a grant binds is
+the whole call, `{tool, input}`.
+
+| Tool | Class | Read (allowed, no record) |
+| --- | --- | --- |
+| `cronjob_manage`, `cronjob` | `cron.manage` | `action: list` |
+| `process_manage`, `process` | `process.write` | `action: list`, `poll`, `log`, `wait` |
+| `browser_exec`, `browser_cdp`, every `browser_*` | `browser.exec` | none |
+| `skill_manage` | `skill.manage` | none |
+| `delegate_task` | `agent.delegate` | none |
+| `send_message` | `message.send` (not agent-callable at v2026.9.24) | none |
+
+An action the table does not know on a tool it does know takes the tool's class,
+not the read. Paths under `$HERMES_HOME` add three rows, matched on a `.hermes`
+path segment like the rest (so the home's last segment must be `.hermes`):
+a write under `.hermes/scripts/` is `cron.manage`, because Hermes's scheduler
+runs those scripts with no `pre_tool_call` at all; `.hermes/approval/` and
+`.hermes/shell-hooks-allowlist.json.lock` are `policy.core` beside the allowlist
+itself. `.hermes/.env` was already `account.credential`.
+
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
 session root, so a relative path resolves the way the shell will resolve it. What
@@ -515,7 +538,14 @@ off.
   the same dispatch. Not traced end to end.
 - A tool Hermes adds in a later release. An unknown tool takes the path it took
   before, which is not a gated one — the alternative would break a session on an
-  upgrade.
+  upgrade. The tools in the table above are no longer unknown (APRV-445).
+
+**Every error path blocks (APRV-445).** Hermes blocks on exit 2 whatever stdout
+says and reads any other non-zero exit with an empty stdout as an ALLOW, so the
+adapter never produces one: a misconfigured hook entry (bad flag, bad duration),
+a throw, SIGTERM or SIGINT mid-wait, a path that reached no verdict, and a
+`dist/` that fails to load all print `{"action":"block","message":...}` and exit
+2. A post-event is unchanged: it never blocks, because the call already ran.
 - The events this hook is not registered for. Hermes has some forty hook events;
   this adapter speaks two.
 

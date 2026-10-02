@@ -40,6 +40,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { Ajv2020 } from "ajv/dist/2020.js";
+
+import { VERB_REGISTRY, type JsonSchema } from "../src/cli/verb-registry.js";
 import { PROPOSE_PAYLOAD_MAX_BYTES, proposedTaskId } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 
@@ -556,4 +559,40 @@ test("wait --timeout 0 reads the current state once and never sleeps", () => {
     assert.equal(runCli(["wait", task, "--timeout", bad, "--json"], dir).code, 2, bad);
   }
   assertClean(dir);
+});
+
+// ---------------------------------------------------------------------------
+// The registry's frozen output shapes describe what the verbs actually print
+// ---------------------------------------------------------------------------
+
+test("propose and start --json validate against their registry output schemas", () => {
+  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  const schemaOf = (name: string): JsonSchema => {
+    const spec = VERB_REGISTRY.find((entry) => entry.name === name && entry.subcommand === undefined);
+    assert.ok(spec?.output !== null && spec?.output !== undefined, name);
+    return spec.output;
+  };
+  const proposeShape = ajv.compile(schemaOf("propose"));
+  const startShape = ajv.compile(schemaOf("start"));
+
+  const dir = caseDir();
+  const manualKey = `${INFERRED}:shape`;
+  const autoKey = `${STATED}:shape`;
+  const outputs = [
+    propose(dir, INFERRED, manualKey),
+    propose(dir, INFERRED, manualKey),
+    propose(dir, STATED, autoKey),
+  ];
+  for (const run of outputs) {
+    assert.equal(run.code, 0, run.stderr);
+    const value = JSON.parse(run.stdout) as unknown;
+    assert.equal(proposeShape(value), true, `${run.stdout}: ${JSON.stringify(proposeShape.errors)}`);
+  }
+  const started = runCli(
+    ["start", proposedTaskId(AGENT, STATED, autoKey), "--action", autoKey, "--payload-json", JSON.stringify(TEXT), "--as", AGENT, "--json"],
+    dir,
+  );
+  assert.equal(started.code, 0, started.stderr);
+  const value = JSON.parse(started.stdout) as unknown;
+  assert.equal(startShape(value), true, JSON.stringify(startShape.errors));
 });
