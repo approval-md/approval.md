@@ -682,6 +682,7 @@ Three properties bind the whole registry. A code fires for exactly the condition
 | `task-is-proposal` | A plain `request` named a task `propose` registered, or a task FILE's registration claimed an id in the `propose:` namespace. A proposal is requested only through `propose`, which re-checks the operator's opening of its class. Nothing is appended. (Amended APRV-445, pending sign-off.) |
 | `task-not-proposal` | `start` named a task `propose` did not register. Nothing is appended. (Amended APRV-445, pending sign-off.) |
 | `key-class-mismatch` | A `propose` key does not begin with `<class>:` followed by an identifier. Exit 2. Nothing is registered. (Amended APRV-445, pending sign-off.) |
+| `contended` | `propose` exhausted its bounded restarts because every in-append re-check was refused by a log that kept moving. Exit 1; nothing more is appended and the proposal's standing is whatever the log says. Distinct from `already-decided`, which would misreport a proposal that stands granted or pending. (Amended APRV-445, pending sign-off.) |
 
 **`token_verify_refusal_codes`** — every way a presented token can fail verification, in definition order. Evaluated as: revoked, then lapsed by derivation, then any state that is not granted, then the parent TTL re-applied, then the harness marker, then the recorded digest, then consumption, then the presented preimage. (Amended APRV-137.)
 

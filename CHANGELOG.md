@@ -15,6 +15,15 @@ before a tag.
 
 ## Unreleased
 
+- **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
+  home's own directories (root, profile homes, `approval/`, `scripts/`) and the
+  approval home are organs; `workspace/`, `skills/` and the rest are ordinary
+  work, so `grep -r`, `find`, `rm -f *.tmp` and friends run there again. An
+  unresolvable `cd` makes later relative paths conservative; globs that could
+  name the home or an organ, globbed credential reads and `<` reads are caught;
+  copies into a directory, `tar -x` and `unzip` are judged by where their files
+  land; profile homes carry the home's organs. `propose` ends a lost race with
+  the new refusal `contended` instead of `already-decided`.
 - **Proposals after the recheck (APRV-445).** `wait` voids a grant only where
   its spend enforces `policy-drift` (harness grants, every proposal): a token
   grant `approval run` still spends after a re-attest reads `granted`. `propose`

@@ -400,7 +400,7 @@ before them in the command (both the directory before and after a `cd` are kept,
 as a `cd` may not have run), and through `realpath` of the deepest existing
 ancestor, so a symlinked parent or workdir is judged by where it lands. A read
 segment's operands and a copy's sources that land on a credential are
-`account.credential`, and so is a directory under `.hermes` or `.approval` handed
+`account.credential`, and so is a directory of credentials (see below) handed
 to a recursive reader (`grep -r`, `rg`, `find`, `tar`, ...) or to a read tool
 (`search_files`, Claude Code's `Grep`/`Glob`). The binary and ordinary
 arguments are never resolved, so `./scripts/x.sh` or `echo approval > out.txt`
@@ -411,9 +411,33 @@ in the home are what they look like.
 `HOME`). A hook Hermes spawns inherits Hermes's environment. Under `approval
 serve` the hook runs in the daemon, so a hosted operator sets
 `APPROVAL_HERMES_HOME` on the serve process. Unexpanded, a `$HERMES_HOME` path
-is `policy.core` when written and `account.credential` when read, and a write
-whose target carries a glob or an unexpandable variable from a directory under
-`.hermes` or `.approval` is `policy.core`.
+is `policy.core` when written and `account.credential` when read. After a `cd`
+this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`, `cd $HERMES_HOME` with the
+home unknown), every later relative write is `policy.core` and every later
+relative read `account.credential`; setting `APPROVAL_HERMES_HOME` on the serve
+process removes that conservatism for the home. `APPROVAL_HERMES_HOME` is
+trusted as given: the operator sets it (under co-location the control plane sets
+it from the tenant's home), and nothing an agent writes reaches the hook
+process's environment. A read pattern (`cat .e*`) is expanded against its
+directory when that directory exists, and is a credential read when it could
+match a credential name and the directory is unknown. `<` input redirection is a
+read of its target. A copy or move into a directory (`cp x .`, `mv -t DIR`,
+`--target-directory=`) writes `<dir>/<source name>`, and `tar -x` / `unzip`
+write unknown names into `-C`/`-d` or the working directory.
+
+**Only the home's own directories are organs; the rest of it is ordinary work**
+(APRV-445 recheck 3). A hosted image sets `HERMES_HOME=/data/.hermes` and keeps
+all agent work under it (`workspace/`, `skills/`, `memories/`, `sessions/`), so
+the rules above are scoped to the gate's own directories: the home root (and a
+profile home, `.hermes/profiles/<p>/`, which has the same organs), an approval
+home, a home's `approval/`, and its `scripts/`. A recursive read or a read tool
+over a directory is `account.credential` only for the home root, an approval
+home, a home's `approval/`, or a directory under a home that directly holds a
+credential file (`.env`, `auth.json`, `config.yaml`, the allowlist or its lock).
+A glob or an unexpandable variable in a write is `policy.core` only when the
+write lands in one of the gate's own directories, or when a pattern in the path
+could itself name `.hermes`, `.approval` or an organ (`../.h*/.env`); anywhere
+else under the home it is a workspace write.
 
 What stays unclassified or out of reach, stated so nobody assumes otherwise:
 inline programs (`python3 -c`, `node -e`) are refused as opaque; `dd` and

@@ -2052,6 +2052,9 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `task-not-proposal` — `start` on a task `propose` did not register.
 - `key-class-mismatch` (exit 2) — a `propose` key that does not begin with
   `<class>:` and an identifier.
+- `contended` — `propose` restarted its bounded number of times on a log that
+  kept moving under it and stopped; nothing more was appended. Read the
+  standing with `wait --timeout 0`, or call again.
 - `append-failed` — the append itself failed; the exit code follows the cause.
   `head-moved` means the log grew between this command's read and its write, so
   nothing was written. Since APRV-236 you see it only after the command has
