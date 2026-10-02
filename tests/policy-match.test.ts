@@ -15,6 +15,7 @@ import { after, test } from "node:test";
 
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
 import {
+  agentRequestability,
   matchesPattern,
   resolve,
   specificityOf,
@@ -520,4 +521,63 @@ test("resolve is deterministic across repeated calls", () => {
   const canonicalSecond = resolve(CANONICAL, "read.web.page");
   assert.deepEqual(canonicalSecond, canonicalFirst);
   assert.notEqual(canonicalSecond, canonicalFirst, "each call returns a fresh object");
+});
+
+// ---------------------------------------------------------------------------
+// agentRequestability (APRV-445)
+// ---------------------------------------------------------------------------
+
+test("agentRequestability: an exact key is required, and the exact key's own value wins", () => {
+  const load = loadPolicy({ file: join(FIXTURES, "valid", "agent-may-request.md") });
+  assert.equal(load.ok, true);
+  const cases: Array<[cls: string, allowed: boolean, explicit: boolean, pattern: string | null]> = [
+    // Declared by name, opened by the family.
+    ["intent.publish.inferred.index", true, true, "intent.publish.*"],
+    ["intent.publish.stated.index", true, true, "intent.publish.*"],
+    // Declared by name, closed by its own line under an open family.
+    ["intent.publish.closed", false, true, "intent.publish.closed"],
+    // Matched only by the wildcard: never declared, never proposable.
+    ["intent.publish.other", false, false, "intent.publish.*"],
+    ["intent.publish.inferred.index.deeper", false, false, "intent.publish.*"],
+    // Declared, and nothing opens it.
+    ["communicate.email.external", false, true, null],
+    // Neither.
+    ["financial.spend", false, false, null],
+  ];
+  for (const [cls, allowed, explicit, pattern] of cases) {
+    assert.deepEqual(agentRequestability(load, cls), { allowed, explicit, pattern }, cls);
+  }
+});
+
+test("agentRequestability: the most specific family that states the flag decides", () => {
+  const load = policy(
+    [
+      'version: "0.1"',
+      "defaults:\n  autonomy: manual",
+      "classes:",
+      '  "a.*": { autonomy: manual, agent_may_request: true }',
+      '  "a.b.*": { autonomy: manual, agent_may_request: false }',
+      '  "a.b.c": { autonomy: manual }',
+      '  "a.x": { autonomy: manual }',
+      // Interior wildcards and the bare `*` are not families for this flag.
+      '  "q.*.r": { autonomy: manual, agent_may_request: true }',
+      '  "q.z.r": { autonomy: manual }',
+      '  "*": { autonomy: manual, agent_may_request: true }',
+      '  "solo": { autonomy: manual }',
+    ].join("\n"),
+  );
+  assert.deepEqual(agentRequestability(load, "a.b.c"), { allowed: false, explicit: true, pattern: "a.b.*" });
+  assert.deepEqual(agentRequestability(load, "a.x"), { allowed: true, explicit: true, pattern: "a.*" });
+  assert.deepEqual(agentRequestability(load, "q.z.r"), { allowed: false, explicit: true, pattern: null });
+  assert.deepEqual(agentRequestability(load, "solo"), { allowed: false, explicit: true, pattern: null });
+});
+
+test("agentRequestability: a policy that did not load opens nothing", () => {
+  const failed: PolicyLoadResult = loadPolicy({ file: join(scratch, "absent.md") });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(agentRequestability(failed, "intent.publish.inferred.index"), {
+    allowed: false,
+    explicit: false,
+    pattern: null,
+  });
 });

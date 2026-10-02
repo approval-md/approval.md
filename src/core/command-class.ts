@@ -158,6 +158,15 @@ export const GATE_SELF_CLASS = "gate.self";
 export type ProtectedPathClass = "log.mutate" | "policy.core" | "policy.edit";
 
 /**
+ * The class a write under `$HERMES_HOME/scripts/` takes (APRV-445): scheduling
+ * code that Hermes's cron runs later with no hook in front of it. Returned by
+ * {@link protectedPathClass} beside the organs, ranked with `policy.edit`, and
+ * deliberately not a {@link ProtectedPathClass}: it is a side effect an
+ * operator prices, not a surface of the gate itself.
+ */
+export const HERMES_SCHEDULED_SCRIPT_CLASS = "cron.manage";
+
+/**
  * The `policy.edit` sub-class namespace a `protected_paths` entry may route to
  * (APRV-266).
  *
@@ -442,6 +451,19 @@ export function protectedPathClass(
     // session state and transcripts are ordinary bookkeeping, and pricing those
     // at a human's attention is the failure mode §11 asks to avoid, the same
     // reasoning that keeps `.muse/worktrees/` out of the entry above.
+    //
+    // APRV-445 adds three rows from the Agent Village DATA-234 survey of Hermes
+    // v2026.9.24. `shell-hooks-allowlist.json.lock` is the allowlist's flock
+    // sidecar: an agent that makes it unwritable makes the gateway's consent
+    // write raise at start, so it is the allowlist's organ as much as the file
+    // is (matched by prefix, so the sidecar and the file are one row).
+    // `approval/` is where a hosted install keeps the hook's own configuration
+    // beside the harness. And `scripts/` is `cron.manage`, not an organ: Hermes
+    // runs a scheduled job's script from `$HERMES_HOME/scripts/` with no
+    // `pre_tool_call` at all, so WRITING one is scheduling code that will run
+    // ungated later, which is the same act as `cronjob_manage create` and is
+    // priced by the same policy line. `.env` is already `account.credential`
+    // (see `isCredentialPath`), which is human-only wherever `policy.core` is.
     if (segment === ".hermes") {
       const next = segments[index + 1];
       if (
@@ -449,11 +471,13 @@ export function protectedPathClass(
         next === "config.yaml" ||
         next === "config.yml" ||
         next === "agent-hooks" ||
-        next === "shell-hooks-allowlist.json" ||
+        next === "approval" ||
+        next.startsWith("shell-hooks-allowlist.json") ||
         next.startsWith("hooks")
       ) {
         return "policy.core";
       }
+      if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
     }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {

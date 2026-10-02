@@ -56,10 +56,13 @@ import { isReaction, REACTIONS } from "../core/audit.js";
 import {
   decide,
   expire,
+  PROPOSE_PAYLOAD_MAX_BYTES,
+  propose,
   register,
   registeredAction,
   request,
   readGateRecords,
+  startProposed,
   withdraw,
   type Decision,
   type GateOptions,
@@ -78,10 +81,12 @@ import {
 import {
   EXPIRE_HELP,
   GRANT_HELP,
+  PROPOSE_HELP,
   REGISTER_HELP,
   REJECT_HELP,
   REQUEST_HELP,
   REVOKE_HELP,
+  START_HELP,
   WITHDRAW_HELP,
 } from "./help.js";
 import type { Streams } from "./main.js";
@@ -142,6 +147,10 @@ function refusalExitCode(refusal: GateRefusal): number {
     // and said no.
     case "payload-store-failed":
       return EXIT_IO;
+    // APRV-445: the caller must change the call, as for any usage error. Its
+    // own code rather than `usage` so a caller can tell "too big" from a typo.
+    case "payload-too-large":
+      return EXIT_USAGE;
     case "log-torn-tail":
       return EXIT_TORN_TAIL;
     case "append-failed":
@@ -446,6 +455,205 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
     );
   } else {
     streams.out(`requested ${task} ${actionKey} at seq ${result.record.seq} (manual)\n`);
+  }
+  return EXIT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// propose / start (APRV-445)
+// ---------------------------------------------------------------------------
+
+type InlinePayload =
+  | { ok: true; value: unknown }
+  | { ok: false; tooLarge: boolean; message: string };
+
+/**
+ * `--payload-json <json>`: the payload as a flag VALUE, for a requester that has
+ * no file on this machine (`approval serve` refuses every path flag from the
+ * agent credential). The size is judged on the UTF-8 bytes of the text as sent,
+ * before it is parsed, and it must parse to a JSON object: an object is what a
+ * channel renders field by field, and a bare string or number would be a payload
+ * with nowhere to say what it is.
+ */
+function readInlinePayload(text: string): InlinePayload {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > PROPOSE_PAYLOAD_MAX_BYTES) {
+    return {
+      ok: false,
+      tooLarge: true,
+      message: `--payload-json is ${String(bytes)} bytes, over the ${String(PROPOSE_PAYLOAD_MAX_BYTES)}-byte limit. A proposal is something a human reads on a phone; nothing was parsed, stored or appended`,
+    };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch (cause) {
+    return {
+      ok: false,
+      tooLarge: false,
+      message: `--payload-json is not valid JSON: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    };
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {
+      ok: false,
+      tooLarge: false,
+      message: "--payload-json must be a JSON object (for example {\"text\":\"...\"}); an array, string, number or null is refused",
+    };
+  }
+  return { ok: true, value };
+}
+
+function inlinePayloadRefusal(
+  streams: Streams,
+  json: boolean,
+  failure: { tooLarge: boolean; message: string },
+  helpText: string,
+): number {
+  if (failure.tooLarge) {
+    return emitRefusal(streams, json, {
+      ok: false,
+      code: "payload-too-large",
+      message: failure.message,
+    });
+  }
+  return usageError(streams, json, failure.message, helpText);
+}
+
+export function commandPropose(argv: string[], streams: Streams, cwd: string): number {
+  const outcome = front(
+    argv,
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--as": "string",
+      "--class": "string",
+      "--key": "string",
+      "--summary": "string",
+      "--payload-json": "string",
+    },
+    PROPOSE_HELP,
+    streams,
+    cwd,
+  );
+  if (outcome.kind === "handled") return outcome.code;
+  const { flags, positionals, json, logPath } = outcome;
+
+  const extra = positionals[0];
+  if (extra !== undefined) {
+    return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`, PROPOSE_HELP);
+  }
+  const cls = stringFlag(flags, "--class");
+  if (cls === null) return usageError(streams, json, "missing --class <class>", PROPOSE_HELP);
+  const key = stringFlag(flags, "--key");
+  if (key === null || key.length === 0) {
+    return usageError(streams, json, "missing --key <key>", PROPOSE_HELP);
+  }
+  const summary = stringFlag(flags, "--summary");
+  if (summary === null || summary.trim().length === 0) {
+    return usageError(streams, json, "missing --summary <text>: it is the line the approver reads", PROPOSE_HELP);
+  }
+  const payloadText = stringFlag(flags, "--payload-json");
+  if (payloadText === null) {
+    return usageError(streams, json, "missing --payload-json <json>", PROPOSE_HELP);
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolvePrincipalActor(asFlag);
+  if (actor === null) return identityUsageError(streams, json, asFlag, PROPOSE_HELP);
+
+  const payload = readInlinePayload(payloadText);
+  if (!payload.ok) return inlinePayloadRefusal(streams, json, payload, PROPOSE_HELP);
+
+  const result = propose(
+    logPath,
+    { cls, actionKey: key, summary, payload: payload.value },
+    actor,
+    gateOptions(flags, cwd),
+  );
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      task: result.task,
+      action_key: result.actionKey,
+      class: result.cls,
+      payload_hash: result.payloadHash,
+      decision: result.decision,
+      state: result.state,
+      seq: result.seq,
+      idempotent: result.idempotent,
+    });
+  } else if (result.decision === "requested") {
+    streams.out(
+      `${result.idempotent ? "already proposed" : "proposed"} ${result.task} ${result.actionKey}: ${String(result.state)}${
+        result.seq === null ? "" : ` at seq ${String(result.seq)}`
+      }\n`,
+    );
+  } else {
+    streams.out(
+      `${result.actionKey}: ${result.decision}, no approval required; proceed, then record it with \`approval start ${result.task} --action <key> --payload-json <json>\`\n`,
+    );
+  }
+  return EXIT_OK;
+}
+
+export function commandStart(argv: string[], streams: Streams, cwd: string): number {
+  const outcome = front(
+    argv,
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--as": "string",
+      "--action": "string",
+      "--payload-json": "string",
+    },
+    START_HELP,
+    streams,
+    cwd,
+  );
+  if (outcome.kind === "handled") return outcome.code;
+  const { flags, positionals, json, logPath } = outcome;
+
+  const task = positionals[0];
+  if (task === undefined) return usageError(streams, json, "missing <task> argument", START_HELP);
+  const extra = positionals[1];
+  if (extra !== undefined) {
+    return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`, START_HELP);
+  }
+  const actionKey = stringFlag(flags, "--action");
+  if (actionKey === null) return usageError(streams, json, "missing --action <key>", START_HELP);
+  const payloadText = stringFlag(flags, "--payload-json");
+  if (payloadText === null) {
+    return usageError(streams, json, "missing --payload-json <json>", START_HELP);
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolvePrincipalActor(asFlag);
+  if (actor === null) return identityUsageError(streams, json, asFlag, START_HELP);
+
+  const payload = readInlinePayload(payloadText);
+  if (!payload.ok) return inlinePayloadRefusal(streams, json, payload, START_HELP);
+
+  const result = startProposed(logPath, task, actionKey, payload.value, actor, gateOptions(flags, cwd));
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      task: result.task,
+      action_key: result.actionKey,
+      class: result.cls,
+      authorization: result.authorization,
+      seq: result.record.seq,
+    });
+  } else {
+    streams.out(
+      `started ${result.task} ${result.actionKey} at seq ${String(result.record.seq)} (${result.authorization === "grant" ? "spent the human's grant" : "authorized by the policy"})\n`,
+    );
   }
   return EXIT_OK;
 }

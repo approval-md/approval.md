@@ -73,7 +73,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
@@ -528,12 +528,30 @@ type Permission = "allow" | "deny";
  * binary name for, and two copies of it would be two lists to drift.
  */
 
+/**
+ * What a harness's own non-shell, non-file tool asks for (APRV-445).
+ *
+ * `gated` names the class the call is judged under and the headline the
+ * approver reads; the payload is always the WHOLE call (`{tool, input}`), so a
+ * grant binds every argument the harness will act on. `read` is a call that
+ * touches nothing and is allowed without a record, exactly as an in-scope read
+ * tool is. A rule returns `null` for a tool it does not know, and that tool
+ * keeps the not-a-gated-tool allow every unknown tool has.
+ */
+type ToolRuleVerdict = { kind: "gated"; cls: string; headline: string } | { kind: "read"; reason: string };
+
 interface HarnessAdapter {
   kind: HarnessKind;
   originApp: string;
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /**
+   * The harness's own tools that carry a side effect of their own, by name and
+   * arguments (APRV-445). Consulted after the shell, file and read tools, for
+   * the calls none of those owns.
+   */
+  toolRules?: (toolName: string, toolInput: Record<string, unknown>) => ToolRuleVerdict | null;
   /**
    * Tools that READ a named path (APRV-347).
    *
@@ -896,6 +914,68 @@ const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
  * answer available to a hook that cannot see inside it, and it is the
  * fail-closed one.
  */
+/**
+ * The classes Hermes's own side-effecting tools are judged under (APRV-445,
+ * from the Agent Village DATA-234 survey of Hermes v2026.9.24).
+ *
+ * Before this table every one of these reached the not-a-gated-tool allow,
+ * because the adapter knew `terminal`, `write_file`, `patch` and the two read
+ * tools and nothing else, so a policy line for `cron.manage` or `message.send`
+ * was a line no Hermes call could ever reach. They are code, not policy: the
+ * classifier decides what a call IS and the policy decides what happens to it,
+ * so an operator prices these classes with ordinary `classes:` lines.
+ *
+ * - `cronjob_manage` (legacy alias `cronjob`): every action that changes the
+ *   schedule or runs a job is `cron.manage`; `list` is a read. A scheduled job
+ *   runs later with no `pre_tool_call` at all, so the schedule is the one place
+ *   a human can see it.
+ * - `process_manage` (legacy alias `process`): `write`, `submit`, `kill`,
+ *   `close` and `handoff` act on a running process and are `process.write`;
+ *   `list`, `poll`, `log` and `wait` are reads.
+ * - `browser_exec`, `browser_cdp` and every other `browser_*`: `browser.exec`.
+ * - `skill_manage`: `skill.manage`. `delegate_task`: `agent.delegate`.
+ *   `send_message`: `message.send` (not agent-callable at v2026.9.24; the rule
+ *   stands so the day it is, it is already gated).
+ *
+ * An action this table does not recognise on a tool it does know is judged
+ * under the tool's side-effecting class rather than allowed: a new verb on a
+ * tool that schedules or drives processes is a new way to do that, and the
+ * strict reading is the safe one.
+ */
+const HERMES_CRON_READ_ACTIONS: ReadonlySet<string> = new Set(["list"]);
+const HERMES_PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log", "wait"]);
+
+function hermesToolRule(toolName: string, toolInput: Record<string, unknown>): ToolRuleVerdict | null {
+  const action = readString(toolInput, "action");
+  const headline = (cls: string): string =>
+    `${toolName}${action === null ? "" : ` ${action}`} (${cls})`;
+  if (toolName === "cronjob_manage" || toolName === "cronjob") {
+    if (action !== null && HERMES_CRON_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads the schedule and changes nothing` };
+    }
+    return { kind: "gated", cls: "cron.manage", headline: headline("cron.manage") };
+  }
+  if (toolName === "process_manage" || toolName === "process") {
+    if (action !== null && HERMES_PROCESS_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads a process and changes nothing` };
+    }
+    return { kind: "gated", cls: "process.write", headline: headline("process.write") };
+  }
+  if (toolName.startsWith("browser_")) {
+    return { kind: "gated", cls: "browser.exec", headline: headline("browser.exec") };
+  }
+  if (toolName === "skill_manage") {
+    return { kind: "gated", cls: "skill.manage", headline: headline("skill.manage") };
+  }
+  if (toolName === "delegate_task") {
+    return { kind: "gated", cls: "agent.delegate", headline: headline("agent.delegate") };
+  }
+  if (toolName === "send_message") {
+    return { kind: "gated", cls: "message.send", headline: headline("message.send") };
+  }
+  return null;
+}
+
 const HERMES_ADAPTER: HarnessAdapter = {
   kind: "hermes",
   originApp: "hermes-hook",
@@ -936,7 +1016,18 @@ const HERMES_ADAPTER: HarnessAdapter = {
   fileTools: ["write_file", "patch"],
   readTools: HERMES_READ_TOOLS,
   shellCwdKey: "workdir",
+  toolRules: hermesToolRule,
 };
+
+/** The adapter's rule-table verdict for this call, or `null` (APRV-445). */
+function toolRuleOf(adapter: HarnessAdapter, input: HookInput): ToolRuleVerdict | null {
+  if (adapter.toolRules === undefined) return null;
+  if (input.toolName === adapter.shellTool) return null;
+  if (adapter.fileTools.includes(input.toolName) || adapter.readTools.includes(input.toolName)) {
+    return null;
+  }
+  return adapter.toolRules(input.toolName, input.toolInput);
+}
 
 /**
  * Every harness this runtime speaks a hook protocol for, by kind (APRV-358).
@@ -4031,6 +4122,23 @@ export function gateHarnessCall(
       ownKeys,
       `the requesting hook process received ${signal} while waiting; the session is ending, so no retry will adopt this request`,
     );
+    // APRV-445. On Hermes an exit with nothing on stdout is an ALLOW unless the
+    // exit is 2, and a harness tearing down may still read the verdict. So the
+    // block directive goes out first, written synchronously because
+    // `process.exit` below does not wait for a stream to drain.
+    if (run.harness === "hermes") {
+      const directive = harnessBlockDirective(
+        "hook-interrupted",
+        `the hook received ${signal} while waiting for a decision; nothing authorizes this call`,
+        "hermes",
+      );
+      try {
+        writeSync(1, directive.stdout);
+      } catch {
+        // stdout is gone; the exit code below is the whole verdict.
+      }
+      process.exit(HERMES_DENY_EXIT);
+    }
     process.exit(EXIT_USAGE);
   };
   const onTerm = (): void => onSignal("SIGTERM");
@@ -4615,7 +4723,9 @@ function runPostToolUse(
     // APRV-347: a read tool MAY have had a start written for it (one outside
     // the scope), so it belongs in this set. A read inside the scope wrote
     // nothing, and the close below finds no start and says so in its own words.
-    !adapter.readTools.includes(input.toolName)
+    !adapter.readTools.includes(input.toolName) &&
+    // APRV-445: a tool the rule table gated wrote a start like any other.
+    toolRuleOf(adapter, input)?.kind !== "gated"
   ) {
     return report(
       streams,
@@ -4928,6 +5038,20 @@ function describeToolCall(
       headline: raw,
       notes: refined.notes,
       segments: classified.segments,
+    };
+  }
+
+  // APRV-445: the harness's own side-effecting tools, by name and arguments.
+  // The payload is the whole call, so a grant binds every argument.
+  const ruled = toolRuleOf(adapter, input);
+  if (ruled !== null) {
+    if (ruled.kind === "read") return { kind: "allow", reason: ruled.reason };
+    return {
+      kind: "gated",
+      classes: [ruled.cls],
+      payload: { tool: input.toolName, input: input.toolInput },
+      headline: ruled.headline,
+      notes: [],
     };
   }
 
@@ -5270,8 +5394,13 @@ function runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
 ): number {
+  // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
+  // on both a usage error's empty stdout is a harness that runs the call, and
+  // on Hermes a non-zero exit with an empty stdout is an allow outright.
   const configurationError = (message: string): number =>
-    adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
+    adapter.kind === "codex" || adapter.kind === "hermes"
+      ? deny(streams, "hook-io", message, adapter.kind)
+      : usageError(streams, message);
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
     ...POLICY_FLAGS,
@@ -5550,7 +5679,18 @@ function runHarnessHook(
     }
   }
 
-  if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
+  // APRV-445: a tool the adapter's own rule table gates goes on to the gated
+  // path below; one it reads is allowed here, with no policy load, exactly as
+  // an in-scope read is.
+  const ruledEarly = toolRuleOf(adapter, input);
+  if (ruledEarly?.kind === "read") {
+    return allow(streams, ruledEarly.reason, adapter.kind, codexCommand);
+  }
+  if (
+    ruledEarly === null &&
+    input.toolName !== adapter.shellTool &&
+    !adapter.fileTools.includes(input.toolName)
+  ) {
     if (!adapter.readTools.includes(input.toolName)) {
       return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
     }
@@ -6034,6 +6174,7 @@ function commandHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
 ): number {
+  if (adapter.kind === "hermes") return hermesFailClosed(argv, streams, cwd, readStdin, adapter);
   try {
     return runHarnessHook(argv, streams, cwd, readStdin, adapter);
   } catch (cause) {
@@ -6047,6 +6188,101 @@ function commandHarnessHook(
       `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       adapter.kind,
     );
+  }
+}
+
+/**
+ * The Hermes hook's last line of defence (APRV-445): whatever happened inside,
+ * a `pre_tool_call` answer leaves this function as a verdict Hermes blocks on or
+ * as an explicit allow, and never as anything Hermes would read as an allow by
+ * default.
+ *
+ * Hermes (v2026.9.24, `agent/shell_hooks.py`) blocks on exit 2 whatever stdout
+ * says, and blocks on any other non-zero exit only when stdout carries a block
+ * directive; ANY OTHER NON-ZERO EXIT WITH AN EMPTY STDOUT IS AN ALLOW, with a
+ * warning in a log nobody reads. So this enforces two rules on every path:
+ *
+ * - a non-zero exit always carries the `{action:"block"}` directive on stdout
+ *   and is always exactly 2;
+ * - exit 0 on a pre-event is only ever the adapter's own `{}` allow. A path that
+ *   returned 0 having printed nothing is a path nobody wrote a verdict for, and
+ *   it blocks.
+ *
+ * A post-event is untouched: it never blocks (see the post path), and it prints
+ * nothing on stdout by design. A throw becomes the same block the other
+ * adapters' catch produces.
+ */
+function hermesFailClosed(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string,
+  adapter: HarnessAdapter,
+): number {
+  let stdout = "";
+  const tracked: Streams = {
+    out: (text) => {
+      stdout += text;
+      streams.out(text);
+    },
+    err: (text) => streams.err(text),
+  };
+  // The post-event question is answered from the raw input, once, before the
+  // run: the run itself may be what fails to read it.
+  let raw: string | null = null;
+  const reading = (): string => {
+    raw ??= readStdin();
+    return raw;
+  };
+  let code: number;
+  try {
+    code = runHarnessHook(argv, tracked, cwd, reading, adapter);
+  } catch (cause) {
+    // A post-event never blocks: the call already ran (see the post path).
+    if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
+    if (stdout.length > 0) {
+      // A verdict was already printed; one more object would be unparseable.
+      return HERMES_DENY_EXIT;
+    }
+    return deny(
+      tracked,
+      "hook-io",
+      `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      adapter.kind,
+    );
+  }
+  const post = raw !== null && isHermesPostEvent(raw);
+  if (post) return code;
+  const blocked = /"action"\s*:\s*"block"/u.test(stdout);
+  if (code === EXIT_OK && stdout.length > 0) return code;
+  if (code === EXIT_OK || !blocked) {
+    if (stdout.length > 0) {
+      // Something that is not a block is already on stdout, and a second
+      // object after it is unparseable stdout, which `fail_closed` blocks and a
+      // build without it allows. The exit code is the verdict that cannot be
+      // misread, so it carries the block.
+      return HERMES_DENY_EXIT;
+    }
+    return deny(
+      tracked,
+      "hook-io",
+      code === EXIT_OK
+        ? "the hook reached no verdict for this call; nothing authorizes it"
+        : `the hook exited ${String(code)} without a verdict; nothing authorizes this call`,
+      adapter.kind,
+    );
+  }
+  return HERMES_DENY_EXIT;
+}
+
+/** Is this raw Hermes event a `post_tool_call`? Unreadable input is not. */
+function isHermesPostEvent(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return false;
+    return (parsed as Record<string, unknown>)["hook_event_name"] === HERMES_POST_TOOL_EVENT;
+  } catch {
+    return false;
   }
 }
 

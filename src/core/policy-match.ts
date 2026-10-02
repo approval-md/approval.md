@@ -666,3 +666,73 @@ function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution
     floorApplied: true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Agent requestability (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an agent may open a request in `actionClass` with `approval propose`,
+ * and which key of the policy said so.
+ *
+ * `allowed` is true only when BOTH hold:
+ *
+ * 1. `actionClass` is an EXACT key of `policy.classes`. Ordinary resolution is
+ *    not consulted for this half on purpose: `propose` lets the requester name
+ *    its own class, which `approval request` deliberately never does, and the
+ *    bound on that is that the operator wrote this class down by name. A class
+ *    some wildcard happens to match was never written down, so `explicit` is
+ *    false and the answer is no.
+ * 2. `agent_may_request: true` is stated on the exact key, or (when the exact
+ *    key states nothing) on the MOST SPECIFIC declared family key
+ *    `<prefix>.*` whose literal prefix the class extends. A family key with an
+ *    interior wildcard, and the bare `*`, are not families for this purpose and
+ *    are never read: the flag names a branch of the class tree an operator can
+ *    see, and a pattern that could match across branches would let one line
+ *    open classes nobody looked at. The exact key's own value wins whenever it
+ *    states one, so `false` on a member closes it under an open family.
+ *
+ * Pure over the policy text. A policy that did not load answers no.
+ */
+export interface AgentRequestability {
+  allowed: boolean;
+  /** `actionClass` is an exact key of `policy.classes`. */
+  explicit: boolean;
+  /** The key whose `agent_may_request` decided, or `null` when none stated one. */
+  pattern: string | null;
+}
+
+export function agentRequestability(
+  load: PolicyLoadResult,
+  actionClass: string,
+): AgentRequestability {
+  if (!load.ok) return { allowed: false, explicit: false, pattern: null };
+  const classes = load.policy.classes ?? {};
+  const own = Object.prototype.hasOwnProperty.call(classes, actionClass)
+    ? classes[actionClass]
+    : undefined;
+  const explicit = own !== undefined;
+
+  let decided: { pattern: string; value: boolean } | null = null;
+  if (own?.agent_may_request !== undefined) {
+    decided = { pattern: actionClass, value: own.agent_may_request };
+  } else {
+    // Families, most specific first: the longest literal prefix the class
+    // extends. `a.b.*` beats `a.*` for `a.b.c`.
+    const classSegments = segments(actionClass);
+    for (let length = classSegments.length - 1; length >= 1; length -= 1) {
+      const family = `${classSegments.slice(0, length).join(".")}.${WILDCARD}`;
+      if (!Object.prototype.hasOwnProperty.call(classes, family)) continue;
+      const value = classes[family]?.agent_may_request;
+      if (value === undefined) continue;
+      decided = { pattern: family, value };
+      break;
+    }
+  }
+
+  return {
+    allowed: explicit && decided?.value === true,
+    explicit,
+    pattern: decided?.pattern ?? null,
+  };
+}

@@ -702,6 +702,9 @@ export function commandRun(
 // approval wait
 // ===========================================================================
 
+/** `wait --timeout 0` (and `0s`, `0ms`, …): read once, never sleep (APRV-445). */
+const ZERO_DURATION = /^0(?:ms|s|m|h|d|w)?$/u;
+
 /** Synchronous sleep with no dependency and no busy-spin. */
 function sleepSync(ms: number): void {
   if (ms <= 0) return;
@@ -798,12 +801,21 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
   if (timeoutText === null) {
     return usageError(streams, json, "missing --timeout <duration>", WAIT_HELP);
   }
-  const timeoutMs = parseDuration(timeoutText);
+  // APRV-445. `--timeout 0` is a STATUS READ: one verified read of the log, the
+  // current state of every request of the task, and no sleep at all. The
+  // duration grammar has no zero (a zero TTL or window in a policy would be a
+  // control that never runs), so the spelling is admitted here and only here.
+  // It is what a poller on `approval serve` uses: that server runs every verb
+  // and every hook call through one queue, and a `wait` that sleeps holds the
+  // whole tenant's hook traffic for as long as it sleeps. The result set and
+  // the exit codes are unchanged; an undecided request answers `timeout`
+  // (exit 6) at once, as a wait that ran out would.
+  const timeoutMs = ZERO_DURATION.test(timeoutText) ? 0 : parseDuration(timeoutText);
   if (timeoutMs === null) {
     return usageError(
       streams,
       json,
-      `--timeout expects a duration like 30s, 10m, 6h, got ${JSON.stringify(timeoutText)}`,
+      `--timeout expects a duration like 30s, 10m, 6h, or 0 to read the current state without waiting, got ${JSON.stringify(timeoutText)}`,
       WAIT_HELP,
     );
   }

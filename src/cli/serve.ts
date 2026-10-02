@@ -37,6 +37,12 @@ export const SERVE_DEFAULT_PORT = 4682;
 /** The interface it binds when `--listen` names none. */
 export const SERVE_DEFAULT_HOST = "127.0.0.1";
 
+/** `--listen`'s value from the environment, when the flag is absent (APRV-445). */
+export const SERVE_LISTEN_ENV = "APPROVAL_SERVE_LISTEN";
+
+/** The `--listen` spelling of a unix-domain socket (APRV-445). */
+const UNIX_PREFIX = "unix:";
+
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
   else streams.err(usageErrorText(message, SERVE_HELP));
@@ -99,8 +105,14 @@ export async function commandServe(
     return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`);
   }
 
-  const listenFlag = stringFlag(parsed.flags, "--listen");
   const portFlag = stringFlag(parsed.flags, "--port");
+  // APRV-445. `APPROVAL_SERVE_LISTEN` is the same value as `--listen`, for a
+  // supervisor that configures processes through their environment. The flag
+  // wins when both are present, and `--port` beside either is still refused.
+  const listenFlagRaw = stringFlag(parsed.flags, "--listen");
+  const listenEnv = env[SERVE_LISTEN_ENV];
+  const listenFlag =
+    listenFlagRaw ?? (portFlag === null && listenEnv !== undefined && listenEnv.length > 0 ? listenEnv : null);
   if (listenFlag !== null && portFlag !== null) {
     return usageError(
       streams,
@@ -111,7 +123,17 @@ export async function commandServe(
 
   let bindHost = SERVE_DEFAULT_HOST;
   let bindPort = SERVE_DEFAULT_PORT;
-  if (listenFlag !== null) {
+  let socketPath: string | null = null;
+  if (listenFlag !== null && listenFlag.startsWith(UNIX_PREFIX)) {
+    // APRV-445: `unix:<path>`. A local transport, so the loopback rule below
+    // has nothing to say about it; the directory's owner is checked instead.
+    const raw = listenFlag.slice(UNIX_PREFIX.length);
+    if (raw.length === 0) return usageError(streams, json, "--listen unix:<path> names no path");
+    socketPath = resolvePath(raw, ".", cwd);
+    const { checkUnixSocketTarget } = await import("../serve/server.js");
+    const target = checkUnixSocketTarget(socketPath);
+    if (!target.ok) return usageError(streams, json, `--listen ${listenFlag}: ${target.message}`);
+  } else if (listenFlag !== null) {
     const listen = parseListen(listenFlag);
     if (!listen.ok) return usageError(streams, json, listen.message);
     bindHost = listen.host;
@@ -127,7 +149,7 @@ export async function commandServe(
   }
 
   const allowNonLoopback = boolFlag(parsed.flags, "--allow-non-loopback");
-  if (!isLoopbackHost(bindHost) && !allowNonLoopback) {
+  if (socketPath === null && !isLoopbackHost(bindHost) && !allowNonLoopback) {
     return usageError(
       streams,
       json,
@@ -197,6 +219,7 @@ export async function commandServe(
       daemonId: daemon.id,
       host: bindHost,
       port: bindPort,
+      ...(socketPath === null ? {} : { socketPath }),
       ...(logFlag === null ? {} : { log: logPath }),
       ...(policyFlag === null ? {} : { policy: resolvePath(policyFlag, ".", cwd) }),
       ...(hookTimeout === null ? {} : { hookTimeout }),
@@ -205,18 +228,24 @@ export async function commandServe(
     });
   } catch (cause) {
     streams.err(
-      `approval: serve could not bind ${bindHost}:${String(bindPort)}: ${
+      `approval: serve could not bind ${socketPath === null ? `${bindHost}:${String(bindPort)}` : `unix:${socketPath}`}: ${
         cause instanceof Error ? cause.message : String(cause)
       }\n`,
     );
     return EXIT_IO;
   }
 
-  if (!isLoopbackHost(server.host)) streams.err(nonLoopbackBanner(server.host, server.port));
+  if (server.socketPath === null && !isLoopbackHost(server.host)) {
+    streams.err(nonLoopbackBanner(server.host, server.port));
+  }
+  const where =
+    server.socketPath === null
+      ? `http://${server.host}:${String(server.port)}/`
+      : `unix:${server.socketPath} (HTTP over the socket)`;
   // Never stdout: an operator piping this server's output somewhere should get
   // bytes that mean one thing, and this process has nothing to say on stdout.
   streams.err(
-    `approval: serve on http://${server.host}:${String(server.port)}/ as ${identity.actor}, daemon ${daemon.id} (${daemon.source}), store ${root}. Two credentials: the agent surface (/verbs, /verb/<name>, /hook/<harness>) and the tenant surface (/log/follow, /export, /status). TLS is your proxy's; press Ctrl-C to stop.\n`,
+    `approval: serve on ${where} as ${identity.actor}, daemon ${daemon.id} (${daemon.source}), store ${root}. Two credentials: the agent surface (/verbs, /verb/<name>, /hook/<harness>) and the tenant surface (/log/follow, /export, /status). TLS is your proxy's; press Ctrl-C to stop.\n`,
   );
 
   return await new Promise<number>((settle) => {

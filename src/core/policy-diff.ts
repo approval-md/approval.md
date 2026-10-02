@@ -112,7 +112,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { Autonomy, Policy, PolicyLoadErrorCode, PolicyLoadResult } from "./policy-load.js";
-import { resolve, type Provenance } from "./policy-match.js";
+import { agentRequestability, resolve, type Provenance } from "./policy-match.js";
 
 /**
  * SPEC.md §7's reserved top-level namespaces, in table order.
@@ -152,6 +152,13 @@ export interface ClassResolutionChange {
   after: ResolutionSnapshot;
   /** Present whenever the truthful irreversible outcome changed. */
   irreversible?: { before: ResolutionSnapshot; after: ResolutionSnapshot };
+  /**
+   * Present whenever `approval propose` would answer this class differently
+   * (APRV-445): whether an agent may open a request in it. Without this an
+   * amendment adding `agent_may_request` resolved every class the same and was
+   * reported as no semantic change, the APRV-111 failure one key along.
+   */
+  agentRequest?: { before: boolean; after: boolean };
 }
 
 /** How an approver entry changed. */
@@ -621,7 +628,10 @@ export function diffPolicies(
     const nextIrreversible = irreversibleSnapshot(after, probe);
     const ordinaryChanged = !sameSnapshot(previous, next);
     const irreversibleChanged = !sameSnapshot(previousIrreversible, nextIrreversible);
-    if (!ordinaryChanged && !irreversibleChanged) continue;
+    const agentBefore = agentRequestability(before, probe).allowed;
+    const agentAfter = agentRequestability(after, probe).allowed;
+    const agentChanged = agentBefore !== agentAfter;
+    if (!ordinaryChanged && !irreversibleChanged && !agentChanged) continue;
     const change: ClassResolutionChange = {
       class: probe,
       before: previous,
@@ -630,6 +640,7 @@ export function diffPolicies(
     if (irreversibleChanged) {
       change.irreversible = { before: previousIrreversible, after: nextIrreversible };
     }
+    if (agentChanged) change.agentRequest = { before: agentBefore, after: agentAfter };
     classes.push(change);
   }
 
@@ -705,6 +716,11 @@ export function renderDiff(diff: PolicyDiff): string[] {
       if (change.irreversible !== undefined) {
         lines.push(
           `  ${change.class} (reversible: false): ${describeSnapshot(change.irreversible.before)} -> ${describeSnapshot(change.irreversible.after)}`,
+        );
+      }
+      if (change.agentRequest !== undefined) {
+        lines.push(
+          `  ${change.class} (agent may propose): ${change.agentRequest.before ? "yes" : "no"} -> ${change.agentRequest.after ? "yes" : "no"}`,
         );
       }
     }

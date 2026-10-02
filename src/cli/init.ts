@@ -151,10 +151,10 @@ function kindOf(path: string): Kind {
  *
  * The payload note is the one editorial decision in this verb, so it is stated
  * rather than implied. `.approval/payloads/` holds the exact bytes each approval
- * bound to (SPEC.md §6.2, §9): the material evidence of what a human said yes
- * to. Evidence defaults to tracked, so the scaffold does not ignore it. The
- * alternative is one line, and it costs the rebuildability of that evidence, so
- * both halves are printed together.
+ * bound to (SPEC.md §6.2, §9). Until APRV-445 those were tracked by default as
+ * evidence; since then they are ignored, because for a proposal they are a
+ * person's own words and a scaffolded store is often a hosted tenant's. The
+ * alternative is one line either way, so both halves are printed together.
  */
 function nextSteps(): string[] {
   return [
@@ -162,7 +162,7 @@ function nextSteps(): string[] {
     "Run `approval policy attest` (as a human: APPROVAL_HUMAN=human:<id>, or --as human:<id>). Attestation is what makes a policy operative, and it is what creates .approval/log/events.jsonl — init made the directory and deliberately put nothing in it, because a log entry nobody signed is not evidence of anything.",
     "Run `approval doctor` to check that this machine can run the system at all: build freshness, identity, attestation, chain health, channels.",
     "Run `approval env --check` to see which environment variables your policy names and where each one would come from (it prints no values). To record where they live, write `.approval/env` — one KEY=VALUE per line, where VALUE is `keychain:<service>`, `secret-service:<label>`, `env:`, or a plaintext literal — `chmod 600` it, and put `eval \"$(approval env)\"` in your shell. No other command reads that file, deliberately: human identity is one of the variables it can carry, so a file the runtime loaded on its own would let anything able to write it act as you.",
-    "Payload bytes are TRACKED by default: .approval/payloads/ is not in the .gitignore lines init wrote. Those bytes are what each approval bound to, and evidence belongs in the history. To keep them out of git instead, add `.approval/payloads/` to .gitignore yourself — the log still records every payload_hash, but the bytes behind those hashes become unrebuildable.",
+    "Payload bytes are IGNORED by default (APRV-445): .approval/payloads/ is in the .gitignore lines init wrote, because those files are the exact material each approval bound to and can be a person's own words. The log still records every payload_hash; set `payload_retention` in APPROVAL.md so the daemon prunes bytes whose action is finished. To keep them in git history as evidence instead, remove that line yourself.",
   ];
 }
 

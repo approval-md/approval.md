@@ -53,12 +53,14 @@
  */
 
 import {
+  chmodSync,
   closeSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -106,6 +108,24 @@ function detail(cause: unknown): string {
 /** Distinguishes concurrent writers' temp files within one process. */
 let tempCounter = 0;
 
+/**
+ * The store's file and directory modes (APRV-445): owner-only.
+ *
+ * A payload is the exact material a human approves, and for a proposal that is
+ * someone's own words. Until this the store took the process umask, so on a
+ * shared host every file was world-readable under a world-listable directory.
+ * The file is created 0600 (the umask can only remove bits from that), and the
+ * store directory is made 0700 on EVERY write, including a directory that
+ * already existed with a wider mode, because a store created by an older build,
+ * by `git checkout` or by hand is exactly the one that is open. A directory that
+ * cannot be narrowed refuses the write rather than storing into it: the request
+ * that needed the bytes is refused `payload-store-failed` and nothing is
+ * appended. Only the store's own directory is touched; its parents are the
+ * operator's.
+ */
+export const PAYLOAD_FILE_MODE = 0o600;
+export const PAYLOAD_DIR_MODE = 0o700;
+
 function writeAtomic(path: string, bytes: string): { ok: true } | { ok: false; message: string } {
   const directory = dirname(path);
   tempCounter += 1;
@@ -114,8 +134,11 @@ function writeAtomic(path: string, bytes: string): { ok: true } | { ok: false; m
     `.${basename(path)}.tmp-${String(process.pid)}-${String(tempCounter)}`,
   );
   try {
-    mkdirSync(directory, { recursive: true });
-    const handle = openSync(temp, "wx");
+    mkdirSync(directory, { recursive: true, mode: PAYLOAD_DIR_MODE });
+    if ((statSync(directory).mode & 0o777) !== PAYLOAD_DIR_MODE) {
+      chmodSync(directory, PAYLOAD_DIR_MODE);
+    }
+    const handle = openSync(temp, "wx", PAYLOAD_FILE_MODE);
     try {
       writeSync(handle, bytes, 0, "utf8");
     } finally {

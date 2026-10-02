@@ -60,7 +60,9 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import type { Socket } from "node:net";
+import { chmodSync, lstatSync, statSync, unlinkSync } from "node:fs";
+import { connect, type Socket } from "node:net";
+import { dirname } from "node:path";
 
 import { StringDecoder } from "node:string_decoder";
 
@@ -186,7 +188,12 @@ export const REFUSAL_EXIT_CODE = 2;
  * - `request`, `wait`, `withdraw` — ask, wait for the answer, and retract your
  *   own question. This is the gate sequence, and it is the reason the agent
  *   credential exists.
- * That is the whole list. It is five verbs, and the shortness is the point: a
+ * - `propose`, `start` (APRV-445) — the same sequence for an action the agent
+ *   declares itself, with its payload as a flag value: register-and-request in
+ *   a class the operator declared by name and opened with `agent_may_request`,
+ *   and record the execution the grant or the policy authorized. Neither takes
+ *   a path, and `start` is requester-only.
+ * That is the whole list. It is seven verbs, and the shortness is the point: a
  * harness under oversight asks and is answered, and everything else about the
  * gate belongs to the party the gate is for.
  *
@@ -230,6 +237,8 @@ export const AGENT_VERBS: ReadonlySet<string> = new Set([
   "request",
   "wait",
   "withdraw",
+  "propose",
+  "start",
 ]);
 
 /**
@@ -286,6 +295,12 @@ export interface ServeOptions {
   host?: string;
   /** TCP port. `0` asks the kernel for an ephemeral one, which is what tests use. */
   port: number;
+  /**
+   * A unix-domain socket to listen on INSTEAD of `host`/`port` (APRV-445). An
+   * absolute path whose directory the serving uid owns; see
+   * {@link checkUnixSocketTarget} and {@link UNIX_SOCKET_MODE}.
+   */
+  socketPath?: string;
   /** `--timeout` pinned on every hook call, when the operator chose one. */
   hookTimeout?: string;
   /**
@@ -307,6 +322,8 @@ export interface ServeOptions {
 export interface ServeHandle {
   readonly host: string;
   readonly port: number;
+  /** The unix socket this listener is bound to, or `null` for a TCP bind. */
+  readonly socketPath: string | null;
   /** How many requests this listener has answered. Diagnostics and tests. */
   requests(): number;
   close(): Promise<void>;
@@ -1101,23 +1118,61 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     socket.on("close", () => sockets.delete(socket));
   });
 
+  const socketPath = options.socketPath ?? null;
+  if (socketPath !== null) {
+    const checked = checkUnixSocketTarget(socketPath);
+    if (!checked.ok) throw new Error(checked.message);
+    await clearStaleSocket(socketPath);
+  }
+
   await new Promise<void>((settle, fail) => {
     const onError = (cause: Error): void => fail(cause);
     http.once("error", onError);
-    http.listen(options.port, host, () => {
+    const ready = (): void => {
       http.off("error", onError);
       settle();
-    });
+    };
+    if (socketPath !== null) http.listen(socketPath, ready);
+    else http.listen(options.port, host, ready);
   });
 
+  if (socketPath !== null) {
+    // The directory is the access control (see `checkUnixSocketTarget`); the
+    // socket itself is opened to every uid that can reach it through that
+    // directory, which is the sandbox user the operator put there. Narrowing
+    // the socket instead would make the operator's group or ACL on the
+    // directory a dead letter for a uid it was written for.
+    try {
+      chmodSync(socketPath, UNIX_SOCKET_MODE);
+    } catch (cause) {
+      await new Promise<void>((settle) => http.close(() => settle()));
+      throw new Error(
+        `the socket ${socketPath} was bound and could not be opened to mode ${UNIX_SOCKET_MODE.toString(8)}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+
   const address = http.address();
-  const boundPort = typeof address === "object" && address !== null ? address.port : options.port;
-  const boundHost = typeof address === "object" && address !== null ? address.address : host;
-  notice(`approval: serve bound ${boundHost}:${String(boundPort)}\n`);
+  const boundPort =
+    socketPath === null && typeof address === "object" && address !== null ? address.port : options.port;
+  const boundHost =
+    socketPath !== null
+      ? `unix:${socketPath}`
+      : typeof address === "object" && address !== null
+        ? address.address
+        : host;
+  notice(
+    socketPath === null
+      ? `approval: serve bound ${boundHost}:${String(boundPort)}\n`
+      : `approval: serve bound ${boundHost}\n`,
+  );
 
   return {
     host: boundHost,
     port: boundPort,
+    socketPath,
     requests: () => requests,
     close: async () => {
       if (closing) return;
@@ -1127,8 +1182,114 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
         for (const socket of sockets) socket.destroy();
         sockets.clear();
       });
+      if (socketPath !== null) {
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // Already gone: the platform removed it on close.
+        }
+      }
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Unix-socket listen target (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * The mode a unix socket is given once bound: everyone the DIRECTORY admits.
+ *
+ * A hosted tenant runs the agent's sandbox as a different uid from this server,
+ * on the same machine, and the socket is how the two meet without a TCP port
+ * anybody on the host could dial. Who may connect is therefore decided by the
+ * directory the socket sits in, which the operator owns and sets (`0710` with
+ * the sandbox's group, an ACL, a bind mount), and the socket itself does not
+ * second-guess it.
+ */
+export const UNIX_SOCKET_MODE = 0o666;
+
+/**
+ * Refuse a socket path this process should not bind (APRV-445).
+ *
+ * Absolute, inside an existing directory OWNED BY THE SERVING UID (the directory
+ * is the access control, so a directory somebody else owns is somebody else's
+ * access control), and not an existing file of any kind other than a socket: a
+ * stale socket is replaced, and anything else at that path is a file this
+ * server would destroy by binding over it. Synchronous and side-effect free, so
+ * the CLI can refuse before any listener exists.
+ */
+export function checkUnixSocketTarget(
+  socketPath: string,
+): { ok: true } | { ok: false; message: string } {
+  if (!socketPath.startsWith("/")) {
+    return { ok: false, message: `unix socket path ${JSON.stringify(socketPath)} is not absolute` };
+  }
+  const directory = dirname(socketPath);
+  let owner: number;
+  try {
+    const stats = statSync(directory);
+    if (!stats.isDirectory()) {
+      return { ok: false, message: `${directory} is not a directory, so ${socketPath} cannot be bound in it` };
+    }
+    owner = stats.uid;
+  } catch (cause) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} could not be read: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    };
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid === null || owner !== uid) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} is owned by uid ${String(owner)}, not by the serving uid ${String(uid)}. The directory is what decides who may connect to this socket (the socket itself is opened ${UNIX_SOCKET_MODE.toString(8)}), so it must be this process's own`,
+    };
+  }
+  try {
+    const existing = lstatSync(socketPath);
+    if (!existing.isSocket()) {
+      return {
+        ok: false,
+        message: `${socketPath} exists and is not a socket; binding there would destroy it, so nothing was bound`,
+      };
+    }
+  } catch {
+    // Absent: the ordinary case.
+  }
+  return { ok: true };
+}
+
+/**
+ * Remove a socket file nothing answers on (APRV-445).
+ *
+ * A server killed without closing leaves its socket file behind, and the next
+ * bind fails `EADDRINUSE` on a path nobody is listening at. A socket something
+ * DOES answer on is another live server, possibly another tenant's gate, and is
+ * refused rather than taken over.
+ */
+async function clearStaleSocket(socketPath: string): Promise<void> {
+  try {
+    if (!lstatSync(socketPath).isSocket()) return;
+  } catch {
+    return;
+  }
+  const live = await new Promise<boolean>((settle) => {
+    const probe = connect(socketPath);
+    probe.once("connect", () => {
+      probe.destroy();
+      settle(true);
+    });
+    probe.once("error", () => settle(false));
+  });
+  if (live) {
+    throw new Error(
+      `${socketPath} is a live socket: another process is listening on it, so this server will not take it over`,
+    );
+  }
+  unlinkSync(socketPath);
 }
 
 /** The default log under a store root, from the CLI's own constant. */

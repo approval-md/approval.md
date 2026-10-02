@@ -120,6 +120,22 @@ THE SEQUENCE.
      read first: approval payload agentmail-draft <inbox> <draft> prints the
      payload to declare, and a draft edited after it is refused, not sent.
 
+WITHOUT A TASK FILE. When the policy opens a class to agents by name
+(agent_may_request), and you hold the payload yourself with no file on the
+gate's machine, one call replaces steps 1 and 2:
+
+  approval propose --class <c> --key <k> --summary <s> --payload-json <j>
+     Registers and requests together; the payload is a JSON object passed as
+     the flag's value. decision "requested": a human is asked, so poll with
+     approval wait <task> --timeout 0, which answers at once and never blocks
+     the gate. decision "autonomous" or "supervised": nothing is asked. The
+     same call with the same class, key and bytes is a safe retry
+     (idempotent:true); new bytes need a new key.
+  approval start <task> --action <k> --payload-json <j>
+     Once you are carrying the action out, record it: this spends the grant
+     or records the policy's own authorization, once per key, and only for
+     bytes that hash to what you proposed.
+
 WHAT A REFUSAL MEANS. Exit 1 with a machine-readable error.code is the runtime
 saying no to a well-formed command. It is NOT a usage error and it is not a
 transient failure: retrying the same call, rephrasing the summary, splitting
