@@ -99,7 +99,7 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { boundScript, describeBoundScript } from "../core/run-payload.js";
-import { withdraw } from "../core/gate.js";
+import { attestedPolicySha256, requestStanding, withdraw } from "../core/gate.js";
 import { openGateWindow } from "../core/gate-window.js";
 import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
@@ -117,6 +117,7 @@ import {
   EXIT_NO_TOKEN,
   EXIT_OK,
   EXIT_TIMEOUT,
+  EXIT_VOID,
   EXIT_TORN_TAIL,
   EXIT_USAGE,
 } from "./exit-codes.js";
@@ -837,6 +838,17 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
   // after a nine-minute wait, and failing then, would leave exactly the stale
   // request the flag exists to prevent.
   const withdrawOnTimeout = boolFlag(flags, "--withdraw-on-timeout");
+  // APRV-445 (L1). A zero wait is a status read, and a status read that
+  // withdraws whatever is still pending would retract every question a poller
+  // looked at, on the first look.
+  if (withdrawOnTimeout && timeoutMs === 0) {
+    return usageError(
+      streams,
+      json,
+      "--withdraw-on-timeout cannot be combined with --timeout 0: a zero wait reads the current state, and withdrawing on it would retract every pending request the moment it is polled",
+      WAIT_HELP,
+    );
+  }
   const asFlag = stringFlag(flags, "--as");
   const withdrawActor = asFlag ?? resolveHumanActor();
   if (withdrawOnTimeout && (withdrawActor === null || !PRINCIPAL_ACTOR.test(withdrawActor))) {
@@ -864,8 +876,16 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     const ts = now();
     const actions: WaitedAction[] = [];
     let pending = false;
+    // APRV-445 refutation (B1): the state a waiter acts on is what the record
+    // still AUTHORIZES. A grant whose window lapsed reads `expired`, and a
+    // grant or pending request pinned to a superseded policy reads `void`, so
+    // a poller asks again instead of being told `granted` about an answer the
+    // spend will refuse.
+    const attestedSha = attestedPolicySha256(read.records, { policy: policyLocation(flags, cwd) });
     for (const key of requestedKeysOf(read.records, task)) {
       const derivation = requestState(read.records, key, ts, ttlMs);
+      const standing = requestStanding(read.records, key, ts, ttlMs, attestedSha);
+      const state = standing === "executed" ? derivation.state : standing;
       // APRV-105. The token, when this machine can open it: the grant sealed it
       // to the ephemeral public key this action's request published, and the
       // private half is in the key store beside the log. Attached only to a
@@ -873,16 +893,16 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
       // state would be a field consumers have to ignore, and a token on a
       // rejected action would be a value with nothing behind it.
       const token =
-        json && derivation.state === "granted"
+        json && state === "granted"
           ? deliveredToken(read.records, key, keyStoreDirFor(logPath))
           : null;
       actions.push({
         action_key: key,
-        state: derivation.state,
+        state,
         seq: derivation.decisionSeq ?? derivation.requestSeq,
         ...(token === null ? {} : { token }),
       });
-      if (derivation.state === "requested") pending = true;
+      if (state === "requested") pending = true;
     }
 
     if (!pending) {
@@ -902,15 +922,28 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
         (action) => action.state === "rejected" || action.state === "revoked",
       );
       const withdrawn = actions.some((action) => action.state === "withdrawn");
+      const voided = actions.some((action) => action.state === "void");
       const expired = actions.some((action) => action.state === "expired");
+      // APRV-445: `void` sits below a human's no and a requester's withdrawal
+      // (both final) and above a lapse, because its repair is the most
+      // specific: the same question, asked again under the policy in force.
       const status = rejected
         ? "rejected"
         : withdrawn
           ? "withdrawn"
-          : expired
-            ? "expired"
-            : "granted";
-      const code = rejected || withdrawn ? EXIT_INTEGRITY : expired ? EXIT_TORN_TAIL : EXIT_OK;
+          : voided
+            ? "void"
+            : expired
+              ? "expired"
+              : "granted";
+      const code =
+        rejected || withdrawn
+          ? EXIT_INTEGRITY
+          : voided
+            ? EXIT_VOID
+            : expired
+              ? EXIT_TORN_TAIL
+              : EXIT_OK;
       if (json) emitJson(streams, { ok: true, task, status, actions });
       else streams.out(renderWaitHuman(task, status, actions, style({ json })));
       return code;

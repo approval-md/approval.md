@@ -4684,8 +4684,11 @@ export type ProposeResult =
       cls: string;
       payloadHash: string;
       decision: "requested" | "autonomous" | "supervised";
-      /** `null` off the manual path, where there is no request to be in a state. */
-      state: RequestState | null;
+      /**
+       * `null` off the manual path, where there is no request to be in a state;
+       * `executed` once `start` recorded the execution (APRV-445, L7).
+       */
+      state: RequestState | "executed" | null;
       seq: number | null;
       idempotent: boolean;
     }
@@ -4737,6 +4740,7 @@ export function propose(
   input: ProposeInput,
   actor: string,
   options: GateOptions = {},
+  retried = false,
 ): ProposeResult {
   if (!isPrincipalActor(actor)) {
     return refuse(
@@ -4794,7 +4798,7 @@ export function propose(
 
   const answered = (
     decision: "requested" | "autonomous" | "supervised",
-    state: RequestState | null,
+    state: RequestState | "executed" | null,
     seq: number | null,
     idempotent: boolean,
   ): ProposeResult => ({
@@ -4827,14 +4831,54 @@ export function propose(
         { state: derivation.state },
       );
     }
-    if (derivation.state !== "none" && derivation.state !== "withdrawn" && derivation.state !== "expired") {
-      // Live or decided: the retry is answered from the log and writes nothing.
+    // APRV-445 refutation (B1): the retry is judged by what the request still
+    // AUTHORIZES, not by what it recorded. A live question, a usable grant, a
+    // human's no and a started execution are answered from the log and append
+    // nothing. A question that can no longer be answered usefully is asked
+    // again under the same registration: a lapsed or withdrawn request, a grant
+    // whose window ran out (a tap at hour 71 of 72 authorizes nothing at 73),
+    // and a grant or pending request pinned to a policy that has since been
+    // re-attested (`void`: the spend and the decision both refuse it).
+    const standing = requestStanding(
+      read.records,
+      input.actionKey,
+      tick(options),
+      ttlOf(load),
+      attested.sha256,
+    );
+    const seqOf = derivation.decisionSeq ?? derivation.requestSeq;
+    if (standing === "executed") {
       return answered(
-        "requested",
-        derivation.state,
-        derivation.decisionSeq ?? derivation.requestSeq,
+        derivation.requestSeq !== null
+          ? "requested"
+          : resolution.autonomy === "autonomous"
+            ? "autonomous"
+            : "supervised",
+        "executed",
+        seqOf,
         true,
       );
+    }
+    if (
+      standing === "requested" ||
+      standing === "granted" ||
+      standing === "rejected" ||
+      standing === "revoked"
+    ) {
+      return answered("requested", standing, seqOf, true);
+    }
+    if (standing === "void" && derivation.state === "requested") {
+      // A pending question no human may decide any more. Taken back by its own
+      // requester (the gate's only way to end a request early that is not a
+      // decision), then asked again below.
+      const retracted = withdraw(logPath, input.actionKey, actor, {
+        ...options,
+        reason: "superseded",
+        note: "the policy this proposal was routed under has been re-attested, so the request is void; the same proposal is asked again under the policy in force",
+      });
+      if (!retracted.ok && retracted.code !== "request-withdrawn" && retracted.code !== "already-decided") {
+        return retracted;
+      }
     }
   } else if (existing.code === "not-registered") {
     const registered = register(
@@ -4857,7 +4901,15 @@ export function propose(
       actor,
       options,
     );
-    if (!registered.ok) return registered;
+    if (!registered.ok) {
+      // APRV-445 (L5). Two identical proposals racing: the other one registered
+      // this exact task first. Its registration is ours byte for byte, so the
+      // call is a retry and is answered as one.
+      if (registered.code === "task-already-registered" && !retried) {
+        return propose(logPath, input, actor, options, true);
+      }
+      return registered;
+    }
     registeredNow = true;
   } else {
     // The derived task exists and declares some other key: nothing `propose`
@@ -5014,4 +5066,72 @@ export function startProposed(
   );
   if (!started.ok) return started;
   return { ok: true, task, actionKey, cls: declared.action.class, authorization: "policy", record: started.record };
+}
+
+// ---------------------------------------------------------------------------
+// Standing: what a request's state means for the party waiting on it (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * A request's state as a waiter must read it (APRV-445 refutation, B1).
+ *
+ * `requestState` answers what the log RECORDED. A waiter needs what the record
+ * still AUTHORIZES, and the two part in three ways the gate already enforces
+ * at the spend and the decision but no reader was told about:
+ *
+ * - a GRANT whose request has lapsed its window is `expired`: there is no
+ *   separate grant TTL (`grantLapsed`), so a tap at hour 71 of a 72 h window
+ *   authorizes nothing at hour 73;
+ * - a GRANT, or a PENDING request, pinned to a policy hash that is no longer the
+ *   attested one is `void`: the spend and the decision both refuse
+ *   `policy-drift`, so the answer it carries (or would carry) can never be used;
+ * - a request the runtime withdrew for `policy-drift` (APRV-235) is `void` too,
+ *   for the same reason, rather than an ordinary requester `withdrawn`;
+ * - a key whose execution started is `executed`.
+ *
+ * `void` and `expired` both mean "ask again": the question as asked can no
+ * longer be answered usefully. Everything else is `requestState` verbatim. An
+ * unattested policy (`attestedSha256` null) voids nothing, because that state is
+ * the human's to repair and may end in the same bytes.
+ */
+export type RequestStanding = RequestState | "void" | "executed";
+
+export function requestStanding(
+  records: EventRecord[],
+  actionKey: string,
+  ts: string,
+  ttlMs: number | null,
+  attestedSha256: string | null,
+): RequestStanding {
+  const derivation = requestState(records, actionKey, ts, ttlMs);
+  if (derivation.execution.started !== null) return "executed";
+  if (derivation.state === "granted") {
+    if (grantLapsed(derivation, ts)) return "expired";
+    const pinned =
+      grantedPolicyHash(records, derivation.decisionSeq) ?? derivation.declared.policy_sha256;
+    if (attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) return "void";
+    return "granted";
+  }
+  if (derivation.state === "requested") {
+    const pinned = derivation.declared.policy_sha256;
+    if (attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) return "void";
+    return "requested";
+  }
+  if (derivation.state === "withdrawn" && derivation.decisionSeq !== null) {
+    for (const record of records) {
+      if (record.seq !== derivation.decisionSeq) continue;
+      if (payloadOf(record)["reason"] === "policy-drift") return "void";
+    }
+  }
+  return derivation.state;
+}
+
+/**
+ * The SHA-256 the live policy bytes are attested under, or `null` when they are
+ * not attested (unread, unattested, or changed since). One read of the file
+ * through the same seam every gate operation uses.
+ */
+export function attestedPolicySha256(records: EventRecord[], options: GateOptions = {}): string | null {
+  const attested = requireAttestation(records, readPolicyOnce(options));
+  return attested.ok ? attested.sha256 : null;
 }

@@ -462,8 +462,17 @@ export function protectedPathClass(
     // runs a scheduled job's script from `$HERMES_HOME/scripts/` with no
     // `pre_tool_call` at all, so WRITING one is scheduling code that will run
     // ungated later, which is the same act as `cronjob_manage create` and is
-    // priced by the same policy line. `.env` is already `account.credential`
-    // (see `isCredentialPath`), which is human-only wherever `policy.core` is.
+    // priced by the same policy line.
+    //
+    // `.env` (and `.env.*`) and `auth.json` are organs too, for WRITES (APRV-445
+    // refutation, B2). `isCredentialPath` makes a READ of them
+    // `account.credential`, but that tier is consulted for reads only, so before
+    // this a `write_file`, a `patch`, a `>>`, a `sed -i` or a `tee -a` onto
+    // `$HERMES_HOME/.env` classified as an ordinary `files.write.workspace` and
+    // ran unattended: and Hermes loads that file with `override=True` into every
+    // process it starts, which makes it the switch for the gate itself
+    // (`HERMES_ACCEPT_HOOKS`) as well as a secret store. Reads stay
+    // `account.credential`.
     if (segment === ".hermes") {
       const next = segments[index + 1];
       if (
@@ -472,6 +481,9 @@ export function protectedPathClass(
         next === "config.yml" ||
         next === "agent-hooks" ||
         next === "approval" ||
+        next === ".env" ||
+        next.startsWith(".env.") ||
+        next === "auth.json" ||
         next.startsWith("shell-hooks-allowlist.json") ||
         next.startsWith("hooks")
       ) {
@@ -628,7 +640,7 @@ const CREDENTIAL_CLASS = "account.credential";
  * kin), which is the environment map holding the Telegram token, the vault
  * passphrase and the sampling secret.
  */
-function isCredentialPath(candidate: string): boolean {
+export function isCredentialPath(candidate: string): boolean {
   if (candidate.length === 0) return false;
   const segments = pathSegments(candidate);
   for (let index = 0; index < segments.length; index += 1) {
@@ -4132,6 +4144,22 @@ export interface CommandSegmentWords {
  * `classifyCommand` answers `unparseable` for. Segments carrying no binary (a
  * bare assignment, a lone redirection) are omitted: they have no verb to show.
  */
+/**
+ * The paths each segment WRITES through a redirection, from the same parse
+ * (APRV-445). `<` is a read and is left out, as are the discard devices.
+ * `null` when the tokenizer refuses the string.
+ */
+export function commandSegmentWriteTargets(command: string): string[][] | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+  return lexed.segments.map((segment) =>
+    segment.redirects
+      .filter((redirect) => redirect.op !== "<")
+      .map((redirect) => redirect.target.text)
+      .filter((target) => !isDiscardTarget(target)),
+  );
+}
+
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
   const lexed = lex(command);
   if (!lexed.ok) return null;

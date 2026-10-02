@@ -1139,7 +1139,7 @@ produces requests to wait for; a task with none returns at once, exit 0.
 
 JSON shape: docs/cli-reference.md#wait
 ${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted, 1 rejected, revoked
-or withdrawn (--json status says which), 3 expired, 4 I/O, and
+or withdrawn (--json status says which), 3 expired, 4 I/O, 7 VOID, and
   6  TIMEOUT — the wait elapsed with request(s) still undecided.
 ${JSON_ERRORS}
 ${why("wait")}`;

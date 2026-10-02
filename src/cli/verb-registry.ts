@@ -1557,7 +1557,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "wait",
     purpose:
-      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted, 1 rejected, revoked or withdrawn, 3 expired, 6 timeout. It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a task with none returns immediately at exit 0. --timeout 0 reads the current state once and never sleeps (an undecided request answers timeout, exit 6, at once): use it to poll through approval serve, which runs every call through one queue that a sleeping wait would hold. Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
+      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted, 1 rejected, revoked or withdrawn, 3 expired (a grant whose request window lapsed included), 6 timeout, 7 void (re-attested policy: ask again). It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a task with none returns immediately at exit 0. --timeout 0 reads the current state once and never sleeps (an undecided request answers timeout, exit 6, at once; it refuses --withdraw-on-timeout): use it to poll through approval serve, which runs every call through one queue that a sleeping wait would hold. Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "task", description: "the task id" }], 1),
@@ -1576,7 +1576,7 @@ const VERBS: VerbSpec[] = [
       {
         ok: BOOLEAN,
         task: STRING,
-        status: { enum: ["granted", "rejected", "withdrawn", "expired", "timeout"] },
+        status: { enum: ["granted", "rejected", "withdrawn", "void", "expired", "timeout"] },
         actions: arrayOf(
           object(
             {
@@ -1610,6 +1610,11 @@ const VERBS: VerbSpec[] = [
         code: 6,
         meaning:
           "TIMEOUT — the wait elapsed with request(s) undecided. Nothing was appended, they are still live, and waiting again is legitimate",
+      },
+      {
+        code: 7,
+        meaning:
+          "VOID — the policy was re-attested since the request was routed, so its grant (or the decision it awaits) can never be used. Ask again: for a proposal, the same propose call re-files",
       },
     ],
   },

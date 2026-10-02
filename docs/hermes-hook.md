@@ -385,7 +385,13 @@ path segment like the rest (so the home's last segment must be `.hermes`):
 a write under `.hermes/scripts/` is `cron.manage`, because Hermes's scheduler
 runs those scripts with no `pre_tool_call` at all; `.hermes/approval/` and
 `.hermes/shell-hooks-allowlist.json.lock` are `policy.core` beside the allowlist
-itself. `.hermes/.env` was already `account.credential`.
+itself. A WRITE to `.hermes/.env`, `.hermes/.env.*` or `.hermes/auth.json`
+(`write_file`, `patch`, `>`/`>>`, `sed -i`, `tee`, `cp`) is `policy.core`; a READ
+of them (`cat`, `read_file`) is `account.credential`. Before the APRV-445 review
+only the read was gated: the credential tier is consulted for reads, so a write
+classified as an ordinary workspace write. A `terminal` call's relative words and
+redirect targets are also judged resolved against its `workdir`, so
+`echo X >> .env` run in `$HERMES_HOME` is the same write as the absolute one.
 
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the

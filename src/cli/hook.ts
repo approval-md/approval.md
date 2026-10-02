@@ -90,9 +90,11 @@ import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
   commandSegmentWords,
+  commandSegmentWriteTargets,
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   GATE_SELF_CLASS,
+  isCredentialPath,
   protectedPathClass,
   type ClassifiedSegment,
   type CommandClassification,
@@ -3045,6 +3047,31 @@ function readToolGate(
   };
 }
 
+/**
+ * A read tool call naming a credential file (APRV-445 refutation, B2): the
+ * Hermes home's `.env` and `auth.json`, and the approval home's vault, keys and
+ * environment map. `null` for anything else.
+ */
+function credentialReadGate(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  cwd: string,
+): { payload: unknown; summary: string } | null {
+  const declared =
+    readString(toolInput, "file_path") ??
+    readString(toolInput, "notebook_path") ??
+    readString(toolInput, "path");
+  if (declared === null) return null;
+  const file = absolute(declared, cwd);
+  if (!isCredentialPath(file)) return null;
+  const input: Record<string, unknown> = { ...toolInput };
+  delete input["description"];
+  return {
+    payload: { tool: toolName, rule: "credential", file, input },
+    summary: `${toolName} ${file} (credential)`,
+  };
+}
+
 /** The verdict note for a gated read: what was asked for, and against what. */
 function readScopeNote(gated: ReadGate, roots: readonly string[]): string {
   return `read-scope: ${gated.declared} resolves to ${gated.file}, which is outside the read scope (${renderReadRoots(roots)})`;
@@ -4963,6 +4990,19 @@ function describeToolCall(
       };
     }
     const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    // APRV-445 refutation (B2, L10). The classifier matches protected paths by
+    // their SEGMENTS, and a relative word carries only the segments it was
+    // written with: `echo X >> .env` run in `$HERMES_HOME` names `.env`, not
+    // `.hermes/.env`, and classified as a workspace write. Where the harness
+    // states the per-call directory the command runs in, every relative word
+    // and every write target is ALSO judged resolved against it: a write that
+    // lands on an organ takes the organ's class, and a read that lands on a
+    // credential takes `account.credential`. It only ever adds a class.
+    if (shellCwd !== null) {
+      for (const cls of resolvedPathClasses(classified.segments, shellCwd, protectedPaths)) {
+        if (!classes.includes(cls)) classes.push(cls);
+      }
+    }
     if (adapter.kind === "codex") {
       // The pure shell classifier sees each segment independently. Preserve
       // Codex hook organs when an earlier simple `cd` changes the directory or
@@ -5065,6 +5105,19 @@ function describeToolCall(
   // a read is the cheaper question to answer: a read inside the scope, or one
   // naming no path at all, returns `null` here and takes the allow below.
   if (adapter.readTools.includes(input.toolName)) {
+    // APRV-445 refutation (B2): a read tool naming a credential file is
+    // `account.credential` wherever the file sits, inside the read scope
+    // included, as the same read through the shell already was.
+    const credential = credentialReadGate(input.toolName, input.toolInput, cwd);
+    if (credential !== null) {
+      return {
+        kind: "gated",
+        classes: ["account.credential"],
+        payload: credential.payload,
+        headline: credential.summary,
+        notes: [],
+      };
+    }
     const read = readToolGate(input.toolName, input.toolInput, readRoots, cwd);
     if (read === null) {
       return {
@@ -5094,6 +5147,46 @@ function describeToolCall(
     // `allow` says which checkout it authorized (APRV-124).
     notes: gated.protectedPath ? [fileTierNote(gated)] : [],
   };
+}
+
+/**
+ * The classes a command's RELATIVE words and write targets take once resolved
+ * against the directory the command runs in (APRV-445 refutation, B2 and L10).
+ *
+ * A redirection target is a write whatever the segment's class. A positional
+ * is judged as a write only in a side-effecting segment and as a read of a
+ * credential only in a read segment, which is the same split the classifier
+ * itself draws for absolute words. Absolute words are left to the classifier,
+ * which already saw them whole.
+ */
+function resolvedPathClasses(
+  segments: readonly ClassifiedSegment[],
+  cwd: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+): string[] {
+  const found: string[] = [];
+  const add = (cls: string | null): void => {
+    if (cls !== null && !found.includes(cls)) found.push(cls);
+  };
+  for (const segment of segments) {
+    const parsed = commandSegmentWords(segment.text)?.[0];
+    const targets = commandSegmentWriteTargets(segment.text)?.[0] ?? [];
+    for (const target of targets) {
+      if (isAbsolute(target)) continue;
+      add(protectedPathClass(resolvePathSegments(cwd, target), protectedPaths));
+    }
+    if (parsed === undefined) continue;
+    const words = [parsed.bin, ...parsed.args].filter((word) => !isAbsolute(word) && !word.startsWith("-"));
+    for (const word of words) {
+      const resolved = resolvePathSegments(cwd, word);
+      if (segment.class.startsWith("read.")) {
+        if (isCredentialPath(resolved)) add("account.credential");
+      } else if (isSideEffectingClass(segment.class)) {
+        add(protectedPathClass(resolved, protectedPaths));
+      }
+    }
+  }
+  return found;
 }
 
 /** The environment variable that turns the sandbox requirement on (APRV-193). */
@@ -5717,7 +5810,10 @@ function runHarnessHook(
     // spawn, provided the hook is configured with `--dir` as the docs show
     // (otherwise `hookScope` runs `git rev-parse` to find the primary).
     const early = hookScope(parsed.flags, cwd);
-    if (readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null) {
+    if (
+      credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
+      readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
+    ) {
       return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
     }
   }
