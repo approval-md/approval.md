@@ -2449,6 +2449,7 @@ test("the refusal-code union is frozen public API", () => {
     "task-is-proposal",
     "task-not-proposal",
     "key-class-mismatch",
+    "contended",
   ]);
 });
 

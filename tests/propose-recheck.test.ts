@@ -362,3 +362,36 @@ test("L-d: cli.js matches `hook hermes` after --no-color, and turns a silent non
   assert.equal(other.code, 1, "the guard rewrote another verb's exit code");
   assert.equal(other.stdout.includes('"block"'), false);
 });
+
+test("recheck 3: a proposal whose every append is refused by a moving log ends `contended`, never `already-decided`", () => {
+  const dir = caseDir();
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const policyPath = join(dir, "APPROVAL.md");
+  const key = `${INFERRED}:contended`;
+  const input = { cls: INFERRED, actionKey: key, summary: "s", payload: TEXT };
+  assert.equal(propose(logPath, input, AGENT, { policy: { file: policyPath } }).ok, true);
+  const first = readFileSync(policyPath);
+  writeFileSync(policyPath, policyText("48h"), "utf8");
+  attest(dir);
+  const second = readFileSync(policyPath);
+
+  // Each attempt reads the policy three times: propose's own read (it sees the
+  // pending request as void under the policy in force), the withdrawal's TTL
+  // read, and the withdrawal's in-append void check. Answering that third read
+  // with the superseded bytes makes every in-append check refuse, which is what
+  // a log another writer keeps moving looks like from inside one call.
+  let reads = 0;
+  const result = propose(logPath, input, AGENT, {
+    policy: {
+      file: policyPath,
+      read: () => {
+        reads += 1;
+        return reads % 3 === 0 ? first : second;
+      },
+    },
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.code, "contended");
+  assert.equal(count(dir, "approval.withdrawn"), 0, "a contended call withdrew something");
+});

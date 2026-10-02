@@ -2311,7 +2311,10 @@ const SUITES = [
     // 24.0.0 (APRV-445 refutation): `gate_refusal_codes` gains
     // `task-is-proposal`, `task-not-proposal` and `key-class-mismatch`. Major
     // for the same reason: a longer union is a changed expectation.
-    vectors_version: "24.0.0",
+    // 25.0.0 (APRV-445 recheck 3): `gate_refusal_codes` gains `contended`,
+    // the refusal a proposal's bounded retry ends on instead of borrowing
+    // `already-decided`.
+    vectors_version: "25.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

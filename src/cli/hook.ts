@@ -73,7 +73,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
@@ -3063,20 +3063,13 @@ function credentialReadGate(
     readString(toolInput, "path");
   if (declared === null) return null;
   // APRV-445 recheck SF2(e, f): judged through realpath, so a symlinked
-  // parent cannot launder the path, and a DIRECTORY under `.hermes` or
-  // `.approval` handed to a read tool (a search, a glob, a grep) reads the
-  // credentials inside it and is gated as they are.
+  // parent cannot launder the path, and a directory of credentials handed to a
+  // read tool (a search, a glob, a grep) is gated as the credentials are.
   const file = canonicalPath(absolute(declared, cwd));
-  const directoryOfSecrets =
-    file.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") &&
-    (() => {
-      try {
-        return statSync(file).isDirectory();
-      } catch {
-        return false;
-      }
-    })();
-  if (!isCredentialPath(file) && !directoryOfSecrets) return null;
+  // Recheck 3 (SF1a): only a directory that holds credentials (a home root, an
+  // approval home, a home's `approval/`, or a directory under a home holding a
+  // credential file); `skills/`, `workspace/` and the like are ordinary.
+  if (!isCredentialPath(file) && !holdsCredentials(file)) return null;
   const input: Record<string, unknown> = { ...toolInput };
   delete input["description"];
   return {
@@ -5216,10 +5209,13 @@ function resolvedPathClasses(
     if (cls !== null && !found.includes(cls)) found.push(cls);
   };
   const shapes = commandSegmentShapes(raw) ?? [];
+  // Trusted as given: the operator sets it (under co-location, the control
+  // plane sets it from the tenant's home), and nothing the agent writes reaches
+  // this process's environment.
   const hermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
   const home = env["HOME"] ?? null;
 
-  /** The word with the variables this hook can know expanded, or `null` parts. */
+  /** The word with the variables this hook can know expanded. */
   const expand = (word: string): { text: string; hermesUnknown: boolean; unresolved: boolean } => {
     let text = word;
     let hermesUnknown = false;
@@ -5232,37 +5228,42 @@ function resolvedPathClasses(
     if (homeRef.test(text) && home !== null && home.length > 0) text = text.replace(homeRef, home);
     return { text, hermesUnknown, unresolved: hermesUnknown || /[$`]/u.test(text) };
   };
-  const hasGlob = (text: string): boolean => /[*?[]/u.test(text);
-  const inGateHome = (path: string): boolean =>
-    path.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval");
-  const isDirectory = (path: string): boolean => {
-    try {
-      return statSync(path).isDirectory();
-    } catch {
-      return false;
-    }
-  };
 
+  // After a `cd` this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`), the
+  // directory every later relative path lands in is unknown (recheck 3, SF2).
+  let cwdUnknown = false;
   let cwds = [canonicalPath(cwd)];
   for (const [index, segment] of segments.entries()) {
     const shape =
       shapes.length === segments.length
         ? shapes[index]
         : shapes.find((candidate) => candidate.text === segment.text);
-    if (shape === undefined || shape.bin === null) continue;
-    const bin = basename(shape.bin);
+    if (shape === undefined) continue;
+    const bin = shape.bin === null ? null : basename(shape.bin);
     const operands = shape.args.filter((arg) => !arg.startsWith("-"));
 
-    if (bin === "cd") {
-      if (operands.length === 1) {
-        const target = expand(operands[0] as string);
-        if (!target.unresolved) {
-          const next = cwds.map((from) => canonicalPath(resolvePathSegments(from, target.text)));
+    if (bin === "cd" || bin === "pushd") {
+      const target = operands[0];
+      if (target === undefined) {
+        // A bare `cd` goes HOME; `cd -` and `pushd` with no operand go to a
+        // directory recorded earlier in a shell this hook never saw.
+        if (bin === "cd" && !shape.args.includes("-") && home !== null) {
+          cwds = [...new Set([...cwds, canonicalPath(home)])];
+        } else {
+          cwdUnknown = true;
+        }
+      } else {
+        const expanded = expand(target);
+        if (expanded.unresolved || hasGlobChars(expanded.text)) {
+          cwdUnknown = true;
+        } else {
+          const next = cwds.map((from) => canonicalPath(resolvePathSegments(from, expanded.text)));
           cwds = [...new Set([...cwds, ...next])];
         }
       }
       continue;
     }
+    if (bin === null && shape.writes.length === 0 && shape.reads.length === 0) continue;
 
     const judgeWrite = (word: string): void => {
       const target = expand(word);
@@ -5270,13 +5271,48 @@ function resolvedPathClasses(
         add("policy.core");
         return;
       }
+      if (!isAbsolute(target.text) && cwdUnknown) {
+        add("policy.core");
+        return;
+      }
+      const globbed = target.unresolved || hasGlobChars(target.text);
       for (const from of cwds) {
         const absoluteTarget = resolvePathSegments(from, target.text);
-        if (target.unresolved || hasGlob(target.text)) {
-          if (inGateHome(from) || inGateHome(canonicalPath(dirname(absoluteTarget)))) add("policy.core");
+        if (globbed) {
+          // SF3a: a pattern in any component that could name the home, the
+          // approval home or an organ is an organ write; a pattern written
+          // into one of the gate's own directories (SF1b) may be any file
+          // there. Anywhere else it is a workspace write.
+          if (globCouldNameOrgan(absoluteTarget) || writesIntoGateRoot(canonicalPath(dirname(absoluteTarget)))) {
+            add("policy.core");
+          }
           continue;
         }
         add(protectedPathClass(canonicalPath(absoluteTarget), protectedPaths));
+      }
+    };
+    /** A copy or move INTO a directory writes `<dir>/<basename of source>`. */
+    const judgeWriteInto = (directory: string, sources: readonly string[]): void => {
+      for (const source of sources) {
+        const name = basename(expand(source).text);
+        if (name.length === 0 || name === "." || name === "..") {
+          // `cp -r stuff/. dir`: the contents land in the directory itself.
+          judgeExtractInto(directory);
+          continue;
+        }
+        judgeWrite(join(directory, name));
+      }
+    };
+    /** An extraction or a contents-copy writes unknown names into `directory`. */
+    const judgeExtractInto = (directory: string): void => {
+      const target = expand(directory);
+      if (target.hermesUnknown || (cwdUnknown && !isAbsolute(target.text))) {
+        add("policy.core");
+        return;
+      }
+      if (target.unresolved) return;
+      for (const from of cwds) {
+        if (writesIntoGateRoot(canonicalPath(resolvePathSegments(from, target.text)))) add("policy.core");
       }
     };
     const judgeRead = (word: string, recursive: boolean): void => {
@@ -5285,22 +5321,62 @@ function resolvedPathClasses(
         add("account.credential");
         return;
       }
-      if (target.unresolved || hasGlob(target.text)) return;
+      if (!isAbsolute(target.text) && cwdUnknown) {
+        add("account.credential");
+        return;
+      }
+      if (target.unresolved) return;
       for (const from of cwds) {
-        const resolved = canonicalPath(resolvePathSegments(from, target.text));
+        const absoluteTarget = resolvePathSegments(from, target.text);
+        if (hasGlobChars(target.text)) {
+          // SF3b: expand against the directory when it is known; otherwise a
+          // pattern that could name a credential is read as one.
+          const candidates = expandGlob(absoluteTarget);
+          if (candidates === null) {
+            if (globCouldNameCredential(absoluteTarget)) add("account.credential");
+          } else {
+            for (const candidate of candidates) {
+              if (isCredentialPath(canonicalPath(candidate))) add("account.credential");
+            }
+          }
+          continue;
+        }
+        const resolved = canonicalPath(absoluteTarget);
         if (isCredentialPath(resolved)) add("account.credential");
-        else if (recursive && inGateHome(resolved) && isDirectory(resolved)) add("account.credential");
+        else if (recursive && holdsCredentials(resolved)) add("account.credential");
       }
     };
 
     for (const target of shape.writes) judgeWrite(target);
+    for (const source of shape.reads) judgeRead(source, false);
+    if (bin === null) continue;
+
+    // `-t DIR` / `--target-directory=DIR` names the destination up front.
+    const targetDirFlag = (): string | null => {
+      for (const [at, arg] of shape.args.entries()) {
+        if (arg === "-t") return shape.args[at + 1] ?? null;
+        if (arg.startsWith("--target-directory=")) return arg.slice("--target-directory=".length);
+      }
+      return null;
+    };
 
     if (WRITE_EVERY_OPERAND.has(bin)) {
       for (const operand of operands) judgeWrite(operand);
     } else if (WRITE_LAST_OPERAND.has(bin)) {
-      const last = operands[operands.length - 1];
-      if (last !== undefined) judgeWrite(last);
-      for (const source of operands.slice(0, -1)) judgeRead(source, true);
+      const targetDir = targetDirFlag();
+      const sources = targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
+      const destination = targetDir ?? operands[operands.length - 1];
+      for (const source of sources) judgeRead(source, true);
+      if (destination !== undefined) {
+        const expanded = expand(destination);
+        const intoDirectory =
+          targetDir !== null ||
+          destination.endsWith("/") ||
+          (!expanded.unresolved &&
+            cwds.some((from) => isDirectoryPath(canonicalPath(resolvePathSegments(from, expanded.text)))));
+        if (intoDirectory) judgeWriteInto(destination, sources);
+        else judgeWrite(destination);
+      }
     } else if (WRITE_AFTER_FIRST_OPERAND.has(bin)) {
       for (const operand of operands.slice(1)) judgeWrite(operand);
     } else if (bin === "sed" && shape.args.some((arg) => arg === "--in-place" || /^-[a-zA-Z]*i/u.test(arg))) {
@@ -5311,6 +5387,12 @@ function resolvedPathClasses(
         if (arg.startsWith("of=")) judgeWrite(arg.slice(3));
         if (arg.startsWith("if=")) judgeRead(arg.slice(3), false);
       }
+    } else if (bin === "tar" && isTarExtract(shape.args)) {
+      // Lows: an extraction writes the archive's names into `-C DIR` or the
+      // working directory.
+      judgeExtractInto(flagValue(shape.args, "-C", "--directory") ?? ".");
+    } else if (bin === "unzip") {
+      judgeExtractInto(flagValue(shape.args, "-d", null) ?? ".");
     }
 
     if (segment.class.startsWith("read.") || RECURSIVE_READERS.has(bin)) {
@@ -5318,6 +5400,155 @@ function resolvedPathClasses(
     }
   }
   return found;
+}
+
+/** `*`, `?` or `[` in a path word. */
+function hasGlobChars(text: string): boolean {
+  return /[*?[]/u.test(text);
+}
+
+/** A shell glob component as an anchored regular expression. */
+function globRegex(component: string): RegExp {
+  let source = "";
+  for (const char of component) {
+    if (char === "*") source += ".*";
+    else if (char === "?") source += ".";
+    else if (char === "[" || char === "]") source += char;
+    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+  }
+  try {
+    return new RegExp(`^${source}$`, "u");
+  } catch {
+    return /^.*$/u;
+  }
+}
+
+/** Names a credential file goes by, for a pattern to be tested against. */
+const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", "auth.json", "env", "vault.enc", "keys"];
+/** Names an organ goes by, beyond the credentials. */
+const ORGAN_NAMES: readonly string[] = [
+  ...CREDENTIAL_NAMES,
+  "config.yaml",
+  "config.yml",
+  "shell-hooks-allowlist.json",
+  "shell-hooks-allowlist.json.lock",
+  "agent-hooks",
+  "approval",
+  "scripts",
+];
+
+/** Could some component of `path`'s pattern name the home or the approval home? */
+function globCouldNameGateHome(path: string): boolean {
+  return path
+    .split(/[/\\]+/u)
+    .some((component) => hasGlobChars(component) && [".hermes", ".approval"].some((name) => globRegex(component).test(name)));
+}
+
+/** SF3a: a written pattern that could land on an organ. */
+function globCouldNameOrgan(path: string): boolean {
+  if (globCouldNameGateHome(path)) return true;
+  const last = basename(path);
+  if (!hasGlobChars(last)) return false;
+  const pattern = globRegex(last);
+  const parent = dirname(path);
+  const parentIsHome =
+    parent.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") ||
+    hasGlobChars(parent);
+  return parentIsHome && ORGAN_NAMES.some((name) => pattern.test(name));
+}
+
+/** SF3b: a read pattern whose directory is unknown, that could name a credential. */
+function globCouldNameCredential(path: string): boolean {
+  const last = basename(path);
+  if (!hasGlobChars(last)) return globCouldNameGateHome(path);
+  const pattern = globRegex(last);
+  return CREDENTIAL_NAMES.some((name) => pattern.test(name)) || globCouldNameGateHome(path);
+}
+
+/** The entries a final-component glob matches, or `null` when the directory is unknown. */
+function expandGlob(path: string): string[] | null {
+  const parent = dirname(path);
+  if (hasGlobChars(parent)) return null;
+  try {
+    const pattern = globRegex(basename(path));
+    return readdirSync(canonicalPath(parent))
+      .filter((name) => pattern.test(name))
+      .map((name) => join(parent, name));
+  } catch {
+    return null;
+  }
+}
+
+function isDirectoryPath(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The gate's own directories (recheck 3, SF1): a Hermes home (or profile home)
+ * root, an approval home, a home's `approval/`, and its `scripts/`. Everything
+ * else under a home (`workspace/`, `skills/`, `memories/`, `sessions/`) is
+ * ordinary work, which matters because a hosted image runs ALL agent work under
+ * `$HERMES_HOME`.
+ */
+function gateRootKind(directory: string): "home" | "approval-home" | "home-approval" | "scripts" | null {
+  const segments = directory.split(/[/\\]+/u).filter((segment) => segment.length > 0);
+  const last = segments[segments.length - 1];
+  const isHome = (at: number): boolean =>
+    segments[at] === ".hermes" ||
+    (segments[at - 2] === ".hermes" && segments[at - 1] === "profiles" && segments[at] !== undefined);
+  if (last === undefined) return null;
+  if (isHome(segments.length - 1)) return "home";
+  if (last === ".approval") return "approval-home";
+  if (last === "approval" && isHome(segments.length - 2)) return "home-approval";
+  if (last === "scripts" && isHome(segments.length - 2)) return "scripts";
+  return null;
+}
+
+/** A glob or an unknown name written here may be an organ (SF1b). */
+function writesIntoGateRoot(directory: string): boolean {
+  return gateRootKind(directory) !== null;
+}
+
+/**
+ * A directory a recursive read of which reads credentials (SF1a): the home
+ * root, the approval home, a home's `approval/`, and any directory under a home
+ * that directly holds a credential file.
+ */
+function holdsCredentials(directory: string): boolean {
+  if (!isDirectoryPath(directory)) return false;
+  const kind = gateRootKind(directory);
+  if (kind === "home" || kind === "approval-home" || kind === "home-approval") return true;
+  if (!directory.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval")) return false;
+  return CREDENTIAL_FILE_NAMES.some((name) => existsSync(join(directory, name)));
+}
+
+const CREDENTIAL_FILE_NAMES: readonly string[] = [
+  ".env",
+  "auth.json",
+  "config.yaml",
+  "config.yml",
+  "shell-hooks-allowlist.json",
+  "shell-hooks-allowlist.json.lock",
+];
+
+function isTarExtract(args: readonly string[]): boolean {
+  const first = args[0] ?? "";
+  return args.some((arg) => arg === "--extract" || arg === "--get" || /^-[a-zA-Z]*x/u.test(arg)) ||
+    (!first.startsWith("-") && first.includes("x"));
+}
+
+function flagValue(args: readonly string[], short: string, long: string | null): string | null {
+  for (const [at, arg] of args.entries()) {
+    if (arg === short) return args[at + 1] ?? null;
+    if (arg.startsWith(short) && arg.length > short.length && !arg.startsWith("--")) return arg.slice(short.length);
+    if (long !== null && arg.startsWith(`${long}=`)) return arg.slice(long.length + 1);
+    if (long !== null && arg === long) return args[at + 1] ?? null;
+  }
+  return null;
 }
 
 /** Binaries every operand of which is a path they create, change or remove. */

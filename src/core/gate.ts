@@ -663,6 +663,15 @@ export const GATE_REFUSAL_CODES = [
    * later as belonging to a different class than its record says.
    */
   "key-class-mismatch",
+  /**
+   * `approval propose` found the log moving under it on every one of its
+   * bounded attempts (APRV-445 recheck 3): each re-read showed an answer the
+   * next append was refused for. Exit 1, nothing more was appended, and the
+   * proposal's standing is whatever the log now says; read it with `wait
+   * --timeout 0` or call again. Distinct from `already-decided`, which would
+   * tell a caller a proposal is answered when it may stand granted or pending.
+   */
+  "contended",
 ] as const;
 
 export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
@@ -4851,7 +4860,10 @@ export function propose(
   const again = (refusal: GateRefusal): ProposeResult =>
     attempt < PROPOSE_MAX_ATTEMPTS
       ? propose(logPath, input, actor, options, attempt + 1, appendedEarlier || withdrewNow || registeredNow)
-      : refusal;
+      : refuse(
+          "contended",
+          `the log moved under propose on each of its ${String(PROPOSE_MAX_ATTEMPTS + 1)} attempts for ${input.actionKey} (last refusal: ${refusal.code}); nothing more was appended. Read the proposal's standing with \`approval wait <task> --timeout 0\`, or call again.`,
+        );
   if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",

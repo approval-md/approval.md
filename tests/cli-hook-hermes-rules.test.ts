@@ -91,6 +91,12 @@ const POLICY = [
   "    autonomy: autonomous",
   "  files.write.workspace:",
   "    autonomy: autonomous",
+  "  files.write.out_of_scope:",
+  "    autonomy: autonomous",
+  "  files.delete.*:",
+  "    autonomy: autonomous",
+  "  files.delete:",
+  "    autonomy: autonomous",
   "  cron.manage:",
   "    autonomy: human-only",
   "  process.write:",
@@ -674,4 +680,85 @@ test("L-e: only redirect targets and write positions resolve, so ordinary words 
       assert.equal(classes.includes(organ), false, `${command} took ${organ}: ${run.stdout} ${run.stderr}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Recheck 3: a hosted home holds ALL agent work, so only its roots are organs
+// ---------------------------------------------------------------------------
+
+test("recheck 3: ordinary work under the home is allowed; the home's roots, globs over organs, unknown cd and < reads are not", () => {
+  const dir = ready();
+  const home = join(dir, ".hermes");
+  for (const sub of ["workspace", "skills/s1", "scripts", "profiles/p1"]) mkdirSync(join(home, sub), { recursive: true });
+  writeFileSync(join(home, ".env"), "TOKEN=x\n", "utf8");
+  writeFileSync(join(home, "skills", "s1", "SKILL.md"), "x", "utf8");
+  writeFileSync(join(home, "profiles", "p1", ".env"), "P=1\n", "utf8");
+  const workspace = join(home, "workspace");
+  const skills = join(home, "skills");
+
+  const allowed: Array<[string, Record<string, unknown>]> = [
+    ["terminal", { command: "grep -r TODO .", workdir: workspace }],
+    ["terminal", { command: "find . -name '*.md'", workdir: skills }],
+    ["terminal", { command: "du -sh .", workdir: workspace }],
+    ["terminal", { command: "rm -f *.tmp", workdir: workspace }],
+    ["terminal", { command: 'echo hi > "out_$N.txt"', workdir: workspace }],
+    ["terminal", { command: 'mkdir -p "$OUT"', workdir: workspace }],
+    ["terminal", { command: "cp /tmp/a.txt .", workdir: workspace }],
+    ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: workspace }],
+    ["terminal", { command: "tar -xf /tmp/x.tar", workdir: workspace }],
+    ["terminal", { command: "touch notes.txt", workdir: home }],
+    ["search_files", { path: skills, pattern: "name" }],
+    ["search_files", { path: workspace, pattern: "x" }],
+    ["read_file", { path: join(skills, "s1", "SKILL.md") }],
+  ];
+  for (const [tool, input] of allowed) {
+    const run = hook(dir, event(dir, { tool_name: tool, tool_input: input }));
+    assert.equal(verdictOf(run).permission, "allow", `${tool} ${JSON.stringify(input)}: ${run.stdout} ${run.stderr}`);
+  }
+
+  const denied: Array<[string, Record<string, unknown>, string]> = [
+    // SF1: the roots themselves.
+    ["terminal", { command: "grep -r TOKEN .", workdir: home }, "account.credential"],
+    ["search_files", { path: home, pattern: "TOKEN" }, "account.credential"],
+    ["terminal", { command: "rm -f *.tmp", workdir: home }, "policy.core"],
+    ["terminal", { command: 'echo x > "$F"', workdir: join(home, "scripts") }, "policy.core"],
+    ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: home }, "policy.core"],
+    ["terminal", { command: "tar -xf /tmp/x.tar", workdir: home }, "policy.core"],
+    ["terminal", { command: `tar -xf /tmp/x.tar -C ${home}`, workdir: dir }, "policy.core"],
+    // SF2: a cd this hook cannot resolve.
+    ["terminal", { command: "cd $X && echo X >> .env", workdir: dir }, "policy.core"],
+    ["terminal", { command: 'cd "$D" && cat .env', workdir: dir }, "account.credential"],
+    ["terminal", { command: "cd $HERMES_HOME && echo X >> .env", workdir: dir }, "policy.core"],
+    ["terminal", { command: `cd ${home}; cd -; echo X >> notes.txt`, workdir: dir }, "policy.core"],
+    // SF3: globs over organs, globbed reads, `<` reads.
+    ["terminal", { command: "echo X > ../.h*/.env", workdir: workspace }, "policy.core"],
+    ["terminal", { command: `echo X > ${dir}/.h?rmes/.env`, workdir: dir }, "policy.core"],
+    ["terminal", { command: "cat .e*", workdir: home }, "account.credential"],
+    ["terminal", { command: `cat ${home}/.e*`, workdir: dir }, "account.credential"],
+    ["terminal", { command: "base64 < .env", workdir: home }, "account.credential"],
+    // Copies into a directory, by every spelling.
+    ["terminal", { command: "cp /tmp/.env .", workdir: home }, "policy.core"],
+    ["terminal", { command: "mv -t . /tmp/.env", workdir: home }, "policy.core"],
+    ["terminal", { command: "cp --target-directory=. /tmp/.env", workdir: home }, "policy.core"],
+    // Profile homes.
+    ["terminal", { command: `echo X >> ${home}/profiles/p1/.env`, workdir: dir }, "policy.core"],
+    ["read_file", { path: join(home, "profiles", "p1", ".env") }, "account.credential"],
+  ];
+  for (const [tool, input, want] of denied) {
+    const run = hook(dir, event(dir, { tool_name: tool, tool_input: input }));
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${tool} ${JSON.stringify(input)}`);
+    assert.ok(classesOf(run).includes(want), `${tool} ${JSON.stringify(input)}: ${verdict.message}`);
+  }
+
+  // With the home stated to the hook, a write to an ordinary file there is
+  // ordinary, and `cd $HERMES_HOME` is resolved rather than assumed.
+  const stated = runCli(
+    ["hook", "hermes", "--as", "agent:hermes"],
+    dir,
+    event(dir, { tool_name: "terminal", tool_input: { command: "echo X >> $HERMES_HOME/notes.txt", workdir: dir } }),
+    [],
+    { APPROVAL_HERMES_HOME: home },
+  );
+  assert.equal(verdictOf(stated).permission, "allow", stated.stdout);
 });

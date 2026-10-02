@@ -474,7 +474,12 @@ export function protectedPathClass(
     // (`HERMES_ACCEPT_HOOKS`) as well as a secret store. Reads stay
     // `account.credential`.
     if (segment === ".hermes") {
-      const next = segments[index + 1];
+      // Recheck 3 (lows): a profile home, `.hermes/profiles/<p>/`, is a home of
+      // its own with the same organs, so its paths are judged one level down.
+      const next =
+        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
+          ? segments[index + 3]
+          : segments[index + 1];
       if (
         next === undefined ||
         next === "config.yaml" ||
@@ -657,7 +662,10 @@ export function isCredentialPath(candidate: string): boolean {
     // not, would be a Never-list item the classifier does not enforce — which is
     // exactly the hole APRV-194 was filed for, one harness along.
     if (segment === ".hermes") {
-      const next = segments[index + 1];
+      const next =
+        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
+          ? segments[index + 3]
+          : segments[index + 1];
       if (next === ".env" || next?.startsWith(".env.") === true) return true;
       if (next === "auth.json") return true;
       continue;
@@ -4171,6 +4179,8 @@ export interface CommandSegmentShape {
   bin: string | null;
   args: string[];
   writes: string[];
+  /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
+  reads: string[];
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -4188,6 +4198,9 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         .filter((redirect) => redirect.op !== "<")
         .map((redirect) => redirect.target.text)
         .filter((target) => !isDiscardTarget(target)),
+      reads: segment.redirects
+        .filter((redirect) => redirect.op === "<")
+        .map((redirect) => redirect.target.text),
     };
   });
 }
