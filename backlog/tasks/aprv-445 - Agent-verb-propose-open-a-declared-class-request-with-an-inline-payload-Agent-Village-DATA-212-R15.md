@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-02 22:09'
+updated_date: '2026-10-02 22:41'
 labels: []
 dependencies: []
 references:
@@ -65,6 +65,15 @@ S1 task-is-proposal (plain request; task file in the propose: namespace). S2 pro
 L1 --withdraw-on-timeout with --timeout 0 refused. L2 stale socket unlinked only on ECONNREFUSED/ENOENT. L3 other-writable socket dir refused, 0666 only in an owner-only dir. L4 agentRequest.humanOnly, explain says refused: human-only. L5 a racing identical registration answers idempotently. L6 key ≤1024 B, summary ≤4096 B, lone surrogates and non-finite numbers exit 2. L7 state executed. L8 README-extended/doctor wording, and init re-run says it appended. L9 task-not-proposal. L11 documented.
 Conformance refusal-unions 24.0.0.
 Validation: npm test exit 0, 5418 tests, 5417 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0.
+
+Scoped recheck (2026-10-03).
+B: requestStanding voids a GRANT only where the spend enforces policy-drift (declared execution harness, or a propose: task). A token grant spent by approval run stays granted, so wait && run keeps working. Pending requests are void for every task. Frozen exit-table text now reads 'void: a re-attest voided a pending request or a harness grant; ask again'.
+SF1: withdraw({onlyIfVoid}) re-checks void inside its attempt. request({agentProposal}) refuses already-decided over a usable grant or a human refusal. propose restarts from a fresh read, up to 4 attempts, when either append refuses. Tested with an 8-way race (1 withdrawal, 1 re-ask) and the clobber sequence.
+SF2: the Hermes terminal resolver tracks cd, expands HERMES_HOME (APPROVAL_HERMES_HOME, else HERMES_HOME, from the hook env; unexpanded is conservative), counts heredoc targets, maps globs and unresolvable targets under .hermes/.approval to policy.core, realpaths deepest ancestors, and makes directory reads under .hermes/.approval account.credential (read tools too). Residuals are documented in docs/hermes-hook.md.
+SF3: exit 7 named in instructions, root help and the backlog-md example.
+L-a: wait answers executed for a policy-path start; propose is never idempotent after it appended a withdrawal. L-b: key id must be printable, with no whitespace or control characters. L-c: register refuses the propose: namespace for every caller except propose, the muse route included. L-d: cli.js strips --no-color before matching, and its exit guard turns any non-0/2 Hermes exit into 2 plus the directive. L-e: only redirect targets and write positions resolve. L-f: kept and documented (synchronous wait vs SIGTERM).
+HOSTED FOLLOW-UP (not this lane): approval-md-hosted hermes-image write-hooks.py GATED_TOOLS lacks cronjob_manage, process(_manage), browser_*, skill_manage, send_message and delegate_task, so those calls never reach the hook and the new classifier rows are inert there until the matchers are added.
+Validation: npm test exit 0, 5427 tests, 5426 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
