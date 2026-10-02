@@ -3483,6 +3483,10 @@ export function findHarnessCarry(
     if (record.event !== "approval.requested") continue;
     if (record.action_key === undefined) continue;
     if (keys.includes(record.action_key)) continue;
+    // APRV-445. A proposal's harness grant belongs to `approval start` and to
+    // nothing else: a hook call that happened to present the same bytes in the
+    // same class must not carry or adopt it.
+    if (isProposalTask(record.task)) continue;
     const payload = payloadOf(record);
     if (payload["execution"] !== "harness") continue;
     if (payload["payload_hash"] !== payloadHash) continue;
@@ -4608,6 +4612,18 @@ export const PROPOSE_ORIGIN_APP = "approval-propose";
 
 /** The task-id prefix `propose` derives under. */
 export const PROPOSE_TASK_PREFIX = "propose:";
+
+/**
+ * Was this task registered by `propose` (APRV-445)?
+ *
+ * A proposal's request carries `execution: "harness"` like a hook's, so the two
+ * hook-side readers of that marker (the carry and the abandoned-question sweep)
+ * ask this first: a proposal waits days for a human, is spent only by `start`,
+ * and is withdrawn only by its requester's own call.
+ */
+export function isProposalTask(task: unknown): boolean {
+  return typeof task === "string" && task.startsWith(PROPOSE_TASK_PREFIX);
+}
 
 /** A concrete class, as `schema/envelope.schema.json` spells one: no wildcard. */
 const CONCRETE_CLASS = /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/u;

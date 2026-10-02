@@ -96,6 +96,11 @@ const POLICY = [
   "    autonomy: human-only",
   "  network.call:",
   "    autonomy: manual",
+  "  intent.publish.*:",
+  "    autonomy: manual",
+  "    agent_may_request: true",
+  "  intent.publish.inferred.index:",
+  "    autonomy: manual",
   "```",
   "",
 ].join("\n");
@@ -454,4 +459,41 @@ test("a hook module that fails to load still blocks, from main itself", () => {
   );
   assert.notEqual(other.code, 0);
   assert.equal(other.stdout, "");
+});
+
+// ---------------------------------------------------------------------------
+// A proposal is not the hook's to sweep or carry (APRV-445)
+// ---------------------------------------------------------------------------
+
+test("the hook's abandoned-question sweep takes back its own stale question and never a proposal", async () => {
+  const dir = ready();
+  // Under `approval serve` the hook and `propose` are ONE actor.
+  const key = "intent.publish.inferred.index:sweep";
+  const proposed = runCli(
+    ["propose", "--class", "intent.publish.inferred.index", "--key", key, "--summary", "s",
+      "--payload-json", '{"text":"hello"}', "--as", "agent:hermes", "--json"],
+    dir,
+  );
+  assert.equal(proposed.code, 0, proposed.stderr);
+
+  // A hook question that nobody answers, abandoned almost at once.
+  const flags = ["--harness-cap", "300s", "--timeout", "1ms", "--retry-grace", "1ms"];
+  const stale = hook(
+    dir,
+    event(dir, { tool_name: "terminal", tool_input: { command: "npm install left-pad", workdir: dir } }),
+    flags,
+  );
+  assert.equal(verdictOf(stale).permission, "deny");
+  await new Promise((settle) => setTimeout(settle, 20));
+
+  // The next gated call sweeps.
+  const next = hook(dir, event(dir, { tool_name: "delegate_task", tool_input: { goal: "g" } }), flags);
+  assert.equal(verdictOf(next).permission, "allow", next.stderr);
+
+  const withdrawn = logRecords(dir)
+    .filter((record) => record["event"] === "approval.withdrawn")
+    .map((record) => String(record["action_key"]));
+  assert.equal(withdrawn.length, 1, `expected exactly the hook's own question withdrawn: ${withdrawn.join(", ")}`);
+  assert.ok(withdrawn[0]?.startsWith("hook:") === true, withdrawn[0] ?? "");
+  assert.equal(withdrawn.includes(key), false, "the sweep withdrew a proposal");
 });

@@ -102,6 +102,7 @@ import {
   consumeHarnessGrant,
   findHarnessCarry,
   finishHarnessExecution,
+  isProposalTask,
   register,
   request,
   startHarnessExecution,
@@ -832,6 +833,68 @@ export const HERMES_POST_TOOL_EVENT = "post_tool_call";
 const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
 
 /**
+ * The classes Hermes's own side-effecting tools are judged under (APRV-445,
+ * from the Agent Village DATA-234 survey of Hermes v2026.9.24).
+ *
+ * Before this table every one of these reached the not-a-gated-tool allow,
+ * because the adapter knew `terminal`, `write_file`, `patch` and the two read
+ * tools and nothing else, so a policy line for `cron.manage` or `message.send`
+ * was a line no Hermes call could ever reach. They are code, not policy: the
+ * classifier decides what a call IS and the policy decides what happens to it,
+ * so an operator prices these classes with ordinary `classes:` lines.
+ *
+ * - `cronjob_manage` (legacy alias `cronjob`): every action that changes the
+ *   schedule or runs a job is `cron.manage`; `list` is a read. A scheduled job
+ *   runs later with no `pre_tool_call` at all, so the schedule is the one place
+ *   a human can see it.
+ * - `process_manage` (legacy alias `process`): `write`, `submit`, `kill`,
+ *   `close` and `handoff` act on a running process and are `process.write`;
+ *   `list`, `poll`, `log` and `wait` are reads.
+ * - `browser_exec`, `browser_cdp` and every other `browser_*`: `browser.exec`.
+ * - `skill_manage`: `skill.manage`. `delegate_task`: `agent.delegate`.
+ *   `send_message`: `message.send` (not agent-callable at v2026.9.24; the rule
+ *   stands so the day it is, it is already gated).
+ *
+ * An action this table does not recognise on a tool it does know is judged
+ * under the tool's side-effecting class rather than allowed: a new verb on a
+ * tool that schedules or drives processes is a new way to do that, and the
+ * strict reading is the safe one.
+ */
+const HERMES_CRON_READ_ACTIONS: ReadonlySet<string> = new Set(["list"]);
+const HERMES_PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log", "wait"]);
+
+function hermesToolRule(toolName: string, toolInput: Record<string, unknown>): ToolRuleVerdict | null {
+  const action = readString(toolInput, "action");
+  const headline = (cls: string): string =>
+    `${toolName}${action === null ? "" : ` ${action}`} (${cls})`;
+  if (toolName === "cronjob_manage" || toolName === "cronjob") {
+    if (action !== null && HERMES_CRON_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads the schedule and changes nothing` };
+    }
+    return { kind: "gated", cls: "cron.manage", headline: headline("cron.manage") };
+  }
+  if (toolName === "process_manage" || toolName === "process") {
+    if (action !== null && HERMES_PROCESS_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads a process and changes nothing` };
+    }
+    return { kind: "gated", cls: "process.write", headline: headline("process.write") };
+  }
+  if (toolName.startsWith("browser_")) {
+    return { kind: "gated", cls: "browser.exec", headline: headline("browser.exec") };
+  }
+  if (toolName === "skill_manage") {
+    return { kind: "gated", cls: "skill.manage", headline: headline("skill.manage") };
+  }
+  if (toolName === "delegate_task") {
+    return { kind: "gated", cls: "agent.delegate", headline: headline("agent.delegate") };
+  }
+  if (toolName === "send_message") {
+    return { kind: "gated", cls: "message.send", headline: headline("message.send") };
+  }
+  return null;
+}
+
+/**
  * Hermes Agent by Nous Research (APRV-398).
  *
  * The harness Agent Village v2 runs every resident agent on, one per tenant in
@@ -914,68 +977,6 @@ const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
  * answer available to a hook that cannot see inside it, and it is the
  * fail-closed one.
  */
-/**
- * The classes Hermes's own side-effecting tools are judged under (APRV-445,
- * from the Agent Village DATA-234 survey of Hermes v2026.9.24).
- *
- * Before this table every one of these reached the not-a-gated-tool allow,
- * because the adapter knew `terminal`, `write_file`, `patch` and the two read
- * tools and nothing else, so a policy line for `cron.manage` or `message.send`
- * was a line no Hermes call could ever reach. They are code, not policy: the
- * classifier decides what a call IS and the policy decides what happens to it,
- * so an operator prices these classes with ordinary `classes:` lines.
- *
- * - `cronjob_manage` (legacy alias `cronjob`): every action that changes the
- *   schedule or runs a job is `cron.manage`; `list` is a read. A scheduled job
- *   runs later with no `pre_tool_call` at all, so the schedule is the one place
- *   a human can see it.
- * - `process_manage` (legacy alias `process`): `write`, `submit`, `kill`,
- *   `close` and `handoff` act on a running process and are `process.write`;
- *   `list`, `poll`, `log` and `wait` are reads.
- * - `browser_exec`, `browser_cdp` and every other `browser_*`: `browser.exec`.
- * - `skill_manage`: `skill.manage`. `delegate_task`: `agent.delegate`.
- *   `send_message`: `message.send` (not agent-callable at v2026.9.24; the rule
- *   stands so the day it is, it is already gated).
- *
- * An action this table does not recognise on a tool it does know is judged
- * under the tool's side-effecting class rather than allowed: a new verb on a
- * tool that schedules or drives processes is a new way to do that, and the
- * strict reading is the safe one.
- */
-const HERMES_CRON_READ_ACTIONS: ReadonlySet<string> = new Set(["list"]);
-const HERMES_PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log", "wait"]);
-
-function hermesToolRule(toolName: string, toolInput: Record<string, unknown>): ToolRuleVerdict | null {
-  const action = readString(toolInput, "action");
-  const headline = (cls: string): string =>
-    `${toolName}${action === null ? "" : ` ${action}`} (${cls})`;
-  if (toolName === "cronjob_manage" || toolName === "cronjob") {
-    if (action !== null && HERMES_CRON_READ_ACTIONS.has(action)) {
-      return { kind: "read", reason: `${toolName} ${action} reads the schedule and changes nothing` };
-    }
-    return { kind: "gated", cls: "cron.manage", headline: headline("cron.manage") };
-  }
-  if (toolName === "process_manage" || toolName === "process") {
-    if (action !== null && HERMES_PROCESS_READ_ACTIONS.has(action)) {
-      return { kind: "read", reason: `${toolName} ${action} reads a process and changes nothing` };
-    }
-    return { kind: "gated", cls: "process.write", headline: headline("process.write") };
-  }
-  if (toolName.startsWith("browser_")) {
-    return { kind: "gated", cls: "browser.exec", headline: headline("browser.exec") };
-  }
-  if (toolName === "skill_manage") {
-    return { kind: "gated", cls: "skill.manage", headline: headline("skill.manage") };
-  }
-  if (toolName === "delegate_task") {
-    return { kind: "gated", cls: "agent.delegate", headline: headline("agent.delegate") };
-  }
-  if (toolName === "send_message") {
-    return { kind: "gated", cls: "message.send", headline: headline("message.send") };
-  }
-  return null;
-}
-
 const HERMES_ADAPTER: HarnessAdapter = {
   kind: "hermes",
   originApp: "hermes-hook",
@@ -3278,6 +3279,11 @@ function abandonedRequests(
   for (const record of records) {
     if (record.event !== "approval.requested") continue;
     if (record.actor !== run.actor) continue;
+    // APRV-445. Under `approval serve` the hook and `propose` act as ONE actor,
+    // and a proposal's request is harness-executed too, so without this every
+    // proposal pending past the hook's wait plus grace (minutes) would be swept
+    // as abandoned by the next gated tool call, days before its TTL.
+    if (isProposalTask(record.task)) continue;
     const key = record.action_key;
     if (typeof key !== "string" || key.length === 0) continue;
     const payload = payloadOf(record);

@@ -838,30 +838,21 @@ ${why("request")}`;
 export const PROPOSE_HELP = `approval propose — register and request one action, payload inline
 
 Usage:
-  approval propose --class <class> --key <key> --summary <text>
-                   --payload-json <json> [--as human:<id>|agent:<id>]
-                   [--policy <path>] [--dir <path>] [--log <path>] [--json]
+  approval propose --class <c> --key <k> --summary <text> --payload-json <json>
+                   [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
-  --class <c>          the action class; must be an EXACT key of the policy's
-                       classes, opened to agents with agent_may_request: true
-                       on it or on a declared <prefix>.* family (required)
+  --class <c>          an EXACT key of the policy's classes, opened to agents by
+                       agent_may_request: true on it or a <prefix>.* family
   --key <k>            the idempotency key, recorded verbatim as action_key
-  --summary <text>     the one line the approver reads (stored in the log in
-                       cleartext; keep private text in the payload)
-  --payload-json <j>   the payload as a JSON object, at most 262144 bytes
+  --summary <text>     the line the approver reads (in the log, in cleartext)
+  --payload-json <j>   the payload, a JSON object of at most 262144 bytes
   --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
-  --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
-  --json               machine-readable output
-  -h, --help           this text
 
-Registers task propose:<hash of actor, class, key> and requests the key in one
-call. decision "requested": a human is asked; poll with
-\`approval wait <task> --timeout 0\`. decision "autonomous" or "supervised":
-nothing is asked; act, then record it with \`approval start\`. A retry with the
-same class, key and payload appends nothing and answers idempotent:true.
+decision "requested": poll \`approval wait <task> --timeout 0\`. "autonomous" or
+"supervised": act, then \`approval start\`. The same class, key and payload
+again appends nothing and answers idempotent:true.
 
-JSON shape: docs/cli-reference.md#propose
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("propose")}`;
@@ -869,24 +860,18 @@ ${why("propose")}`;
 export const START_HELP = `approval start — record that you are carrying out a proposed action
 
 Usage:
-  approval start <task> --action <key> --payload-json <json>
-                 [--as human:<id>|agent:<id>] [--policy <path>] [--dir <path>]
-                 [--log <path>] [--json]
+  approval start <task> --action <key> --payload-json <json> [--as <id>]
+                 [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
   --action <key>       the action's idempotency key (required)
-  --payload-json <j>   the bytes you are about to act on; must hash to the
-                       registered payload_hash (required)
+  --payload-json <j>   the bytes you act on; must hash to the registered binding
   --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
-  --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
-  --json               machine-readable output
-  -h, --help           this text
 
 Appends one execution.started, once per key. REQUESTER-ONLY. A key with a
-request spends its harness grant (refused unless granted and unexpired); a key
-with none is recorded as policy-authorized (refused for a manual class).
+request spends its harness grant; a key with none is recorded as authorized by
+the policy, and a manual class is refused.
 
-JSON shape: docs/cli-reference.md#start
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("start")}`;
@@ -1141,8 +1126,7 @@ Usage:
                 [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
-  --timeout <d>    how long to wait, in the duration grammar (e.g. 6h), or 0 to
-                   read the current state once without waiting. Required
+  --timeout <d>    how long to wait (e.g. 6h; 0 reads the state once). Required
   --interval <d>   poll interval (default 500ms)
   --withdraw-on-timeout  on timeout, withdraw the requests THIS actor opened
   --as <id>        the withdrawing actor; read only with the flag above
@@ -2737,17 +2721,13 @@ export const SERVE_HELP = `approval serve — the agent-facing surface over HTTP
 
 Usage:
   approval serve [--as agent:<id>] [--dir <p>] [--log <p>] [--policy <p>]
-                 [--port <n> | --listen <host:port> --allow-non-loopback
-                  | --listen unix:<path>]
+                 [--port <n> | --listen <host:port>|unix:<path>]
 
 Flags:
   --as agent:<id>  the identity EVERY call is recorded under, or APPROVAL_AGENT
   --dir/--log/--policy <p>   the store root, and the log and policy pinned
-  --port <n>=4682  loopback. --listen <host:port> widens, and a non-loopback
-                   host ALSO needs --allow-non-loopback
-  --listen unix:<path>  a unix socket instead (or APPROVAL_SERVE_LISTEN): mode
-                   666 in a directory the serving uid must own, which is the
-                   access control; a stale socket is replaced, a live one refused
+  --port <n>=4682  loopback. --listen <host:port> widens (+--allow-non-loopback
+                   off loopback); unix:<path> or APPROVAL_SERVE_LISTEN: a socket
   --hook-timeout/--hook-harness-cap <d>  pinned on every hook call, as the stdin form's --timeout and --harness-cap (the CALLER's own kill timeout)
 
 For a harness in a sandbox with no local log and no policy. THE VERBS ARE mcp

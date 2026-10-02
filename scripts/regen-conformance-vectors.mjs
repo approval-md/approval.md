@@ -2302,7 +2302,13 @@ const SUITES = [
     // harness's own timeout rather than anything about this command or this
     // approver. A caller that collapsed it into either neighbour would retry a
     // command that cannot be answered under this configuration, forever.
-    vectors_version: "22.0.0",
+    // 23.0.0 (APRV-445): `gate_refusal_codes` gains `class-not-agent-requestable`
+    // and `payload-too-large`, the two refusals `approval propose` adds. Major
+    // for the reason 22.0.0 was: a longer union is a changed expectation. The
+    // first is the operator's bound on a class the requester names itself (an
+    // exact `classes` key opened by `agent_may_request`), and a caller that read
+    // it as `class-human-only` would stop for good where a policy edit fixes it.
+    vectors_version: "23.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
