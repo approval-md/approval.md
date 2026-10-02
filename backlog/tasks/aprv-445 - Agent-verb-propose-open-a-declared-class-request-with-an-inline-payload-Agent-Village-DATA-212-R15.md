@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-02 22:41'
+updated_date: '2026-10-02 23:10'
 labels: []
 dependencies: []
 references:
@@ -74,6 +74,8 @@ SF3: exit 7 named in instructions, root help and the backlog-md example.
 L-a: wait answers executed for a policy-path start; propose is never idempotent after it appended a withdrawal. L-b: key id must be printable, with no whitespace or control characters. L-c: register refuses the propose: namespace for every caller except propose, the muse route included. L-d: cli.js strips --no-color before matching, and its exit guard turns any non-0/2 Hermes exit into 2 plus the directive. L-e: only redirect targets and write positions resolve. L-f: kept and documented (synchronous wait vs SIGTERM).
 HOSTED FOLLOW-UP (not this lane): approval-md-hosted hermes-image write-hooks.py GATED_TOOLS lacks cronjob_manage, process(_manage), browser_*, skill_manage, send_message and delegate_task, so those calls never reach the hook and the new classifier rows are inert there until the matchers are added.
 Validation: npm test exit 0, 5427 tests, 5426 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0.
+
+Recheck 3 (2026-10-03). SF1: the organ rules are scoped to the gate's own directories (gateRootKind: home root, profile home, approval home, a home's approval/, scripts/). A recursive read or read tool is credential only for those roots or for a directory under a home that directly holds a credential file (holdsCredentials). A glob or unknown-variable write is policy.core only into those directories, or when a pattern could name the home or an organ. workspace/, skills/ and similar are ordinary, which fits the hosted HERMES_HOME=/data/.hermes. SF2: after an unresolvable cd (cd $X, cd "$D", cd -, an unknown $HERMES_HOME), later relative writes are policy.core and later relative reads account.credential. SF3: globs over .hermes/.approval/organ names, globbed reads (expanded when the directory exists), and < reads. Lows: copies into a directory (-t, --target-directory=, trailing /, existing dir) write <dir>/<name>; tar -x and unzip write into -C/-d or the cwd; profile homes .hermes/profiles/<p>/ carry the home's organs; registry code 7 wording; new refusal 'contended' (exit 1) when propose exhausts its restarts; APPROVAL_HERMES_HOME documented as trusted as given. Conformance refusal-unions 25.0.0. Validation: npm test exit 0, 5429 tests, 5428 pass, 0 fail, 1 skipped; tsc exit 0; lint exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
