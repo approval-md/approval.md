@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-02 20:26'
+updated_date: '2026-10-02 20:41'
 labels: []
 dependencies: []
 references:
@@ -24,16 +24,16 @@ Agent Village (Edge City, DATA-212 R15) needs a resident's agent, holding only t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 propose --class --key --summary --payload-json [--json] is a verb in the registry, the CLI dispatch, and the serve agent verb list; --payload-json is a string flag carrying a JSON object, refused above a documented size with a named code
-- [ ] #2 propose registers and requests in one call; the task id is derived deterministically from the store, class and key; an identical retry returns the live request with idempotent:true and exit 0; the same key with a different payload while live refuses duplicate-request
-- [ ] #3 propose refuses class-not-agent-requestable unless the class is an exact key of policy.classes and that key or a declared prefix family of it sets agent_may_request: true; the flag is in the schema, PolicyClassRule, explain and diff
-- [ ] #4 an autonomous class registers the task and returns decision autonomous with the task id, writing no approval record
-- [ ] #5 payload store files are written 0600 inside a 0700 directory for every writer; approval init gitignores .approval/payloads/
-- [ ] #6 wait --timeout 0 returns the current state without sleeping
-- [ ] #7 approval serve accepts --listen unix:<path> / APPROVAL_SERVE_LISTEN=unix:<path>: socket 0666, stale socket replaced, refused when the directory is not owned by the serving uid
-- [ ] #8 the Hermes adapter classifies cronjob_manage, process_manage, browser_*, skill_manage, delegate_task, send_message and the HERMES_HOME script/env/approval paths per the DATA-234 table
-- [ ] #9 the Hermes hook emits the block directive and exits 2 on every error path
-- [ ] #10 SPEC.md, docs/cli-reference.md and CHANGELOG.md describe the verb, the flag and the listen target; npm test green
+- [x] #1 propose --class --key --summary --payload-json [--json] is a verb in the registry, the CLI dispatch, and the serve agent verb list; --payload-json is a string flag carrying a JSON object, refused above a documented size with a named code
+- [x] #2 propose registers and requests in one call; the task id is derived deterministically from the store, class and key; an identical retry returns the live request with idempotent:true and exit 0; the same key with a different payload while live refuses duplicate-request
+- [x] #3 propose refuses class-not-agent-requestable unless the class is an exact key of policy.classes and that key or a declared prefix family of it sets agent_may_request: true; the flag is in the schema, PolicyClassRule, explain and diff
+- [x] #4 an autonomous class registers the task and returns decision autonomous with the task id, writing no approval record
+- [x] #5 payload store files are written 0600 inside a 0700 directory for every writer; approval init gitignores .approval/payloads/
+- [x] #6 wait --timeout 0 returns the current state without sleeping
+- [x] #7 approval serve accepts --listen unix:<path> / APPROVAL_SERVE_LISTEN=unix:<path>: socket 0666, stale socket replaced, refused when the directory is not owned by the serving uid
+- [x] #8 the Hermes adapter classifies cronjob_manage, process_manage, browser_*, skill_manage, delegate_task, send_message and the HERMES_HOME script/env/approval paths per the DATA-234 table
+- [x] #9 the Hermes hook emits the block directive and exits 2 on every error path
+- [x] #10 SPEC.md, docs/cli-reference.md and CHANGELOG.md describe the verb, the flag and the listen target; npm test green
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -55,4 +55,13 @@ Agent Village (Edge City, DATA-212 R15) needs a resident's agent, holding only t
 <!-- SECTION:NOTES:BEGIN -->
 Progress 2026-10-02: core propose()/startProposed() in src/core/gate.ts; agentRequestability() in policy-match.ts; schema + PolicyClassRule + explain (agentRequest) + diff (agentRequest change) done; CLI propose/start, registry, dispatch, serve AGENT_VERBS/AGENT_FLAGS; wait --timeout 0; payload store 0600/0700 for every writer (writeAtomic); init gitignores .approval/payloads/ (reverses the tracked-by-default note, flagged for Carter); serve --listen unix:<path> + APPROVAL_SERVE_LISTEN; Hermes toolRules table + .hermes/scripts|approval|allowlist.lock path rows; hermesFailClosed wrapper + main.ts catch for a hook.js load failure.
 Found while testing: (1) the hook's abandoned-question sweep (APRV-287) and findHarnessCarry select by actor + execution:harness, so under serve (one actor) every proposal pending past wait+grace would be withdrawn by the next gated tool call; proposals (task prefix propose:) are now excluded from both, with a test. (2) The hook wait loop is synchronous (Atomics.wait), so its SIGTERM/SIGINT handler cannot run mid-wait: the process keeps waiting and answers at timeout. Pre-existing; for Hermes the answer is still the block directive at exit 2.
+
+Validation: npm test (tsc + run-tests.mjs) exit 0, 5398 tests, 5397 pass, 0 fail, 1 skipped (baseline at 6b74ca72: 5358 / 5357 / 0 / 1, exit 0). tsc --noEmit exit 0; npm run lint exit 0. New suites: tests/cli-propose.test.ts (15), tests/serve-propose.test.ts (5), tests/cli-hook-hermes-rules.test.ts (13); additions in policy-load, policy-match, policy-explain, payload-store, serve, cli-instructions, cli-policy, cli-init, gate. Conformance refusal-unions regenerated at 23.0.0 (gate union gained two codes). Mutation check: with the propose-task exclusion removed from the hook's abandoned sweep, the sweep test fails (the proposal is withdrawn).
+Decisions for the human: (a) init now gitignores .approval/payloads/, reversing the documented tracked-by-default stance (brief ruling A5); (b) SPEC.md amendments are marked (Amended APRV-445, pending sign-off.); (c) a new agent verb start was added to close the A4 gap (no agent-credential path recorded execution.started for a non-hook action); (d) .hermes/.env stays account.credential (both human-only), not policy.core as the brief's table said.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added the agent verbs propose (register + request in one call, payload inline as --payload-json, class bounded by an exact policy key opened with the new per-class agent_may_request) and start (requester-only execution.started through the existing harness-grant and policy-start spenders), wait --timeout 0, owner-only payload store files, init gitignoring payloads, serve --listen unix:<path>, Hermes classifier rows for its own side-effecting tools and .hermes paths, and a Hermes fail-closed wrapper. Proposals are excluded from the hook's abandoned sweep and carry. Verified by npm test exit 0 (5398 tests), typecheck and lint.
+<!-- SECTION:FINAL_SUMMARY:END -->
