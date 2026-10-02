@@ -61,7 +61,8 @@
           "payload-too-large",
           "task-is-proposal",
           "task-not-proposal",
-          "key-class-mismatch"
+          "key-class-mismatch",
+          "contended"
         ]
       }
     },
