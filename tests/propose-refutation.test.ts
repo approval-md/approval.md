@@ -390,6 +390,8 @@ test("L5: two identical proposals racing to register are one proposal, answered 
                 },
               },
               AGENT,
+              // The twin is another `propose` call, which owns the namespace.
+              { proposal: true },
             );
             assert.equal(twin.ok, true);
           }

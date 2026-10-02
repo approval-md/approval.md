@@ -1576,7 +1576,7 @@ const VERBS: VerbSpec[] = [
       {
         ok: BOOLEAN,
         task: STRING,
-        status: { enum: ["granted", "rejected", "withdrawn", "void", "expired", "timeout"] },
+        status: { enum: ["granted", "executed", "rejected", "withdrawn", "void", "expired", "timeout"] },
         actions: arrayOf(
           object(
             {
@@ -1597,7 +1597,7 @@ const VERBS: VerbSpec[] = [
     ),
     error: ERROR_SCHEMA,
     exit_codes: [
-      { code: 0, meaning: "granted (a task with no requests is granted vacuously)" },
+      { code: 0, meaning: "granted, or executed on the policy's own authority after its request ended (a task with no requests, an unknown task id included, is granted vacuously)" },
       {
         code: 1,
         meaning:

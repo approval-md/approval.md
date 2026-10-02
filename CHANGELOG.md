@@ -15,6 +15,17 @@ before a tag.
 
 ## Unreleased
 
+- **Proposals after the recheck (APRV-445).** `wait` voids a grant only where
+  its spend enforces `policy-drift` (harness grants, every proposal): a token
+  grant `approval run` still spends after a re-attest reads `granted`. `propose`
+  re-checks its decision inside the append, so concurrent identical proposals on
+  a void key withdraw it once and ask once, and a stale caller cannot ask again
+  over a fresh grant. The Hermes `terminal` path resolver follows `cd`,
+  `$HERMES_HOME`, heredocs, globs and symlinks, resolves only write positions,
+  and read tools treat a directory under `.hermes`/`.approval` as credentials.
+  `wait` reports `executed` for a policy-path start after a withdrawal; key ids
+  must be printable; the muse registration route refuses `propose:` ids; the
+  bin's Hermes guard covers `--no-color` and any silent non-zero exit.
 - **Proposals after review (APRV-445).** `approval wait` reports what a request
   still authorizes: a grant whose window lapsed is `expired` (exit 3), and a
   grant or pending request pinned to a re-attested policy is `void`, a new exit

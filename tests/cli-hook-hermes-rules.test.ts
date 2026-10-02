@@ -25,6 +25,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,9 +52,21 @@ interface Run {
   stderr: string;
 }
 
-function runCli(args: string[], cwd: string, input = "", nodeArgs: string[] = []): Run {
-  const childEnv = { ...process.env };
+function runCli(
+  args: string[],
+  cwd: string,
+  input = "",
+  nodeArgs: string[] = [],
+  envOverrides: Record<string, string | undefined> = {},
+): Run {
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
   delete childEnv["APPROVAL_HUMAN"];
+  delete childEnv["HERMES_HOME"];
+  delete childEnv["APPROVAL_HERMES_HOME"];
+  for (const [name, value] of Object.entries(envOverrides)) {
+    if (value === undefined) delete childEnv[name];
+    else childEnv[name] = value;
+  }
   const result = spawnSync(process.execPath, [...nodeArgs, CLI_ENTRY, ...args], {
     cwd,
     encoding: "utf8",
@@ -562,4 +575,103 @@ test("every write shape onto .hermes/.env, auth.json or config.yaml is policy.co
   assert.equal(notes.permission, "allow");
   assert.equal(protectedPathClass("/data/.hermes/.env", []), "policy.core");
   assert.equal(protectedPathClass("/data/.hermes/auth.json", []), "policy.core");
+});
+
+// ---------------------------------------------------------------------------
+// SF2 and L-e (APRV-445 recheck): the paths a shell command really touches
+// ---------------------------------------------------------------------------
+
+/** Ask the hook about `input` and return the classes its answer names. */
+function classesOf(run: Run): string[] {
+  const text = `${run.stdout} ${run.stderr}`;
+  return [
+    ...new Set(text.match(/(account\.credential|policy\.core|cron\.manage|files\.write\.workspace|read\.[a-z_.]+)/gu) ?? []),
+  ];
+}
+
+function claudeEvent(dir: string, tool: string, input: Record<string, unknown>): string {
+  return JSON.stringify({
+    hook_event_name: "PreToolUse",
+    session_id: "cc-1",
+    tool_use_id: `cc-${String(Math.random()).slice(2)}`,
+    cwd: dir,
+    tool_name: tool,
+    tool_input: input,
+    transcript_path: "/dev/null",
+    permission_mode: "default",
+  });
+}
+
+test("SF2: variables, cd, heredocs, globs and symlinks cannot launder a write or a read of the home's secrets", () => {
+  const dir = ready();
+  const home = join(dir, ".hermes");
+  mkdirSync(join(home, "scripts"), { recursive: true });
+  writeFileSync(join(home, ".env"), "TOKEN=x\n", "utf8");
+  symlinkSync(home, join(dir, "h"));
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  writeFileSync(join(dir, ".approval", "env"), "SECRET=1\n", "utf8");
+
+  const rows: Array<{ tool: string; input: Record<string, unknown>; want: string; env?: Record<string, string> }> = [
+    // (a) $HERMES_HOME: expanded when the hook knows it, conservative when not.
+    { tool: "terminal", input: { command: "echo X >> $HERMES_HOME/.env", workdir: dir }, want: "policy.core" },
+    { tool: "terminal", input: { command: 'echo X >> "${HERMES_HOME}/.env"', workdir: dir }, want: "policy.core" },
+    { tool: "terminal", input: { command: "echo X >> $HERMES_HOME/.env", workdir: dir }, want: "policy.core", env: { HERMES_HOME: home } },
+    { tool: "terminal", input: { command: "cat $HERMES_HOME/.env", workdir: dir }, want: "account.credential" },
+    { tool: "terminal", input: { command: "cat ${HERMES_HOME}/.env", workdir: dir }, want: "account.credential", env: { APPROVAL_HERMES_HOME: home } },
+    { tool: "terminal", input: { command: "cp /tmp/x $HERMES_HOME/.env", workdir: dir }, want: "policy.core" },
+    // (b) cd tracking.
+    { tool: "terminal", input: { command: `cd ${home} && echo X >> .env`, workdir: dir }, want: "policy.core" },
+    { tool: "terminal", input: { command: "cd .hermes; echo X >> .env", workdir: dir }, want: "policy.core" },
+    // (c) heredoc targets.
+    { tool: "terminal", input: { command: "cat > .env <<EOF\nX\nEOF", workdir: home }, want: "policy.core" },
+    { tool: "terminal", input: { command: "cat >> .env <<'EOF'\nX\nEOF", workdir: home }, want: "policy.core" },
+    // (d) a glob in a write from the home.
+    { tool: "terminal", input: { command: "echo X > .e*v", workdir: home }, want: "policy.core" },
+    // (e) symlinked parents and working directories.
+    { tool: "terminal", input: { command: "echo X >> h/.env", workdir: dir }, want: "policy.core" },
+    { tool: "terminal", input: { command: "echo X >> .env", workdir: join(dir, "h") }, want: "policy.core" },
+    { tool: "terminal", input: { command: "cat .env", workdir: join(dir, "h") }, want: "account.credential" },
+    { tool: "read_file", input: { path: join(dir, "h", ".env") }, want: "account.credential" },
+    // (f) directory searches over the home or the approval home.
+    { tool: "search_files", input: { path: home, pattern: "TOKEN" }, want: "account.credential" },
+    { tool: "terminal", input: { command: "grep -r TOKEN .", workdir: home }, want: "account.credential" },
+    { tool: "terminal", input: { command: `grep -r TOKEN ${home}`, workdir: dir }, want: "account.credential" },
+    { tool: "terminal", input: { command: "rg SECRET .approval", workdir: dir }, want: "account.credential" },
+  ];
+  for (const row of rows) {
+    const run = runCli(
+      ["hook", "hermes", "--as", "agent:hermes"],
+      dir,
+      event(dir, { tool_name: row.tool, tool_input: row.input }),
+      [],
+      row.env ?? {},
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${row.tool} ${JSON.stringify(row.input)} ${JSON.stringify(row.env ?? {})}`);
+    assert.ok(classesOf(run).includes(row.want), `${row.tool} ${JSON.stringify(row.input)}: ${verdict.message}`);
+  }
+
+  // Claude Code's read tools take the same realpath and directory rules.
+  for (const [tool, input] of [
+    ["Grep", { pattern: "SECRET", path: join(dir, ".approval") }],
+    ["Read", { file_path: join(dir, "h", ".env") }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const run = runCli(["hook", "claude-code", "--as", "agent:cc"], dir, claudeEvent(dir, tool, input));
+    assert.match(run.stdout, /"permissionDecision":"deny"/u, `${tool} ${JSON.stringify(input)}`);
+    assert.ok(classesOf(run).includes("account.credential"), `${tool}: ${run.stdout}`);
+  }
+});
+
+test("L-e: only redirect targets and write positions resolve, so ordinary words and binaries in the home stay ordinary", () => {
+  const dir = ready();
+  const home = join(dir, ".hermes");
+  mkdirSync(join(home, "scripts"), { recursive: true });
+  mkdirSync(join(home, "approval"), { recursive: true });
+  for (const command of ["echo approval > out.txt", "./scripts/x.sh", "touch notes.txt", "echo scripts config.yaml .env > notes.md"]) {
+    const run = hook(dir, event(dir, { tool_name: "terminal", tool_input: { command, workdir: home } }));
+    const classes = classesOf(run);
+    for (const organ of ["policy.core", "cron.manage", "account.credential"]) {
+      assert.equal(classes.includes(organ), false, `${command} took ${organ}: ${run.stdout} ${run.stderr}`);
+    }
+  }
 });

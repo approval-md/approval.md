@@ -1298,6 +1298,8 @@ export function register(
  */
 export interface RegisterOptions extends GateOptions {
   harness?: HarnessProvenance;
+  /** Set by `propose` alone: the `propose:` task namespace is its (APRV-445). */
+  proposal?: true;
 }
 
 /**
@@ -1338,10 +1340,13 @@ function attemptRegister(
   // APRV-445 refutation (S1). The `propose:` namespace belongs to `propose`;
   // a task FILE claiming an id in it would borrow the exclusions proposals get
   // from the harness hook (its sweep and its carry).
-  if ("file" in source && isProposalTask(resolved.task)) {
+  // Recheck L-c: the in-memory sources too (the muse `POST /v1/registrations`
+  // route registers whatever task id its caller names); only `propose` itself
+  // passes `proposal: true`.
+  if (isProposalTask(resolved.task) && options.proposal !== true) {
     return refuse(
       "task-is-proposal",
-      `task id ${resolved.task} is in the namespace \`approval propose\` derives its ids in (${PROPOSE_TASK_PREFIX}); a task file may not claim it. Nothing was appended.`,
+      `task id ${resolved.task} is in the namespace \`approval propose\` derives its ids in (${PROPOSE_TASK_PREFIX}); only propose registers there. Nothing was appended.`,
     );
   }
 
@@ -2328,6 +2333,22 @@ function attemptRequest(
     );
   }
 
+  // APRV-445 recheck (SF1). A proposal is asked again only when its last
+  // answer can no longer be used, and that is judged HERE, against the records
+  // this attempt appends on, not against whatever its caller read earlier. A
+  // usable grant (unexpired, under the policy in force) or a human's refusal
+  // stands: a stale caller may not put a fresh question over it.
+  if (input.agentProposal === true) {
+    const standing = requestStanding(read.records, input.actionKey, ts, ttlOf(load), attested.sha256);
+    if (standing === "granted" || standing === "rejected" || standing === "revoked") {
+      return refuse(
+        "already-decided",
+        `action ${input.actionKey} already carries a ${standing} answer that still stands at seq ${String(derivation.decisionSeq)}; a proposal is asked again only when its answer can no longer be used. Nothing was appended.`,
+        { state: derivation.state },
+      );
+    }
+  }
+
   // APRV-173, SPEC.md §5.2's request-volume limits, enforced here and nowhere
   // else. Placed AFTER the legality checks above and BEFORE budgets, and both
   // halves of that placement are deliberate.
@@ -3190,6 +3211,15 @@ function attemptDecide(
 // ---------------------------------------------------------------------------
 
 export interface WithdrawOptions extends GateOptions {
+  /**
+   * Withdraw only a pending request that is VOID at the moment of the append
+   * (APRV-445 recheck, SF1): pinned to a policy hash that is no longer the
+   * attested one. Judged inside the retried read-check-append cycle, so a
+   * caller acting on a stale reading cannot retract a question a concurrent
+   * caller has just re-asked under the policy in force. A live, non-void
+   * request refuses `duplicate-request`.
+   */
+  onlyIfVoid?: true;
   /** Why the requester is retracting. Defaults to `cancelled`. */
   reason?: WithdrawReason;
   /** The requester's free-text elaboration, recorded in the payload. */
@@ -3317,6 +3347,18 @@ function attemptWithdraw(
       `action ${actionKey} was already ${derivation.state} at seq ${String(derivation.decisionSeq)}; a human's answer stands, and withdrawing a question that has been answered would erase the answer`,
       { state: derivation.state },
     );
+  }
+
+  if (options.onlyIfVoid === true) {
+    const attested = requireAttestation(read.records, readPolicyOnce(options));
+    const pinned = derivation.declared.policy_sha256;
+    if (!attested.ok || pinned === null || pinned === attested.sha256) {
+      return refuse(
+        "duplicate-request",
+        `action ${actionKey} has a live request at seq ${String(derivation.requestSeq)} routed under the policy in force, so it is not void and was not withdrawn`,
+        { state: derivation.state },
+      );
+    }
   }
 
   if (derivation.requestActor !== actor) {
@@ -4653,6 +4695,17 @@ export const PROPOSE_KEY_MAX_BYTES = 1024;
 /** The longest `--summary` `propose` accepts, in UTF-8 bytes (APRV-445, L6). */
 export const PROPOSE_SUMMARY_MAX_BYTES = 4096;
 
+/**
+ * The id after `<class>:` (APRV-445 recheck L-b): one or more printable
+ * characters, no whitespace, no control, format, private-use, unassigned or
+ * surrogate code points, so a key reads back the same in a log, a phone and a
+ * shell.
+ */
+const PROPOSE_KEY_ID = /^[^\s\p{C}]+$/u;
+
+/** How many times `propose` starts again on a log that moved under it (SF1). */
+const PROPOSE_MAX_ATTEMPTS = 4;
+
 /** `origin.app` on every envelope `propose` registers. */
 export const PROPOSE_ORIGIN_APP = "approval-propose";
 
@@ -4786,8 +4839,19 @@ export function propose(
   input: ProposeInput,
   actor: string,
   options: GateOptions = {},
-  retried = false,
+  attempt = 0,
+  appendedEarlier = false,
 ): ProposeResult {
+  // APRV-445 recheck (SF1). Every decision below is re-checked by the append
+  // it leads to (`withdraw` with `onlyIfVoid`, `request` with
+  // `agentProposal`), so a caller that read a stale log is refused there
+  // rather than writing over a concurrent caller. A refusal of that kind means
+  // the log moved under this call; the call starts again from a fresh read, a
+  // bounded number of times, and answers what it then finds.
+  const again = (refusal: GateRefusal): ProposeResult =>
+    attempt < PROPOSE_MAX_ATTEMPTS
+      ? propose(logPath, input, actor, options, attempt + 1, appendedEarlier || withdrewNow || registeredNow)
+      : refusal;
   if (!isPrincipalActor(actor)) {
     return refuse(
       "actor-invalid",
@@ -4806,10 +4870,13 @@ export function propose(
   // APRV-445 refutation (S4): the key carries its class, so a consumer that
   // parses the key can never attribute it to a class its record does not name.
   // Consumers read the class from the record; this keeps the key from lying.
-  if (!input.actionKey.startsWith(`${input.cls}:`) || input.actionKey.length === input.cls.length + 1) {
+  if (
+    !input.actionKey.startsWith(`${input.cls}:`) ||
+    !PROPOSE_KEY_ID.test(input.actionKey.slice(input.cls.length + 1))
+  ) {
     return refuse(
       "key-class-mismatch",
-      `key ${JSON.stringify(input.actionKey)} does not begin with ${JSON.stringify(`${input.cls}:`)} followed by an identifier; a proposal's key names the class it is proposed under. Nothing was registered and nothing was appended.`,
+      `key ${JSON.stringify(input.actionKey)} is not ${JSON.stringify(`${input.cls}:`)} followed by an identifier of printable characters with no whitespace or control characters; a proposal's key names the class it is proposed under. Nothing was registered and nothing was appended.`,
     );
   }
   if (Buffer.byteLength(input.actionKey, "utf8") > PROPOSE_KEY_MAX_BYTES) {
@@ -4871,11 +4938,12 @@ export function propose(
     decision,
     state,
     seq,
-    idempotent,
+    idempotent: idempotent && !appendedEarlier,
   });
 
   const existing = registeredAction(read.records, task, input.actionKey);
   let registeredNow = false;
+  let withdrewNow = false;
   if (existing.ok) {
     const derivation = requestState(read.records, input.actionKey, tick(options), ttlOf(load));
     if (existing.action.payload_hash !== hash) {
@@ -4934,12 +5002,23 @@ export function propose(
       // decision), then asked again below.
       const retracted = withdraw(logPath, input.actionKey, actor, {
         ...options,
+        onlyIfVoid: true,
         reason: "superseded",
         note: "the policy this proposal was routed under has been re-attested, so the request is void; the same proposal is asked again under the policy in force",
       });
-      if (!retracted.ok && retracted.code !== "request-withdrawn" && retracted.code !== "already-decided") {
+      if (!retracted.ok) {
+        // A concurrent caller withdrew it, re-asked it, or a human answered it.
+        if (
+          retracted.code === "request-withdrawn" ||
+          retracted.code === "already-decided" ||
+          retracted.code === "duplicate-request" ||
+          retracted.code === "expired"
+        ) {
+          return again(retracted);
+        }
         return retracted;
       }
+      withdrewNow = true;
     }
   } else if (existing.code === "not-registered") {
     const registered = register(
@@ -4960,15 +5039,13 @@ export function propose(
         },
       },
       actor,
-      options,
+      { ...options, proposal: true },
     );
     if (!registered.ok) {
       // APRV-445 (L5). Two identical proposals racing: the other one registered
       // this exact task first. Its registration is ours byte for byte, so the
       // call is a retry and is answered as one.
-      if (registered.code === "task-already-registered" && !retried) {
-        return propose(logPath, input, actor, options, true);
-      }
+      if (registered.code === "task-already-registered") return again(registered);
       return registered;
     }
     registeredNow = true;
@@ -4996,13 +5073,20 @@ export function propose(
     actor,
     options,
   );
-  if (!result.ok) return result;
+  if (!result.ok) {
+    if (result.code === "duplicate-request" || result.code === "already-decided" || result.code === "already-executed") {
+      return again(result);
+    }
+    return result;
+  }
   if (result.record === null) {
     return answered(
       result.autonomy === "autonomous" ? "autonomous" : "supervised",
       null,
       null,
-      !registeredNow,
+      // APRV-445 recheck (L-a): a call that withdrew a void request appended
+      // something, so it is not an idempotent answer.
+      !registeredNow && !withdrewNow,
     );
   }
   return answered("requested", "requested", result.record.seq, false);
@@ -5161,9 +5245,11 @@ export function startProposed(
  * - a GRANT whose request has lapsed its window is `expired`: there is no
  *   separate grant TTL (`grantLapsed`), so a tap at hour 71 of a 72 h window
  *   authorizes nothing at hour 73;
- * - a GRANT, or a PENDING request, pinned to a policy hash that is no longer the
- *   attested one is `void`: the spend and the decision both refuse
- *   `policy-drift`, so the answer it carries (or would carry) can never be used;
+ * - a PENDING request pinned to a policy hash that is no longer the attested
+ *   one is `void` for every task, because the decision refuses `policy-drift`;
+ *   a GRANT is `void` on the same condition only where its spend enforces the
+ *   same refusal: a harness grant (`execution: "harness"`), which includes
+ *   every proposal. A token grant spent through `approval run` stays `granted`;
  * - a request the runtime withdrew for `policy-drift` (APRV-235) is `void` too,
  *   for the same reason, rather than an ordinary requester `withdrawn`;
  * - a key whose execution started is `executed`.
@@ -5186,9 +5272,20 @@ export function requestStanding(
   if (derivation.execution.started !== null) return "executed";
   if (derivation.state === "granted") {
     if (grantLapsed(derivation, ts)) return "expired";
+    // APRV-445 recheck (B). A grant is void only where its SPEND refuses
+    // `policy-drift`, which is the harness spend (`consumeHarnessGrant`) and
+    // therefore every proposal. A token grant is spent by `approval run`
+    // through `consumeToken`, which does not compare policy hashes, so after a
+    // re-attest that grant still runs: calling it void would abort the
+    // documented `wait && run` flow and send an agent to ask again over a live
+    // human grant.
+    const driftEnforced =
+      derivation.declared.execution === "harness" || isProposalTask(derivation.task);
     const pinned =
       grantedPolicyHash(records, derivation.decisionSeq) ?? derivation.declared.policy_sha256;
-    if (attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) return "void";
+    if (driftEnforced && attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) {
+      return "void";
+    }
     return "granted";
   }
   if (derivation.state === "requested") {

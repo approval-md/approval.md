@@ -878,14 +878,25 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     let pending = false;
     // APRV-445 refutation (B1): the state a waiter acts on is what the record
     // still AUTHORIZES. A grant whose window lapsed reads `expired`, and a
-    // grant or pending request pinned to a superseded policy reads `void`, so
+    // pending request, or a harness grant (every proposal), pinned to a
+    // superseded policy reads `void` (a token grant `run` still spends stays
+    // `granted`), so
     // a poller asks again instead of being told `granted` about an answer the
     // spend will refuse.
     const attestedSha = attestedPolicySha256(read.records, { policy: policyLocation(flags, cwd) });
     for (const key of requestedKeysOf(read.records, task)) {
       const derivation = requestState(read.records, key, ts, ttlMs);
       const standing = requestStanding(read.records, key, ts, ttlMs, attestedSha);
-      const state = standing === "executed" ? derivation.state : standing;
+      // An executed key reads as its recorded decision when a grant authorized
+      // it (the long-standing `granted`), and as `executed` when it ran on the
+      // policy's own authority after its request ended (APRV-445 recheck L-a):
+      // a policy-path `start` after a withdrawal is not a `withdrawn` action.
+      const state =
+        standing === "executed"
+          ? derivation.state === "granted"
+            ? "granted"
+            : "executed"
+          : standing;
       // APRV-105. The token, when this machine can open it: the grant sealed it
       // to the ephemeral public key this action's request published, and the
       // private half is in the key store beside the log. Attached only to a
@@ -935,7 +946,9 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
             ? "void"
             : expired
               ? "expired"
-              : "granted";
+              : actions.length > 0 && actions.every((action) => action.state === "executed")
+                ? "executed"
+                : "granted";
       const code =
         rejected || withdrawn
           ? EXIT_INTEGRITY

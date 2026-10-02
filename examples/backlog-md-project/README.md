@@ -187,7 +187,8 @@ exit=6
 ```
 
 For `wait` the exit code is the decision: 0 granted, 1 rejected or revoked or
-withdrawn, 3 expired, 6 the timeout elapsed with the request still live. An
+withdrawn, 3 expired, 6 the timeout elapsed with the request still live, 7 void
+(a re-attested policy voided the pending request or a harness grant; ask again). An
 agent session passes a real timeout (`--timeout 6h`) and blocks here while a
 person decides on whatever channel the policy configures. This example's
 channel is the CLI, so the person is you, in another terminal:

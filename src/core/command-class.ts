@@ -4160,6 +4160,38 @@ export function commandSegmentWriteTargets(command: string): string[][] | null {
   );
 }
 
+/**
+ * Every segment of `command` with its binary (or `null`), its arguments and the
+ * paths it writes through a redirection, from ONE lex of the whole command
+ * (APRV-445 recheck). Lexing a segment's text on its own fails for a heredoc,
+ * whose body lives outside the segment's text; this keeps the body attached.
+ */
+export interface CommandSegmentShape {
+  text: string;
+  bin: string | null;
+  args: string[];
+  writes: string[];
+}
+
+export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+  return lexed.segments.map((segment) => {
+    const words = segment.words.map((word) => word.text);
+    let cursor = 0;
+    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    return {
+      text: segment.text,
+      bin: words[cursor] ?? null,
+      args: words.slice(cursor + 1),
+      writes: segment.redirects
+        .filter((redirect) => redirect.op !== "<")
+        .map((redirect) => redirect.target.text)
+        .filter((target) => !isDiscardTarget(target)),
+    };
+  });
+}
+
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
   const lexed = lex(command);
   if (!lexed.ok) return null;

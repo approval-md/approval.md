@@ -1673,7 +1673,8 @@ classes:
   intent.publish.stated.index: { autonomy: autonomous }
 ```
 
-**The key** must begin with `<class>:` and name something after it (refused
+**The key** must begin with `<class>:` and an id of printable characters with
+no whitespace or control characters (refused
 `key-class-mismatch`, exit 2): `intent.publish.inferred.index:<intention id>`.
 It is recorded verbatim as `action_key`, and a consumer reads the class from the
 record rather than parsing it back out of the key. The key is at most 1024 bytes
@@ -2408,11 +2409,17 @@ looked at.
 
 **What a waiter is told is what the request still authorizes** (APRV-445). A
 grant whose request window has lapsed reads `expired` (exit 3), not `granted`. A
-grant or pending request pinned to a policy hash that is no longer the attested
-one, or a request the runtime withdrew for `policy-drift`, reads `void`, **exit
-7**: the answer can never be used, and the repair is to ask again (for a
-proposal, the same `propose` call re-files). Precedence: rejected > withdrawn >
-void > expired > granted. A task with no requests at all, an unknown task id
+pending request pinned to a policy hash that is no longer the attested one (any
+task), a HARNESS grant so pinned (`execution: "harness"`, every proposal
+included: its spend refuses `policy-drift`), or a request the runtime withdrew
+for `policy-drift`, reads `void`, **exit 7**: the answer can never be used, and
+the repair is to ask again (for a proposal, the same `propose` call re-files). A
+token grant is NOT void after a re-attest: `approval run` spends it without
+comparing policy hashes, so `wait && run` keeps working and `wait` reads
+`granted`. Precedence: rejected > withdrawn >
+void > expired > granted. An action that ran on the policy's own authority
+after its request ended (a `start` after a withdrawal and a re-tiering) reads
+`executed`, status `executed`, exit 0. A task with no requests at all, an unknown task id
 included, is granted vacuously at exit 0, so poll the task id `propose`
 returned.
 

@@ -630,7 +630,7 @@ The CLI's frozen table is:
 | 4 | I/O error |
 | 5 | no valid execution token (approval run only) |
 | 6 | timeout (approval wait only) |
-| 7 | void: the policy changed since the request was asked; ask again (approval wait only) |
+| 7 | void: a re-attest voided a pending request or a harness grant; ask again (approval wait only) |
 
 **Context matters.** Ordinary well-formed gate refusals also use exit 1; inspect the machine-readable `error.code` rather than interpreting every 1 as corruption. `approval run` returns the executed child's status. Harness hooks have their own protocol semantics: exit 0 can carry a deny verdict, and exit 2 can mean a blocking or visible hook report rather than CLI misuse. See the command's `--help` and its integration guide.
 

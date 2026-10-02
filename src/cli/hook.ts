@@ -73,7 +73,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, writeSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
@@ -89,8 +89,8 @@ import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
+  commandSegmentShapes,
   commandSegmentWords,
-  commandSegmentWriteTargets,
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   GATE_SELF_CLASS,
@@ -3062,8 +3062,21 @@ function credentialReadGate(
     readString(toolInput, "notebook_path") ??
     readString(toolInput, "path");
   if (declared === null) return null;
-  const file = absolute(declared, cwd);
-  if (!isCredentialPath(file)) return null;
+  // APRV-445 recheck SF2(e, f): judged through realpath, so a symlinked
+  // parent cannot launder the path, and a DIRECTORY under `.hermes` or
+  // `.approval` handed to a read tool (a search, a glob, a grep) reads the
+  // credentials inside it and is gated as they are.
+  const file = canonicalPath(absolute(declared, cwd));
+  const directoryOfSecrets =
+    file.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") &&
+    (() => {
+      try {
+        return statSync(file).isDirectory();
+      } catch {
+        return false;
+      }
+    })();
+  if (!isCredentialPath(file) && !directoryOfSecrets) return null;
   const input: Record<string, unknown> = { ...toolInput };
   delete input["description"];
   return {
@@ -4999,7 +5012,7 @@ function describeToolCall(
     // lands on an organ takes the organ's class, and a read that lands on a
     // credential takes `account.credential`. It only ever adds a class.
     if (shellCwd !== null) {
-      for (const cls of resolvedPathClasses(classified.segments, shellCwd, protectedPaths)) {
+      for (const cls of resolvedPathClasses(raw, classified.segments, shellCwd, protectedPaths)) {
         if (!classes.includes(cls)) classes.push(cls);
       }
     }
@@ -5150,43 +5163,194 @@ function describeToolCall(
 }
 
 /**
- * The classes a command's RELATIVE words and write targets take once resolved
- * against the directory the command runs in (APRV-445 refutation, B2 and L10).
+ * The classes a shell command's PATHS take once they are resolved the way the
+ * shell and the filesystem will resolve them (APRV-445 refutation B2 and L10,
+ * recheck SF2 and L-e), for a harness that states the directory each call runs
+ * in.
  *
- * A redirection target is a write whatever the segment's class. A positional
- * is judged as a write only in a side-effecting segment and as a read of a
- * credential only in a read segment, which is the same split the classifier
- * itself draws for absolute words. Absolute words are left to the classifier,
- * which already saw them whole.
+ * The classifier matches organs and credentials by path SEGMENTS of the words
+ * as written. A word written relative (`.env` run in `$HERMES_HOME`), through a
+ * variable (`$HERMES_HOME/.env`), after a `cd`, or through a symlinked parent
+ * (`h/.env` where `h -> .hermes`) carries none of the segments that matter. So
+ * each path a segment touches is also judged here:
+ *
+ * - WRITTEN paths are the redirect targets (heredocs included) and the
+ *   write-argument positions of the binaries whose writes are known (L-e):
+ *   never the binary, never a word that is merely an argument. A written path
+ *   resolving to an organ takes its class; one carrying a glob or a variable
+ *   this hook cannot expand, written from a directory under `.hermes` or
+ *   `.approval`, is `policy.core` (it may be any file there); an unexpanded
+ *   `$HERMES_HOME` in a written path is `policy.core` wherever it is written
+ *   from, since it names the home by definition.
+ * - READ paths (a read segment's arguments, a copy's sources) that resolve to a
+ *   credential take `account.credential`, and so does a directory under
+ *   `.hermes` or `.approval` handed to a binary that reads directories
+ *   recursively (`grep -r`, `rg`, `find`, `tar`, ...).
+ * - `cd` moves the directory for the segments after it. Like the Codex arm, a
+ *   `cd` may or may not have run (`||`, a failed `cd`), so the directories
+ *   before and after it are both kept and every later path is judged from each.
+ * - Every path is resolved through `realpath` on its deepest existing ancestor,
+ *   so a symlinked parent or working directory is judged by where it lands.
+ * - `$HERMES_HOME` / `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
+ *   `HERMES_HOME`, from this hook process's environment; `~`, `$HOME` and
+ *   `${HOME}` to `HOME`. Under `approval serve` the process is the daemon, so a
+ *   hosted operator sets `APPROVAL_HERMES_HOME` there; without it, the
+ *   conservative rules above apply to the unexpanded spelling.
+ *
+ * What stays out of reach is listed in `docs/hermes-hook.md`: inline programs
+ * (`python -c`, which the classifier already refuses as opaque), `dd`/`install`
+ * (unclassified, so already denied), and a recursive search of an ANCESTOR of
+ * the home with a filename filter.
+ *
+ * It only ever adds classes.
  */
 function resolvedPathClasses(
+  raw: string,
   segments: readonly ClassifiedSegment[],
   cwd: string,
   protectedPaths: readonly ProtectedPathEntry[],
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const found: string[] = [];
   const add = (cls: string | null): void => {
     if (cls !== null && !found.includes(cls)) found.push(cls);
   };
-  for (const segment of segments) {
-    const parsed = commandSegmentWords(segment.text)?.[0];
-    const targets = commandSegmentWriteTargets(segment.text)?.[0] ?? [];
-    for (const target of targets) {
-      if (isAbsolute(target)) continue;
-      add(protectedPathClass(resolvePathSegments(cwd, target), protectedPaths));
+  const shapes = commandSegmentShapes(raw) ?? [];
+  const hermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
+  const home = env["HOME"] ?? null;
+
+  /** The word with the variables this hook can know expanded, or `null` parts. */
+  const expand = (word: string): { text: string; hermesUnknown: boolean; unresolved: boolean } => {
+    let text = word;
+    let hermesUnknown = false;
+    const hermesRef = /^\$(?:\{HERMES_HOME\}|HERMES_HOME)(?=\/|$)/u;
+    if (hermesRef.test(text)) {
+      if (hermesHome !== null && hermesHome.length > 0) text = text.replace(hermesRef, hermesHome);
+      else hermesUnknown = true;
     }
-    if (parsed === undefined) continue;
-    const words = [parsed.bin, ...parsed.args].filter((word) => !isAbsolute(word) && !word.startsWith("-"));
-    for (const word of words) {
-      const resolved = resolvePathSegments(cwd, word);
-      if (segment.class.startsWith("read.")) {
-        if (isCredentialPath(resolved)) add("account.credential");
-      } else if (isSideEffectingClass(segment.class)) {
-        add(protectedPathClass(resolved, protectedPaths));
+    const homeRef = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/u;
+    if (homeRef.test(text) && home !== null && home.length > 0) text = text.replace(homeRef, home);
+    return { text, hermesUnknown, unresolved: hermesUnknown || /[$`]/u.test(text) };
+  };
+  const hasGlob = (text: string): boolean => /[*?[]/u.test(text);
+  const inGateHome = (path: string): boolean =>
+    path.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval");
+  const isDirectory = (path: string): boolean => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
+  let cwds = [canonicalPath(cwd)];
+  for (const [index, segment] of segments.entries()) {
+    const shape =
+      shapes.length === segments.length
+        ? shapes[index]
+        : shapes.find((candidate) => candidate.text === segment.text);
+    if (shape === undefined || shape.bin === null) continue;
+    const bin = basename(shape.bin);
+    const operands = shape.args.filter((arg) => !arg.startsWith("-"));
+
+    if (bin === "cd") {
+      if (operands.length === 1) {
+        const target = expand(operands[0] as string);
+        if (!target.unresolved) {
+          const next = cwds.map((from) => canonicalPath(resolvePathSegments(from, target.text)));
+          cwds = [...new Set([...cwds, ...next])];
+        }
       }
+      continue;
+    }
+
+    const judgeWrite = (word: string): void => {
+      const target = expand(word);
+      if (target.hermesUnknown) {
+        add("policy.core");
+        return;
+      }
+      for (const from of cwds) {
+        const absoluteTarget = resolvePathSegments(from, target.text);
+        if (target.unresolved || hasGlob(target.text)) {
+          if (inGateHome(from) || inGateHome(canonicalPath(dirname(absoluteTarget)))) add("policy.core");
+          continue;
+        }
+        add(protectedPathClass(canonicalPath(absoluteTarget), protectedPaths));
+      }
+    };
+    const judgeRead = (word: string, recursive: boolean): void => {
+      const target = expand(word);
+      if (target.hermesUnknown) {
+        add("account.credential");
+        return;
+      }
+      if (target.unresolved || hasGlob(target.text)) return;
+      for (const from of cwds) {
+        const resolved = canonicalPath(resolvePathSegments(from, target.text));
+        if (isCredentialPath(resolved)) add("account.credential");
+        else if (recursive && inGateHome(resolved) && isDirectory(resolved)) add("account.credential");
+      }
+    };
+
+    for (const target of shape.writes) judgeWrite(target);
+
+    if (WRITE_EVERY_OPERAND.has(bin)) {
+      for (const operand of operands) judgeWrite(operand);
+    } else if (WRITE_LAST_OPERAND.has(bin)) {
+      const last = operands[operands.length - 1];
+      if (last !== undefined) judgeWrite(last);
+      for (const source of operands.slice(0, -1)) judgeRead(source, true);
+    } else if (WRITE_AFTER_FIRST_OPERAND.has(bin)) {
+      for (const operand of operands.slice(1)) judgeWrite(operand);
+    } else if (bin === "sed" && shape.args.some((arg) => arg === "--in-place" || /^-[a-zA-Z]*i/u.test(arg))) {
+      const scripted = shape.args.some((arg) => arg === "-e" || arg === "-f");
+      for (const operand of scripted ? operands : operands.slice(1)) judgeWrite(operand);
+    } else if (bin === "dd") {
+      for (const arg of shape.args) {
+        if (arg.startsWith("of=")) judgeWrite(arg.slice(3));
+        if (arg.startsWith("if=")) judgeRead(arg.slice(3), false);
+      }
+    }
+
+    if (segment.class.startsWith("read.") || RECURSIVE_READERS.has(bin)) {
+      for (const operand of operands) judgeRead(operand, RECURSIVE_READERS.has(bin));
     }
   }
   return found;
+}
+
+/** Binaries every operand of which is a path they create, change or remove. */
+const WRITE_EVERY_OPERAND: ReadonlySet<string> = new Set([
+  "touch", "truncate", "mkdir", "rm", "rmdir", "shred", "tee", "unlink",
+]);
+/** Binaries whose LAST operand is the destination and the rest are sources. */
+const WRITE_LAST_OPERAND: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
+/** Binaries whose first operand is a mode or owner and the rest are paths. */
+const WRITE_AFTER_FIRST_OPERAND: ReadonlySet<string> = new Set(["chmod", "chown", "chgrp"]);
+/** Readers that walk a directory they are handed. */
+const RECURSIVE_READERS: ReadonlySet<string> = new Set([
+  "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "tar", "zip", "du", "tree",
+]);
+
+/**
+ * `path` resolved through the realpath of its deepest existing ancestor, so a
+ * symlinked parent is judged by where it lands and a path that does not exist
+ * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
+ */
+function canonicalPath(path: string): string {
+  let current = path;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return resolvePathSegments(realpathSync(current), ...tail.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolvePathSegments(path);
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 /** The environment variable that turns the sandbox requirement on (APRV-193). */

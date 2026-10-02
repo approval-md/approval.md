@@ -226,7 +226,8 @@ Ask — an agent declares an action and acts on the answer:
             draft the agent composed, refused if the draft changed after the
             snapshot a human approved
   wait      block until a task's requests are decided; the exit code IS the
-            decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
+            decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired,
+            6 timeout, 7 void: a re-attest voided it, ask again)
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
             terminal, requester-only, and a late grant then authorizes nothing
   hook      put the gate in front of an agent HARNESS. "hook claude-code" and

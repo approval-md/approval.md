@@ -389,9 +389,46 @@ itself. A WRITE to `.hermes/.env`, `.hermes/.env.*` or `.hermes/auth.json`
 (`write_file`, `patch`, `>`/`>>`, `sed -i`, `tee`, `cp`) is `policy.core`; a READ
 of them (`cat`, `read_file`) is `account.credential`. Before the APRV-445 review
 only the read was gated: the credential tier is consulted for reads, so a write
-classified as an ordinary workspace write. A `terminal` call's relative words and
-redirect targets are also judged resolved against its `workdir`, so
-`echo X >> .env` run in `$HERMES_HOME` is the same write as the absolute one.
+classified as an ordinary workspace write.
+
+**A `terminal` call's paths are judged where they land** (APRV-445 review and
+recheck). Redirect targets (heredocs included) and the write positions of the
+binaries whose writes are known (`cp`/`mv`/`ln`/`install`/`rsync` destinations,
+every `tee`/`touch`/`rm`/`mkdir`/`truncate` operand, `sed -i` files, `chmod`
+paths, `dd of=`) are resolved against the call's `workdir`, through every `cd`
+before them in the command (both the directory before and after a `cd` are kept,
+as a `cd` may not have run), and through `realpath` of the deepest existing
+ancestor, so a symlinked parent or workdir is judged by where it lands. A read
+segment's operands and a copy's sources that land on a credential are
+`account.credential`, and so is a directory under `.hermes` or `.approval` handed
+to a recursive reader (`grep -r`, `rg`, `find`, `tar`, ...) or to a read tool
+(`search_files`, Claude Code's `Grep`/`Glob`). The binary and ordinary
+arguments are never resolved, so `./scripts/x.sh` or `echo approval > out.txt`
+in the home are what they look like.
+
+`$HERMES_HOME` and `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
+`HERMES_HOME`, from the hook process's environment (`~`, `$HOME`, `${HOME}` to
+`HOME`). A hook Hermes spawns inherits Hermes's environment. Under `approval
+serve` the hook runs in the daemon, so a hosted operator sets
+`APPROVAL_HERMES_HOME` on the serve process. Unexpanded, a `$HERMES_HOME` path
+is `policy.core` when written and `account.credential` when read, and a write
+whose target carries a glob or an unexpandable variable from a directory under
+`.hermes` or `.approval` is `policy.core`.
+
+What stays unclassified or out of reach, stated so nobody assumes otherwise:
+inline programs (`python3 -c`, `node -e`) are refused as opaque; `dd` and
+`install` have no classifier rule and are denied as unclassified; a recursive
+search of an ANCESTOR of the home with a filename filter (`search_files` over
+`$HOME` with `file_glob: .env`, Claude Code's `Grep` over the repository with
+`glob: **/env`, or `Grep` with no path) reads the secrets without naming a
+directory this hook can recognise; and a write through a variable other than
+`HERMES_HOME`/`HOME` from outside the home is judged by its spelling.
+
+**SIGTERM while the hook waits.** The wait is a synchronous poll, so a signal's
+handler runs only when the wait ends: the hook keeps waiting, then answers with
+the block directive at exit 2 as a wait that ran out does. The `approval` bin
+also guards the exit: a Hermes hook that leaves with any non-zero code other than
+2 leaves as 2, printing the directive if nothing was printed.
 
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
