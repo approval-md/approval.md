@@ -394,8 +394,8 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     ),
     // APRV-445: may an agent open a request in this class with `propose`.
     agentRequest: object(
-      { allowed: BOOLEAN, explicit: BOOLEAN, pattern: nullable(STRING) },
-      ["allowed", "explicit", "pattern"],
+      { allowed: BOOLEAN, explicit: BOOLEAN, pattern: nullable(STRING), humanOnly: BOOLEAN },
+      ["allowed", "explicit", "pattern", "humanOnly"],
     ),
     decisionPath: arrayOf(STRING),
   },
@@ -913,7 +913,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "propose",
     purpose:
-      "Register and request ONE action in one call, with the payload inline as a JSON object (--payload-json, at most 262144 bytes) rather than a file, for a requester with no file on the gate's machine. Unlike request, the caller names the class, and that is bounded by the operator: the class must be an EXACT key of the policy's classes (a wildcard match does not count) and that key or a declared <prefix>.* family must set agent_may_request: true, else class-not-agent-requestable and nothing is written. The task id is derived from the actor, class and key (propose:<32 hex>), so a retry with the same class, key and bytes appends nothing and answers idempotent:true; the same key with different bytes refuses duplicate-request while a request is live and payload-mismatch otherwise. decision requested: a human is asked, poll with wait <task> --timeout 0. decision autonomous or supervised: nothing is asked, act and then record it with start. The summary is stored in the log in cleartext; the payload is stored in the payload store, never in the log.",
+      "Register and request ONE action in one call, with the payload inline as a JSON object (--payload-json, at most 262144 bytes) rather than a file, for a requester with no file on the gate's machine. Unlike request, the caller names the class, and that is bounded by the operator: the class must be an EXACT key of the policy's classes (a wildcard match does not count) and that key or a declared <prefix>.* family must set agent_may_request: true, else class-not-agent-requestable and nothing is written. --key MUST begin with <class>: (key-class-mismatch otherwise); consumers read the class from the record. --key is at most 1024 bytes and --summary at most 4096; lone surrogates and non-finite numbers are usage errors. The task id is derived from the actor, class and key (propose:<32 hex>), so a retry with the same class, key and bytes appends nothing and answers idempotent:true while the request is pending, usably granted, refused or executed (state executed); a request that can no longer be answered usefully (withdrawn, expired, a grant whose window lapsed, or one voided by a re-attested policy) is asked again by the same call. The same key with different bytes refuses duplicate-request while a request is live and payload-mismatch otherwise. decision requested: a human is asked, poll with wait <task> --timeout 0. decision autonomous or supervised: nothing is asked, act and then record it with start. The summary is stored in the log in cleartext; the payload is stored in the payload store, never in the log.",
     human_only: false,
     input: input({
       flags: {
@@ -937,7 +937,7 @@ const VERBS: VerbSpec[] = [
         payload_hash: SHA256,
         decision: { enum: ["requested", "autonomous", "supervised"] },
         state: nullable({
-          enum: ["requested", "granted", "rejected", "revoked", "expired", "withdrawn"],
+          enum: ["requested", "granted", "rejected", "revoked", "expired", "withdrawn", "executed"],
         }),
         seq: nullable(INTEGER),
         idempotent: BOOLEAN,
@@ -951,7 +951,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "start",
     purpose:
-      "Record execution.started for a proposed action you are about to carry out yourself, once per key. REQUESTER-ONLY: the actor must be the one that registered the task. --payload-json is the bytes you are about to act on and must hash to the registered payload_hash. A key that has a request spends its harness grant (refused unless granted, unexpired, unspent and under the policy it was asked under); a key with no request is recorded as authorized by the policy (refused for a manual or human-only class). It grants nothing: it writes only what the grant or the policy already authorized, and a second start of the same key is already-executed.",
+      "Record execution.started for a proposed action you are about to carry out yourself, once per key. Proposals only (task-not-proposal otherwise). REQUESTER-ONLY: the actor must be the one that registered the task. --payload-json is the bytes you are about to act on and must hash to the registered payload_hash. A key whose request is pending or granted-and-unspent spends its harness grant (refused unless granted, unexpired, unspent and under the policy it was asked under); a key with no such request (none, or one withdrawn, expired, rejected or revoked) is recorded as authorized by the policy (refused for a manual or human-only class). It grants nothing: it writes only what the grant or the policy already authorized, and a second start of the same key is already-executed.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "task", description: "the task id propose returned" }], 1),

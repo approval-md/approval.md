@@ -2308,7 +2308,10 @@ const SUITES = [
     // first is the operator's bound on a class the requester names itself (an
     // exact `classes` key opened by `agent_may_request`), and a caller that read
     // it as `class-human-only` would stop for good where a policy edit fixes it.
-    vectors_version: "23.0.0",
+    // 24.0.0 (APRV-445 refutation): `gate_refusal_codes` gains
+    // `task-is-proposal`, `task-not-proposal` and `key-class-mismatch`. Major
+    // for the same reason: a longer union is a changed expectation.
+    vectors_version: "24.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

@@ -643,6 +643,26 @@ export const GATE_REFUSAL_CODES = [
    * parsed or hashed; nothing is stored and nothing is appended.
    */
   "payload-too-large",
+  /**
+   * `approval request` (or a task FILE's registration) named a `propose:` task
+   * (APRV-445 refutation, S1). A proposal is requested only through `propose`,
+   * which re-checks the operator's opening of its class; a plain request on the
+   * same task would skip that check, and a file-registered `propose:` id would
+   * borrow the exclusions proposals get from the harness hook.
+   */
+  "task-is-proposal",
+  /**
+   * `approval start` named a task `propose` did not register (APRV-445, L9).
+   * `start` records executions of proposals and of nothing else; every other
+   * action executes through `approval run`, an adapter, or the hook.
+   */
+  "task-not-proposal",
+  /**
+   * `approval propose --key` does not begin with `<class>:` (APRV-445, S4). The
+   * key names the class it was proposed under, so a key cannot be read back
+   * later as belonging to a different class than its record says.
+   */
+  "key-class-mismatch",
 ] as const;
 
 export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
@@ -1313,6 +1333,16 @@ function attemptRegister(
       if (lost !== null) return lost;
     }
     return resolved.refusal;
+  }
+
+  // APRV-445 refutation (S1). The `propose:` namespace belongs to `propose`;
+  // a task FILE claiming an id in it would borrow the exclusions proposals get
+  // from the harness hook (its sweep and its carry).
+  if ("file" in source && isProposalTask(resolved.task)) {
+    return refuse(
+      "task-is-proposal",
+      `task id ${resolved.task} is in the namespace \`approval propose\` derives its ids in (${PROPOSE_TASK_PREFIX}); a task file may not claim it. Nothing was appended.`,
+    );
   }
 
   const validation = validate(
@@ -2001,6 +2031,16 @@ function attemptRequest(
     input.cls,
     input.reversible === undefined ? {} : { reversible: input.reversible },
   );
+
+  // APRV-445 refutation (S1). A `propose:` task is requested through `propose`
+  // and nothing else, so its agent-requestability check cannot be skipped by
+  // asking for the same registration with a plain `request`.
+  if (isProposalTask(input.task) && input.agentProposal !== true) {
+    return refuse(
+      "task-is-proposal",
+      `task ${input.task} was registered by \`approval propose\` and is requested only through it; nothing was appended`,
+    );
+  }
 
   // APRV-445. A proposal's class came from the requester, so the operator's
   // opening of that class to agents is re-read here, from the same bytes the
@@ -4607,6 +4647,12 @@ export function expire(
  */
 export const PROPOSE_PAYLOAD_MAX_BYTES = 256 * 1024;
 
+/** The longest `--key` `propose` accepts, in UTF-8 bytes (APRV-445, L6). */
+export const PROPOSE_KEY_MAX_BYTES = 1024;
+
+/** The longest `--summary` `propose` accepts, in UTF-8 bytes (APRV-445, L6). */
+export const PROPOSE_SUMMARY_MAX_BYTES = 4096;
+
 /** `origin.app` on every envelope `propose` registers. */
 export const PROPOSE_ORIGIN_APP = "approval-propose";
 
@@ -4757,6 +4803,21 @@ export function propose(
   if (input.actionKey.length === 0) {
     return refuse("envelope-invalid", "the action key is empty; nothing was registered and nothing was appended.");
   }
+  // APRV-445 refutation (S4): the key carries its class, so a consumer that
+  // parses the key can never attribute it to a class its record does not name.
+  // Consumers read the class from the record; this keeps the key from lying.
+  if (!input.actionKey.startsWith(`${input.cls}:`) || input.actionKey.length === input.cls.length + 1) {
+    return refuse(
+      "key-class-mismatch",
+      `key ${JSON.stringify(input.actionKey)} does not begin with ${JSON.stringify(`${input.cls}:`)} followed by an identifier; a proposal's key names the class it is proposed under. Nothing was registered and nothing was appended.`,
+    );
+  }
+  if (Buffer.byteLength(input.actionKey, "utf8") > PROPOSE_KEY_MAX_BYTES) {
+    return refuse("envelope-invalid", `the key is over ${String(PROPOSE_KEY_MAX_BYTES)} bytes; nothing was registered and nothing was appended.`);
+  }
+  if (Buffer.byteLength(input.summary, "utf8") > PROPOSE_SUMMARY_MAX_BYTES) {
+    return refuse("envelope-invalid", `the summary is over ${String(PROPOSE_SUMMARY_MAX_BYTES)} bytes; nothing was registered and nothing was appended.`);
+  }
 
   let hash: string;
   try {
@@ -4779,10 +4840,10 @@ export function propose(
   const load = parsePolicy(policyRead, options);
 
   const opened = agentRequestability(load, input.cls);
-  if (!opened.allowed) {
+  const resolution = resolve(load, input.cls);
+  if (!opened.allowed && !(opened.humanOnly && opened.explicit && opened.pattern !== null)) {
     return refuse("class-not-agent-requestable", notAgentRequestable(input.cls, opened));
   }
-  const resolution = resolve(load, input.cls);
   if (harnessLaunchNeedsRule(input.cls, resolution)) {
     return refuse(
       "harness-launch-unruled",
@@ -5018,6 +5079,13 @@ export function startProposed(
     );
   }
 
+  if (!isProposalTask(task)) {
+    return refuse(
+      "task-not-proposal",
+      `task ${task} was not registered by \`approval propose\`; start records the executions of proposals only. Nothing was appended.`,
+    );
+  }
+
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
   const declared = registeredAction(read.records, task, actionKey);
@@ -5040,10 +5108,21 @@ export function startProposed(
     );
   }
 
-  const requested = read.records.some(
-    (record) => record.event === "approval.requested" && record.action_key === actionKey,
+  // APRV-445 refutation (S5). Only a request that can still answer binds the
+  // key to the grant path: one that is pending (spending it refuses until a
+  // human decides) or granted and unspent. A withdrawn, expired, rejected or
+  // revoked request says nothing about an action the policy authorizes on its
+  // own now, so after a re-tiering to autonomous the start is the policy's.
+  const derivation = requestState(
+    read.records,
+    actionKey,
+    tick(options),
+    ttlOf(parsePolicy(readPolicyOnce(options), options)),
   );
-  if (requested) {
+  const binding =
+    derivation.execution.started === null &&
+    (derivation.state === "requested" || derivation.state === "granted");
+  if (binding) {
     const spent = consumeHarnessGrant(logPath, actionKey, actor, {
       ...options,
       presentedPayloadHash: hash,

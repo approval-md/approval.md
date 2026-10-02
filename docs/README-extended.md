@@ -590,7 +590,7 @@ The sequence is exclusive. Persist the processed sequence and hash after applyin
 
 ### Decide what to publish
 
-**`approval init` does not ignore `.approval/log/` or `.approval/payloads/`.** The evidence is trackable by default. This can include real message text, recipients, paths, agent descriptions, and other information unsuitable for a public repository.
+**`approval init` does not ignore `.approval/log/`, and since APRV-445 it does ignore `.approval/payloads/`.** The log is trackable by default; the payload bytes are not, because they can include real message text, recipients, paths, a person's own words, and other information unsuitable for a public repository. A directory scaffolded before APRV-445 still tracks them until a re-run of `approval init` appends the ignore line (it says so), and the log itself still carries every summary in cleartext.
 
 Review staged content before committing. Add local ignore rules when payloads or logs must stay private, or keep the evidence in a suitably private repository. Omitting payload bytes trades away the ability to reconstruct them from a public hash; it does not remove existing copies from history.
 
@@ -630,6 +630,7 @@ The CLI's frozen table is:
 | 4 | I/O error |
 | 5 | no valid execution token (approval run only) |
 | 6 | timeout (approval wait only) |
+| 7 | void: the policy changed since the request was asked; ask again (approval wait only) |
 
 **Context matters.** Ordinary well-formed gate refusals also use exit 1; inspect the machine-readable `error.code` rather than interpreting every 1 as corruption. `approval run` returns the executed child's status. Harness hooks have their own protocol semantics: exit 0 can carry a deny verdict, and exit 2 can mean a blocking or visible hook report rather than CLI misuse. See the command's `--help` and its integration guide.
 

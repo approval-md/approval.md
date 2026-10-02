@@ -1136,7 +1136,19 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     else http.listen(options.port, host, ready);
   });
 
-  if (socketPath !== null) {
+  // APRV-445 refutation (L3). The socket is opened to 0666 only where nobody
+  // but the serving uid can write the directory. Between the bind and the
+  // chmod the socket carries the umask's narrower mode, which fails closed;
+  // what a group- or other-writable directory would add is someone able to
+  // swap the socket inside that window, so there the chmod is skipped and the
+  // socket keeps the umask's mode (the operator widens the umask or the
+  // directory's ACL instead). Other-writable directories are refused outright.
+  const widen =
+    socketPath !== null && (statSync(dirname(socketPath)).mode & 0o022) === 0;
+  if (socketPath !== null && !widen) {
+    notice(`approval: serve left ${socketPath} at its umask mode: its directory is group-writable, and only a directory the serving uid alone can write is trusted to hold a 0666 socket\n`);
+  }
+  if (socketPath !== null && widen) {
     // The directory is the access control (see `checkUnixSocketTarget`); the
     // socket itself is opened to every uid that can reach it through that
     // directory, which is the sandbox user the operator put there. Narrowing
@@ -1227,12 +1239,14 @@ export function checkUnixSocketTarget(
   }
   const directory = dirname(socketPath);
   let owner: number;
+  let mode: number;
   try {
     const stats = statSync(directory);
     if (!stats.isDirectory()) {
       return { ok: false, message: `${directory} is not a directory, so ${socketPath} cannot be bound in it` };
     }
     owner = stats.uid;
+    mode = stats.mode & 0o777;
   } catch (cause) {
     return {
       ok: false,
@@ -1246,6 +1260,16 @@ export function checkUnixSocketTarget(
     return {
       ok: false,
       message: `the socket's directory ${directory} is owned by uid ${String(owner)}, not by the serving uid ${String(uid)}. The directory is what decides who may connect to this socket (the socket itself is opened ${UNIX_SOCKET_MODE.toString(8)}), so it must be this process's own`,
+    };
+  }
+  // APRV-445 refutation (L3). An other-writable directory (`/tmp` is the
+  // usual one) lets anybody on the host unlink this socket and bind their own
+  // in its place, between this process's bind and every client's connect, so
+  // the directory would decide nothing. Refused rather than used.
+  if ((mode & 0o002) !== 0) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} is writable by every user (mode ${mode.toString(8)}), so anyone could replace the socket; use a directory only the serving uid (and, if you mean it, its group) can write`,
     };
   }
   try {
@@ -1276,20 +1300,36 @@ async function clearStaleSocket(socketPath: string): Promise<void> {
   } catch {
     return;
   }
-  const live = await new Promise<boolean>((settle) => {
+  // APRV-445 refutation (L2): only a refusal that PROVES nobody listens makes
+  // the file stale. ECONNREFUSED is a socket with no listener and ENOENT is a
+  // file that vanished meanwhile; anything else (EACCES, EAGAIN on a full
+  // backlog, a timeout) is a socket this process cannot judge, and it is left
+  // alone rather than unlinked from under whoever owns it.
+  const probed = await new Promise<"live" | "stale" | string>((settle) => {
     const probe = connect(socketPath);
     probe.once("connect", () => {
       probe.destroy();
-      settle(true);
+      settle("live");
     });
-    probe.once("error", () => settle(false));
+    probe.once("error", (cause: NodeJS.ErrnoException) => {
+      settle(cause.code === "ECONNREFUSED" || cause.code === "ENOENT" ? "stale" : cause.code ?? "unknown");
+    });
   });
-  if (live) {
+  if (probed === "live") {
     throw new Error(
       `${socketPath} is a live socket: another process is listening on it, so this server will not take it over`,
     );
   }
-  unlinkSync(socketPath);
+  if (probed !== "stale") {
+    throw new Error(
+      `${socketPath} exists and probing it failed with ${probed}, which does not prove nothing listens there; it was left in place`,
+    );
+  }
+  try {
+    unlinkSync(socketPath);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+  }
 }
 
 /** The default log under a store root, from the CLI's own constant. */

@@ -360,7 +360,7 @@ test("explain reports agentRequest, with a decision-path line only when some key
   const load = loadPolicy({ file: fixture });
 
   const open = explain(load, "intent.publish.inferred.index");
-  assert.deepEqual(open.agentRequest, { allowed: true, explicit: true, pattern: "intent.publish.*" });
+  assert.deepEqual(open.agentRequest, { allowed: true, explicit: true, pattern: "intent.publish.*", humanOnly: false });
   assert.ok(open.decisionPath.some((line) => line.startsWith("agent requests: allowed")), open.decisionPath.join("\n"));
 
   const wildcardOnly = explain(load, "intent.publish.other");
@@ -368,7 +368,7 @@ test("explain reports agentRequest, with a decision-path line only when some key
   assert.ok(wildcardOnly.decisionPath.some((line) => /is not a key of `classes`/u.test(line)));
 
   const silent = explain(load, "communicate.email.external");
-  assert.deepEqual(silent.agentRequest, { allowed: false, explicit: true, pattern: null });
+  assert.deepEqual(silent.agentRequest, { allowed: false, explicit: true, pattern: null, humanOnly: false });
   assert.equal(silent.decisionPath.some((line) => line.startsWith("agent requests")), false);
 
   // An amendment that only adds the flag is a semantic change, not "no change".

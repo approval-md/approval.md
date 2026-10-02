@@ -545,7 +545,7 @@ test("agentRequestability: an exact key is required, and the exact key's own val
     ["financial.spend", false, false, null],
   ];
   for (const [cls, allowed, explicit, pattern] of cases) {
-    assert.deepEqual(agentRequestability(load, cls), { allowed, explicit, pattern }, cls);
+    assert.deepEqual(agentRequestability(load, cls), { allowed, explicit, pattern, humanOnly: false }, cls);
   }
 });
 
@@ -566,10 +566,10 @@ test("agentRequestability: the most specific family that states the flag decides
       '  "solo": { autonomy: manual }',
     ].join("\n"),
   );
-  assert.deepEqual(agentRequestability(load, "a.b.c"), { allowed: false, explicit: true, pattern: "a.b.*" });
-  assert.deepEqual(agentRequestability(load, "a.x"), { allowed: true, explicit: true, pattern: "a.*" });
-  assert.deepEqual(agentRequestability(load, "q.z.r"), { allowed: false, explicit: true, pattern: null });
-  assert.deepEqual(agentRequestability(load, "solo"), { allowed: false, explicit: true, pattern: null });
+  assert.deepEqual(agentRequestability(load, "a.b.c"), { allowed: false, explicit: true, pattern: "a.b.*", humanOnly: false });
+  assert.deepEqual(agentRequestability(load, "a.x"), { allowed: true, explicit: true, pattern: "a.*", humanOnly: false });
+  assert.deepEqual(agentRequestability(load, "q.z.r"), { allowed: false, explicit: true, pattern: null, humanOnly: false });
+  assert.deepEqual(agentRequestability(load, "solo"), { allowed: false, explicit: true, pattern: null, humanOnly: false });
 });
 
 test("agentRequestability: a policy that did not load opens nothing", () => {
@@ -579,5 +579,6 @@ test("agentRequestability: a policy that did not load opens nothing", () => {
     allowed: false,
     explicit: false,
     pattern: null,
+    humanOnly: false,
   });
 });

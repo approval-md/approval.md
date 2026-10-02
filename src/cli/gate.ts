@@ -56,7 +56,9 @@ import { isReaction, REACTIONS } from "../core/audit.js";
 import {
   decide,
   expire,
+  PROPOSE_KEY_MAX_BYTES,
   PROPOSE_PAYLOAD_MAX_BYTES,
+  PROPOSE_SUMMARY_MAX_BYTES,
   propose,
   register,
   registeredAction,
@@ -150,6 +152,7 @@ function refusalExitCode(refusal: GateRefusal): number {
     // APRV-445: the caller must change the call, as for any usage error. Its
     // own code rather than `usage` so a caller can tell "too big" from a typo.
     case "payload-too-large":
+    case "key-class-mismatch":
       return EXIT_USAGE;
     case "log-torn-tail":
       return EXIT_TORN_TAIL;
@@ -503,7 +506,62 @@ function readInlinePayload(text: string): InlinePayload {
       message: "--payload-json must be a JSON object (for example {\"text\":\"...\"}); an array, string, number or null is refused",
     };
   }
+  const flaw = payloadFlaw(value, "$");
+  if (flaw !== null) return { ok: false, tooLarge: false, message: `--payload-json ${flaw}` };
   return { ok: true, value };
+}
+
+/**
+ * What makes a parsed payload unbindable (APRV-445, L6), or `null`.
+ *
+ * A lone UTF-16 surrogate has no UTF-8 encoding, so the bytes a channel shows
+ * and the bytes the hash covers could disagree; a number JSON.parse turned into
+ * Infinity (`1e400`) has no RFC 8785 serialization at all. Both are refused as
+ * usage errors. Integers beyond 2^53 parse to the nearest double and are hashed
+ * as that double; that is documented rather than refused.
+ */
+function payloadFlaw(value: unknown, path: string): string | null {
+  if (typeof value === "string") {
+    return wellFormed(value) ? null : `has a lone UTF-16 surrogate at ${path}`;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? null : `has a number at ${path} that is not finite (JSON.parse read it as ${String(value)})`;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const flaw = payloadFlaw(value[index], `${path}[${String(index)}]`);
+      if (flaw !== null) return flaw;
+    }
+    return null;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (!wellFormed(key)) return `has a lone UTF-16 surrogate in a key under ${path}`;
+      const flaw = payloadFlaw(entry, `${path}.${key}`);
+      if (flaw !== null) return flaw;
+    }
+  }
+  return null;
+}
+
+/** No lone UTF-16 surrogate (what `String.prototype.isWellFormed` answers). */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+
+function wellFormed(text: string): boolean {
+  return !LONE_SURROGATE.test(text);
+}
+
+/** `--key` and `--summary` caps and well-formedness (APRV-445, L6), or `null`. */
+function proposeTextFlaw(key: string, summary: string): string | null {
+  if (!wellFormed(key)) return "--key has a lone UTF-16 surrogate";
+  if (!wellFormed(summary)) return "--summary has a lone UTF-16 surrogate";
+  if (Buffer.byteLength(key, "utf8") > PROPOSE_KEY_MAX_BYTES) {
+    return `--key is over ${String(PROPOSE_KEY_MAX_BYTES)} bytes`;
+  }
+  if (Buffer.byteLength(summary, "utf8") > PROPOSE_SUMMARY_MAX_BYTES) {
+    return `--summary is over ${String(PROPOSE_SUMMARY_MAX_BYTES)} bytes; it is one line an approver reads, and the payload is where text goes`;
+  }
+  return null;
 }
 
 function inlinePayloadRefusal(
@@ -559,6 +617,9 @@ export function commandPropose(argv: string[], streams: Streams, cwd: string): n
   if (payloadText === null) {
     return usageError(streams, json, "missing --payload-json <json>", PROPOSE_HELP);
   }
+
+  const textFlaw = proposeTextFlaw(key, summary);
+  if (textFlaw !== null) return usageError(streams, json, textFlaw, PROPOSE_HELP);
 
   const asFlag = stringFlag(flags, "--as");
   const actor = resolvePrincipalActor(asFlag);

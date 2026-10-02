@@ -2443,6 +2443,12 @@ test("the refusal-code union is frozen public API", () => {
     // agents by name, and a proposal payload over the documented size.
     "class-not-agent-requestable",
     "payload-too-large",
+    // APRV-445 refutation: a plain request (or a task file) in the `propose:`
+    // namespace, a `start` on a task `propose` did not register, and a key that
+    // does not name its class.
+    "task-is-proposal",
+    "task-not-proposal",
+    "key-class-mismatch",
   ]);
 });
 

@@ -312,7 +312,9 @@ export function explain(
   const agentRequest = agentRequestability(load, actionClass);
   if (agentRequest.pattern !== null) {
     decisionPath.push(
-      agentRequest.allowed
+      agentRequest.humanOnly
+        ? `agent requests: refused: human-only — ${quote(actionClass)} resolves human-only, which no agent may request, whatever ${quote(agentRequest.pattern)} says`
+        : agentRequest.allowed
         ? `agent requests: allowed — ${quote(agentRequest.pattern)} sets agent_may_request: true and the class is declared by name, so an agent may open a request for it with \`approval propose\``
         : agentRequest.explicit
           ? `agent requests: refused — ${quote(agentRequest.pattern)} sets agent_may_request: false`

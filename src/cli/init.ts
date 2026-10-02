@@ -358,7 +358,16 @@ export function commandInit(
   if (written.length === 0) {
     streams.out("  nothing written — every target already exists\n");
   } else {
-    for (const path of written) streams.out(`  wrote    ${path}\n`);
+    for (const path of written) {
+      // APRV-445 refutation (L8): a re-run in a directory scaffolded by an
+      // older build appends the lines it lacks (since APRV-445, the payload
+      // store's), and says which, so the change of default is not silent.
+      if (path === ".gitignore" && currentGitignore !== null) {
+        streams.out(`  appended .gitignore: ${merged.added.join(", ")}\n`);
+      } else {
+        streams.out(`  wrote    ${path}\n`);
+      }
+    }
   }
   for (const entry of existing) {
     streams.out(`  existing ${entry.path} (${entry.code}) — left exactly as it is\n`);

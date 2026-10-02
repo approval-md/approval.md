@@ -697,3 +697,4 @@ BotFather (`/revoke`) or delete the bot (`/deletebot`).
 | 4 | A filesystem fact: unreadable path, permissions. |
 | 5 | `approval run` only: no valid token was presented. |
 | 6 | `approval wait` only: the timeout elapsed with decisions still pending. |
+| 7 | `approval wait` only: void. The policy was re-attested since the request was asked, so its answer can never be used; ask again. |

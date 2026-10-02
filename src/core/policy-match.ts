@@ -700,13 +700,20 @@ export interface AgentRequestability {
   explicit: boolean;
   /** The key whose `agent_may_request` decided, or `null` when none stated one. */
   pattern: string | null;
+  /**
+   * The class resolves `human-only` (APRV-445 refutation, L4). A human-only
+   * member under an open family is never proposable, whatever the flag says,
+   * and an explanation or a diff that called it "allowed" would be stating a
+   * door the gate slams.
+   */
+  humanOnly: boolean;
 }
 
 export function agentRequestability(
   load: PolicyLoadResult,
   actionClass: string,
 ): AgentRequestability {
-  if (!load.ok) return { allowed: false, explicit: false, pattern: null };
+  if (!load.ok) return { allowed: false, explicit: false, pattern: null, humanOnly: false };
   const classes = load.policy.classes ?? {};
   const own = Object.prototype.hasOwnProperty.call(classes, actionClass)
     ? classes[actionClass]
@@ -730,9 +737,11 @@ export function agentRequestability(
     }
   }
 
+  const humanOnly = resolve(load, actionClass).autonomy === "human-only";
   return {
-    allowed: explicit && decided?.value === true,
+    allowed: explicit && decided?.value === true && !humanOnly,
     explicit,
     pattern: decided?.pattern ?? null,
+    humanOnly,
   };
 }

@@ -141,7 +141,7 @@ test("a clean rule match answers with the full explanation object", () => {
         tieBreak: "specificity",
       },
     ],
-    agentRequest: { allowed: false, explicit: false, pattern: null },
+    agentRequest: { allowed: false, explicit: false, pattern: null, humanOnly: false },
     decisionPath: [
       'class "read.web"; reversible: not stated',
       `policy loaded from ${path}`,
@@ -187,7 +187,7 @@ test("--reversible false engages the floor and records what it overrode", () => 
         tieBreak: "specificity",
       },
     ],
-    agentRequest: { allowed: false, explicit: false, pattern: null },
+    agentRequest: { allowed: false, explicit: false, pattern: null, humanOnly: false },
     decisionPath: [
       'class "read.web"; reversible: false',
       `policy loaded from ${path}`,
@@ -226,7 +226,7 @@ test("an unmatched class falls to defaults.autonomy", () => {
     irreversibility: "not-applicable",
     irreversiblePatterns: [],
     candidates: [],
-    agentRequest: { allowed: false, explicit: false, pattern: null },
+    agentRequest: { allowed: false, explicit: false, pattern: null, humanOnly: false },
     decisionPath: [
       'class "physical.order"; reversible: not stated',
       `policy loaded from ${path}`,
