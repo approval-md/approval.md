@@ -28,6 +28,22 @@ before a tag.
   a Telegram redelivery of the refused tap, or its bytes replayed, takes no
   fallback to the new card, so it appends nothing and sends nothing.
 
+- **The Agent Village tenant policy lives here, and the Hermes guide describes
+  the co-located shape (APRV-446).** `examples/agent-village/approval-policy.md`
+  is the canonical day-one policy the control plane renders into each tenant's
+  `APPROVAL.md`: a recorder (autonomous default), the three gate organs
+  human-only, the Hermes tool classes and `network.call`/`read.web` recorded and
+  never gated, `intent.publish.inferred.index` manual and agent-requestable, a
+  72h proposal window, and the relay credential and resident chat named by env.
+  It is named `approval-policy.md` because any file named `APPROVAL.md`
+  classifies `policy.core`. `tests/agent-village-policy.test.ts` proves it
+  through the real loader, resolver, `policy attest --bootstrap` and `hook
+  hermes`, and runs the propose round once the build carries #569's
+  `agent_may_request`. `docs/hermes-hook.md` "For Agent Village" now covers
+  `serve` on loopback or a unix socket, the agent token file, `up --api-base`
+  against the relay, the operator attestation, the 240 s hook window beside the
+  72 h proposal window, and what the hook never sees.
+
 - **A hosted tenant with no shell gets its starting policy from the operator,
   once, and can see who set it (APRV-449).** `approval policy attest
   --bootstrap --as human:<operator>` attests a store's first policy and nothing
