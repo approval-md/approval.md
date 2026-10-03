@@ -502,6 +502,32 @@ export function resolveHumanActor(options: { actor?: string } = {}): string | nu
   return null;
 }
 
+/**
+ * Who attested the policy at `seq`: the `actor` of the attestation record a
+ * status names, or `null` when no record at that seq is an attestation
+ * (APRV-449).
+ *
+ * `records` are VERIFIED records, as {@link checkAttestation}'s are. The answer
+ * is read from the log and never from the policy file: a tenant asking who set
+ * their starting policy is asking what was recorded, and an `approvers:` block
+ * in the file names who MAY decide, which is a different fact. Records are
+ * appended in seq order, so the record at index `seq - 1` is tried first and a
+ * scan is the fallback for a slice that does not start at genesis.
+ *
+ * The identity is config-declared (see {@link resolveHumanActor}), so this
+ * reports the identity the attesting process declared. It does not authenticate
+ * it, and a caller rendering it should not imply that it does.
+ */
+export function attesterAt(records: readonly EventRecord[], seq: number): string | null {
+  const direct = records[seq - 1];
+  const record =
+    direct !== undefined && direct.seq === seq
+      ? direct
+      : records.find((candidate) => candidate.seq === seq);
+  if (record === undefined || attestationSha256(record) === null) return null;
+  return record.actor;
+}
+
 // ===========================================================================
 // Organ attestation (APRV-272, amended SPEC.md §5.2 and §8)
 // ===========================================================================

@@ -49,6 +49,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve as resolvePathSegments } from "node:path";
 
+import { appendBootstrapAttestation, type BootstrapError } from "../core/attest-bootstrap.js";
 import {
   HUMAN_ACTOR_ENV,
   appendAttestation,
@@ -62,7 +63,13 @@ import {
 } from "../core/command-class.js";
 import { POLICY_FILENAMES, loadPolicy } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
-import { EXIT_IO, EXIT_OK, EXIT_TORN_TAIL, EXIT_USAGE } from "./exit-codes.js";
+import {
+  EXIT_INTEGRITY,
+  EXIT_IO,
+  EXIT_OK,
+  EXIT_TORN_TAIL,
+  EXIT_USAGE,
+} from "./exit-codes.js";
 import { POLICY_ATTEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
@@ -75,6 +82,7 @@ const FLAGS: Record<string, FlagKind> = {
   "--path": "string",
   "--as": "string",
   "--log": "string",
+  "--bootstrap": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -475,6 +483,17 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
 
   const organFlag = stringFlag(parsed.flags, "--organ");
   const pathFlag = stringFlag(parsed.flags, "--path");
+  const bootstrap = boolFlag(parsed.flags, "--bootstrap");
+  // APRV-449. The bootstrap is a rule about the POLICY attestation (a store's
+  // first one), so beside a route that appends a different event it would be a
+  // flag nobody read. Refused rather than ignored.
+  if (bootstrap && (organFlag !== null || pathFlag !== null)) {
+    return usageError(
+      streams,
+      json,
+      `--bootstrap attests a store's first POLICY and cannot be combined with ${organFlag !== null ? "--organ" : "--path"}, which appends a different record`,
+    );
+  }
   // `--path` is decided first so that passing both flags reports the conflict
   // rather than silently running the organ route with a `--path` nobody read.
   if (pathFlag !== null) {
@@ -505,7 +524,13 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
 
   // No timestamp is passed: `policy.updated` is gate-typed, so amended SPEC.md
   // §8 (A2) has core stamp it at the write boundary from its own clock.
-  const result = appendAttestation(logPath, policy.path, actor);
+  //
+  // `--bootstrap` (APRV-449) reads the verified log first and attests only a
+  // store that has never been attested; a re-run is `policy-already-attested`
+  // and changed bytes are `policy-amendment-required`, both appending nothing.
+  const result = bootstrap
+    ? appendBootstrapAttestation(logPath, policy.path, actor)
+    : appendAttestation(logPath, policy.path, actor);
 
   if (result.ok) {
     const sha256 = (result.record.payload as Record<string, unknown>)["sha256"] as string;
@@ -519,14 +544,19 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
     return EXIT_OK;
   }
 
+  const error: BootstrapError = result.error;
   if (json) {
+    // `seq` and `attested_by` ride only on the two bootstrap refusals, which is
+    // the one place they are facts: the attestation in force, and who made it.
+    const extra =
+      error.seq === undefined ? {} : { seq: error.seq, attested_by: error.attested_by ?? null };
     streams.err(
-      `${JSON.stringify({ ok: false, error: { code: result.error.code, message: result.error.message } })}\n`,
+      `${JSON.stringify({ ok: false, error: { code: error.code, message: error.message, ...extra } })}\n`,
     );
   } else {
-    streams.err(`approval: ${result.error.message}\n`);
+    streams.err(`approval: ${error.message}\n`);
   }
-  switch (result.error.code) {
+  switch (error.code) {
     case "actor-not-human":
       // The actor rule, re-refused by core with its own code since APRV-20 pass
       // two. Reachable only if this layer's check and core's ever disagree; it
@@ -537,9 +567,19 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
       // different fact from the actor rule, and no longer spelled the same way.
       return EXIT_USAGE;
     case "corrupt-tail":
+    case "log-torn-tail":
       // A torn tail has its own code in the frozen table, and calling it I/O
       // would misreport a crashed write as a permission problem.
       return EXIT_TORN_TAIL;
+    case "policy-already-attested":
+    case "policy-amendment-required":
+    case "head-moved":
+    case "log-corrupt":
+      // APRV-449. Decisions the runtime made from the log (and a chain it will
+      // not decide from), on the split the gate verbs draw: a well-formed
+      // command the runtime said no to is 1, not 2. A provisioning step branches
+      // on `error.code`; `policy-already-attested` is its expected re-run answer.
+      return EXIT_INTEGRITY;
     default:
       return EXIT_IO;
   }
