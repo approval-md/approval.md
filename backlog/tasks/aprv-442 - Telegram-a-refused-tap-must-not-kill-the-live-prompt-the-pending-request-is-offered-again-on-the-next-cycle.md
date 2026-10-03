@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-opus-lane-c3'
 created_date: '2026-09-25 08:08'
-updated_date: '2026-10-03 13:44'
+updated_date: '2026-10-03 18:44'
 labels:
   - telegram
   - channels
@@ -63,6 +63,12 @@ Refuter (fresh opus): no blocker. Fixed finding 1 (a replay or webhook redeliver
 Validation: tests/telegram-webhook.test.ts, four cases (poll and webhook x burst and paced), failing before the fix (cycle after refusal delivered []), passing after. Related suites (telegram-webhook, channels-telegram, sender-identity, checkpoint-tap, gesture-refusal, telegram-tap-latency, channels-contract): 321 pass, exit 0. Full suite before the refuter fix: 5393 pass, 0 fail, exit 0, no new failures vs baseline. Lint and tsc exit 0.
 
 Validation after the refuter fix: full suite 5393 pass, 0 fail, exit 0, no new failures vs scripts/ci-baseline.json; lint exit 0; tsc exit 0.
+
+Follow-up, not in this PR (second, fresh refuter on the final diff bfb99e38: no blocker).
+- Finding 1, test gaps: no test yet for the handler-throws release (a throwing handler, the next cycle re-offers, a replay of the thrown-on bytes appends nothing); for a refusal on a pre-restart stale copy (two channels: the unmapped account taps the old copy, the next cycle re-sends, a replay of the stale copy is dead; this is the branch that justifies recording the tap nonce separately); or for a digest-member refusal (only that member is re-offered, its siblings stay armed) and a released key the log settled before the cycle (dropped, terminal pass annotates).
+- Finding 3: under paced, a released digest member nulls the whole paced.current while its siblings stay armed on screen, so a second question can show under them. Alternative: filter the key out and null only when empty, at the cost of that member waiting for its siblings.
+- Finding 4: under paced, when a checkpoint is due, offerCheckpoint ends the cycle after the drain and before the send, so the re-offer lands one cycle later.
+- Churn question (5b): an unmapped chat member can churn cards, one refusal record and one re-send per tap on each fresh card, and can kill the card the mapped approver is about to tap. The coordinator prefers to keep the disarm and rate-limit re-offers to one per cycle per request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
