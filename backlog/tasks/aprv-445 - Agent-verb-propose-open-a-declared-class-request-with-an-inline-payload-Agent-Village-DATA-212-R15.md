@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-02 23:10'
+updated_date: '2026-10-03 05:23'
 labels: []
 dependencies: []
 references:
@@ -76,6 +76,10 @@ HOSTED FOLLOW-UP (not this lane): approval-md-hosted hermes-image write-hooks.py
 Validation: npm test exit 0, 5427 tests, 5426 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0.
 
 Recheck 3 (2026-10-03). SF1: the organ rules are scoped to the gate's own directories (gateRootKind: home root, profile home, approval home, a home's approval/, scripts/). A recursive read or read tool is credential only for those roots or for a directory under a home that directly holds a credential file (holdsCredentials). A glob or unknown-variable write is policy.core only into those directories, or when a pattern could name the home or an organ. workspace/, skills/ and similar are ordinary, which fits the hosted HERMES_HOME=/data/.hermes. SF2: after an unresolvable cd (cd $X, cd "$D", cd -, an unknown $HERMES_HOME), later relative writes are policy.core and later relative reads account.credential. SF3: globs over .hermes/.approval/organ names, globbed reads (expanded when the directory exists), and < reads. Lows: copies into a directory (-t, --target-directory=, trailing /, existing dir) write <dir>/<name>; tar -x and unzip write into -C/-d or the cwd; profile homes .hermes/profiles/<p>/ carry the home's organs; registry code 7 wording; new refusal 'contended' (exit 1) when propose exhausts its restarts; APPROVAL_HERMES_HOME documented as trusted as given. Conformance refusal-unions 25.0.0. Validation: npm test exit 0, 5429 tests, 5428 pass, 0 fail, 1 skipped; tsc exit 0; lint exit 0.
+
+Merge 2026-10-02: origin/main 89b8fe54 merged at 4db5f5f6 (conflicts in execute/help/hook/instructions/verb-registry/server resolved keeping both; hermesFailClosed now passes the APRV-427 wait seam). Resume point: run the full npm test in the worktree, then push carter/data-212-propose and watch gh pr checks 569.
+
+Post-merge validation: npm test exit 0, 5461 tests, 5460 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0. Refusal unions unchanged by the merge (origin touched no conformance vectors), so no regeneration. Resume point: push carter/data-212-propose and watch gh pr checks 569 to a verdict; the orchestrator arms the merge.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
