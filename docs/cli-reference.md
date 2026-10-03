@@ -65,10 +65,19 @@ tampering.
 ```
 clean      {"status":"clean","records":3,"head":{"seq":3,"hash":"<64 hex>"}}
 torn-tail  {"status":"torn-tail","records":3,"head":null,
-            "intactThroughSeq":3,"message":"..."}
+            "intactThroughSeq":3,"tear":"nul-filled","tornBytes":456,
+            "intactBytes":2817,"message":"..."}
 corrupt    {"status":"corrupt","records":null,"head":null,
             "firstBadSeq":2,"reason":"hash-mismatch","message":"..."}
 ```
+
+On a torn tail, `tear` says which crash left it (APRV-440). `nul-filled` means
+every byte of the unterminated tail is NUL: the crash-before-writeback
+signature, where the file grew but its data never reached the disk, so nothing
+was tampered and no record was half-written. `partial-line` is a writer that
+died mid-line. `intactBytes` is where the verified records end, which is the
+length to truncate the file to; `tornBytes` is what that removes. Nothing is
+truncated by this verb.
 
 `head` is null for an empty log. `reason` is one of `malformed-line`,
 `schema-invalid`, `bad-alg`, `hash-mismatch`, `prev-mismatch`, `seq-gap`,

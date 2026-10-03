@@ -670,10 +670,33 @@ test("doctor: a torn tail fails the log check and is not repaired", async () => 
 
   const check = checkNamed(run, "log");
   assert.equal(check.status, "fail");
-  assert.match(check.detail, /unterminated final line/u);
+  assert.match(check.detail, /unterminated line of 36 byte\(s\) after record \d+/u);
+  assert.match(check.detail, /crashed write/u);
   assert.match(check.fix ?? "", /approval log verify/u);
   assert.equal(run.code, 1);
   // The torn line is exactly where it was: doctor truncates nothing.
+  assert.deepEqual(readFileSync(logPathOf(home)), before);
+});
+
+test("doctor: a NUL-filled tail is the crash-before-writeback signature, and the fix names the bytes (APRV-440)", async () => {
+  const port = await freePort();
+  const home = await makeHome({ port });
+  const intact = statSync(logPathOf(home)).size;
+  appendFileSync(logPathOf(home), Buffer.alloc(456));
+  const before = readFileSync(logPathOf(home));
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  const check = checkNamed(run, "log");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /456 NUL byte\(s\) after record \d+, the crash-before-writeback signature/u);
+  assert.match(check.detail, /nothing was tampered/u);
+  const fix = check.fix ?? "";
+  assert.ok(fix.includes(`keep the first ${String(intact)} byte(s)`), fix);
+  assert.ok(fix.includes("drop the final 456"), fix);
+  assert.ok(fix.startsWith("approval log verify"), fix);
+  assert.ok(fix.includes(`truncateSync(process.argv[1], ${String(intact)})`), fix);
+  assert.equal(run.code, 1);
   assert.deepEqual(readFileSync(logPathOf(home)), before);
 });
 

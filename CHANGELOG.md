@@ -15,6 +15,29 @@ before a tag.
 
 ## Unreleased
 
+- **An acknowledged append survives the machine dying the next moment
+  (APRV-440).** Every append to `events.jsonl` now fsyncs the descriptor after
+  its single write and before the verb reports ok, and the append that creates
+  the file also fsyncs the log directory (and the parent of any directory it
+  created), so the new name is as durable as its bytes. Before this the append
+  was atomic against other writers and nothing more: on a hosted tenant a
+  platform kill about 30 s after an acknowledged attestation left the file
+  ending in 456 NUL bytes where the record had been. A failed fsync, a failed
+  directory fsync and a short write are each reported as `io` rather than
+  acknowledged, with a message that says the bytes may be on disk; no refusal
+  code was added and compare-and-append is unchanged. Measured on macOS (APFS,
+  Node's fsync is `F_FULLFSYNC` there): 3.7 ms per append, and 84 ms added to a
+  daemon tick that appends 20 records; a tick that appends nothing pays nothing.
+  `APPROVAL_BENCH=1 node --test dist/tests/append-fsync.bench.js` re-measures.
+  `approval log verify` now says which crash tore a tail: `tear: "nul-filled"`
+  is the crash-before-writeback signature (the file grew, its data never reached
+  the disk; nothing was tampered and no record is half-written), and
+  `partial-line` is a writer that died mid-line. `--json` gains `tear`,
+  `tornBytes` and `intactBytes` (the byte offset the verified records end at),
+  the torn-byte count is now UTF-8 bytes rather than string length, and
+  `approval doctor`'s log row names the bytes to keep and the command that
+  keeps them. Nothing truncates on its own.
+
 - **A harness probe drives its own matrix, so an operator runs one command
   instead of typing thirty prompts (APRV-418).**
   `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human

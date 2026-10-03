@@ -42,6 +42,16 @@
  *    canonicalization minus the `hash` field. One scheme, two inputs — a
  *    verifier strips `hash` and re-derives. Appended with a single `write(2)`
  *    on a handle opened `O_APPEND`.
+ * 5b. **Durable before ok (APRV-440).** The write is followed by `fsync(2)` on
+ *    the same descriptor, and only then does the append report ok. When this
+ *    append created the file, the log directory is fsynced too (and the parent
+ *    of every directory this call created), so the new name survives along with
+ *    its bytes. Without this, an acknowledged record lived in the page cache
+ *    only: a platform kill before writeback left the file extended over blocks
+ *    that were never written, which reads back as a NUL-filled unterminated tail
+ *    (observed on a hosted tenant on 2026-09-25: an acknowledged attestation
+ *    lost, 456 NUL bytes in its place). Atomicity against concurrent writers
+ *    was guarantee 5 all along; durability against the machine dying is this one.
  *
  * 6. **The writing daemon names itself, or is refused (APRV-383).** A record
  *    appended by a declaring daemon process carries `daemon`, the id of the
@@ -62,12 +72,12 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   fstatSync,
   mkdirSync,
   openSync,
   readSync,
   unlinkSync,
-  writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
 
@@ -76,6 +86,7 @@ import {
   daemonStampForAppend,
 } from "./daemon-identity.js";
 import { canonicalize, JcsError } from "./jcs.js";
+import { appendWriteLayer } from "./log-write-layer.js";
 import { validate, type ValidateOptions, type ValidationError } from "./validate.js";
 
 /** SPEC.md §8: the hash scheme identifier stamped on every v0.1 record. */
@@ -424,6 +435,66 @@ function sleepSync(ms: number): void {
   Atomics.wait(buffer, 0, 0, ms);
 }
 
+/** `O_APPEND` writer flags; `O_EXCL` added for the first try, so creation is known. */
+const APPEND_FLAGS = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT;
+/** The mode Node's `"a"` opens with; the umask applies as it always did. */
+const APPEND_MODE = 0o666;
+
+/**
+ * Open `logPath` for append and say whether this call created it. `O_EXCL`
+ * first: under the append lock no other sanctioned writer can race the create, so
+ * `EEXIST` means the file was already there and a plain append open follows.
+ */
+function openForAppend(logPath: string): { fd: number; created: boolean } {
+  const writeLayer = appendWriteLayer();
+  try {
+    return { fd: writeLayer.open(logPath, APPEND_FLAGS | fsConstants.O_EXCL, APPEND_MODE), created: true };
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+  }
+  return { fd: writeLayer.open(logPath, APPEND_FLAGS, APPEND_MODE), created: false };
+}
+
+/**
+ * fsync a directory, so a name created in it survives a crash. Windows cannot
+ * open a directory for this and its filesystems journal names themselves, so it
+ * is skipped there; everywhere else a failure is the caller's to report.
+ */
+function fsyncDirectory(dir: string): void {
+  if (process.platform === "win32") return;
+  const writeLayer = appendWriteLayer();
+  const fd = writeLayer.open(dir, fsConstants.O_RDONLY, 0);
+  try {
+    writeLayer.fsync(fd);
+  } finally {
+    try {
+      writeLayer.close(fd);
+    } catch {
+      // The fsync above is what mattered; a failed close of a read-only
+      // directory handle changes nothing on disk.
+    }
+  }
+}
+
+/**
+ * The directories whose entries a first append made new: the log's own
+ * directory (which gained the file), and, when `withAppendLock` had to create
+ * directories, the parent of each one it created, up to and including the
+ * parent of the topmost. Ordered innermost first.
+ */
+function directoriesToSync(logPath: string, firstCreatedDir: string | undefined): string[] {
+  const dirs = [dirname(logPath)];
+  if (firstCreatedDir === undefined) return dirs;
+  const stop = dirname(firstCreatedDir);
+  for (let dir = dirs[0] as string; dir !== stop; ) {
+    const parent = dirname(dir);
+    if (parent === dir) break; // the filesystem root: nothing above to sync
+    dirs.push(parent);
+    dir = parent;
+  }
+  return dirs;
+}
+
 type LockOutcome = { ok: true; path: string } | { ok: false; error: AppendError };
 
 /**
@@ -756,8 +827,22 @@ export function withAppendLock<T>(
   run: () => T,
   options: LockOptions = {},
 ): LockedResult<T> {
+  return lockedRun(logPath, () => run(), options);
+}
+
+/**
+ * {@link withAppendLock}, also telling `run` the first directory its `mkdir`
+ * created (`undefined` when the log's directory already existed), which the
+ * append needs to know which directory entries are new (APRV-440).
+ */
+function lockedRun<T>(
+  logPath: string,
+  run: (firstCreatedDir: string | undefined) => T,
+  options: LockOptions,
+): LockedResult<T> {
+  let firstCreatedDir: string | undefined;
   try {
-    mkdirSync(dirname(logPath), { recursive: true });
+    firstCreatedDir = mkdirSync(dirname(logPath), { recursive: true });
   } catch (cause) {
     return {
       ok: false,
@@ -776,7 +861,7 @@ export function withAppendLock<T>(
   if (!lock.ok) return { ok: false, error: lock.error };
 
   try {
-    return { ok: true, value: run() };
+    return { ok: true, value: run(firstCreatedDir) };
   } finally {
     releaseLock(lock.path);
   }
@@ -825,7 +910,11 @@ export function appendEvent(
   if (stamp.kind === "refuse") return fail(stamp.code, stamp.message);
   const daemon = stamp.kind === "stamp" ? stamp.id : null;
 
-  const held = withAppendLock<AppendResult>(logPath, () => {
+  // Set once bytes may reach the file, success or not: the read cache
+  // must re-prove a log whose bytes changed even when the append then failed to
+  // confirm them durable.
+  let wrote = false;
+  const held = lockedRun<AppendResult>(logPath, (firstCreatedDir) => {
     const tail = readTail(logPath);
     if (!tail.ok) return { ok: false, error: tail.error };
 
@@ -864,22 +953,63 @@ export function appendEvent(
       );
     }
 
-    let fd: number;
+    let opened: { fd: number; created: boolean };
     try {
-      fd = openSync(logPath, "a");
+      opened = openForAppend(logPath);
     } catch (cause) {
       return fail("io", `log ${logPath} could not be opened for append: ${errorMessage(cause)}`);
     }
+    const { fd, created } = opened;
+    const writeLayer = appendWriteLayer();
+    const bytes = Buffer.from(`${line}\n`, "utf8");
     try {
       // Single write syscall on an O_APPEND handle: the line lands whole or not at all.
-      writeSync(fd, `${line}\n`);
-    } catch (cause) {
-      return fail("io", `log ${logPath} could not be written: ${errorMessage(cause)}`);
+      // Set BEFORE the write: one that throws may still have put bytes in the
+      // file, and a needless re-proof by the read cache costs only time.
+      wrote = true;
+      let written: number;
+      try {
+        written = writeLayer.write(fd, bytes);
+      } catch (cause) {
+        return fail("io", `log ${logPath} could not be written: ${errorMessage(cause)}`);
+      }
+      if (written !== bytes.length) {
+        return fail(
+          "io",
+          `log ${logPath} took ${String(written)} of ${String(bytes.length)} bytes of seq ${String(record.seq)}: the write was short, so the file now ends with a torn line and the record was not appended`,
+        );
+      }
+      // Durable before ok (guarantee 5b). Until this returns, the record exists
+      // in the page cache only, and a kill before writeback leaves the file
+      // extended over unwritten blocks: a NUL-filled tail where the record was.
+      try {
+        writeLayer.fsync(fd);
+      } catch (cause) {
+        return fail(
+          "io",
+          `log ${logPath}: seq ${String(record.seq)} was written but fsync failed (${errorMessage(cause)}), so it is not known to be durable: it may be in the file now and gone after a crash. Re-read the log before deciding anything from it.`,
+        );
+      }
     } finally {
       try {
-        closeSync(fd);
+        writeLayer.close(fd);
       } catch {
-        // Nothing actionable; the data is already handed to the kernel.
+        // Nothing actionable: the bytes are written and, on the ok path, synced.
+      }
+    }
+
+    // A new file is a new directory entry, and fsync of the file does not make
+    // its NAME durable: without this a crash can keep the bytes and lose the file.
+    if (created) {
+      for (const dir of directoriesToSync(logPath, firstCreatedDir)) {
+        try {
+          fsyncDirectory(dir);
+        } catch (cause) {
+          return fail(
+            "io",
+            `log ${logPath}: seq ${String(record.seq)} was written and synced but its directory ${dir} could not be (${errorMessage(cause)}), so the newly created file is not known to survive a crash. Re-read the log before deciding anything from it.`,
+          );
+        }
       }
     }
 
@@ -887,8 +1017,8 @@ export function appendEvent(
   }, options);
 
   const result: AppendResult = held.ok ? held.value : { ok: false, error: held.error };
-  // After the lock is released and only for a record that actually landed: the
-  // reader cache must not serve a prefix proof anchored before this write.
-  if (result.ok) noteAppend(logPath);
+  // After the lock is released, for every append that put bytes in the file:
+  // the reader cache must not serve a prefix proof anchored before this write.
+  if (wrote) noteAppend(logPath);
   return result;
 }
