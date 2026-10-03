@@ -185,6 +185,8 @@ so the store is checked rather than trusted.
 - [docs/cli-reference.md#policy-attest](cli-reference.md#policy-attest): the verb,
   `--bootstrap`, and the refusal shapes.
 - [docs/hermes-hook.md](hermes-hook.md): the fail-closed hook that blocks every
-  tool until this step has run.
+  tool until this step has run, and the co-located Agent Village shape.
+- [examples/agent-village/approval-policy.md](../examples/agent-village/approval-policy.md):
+  the Agent Village starting policy, the template `$RENDERED` is rendered from.
 - SPEC.md §5.2 (attestation), §10.3 (channel amendments), §11 (identity is
   config-declared), §13 (non-goals; APRV-422 pending).

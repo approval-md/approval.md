@@ -77,6 +77,10 @@ VERIFICATION. tests/cli-attest-bootstrap.test.ts (9 tests, every child spawned w
 
 AC #4 reading: the trust statement is written once (docs/hosted-provisioning.md, 'The trust statement') and cites APRV-422's proposed section 13 wording verbatim; the reverse pointer from SPEC.md section 13 is SPEC hunk 3 above, for the human applying APRV-422.
 
+Resume point: pushed lane/aprv-449-446 at 5fbb6ab8; next: gh pr create, watch checks.
+
+CI: PR #570 green (full gate shards 1-3, protected paths, classify tier, ci). Full local npm test on the stacked branch (449 + 446): 5405 pass, 0 fail, 2 skipped, exit 0.
+
 Review fixes (refuter on #570, 2026-10-03):
 1. --bootstrap resolves the log under --dir (the store's default log path) unless --log is given; the plain verb keeps its cwd default. Test: attest --bootstrap --dir <store> from a foreign cwd lands in the store's log, the re-run refuses there, no stray log appears, and an explicit --log still wins.
 2. docs/hosted-provisioning.md step 2 now writes the render only when the store has no log file at all; --bootstrap is the only attestation guard; step 3 passes --dir; the doc says why a status --json guard is wrong (a torn tail reads not-attested; status exits 1 so pipefail makes the if always false) and that steps 1-3 run before up/serve start.
