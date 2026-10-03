@@ -277,7 +277,9 @@ export type VerifyFailureReason =
  * - `torn-tail` — the file's final line is torn (it is not newline-terminated,
  *   i.e. a writer died mid-line) while every complete line before it verifies.
  *   This is the crashed-write signature and is deliberately distinct from
- *   corruption: it is an incomplete write, not evidence of tampering.
+ *   corruption: it is an incomplete write, not evidence of tampering. `tear`
+ *   says which crash (APRV-440), and `intactBytes` is where the verified log
+ *   ends, which is the length a human truncates the file to.
  * - `corrupt` — everything else, reported at the first offending record.
  */
 export type VerifyResult =
@@ -286,6 +288,11 @@ export type VerifyResult =
       status: "torn-tail";
       records: number;
       intactThroughSeq: number;
+      tear: TornTailKind;
+      /** UTF-8 byte length of the unterminated tail (exact for a NUL-filled one). */
+      tornBytes: number;
+      /** Byte offset where the tail starts: the verified log is the file's first this-many bytes. */
+      intactBytes: number;
       message: string;
       anomalies: ChainAnomaly[];
     }
@@ -296,6 +303,27 @@ export type VerifyResult =
       message: string;
       anomalies: ChainAnomaly[];
     };
+
+/**
+ * Which crash a torn tail is the signature of (APRV-440).
+ *
+ * - `nul-filled` — every byte of the unterminated tail is NUL. The file was
+ *   extended (its size reached the disk) but the data blocks under the new size
+ *   never did: the machine stopped after the append was acknowledged and before
+ *   writeback. A kill between the write and its fsync, or an append made before
+ *   fsync was in the append path, leaves exactly this. No record text survives
+ *   to be half-written, so it is neither a tampered line nor a partial one.
+ * - `partial-line` — anything else: some of a record's bytes reached the file
+ *   and its newline did not, the signature of a writer that died mid-write.
+ *
+ * Neither is corruption, and neither is ever repaired here.
+ */
+export type TornTailKind = "nul-filled" | "partial-line";
+
+/** True when every character of `tail` is NUL (the tail is never empty here). */
+function isNulFilled(tail: string): boolean {
+  return tail.length > 0 && tail.replaceAll("\u0000", "").length === 0;
+}
 
 /** Options accepted by {@link verify}. */
 export interface VerifyOptions extends ValidateOptions {
@@ -786,15 +814,28 @@ export function verifyText(
   const anomalies = chainAnomalies(records, toleranceOf(options));
 
   if (torn !== null) {
+    const intactThroughSeq = head === null ? 0 : head.seq;
+    const tear: TornTailKind = isNulFilled(torn) ? "nul-filled" : "partial-line";
+    // Bytes, not UTF-16 units: the operator truncates a file, and a count in
+    // code units would be wrong for any tail holding a multi-byte character.
+    // The verified prefix ends at a newline, and a decoded line re-encodes to
+    // its own bytes once it has verified, so `intactBytes` is exact.
+    const tornBytes = Buffer.byteLength(torn, "utf8");
+    const intactBytes = (prefix === null ? 0 : prefix.byteLength) + Buffer.byteLength(text, "utf8") - tornBytes;
+    const signature =
+      tear === "nul-filled"
+        ? `ends with an unterminated tail of ${String(tornBytes)} NUL byte(s) after record ${String(intactThroughSeq)}: the crash-before-writeback signature (the file was extended but its data never reached the disk before the machine stopped), not a tampered or half-written line. Whatever those bytes held, one acknowledged append or several, is gone from this file`
+        : `ends with an unterminated line of ${String(tornBytes)} byte(s) after record ${String(intactThroughSeq)}: the signature of a crashed write, a writer that died mid-line`;
     return {
       result: {
         status: "torn-tail",
         anomalies,
         records: lineCount,
-        intactThroughSeq: head === null ? 0 : head.seq,
-        message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
-          head === null ? 0 : head.seq
-        } verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`,
+        intactThroughSeq,
+        tear,
+        tornBytes,
+        intactBytes,
+        message: `log ${logPath} ${signature}; records 1..${String(intactThroughSeq)} verify clean and are its first ${String(intactBytes)} byte(s). The log is NOT repaired here: truncating the torn tail is a human decision.`,
       },
       records,
     };
