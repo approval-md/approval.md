@@ -86,7 +86,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { POLICY_HASH_FIELD, policyBytesHash } from "../core/attest.js";
@@ -145,6 +145,18 @@ export const RELAY_GESTURE_WINDOW_MS = 5 * 60_000;
  * holds.
  */
 export const RELAY_NONCE_RETENTION_MS = 2 * RELAY_GESTURE_WINDOW_MS + 60_000;
+
+/**
+ * How long a relay proposal stays open (APRV-455 refuter L2).
+ *
+ * The onboarding review is answered in the screen that rendered it, so an hour
+ * is generous; past it the prompt retires from every channel queue by
+ * derivation, and a control plane whose resident came back later proposes
+ * again. Until a proposal is attested the bytes on disk are not the policy in
+ * force, so the control plane restores the in-force bytes when a proposal is
+ * declined or lapses.
+ */
+export const RELAY_PROPOSAL_TTL_MS = 60 * 60_000;
 
 /** The actor a proposal is recorded under when the operator names none. */
 export const RELAY_DEFAULT_PROPOSER = "agent:edgeos-relay";
@@ -379,9 +391,11 @@ export type NonceClaim = "claimed" | "replayed" | { error: string };
 /**
  * Where used nonces are remembered.
  *
- * One file per nonce, named by its SHA-256 and created with `O_EXCL`, under the
- * gate's own `daemon/` directory. The file system settles the race: of any
- * number of processes claiming one nonce at once, exactly one creates the file.
+ * One file per nonce, named by its SHA-256, written whole to a private temp and
+ * then hard-linked into place, under the gate's own `daemon/` directory. The
+ * file system settles the race: `link` fails with EEXIST exactly as `O_EXCL`
+ * does, so of any number of processes claiming one nonce at once exactly one
+ * wins, and a claim file never exists without the time it was claimed.
  * That is why two relays on one gate need no lease between them for replay
  * protection, and why a restart forgets nothing it was still obliged to
  * remember. Files older than {@link RELAY_NONCE_RETENTION_MS} are pruned.
@@ -389,6 +403,8 @@ export type NonceClaim = "claimed" | "replayed" | { error: string };
 export interface NonceLedger {
   claim(nonce: string, nowMs: number): NonceClaim;
 }
+
+let tempCounter = 0;
 
 /** How often the ledger prunes, at most. */
 const PRUNE_INTERVAL_MS = 60_000;
@@ -406,14 +422,21 @@ export function fileNonceLedger(dir: string): NonceLedger {
       return;
     }
     for (const name of names) {
-      if (!/^[a-f0-9]{64}$/u.test(name)) continue;
       const path = join(dir, name);
       try {
-        // The claim time is the file's own content rather than its mtime, so a
-        // copy or a restore that touched every file does not extend them all.
-        const claimed = Number(readFileSync(path, "utf8").trim());
-        if (Number.isFinite(claimed) && nowMs - claimed > RELAY_NONCE_RETENTION_MS) unlinkSync(path);
-        else if (!Number.isFinite(claimed) && nowMs - statSync(path).mtimeMs > RELAY_NONCE_RETENTION_MS) {
+        if (/^[a-f0-9]{64}$/u.test(name)) {
+          // The claim time is the file's own content rather than its mtime, so
+          // a copy or a restore that touched every file does not extend them
+          // all. A claim file is linked into place already holding its content
+          // (see `claim`), so it is never seen empty; anything that does not
+          // parse as a positive time is judged by mtime instead, which is the
+          // strict direction for a file this pass did not write.
+          const text = readFileSync(path, "utf8").trim();
+          const claimed = /^[1-9][0-9]*$/u.test(text) ? Number(text) : Number.NaN;
+          const age = Number.isFinite(claimed) ? nowMs - claimed : nowMs - statSync(path).mtimeMs;
+          if (age > RELAY_NONCE_RETENTION_MS) unlinkSync(path);
+        } else if (name.endsWith(".tmp") && nowMs - statSync(path).mtimeMs > RELAY_NONCE_RETENTION_MS) {
+          // A temp left by a claim that died between write and link.
           unlinkSync(path);
         }
       } catch {
@@ -431,17 +454,29 @@ export function fileNonceLedger(dir: string): NonceLedger {
       }
       prune(nowMs);
       const path = join(dir, createHash("sha256").update(nonce, "utf8").digest("hex"));
+      // Written whole to a private temp, then LINKED into place: `link` fails
+      // with EEXIST exactly as `O_EXCL` does, so one claimant wins, and the
+      // claim file never exists without its content, so a concurrent prune can
+      // never judge a half-made claim (APRV-455 refuter M1).
+      tempCounter += 1;
+      const temp = `${path}.${String(process.pid)}.${String(tempCounter)}.tmp`;
       try {
-        const handle = openSync(path, "wx", 0o600);
-        try {
-          writeFileSync(handle, `${String(nowMs)}\n`, { encoding: "utf8" });
-        } finally {
-          closeSync(handle);
-        }
+        writeFileSync(temp, `${String(nowMs)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      } catch (cause) {
+        return { error: cause instanceof Error ? cause.message : String(cause) };
+      }
+      try {
+        linkSync(temp, path);
         return "claimed";
       } catch (cause) {
         if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
           return { error: cause instanceof Error ? cause.message : String(cause) };
+        }
+      } finally {
+        try {
+          unlinkSync(temp);
+        } catch {
+          // Already gone; its absence is the desired state.
         }
       }
       // It exists. A file left by a claim older than the retention is a nonce
@@ -606,7 +641,12 @@ function applyPropose(
 
   const proposed = proposeAttestation(
     logPath,
-    { policyPath, baseline, reaffirm: true },
+    {
+      policyPath,
+      baseline,
+      reaffirm: true,
+      waitUntil: new Date(Date.parse(tick(options.gateOptions)) + RELAY_PROPOSAL_TTL_MS).toISOString(),
+    },
     options.proposer,
     {
       ...schemaOptions,

@@ -32,7 +32,7 @@
  * A Telegram bot admits one receiver, so its transports take a lease. A relay
  * has no such constraint: two relays on one gate would each record through
  * compare-and-append, the gate would answer a duplicate decision
- * `already-decided`, and the nonce ledger is a directory of `O_EXCL` files that
+ * `already-decided`, and the nonce ledger is a directory of exclusively linked files that
  * refuses a replay whichever relay it reaches. A second relay on the SAME port
  * fails to bind and says so.
  *
@@ -75,8 +75,12 @@ export const RELAY_MIN_SECRET_LENGTH = 24;
 /** What a header carries unambiguously, and what `openssl rand -hex` produces. */
 const SECRET_CHARSET = /^[A-Za-z0-9_-]{1,256}$/u;
 
-/** A proposer is a principal, as `core/policy-proposal.ts` requires. */
-const PROPOSER_PATTERN = /^(?:human|agent):[^\s]+$/u;
+/**
+ * A proposer is an `agent:` id. The relay is a machine carrying a proposal the
+ * control plane rendered, and recording it under a `human:` id would say a
+ * person proposed something nobody typed (APRV-455 refuter L1).
+ */
+const PROPOSER_PATTERN = /^agent:[^\s]+$/u;
 
 const RELAY_FLAGS: Record<string, FlagKind> = {
   "--listen": "string",
@@ -102,7 +106,7 @@ export const RELAY_START_REFUSAL_CODES = [
   "relay-secret-weak",
   /** It holds a character outside A-Z a-z 0-9 _ -, or is longer than 256. */
   "relay-secret-charset",
-  /** `--proposer` is not a `human:` or `agent:` id. */
+  /** `--proposer` is not an `agent:` id. */
   "relay-proposer-invalid",
   /** The bind flags do not name a usable loopback (or explicitly widened) address. */
   "relay-bind-invalid",
@@ -167,7 +171,7 @@ export function prepareRelay(request: RelayRequest): RelayPreparation {
     return {
       ok: false,
       code: "relay-proposer-invalid",
-      message: `--proposer ${JSON.stringify(proposer)} is not a human:<id> or agent:<id> actor. A proposal is recorded under it, and it asks a question; it never answers one`,
+      message: `--proposer ${JSON.stringify(proposer)} is not an agent:<id> actor. A proposal is recorded under it, and the relay is a machine carrying what the control plane rendered: a human: id would say a person proposed something nobody typed`,
     };
   }
 

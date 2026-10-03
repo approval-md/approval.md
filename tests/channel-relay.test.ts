@@ -18,6 +18,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +65,8 @@ const RESIDENT = "4f1c2a9e-7b3d-4e8a-9c21-5d6e7f8a9b0c";
 const RESIDENT_NEW = "aa11bb22-cc33-4d44-8e55-66ff77889900";
 const STRANGER = "0b0b0b0b-1c1c-4d2d-8e3e-4f4f4f4f4f4f";
 const OPERATOR = "human:operator";
+/** What the control plane's proposals are recorded under (`--proposer`). */
+const PROPOSER = "agent:control-plane";
 const AGENT = "agent:hermes";
 const TASK = "task-455";
 const CLASS = "communicate.email.external";
@@ -106,6 +109,8 @@ function policyText(options: {
 
 interface World {
   unit: Scenario;
+  /** Every line the relay wrote to its operational log. */
+  lines: string[];
   relay: RelayHandle;
   url: string;
   nowMs: { value: number };
@@ -156,6 +161,7 @@ async function world(
     }
   }
 
+  const lines: string[] = [];
   const nowMs = { value: Date.parse(options.relayNow ?? at(2)) };
   const ledgerDir = options.ledgerDir ?? join(unit.dir, ".approval", "daemon", "relay-nonces");
   const relay = await serveRelay({
@@ -166,11 +172,11 @@ async function world(
     port: 0,
     now: () => nowMs.value,
     gateOptions: { ...unit.options, clock: fixedClock(options.gateNow ?? at(2)) },
-    proposer: OPERATOR,
-    log: () => {},
+    proposer: PROPOSER,
+    log: (line) => lines.push(line),
   });
   open.push(relay);
-  return { unit, relay, url: `http://127.0.0.1:${String(relay.port)}${RELAY_PATH}`, nowMs, ledgerDir, keys };
+  return { unit, relay, url: `http://127.0.0.1:${String(relay.port)}${RELAY_PATH}`, nowMs, ledgerDir, keys, lines };
 }
 
 interface Posted {
@@ -444,6 +450,7 @@ test("a replayed post is refused before the gate, across a restart too, and a st
 
   // The same nonce on a different key, after a restart on the same ledger: still refused.
   await w.relay.close();
+  const lines = w.lines;
   const restarted = await serveRelay({
     logPath: w.unit.logPath,
     secret: SECRET,
@@ -452,8 +459,8 @@ test("a replayed post is refused before the gate, across a restart too, and a st
     port: 0,
     now: () => w.nowMs.value,
     gateOptions: { ...w.unit.options, clock: fixedClock(at(2)) },
-    proposer: OPERATOR,
-    log: () => {},
+    proposer: PROPOSER,
+    log: (line) => lines.push(line),
   });
   open.push(restarted);
   const url = `http://127.0.0.1:${String(restarted.port)}${RELAY_PATH}`;
@@ -495,7 +502,9 @@ test("propose then attest: policy.updated under the resident with payload.sender
   assert.match(String(proposed.body["changes"]), /class resolution/u);
   const proposal = eventsOf(w.unit, "policy.proposed")[0];
   assert.ok(proposal !== undefined);
-  assert.equal(proposal.actor, OPERATOR);
+  assert.equal(proposal.actor, PROPOSER);
+  // A relay proposal retires itself: it carries a deadline an hour out.
+  assert.equal(payloadOf(proposal)["wait_until"], new Date(Date.parse(at(2)) + 60 * 60_000).toISOString());
 
   // A retry of the same proposal is the same proposal.
   const retried = await post(w.url, gesture("propose", { policy_sha256: sha }));
@@ -612,21 +621,79 @@ test("an amendment that introduces the EdgeOS mapping cannot be attested through
   assert.equal(eventsOf(w.unit, "policy.updated").length, 1);
 });
 
+test("a decision resolves against the policy IN FORCE, never a mapping sitting unattested on disk", async () => {
+  const w = await world();
+  // The control plane writes a policy that repoints the resident's EdgeOS id to
+  // a new account and proposes it. Until a human attests it, that mapping must
+  // decide nothing.
+  writeFileSync(w.unit.policyPath, policyText({ edgeos: RESIDENT_NEW }), "utf8");
+  const sha = policyFileHash(w.unit.policyPath);
+  assert.equal((await post(w.url, gesture("propose", { policy_sha256: sha }))).status, 200);
+
+  const swapped = await post(w.url, gesture("reject", { action_key: w.keys[0], sender: sender(RESIDENT_NEW) }));
+  assert.equal(refusalCode(swapped), "sender-unmapped");
+  assert.equal(eventsOf(w.unit, "approval.rejected").length, 0);
+  const refusal = eventsOf(w.unit, "audit.decision_refused")[0];
+  assert.ok(refusal !== undefined);
+  assert.deepEqual(payloadOf(refusal)["sender"], { channel: "edgeos", id: RESIDENT_NEW });
+
+  // The account in force still answers.
+  const rejected = await post(w.url, gesture("reject", { action_key: w.keys[0], sender: sender(RESIDENT) }));
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
+  assert.equal(eventsOf(w.unit, "approval.rejected")[0]?.actor, "human:resident");
+  assertClean(w.unit);
+});
+
+test("in-force bytes that cannot be recovered refuse policy-not-attested and append nothing", async () => {
+  const w = await world();
+  const storeDir = join(w.unit.dir, ".approval", "payloads");
+  for (const entry of readdirSync(storeDir, { recursive: true })) {
+    const name = String(entry);
+    if (name.endsWith(".json")) writeFileSync(join(storeDir, name), "{}", "utf8");
+  }
+  const before = logBytes(w.unit);
+  const posted = await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() }));
+  assert.equal(refusalCode(posted), "policy-not-attested");
+  assert.equal(logBytes(w.unit), before);
+});
+
+test("a claim file another relay has just made is never pruned as old, so its nonce cannot be claimed twice", () => {
+  const dir = join(scratch.root, "prune-ledger");
+  const ledger = fileNonceLedger(dir);
+  const n = "racing-nonce-00000000001";
+  // A claimed file whose content is not a time (a foreign or half-made file)
+  // is judged by its mtime, which is fresh, so the prune keeps it.
+  assert.equal(ledger.claim("warm-up-nonce-0000000001", Date.parse(at(0))), "claimed");
+  const digest = createHash("sha256").update(n, "utf8").digest("hex");
+  writeFileSync(join(dir, digest), "", "utf8");
+  const later = fileNonceLedger(dir);
+  assert.equal(later.claim(n, Date.now()), "replayed");
+  // And no temp file is left behind by a claim.
+  assert.equal(readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
+});
+
 // ---------------------------------------------------------------------------
 // The secret never reaches the log; the relay is unreachable through serve and MCP
 // ---------------------------------------------------------------------------
 
-test("the relay secret appears nowhere in the log or the payload store after every kind of gesture", async () => {
+test("the relay secret appears nowhere in the log, the payload store, the responses or the relay's own lines", async () => {
   const w = await world();
-  await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender(STRANGER) }));
-  await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() }));
+  const responses: Posted[] = [];
+  responses.push(await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender(STRANGER) })));
+  responses.push(await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() })));
   writeFileSync(w.unit.policyPath, policyText({ ttl: "12h" }), "utf8");
   const sha = policyFileHash(w.unit.policyPath);
-  await post(w.url, gesture("propose", { policy_sha256: sha }));
-  await post(w.url, gesture("attest", { policy_sha256: sha, sender: sender() }));
-  await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() }), { secret: "wrong-secret-value-that-is-long" });
+  responses.push(await post(w.url, gesture("propose", { policy_sha256: sha })));
+  responses.push(await post(w.url, gesture("attest", { policy_sha256: sha, sender: sender() })));
+  responses.push(
+    await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() }), { secret: `${SECRET}-wrong` }),
+  );
+  responses.push(await post(w.url, null, { raw: "{broken" }));
 
   assert.equal(logBytes(w.unit).includes(SECRET), false);
+  for (const response of responses) assert.equal(JSON.stringify(response.body).includes(SECRET), false);
+  assert.ok(w.lines.length > 0, "the relay wrote no operational line to check");
+  for (const line of w.lines) assert.equal(line.includes(SECRET), false, line);
   const storeDir = join(w.unit.dir, ".approval", "payloads");
   let names: string[] = [];
   try {
@@ -650,7 +717,8 @@ test("neither serve nor MCP can reach the relay: the verb is human_only and noth
 
   const root = fileURLToPath(new URL("../../src/", import.meta.url));
   for (const dir of ["serve", "mcp"]) {
-    for (const name of readdirSync(join(root, dir))) {
+    for (const entry of readdirSync(join(root, dir), { recursive: true })) {
+      const name = String(entry);
       if (!name.endsWith(".ts")) continue;
       const source = readFileSync(join(root, dir, name), "utf8");
       assert.equal(/channels\/relay/u.test(source), false, `${dir}/${name} imports the relay`);
@@ -688,6 +756,9 @@ test("the secret comes from the launch environment, with a floor and a charset, 
   assert.equal(code({ APPROVAL_RELAY_SECRET: `${"a".repeat(30)} b` }), "relay-secret-charset");
   assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }), "ok");
   assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { proposer: "system:me" }), "relay-proposer-invalid");
+  // A machine relay does not record proposals under a person's name.
+  assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { proposer: "human:carter" }), "relay-proposer-invalid");
+  assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { proposer: "agent:control-plane" }), "ok");
   assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { listen: "0.0.0.0:4684" }), "relay-bind-invalid");
   assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { listen: "0.0.0.0:4684", allowNonLoopback: true }), "ok");
   assert.equal(code({ APPROVAL_RELAY_SECRET: SECRET }, { port: "0" }), "relay-bind-invalid");

@@ -37,9 +37,11 @@ before a tag.
   refused `sender-unmapped` with one `audit.decision_refused` and the relay
   never decides as an identity of its own; expiry, policy drift and attestation
   resolve exactly as for a Telegram tap. A forged post appends nothing; a
-  replayed nonce is refused across restarts by an `O_EXCL` ledger under
+  replayed nonce is refused across restarts by an exclusively linked ledger under
   `.approval/daemon/relay-nonces/`; a grant's raw token never leaves the
-  process. `propose` may reaffirm bytes already in force
+  process. Every gesture resolves its sender against the policy IN FORCE, so a
+  mapping sitting unattested on disk decides nothing. `propose` (under an
+  `agent:` proposer, with a one-hour deadline) may reaffirm bytes already in force
   (`ProposeInput.reaffirm`), so an unchanged onboarding review still makes the
   resident the attester of record. The verb is `human_only` in the registry,
   so neither `serve` nor MCP publishes it. New frozen union

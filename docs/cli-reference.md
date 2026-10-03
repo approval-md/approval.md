@@ -4517,7 +4517,7 @@ as it resolves a Telegram `from.id`, and records the gesture through the same
 
 ```
 approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
-                       [--proposer human:<id>|agent:<id>] [--policy <p>] [--dir <p>]
+                       [--proposer agent:<id>] [--policy <p>] [--dir <p>]
                        [--log <p>] [--json]
 ```
 
@@ -4540,6 +4540,13 @@ What the relay cannot do, by construction:
   `approvers.<id>.senders.edgeos` maps, or refused `sender-unmapped` with one
   `audit.decision_refused`. A policy that maps no EdgeOS account refuses every
   gesture the same way; there is no fallback to a configured identity.
+- **Read a mapping nobody has attested.** Every gesture, decisions included,
+  resolves its sender against the policy IN FORCE: the verified bytes the
+  latest attestation names, recovered from the payload store. A mapping
+  sitting unattested on disk (the relay's own `propose` puts one there) decides
+  nothing until a human attests it. Where the in-force bytes cannot be
+  recovered, the gesture is refused `policy-not-attested` and nothing is
+  appended.
 - **Choose who may sign for a policy change.** An attestation is resolved
   against the policy IN FORCE, never the one being attested, so an account a
   proposal adds or repoints cannot accept the proposal that names it, and an
@@ -4592,8 +4599,8 @@ along on a valid post.
 - `issued_at` is RFC 3339 in UTC ending in `Z`, within five minutes of the
   relay's clock either side. It is used for that window and recorded nowhere;
   every record's `ts` is the runtime's own.
-- `nonce` is claimed before the gesture is applied, in a ledger of `O_EXCL`
-  files under the gate's `.approval/daemon/relay-nonces/`, kept for eleven
+- `nonce` is claimed before the gesture is applied, in a ledger of exclusively
+  linked files under the gate's `.approval/daemon/relay-nonces/`, kept for eleven
   minutes. A replay is refused `relay-nonce-replayed` at this process, after a
   restart, or at a second relay on the same gate. A retry is a new post with a
   new nonce, and the gate answers a repeated decision `already-decided`.
@@ -4601,14 +4608,25 @@ along on a valid post.
 `propose` is the control plane's half of the onboarding review. It writes the
 rendered policy into the store, then posts its hash: the relay re-hashes the
 file and refuses `relay-policy-mismatch` when the bytes are not the ones named,
-then appends a `policy.proposed` under `--proposer` (default
-`agent:edgeos-relay`) with the semantic diff against the verified in-force
-text. A retry of an open proposal of the same bytes returns it with
+then appends a `policy.proposed` under `--proposer` (an `agent:` id, default
+`agent:edgeos-relay`: the relay is a machine, and a `human:` proposer would say
+a person proposed what nobody typed) with the semantic diff against the
+verified in-force text and a deadline one hour out, after which the prompt
+retires from every queue. A retry of an open proposal of the same bytes returns it with
 `"existing":true`. It also admits bytes ALREADY in force (`"reaffirm":true`):
 the review most residents make is "accept, unchanged", and that acceptance is
 still their attestation. A reaffirmation changes the attester of record and
 nothing else. The prompt also reaches Telegram, where the resident's tap
 answers it equally.
+
+**Until a proposal is attested, the bytes on disk are not the policy in
+force.** Every gated call refuses `policy-not-attested` in that window (a
+grant through the relay included), exactly as during any amendment. So the
+control plane proposes and collects the acceptance in the same screen, and
+restores the in-force bytes when the resident declines or the proposal lapses.
+A `decline` appends `policy.declined` and leaves the attestation in force
+where it was, the operator's included: it is a refusal to adopt the proposed
+bytes, never a withdrawal of the policy already attested.
 
 `attest` / `decline` answer the open proposal of that hash. `attest` appends
 `policy.updated` with `actor: human:<approver>` and `payload.sender
@@ -4650,8 +4668,18 @@ with the counters. Never a body, a sender id or the secret.
 
 There is no transport lease. A Telegram bot admits one receiver; a relay has no
 such constraint, because compare-and-append, the gate's idempotency and the
-`O_EXCL` nonce ledger make two relays on one gate safe. A second relay on the
-same port fails to bind.
+nonce ledger (each claim written whole and linked into place, so exactly one
+claimant wins) make two relays on one gate safe. A second relay on the same
+port fails to bind.
+
+**Who is listening on the port is the caller's check.** The secret travels in a
+header, so whoever holds the loopback port when the control plane posts
+receives it. In a sandbox where another uid can bind loopback (the Agent
+Village's `hermes` user), the control plane checks that the listener on 4684
+belongs to the relay's own user before it posts, the same foreign-listener
+rule the hook applies to `serve`. A unix socket in a directory only the relay's
+user can write, or a signature over the body in place of a bearer secret, would
+remove the check; neither is in this version.
 
 ## quickstart
 

@@ -34,7 +34,7 @@
  * ## Replay
  *
  * Every gesture carries a nonce and an `issued_at`. The nonce is claimed in a
- * ledger of `O_EXCL` files under the gate's `daemon/` directory before the
+ * ledger of exclusively linked files under the gate's `daemon/` directory before the
  * gesture is applied, so a replayed post is refused `relay-nonce-replayed`
  * whether it arrives at this process, after its restart, or at a second relay
  * on the same gate; a post older than the window is refused

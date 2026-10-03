@@ -759,7 +759,11 @@ sandbox (one per resident)
   the daemon trusts the control plane's attribution of the gesture to that id,
   which is operator trust, and no hosted service has authority over decisions
   (APRV-422). The relay is reachable through neither serve credential, holds no
-  human identity of its own, and refuses an unmapped id `sender-unmapped`
+  human identity of its own, and refuses an unmapped id `sender-unmapped`.
+  Until the resident accepts, the new bytes are unattested and gated calls
+  refuse, so the control plane proposes and collects the acceptance in one
+  screen and restores the in-force bytes on a decline; it also checks that the
+  listener on the relay's port belongs to approvald before it posts the secret
   ([cli-reference#channel-relay](cli-reference.md#channel-relay)).
 - **Two windows, and they never meet.** The policy's `approval_ttl` is 72 h: that
   is how long a proposal (the inferred-intent flow, `approval propose`) waits for

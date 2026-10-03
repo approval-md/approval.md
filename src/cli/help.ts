@@ -1979,7 +1979,7 @@ export const CHANNEL_RELAY_HELP = `approval channel relay — gestures an operat
 
 Usage:
   approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
-        [--proposer human:<id>|agent:<id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+        [--proposer agent:<id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
   --port <n> / --listen <[host:]port>   LOOPBACK by default (4684); routable also needs --allow-non-loopback
@@ -1991,7 +1991,7 @@ plane sends it in x-approval-relay-secret, and a post without it is refused
 and never written to the log. POST /relay/gesture takes one closed JSON body:
 propose, attest or decline a policy by sha256, or grant or reject a request by
 action key, each with a nonce and issued_at. The sender is an EdgeOS id, and
-it is resolved against approvers.<id>.senders.edgeos in the attested policy:
+it is resolved against approvers.<id>.senders.edgeos in the policy in force:
 an unmapped account is refused sender-unmapped. This process holds NO human
 identity and NO TLS. Trust: the daemon trusts the relay's attribution.
 

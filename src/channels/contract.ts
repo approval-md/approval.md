@@ -811,6 +811,38 @@ export interface ChannelActorOptions {
 }
 
 /**
+ * The policy IN FORCE, loaded from its verified bytes (APRV-455 refuter H1).
+ *
+ * `inForcePolicyText` recovers the attested text from the payload store and
+ * checks it against the attested digest from the verified log; this loads it
+ * under the path this process enforces, so a load failure reads the way the
+ * file's own would.
+ */
+function inForceLoad(
+  logPath: string,
+  gateOptions: DecideOptions,
+): { ok: true; load: ReturnType<typeof readGatePolicy> } | { ok: false; reason: string } {
+  const read = readVerifiedRecords(
+    logPath,
+    gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+  );
+  if (!read.ok) return { ok: false, reason: `the log could not be read (${read.code})` };
+  const inForce = inForcePolicyText(
+    read.records,
+    gateOptions.payloadStoreDir ?? payloadStoreDirFor(logPath),
+  );
+  if (!inForce.ok) return { ok: false, reason: inForce.reason };
+  return {
+    ok: true,
+    load: loadPolicyText(
+      listenerPolicyPath(gateOptions) ?? "APPROVAL.md",
+      inForce.text,
+      gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+    ),
+  };
+}
+
+/**
  * The refusal {@link ChannelActorOptions.requireSenderMapping} turns a
  * configured-actor fallback into (APRV-455).
  *
@@ -909,7 +941,28 @@ export function recordChannelDecision(
   // mapping the operator attested, and the gate's own authorization logic is
   // untouched by it. `namesApprover` and `actor-not-approver` then run exactly
   // as they always have, over an identity that is better evidenced.
-  const load = readGatePolicy(gateOptions);
+  // APRV-455 refuter H1. A relay resolves the sender against the policy IN
+  // FORCE (the verified bytes the latest attestation names), never against the
+  // file on disk. Its own `propose` gesture puts unattested bytes on disk as a
+  // matter of course, and a mapping in those bytes must not decide who may
+  // answer anything until a human has attested them. Where the in-force bytes
+  // cannot be recovered the gesture is refused `policy-not-attested` and
+  // nothing is appended: the rule SPEC.md §10.3 already sets for checkpoint
+  // signatures and reviews, for the same reason.
+  let load = readGatePolicy(gateOptions);
+  if (actorOptions.requireSenderMapping === true) {
+    const inForce = inForceLoad(logPath, gateOptions);
+    if (!inForce.ok) {
+      return {
+        outcome: {
+          ok: false,
+          code: "policy-not-attested",
+          message: `decision on ${decision.action_key} refused: this surface resolves a sender only against the policy in force, and ${inForce.reason}. Nothing was decided and nothing was recorded.`,
+        },
+      };
+    }
+    load = inForce.load;
+  }
   const resolution = actorForSender(
     load,
     actorOptions.actor,
