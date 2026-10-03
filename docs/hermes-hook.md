@@ -364,6 +364,96 @@ Tool names and argument keys are Hermes's own, read off its tool registrations:
 | `search_files` | read | `path`; its `target` enum selects a grep or a name search |
 | `execute_code` | **refused outright** | nothing — see below |
 
+**Hermes's own side-effecting tools have classes of their own (APRV-445).** They
+were allowed as "not a gated tool" until the Agent Village survey of v2026.9.24
+listed what they do. The class is the classifier's; what happens to it is the
+policy's, so each takes an ordinary `classes:` line. The payload a grant binds is
+the whole call, `{tool, input}`.
+
+| Tool | Class | Read (allowed, no record) |
+| --- | --- | --- |
+| `cronjob_manage`, `cronjob` | `cron.manage` | `action: list` |
+| `process_manage`, `process` | `process.write` | `action: list`, `poll`, `log`, `wait` |
+| `browser_exec`, `browser_cdp`, every `browser_*` | `browser.exec` | none |
+| `skill_manage` | `skill.manage` | none |
+| `delegate_task` | `agent.delegate` | none |
+| `send_message` | `message.send` (not agent-callable at v2026.9.24) | none |
+
+An action the table does not know on a tool it does know takes the tool's class,
+not the read. Paths under `$HERMES_HOME` add three rows, matched on a `.hermes`
+path segment like the rest (so the home's last segment must be `.hermes`):
+a write under `.hermes/scripts/` is `cron.manage`, because Hermes's scheduler
+runs those scripts with no `pre_tool_call` at all; `.hermes/approval/` and
+`.hermes/shell-hooks-allowlist.json.lock` are `policy.core` beside the allowlist
+itself. A WRITE to `.hermes/.env`, `.hermes/.env.*` or `.hermes/auth.json`
+(`write_file`, `patch`, `>`/`>>`, `sed -i`, `tee`, `cp`) is `policy.core`; a READ
+of them (`cat`, `read_file`) is `account.credential`. Before the APRV-445 review
+only the read was gated: the credential tier is consulted for reads, so a write
+classified as an ordinary workspace write.
+
+**A `terminal` call's paths are judged where they land** (APRV-445 review and
+recheck). Redirect targets (heredocs included) and the write positions of the
+binaries whose writes are known (`cp`/`mv`/`ln`/`install`/`rsync` destinations,
+every `tee`/`touch`/`rm`/`mkdir`/`truncate` operand, `sed -i` files, `chmod`
+paths, `dd of=`) are resolved against the call's `workdir`, through every `cd`
+before them in the command (both the directory before and after a `cd` are kept,
+as a `cd` may not have run), and through `realpath` of the deepest existing
+ancestor, so a symlinked parent or workdir is judged by where it lands. A read
+segment's operands and a copy's sources that land on a credential are
+`account.credential`, and so is a directory of credentials (see below) handed
+to a recursive reader (`grep -r`, `rg`, `find`, `tar`, ...) or to a read tool
+(`search_files`, Claude Code's `Grep`/`Glob`). The binary and ordinary
+arguments are never resolved, so `./scripts/x.sh` or `echo approval > out.txt`
+in the home are what they look like.
+
+`$HERMES_HOME` and `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
+`HERMES_HOME`, from the hook process's environment (`~`, `$HOME`, `${HOME}` to
+`HOME`). A hook Hermes spawns inherits Hermes's environment. Under `approval
+serve` the hook runs in the daemon, so a hosted operator sets
+`APPROVAL_HERMES_HOME` on the serve process. Unexpanded, a `$HERMES_HOME` path
+is `policy.core` when written and `account.credential` when read. After a `cd`
+this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`, `cd $HERMES_HOME` with the
+home unknown), every later relative write is `policy.core` and every later
+relative read `account.credential`; setting `APPROVAL_HERMES_HOME` on the serve
+process removes that conservatism for the home. `APPROVAL_HERMES_HOME` is
+trusted as given: the operator sets it (under co-location the control plane sets
+it from the tenant's home), and nothing an agent writes reaches the hook
+process's environment. A read pattern (`cat .e*`) is expanded against its
+directory when that directory exists, and is a credential read when it could
+match a credential name and the directory is unknown. `<` input redirection is a
+read of its target. A copy or move into a directory (`cp x .`, `mv -t DIR`,
+`--target-directory=`) writes `<dir>/<source name>`, and `tar -x` / `unzip`
+write unknown names into `-C`/`-d` or the working directory.
+
+**Only the home's own directories are organs; the rest of it is ordinary work**
+(APRV-445 recheck 3). A hosted image sets `HERMES_HOME=/data/.hermes` and keeps
+all agent work under it (`workspace/`, `skills/`, `memories/`, `sessions/`), so
+the rules above are scoped to the gate's own directories: the home root (and a
+profile home, `.hermes/profiles/<p>/`, which has the same organs), an approval
+home, a home's `approval/`, and its `scripts/`. A recursive read or a read tool
+over a directory is `account.credential` only for the home root, an approval
+home, a home's `approval/`, or a directory under a home that directly holds a
+credential file (`.env`, `auth.json`, `config.yaml`, the allowlist or its lock).
+A glob or an unexpandable variable in a write is `policy.core` only when the
+write lands in one of the gate's own directories, or when a pattern in the path
+could itself name `.hermes`, `.approval` or an organ (`../.h*/.env`); anywhere
+else under the home it is a workspace write.
+
+What stays unclassified or out of reach, stated so nobody assumes otherwise:
+inline programs (`python3 -c`, `node -e`) are refused as opaque; `dd` and
+`install` have no classifier rule and are denied as unclassified; a recursive
+search of an ANCESTOR of the home with a filename filter (`search_files` over
+`$HOME` with `file_glob: .env`, Claude Code's `Grep` over the repository with
+`glob: **/env`, or `Grep` with no path) reads the secrets without naming a
+directory this hook can recognise; and a write through a variable other than
+`HERMES_HOME`/`HOME` from outside the home is judged by its spelling.
+
+**SIGTERM while the hook waits.** The wait is a synchronous poll, so a signal's
+handler runs only when the wait ends: the hook keeps waiting, then answers with
+the block directive at exit 2 as a wait that ran out does. The `approval` bin
+also guards the exit: a Hermes hook that leaves with any non-zero code other than
+2 leaves as 2, printing the directive if nothing was printed.
+
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
 session root, so a relative path resolves the way the shell will resolve it. What
@@ -515,7 +605,14 @@ off.
   the same dispatch. Not traced end to end.
 - A tool Hermes adds in a later release. An unknown tool takes the path it took
   before, which is not a gated one — the alternative would break a session on an
-  upgrade.
+  upgrade. The tools in the table above are no longer unknown (APRV-445).
+
+**Every error path blocks (APRV-445).** Hermes blocks on exit 2 whatever stdout
+says and reads any other non-zero exit with an empty stdout as an ALLOW, so the
+adapter never produces one: a misconfigured hook entry (bad flag, bad duration),
+a throw, SIGTERM or SIGINT mid-wait, a path that reached no verdict, and a
+`dist/` that fails to load all print `{"action":"block","message":...}` and exit
+2. A post-event is unchanged: it never blocks, because the call already ran.
 - The events this hook is not registered for. Hermes has some forty hook events;
   this adapter speaks two.
 

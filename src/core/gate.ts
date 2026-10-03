@@ -167,10 +167,12 @@ import {
   type PolicyLoadResult,
 } from "./policy-load.js";
 import {
+  agentRequestability,
   harnessLaunchNeedsRule,
   harnessLaunchUnruledRefusal,
   humanOnlyRefusal,
   resolve,
+  type AgentRequestability,
   type Resolution,
 } from "./policy-match.js";
 import {
@@ -626,6 +628,50 @@ export const GATE_REFUSAL_CODES = [
    * nothing can ever open. Nothing is appended; the next attempt asks again.
    */
   "token-delivery-unavailable",
+  /**
+   * `approval propose` named a class the policy has not opened to agents
+   * (APRV-445, amended SPEC.md §5.2): the class is not an exact key of
+   * `policy.classes`, or neither that key nor a declared `<prefix>.*` family of
+   * it sets `agent_may_request: true`. Nothing is registered and nothing is
+   * appended. The repair is the operator's, a policy edit and a re-attestation;
+   * no retry by the agent changes it.
+   */
+  "class-not-agent-requestable",
+  /**
+   * `approval propose` / `approval start` carried a payload larger than
+   * {@link PROPOSE_PAYLOAD_MAX_BYTES} (APRV-445). Refused before the bytes are
+   * parsed or hashed; nothing is stored and nothing is appended.
+   */
+  "payload-too-large",
+  /**
+   * `approval request` (or a task FILE's registration) named a `propose:` task
+   * (APRV-445 refutation, S1). A proposal is requested only through `propose`,
+   * which re-checks the operator's opening of its class; a plain request on the
+   * same task would skip that check, and a file-registered `propose:` id would
+   * borrow the exclusions proposals get from the harness hook.
+   */
+  "task-is-proposal",
+  /**
+   * `approval start` named a task `propose` did not register (APRV-445, L9).
+   * `start` records executions of proposals and of nothing else; every other
+   * action executes through `approval run`, an adapter, or the hook.
+   */
+  "task-not-proposal",
+  /**
+   * `approval propose --key` does not begin with `<class>:` (APRV-445, S4). The
+   * key names the class it was proposed under, so a key cannot be read back
+   * later as belonging to a different class than its record says.
+   */
+  "key-class-mismatch",
+  /**
+   * `approval propose` found the log moving under it on every one of its
+   * bounded attempts (APRV-445 recheck 3): each re-read showed an answer the
+   * next append was refused for. Exit 1, nothing more was appended, and the
+   * proposal's standing is whatever the log now says; read it with `wait
+   * --timeout 0` or call again. Distinct from `already-decided`, which would
+   * tell a caller a proposal is answered when it may stand granted or pending.
+   */
+  "contended",
 ] as const;
 
 export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
@@ -1261,6 +1307,8 @@ export function register(
  */
 export interface RegisterOptions extends GateOptions {
   harness?: HarnessProvenance;
+  /** Set by `propose` alone: the `propose:` task namespace is its (APRV-445). */
+  proposal?: true;
 }
 
 /**
@@ -1296,6 +1344,19 @@ function attemptRegister(
       if (lost !== null) return lost;
     }
     return resolved.refusal;
+  }
+
+  // APRV-445 refutation (S1). The `propose:` namespace belongs to `propose`;
+  // a task FILE claiming an id in it would borrow the exclusions proposals get
+  // from the harness hook (its sweep and its carry).
+  // Recheck L-c: the in-memory sources too (the muse `POST /v1/registrations`
+  // route registers whatever task id its caller names); only `propose` itself
+  // passes `proposal: true`.
+  if (isProposalTask(resolved.task) && options.proposal !== true) {
+    return refuse(
+      "task-is-proposal",
+      `task id ${resolved.task} is in the namespace \`approval propose\` derives its ids in (${PROPOSE_TASK_PREFIX}); only propose registers there. Nothing was appended.`,
+    );
   }
 
   const validation = validate(
@@ -1555,6 +1616,15 @@ export interface RequestInput {
    * spend a human's decision on an authorization that can never execute.
    */
   delivery?: "self";
+  /**
+   * This request was opened by `approval propose`, whose caller named the class
+   * itself (APRV-445). When set, intake re-checks `agentRequestability` against
+   * the policy bytes THIS attempt read, inside the retried read-check-append
+   * cycle, so a re-attestation between `propose`'s own check and the append
+   * cannot admit a class the policy no longer opens to agents (SPEC.md §11.1
+   * invariant 5). It only ever adds a refusal.
+   */
+  agentProposal?: true;
 }
 
 /**
@@ -1997,6 +2067,26 @@ function attemptRequest(
     input.reversible === undefined ? {} : { reversible: input.reversible },
   );
 
+  // APRV-445 refutation (S1). A `propose:` task is requested through `propose`
+  // and nothing else, so its agent-requestability check cannot be skipped by
+  // asking for the same registration with a plain `request`.
+  if (isProposalTask(input.task) && input.agentProposal !== true) {
+    return refuse(
+      "task-is-proposal",
+      `task ${input.task} was registered by \`approval propose\` and is requested only through it; nothing was appended`,
+    );
+  }
+
+  // APRV-445. A proposal's class came from the requester, so the operator's
+  // opening of that class to agents is re-read here, from the same bytes the
+  // attestation above verified, before anything else can be decided for it.
+  if (input.agentProposal === true) {
+    const opened = agentRequestability(load, input.cls);
+    if (!opened.allowed) {
+      return refuse("class-not-agent-requestable", notAgentRequestable(input.cls, opened));
+    }
+  }
+
   // APRV-185, amended SPEC.md §5.2, and the first thing intake asks once the
   // class has an autonomy: a `human-only` class is not requestable. The policy
   // itself answers, so nothing is put in front of a human, nothing is drawn,
@@ -2271,6 +2361,22 @@ function attemptRequest(
       `action ${input.actionKey} already executed (execution.started at seq ${String(derivation.execution.started)}); an idempotency key is single-use`,
       { state: derivation.state },
     );
+  }
+
+  // APRV-445 recheck (SF1). A proposal is asked again only when its last
+  // answer can no longer be used, and that is judged HERE, against the records
+  // this attempt appends on, not against whatever its caller read earlier. A
+  // usable grant (unexpired, under the policy in force) or a human's refusal
+  // stands: a stale caller may not put a fresh question over it.
+  if (input.agentProposal === true) {
+    const standing = requestStanding(read.records, input.actionKey, ts, ttlOf(load), attested.sha256);
+    if (standing === "granted" || standing === "rejected" || standing === "revoked") {
+      return refuse(
+        "already-decided",
+        `action ${input.actionKey} already carries a ${standing} answer that still stands at seq ${String(derivation.decisionSeq)}; a proposal is asked again only when its answer can no longer be used. Nothing was appended.`,
+        { state: derivation.state },
+      );
+    }
   }
 
   // APRV-173, SPEC.md §5.2's request-volume limits, enforced here and nowhere
@@ -3135,6 +3241,15 @@ function attemptDecide(
 // ---------------------------------------------------------------------------
 
 export interface WithdrawOptions extends GateOptions {
+  /**
+   * Withdraw only a pending request that is VOID at the moment of the append
+   * (APRV-445 recheck, SF1): pinned to a policy hash that is no longer the
+   * attested one. Judged inside the retried read-check-append cycle, so a
+   * caller acting on a stale reading cannot retract a question a concurrent
+   * caller has just re-asked under the policy in force. A live, non-void
+   * request refuses `duplicate-request`.
+   */
+  onlyIfVoid?: true;
   /** Why the requester is retracting. Defaults to `cancelled`. */
   reason?: WithdrawReason;
   /** The requester's free-text elaboration, recorded in the payload. */
@@ -3262,6 +3377,18 @@ function attemptWithdraw(
       `action ${actionKey} was already ${derivation.state} at seq ${String(derivation.decisionSeq)}; a human's answer stands, and withdrawing a question that has been answered would erase the answer`,
       { state: derivation.state },
     );
+  }
+
+  if (options.onlyIfVoid === true) {
+    const attested = requireAttestation(read.records, readPolicyOnce(options));
+    const pinned = derivation.declared.policy_sha256;
+    if (!attested.ok || pinned === null || pinned === attested.sha256) {
+      return refuse(
+        "duplicate-request",
+        `action ${actionKey} has a live request at seq ${String(derivation.requestSeq)} routed under the policy in force, so it is not void and was not withdrawn`,
+        { state: derivation.state },
+      );
+    }
   }
 
   if (derivation.requestActor !== actor) {
@@ -3468,6 +3595,10 @@ export function findHarnessCarry(
     if (record.event !== "approval.requested") continue;
     if (record.action_key === undefined) continue;
     if (keys.includes(record.action_key)) continue;
+    // APRV-445. A proposal's harness grant belongs to `approval start` and to
+    // nothing else: a hook call that happened to present the same bytes in the
+    // same class must not carry or adopt it.
+    if (isProposalTask(record.task)) continue;
     const payload = payloadOf(record);
     if (payload["execution"] !== "harness") continue;
     if (payload["payload_hash"] !== payloadHash) continue;
@@ -4572,4 +4703,644 @@ export function expire(
     forgetPrivateKey(options.keyStoreDir ?? keyStoreDirFor(logPath), actionKey);
   }
   return expired;
+}
+
+// ---------------------------------------------------------------------------
+// propose (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * The largest payload `approval propose` and `approval start` accept, in UTF-8
+ * bytes of the JSON text as the caller sent it: 256 KiB.
+ *
+ * Well under `approval serve`'s 1 MiB body cap, so the refusal a caller meets is
+ * this named one rather than a transport's. A proposal is a sentence or a
+ * paragraph a human will read on a phone; a payload this size is not one.
+ */
+export const PROPOSE_PAYLOAD_MAX_BYTES = 256 * 1024;
+
+/** The longest `--key` `propose` accepts, in UTF-8 bytes (APRV-445, L6). */
+export const PROPOSE_KEY_MAX_BYTES = 1024;
+
+/** The longest `--summary` `propose` accepts, in UTF-8 bytes (APRV-445, L6). */
+export const PROPOSE_SUMMARY_MAX_BYTES = 4096;
+
+/**
+ * The id after `<class>:` (APRV-445 recheck L-b): one or more printable
+ * characters, no whitespace, no control, format, private-use, unassigned or
+ * surrogate code points, so a key reads back the same in a log, a phone and a
+ * shell.
+ */
+const PROPOSE_KEY_ID = /^[^\s\p{C}]+$/u;
+
+/** How many times `propose` starts again on a log that moved under it (SF1). */
+const PROPOSE_MAX_ATTEMPTS = 4;
+
+/** `origin.app` on every envelope `propose` registers. */
+export const PROPOSE_ORIGIN_APP = "approval-propose";
+
+/** The task-id prefix `propose` derives under. */
+export const PROPOSE_TASK_PREFIX = "propose:";
+
+/**
+ * Was this task registered by `propose` (APRV-445)?
+ *
+ * A proposal's request carries `execution: "harness"` like a hook's, so the two
+ * hook-side readers of that marker (the carry and the abandoned-question sweep)
+ * ask this first: a proposal waits days for a human, is spent only by `start`,
+ * and is withdrawn only by its requester's own call.
+ */
+export function isProposalTask(task: unknown): boolean {
+  return typeof task === "string" && task.startsWith(PROPOSE_TASK_PREFIX);
+}
+
+/** A concrete class, as `schema/envelope.schema.json` spells one: no wildcard. */
+const CONCRETE_CLASS = /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/u;
+
+/**
+ * The task id `propose` registers under, from who is asking, the class and the
+ * key: `propose:` and the first 32 hex digits of the SHA-256 over the RFC 8785
+ * canonical JSON of `[actor, class, key]`.
+ *
+ * Deterministic, so a retry lands on the task its first attempt registered and
+ * is recognised as a retry. The ACTOR is the tenant half of the derivation: one
+ * `approval serve` process serves one store as one fixed `agent:<id>`, so within
+ * a store the actor is who the tenant's agent is, and two actors proposing the
+ * same key derive two different tasks, the second of which `register` refuses
+ * because the key is already declared under the first (`task-already-registered`).
+ * The class is in it so that the same key proposed under a second class is a
+ * different task rather than a silent re-declaration.
+ */
+export function proposedTaskId(actor: string, cls: string, actionKey: string): string {
+  return `${PROPOSE_TASK_PREFIX}${hashOfPayload([actor, cls, actionKey]).slice(0, 32)}`;
+}
+
+/** The sentence a `class-not-agent-requestable` refusal says. */
+function notAgentRequestable(cls: string, opened: AgentRequestability): string {
+  const why = !opened.explicit
+    ? `${JSON.stringify(cls)} is not a key of the policy's \`classes\` map, and propose takes only a class the operator declared by name (a wildcard rule that happens to match does not count)`
+    : opened.pattern === null
+      ? `neither ${JSON.stringify(cls)} nor any declared \`<prefix>.*\` family of it sets agent_may_request: true`
+      : `${JSON.stringify(opened.pattern)} sets agent_may_request: false`;
+  return `class ${cls} is not open to agent requests: ${why}. Nothing was registered and nothing was appended. Opening a class to agents is a policy edit (agent_may_request: true on the class or its family) and a human re-attestation (amended SPEC.md §5.2).`;
+}
+
+/** What an agent proposes. The payload is a parsed JSON object. */
+export interface ProposeInput {
+  cls: string;
+  actionKey: string;
+  summary: string;
+  payload: unknown;
+}
+
+/**
+ * How a proposal stands after the call.
+ *
+ * `decision` is what the caller branches on: `requested` means a human is (or
+ * was) asked and `state` says where that stands; `autonomous` and `supervised`
+ * mean the policy itself authorizes the action, nothing was put in front of a
+ * human, and the caller proceeds and records the execution with `approval start`.
+ *
+ * `idempotent` is true exactly when this call appended nothing: a retry of a
+ * proposal whose registration (and, on the manual path, whose request) already
+ * stands under the same class, key and payload hash.
+ */
+export type ProposeResult =
+  | {
+      ok: true;
+      task: string;
+      actionKey: string;
+      cls: string;
+      payloadHash: string;
+      decision: "requested" | "autonomous" | "supervised";
+      /**
+       * `null` off the manual path, where there is no request to be in a state;
+       * `executed` once `start` recorded the execution (APRV-445, L7).
+       */
+      state: RequestState | "executed" | null;
+      seq: number | null;
+      idempotent: boolean;
+    }
+  | GateRefusal;
+
+/**
+ * `approval propose` (APRV-445, amended SPEC.md §5.2): register and request one
+ * action in one call, for a requester that holds the payload inline and no file
+ * on the gate's machine.
+ *
+ * ## Why this verb may name its class when `request` may not
+ *
+ * `approval request` reads the class from the log's `task.registered` record so
+ * that an agent cannot call a `financial.spend` a `read.web`. Here the agent is
+ * also the registrant, so that rule alone would prove nothing, and the bound is
+ * the operator's instead: the class must be an EXACT key of `policy.classes`, and
+ * that key or a declared `<prefix>.*` family of it must say
+ * `agent_may_request: true`. A class reached only through a wildcard is refused,
+ * so the set of classes an agent can propose in is a set of lines the operator
+ * wrote and attested by name. What the agent chooses among them is still its own
+ * statement (SPEC.md §11.1 invariant 4 is why the choice is bounded at all), and
+ * an operator opening two classes of different autonomy to agents is trusting
+ * the agent to pick the right one; the record names the class it picked.
+ *
+ * ## Order
+ *
+ * Attestation, then the agent-requestability gate and the class's own autonomy
+ * (`human-only`, an unruled `harness.launch.*`), all BEFORE anything is
+ * registered, so a refused class leaves no registration behind. Then the
+ * registration, then {@link request} with `agentProposal: true`, which repeats
+ * the gate against the bytes its own attempt reads. `execution: "harness"` on the
+ * request: nothing ever presents a token for a proposal, the requester proceeds
+ * on the grant itself and records that with `approval start`, so a minted token
+ * would be a live credential with no spender.
+ *
+ * ## Idempotency
+ *
+ * The task id is {@link proposedTaskId}. A second call with the same actor,
+ * class, key and payload hash finds its own registration and appends nothing
+ * while the request is live or decided, answering with the request's state and
+ * `idempotent: true`. A withdrawn or expired request (a re-attestation voids
+ * pending requests as `policy-drift`) is asked again under the same registration.
+ * The same key with DIFFERENT bytes refuses: `duplicate-request` while a request
+ * is live, `payload-mismatch` otherwise, because a key is bound to the bytes it
+ * was first registered with and new bytes need a new key.
+ */
+export function propose(
+  logPath: string,
+  input: ProposeInput,
+  actor: string,
+  options: GateOptions = {},
+  attempt = 0,
+  appendedEarlier = false,
+): ProposeResult {
+  // APRV-445 recheck (SF1). Every decision below is re-checked by the append
+  // it leads to (`withdraw` with `onlyIfVoid`, `request` with
+  // `agentProposal`), so a caller that read a stale log is refused there
+  // rather than writing over a concurrent caller. A refusal of that kind means
+  // the log moved under this call; the call starts again from a fresh read, a
+  // bounded number of times, and answers what it then finds.
+  const again = (refusal: GateRefusal): ProposeResult =>
+    attempt < PROPOSE_MAX_ATTEMPTS
+      ? propose(logPath, input, actor, options, attempt + 1, appendedEarlier || withdrewNow || registeredNow)
+      : refuse(
+          "contended",
+          `the log moved under propose on each of its ${String(PROPOSE_MAX_ATTEMPTS + 1)} attempts for ${input.actionKey} (last refusal: ${refusal.code}); nothing more was appended. Read the proposal's standing with \`approval wait <task> --timeout 0\`, or call again.`,
+        );
+  if (!isPrincipalActor(actor)) {
+    return refuse(
+      "actor-invalid",
+      `propose requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+  if (!CONCRETE_CLASS.test(input.cls)) {
+    return refuse(
+      "envelope-invalid",
+      `class ${JSON.stringify(input.cls)} is not a concrete action class: lowercase dot-separated segments of [a-z0-9_-], no wildcard. Nothing was registered and nothing was appended.`,
+    );
+  }
+  if (input.actionKey.length === 0) {
+    return refuse("envelope-invalid", "the action key is empty; nothing was registered and nothing was appended.");
+  }
+  // APRV-445 refutation (S4): the key carries its class, so a consumer that
+  // parses the key can never attribute it to a class its record does not name.
+  // Consumers read the class from the record; this keeps the key from lying.
+  if (
+    !input.actionKey.startsWith(`${input.cls}:`) ||
+    !PROPOSE_KEY_ID.test(input.actionKey.slice(input.cls.length + 1))
+  ) {
+    return refuse(
+      "key-class-mismatch",
+      `key ${JSON.stringify(input.actionKey)} is not ${JSON.stringify(`${input.cls}:`)} followed by an identifier of printable characters with no whitespace or control characters; a proposal's key names the class it is proposed under. Nothing was registered and nothing was appended.`,
+    );
+  }
+  if (Buffer.byteLength(input.actionKey, "utf8") > PROPOSE_KEY_MAX_BYTES) {
+    return refuse("envelope-invalid", `the key is over ${String(PROPOSE_KEY_MAX_BYTES)} bytes; nothing was registered and nothing was appended.`);
+  }
+  if (Buffer.byteLength(input.summary, "utf8") > PROPOSE_SUMMARY_MAX_BYTES) {
+    return refuse("envelope-invalid", `the summary is over ${String(PROPOSE_SUMMARY_MAX_BYTES)} bytes; nothing was registered and nothing was appended.`);
+  }
+
+  let hash: string;
+  try {
+    hash = hashOfPayload(input.payload);
+  } catch (cause) {
+    return refuse(
+      "payload-store-failed",
+      `the payload for ${input.actionKey} could not be canonicalized: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }. Nothing was registered and nothing was appended.`,
+    );
+  }
+  const task = proposedTaskId(actor, input.cls, input.actionKey);
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+  const policyRead = readPolicyOnce(options);
+  const attested = requireAttestation(read.records, policyRead);
+  if (!attested.ok) return attested;
+  const load = parsePolicy(policyRead, options);
+
+  const opened = agentRequestability(load, input.cls);
+  const resolution = resolve(load, input.cls);
+  if (!opened.allowed && !(opened.humanOnly && opened.explicit && opened.pattern !== null)) {
+    return refuse("class-not-agent-requestable", notAgentRequestable(input.cls, opened));
+  }
+  if (harnessLaunchNeedsRule(input.cls, resolution)) {
+    return refuse(
+      "harness-launch-unruled",
+      harnessLaunchUnruledRefusal(input.cls, `the proposal ${input.actionKey} was not registered and nothing was appended`),
+    );
+  }
+  if (resolution.autonomy === "human-only") {
+    return refuse(
+      "class-human-only",
+      humanOnlyRefusal(input.cls, `the proposal ${input.actionKey} was not registered and nothing was appended`),
+    );
+  }
+
+  const answered = (
+    decision: "requested" | "autonomous" | "supervised",
+    state: RequestState | "executed" | null,
+    seq: number | null,
+    idempotent: boolean,
+  ): ProposeResult => ({
+    ok: true,
+    task,
+    actionKey: input.actionKey,
+    cls: input.cls,
+    payloadHash: hash,
+    decision,
+    state,
+    seq,
+    idempotent: idempotent && !appendedEarlier,
+  });
+
+  const existing = registeredAction(read.records, task, input.actionKey);
+  let registeredNow = false;
+  let withdrewNow = false;
+  if (existing.ok) {
+    const derivation = requestState(read.records, input.actionKey, tick(options), ttlOf(load));
+    if (existing.action.payload_hash !== hash) {
+      if (derivation.state === "requested") {
+        return refuse(
+          "duplicate-request",
+          `action ${input.actionKey} already has a live request at seq ${String(derivation.requestSeq)} awaiting a decision, over different bytes (${String(existing.action.payload_hash)}; this call presents ${hash}). A key is bound to the bytes it was first proposed with: wait for that request, withdraw it, or propose the new bytes under a new key. Nothing was appended.`,
+          { state: derivation.state },
+        );
+      }
+      return refuse(
+        "payload-mismatch",
+        `action ${input.actionKey} is registered under task ${task} with payload ${String(existing.action.payload_hash)}, and this call presents ${hash}. A key is bound to the bytes it was first proposed with; propose new bytes under a new key. Nothing was appended.`,
+        { state: derivation.state },
+      );
+    }
+    // APRV-445 refutation (B1): the retry is judged by what the request still
+    // AUTHORIZES, not by what it recorded. A live question, a usable grant, a
+    // human's no and a started execution are answered from the log and append
+    // nothing. A question that can no longer be answered usefully is asked
+    // again under the same registration: a lapsed or withdrawn request, a grant
+    // whose window ran out (a tap at hour 71 of 72 authorizes nothing at 73),
+    // and a grant or pending request pinned to a policy that has since been
+    // re-attested (`void`: the spend and the decision both refuse it).
+    const standing = requestStanding(
+      read.records,
+      input.actionKey,
+      tick(options),
+      ttlOf(load),
+      attested.sha256,
+    );
+    const seqOf = derivation.decisionSeq ?? derivation.requestSeq;
+    if (standing === "executed") {
+      return answered(
+        derivation.requestSeq !== null
+          ? "requested"
+          : resolution.autonomy === "autonomous"
+            ? "autonomous"
+            : "supervised",
+        "executed",
+        seqOf,
+        true,
+      );
+    }
+    if (
+      standing === "requested" ||
+      standing === "granted" ||
+      standing === "rejected" ||
+      standing === "revoked"
+    ) {
+      return answered("requested", standing, seqOf, true);
+    }
+    if (standing === "void" && derivation.state === "requested") {
+      // A pending question no human may decide any more. Taken back by its own
+      // requester (the gate's only way to end a request early that is not a
+      // decision), then asked again below.
+      const retracted = withdraw(logPath, input.actionKey, actor, {
+        ...options,
+        onlyIfVoid: true,
+        reason: "superseded",
+        note: "the policy this proposal was routed under has been re-attested, so the request is void; the same proposal is asked again under the policy in force",
+      });
+      if (!retracted.ok) {
+        // A concurrent caller withdrew it, re-asked it, or a human answered it.
+        if (
+          retracted.code === "request-withdrawn" ||
+          retracted.code === "already-decided" ||
+          retracted.code === "duplicate-request" ||
+          retracted.code === "expired"
+        ) {
+          return again(retracted);
+        }
+        return retracted;
+      }
+      withdrewNow = true;
+    }
+  } else if (existing.code === "not-registered") {
+    const registered = register(
+      logPath,
+      {
+        task,
+        envelope: {
+          origin: { app: PROPOSE_ORIGIN_APP, created_by: actor },
+          state: "proposed",
+          actions: [
+            {
+              class: input.cls,
+              summary: input.summary,
+              idempotency_key: input.actionKey,
+              payload_hash: hash,
+            },
+          ],
+        },
+      },
+      actor,
+      { ...options, proposal: true },
+    );
+    if (!registered.ok) {
+      // APRV-445 (L5). Two identical proposals racing: the other one registered
+      // this exact task first. Its registration is ours byte for byte, so the
+      // call is a retry and is answered as one.
+      if (registered.code === "task-already-registered") return again(registered);
+      return registered;
+    }
+    registeredNow = true;
+  } else {
+    // The derived task exists and declares some other key: nothing `propose`
+    // registers looks like that, so somebody else registered this id.
+    return refuse(
+      "task-already-registered",
+      `task ${task} is already registered without action ${input.actionKey}; propose registers each derived task with exactly one action, so this id was registered by something else and is not reused. Nothing was appended.`,
+    );
+  }
+
+  const result = request(
+    logPath,
+    {
+      task,
+      actionKey: input.actionKey,
+      cls: input.cls,
+      summary: input.summary,
+      payload_hash: hash,
+      payload: { value: input.payload },
+      execution: "harness",
+      agentProposal: true,
+    },
+    actor,
+    options,
+  );
+  if (!result.ok) {
+    if (result.code === "duplicate-request" || result.code === "already-decided" || result.code === "already-executed") {
+      return again(result);
+    }
+    return result;
+  }
+  if (result.record === null) {
+    return answered(
+      result.autonomy === "autonomous" ? "autonomous" : "supervised",
+      null,
+      null,
+      // APRV-445 recheck (L-a): a call that withdrew a void request appended
+      // something, so it is not an idempotent answer.
+      !registeredNow && !withdrewNow,
+    );
+  }
+  return answered("requested", "requested", result.record.seq, false);
+}
+
+// ---------------------------------------------------------------------------
+// start (APRV-445)
+// ---------------------------------------------------------------------------
+
+export type StartProposedResult =
+  | {
+      ok: true;
+      task: string;
+      actionKey: string;
+      cls: string;
+      /** `grant` when a human's harness grant was spent; `policy` when the policy authorized it. */
+      authorization: "grant" | "policy";
+      record: EventRecord;
+    }
+  | GateRefusal;
+
+/**
+ * `approval start <task> --action <key> --payload-json <json>` (APRV-445): record
+ * the `execution.started` for an action its requester is about to carry out
+ * itself, outside any harness hook.
+ *
+ * Until this verb an agent holding only the serve agent credential could ask and
+ * wait, and could not say that it then acted: `approval run` spawns argv on the
+ * gate's machine, and the harness hook writes starts only for tool calls it
+ * classified. A proposal the policy authorizes outright (`autonomous`,
+ * `supervised`) therefore left no record at all, and one a human granted left a
+ * grant nobody spent, so a second publication of the same key was indistinguishable
+ * from the first.
+ *
+ * It adds no authority. It writes through the two existing spenders and through
+ * nothing else: {@link consumeHarnessGrant} when the key carries a request (it
+ * refuses unless that request is granted, unexpired, harness-executed and
+ * unspent, under the policy it was asked under), and {@link startHarnessExecution}
+ * when it carries none (it refuses a `manual` or `human-only` class, an escalated
+ * loop and a spent key, and charges the budgets). Both pin the single-use rule:
+ * a second start of one key is `already-executed`.
+ *
+ * Two checks of its own, both before either spender runs. REQUESTER-ONLY: the
+ * actor must be the one that registered the task (`not-requester` otherwise), as
+ * `withdraw` is, so an agent cannot spend or exhaust a key someone else declared.
+ * And the bytes: the caller presents the payload it is about to act on, and its
+ * hash must equal the registered `payload_hash` (`payload-mismatch` otherwise),
+ * so the thing done is the thing that was approved, which the grant path checks
+ * again against the grant's own binding.
+ */
+export function startProposed(
+  logPath: string,
+  task: string,
+  actionKey: string,
+  payload: unknown,
+  actor: string,
+  options: GateOptions = {},
+): StartProposedResult {
+  if (!isPrincipalActor(actor)) {
+    return refuse(
+      "actor-invalid",
+      `start requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+  let hash: string;
+  try {
+    hash = hashOfPayload(payload);
+  } catch (cause) {
+    return refuse(
+      "payload-store-failed",
+      `the payload for ${actionKey} could not be canonicalized: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }. Nothing was appended.`,
+    );
+  }
+
+  if (!isProposalTask(task)) {
+    return refuse(
+      "task-not-proposal",
+      `task ${task} was not registered by \`approval propose\`; start records the executions of proposals only. Nothing was appended.`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+  const declared = registeredAction(read.records, task, actionKey);
+  if (!declared.ok) return declared;
+
+  let registrant: string | null = null;
+  for (const record of read.records) {
+    if (record.event === "task.registered" && record.task === task) registrant = record.actor;
+  }
+  if (registrant !== actor) {
+    return refuse(
+      "not-requester",
+      `task ${task} was registered by ${String(registrant)}, and only its registrant may record that it is carrying the action out; ${actor} may not. Nothing was appended.`,
+    );
+  }
+  if (declared.action.payload_hash !== hash) {
+    return refuse(
+      "payload-mismatch",
+      `the payload presented for ${actionKey} hashes to ${hash}, but the action is registered with ${String(declared.action.payload_hash)}. What is carried out must be the bytes that were proposed; nothing was appended.`,
+    );
+  }
+
+  // APRV-445 refutation (S5). Only a request that can still answer binds the
+  // key to the grant path: one that is pending (spending it refuses until a
+  // human decides) or granted and unspent. A withdrawn, expired, rejected or
+  // revoked request says nothing about an action the policy authorizes on its
+  // own now, so after a re-tiering to autonomous the start is the policy's.
+  const derivation = requestState(
+    read.records,
+    actionKey,
+    tick(options),
+    ttlOf(parsePolicy(readPolicyOnce(options), options)),
+  );
+  const binding =
+    derivation.execution.started === null &&
+    (derivation.state === "requested" || derivation.state === "granted");
+  if (binding) {
+    const spent = consumeHarnessGrant(logPath, actionKey, actor, {
+      ...options,
+      presentedPayloadHash: hash,
+      spendingTask: task,
+    });
+    if (!spent.ok) return spent;
+    return { ok: true, task, actionKey, cls: declared.action.class, authorization: "grant", record: spent.record };
+  }
+  const started = startHarnessExecution(
+    logPath,
+    {
+      task,
+      actionKey,
+      cls: declared.action.class,
+      payload_hash: hash,
+      ...(declared.action.est_cost_usd === undefined ? {} : { est_cost_usd: declared.action.est_cost_usd }),
+    },
+    actor,
+    options,
+  );
+  if (!started.ok) return started;
+  return { ok: true, task, actionKey, cls: declared.action.class, authorization: "policy", record: started.record };
+}
+
+// ---------------------------------------------------------------------------
+// Standing: what a request's state means for the party waiting on it (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * A request's state as a waiter must read it (APRV-445 refutation, B1).
+ *
+ * `requestState` answers what the log RECORDED. A waiter needs what the record
+ * still AUTHORIZES, and the two part in three ways the gate already enforces
+ * at the spend and the decision but no reader was told about:
+ *
+ * - a GRANT whose request has lapsed its window is `expired`: there is no
+ *   separate grant TTL (`grantLapsed`), so a tap at hour 71 of a 72 h window
+ *   authorizes nothing at hour 73;
+ * - a PENDING request pinned to a policy hash that is no longer the attested
+ *   one is `void` for every task, because the decision refuses `policy-drift`;
+ *   a GRANT is `void` on the same condition only where its spend enforces the
+ *   same refusal: a harness grant (`execution: "harness"`), which includes
+ *   every proposal. A token grant spent through `approval run` stays `granted`;
+ * - a request the runtime withdrew for `policy-drift` (APRV-235) is `void` too,
+ *   for the same reason, rather than an ordinary requester `withdrawn`;
+ * - a key whose execution started is `executed`.
+ *
+ * `void` and `expired` both mean "ask again": the question as asked can no
+ * longer be answered usefully. Everything else is `requestState` verbatim. An
+ * unattested policy (`attestedSha256` null) voids nothing, because that state is
+ * the human's to repair and may end in the same bytes.
+ */
+export type RequestStanding = RequestState | "void" | "executed";
+
+export function requestStanding(
+  records: EventRecord[],
+  actionKey: string,
+  ts: string,
+  ttlMs: number | null,
+  attestedSha256: string | null,
+): RequestStanding {
+  const derivation = requestState(records, actionKey, ts, ttlMs);
+  if (derivation.execution.started !== null) return "executed";
+  if (derivation.state === "granted") {
+    if (grantLapsed(derivation, ts)) return "expired";
+    // APRV-445 recheck (B). A grant is void only where its SPEND refuses
+    // `policy-drift`, which is the harness spend (`consumeHarnessGrant`) and
+    // therefore every proposal. A token grant is spent by `approval run`
+    // through `consumeToken`, which does not compare policy hashes, so after a
+    // re-attest that grant still runs: calling it void would abort the
+    // documented `wait && run` flow and send an agent to ask again over a live
+    // human grant.
+    const driftEnforced =
+      derivation.declared.execution === "harness" || isProposalTask(derivation.task);
+    const pinned =
+      grantedPolicyHash(records, derivation.decisionSeq) ?? derivation.declared.policy_sha256;
+    if (driftEnforced && attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) {
+      return "void";
+    }
+    return "granted";
+  }
+  if (derivation.state === "requested") {
+    const pinned = derivation.declared.policy_sha256;
+    if (attestedSha256 !== null && pinned !== null && pinned !== attestedSha256) return "void";
+    return "requested";
+  }
+  if (derivation.state === "withdrawn" && derivation.decisionSeq !== null) {
+    for (const record of records) {
+      if (record.seq !== derivation.decisionSeq) continue;
+      if (payloadOf(record)["reason"] === "policy-drift") return "void";
+    }
+  }
+  return derivation.state;
+}
+
+/**
+ * The SHA-256 the live policy bytes are attested under, or `null` when they are
+ * not attested (unread, unattested, or changed since). One read of the file
+ * through the same seam every gate operation uses.
+ */
+export function attestedPolicySha256(records: EventRecord[], options: GateOptions = {}): string | null {
+  const attested = requireAttestation(records, readPolicyOnce(options));
+  return attested.ok ? attested.sha256 : null;
 }

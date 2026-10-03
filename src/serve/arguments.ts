@@ -43,7 +43,7 @@
  * gate for such a harness through the hook route, which builds the envelope
  * from the tool call itself. On top of that, only the flags named in
  * {@link AGENT_FLAGS} are accepted at all, per verb, so a flag added to one of
- * the five agent verbs tomorrow is refused until somebody decides otherwise.
+ * the seven agent verbs tomorrow is refused until somebody decides otherwise.
  *
  * **Tenant scope.** Every path-typed flag is CONFINED to the store, and which
  * flags those are comes from the registry ({@link pathFlagsOf}) rather than
@@ -68,9 +68,9 @@ export const PINNED_FLAGS: readonly string[] = ["--dir", "--log", "--policy"];
 /**
  * What each AGENT verb may be given, flag by flag.
  *
- * A positive list per verb, and short on purpose. The agent surface is five
- * verbs; between them they need an action key, a decision deadline, a note and
- * `--json`. Everything else on those verbs is either the store (pinned), the
+ * A positive list per verb, and short on purpose. The agent surface is seven
+ * verbs; between them they need an action key, a decision deadline, a note,
+ * a proposal's class, key, summary and inline payload, and `--json`. Everything else on those verbs is either the store (pinned), the
  * identity (`--as`, refused by the argv builder both transports share), a path
  * (refused below), or something nobody has decided a sandboxed harness should
  * have.
@@ -85,6 +85,10 @@ export const AGENT_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["request", new Set(["--action", "--json"])],
   ["wait", new Set(["--timeout", "--interval", "--withdraw-on-timeout", "--json"])],
   ["withdraw", new Set(["--action", "--reason", "--note", "--json"])],
+  // APRV-445. The payload travels as a string VALUE, which is the whole reason
+  // these two verbs exist on this surface: a path would name the host's file.
+  ["propose", new Set(["--class", "--key", "--summary", "--payload-json", "--json"])],
+  ["start", new Set(["--action", "--payload-json", "--json"])],
 ]);
 
 /**

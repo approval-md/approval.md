@@ -100,12 +100,13 @@ THE SEQUENCE.
   3. approval wait <task> --timeout <duration>
      Blocks until every request of the task is decided. THE EXIT CODE IS THE
      DECISION: 0 granted or nothing-to-wait-for, 1 rejected, revoked, withdrawn
-     or not-registered (a task the log never registered), 3 expired, 6 timeout.
-     Exit 0 alone is not a grant: proceed to run only on --json status
-     "granted", which means a granted action whose grant is not yet spent.
-     nothing-to-wait-for means no request is open or every grant is already
-     used. A timeout is not an answer: the request is still live and waiting
-     again is legitimate.
+     or not-registered (a task the log never registered), 3 expired, 6 timeout,
+     7 void (a re-attested policy voided the pending request or harness grant:
+     ask again). Exit 0 alone is not a grant: proceed to run only on --json
+     status "granted", which means a granted action whose grant is not yet
+     spent. nothing-to-wait-for means no request is open or every grant is
+     already used. A timeout is not an answer: the request is still live and
+     waiting again is legitimate.
   3b. approval withdraw <task> --action <key> --reason timeout
      IF YOU STOP WAITING, SAY SO. A pending request you can no longer act on is
      a question a person will still be asked, and their attention is the scarce
@@ -123,6 +124,22 @@ THE SEQUENCE.
      same boundary. For an AgentMail draft, take the snapshot a human will
      read first: approval payload agentmail-draft <inbox> <draft> prints the
      payload to declare, and a draft edited after it is refused, not sent.
+
+WITHOUT A TASK FILE. When the policy opens a class to agents by name
+(agent_may_request), and you hold the payload yourself with no file on the
+gate's machine, one call replaces steps 1 and 2:
+
+  approval propose --class <c> --key <k> --summary <s> --payload-json <j>
+     Registers and requests together; the payload is a JSON object passed as
+     the flag's value. decision "requested": a human is asked, so poll with
+     approval wait <task> --timeout 0, which answers at once and never blocks
+     the gate. decision "autonomous" or "supervised": nothing is asked. The
+     same call with the same class, key and bytes is a safe retry
+     (idempotent:true); new bytes need a new key.
+  approval start <task> --action <k> --payload-json <j>
+     Once you are carrying the action out, record it: this spends the grant
+     or records the policy's own authorization, once per key, and only for
+     bytes that hash to what you proposed.
 
 WHAT A REFUSAL MEANS. Exit 1 with a machine-readable error.code is the runtime
 saying no to a well-formed command. It is NOT a usage error and it is not a

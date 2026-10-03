@@ -47,8 +47,10 @@ import type {
   SupervisionMode,
 } from "./policy-load.js";
 import {
+  agentRequestability,
   resolve,
   STRICTNESS,
+  type AgentRequestability,
   type Provenance,
   type Specificity,
 } from "./policy-match.js";
@@ -157,6 +159,12 @@ export interface Explanation {
   irreversiblePatterns: string[];
   /** Every matching rule, most specific first (order from `resolve()`). */
   candidates: ExplanationCandidate[];
+  /**
+   * Whether an agent may open a request in this class with `approval propose`
+   * (APRV-445), and which key decided. Read through `agentRequestability`,
+   * never through the resolution above: an exact `classes` key is required.
+   */
+  agentRequest: AgentRequestability;
   /** Ordered human sentences narrating the decision; what the CLI prints. */
   decisionPath: string[];
 }
@@ -250,6 +258,7 @@ export function explain(
       irreversibility: reversible === false ? "already-manual" : "not-applicable",
       irreversiblePatterns: [],
       candidates: [],
+      agentRequest: agentRequestability(load, actionClass),
       decisionPath,
     };
   }
@@ -297,6 +306,21 @@ export function explain(
     final.irreversiblePatterns,
     overridden,
   );
+  // APRV-445. Printed only when some key of the policy states
+  // `agent_may_request` for this class or its family, so no other explanation
+  // grows a line about a key it does not turn on.
+  const agentRequest = agentRequestability(load, actionClass);
+  if (agentRequest.pattern !== null) {
+    decisionPath.push(
+      agentRequest.humanOnly
+        ? `agent requests: refused: human-only — ${quote(actionClass)} resolves human-only, which no agent may request, whatever ${quote(agentRequest.pattern)} says`
+        : agentRequest.allowed
+        ? `agent requests: allowed — ${quote(agentRequest.pattern)} sets agent_may_request: true and the class is declared by name, so an agent may open a request for it with \`approval propose\``
+        : agentRequest.explicit
+          ? `agent requests: refused — ${quote(agentRequest.pattern)} sets agent_may_request: false`
+          : `agent requests: refused — ${quote(agentRequest.pattern)} sets agent_may_request, but ${quote(actionClass)} is not a key of \`classes\`; \`approval propose\` takes only a class the policy declares by name`,
+    );
+  }
   // APRV-127: name the mode, because "supervised" no longer says enough. A
   // reader deciding whether to expect a prompt needs to know whether a fraction
   // of this class stops first, and at what rate.
@@ -328,6 +352,7 @@ export function explain(
     irreversibility: irreversibilityDecision(reversible, final),
     irreversiblePatterns: final.irreversiblePatterns,
     candidates,
+    agentRequest,
     decisionPath,
   };
 }

@@ -77,6 +77,19 @@ export const EXIT_NO_TOKEN = 5;
  */
 export const EXIT_TIMEOUT = 6;
 
+/**
+ * Void — **`approval wait` only** (APRV-445). A request of the task has an
+ * answer that can never be used, because the policy was re-attested since the
+ * request was routed: a pending request no human may now decide (any task), or
+ * a HARNESS grant (`execution: "harness"`, every proposal included) whose spend
+ * refuses `policy-drift`. A token grant spent by `approval run` is not void: its
+ * spend does not compare policy hashes, so it reads `granted`. Ask again; a new
+ * request is routed, budgeted and shown under the policy in force. Distinct from 1 (a human said no, or the
+ * requester withdrew) because the repair is the opposite: here asking again is
+ * exactly right.
+ */
+export const EXIT_VOID = 7;
+
 /** The frozen table, for help text and for tests that pin it. */
 export const EXIT_CODE_TABLE: ReadonlyArray<readonly [number, string]> = [
   [EXIT_OK, "success"],
@@ -86,4 +99,5 @@ export const EXIT_CODE_TABLE: ReadonlyArray<readonly [number, string]> = [
   [EXIT_IO, "I/O error"],
   [EXIT_NO_TOKEN, "no valid execution token (approval run only)"],
   [EXIT_TIMEOUT, "timeout (approval wait only)"],
+  [EXIT_VOID, "void: a re-attest voided a pending request or a harness grant; ask again (approval wait only)"],
 ];

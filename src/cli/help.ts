@@ -53,6 +53,10 @@ Usage:
                       [--yes] [--json]
   approval register   <task-file> [--as <id>] [--log <path>] [--json]
   approval request    <task> --action <key> [--as <id>] [--json]
+  approval propose    --class <c> --key <k> --summary <s> --payload-json <j>
+                      [--as <id>] [--json]
+  approval start      <task> --action <key> --payload-json <j> [--as <id>]
+                      [--json]
   approval grant|reject|revoke <action-key> [--note <text>] [--as human:<id>] [--json]
   approval expire     <action-key> [--json]
   approval token      <action-key> [--policy <path>] [--dir <path>] [--json]
@@ -129,7 +133,8 @@ Usage:
   approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
                       [--policy <path>]              (MCP over stdio; foreground)
   approval serve      --as agent:<id> [--dir <path>] [--log <path>]
-                      [--policy <path>] [--port <n> | --listen <host:port>]
+                      [--policy <path>] [--port <n> | --listen <host:port>
+                      | --listen unix:<path>]
                       [--allow-non-loopback]               (HTTP; foreground)
   approval muse       [--dir <path>] [--port <n>]  (local prototype; foreground)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
@@ -195,6 +200,12 @@ Ask — an agent declares an action and acts on the answer:
   request   ask the gate to admit a declared action (manual classes append
             approval.requested; supervised/autonomous append nothing and
             proceed straight to execution, per amended SPEC.md §6.3)
+  propose   register and request one action in one call, payload inline as
+            JSON, in a class the policy declares by name and opens to agents
+            (agent_may_request); retry-safe on the same class, key and bytes
+  start     record execution.started for a proposed action its requester is
+            carrying out: spends the harness grant, or records the policy's
+            own authorization for a non-manual class. REQUESTER-ONLY
   token     report whether a live single-use execution token exists for an
             action (the RAW token is printed once, by grant, and stored nowhere)
   consume   spend a token and append execution.started (internal plumbing;
@@ -216,8 +227,9 @@ Ask — an agent declares an action and acts on the answer:
             snapshot a human approved
   wait      block until a task's requests are decided; the exit code IS the
             decision (0 granted or nothing-to-wait-for, 1 rejected/revoked/
-            withdrawn/not-registered, 3 expired, 6 timeout); run only on
-            --json status "granted", which means an unspent grant
+            withdrawn/not-registered, 3 expired, 6 timeout, 7 void: a
+            re-attest voided it, ask again); run only on --json status
+            "granted", which means an unspent grant
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
             terminal, requester-only, and a late grant then authorizes nothing
   hook      put the gate in front of an agent HARNESS. "hook claude-code" and
@@ -826,6 +838,47 @@ ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("request")}`;
 
+export const PROPOSE_HELP = `approval propose — register and request one action, payload inline
+
+Usage:
+  approval propose --class <c> --key <k> --summary <text> --payload-json <json>
+                   [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --class <c>          an EXACT key of the policy's classes, opened to agents by
+                       agent_may_request: true on it or a <prefix>.* family
+  --key <k>            "<class>:<id>", recorded verbatim as action_key (≤1 KiB)
+  --summary <text>     the line the approver reads (in the log, in cleartext)
+  --payload-json <j>   the payload, a JSON object of at most 262144 bytes
+  --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
+
+decision "requested": poll \`approval wait <task> --timeout 0\` (7 void or 3
+expired: propose again). "autonomous"/"supervised": act, then \`approval start\`.
+A retry appends nothing (idempotent:true) unless the answer can't be used.
+
+${GATE_CODES_POINTER}
+${JSON_ERRORS}
+${why("propose")}`;
+
+export const START_HELP = `approval start — record that you are carrying out a proposed action
+
+Usage:
+  approval start <task> --action <key> --payload-json <json> [--as <id>]
+                 [--policy <p>] [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --action <key>       the action's idempotency key (required)
+  --payload-json <j>   the bytes you act on; must hash to the registered binding
+  --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
+
+Appends one execution.started, once per key. REQUESTER-ONLY. A key with a
+request spends its harness grant; a key with none is recorded as authorized by
+the policy, and a manual class is refused.
+
+${GATE_CODES_POINTER}
+${JSON_ERRORS}
+${why("start")}`;
+
 function decisionHelp(verb: "grant" | "reject" | "revoke"): string {
   const noun = verb === "grant" ? "approval" : verb === "reject" ? "refusal" : "withdrawal";
   const body =
@@ -1076,7 +1129,7 @@ Usage:
                 [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
-  --timeout <d>    how long to wait, in the duration grammar (e.g. 6h). Required
+  --timeout <d>    how long to wait (e.g. 6h; 0 reads the state once). Required
   --interval <d>   poll interval (default 500ms)
   --withdraw-on-timeout  on timeout, withdraw the requests THIS actor opened
   --as <id>        the withdrawing actor; read only with the flag above
@@ -1089,7 +1142,7 @@ requests; none left to wait on is exit 0, nothing-to-wait-for, never granted.
 
 JSON shape: docs/cli-reference.md#wait
 ${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted or nothing-to-wait-for,
-1 rejected/revoked/withdrawn/not-registered (--json says which), 3 expired, 4 I/O, and
+1 rejected/revoked/withdrawn/not-registered (--json says which), 3 expired, 4 I/O, 7 VOID, and
   6  TIMEOUT — the wait elapsed with request(s) still undecided.
 ${JSON_ERRORS}
 ${why("wait")}`;
@@ -2671,12 +2724,12 @@ export const SERVE_HELP = `approval serve — the agent-facing surface over HTTP
 
 Usage:
   approval serve [--as agent:<id>] [--dir <p>] [--log <p>] [--policy <p>]
-                 [--port <n> | --listen <host:port> --allow-non-loopback]
+                 [--port <n> | --listen <host:port>|unix:<path>]
 
 Flags:
   --as agent:<id>  the identity EVERY call is recorded under, or APPROVAL_AGENT
   --dir/--log/--policy <p>   the store root, and the log and policy pinned
-  --port <n>=4682  loopback. --listen <host:port> widens, non-loopback ALSO needs --allow-non-loopback
+  --port <n>=4682  loopback. --listen <host:port> widens, non-loopback ALSO needs --allow-non-loopback; unix:<path> or APPROVAL_SERVE_LISTEN: a socket
   --hook-timeout/--hook-harness-cap <d>  pinned on every hook call, as the stdin form's --timeout and --harness-cap (the CALLER's own kill timeout)
   --hook-threads <n>=16 / --hook-queue <n>=64  hook calls running at once (a thread each) / waiting; past both, refused serve-hook-saturated
 

@@ -424,7 +424,9 @@ test("a call that names an identity is refused rather than quietly ignored", asy
 const EXPECTED_AGENT_VERBS = [
   "hook_classify",
   "instructions",
+  "propose",
   "request",
+  "start",
   "wait",
   "withdraw",
 ];
@@ -552,7 +554,7 @@ test("the tenant credential never acts: request, wait and consume are refused", 
     // `register` is NOT here any more: its positional is a host path, so the
     // review moved it to the tenant side and the hook endpoint became the
     // harness's way to register (it synthesises the envelope itself).
-    for (const verb of ["request", "wait", "consume", "withdraw", "hook_classify"]) {
+    for (const verb of ["request", "wait", "consume", "withdraw", "hook_classify", "propose", "start"]) {
       const response = await post(server, `/verb/${verb}`, TENANT_TOKEN, {});
       assert.equal(response.status, 403, `${verb} answered the tenant credential`);
       const parsed = (await response.json()) as { error: { code: string; message: string } };
@@ -1230,6 +1232,8 @@ const NON_PATH_FLAGS = new Set([
   "--reaction", "--read-jail", "--reason", "--remote", "--reversible", "--schemas",
   "--session", "--since", "--source", "--task", "--tasks", "--timeout", "--token",
   "--until", "--withdraw-on-timeout", "-h", "-n",
+  // APRV-445: `propose` and `start`. The payload is a JSON VALUE, never a path.
+  "--class", "--key", "--summary", "--payload-json",
 ]);
 
 test("every path-typed flag on every published verb is pinned or confined", () => {

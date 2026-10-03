@@ -392,6 +392,11 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
         ["pattern", "specificity", "autonomy", "winner", "tieBreak"],
       ),
     ),
+    // APRV-445: may an agent open a request in this class with `propose`.
+    agentRequest: object(
+      { allowed: BOOLEAN, explicit: BOOLEAN, pattern: nullable(STRING), humanOnly: BOOLEAN },
+      ["allowed", "explicit", "pattern", "humanOnly"],
+    ),
     decisionPath: arrayOf(STRING),
   },
   [
@@ -406,6 +411,7 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     "irreversibility",
     "irreversiblePatterns",
     "candidates",
+    "agentRequest",
     "decisionPath",
   ],
 );
@@ -899,6 +905,76 @@ const VERBS: VerbSpec[] = [
         seq: nullable(INTEGER),
       },
       ["ok", "task", "action_key", "class", "autonomy", "proceed", "requested", "seq"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "propose",
+    purpose:
+      "Register and request ONE action in one call, with the payload inline as a JSON object (--payload-json, at most 262144 bytes) rather than a file, for a requester with no file on the gate's machine. Unlike request, the caller names the class, and that is bounded by the operator: the class must be an EXACT key of the policy's classes (a wildcard match does not count) and that key or a declared <prefix>.* family must set agent_may_request: true, else class-not-agent-requestable and nothing is written. --key MUST begin with <class>: (key-class-mismatch otherwise); consumers read the class from the record. --key is at most 1024 bytes and --summary at most 4096; lone surrogates and non-finite numbers are usage errors. The task id is derived from the actor, class and key (propose:<32 hex>), so a retry with the same class, key and bytes appends nothing and answers idempotent:true while the request is pending, usably granted, refused or executed (state executed); a request that can no longer be answered usefully (withdrawn, expired, a grant whose window lapsed, or one voided by a re-attested policy) is asked again by the same call. The same key with different bytes refuses duplicate-request while a request is live and payload-mismatch otherwise. decision requested: a human is asked, poll with wait <task> --timeout 0. decision autonomous or supervised: nothing is asked, act and then record it with start. The summary is stored in the log in cleartext; the payload is stored in the payload store, never in the log.",
+    human_only: false,
+    input: input({
+      flags: {
+        "--class": "string",
+        "--key": "string",
+        "--summary": "string",
+        "--payload-json": "string",
+        ...AS_FLAG,
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        task: STRING,
+        action_key: STRING,
+        class: STRING,
+        payload_hash: SHA256,
+        decision: { enum: ["requested", "autonomous", "supervised"] },
+        state: nullable({
+          enum: ["requested", "granted", "rejected", "revoked", "expired", "withdrawn", "executed"],
+        }),
+        seq: nullable(INTEGER),
+        idempotent: BOOLEAN,
+      },
+      ["ok", "task", "action_key", "class", "payload_hash", "decision", "state", "seq", "idempotent"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "start",
+    purpose:
+      "Record execution.started for a proposed action you are about to carry out yourself, once per key. Proposals only (task-not-proposal otherwise). REQUESTER-ONLY: the actor must be the one that registered the task. --payload-json is the bytes you are about to act on and must hash to the registered payload_hash. A key whose request is pending or granted-and-unspent spends its harness grant (refused unless granted, unexpired, unspent and under the policy it was asked under); a key with no such request (none, or one withdrawn, expired, rejected or revoked) is recorded as authorized by the policy (refused for a manual or human-only class). It grants nothing: it writes only what the grant or the policy already authorized, and a second start of the same key is already-executed.",
+    human_only: false,
+    input: input({
+      positionals: positionals([{ name: "task", description: "the task id propose returned" }], 1),
+      flags: {
+        "--action": "string",
+        "--payload-json": "string",
+        ...AS_FLAG,
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        task: STRING,
+        action_key: STRING,
+        class: STRING,
+        authorization: { enum: ["grant", "policy"] },
+        seq: INTEGER,
+      },
+      ["ok", "task", "action_key", "class", "authorization", "seq"],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
@@ -1481,7 +1557,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "wait",
     purpose:
-      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted (or nothing-to-wait-for, which `status` names and which is no grant), 1 rejected, revoked, withdrawn or not-registered, 3 expired, 6 timeout. It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a registered task with none, or whose every grant an execution has already spent, returns immediately at exit 0 with status nothing-to-wait-for, NEVER granted; a task the log has never registered is refused not-registered at exit 1 (APRV-428). Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
+      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted (or nothing-to-wait-for, which `status` names and which is no grant), 1 rejected, revoked, withdrawn or not-registered, 3 expired (a grant whose request window lapsed included), 6 timeout, 7 void (a re-attest voided a pending request or a harness grant: ask again). It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a registered task with none, or whose every grant an execution has already spent, returns immediately at exit 0 with status nothing-to-wait-for, NEVER granted; a task the log has never registered is refused not-registered at exit 1 (APRV-428). --timeout 0 reads the current state once and never sleeps (an undecided request answers timeout, exit 6, at once; it refuses --withdraw-on-timeout): use it to poll through approval serve, which runs every call through one queue that a sleeping wait would hold. Under policy token_delivery: sealed, a granted action's --json entry also carries the raw execution token, opened from the grant's ciphertext with the private key this machine kept when it opened the request; that removes the terminal paste and works across machines. Recovering a minted token is not minting one: it still exists only because a human granted it, still binds to the payload bytes, and is still single-use.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "task", description: "the task id" }], 1),
@@ -1501,7 +1577,16 @@ const VERBS: VerbSpec[] = [
         ok: BOOLEAN,
         task: STRING,
         status: {
-          enum: ["granted", "rejected", "withdrawn", "expired", "nothing-to-wait-for", "timeout"],
+          enum: [
+            "granted",
+            "executed",
+            "rejected",
+            "withdrawn",
+            "void",
+            "expired",
+            "nothing-to-wait-for",
+            "timeout",
+          ],
         },
         actions: arrayOf(
           object(
@@ -1526,7 +1611,7 @@ const VERBS: VerbSpec[] = [
       {
         code: 0,
         meaning:
-          "granted; or nothing-to-wait-for, a registered task with no requests or whose every grant is already spent. `status` says which, and only `granted` is a grant",
+          "granted; or executed on the policy's own authority after its request ended; or nothing-to-wait-for, a registered task with no requests or whose every grant is already spent. `status` says which, and only `granted` is a grant",
       },
       {
         code: 1,
@@ -1540,6 +1625,11 @@ const VERBS: VerbSpec[] = [
         code: 6,
         meaning:
           "TIMEOUT — the wait elapsed with request(s) undecided. Nothing was appended, they are still live, and waiting again is legitimate",
+      },
+      {
+        code: 7,
+        meaning:
+          "VOID — the policy was re-attested since the request was routed, and the answer can never be used: a PENDING request (any task; no decision may land on it) or a HARNESS grant (execution: harness, every proposal included; its spend refuses policy-drift). A token grant for approval run is not void and reads granted. Ask again: for a proposal, the same propose call re-files",
       },
     ],
   },

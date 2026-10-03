@@ -324,6 +324,7 @@ semantics: SPEC.md section 5.
 | `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
 | `classes.<pattern>.retro_rate` | This class's retrospective sampling rate, in (0, 1], overriding `audit.supervised_sample_rate` for it alone. Optional on `supervised`, `supervised-retro` and `supervised-live`, refused on the rest. Absent means the global rate (§5.2, APRV-183). |
 | `classes.<pattern>.allow_irreversible` | Explicit operator permission for a truthful `reversible: false` action to retain this rule's `autonomous` or supervised behavior. Optional boolean; absent or `false` preserves the manual floor. `true` is refused on `manual` and `human-only`, cannot appear in `defaults`, and takes effect only when every equally most-specific matching rule says `true` (§5.2, §7, APRV-317). |
+| `classes.<pattern>.agent_may_request` | Whether an agent may open a request in this class with `approval propose`, naming the class itself and carrying the payload inline. Optional boolean; absent or `false` means no. Read only on a key that names the class EXACTLY and on a declared `<prefix>.*` family of it; the exact key's own value wins, else the most specific family that states one. `propose` additionally requires the class to be an exact key, so a wildcard match alone never opens it. `true` is refused on `human-only` (§5.2, APRV-445). |
 | `classes.<pattern>.approvers` | Approver ids permitted to decide this class. Absent restricts nobody, since the list is a narrowing and a narrowing nobody wrote narrows nothing; a named list refuses everyone else with `actor-not-approver` (§5.1). |
 | `classes.<pattern>.limits` | Per-class ceilings, every value a positive number: `per_action_usd`, `daily_usd`, and the request-volume counts `max_pending` and `requests_per_hour`. Absent means this class carries no ceiling of its own (§5.1, §5.2). |
 | `budgets.global.daily_usd` | Repo-wide spend ceiling per rolling day, computed from the log. Absent means no spend ceiling (§5.1). |
@@ -589,7 +590,7 @@ The sequence is exclusive. Persist the processed sequence and hash after applyin
 
 ### Decide what to publish
 
-**`approval init` does not ignore `.approval/log/` or `.approval/payloads/`.** The evidence is trackable by default. This can include real message text, recipients, paths, agent descriptions, and other information unsuitable for a public repository.
+**`approval init` does not ignore `.approval/log/`, and since APRV-445 it does ignore `.approval/payloads/`.** The log is trackable by default; the payload bytes are not, because they can include real message text, recipients, paths, a person's own words, and other information unsuitable for a public repository. A directory scaffolded before APRV-445 still tracks them until a re-run of `approval init` appends the ignore line (it says so), and the log itself still carries every summary in cleartext.
 
 Review staged content before committing. Add local ignore rules when payloads or logs must stay private, or keep the evidence in a suitably private repository. Omitting payload bytes trades away the ability to reconstruct them from a public hash; it does not remove existing copies from history.
 
@@ -629,6 +630,7 @@ The CLI's frozen table is:
 | 4 | I/O error |
 | 5 | no valid execution token (approval run only) |
 | 6 | timeout (approval wait only) |
+| 7 | void: a re-attest voided a pending request or a harness grant; ask again (approval wait only) |
 
 **Context matters.** Ordinary well-formed gate refusals also use exit 1; inspect the machine-readable `error.code` rather than interpreting every 1 as corruption. `approval run` returns the executed child's status. Harness hooks have their own protocol semantics: exit 0 can carry a deny verdict, and exit 2 can mean a blocking or visible hook report rather than CLI misuse. See the command's `--help` and its integration guide.
 

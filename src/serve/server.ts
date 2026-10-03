@@ -75,9 +75,8 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import type { Socket } from "node:net";
-
-import { realpathSync } from "node:fs";
+import { chmodSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { connect, type Socket } from "node:net";
 import { basename, dirname, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
@@ -212,7 +211,12 @@ export const REFUSAL_EXIT_CODE = 2;
  * - `request`, `wait`, `withdraw` — ask, wait for the answer, and retract your
  *   own question. This is the gate sequence, and it is the reason the agent
  *   credential exists.
- * That is the whole list. It is five verbs, and the shortness is the point: a
+ * - `propose`, `start` (APRV-445) — the same sequence for an action the agent
+ *   declares itself, with its payload as a flag value: register-and-request in
+ *   a class the operator declared by name and opened with `agent_may_request`,
+ *   and record the execution the grant or the policy authorized. Neither takes
+ *   a path, and `start` is requester-only.
+ * That is the whole list. It is seven verbs, and the shortness is the point: a
  * harness under oversight asks and is answered, and everything else about the
  * gate belongs to the party the gate is for.
  *
@@ -256,6 +260,8 @@ export const AGENT_VERBS: ReadonlySet<string> = new Set([
   "request",
   "wait",
   "withdraw",
+  "propose",
+  "start",
 ]);
 
 /**
@@ -314,6 +320,12 @@ export interface ServeOptions {
   host?: string;
   /** TCP port. `0` asks the kernel for an ephemeral one, which is what tests use. */
   port: number;
+  /**
+   * A unix-domain socket to listen on INSTEAD of `host`/`port` (APRV-445). An
+   * absolute path whose directory the serving uid owns; see
+   * {@link checkUnixSocketTarget} and {@link UNIX_SOCKET_MODE}.
+   */
+  socketPath?: string;
   /** `--timeout` pinned on every hook call, when the operator chose one. */
   hookTimeout?: string;
   /**
@@ -345,6 +357,8 @@ export interface ServeOptions {
 export interface ServeHandle {
   readonly host: string;
   readonly port: number;
+  /** The unix socket this listener is bound to, or `null` for a TCP bind. */
+  readonly socketPath: string | null;
   /** How many requests this listener has answered. Diagnostics and tests. */
   requests(): number;
   /** The hook thread pool's state now. Diagnostics and tests. */
@@ -1187,23 +1201,73 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     socket.on("close", () => sockets.delete(socket));
   });
 
+  const socketPath = options.socketPath ?? null;
+  if (socketPath !== null) {
+    const checked = checkUnixSocketTarget(socketPath);
+    if (!checked.ok) throw new Error(checked.message);
+    await clearStaleSocket(socketPath);
+  }
+
   await new Promise<void>((settle, fail) => {
     const onError = (cause: Error): void => fail(cause);
     http.once("error", onError);
-    http.listen(options.port, host, () => {
+    const ready = (): void => {
       http.off("error", onError);
       settle();
-    });
+    };
+    if (socketPath !== null) http.listen(socketPath, ready);
+    else http.listen(options.port, host, ready);
   });
 
+  // APRV-445 refutation (L3). The socket is opened to 0666 only where nobody
+  // but the serving uid can write the directory. Between the bind and the
+  // chmod the socket carries the umask's narrower mode, which fails closed;
+  // what a group- or other-writable directory would add is someone able to
+  // swap the socket inside that window, so there the chmod is skipped and the
+  // socket keeps the umask's mode (the operator widens the umask or the
+  // directory's ACL instead). Other-writable directories are refused outright.
+  const widen =
+    socketPath !== null && (statSync(dirname(socketPath)).mode & 0o022) === 0;
+  if (socketPath !== null && !widen) {
+    notice(`approval: serve left ${socketPath} at its umask mode: its directory is group-writable, and only a directory the serving uid alone can write is trusted to hold a 0666 socket\n`);
+  }
+  if (socketPath !== null && widen) {
+    // The directory is the access control (see `checkUnixSocketTarget`); the
+    // socket itself is opened to every uid that can reach it through that
+    // directory, which is the sandbox user the operator put there. Narrowing
+    // the socket instead would make the operator's group or ACL on the
+    // directory a dead letter for a uid it was written for.
+    try {
+      chmodSync(socketPath, UNIX_SOCKET_MODE);
+    } catch (cause) {
+      await new Promise<void>((settle) => http.close(() => settle()));
+      throw new Error(
+        `the socket ${socketPath} was bound and could not be opened to mode ${UNIX_SOCKET_MODE.toString(8)}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+
   const address = http.address();
-  const boundPort = typeof address === "object" && address !== null ? address.port : options.port;
-  const boundHost = typeof address === "object" && address !== null ? address.address : host;
-  notice(`approval: serve bound ${boundHost}:${String(boundPort)}\n`);
+  const boundPort =
+    socketPath === null && typeof address === "object" && address !== null ? address.port : options.port;
+  const boundHost =
+    socketPath !== null
+      ? `unix:${socketPath}`
+      : typeof address === "object" && address !== null
+        ? address.address
+        : host;
+  notice(
+    socketPath === null
+      ? `approval: serve bound ${boundHost}:${String(boundPort)}\n`
+      : `approval: serve bound ${boundHost}\n`,
+  );
 
   return {
     host: boundHost,
     port: boundPort,
+    socketPath,
     requests: () => requests,
     hookThreads: () => hooks.stats(),
     close: async () => {
@@ -1221,8 +1285,142 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       await stopped;
+      if (socketPath !== null) {
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // Already gone: the platform removed it on close.
+        }
+      }
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Unix-socket listen target (APRV-445)
+// ---------------------------------------------------------------------------
+
+/**
+ * The mode a unix socket is given once bound: everyone the DIRECTORY admits.
+ *
+ * A hosted tenant runs the agent's sandbox as a different uid from this server,
+ * on the same machine, and the socket is how the two meet without a TCP port
+ * anybody on the host could dial. Who may connect is therefore decided by the
+ * directory the socket sits in, which the operator owns and sets (`0710` with
+ * the sandbox's group, an ACL, a bind mount), and the socket itself does not
+ * second-guess it.
+ */
+export const UNIX_SOCKET_MODE = 0o666;
+
+/**
+ * Refuse a socket path this process should not bind (APRV-445).
+ *
+ * Absolute, inside an existing directory OWNED BY THE SERVING UID (the directory
+ * is the access control, so a directory somebody else owns is somebody else's
+ * access control), and not an existing file of any kind other than a socket: a
+ * stale socket is replaced, and anything else at that path is a file this
+ * server would destroy by binding over it. Synchronous and side-effect free, so
+ * the CLI can refuse before any listener exists.
+ */
+export function checkUnixSocketTarget(
+  socketPath: string,
+): { ok: true } | { ok: false; message: string } {
+  if (!socketPath.startsWith("/")) {
+    return { ok: false, message: `unix socket path ${JSON.stringify(socketPath)} is not absolute` };
+  }
+  const directory = dirname(socketPath);
+  let owner: number;
+  let mode: number;
+  try {
+    const stats = statSync(directory);
+    if (!stats.isDirectory()) {
+      return { ok: false, message: `${directory} is not a directory, so ${socketPath} cannot be bound in it` };
+    }
+    owner = stats.uid;
+    mode = stats.mode & 0o777;
+  } catch (cause) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} could not be read: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    };
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid === null || owner !== uid) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} is owned by uid ${String(owner)}, not by the serving uid ${String(uid)}. The directory is what decides who may connect to this socket (the socket itself is opened ${UNIX_SOCKET_MODE.toString(8)}), so it must be this process's own`,
+    };
+  }
+  // APRV-445 refutation (L3). An other-writable directory (`/tmp` is the
+  // usual one) lets anybody on the host unlink this socket and bind their own
+  // in its place, between this process's bind and every client's connect, so
+  // the directory would decide nothing. Refused rather than used.
+  if ((mode & 0o002) !== 0) {
+    return {
+      ok: false,
+      message: `the socket's directory ${directory} is writable by every user (mode ${mode.toString(8)}), so anyone could replace the socket; use a directory only the serving uid (and, if you mean it, its group) can write`,
+    };
+  }
+  try {
+    const existing = lstatSync(socketPath);
+    if (!existing.isSocket()) {
+      return {
+        ok: false,
+        message: `${socketPath} exists and is not a socket; binding there would destroy it, so nothing was bound`,
+      };
+    }
+  } catch {
+    // Absent: the ordinary case.
+  }
+  return { ok: true };
+}
+
+/**
+ * Remove a socket file nothing answers on (APRV-445).
+ *
+ * A server killed without closing leaves its socket file behind, and the next
+ * bind fails `EADDRINUSE` on a path nobody is listening at. A socket something
+ * DOES answer on is another live server, possibly another tenant's gate, and is
+ * refused rather than taken over.
+ */
+async function clearStaleSocket(socketPath: string): Promise<void> {
+  try {
+    if (!lstatSync(socketPath).isSocket()) return;
+  } catch {
+    return;
+  }
+  // APRV-445 refutation (L2): only a refusal that PROVES nobody listens makes
+  // the file stale. ECONNREFUSED is a socket with no listener and ENOENT is a
+  // file that vanished meanwhile; anything else (EACCES, EAGAIN on a full
+  // backlog, a timeout) is a socket this process cannot judge, and it is left
+  // alone rather than unlinked from under whoever owns it.
+  const probed = await new Promise<"live" | "stale" | string>((settle) => {
+    const probe = connect(socketPath);
+    probe.once("connect", () => {
+      probe.destroy();
+      settle("live");
+    });
+    probe.once("error", (cause: NodeJS.ErrnoException) => {
+      settle(cause.code === "ECONNREFUSED" || cause.code === "ENOENT" ? "stale" : cause.code ?? "unknown");
+    });
+  });
+  if (probed === "live") {
+    throw new Error(
+      `${socketPath} is a live socket: another process is listening on it, so this server will not take it over`,
+    );
+  }
+  if (probed !== "stale") {
+    throw new Error(
+      `${socketPath} exists and probing it failed with ${probed}, which does not prove nothing listens there; it was left in place`,
+    );
+  }
+  try {
+    unlinkSync(socketPath);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+  }
 }
 
 /**
