@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-03 04:25'
-updated_date: '2026-10-03 23:39'
+updated_date: '2026-10-03 23:56'
 labels:
   - channels
   - attest
@@ -78,6 +78,10 @@ PROPOSED SPEC HUNKS (pending Carter's sign-off; NOT applied in this PR):
 relay-secret-mismatch (no secret header, or not the launch environment's secret; checked before the path, method and body; 401) · relay-duplicate-secret-header (more than one secret header; 401) · relay-malformed-request (request line and Host form no URL; 400) · relay-unknown-path (a path other than /relay/gesture; 404) · relay-method-not-allowed (not POST; 405) · relay-body-too-large (over 16 KiB; 413) · relay-body-unreadable (unreadable or not JSON; 400) · relay-body-invalid (JSON outside the closed gesture shape, including any unknown field; 400) · relay-sender-invalid (sender.channel is not edgeos, or the id is outside the pinned grammar; 400) · relay-gesture-stale (issued_at more than five minutes from the relay's clock; 400) · relay-nonce-replayed (nonce already claimed within the retention; 409) · relay-nonce-unavailable (the ledger could not record the claim, so nothing is decided; 503) · relay-policy-mismatch (propose names a hash that is not the policy file on disk; 409) · relay-handler-failed (applying the gesture threw; 500). Evaluation order: secret, duplicate header, URL, path, method, body size, JSON, shape, sender, freshness, nonce, then the gesture. None appends to the log.
 
 Validation: full npm test exit 0 (5463 tests, 5461 pass, 0 fail, 2 skipped) on the final tree; tsc exit 0; npm run lint exit 0; tests/channel-relay.test.ts 24 and tests/sender-edgeos.test.ts 10 all pass; conformance regenerated (refusal-unions 26.0.0) and tests/conformance-regen.test.ts passes.
+
+REFUTER 2 (fresh opus, on 9bf48e4d, diff plus SPEC 11.1). No BLOCKER or HIGH. Fixed in the third commit: MEDIUM-1 an agent could start its own relay with its own secret (the verb classified gate.self) and write records reading as EdgeOS-session evidence; `approval channel relay` now classifies policy.core (rule approval-channel-relay, human-only in the reference policy), the registry note and docs say the attribution is as strong as control over who launches it. MEDIUM-2 the decision path relabelled log failures as policy-not-attested; log read failures now keep their own code (log-torn-tail etc.), and only unrecoverable in-force bytes refuse policy-not-attested. LOW-1 propose now refuses relay-policy-mismatch when the bytes proposed are not the hash the caller named (file changed between the two reads). LOW-4 the trimmed secret and NOTE literal 127.0.0.1 are documented; "withheld from every child" now says `approval run` children. Not fixed, noted: LOW-2 a Telegram edge where a reaffirmation is appended before the listener's next cycle leaves the earlier prompt armed and a tap on it answers the reaffirmation (no authority gained; misleading diff), no Telegram regression test for the latest-proposal fix; LOW-3 the two-ledger test is sequential, reaffirm has no unit test outside the relay.
+
+ADDITIONAL PROPOSED SPEC HUNKS (11.2, pending sign-off): the `policy-not-attested` row gains a second trigger: "a relay decision (APRV-455) whose in-force policy bytes cannot be recovered from the payload store, because a relay resolves its sender only against the policy in force; nothing is appended". The `sender-unmapped` row gains: "on a relay (APRV-455), also when the policy in force declares no sender for the relay's channel, because a relay has no configured identity to fall back on". Classifier: `approval channel relay` is policy.core (command-class refinement approval-channel-relay).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

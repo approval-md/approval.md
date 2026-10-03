@@ -666,6 +666,18 @@ function applyPropose(
       },
     };
   }
+  if (proposed.sha256 !== gesture.policySha256) {
+    // The file changed between the relay's hash check and the proposal's own
+    // read. The proposal already appended names bytes the caller never
+    // rendered; nothing can be attested unseen (acceptance re-hashes, and the
+    // caller attests by the hash IT named, which this proposal is not), and
+    // the caller is told rather than handed a hash it did not ask for.
+    return relayRefusal(
+      409,
+      "relay-policy-mismatch",
+      `the policy file changed while this proposal was being made: it names ${gesture.policySha256} and the proposal recorded at seq ${String(proposed.record.seq)} is of ${proposed.sha256}. Write the rendered policy again and propose its hash; an acceptance of ${gesture.policySha256} finds no open proposal and attests nothing`,
+    );
+  }
   return {
     status: 200,
     body: {

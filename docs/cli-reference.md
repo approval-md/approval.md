@@ -4545,8 +4545,9 @@ What the relay cannot do, by construction:
   latest attestation names, recovered from the payload store. A mapping
   sitting unattested on disk (the relay's own `propose` puts one there) decides
   nothing until a human attests it. Where the in-force bytes cannot be
-  recovered, the gesture is refused `policy-not-attested` and nothing is
-  appended.
+  recovered, a decision is refused `policy-not-attested` (an attestation,
+  `attest-requires-terminal`) and nothing is appended; a log that cannot be
+  read keeps its own code.
 - **Choose who may sign for a policy change.** An attestation is resolved
   against the policy IN FORCE, never the one being attested, so an account a
   proposal adds or repoints cannot accept the proposal that names it, and an
@@ -4560,14 +4561,22 @@ What the relay cannot do, by construction:
 - **Be reached through `approval serve` or `approval mcp serve`.** It is its
   own process, port and credential. The registry marks it `human_only`, so no
   wrapper publishes it, and neither serve credential reaches it.
+- **Be started by an agent.** The attribution a relay records is exactly as
+  strong as control over who launches it, because its launcher chooses the
+  secret. The hook classifier holds `approval channel relay` as `policy.core`
+  (human-only in the reference policy), so an agent session cannot start one; a
+  deployment starts it from its own launcher as the store's user. A keyed
+  `senders.edgeos` mapping adds a second lock: a process without
+  `APPROVAL_SENDER_KEY` cannot resolve any account.
 
 ### The secret
 
 `APPROVAL_RELAY_SECRET` is REQUIRED and is read from the launch environment,
 never from a file in the tree (SPEC.md §11.1 invariant 7). At least 24
 characters of `A-Z a-z 0-9 _ -` (generate it: `openssl rand -hex 32`), with the
-same value given to the control plane. Under the `APPROVAL_` prefix it is
-withheld from every child an agent's session spawns. The control plane sends it
+same value given to the control plane; surrounding whitespace is stripped at
+start, so the control plane sends the trimmed value. Under the `APPROVAL_`
+prefix it is withheld from every child `approval run` spawns. The control plane sends it
 in `x-approval-relay-secret`; it is compared in constant time over SHA-256
 digests, BEFORE the path, the method or the body, and a duplicate header is
 refused rather than resolved. **A refusal never reaches the gate and appends
@@ -4677,7 +4686,8 @@ header, so whoever holds the loopback port when the control plane posts
 receives it. In a sandbox where another uid can bind loopback (the Agent
 Village's `hermes` user), the control plane checks that the listener on 4684
 belongs to the relay's own user before it posts, the same foreign-listener
-rule the hook applies to `serve`. A unix socket in a directory only the relay's
+rule the hook applies to `serve`, and posts to the literal `127.0.0.1`, never
+`localhost`, which another uid could answer on `[::1]`. A unix socket in a directory only the relay's
 user can write, or a signature over the body in place of a bearer secret, would
 remove the check; neither is in this version.
 

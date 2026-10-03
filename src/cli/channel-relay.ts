@@ -21,7 +21,9 @@
  *    policy decides WHETHER a channel exists, never the value that
  *    authenticates it, and a second declaration would be a second place for
  *    one fact to be wrong. Under the `APPROVAL_` prefix it is withheld from
- *    every child an agent's session spawns (`core/child-env.ts`).
+ *    every child `approval run` spawns (`core/child-env.ts`), and the hook
+ *    classifier holds this command line `policy.core`, so an agent session
+ *    cannot start a relay with a secret of its own.
  * 2. **No human identity.** This verb takes no `--as` and reads no
  *    `APPROVAL_HUMAN`. Every gesture is attributed to the account the attested
  *    policy maps, or refused `sender-unmapped`.

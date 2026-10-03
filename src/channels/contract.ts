@@ -821,12 +821,16 @@ export interface ChannelActorOptions {
 function inForceLoad(
   logPath: string,
   gateOptions: DecideOptions,
-): { ok: true; load: ReturnType<typeof readGatePolicy> } | { ok: false; reason: string } {
+):
+  | { ok: true; load: ReturnType<typeof readGatePolicy> }
+  | { ok: false; reason: string; log?: { code: GateRefusal["code"]; message: string } } {
   const read = readVerifiedRecords(
     logPath,
     gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
   );
-  if (!read.ok) return { ok: false, reason: `the log could not be read (${read.code})` };
+  // A log that cannot be read keeps its own code (SPEC.md §11.1 invariant 6):
+  // a torn tail is not an unattested policy, and the repairs differ.
+  if (!read.ok) return { ok: false, reason: read.message, log: { code: read.code, message: read.message } };
   const inForce = inForcePolicyText(
     read.records,
     gateOptions.payloadStoreDir ?? payloadStoreDirFor(logPath),
@@ -952,6 +956,9 @@ export function recordChannelDecision(
   let load = readGatePolicy(gateOptions);
   if (actorOptions.requireSenderMapping === true) {
     const inForce = inForceLoad(logPath, gateOptions);
+    if (!inForce.ok && inForce.log !== undefined) {
+      return { outcome: { ok: false, code: inForce.log.code, message: inForce.log.message } };
+    }
     if (!inForce.ok) {
       return {
         outcome: {

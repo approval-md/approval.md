@@ -644,6 +644,15 @@ test("a decision resolves against the policy IN FORCE, never a mapping sitting u
   assertClean(w.unit);
 });
 
+test("a log that cannot be read keeps its own code on the decision path", async () => {
+  const w = await world();
+  writeFileSync(w.unit.logPath, `${readFileSync(w.unit.logPath, "utf8")}{"torn":`, "utf8");
+  const posted = await post(w.url, gesture("grant", { action_key: w.keys[0], sender: sender() }));
+  assert.equal(posted.status, 409);
+  assert.notEqual(refusalCode(posted), "policy-not-attested");
+  assert.match(refusalCode(posted), /^log-/u);
+});
+
 test("in-force bytes that cannot be recovered refuse policy-not-attested and append nothing", async () => {
   const w = await world();
   const storeDir = join(w.unit.dir, ".approval", "payloads");
