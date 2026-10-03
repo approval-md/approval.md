@@ -417,6 +417,14 @@ function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
     case "torn-tail": {
       const file = shellWord(logPath);
       const keep = String(result.intactBytes);
+      // What the truncation removes, from the file's own size: verify counts
+      // the tail's DECODED bytes, which overstates a tail holding invalid UTF-8.
+      let drop = result.tornBytes;
+      try {
+        drop = statSync(logPath).size - result.intactBytes;
+      } catch {
+        // Unreadable now: the verify count stands.
+      }
       return {
         check: "log",
         status: "fail",
@@ -428,7 +436,7 @@ function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
         // because truncating is a human decision taken after it, and the
         // truncation is spelled in `node` because `truncate(1)` is not on
         // macOS and node is wherever this CLI runs. Doctor truncates nothing.
-        fix: `approval log verify — read the full report; then, if you decide to repair, keep the first ${keep} byte(s) of ${logPath} and drop the final ${String(result.tornBytes)}: \`node -e "require('fs').truncateSync(process.argv[1], ${keep})" ${file}\`. Nothing here truncates, because that is a human decision`,
+        fix: `approval log verify — read the full report; then, if you decide to repair, keep the first ${keep} byte(s) of ${logPath} and drop the final ${String(drop)}: \`node -e "require('fs').truncateSync(process.argv[1], ${keep})" ${file}\`. Nothing here truncates, because that is a human decision`,
       };
     }
     case "corrupt":

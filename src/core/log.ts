@@ -456,9 +456,19 @@ function openForAppend(logPath: string): { fd: number; created: boolean } {
 }
 
 /**
+ * The errors a directory fsync returns on a filesystem that cannot sync a
+ * directory at all (some FUSE, SMB and drvfs mounts). PostgreSQL ignores the
+ * same set for the same reason: there, every first append would otherwise
+ * report io with record 1 already in the file, inviting a re-run and a
+ * duplicate. EIO and everything else still fail the append.
+ */
+const DIRECTORY_FSYNC_UNSUPPORTED = new Set(["EINVAL", "EBADF", "ENOTSUP", "EOPNOTSUPP"]);
+
+/**
  * fsync a directory, so a name created in it survives a crash. Windows cannot
  * open a directory for this and its filesystems journal names themselves, so it
- * is skipped there; everywhere else a failure is the caller's to report.
+ * is skipped there, as is a filesystem that reports directory fsync as
+ * unsupported; everywhere else a failure is the caller's to report.
  */
 function fsyncDirectory(dir: string): void {
   if (process.platform === "win32") return;
@@ -466,6 +476,8 @@ function fsyncDirectory(dir: string): void {
   const fd = writeLayer.open(dir, fsConstants.O_RDONLY, 0);
   try {
     writeLayer.fsync(fd);
+  } catch (cause) {
+    if (!DIRECTORY_FSYNC_UNSUPPORTED.has((cause as NodeJS.ErrnoException).code ?? "")) throw cause;
   } finally {
     try {
       writeLayer.close(fd);
@@ -879,7 +891,11 @@ function lockedRun<T>(
  */
 const appendListeners: Array<(logPath: string) => void> = [];
 
-/** Subscribe to successful appends. Process-wide, memory-only, additive. */
+/**
+ * Subscribe to appends that put bytes in the file: every successful one, and
+ * since APRV-440 one that wrote and then failed to confirm them durable (a
+ * short write, a failed fsync). Process-wide, memory-only, additive.
+ */
 export function onLogAppended(listener: (logPath: string) => void): void {
   appendListeners.push(listener);
 }

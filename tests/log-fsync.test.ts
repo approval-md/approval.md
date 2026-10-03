@@ -28,6 +28,8 @@ import {
   rmSync,
   writeSync,
 } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, afterEach, test } from "node:test";
@@ -95,7 +97,7 @@ function recordingLayer(
   recorder: Recorder,
   fail: {
     fsyncFile?: boolean;
-    fsyncDir?: boolean;
+    fsyncDir?: boolean | string;
     shortWrite?: boolean;
   } = {},
 ): AppendWriteLayer {
@@ -140,8 +142,9 @@ function recordingLayer(
       if (isLog && fail.fsyncFile === true) {
         throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" });
       }
-      if (!isLog && fail.fsyncDir === true) {
-        throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" });
+      if (!isLog && fail.fsyncDir !== undefined && fail.fsyncDir !== false) {
+        const code = fail.fsyncDir === true ? "EIO" : fail.fsyncDir;
+        throw Object.assign(new Error(`${code}: fsync`), { code });
       }
       fsyncSync(fd);
     },
@@ -296,6 +299,46 @@ test("a failed directory fsync after a first append is an io failure naming the 
   assert.ok(result.error.message.includes(`its directory ${dirname(logPath)} could not be`));
   // The directory handle is closed even though its fsync threw.
   assert.equal(words(recorder, logPath).at(-1), `close(dir:${dirname(logPath)})`);
+});
+
+test("a filesystem that cannot fsync a directory (EINVAL) does not fail the first append", () => {
+  const { logPath } = caseDirs();
+  mkdirSync(dirname(logPath), { recursive: true });
+
+  const recorder = newRecorder();
+  setAppendWriteLayerForTests(recordingLayer(recorder, { fsyncDir: "EINVAL" }));
+  const result = appendEvent(logPath, input(1));
+  setAppendWriteLayerForTests(null);
+
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.ok(words(recorder, logPath).includes(`fsync(dir:${dirname(logPath)})`));
+});
+
+test("production's layer really calls fs.fsyncSync on the log, after the write", () => {
+  // The cases above prove the ORDER through an injected layer; this one proves
+  // the layer production runs is not a no-op. Node keeps the named exports of a
+  // builtin in step with its default export via syncBuiltinESMExports, so the
+  // spy reaches the binding core/log-write-layer.ts imported.
+  const { logPath } = caseDirs();
+  setAppendWriteLayerForTests(null);
+  const original = fs.fsyncSync;
+  const synced: number[] = [];
+  fs.fsyncSync = (fd: number): void => {
+    synced.push(fs.fstatSync(fd).size);
+    original(fd);
+  };
+  syncBuiltinESMExports();
+  let result: ReturnType<typeof appendEvent>;
+  try {
+    result = appendEvent(logPath, input(1));
+  } finally {
+    fs.fsyncSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.ok(result.ok, JSON.stringify(result));
+  // The file first (its full line already written), then its directories.
+  assert.ok(synced.length >= 2, `fsyncSync ran ${String(synced.length)} time(s)`);
+  assert.equal(synced[0], Buffer.byteLength(`${result.line}\n`, "utf8"));
 });
 
 test("a short write is reported, never acknowledged, and is not fsynced as if whole", () => {

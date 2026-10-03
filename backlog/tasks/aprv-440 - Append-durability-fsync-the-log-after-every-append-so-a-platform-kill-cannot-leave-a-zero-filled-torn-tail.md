@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-opus'
 created_date: '2026-09-25 01:49'
-updated_date: '2026-10-03 13:44'
+updated_date: '2026-10-03 13:55'
 labels:
   - log
   - durability
@@ -60,6 +60,8 @@ Implementation (what the diff will not say):
 AC #3 measurement (tests/append-fsync.bench.ts, APPROVAL_BENCH=1, macOS APFS, where libuv's fsync is F_FULLFSYNC; 2026-10-03): one append median 4.10 ms with fsync vs 0.35 ms without, so fsync costs 3.74 ms per append (p95 6.10 vs 0.62). A daemon tick appending 20 drift records: median 167.1 ms with fsync vs 83.1 ms without, +84.0 ms per tick (4.2 ms per append). A tick that appends nothing pays nothing. Budget, written into the bench: 25 ms per append (a tap's ack pays one append inside APRV-206's 300 ms bound) and 1000 ms per 20-append tick (the default interval is 30 s). Both are well inside budget, so appends are not batched; each append's ok still means durable. Linux ext4 on virtio (the hosted shape) is unmeasured here; run the bench there before reading it as settled.
 
 Validation: node --test on log-fsync, log, verify, cli, cli-doctor, daemon-tick-cost and read-proof, exit 0 (210 pass, 0 fail); oxlint exit 0. Full suite (run-tests.mjs --baseline): 5401 pass, 2 fail, exit 1. Both failures were build-freshness: I edited log.ts mid-run, so dist went stale. Both files pass alone on a fresh build (exit 0). CI is the full-matrix verdict.
+
+Refuter (fresh opus, scope: durability vs injection test, compare-and-append unchanged, no new refusal code): nothing blocking; all three points hold. Fixed in this commit: (1) a directory fsync returning EINVAL/EBADF/ENOTSUP/EOPNOTSUPP (a filesystem that cannot sync directories) no longer fails a first append, matching PostgreSQL; EIO still fails. (2) A test now spies fs.fsyncSync through syncBuiltinESMExports, so a no-op production layer would fail the suite. (3) doctor's 'drop the final N bytes' is computed from file size minus intactBytes, because verify's tornBytes overstates a tail holding invalid UTF-8. (4) onLogAppended's doc comment says it fires on wrote-then-failed appends. Left as follow-ups for the human to file or decline: cli/log-sync.ts placeAtomically (temp + rename, no fsync) and preflight's moveFile; directory entries made by approval init (.approval/ is never synced on init-then-attest), by an earlier append that failed after mkdir, or by a racing mkdir, plus a failed directory fsync that is never retried (low impact on journaling filesystems, since the file fsync commits the journal); NULs before a complete line (fsyncgate, or pre-fix multi-page losses) read as corrupt rather than torn-tail; the hosted hypervisor must honor guest flushes (virtio cache=unsafe would void this), and the Linux bench has not been run.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
