@@ -253,7 +253,9 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
   assert.deepEqual(body, {
     ok: true,
     healthy: true,
-    attestation: { state: "attested", seq: 1 },
+    // Additive (APRV-449): who made the attestation in force, read from the
+    // verified record at that seq.
+    attestation: { state: "attested", seq: 1, attested_by: "human:carter" },
     verification: { status: "clean", records: 4 },
     dangling: [],
     budgets: [
@@ -319,14 +321,14 @@ test("status reports a policy edited after attestation as hash-mismatch, exit 1"
   const { code, body } = statusJson(dir);
   assert.equal(code, 1);
   assert.equal(body["healthy"], false);
-  assert.deepEqual(body["attestation"], { state: "hash-mismatch", seq: 1 });
+  assert.deepEqual(body["attestation"], { state: "hash-mismatch", seq: 1, attested_by: "human:carter" });
 });
 
 test("status reports a never-attested policy with a null seq, exit 1", () => {
   const dir = caseDir();
   const { code, body } = statusJson(dir);
   assert.equal(code, 1);
-  assert.deepEqual(body["attestation"], { state: "not-attested", seq: null });
+  assert.deepEqual(body["attestation"], { state: "not-attested", seq: null, attested_by: null });
   assert.deepEqual(body["verification"], { status: "clean", records: 0 });
 });
 
@@ -345,7 +347,7 @@ test("status text mode names health, attestation, verification, dangling and bud
   // spaces rather than a colon, and the payload store's rationale paragraph
   // moved to `--json`'s `payload_store.note` (still asserted above).
   assert.match(run.stdout, /^health {2,}ok$/mu);
-  assert.match(run.stdout, /^attestation {2,}attested \(seq 1\)$/mu);
+  assert.match(run.stdout, /^attestation {2,}attested \(seq 1, by human:carter\)$/mu);
   assert.match(run.stdout, /^verification {2,}clean/mu);
   assert.match(run.stdout, /^dangling executions {2,}none$/mu);
   assert.match(run.stdout, /^budget global\.daily_usd {2,}consumed /mu);

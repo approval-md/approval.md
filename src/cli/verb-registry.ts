@@ -725,13 +725,14 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime.",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime. With --bootstrap it attests a store's FIRST policy only, reading the verified log first: a re-run over the same bytes refuses policy-already-attested and changed bytes refuse policy-amendment-required, both at exit 1 with nothing appended, which is the operator's provisioning step for a tenant with no shell (APRV-449).",
     human_only: true,
     input: input({
       flags: {
         ...POLICY_FLAGS,
         "--organ": "string",
         "--path": "string",
+        "--bootstrap": "boolean",
         ...AS_FLAG,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -1703,7 +1704,12 @@ const VERBS: VerbSpec[] = [
       {
         ok: { const: true },
         healthy: BOOLEAN,
-        attestation: object({ state: STRING, seq: nullable(INTEGER) }, ["state", "seq"]),
+        // APRV-449: `attested_by` is the actor of the attesting record at `seq`,
+        // read from the verified log, `null` when there is none. Always present.
+        attestation: object(
+          { state: STRING, seq: nullable(INTEGER), attested_by: nullable(STRING) },
+          ["state", "seq", "attested_by"],
+        ),
         verification: object({ status: STRING, records: nullable(INTEGER) }, ["status", "records"]),
         dangling: arrayOf(OPEN_OBJECT),
         indeterminate: arrayOf(OPEN_OBJECT),

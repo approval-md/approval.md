@@ -76,6 +76,7 @@ import {
 } from "../channels/telegram.js";
 import {
   HUMAN_ACTOR_ENV,
+  attesterAt,
   checkAttestation,
   findOrganAttestation,
   findPathSignOff,
@@ -359,12 +360,17 @@ function resolvePolicyPath(policyFlag: string | null, dir: string, cwd: string):
 function checkAttestationHealth(records: EventRecord[], policyPath: string): DoctorCheck {
   const status = checkAttestation(records, policyPath);
   switch (status.status) {
-    case "attested":
+    case "attested": {
+      // APRV-449: WHO set the policy in force, from the verified record at that
+      // seq and never from the file. A hosted tenant reads this row to learn
+      // whether their starting policy is the operator's or their own.
+      const by = attesterAt(records, status.seq);
       return {
         check: "attestation",
         status: "pass",
-        detail: `${policyPath} is attested at seq ${status.seq} (sha256 ${status.sha256.slice(0, 12)}…)`,
+        detail: `${policyPath} is attested at seq ${status.seq}${by === null ? "" : ` by ${by}`} (sha256 ${status.sha256.slice(0, 12)}…)`,
       };
+    }
     case "not-attested":
       return {
         check: "attestation",
