@@ -788,6 +788,17 @@ was read from, and binds the digest it checked, so an attestation landing in
 between, or a file rewritten in between, refuses (`head-moved`, or `io` naming
 the changed bytes) rather than stacking an operator attestation on top. A torn
 log is exit 3 and a log that does not verify is `log-corrupt` at exit 1.
+
+With `--bootstrap` the log is the store's: it resolves under `--dir`
+(`<dir>/.approval/log/events.jsonl`) unless `--log` names one, so `approval
+policy attest --bootstrap --dir "$STORE"` attests the store's own log from any
+working directory. The plain verb keeps its working-directory default. A
+refused append can leave one unbound copy of the policy text in the payload
+store, because the text is stored before the append (APRV-356). It is not
+removed: the record that moved the head may be another attestation of the same
+bytes, which binds that very file. An unbound file is inert, and `approval
+status` counts it under `payload_store.orphans`.
+
 `--bootstrap` beside `--organ` or `--path` is a usage error. The whole
 provisioning sequence is [docs/hosted-provisioning.md](hosted-provisioning.md).
 

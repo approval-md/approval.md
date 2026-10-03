@@ -479,11 +479,20 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
 
   const dirFlag = stringFlag(parsed.flags, "--dir");
   const dir = dirFlag === null ? cwd : absolute(dirFlag, cwd);
-  const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
+  const bootstrap = boolFlag(parsed.flags, "--bootstrap");
+  const logFlag = stringFlag(parsed.flags, "--log");
+  // APRV-449 review. With --bootstrap the log is the STORE's, so it resolves
+  // under --dir (as `approval serve --dir` resolves it) unless --log names one.
+  // A provisioning step run from another directory with `--dir $STORE` would
+  // otherwise attest into a stray log beside its own cwd, and the store it
+  // meant would stay unattested. The plain verb keeps its cwd-relative default.
+  const logPath =
+    bootstrap && logFlag === null
+      ? join(dir, DEFAULT_LOG_PATH)
+      : resolvePath(logFlag, DEFAULT_LOG_PATH, cwd);
 
   const organFlag = stringFlag(parsed.flags, "--organ");
   const pathFlag = stringFlag(parsed.flags, "--path");
-  const bootstrap = boolFlag(parsed.flags, "--bootstrap");
   // APRV-449. The bootstrap is a rule about the POLICY attestation (a store's
   // first one), so beside a route that appends a different event it would be a
   // flag nobody read. Refused rather than ignored.

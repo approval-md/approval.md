@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-03 05:56'
+updated_date: '2026-10-03 13:20'
 labels:
   - hosting
   - attest
@@ -80,6 +80,14 @@ AC #4 reading: the trust statement is written once (docs/hosted-provisioning.md,
 Resume point: pushed lane/aprv-449-446 at 5fbb6ab8; next: gh pr create, watch checks.
 
 CI: PR #570 green (full gate shards 1-3, protected paths, classify tier, ci). Full local npm test on the stacked branch (449 + 446): 5405 pass, 0 fail, 2 skipped, exit 0.
+
+Review fixes (refuter on #570, 2026-10-03):
+1. --bootstrap resolves the log under --dir (the store's default log path) unless --log is given; the plain verb keeps its cwd default. Test: attest --bootstrap --dir <store> from a foreign cwd lands in the store's log, the re-run refuses there, no stray log appears, and an explicit --log still wins.
+2. docs/hosted-provisioning.md step 2 now writes the render only when the store has no log file at all; --bootstrap is the only attestation guard; step 3 passes --dir; the doc says why a status --json guard is wrong (a torn tail reads not-attested; status exits 1 so pipefail makes the if always false) and that steps 1-3 run before up/serve start.
+3. BOOTSTRAP_REFUSAL_CODES pinned by a deepEqual freeze test (SPEC §11.1 invariant 6, verb-local union per §11.2).
+4. The orphan payload file on a refused append is documented, not removed (core/attest-bootstrap.ts header, cli-reference, the refusal table): removal is unsafe because the record that moved the head may be another attestation of the same bytes, which binds that file. Inert; status counts it under payload_store.orphans.
+SPEC HUNK 4 (added): the §11.2 refusal-code registry gains a verb-local note for approval policy attest --bootstrap: policy-already-attested (the live policy already matches its latest attestation; nothing appended; the expected answer on a provisioning re-run) and policy-amendment-required (the log carries an attestation of other bytes; a change to an attested policy is the approver's act through a channel; nothing appended), exported as BOOTSTRAP_REFUSAL_CODES, frozen, pinned in tests/cli-attest-bootstrap.test.ts. All four SPEC hunks stay pending sign-off and ride APRV-454.
+Verification: tsc 0, lint 0; cli-attest-bootstrap, cli-attest, cli-status, cli-style-render, e2e-demo, cli-long-help, cli-help, docs-guard, cli-doctor: 233/233.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

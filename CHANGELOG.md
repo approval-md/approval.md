@@ -41,9 +41,10 @@ before a tag.
   verb is unchanged, and needs no TTY either way. `approval status` gains
   `attestation.attested_by` (the text row reads `attested (seq 1, by
   human:carter)`) and `approval doctor`'s attestation row names the attester,
-  both read from the verified record. `docs/hosted-provisioning.md` is the
-  sequence (init, write the policy only while unattested, attest as the store
-  user), every refusal code, and the trust statement: the operator sets the
+  both read from the verified record. With `--bootstrap` the log resolves under
+  `--dir` unless `--log` names one. `docs/hosted-provisioning.md` is the
+  sequence (init, write the policy only into a store with no log, attest as the
+  store user), every refusal code, and the trust statement: the operator sets the
   starting policy, and every change needs the approver's act through a channel.
 
 - **A harness probe drives its own matrix, so an operator runs one command

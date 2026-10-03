@@ -40,6 +40,19 @@
  * on is passed as `expectedSha256`, so a file rewritten between the check and the
  * append is refused rather than attested.
  *
+ * ## A refused append can leave one unbound store file, deliberately
+ *
+ * `appendAttestation` writes the attested text to the payload store BEFORE it
+ * appends (APRV-356: no record may bind bytes the store lacks). If the append
+ * then fails, `head-moved` above all, the `{ text }` file stays behind with no
+ * record binding it. It is not removed, because removal is the unsafe
+ * direction: the store is content-addressed, and the record that moved the head
+ * may be another attestation of these same bytes, which binds this very file.
+ * Deleting it would turn a harmless orphan into a binding whose bytes are gone.
+ * An unbound file is inert (nothing reads a payload no record names), `approval
+ * status` counts it under `payload_store.orphans`, and the next successful
+ * attestation of the same bytes binds it.
+ *
  * ## What it does not change
  *
  * The actor rule (human only), bytes-not-parse, config-declared identity and the
