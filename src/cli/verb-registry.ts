@@ -2018,6 +2018,31 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "channel",
+    subcommand: "relay",
+    purpose:
+      "Serve POST /relay/gesture on loopback for an operator's control plane (APRV-455): propose, attest or decline a policy by sha256, or grant or reject a request by action key, attributed to the EdgeOS account the attested policy maps. Authenticated by APPROVAL_RELAY_SECRET from the launch environment; a post without it is refused and never logged. It holds no human identity: an unmapped account is refused sender-unmapped. The raw execution token of a grant never leaves the process.",
+    human_only: true,
+    human_only_note:
+      "It records human decisions and attestations, and it holds the relay credential. An agent that could start it, or call it, would be holding the door the relay secret exists to keep shut, so no wrapper publishes it and neither serve credential reaches it.",
+    input: input({
+      flags: {
+        "--listen": "string",
+        "--port": "string",
+        "--allow-non-loopback": "boolean",
+        "--proposer": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "daemon",
     subcommand: "run",
     purpose:

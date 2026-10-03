@@ -15,6 +15,38 @@ before a tag.
 
 ## Unreleased
 
+- **`edgeos` is a sender channel (APRV-455).** `approvers.<id>.senders.edgeos`
+  maps a person's EdgeOS `/humans/me` id, raw (an ASCII letter or digit, then
+  up to 127 letters, digits, `.`, `_` or `-`; colon-free, so it can never be
+  read as the keyed form) or keyed under `APPROVAL_SENDER_KEY` exactly as
+  `telegram` is. It qualifies on the APRV-324 ground: the gesture is attributed
+  to an id the person cannot choose, by a relay the daemon trusts the way it
+  trusts the Bot API's `from.id`. An observed id that already wears the
+  `hmac-sha256:` prefix is never compared raw, so a published digest cannot be
+  replayed as an account. The schema hunk is confined to the `senders` object
+  and the `senderChannel` definition.
+- **`approval channel relay` (APRV-455).** A third arrival for a human
+  gesture: a loopback HTTP listener (port 4684) an operator's control plane
+  posts to, authenticated by `APPROVAL_RELAY_SECRET` from the launch
+  environment in `x-approval-relay-secret`, checked before the path, method
+  or body. `POST /relay/gesture` takes one closed body: `propose`,
+  `attest` or `decline` a policy by sha256, or `grant` or `reject` a
+  request by action key, each with an EdgeOS sender, a nonce and an
+  `issued_at`. Gestures go through `recordChannelDecision` with the new
+  `requireSenderMapping`, so an unmapped account (or a policy mapping none) is
+  refused `sender-unmapped` with one `audit.decision_refused` and the relay
+  never decides as an identity of its own; expiry, policy drift and attestation
+  resolve exactly as for a Telegram tap. A forged post appends nothing; a
+  replayed nonce is refused across restarts by an `O_EXCL` ledger under
+  `.approval/daemon/relay-nonces/`; a grant's raw token never leaves the
+  process. `propose` may reaffirm bytes already in force
+  (`ProposeInput.reaffirm`), so an unchanged onboarding review still makes the
+  resident the attester of record. The verb is `human_only` in the registry,
+  so neither `serve` nor MCP publishes it. New frozen union
+  `relay_refusal_codes` (refusal-unions vectors 26.0.0). Trust level: the
+  daemon trusts the relay's attribution, which is operator trust (APRV-422).
+  The SPEC §10.3 and §11.2 hunks are proposed in the task notes, pending
+  sign-off.
 - **An acknowledged append survives the machine dying the next moment
   (APRV-440).** Every append to `events.jsonl` now fsyncs the descriptor after
   its single write and before the verb reports ok, and the append that creates

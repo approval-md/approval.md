@@ -4503,6 +4503,156 @@ belong to a RUNNING listener: they are on its stderr as they happen, in its
 Which variables are read comes from the policy, so a renamed variable reads back
 as the name you set.
 
+## channel relay
+
+A third arrival for a human gesture, beside a Telegram tap and a terminal
+(APRV-455). An operator's control plane holds an authenticated session for a
+person (the Agent Village control plane holds an EdgeOS session for each
+resident), shows them a request or their policy, and posts what they did to
+this verb. The post carries the gesture, the EdgeOS `/humans/me` id of the
+session that made it, the policy hash or the action key it answers, a nonce and
+an `issued_at`. The daemon resolves the id against the attested policy exactly
+as it resolves a Telegram `from.id`, and records the gesture through the same
+`recordChannelDecision` a tap goes through.
+
+```
+approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
+                       [--proposer human:<id>|agent:<id>] [--policy <p>] [--dir <p>]
+                       [--log <p>] [--json]
+```
+
+### Trust level
+
+**The daemon trusts the relay's attribution.** A post that carries the relay
+secret is the operator's control plane reporting which EdgeOS account acted,
+and the daemon believes that report the way it believes the Telegram Bot API's
+report of `callback_query.from.id`. That is operator trust, stated in
+APRV-422's words: no hosted service has authority over decisions. The relay
+carries a person's gesture and decides nothing. Which approver the account is,
+whether that approver may decide this request or attest this policy, and
+whether the request is still answerable are all decided by the runtime, from
+the verified log and the attested policy, with the same codes a tap gets.
+
+What the relay cannot do, by construction:
+
+- **Act as anyone of its own.** It takes no `--as` and reads no
+  `APPROVAL_HUMAN`. Every gesture is attributed to the account
+  `approvers.<id>.senders.edgeos` maps, or refused `sender-unmapped` with one
+  `audit.decision_refused`. A policy that maps no EdgeOS account refuses every
+  gesture the same way; there is no fallback to a configured identity.
+- **Choose who may sign for a policy change.** An attestation is resolved
+  against the policy IN FORCE, never the one being attested, so an account a
+  proposal adds or repoints cannot accept the proposal that names it, and an
+  amendment that introduces the EdgeOS mapping is refused
+  `attest-requires-terminal` (the operator bootstrap of APRV-449 is what maps
+  the resident the first time).
+- **Hold a token.** A grant that mints a token for the deciding surface has it
+  dropped unread; the response says only `token_issued`. Requests in the Agent
+  Village are harness-executed or sealed, so none is lost; a manual-delivery
+  request granted here has a token nobody holds and is asked again.
+- **Be reached through `approval serve` or `approval mcp serve`.** It is its
+  own process, port and credential. The registry marks it `human_only`, so no
+  wrapper publishes it, and neither serve credential reaches it.
+
+### The secret
+
+`APPROVAL_RELAY_SECRET` is REQUIRED and is read from the launch environment,
+never from a file in the tree (SPEC.md §11.1 invariant 7). At least 24
+characters of `A-Z a-z 0-9 _ -` (generate it: `openssl rand -hex 32`), with the
+same value given to the control plane. Under the `APPROVAL_` prefix it is
+withheld from every child an agent's session spawns. The control plane sends it
+in `x-approval-relay-secret`; it is compared in constant time over SHA-256
+digests, BEFORE the path, the method or the body, and a duplicate header is
+refused rather than resolved. **A refusal never reaches the gate and appends
+nothing to the log**: it is counted, written to stderr, and answered with its
+code. The secret appears in no response, no log record and no stderr line.
+
+Loopback by default (port 4684). There is no TLS here; a routable bind takes
+`--listen <host:port> --allow-non-loopback` and prints a banner every start.
+
+### The body
+
+`POST /relay/gesture`, one JSON object, closed: an unknown field is refused, so
+nothing that looks like authority (an `actor`, a second sender, a `ts`) rides
+along on a valid post.
+
+```json
+{"gesture":"propose","policy_sha256":"<64 hex>","nonce":"<16..128 of A-Za-z0-9_->","issued_at":"2026-10-03T12:00:00Z"}
+{"gesture":"attest","policy_sha256":"<64 hex>","sender":{"channel":"edgeos","id":"<EdgeOS id>"},"nonce":"...","issued_at":"..."}
+{"gesture":"decline","policy_sha256":"<64 hex>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+{"gesture":"grant","action_key":"<the request's key>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+{"gesture":"reject","action_key":"<the request's key>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+```
+
+- `sender.channel` is `edgeos` and nothing else. `sender.id` is the raw
+  `/humans/me` id: an ASCII letter or digit, then up to 127 letters, digits,
+  `.`, `_` or `-`, the grammar `senders.edgeos` pins. Never a digest (a keyed
+  policy is resolved with `APPROVAL_SENDER_KEY` in the relay's environment) and
+  never an email address.
+- `issued_at` is RFC 3339 in UTC ending in `Z`, within five minutes of the
+  relay's clock either side. It is used for that window and recorded nowhere;
+  every record's `ts` is the runtime's own.
+- `nonce` is claimed before the gesture is applied, in a ledger of `O_EXCL`
+  files under the gate's `.approval/daemon/relay-nonces/`, kept for eleven
+  minutes. A replay is refused `relay-nonce-replayed` at this process, after a
+  restart, or at a second relay on the same gate. A retry is a new post with a
+  new nonce, and the gate answers a repeated decision `already-decided`.
+
+`propose` is the control plane's half of the onboarding review. It writes the
+rendered policy into the store, then posts its hash: the relay re-hashes the
+file and refuses `relay-policy-mismatch` when the bytes are not the ones named,
+then appends a `policy.proposed` under `--proposer` (default
+`agent:edgeos-relay`) with the semantic diff against the verified in-force
+text. A retry of an open proposal of the same bytes returns it with
+`"existing":true`. It also admits bytes ALREADY in force (`"reaffirm":true`):
+the review most residents make is "accept, unchanged", and that acceptance is
+still their attestation. A reaffirmation changes the attester of record and
+nothing else. The prompt also reaches Telegram, where the resident's tap
+answers it equally.
+
+`attest` / `decline` answer the open proposal of that hash. `attest` appends
+`policy.updated` with `actor: human:<approver>` and `payload.sender
+{channel: edgeos, id}`. A hash that names no open proposal (superseded,
+answered, never proposed) is refused `proposal-not-found`, and a file changed
+under the proposal is refused `proposal-stale`; neither attests anything.
+
+`grant` / `reject` answer a pending request exactly as a Telegram tap does,
+including `expired`, `policy-drift` (with its `audit.decision_refused` and
+withdrawal), `already-decided` and `actor-not-approver`.
+
+### Responses
+
+| status | body | meaning |
+| --- | --- | --- |
+| 200 | `{"ok":true,"gesture":…,"event":…,"seq":…,"actor":…}` | recorded (`propose` returns `sha256`, `seq`, `existing`, `reaffirm`, `changes`, `loads`) |
+| 409 | `{"ok":false,"gesture":…,"refusal":{"code","message"}}` | the gate or the decision surface refused; the code is from `gate_refusal_codes` or `channel_decision_refusal_codes` |
+| 4xx/5xx | `{"error":{"code","message"}}` | the relay refused the post; the code is from `relay_refusal_codes`, and nothing was appended |
+
+`relay_refusal_codes` (frozen, pinned in `conformance/vectors/refusal-unions.v1.json`):
+`relay-secret-mismatch`, `relay-duplicate-secret-header` (401),
+`relay-malformed-request` (400), `relay-unknown-path` (404),
+`relay-method-not-allowed` (405), `relay-body-too-large` (413),
+`relay-body-unreadable`, `relay-body-invalid`, `relay-sender-invalid`,
+`relay-gesture-stale` (400), `relay-nonce-replayed` (409),
+`relay-nonce-unavailable` (503, the ledger could not record the nonce, so
+nothing was decided), `relay-policy-mismatch` (409), `relay-handler-failed`
+(500).
+
+Start-up refusals (exit 2, `{"error":{"code"}}` under `--json`):
+`relay-secret-missing`, `relay-secret-weak`, `relay-secret-charset`,
+`relay-proposer-invalid`, `relay-bind-invalid`. An unreadable log exits 4, a
+torn tail 3, a corrupt chain 1.
+
+With `--json`, stdout carries one object per line: `relay_started` (`host`,
+`port`, `path`, `proposer`), one `relay_gesture` per gesture that reached the
+gate (`gesture`, `ok`, and `seq`/`record`/`actor` or `code`), and `stopped`
+with the counters. Never a body, a sender id or the secret.
+
+There is no transport lease. A Telegram bot admits one receiver; a relay has no
+such constraint, because compare-and-append, the gate's idempotency and the
+`O_EXCL` nonce ledger make two relays on one gate safe. A second relay on the
+same port fails to bind.
+
 ## quickstart
 
 `approval quickstart [--dir <path>] [--api-base <url>]` is the human-only solo setup ceremony. It

@@ -1396,14 +1396,13 @@ Usage:
   approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
                        [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
+  approval channel relay [--listen [host:]port | --port <n>] [--proposer <a>] [--json]
 
 Subcommands:
-  cli        render the pending queue in this terminal and, when it IS a
-             terminal, collect decisions with a prompt
-  web        serve the pending queue as a page on 127.0.0.1 ONLY, with
-             Grant/Reject forms and a batch gesture
-  telegram   deliver the queue to a Telegram chat and long-poll for
-             Approve/Reject taps
+  cli        render the pending queue here; on a terminal, collect decisions
+  web        the queue as a page on 127.0.0.1 ONLY, with Grant/Reject forms
+  telegram   deliver the queue to a Telegram chat; collect Approve/Reject taps
+  relay      take gestures an operator's authenticated relay carries (EdgeOS)
 
 A channel is TRANSPORT: it renders what the runtime derived and reports the
 gesture a human made. Every decision collected here is recorded by the same
@@ -1975,6 +1974,31 @@ JSON shape: docs/cli-reference.md#channel-telegram-webhook
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("channel-telegram-webhook")}`;
+
+export const CHANNEL_RELAY_HELP = `approval channel relay — gestures an operator's authenticated relay carries
+
+Usage:
+  approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
+        [--proposer human:<id>|agent:<id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --port <n> / --listen <[host:]port>   LOOPBACK by default (4684); routable also needs --allow-non-loopback
+  --proposer <actor>   who a propose gesture is recorded under (default agent:edgeos-relay)
+  -h, --help           this text
+
+APPROVAL_RELAY_SECRET is REQUIRED, from the launch environment: the control
+plane sends it in x-approval-relay-secret, and a post without it is refused
+and never written to the log. POST /relay/gesture takes one closed JSON body:
+propose, attest or decline a policy by sha256, or grant or reject a request by
+action key, each with a nonce and issued_at. The sender is an EdgeOS id, and
+it is resolved against approvers.<id>.senders.edgeos in the attested policy:
+an unmapped account is refused sender-unmapped. This process holds NO human
+identity and NO TLS. Trust: the daemon trusts the relay's attribution.
+
+JSON shape: docs/cli-reference.md#channel-relay
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("channel-relay")}`;
 
 export const TELEGRAM_HEALTH_HELP = `approval channel telegram health — is this runtime configured for Telegram?
 

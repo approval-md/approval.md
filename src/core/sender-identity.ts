@@ -13,10 +13,12 @@
  *
  * ## What is evidence here, and what is not
  *
- * Exactly one field in the whole system is a sender fact worth mapping:
- * Telegram's `callback_query.from.id`, the stable numeric account id the Bot
- * API attributes the tap to. {@link SENDER_CHANNELS} is closed to that one
- * channel for that reason. A web form post authenticates nobody and a CLI
+ * Two fields in the whole system are sender facts worth mapping. Telegram's
+ * `callback_query.from.id`, the stable numeric account id the Bot API
+ * attributes the tap to, and (APRV-455) the EdgeOS `/humans/me` id that an
+ * operator's control plane attributes a gesture to when it carries it over
+ * `approval channel relay`. {@link SENDER_CHANNELS} is closed to those two
+ * channels for that reason. A web form post authenticates nobody and a CLI
  * process authenticates local machine control, so neither may be given an
  * identity key it cannot support: a `senders` entry for either is a schema
  * violation rather than a mapping nothing backs.
@@ -163,19 +165,46 @@ export function senderKeyFrom(env: NodeJS.ProcessEnv = process.env): string | nu
  *
  * Closed, and short on purpose. `telegram` is here because the Bot API reports
  * `callback_query.from.id`, a stable numeric account id the sender cannot
- * choose. `web` and `cli` are absent because neither authenticates a person:
- * the web page takes an unauthenticated form post and the CLI takes whoever
- * controls the process. A policy that named either would be asserting a binding
- * the runtime cannot check, so the schema refuses the key rather than carrying
- * a mapping that reads like identity.
+ * choose. `edgeos` is here (APRV-455) on the same ground: a gesture on it
+ * arrives through `approval channel relay`, authenticated by a shared secret
+ * from the daemon's launch environment, and the control plane holding that
+ * secret attributes it to the EdgeOS `/humans/me` id of the session the person
+ * signed in with, which the person cannot choose. In both cases the daemon
+ * trusts a relay's report of who acted; that is operator trust, and it is the
+ * same trust whichever relay carries the report.
+ *
+ * `web` and `cli` are absent because neither authenticates a person: the web
+ * page takes an unauthenticated form post and the CLI takes whoever controls
+ * the process. A policy that named either would be asserting a binding the
+ * runtime cannot check, so the schema refuses the key rather than carrying a
+ * mapping that reads like identity.
  */
-export const SENDER_CHANNELS = ["telegram"] as const;
+export const SENDER_CHANNELS = ["telegram", "edgeos"] as const;
 
 export type SenderChannel = (typeof SENDER_CHANNELS)[number];
 
 /** Is `name` a channel whose transport can attribute a gesture (§2)? */
 export function isSenderChannel(name: string): name is SenderChannel {
   return (SENDER_CHANNELS as readonly string[]).includes(name);
+}
+
+/**
+ * The grammar of a RAW EdgeOS sender id (APRV-455), the same one
+ * `schema/policy.schema.json` pins on `senders.edgeos`.
+ *
+ * The id is the one EdgeOS returns from `/humans/me`, and this runtime treats
+ * it as opaque: it is compared byte for byte and never parsed. The grammar is a
+ * bound on what may be compared, not a reading of what the id means. An ASCII
+ * letter or digit, then up to 127 letters, digits, `.`, `_` or `-`: enough
+ * for a UUID or a decimal id, and deliberately without `:` or whitespace, so a
+ * raw id can never be mistaken for the {@link SENDER_HASH_PREFIX} form and can
+ * never contain the separator {@link senderIndex} joins its keys with.
+ */
+export const EDGEOS_SENDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
+/** Is `id` a raw EdgeOS sender id this runtime will compare (APRV-455)? */
+export function isEdgeosSenderId(id: string): boolean {
+  return EDGEOS_SENDER_ID_PATTERN.test(id);
 }
 
 /**
@@ -482,7 +511,17 @@ export function resolveSender(
   // digits — so asking both questions widens nothing and lets one policy carry
   // a migration in progress. They are kept apart rather than concatenated
   // because WHICH one matched decides the form the record takes.
-  const rawClaimed = index.get(indexKey(sender.channel, sender.id)) ?? [];
+  //
+  // APRV-455: an OBSERVED id that already wears the keyed prefix is never
+  // compared raw. A Telegram id is digits and cannot wear it, so this changes
+  // nothing there; on a channel whose ids a relay reports, a caller that copied
+  // a digest out of the published policy and reported it as the account would
+  // otherwise match the keyed entry by string equality, without the key and
+  // without being the account. The keyed comparison below still runs, over the
+  // digest OF that string, which no approver's entry is.
+  const rawClaimed = isHashedSenderId(sender.id)
+    ? []
+    : (index.get(indexKey(sender.channel, sender.id)) ?? []);
   const keyedClaimed =
     key === null ? [] : (index.get(indexKey(sender.channel, hashedSenderId(key, sender.id))) ?? []);
   const claimed = [...rawClaimed, ...keyedClaimed];
