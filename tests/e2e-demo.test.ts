@@ -406,7 +406,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(status.code, 0, status.stderr);
     const health = json(status);
     assert.equal(health["healthy"], true);
-    assert.deepEqual(health["attestation"], { state: "attested", seq: 1 });
+    assert.deepEqual(health["attestation"], { state: "attested", seq: 1, attested_by: HUMAN });
     assert.deepEqual(health["verification"], { status: "clean", records: 3 });
     assert.deepEqual(health["dangling"], []);
   });
