@@ -746,6 +746,62 @@ existed still validate and verify; a reader treats the absent field as the
 pre-amendment state, where the in-force bytes are unrecoverable and the
 fail-closed fallback applies.
 
+**No terminal is needed.** The identity is declared, so the verb runs the same
+from a provisioning script with stdin at `/dev/null` as from a shell. The
+`attest-requires-terminal` refusal belongs to the channel path (a tap cannot
+attest a policy that maps no sender for that channel), never to this verb.
+
+### `--bootstrap`: a store's first policy, safe to re-run (APRV-449)
+
+The plain verb is an unconditional assertion: it reads no log and appends a
+`policy.updated` every time it runs. That is right for a human at a terminal and
+wrong for a provisioning step that runs again on every update and recreate of a
+hosted tenant, where a re-run would add an attestation per redeploy and, once
+the tenant has attested or amended their own policy, would put the operator back
+on record as its attester. `--bootstrap` reads the VERIFIED log first:
+
+```
+approval policy attest --bootstrap --as human:<operator> [--json]
+```
+
+| the log carries | answer | exit |
+|---|---|---|
+| no attestation | attests, exactly as the plain verb | 0 |
+| an attestation of these exact bytes | `policy-already-attested`, nothing appended | 1 |
+| an attestation of other bytes | `policy-amendment-required`, nothing appended | 1 |
+
+Both refusals add `seq` and `attested_by` (the attestation in force and who made
+it) to the error object:
+
+```
+refusal  {"ok":false,"error":{"code":"policy-already-attested","message":"...",
+          "seq":1,"attested_by":"human:carter"}}  on stderr
+```
+
+`policy-already-attested` is the expected answer on a re-run, so a provisioning
+step branches on `error.code` and treats that one code as done.
+`policy-amendment-required` means the bytes on disk moved after the store was
+attested. The operator does not attest that change: a change to an attested
+policy is an amendment, and an amendment is the approver's act through a channel
+(SPEC.md §10.3). The append is compare-and-append against the head the decision
+was read from, and binds the digest it checked, so an attestation landing in
+between, or a file rewritten in between, refuses (`head-moved`, or `io` naming
+the changed bytes) rather than stacking an operator attestation on top. A torn
+log is exit 3 and a log that does not verify is `log-corrupt` at exit 1.
+
+With `--bootstrap` the log is the store's: it resolves under `--dir`
+(`<dir>/.approval/log/events.jsonl`) unless `--log` names one, so `approval
+policy attest --bootstrap --dir "$STORE"` attests the store's own log from any
+working directory. The plain verb keeps its working-directory default. A
+refused append can leave one unbound copy of the policy text in the payload
+store, because the text is stored before the append (APRV-356). It is not
+removed: the record that moved the head may be another attestation of the same
+bytes, which binds that very file. An unbound file is inert, and `approval
+status` counts it under `payload_store.orphans`.
+
+`--bootstrap` beside `--organ` or `--path` is a usage error. The whole
+provisioning sequence is [docs/hosted-provisioning.md](hosted-provisioning.md).
+
 ### `--organ <path>`: the gate's organs (APRV-272)
 
 The ORGANS are the harness files that install the hook: `.claude/settings*`,
@@ -2521,6 +2577,17 @@ informational: it moves neither the health verdict nor the exit code. An empty
 store is the normal state of a repo that has never made a request carrying
 `--payload`. (`approval doctor` is where an unwritable store is a failure.)
 
+**attestation** names the policy in force: its state, the seq of the attestation
+the log last recorded, and `attested_by`, the actor of that record (APRV-449).
+The identity is read from the verified record and never from the file, so a
+hosted tenant can see whether their starting policy is the operator's
+bootstrap or their own later act (docs/hosted-provisioning.md). It is the
+identity the attesting process declared, which the runtime does not
+authenticate. `attested_by` is `null` when nothing was attested; on
+`hash-mismatch` it names who attested the bytes the live file no longer
+matches. The text row reads `attested (seq 1, by human:carter)`, and `approval
+doctor`'s attestation row carries the same name.
+
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
@@ -2571,7 +2638,7 @@ does not know the flag exists.
 **What it reports**, in one object:
 
 - `attestation` — attested | hash-mismatch | not-attested | unreadable, with the
-  seq of the governing `policy.updated` record.
+  seq of the governing `policy.updated` record and `attested_by`, its actor.
 - `verification` — the latest chain verdict, and the record count (null when
   corrupt).
 - `dangling` — executions the runtime meant to watch and never closed. Not
@@ -2612,7 +2679,7 @@ does not know the flag exists.
 
 ```
 {"ok":true,"healthy":false,
- "attestation":{"state":"attested","seq":1},
+ "attestation":{"state":"attested","seq":1,"attested_by":"human:carter"},
  "verification":{"status":"clean","records":6},
  "dangling":[{"action_key":"...","task":"...","ts":"...","seq":5}],
  "budgets":[{"limit":"global.daily_usd","scope":"global",
@@ -2631,9 +2698,9 @@ does not know the flag exists.
  "daemon":{"id":"daemon-3f2a9c11","source":"derived","allowed":null}}
 ```
 
-`ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
-null for not-attested and unreadable. `note` carries the unrebuildable warning
-verbatim.
+`ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` and
+`attestation.attested_by` are null for not-attested and unreadable. `note`
+carries the unrebuildable warning verbatim.
 
 ## coverage
 
@@ -2825,7 +2892,8 @@ The checks, at length:
   `--as`: this reports what the next command will find.
 - **attestation** — anything other than "the live bytes match" makes every gated
   operation refuse, and that refusal reads like "the policy says no" when it
-  means "the policy is unverified".
+  means "the policy is unverified". A pass names the seq and the attester read
+  from that record (`attested at seq 1 by human:carter`, APRV-449).
 - **log** — a torn tail and a corrupt log are both failures here; neither is
   repaired, and doctor never truncates a torn line.
 - **telegram** — `getMe` against `--api-base`, when both variables are set;

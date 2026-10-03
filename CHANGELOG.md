@@ -28,6 +28,22 @@ before a tag.
   a Telegram redelivery of the refused tap, or its bytes replayed, takes no
   fallback to the new card, so it appends nothing and sends nothing.
 
+- **A hosted tenant with no shell gets its starting policy from the operator,
+  once, and can see who set it (APRV-449).** `approval policy attest
+  --bootstrap --as human:<operator>` attests a store's first policy and nothing
+  else: it reads the verified log first, a re-run over the same bytes refuses
+  `policy-already-attested`, changed bytes refuse `policy-amendment-required`,
+  and neither appends anything (exit 1, with `seq` and `attested_by` in the
+  error). The append is compare-and-append against the head it read. The plain
+  verb is unchanged, and needs no TTY either way. `approval status` gains
+  `attestation.attested_by` (the text row reads `attested (seq 1, by
+  human:carter)`) and `approval doctor`'s attestation row names the attester,
+  both read from the verified record. With `--bootstrap` the log resolves under
+  `--dir` unless `--log` names one. `docs/hosted-provisioning.md` is the
+  sequence (init, write the policy only into a store with no log, attest as the
+  store user), every refusal code, and the trust statement: the operator sets the
+  starting policy, and every change needs the approver's act through a channel.
+
 - **A harness probe drives its own matrix, so an operator runs one command
   instead of typing thirty prompts (APRV-418).**
   `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human

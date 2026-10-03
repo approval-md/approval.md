@@ -411,7 +411,7 @@ test("status paints no timestamp and no seq, even with FORCE_COLOR", () => {
 
   const run = runCli(["status"], dir, { FORCE_COLOR: "1" });
   assert.ok(run.stdout.includes(ESC), "FORCE_COLOR must colour the human report");
-  assert.match(undressed(run.stdout), /^attestation {2,}attested \(seq 1\)$/mu);
+  assert.match(undressed(run.stdout), /^attestation {2,}attested \(seq 1, by human:carter\)$/mu);
   assertValuesUndressed(run.stdout);
 });
 
