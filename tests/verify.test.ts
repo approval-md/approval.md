@@ -31,7 +31,7 @@ import {
   type EventRecord,
 } from "../src/core/log.js";
 import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
-import { verify, type VerifyResult } from "../src/core/verify.js";
+import { verify, verifyText, verifyWithRecords, type VerifyResult } from "../src/core/verify.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-verify-"));
 let counter = 0;
@@ -493,6 +493,89 @@ test("a torn tail on top of a corrupt prefix reports the corruption, not the tea
   appendFileSync(tampered, '{"seq":7,"ts":');
 
   assertCorrupt(verify(tampered), "hash-mismatch", 2);
+});
+
+// ------------------------------------------- 9b. which crash tore it (APRV-440) --
+
+test("a NUL-filled unterminated tail is named the crash-before-writeback signature, with the bytes to keep", () => {
+  const { logPath } = buildLog(5);
+  const intact = statSync(logPath).size;
+  // What the hosted incident left: the file extended over blocks never written.
+  const torn = copyOf(logPath);
+  appendFileSync(torn, Buffer.alloc(456));
+
+  const result = verify(torn);
+  assert.ok(result.status === "torn-tail", JSON.stringify(result));
+  assert.equal(result.tear, "nul-filled");
+  assert.equal(result.intactThroughSeq, 5);
+  assert.equal(result.tornBytes, 456);
+  assert.equal(result.intactBytes, intact);
+  assert.match(result.message, /456 NUL byte\(s\) after record 5: the crash-before-writeback signature/u);
+  assert.match(result.message, /not a tampered or half-written line/u);
+  assert.ok(result.message.includes(`first ${String(intact)} byte(s)`));
+  // Truncating to intactBytes is exactly the original, clean log.
+  assert.deepEqual(readFileSync(torn).subarray(0, result.intactBytes), readFileSync(logPath));
+});
+
+test("a partial record line is a partial-line tear, distinct from the NUL signature", () => {
+  const { logPath } = buildLog(3);
+  const intact = statSync(logPath).size;
+  const torn = copyOf(logPath);
+  appendFileSync(torn, '{"seq":4,"ts":"2026-08-04T09:1');
+
+  const result = verify(torn);
+  assert.ok(result.status === "torn-tail");
+  assert.equal(result.tear, "partial-line");
+  assert.equal(result.intactBytes, intact);
+  assert.doesNotMatch(result.message, /crash-before-writeback/u);
+  assert.match(result.message, /crashed write/u);
+});
+
+test("a record cut off and then NUL-padded is a partial line: some of its bytes landed", () => {
+  const { logPath } = buildLog(2);
+  const torn = copyOf(logPath);
+  appendFileSync(torn, Buffer.concat([Buffer.from('{"seq":3,', "utf8"), Buffer.alloc(64)]));
+
+  const result = verify(torn);
+  assert.ok(result.status === "torn-tail");
+  assert.equal(result.tear, "partial-line");
+  assert.equal(result.tornBytes, 9 + 64);
+});
+
+test("torn byte counts are UTF-8 bytes, not string length", () => {
+  const { logPath } = buildLog(2);
+  const intact = statSync(logPath).size;
+  const torn = copyOf(logPath);
+  // "é" is two bytes and one UTF-16 unit; "€" is three bytes and one unit.
+  appendFileSync(torn, '{"note":"é€');
+
+  const result = verify(torn);
+  assert.ok(result.status === "torn-tail");
+  assert.equal(result.tornBytes, Buffer.byteLength('{"note":"é€', "utf8"));
+  assert.equal(result.intactBytes, intact);
+});
+
+test("intactBytes counts the verified prefix when a walk resumes behind one", () => {
+  const { logPath } = buildLog(4);
+  const whole = readFileSync(logPath);
+  const walked = verifyWithRecords(logPath);
+  assert.ok(walked.result.status === "clean" && walked.result.head !== null);
+  // Resume behind the first two records, as the verified-read cache does.
+  const cut = whole.indexOf(0x0a, whole.indexOf(0x0a) + 1) + 1;
+  const prefixRecords = walked.records.slice(0, 2);
+  const head = prefixRecords[1] as EventRecord;
+  const remainder = Buffer.concat([whole.subarray(cut), Buffer.alloc(100)]).toString("utf8");
+
+  const resumed = verifyText(logPath, remainder, {}, {
+    byteLength: cut,
+    lines: 2,
+    head: { seq: head.seq, hash: head.hash },
+    records: prefixRecords,
+  });
+  assert.ok(resumed.result.status === "torn-tail", JSON.stringify(resumed.result));
+  assert.equal(resumed.result.tear, "nul-filled");
+  assert.equal(resumed.result.intactBytes, whole.length);
+  assert.equal(resumed.result.tornBytes, 100);
 });
 
 // ------------------------------------------------------------ 10. read-only --

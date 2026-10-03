@@ -27,6 +27,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,9 +86,12 @@ function hashMismatchMessage(seq: number): string {
   })`;
 }
 
-/** The exact `torn-tail` message for {@link tornCopy} of a 3-record log. */
-function tornTailMessage(path: string): string {
-  return `log ${path} ends with an unterminated line of 32 byte(s); records 1..3 verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`;
+/**
+ * The exact `torn-tail` message for {@link tornCopy} of a 3-record log whose
+ * intact records are its first `intactBytes` bytes.
+ */
+function tornTailMessage(path: string, intactBytes: number): string {
+  return `log ${path} ends with an unterminated line of 32 byte(s) after record 3: the signature of a crashed write, a writer that died mid-line; records 1..3 verify clean and are its first ${String(intactBytes)} byte(s). The log is NOT repaired here: truncating the torn tail is a human decision.`;
 }
 
 /** dist/tests/cli.test.js -> dist/src/cli/main.js */
@@ -263,6 +267,7 @@ test("log verify: corrupt log reports reason and first bad seq on stderr", () =>
 test("log verify: torn tail exits 3 with the exact JSON shape", () => {
   const dir = caseDir();
   const logPath = buildLog(dir, 3);
+  const intactBytes = statSync(logPath).size;
   const torn = tornCopy(logPath);
 
   const run = runCli(["log", "verify", "--log", torn, "--json"], dir);
@@ -272,7 +277,10 @@ test("log verify: torn tail exits 3 with the exact JSON shape", () => {
     records: 3,
     head: null,
     intactThroughSeq: 3,
-    message: tornTailMessage(torn),
+    tear: "partial-line",
+    tornBytes: 32,
+    intactBytes,
+    message: tornTailMessage(torn, intactBytes),
   });
 });
 

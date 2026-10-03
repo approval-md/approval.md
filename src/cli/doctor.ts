@@ -399,6 +399,15 @@ function checkAttestationHealth(records: EventRecord[], policyPath: string): Doc
 // 4. log
 // ---------------------------------------------------------------------------
 
+/**
+ * A path as one POSIX shell word: bare when it holds only characters no shell
+ * interprets, single-quoted otherwise (`'` closed, escaped and reopened), so a
+ * fix command pasted from a row names the file the row is about.
+ */
+function shellWord(path: string): string {
+  return /^[A-Za-z0-9_./@:+-]+$/.test(path) ? path : `'${path.split("'").join(`'\\''`)}'`;
+}
+
 /** The chain verdict, in doctor's vocabulary. Reads; never writes. */
 function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
   switch (result.status) {
@@ -411,13 +420,31 @@ function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
             ? `${logPath} is empty (an audit trail that has recorded nothing is clean, not missing)`
             : `${logPath} verifies: ${result.records} record(s), head seq ${result.head.seq} ${result.head.hash.slice(0, 12)}…`,
       };
-    case "torn-tail":
+    case "torn-tail": {
+      const file = shellWord(logPath);
+      const keep = String(result.intactBytes);
+      // What the truncation removes, from the file's own size: verify counts
+      // the tail's DECODED bytes, which overstates a tail holding invalid UTF-8.
+      let drop = result.tornBytes;
+      try {
+        drop = statSync(logPath).size - result.intactBytes;
+      } catch {
+        // Unreadable now: the verify count stands.
+      }
       return {
         check: "log",
         status: "fail",
-        detail: `${logPath} ends with an unterminated final line — the signature of a crashed write, not of tampering; records 1..${result.intactThroughSeq} verify clean`,
-        fix: "approval log verify — the full report; nothing here truncates the torn line, because that is a human decision",
+        detail:
+          result.tear === "nul-filled"
+            ? `${logPath} ends with ${String(result.tornBytes)} NUL byte(s) after record ${String(result.intactThroughSeq)}, the crash-before-writeback signature: the file grew but its data never reached the disk before the machine stopped, so nothing was tampered and whatever was appended there is lost; records 1..${String(result.intactThroughSeq)} verify clean`
+            : `${logPath} ends with an unterminated line of ${String(result.tornBytes)} byte(s) after record ${String(result.intactThroughSeq)}, the signature of a crashed write (a writer that died mid-line), not of tampering; records 1..${String(result.intactThroughSeq)} verify clean`,
+        // APRV-440: which bytes, exactly. The line still opens with the read,
+        // because truncating is a human decision taken after it, and the
+        // truncation is spelled in `node` because `truncate(1)` is not on
+        // macOS and node is wherever this CLI runs. Doctor truncates nothing.
+        fix: `approval log verify — read the full report; then, if you decide to repair, keep the first ${keep} byte(s) of ${logPath} and drop the final ${String(drop)}: \`node -e "require('fs').truncateSync(process.argv[1], ${keep})" ${file}\`. Nothing here truncates, because that is a human decision`,
       };
+    }
     case "corrupt":
       return {
         check: "log",
