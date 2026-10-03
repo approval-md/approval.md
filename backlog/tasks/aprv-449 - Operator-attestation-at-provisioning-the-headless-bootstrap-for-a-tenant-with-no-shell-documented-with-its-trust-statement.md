@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-03 05:43'
+updated_date: '2026-10-03 05:56'
 labels:
   - hosting
   - attest
@@ -76,6 +76,10 @@ SPEC HUNKS PROPOSED (not applied; agents may not edit SPEC.md):
 VERIFICATION. tests/cli-attest-bootstrap.test.ts (9 tests, every child spawned with stdin ignored and no APPROVAL_HUMAN): headless attest stores the attested text byte for byte in the payload store; bootstrap first run, re-run refusal, refusal over another human's attestation, amendment refusal, agent actor, flag mixes; status and doctor name the attester. Full npm test: 5397 pass, 1 fail (tests/cli-style-render.test.ts 'status paints no timestamp and no seq', which pinned the old row text); fixed, and cli-style-render + cli-status + cli-attest-bootstrap rerun 55/55, exit 0. tsc --noEmit 0, lint 0.
 
 AC #4 reading: the trust statement is written once (docs/hosted-provisioning.md, 'The trust statement') and cites APRV-422's proposed section 13 wording verbatim; the reverse pointer from SPEC.md section 13 is SPEC hunk 3 above, for the human applying APRV-422.
+
+Resume point: pushed lane/aprv-449-446 at 5fbb6ab8; next: gh pr create, watch checks.
+
+CI: PR #570 green (full gate shards 1-3, protected paths, classify tier, ci). Full local npm test on the stacked branch (449 + 446): 5405 pass, 0 fail, 2 skipped, exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

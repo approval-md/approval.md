@@ -12,6 +12,7 @@ run, against the real runtime, on a gate instance of its own.
 | [`web-agent-demo/`](web-agent-demo/) | The stage demo: a web agent behind the gate, a room watching, a human on a phone. Its [crowd track](web-agent-demo/runbook.md) hands the same gate to everybody's own agent over MCP. |
 | [`grok-bot-connector/`](grok-bot-connector/) | A Grok Bot agent on the other end of an MCP connector, using the gate and then skipping it. |
 | [`backlog-md-project/`](backlog-md-project/) | A Backlog.md project carrying approval envelopes, end to end. |
+| [`agent-village/approval-policy.md`](agent-village/approval-policy.md) | Not a transcript: the canonical starting policy for a co-located Agent Village tenant, which the control plane renders into the tenant's `APPROVAL.md`. `tests/agent-village-policy.test.ts` proves it. |
 
 ## Reproducing a demo
 
