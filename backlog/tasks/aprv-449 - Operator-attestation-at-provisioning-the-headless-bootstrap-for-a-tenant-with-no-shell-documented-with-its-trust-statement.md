@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-03 05:43'
+updated_date: '2026-10-03 13:20'
 labels:
   - hosting
   - attest
@@ -76,6 +76,14 @@ SPEC HUNKS PROPOSED (not applied; agents may not edit SPEC.md):
 VERIFICATION. tests/cli-attest-bootstrap.test.ts (9 tests, every child spawned with stdin ignored and no APPROVAL_HUMAN): headless attest stores the attested text byte for byte in the payload store; bootstrap first run, re-run refusal, refusal over another human's attestation, amendment refusal, agent actor, flag mixes; status and doctor name the attester. Full npm test: 5397 pass, 1 fail (tests/cli-style-render.test.ts 'status paints no timestamp and no seq', which pinned the old row text); fixed, and cli-style-render + cli-status + cli-attest-bootstrap rerun 55/55, exit 0. tsc --noEmit 0, lint 0.
 
 AC #4 reading: the trust statement is written once (docs/hosted-provisioning.md, 'The trust statement') and cites APRV-422's proposed section 13 wording verbatim; the reverse pointer from SPEC.md section 13 is SPEC hunk 3 above, for the human applying APRV-422.
+
+Review fixes (refuter on #570, 2026-10-03):
+1. --bootstrap resolves the log under --dir (the store's default log path) unless --log is given; the plain verb keeps its cwd default. Test: attest --bootstrap --dir <store> from a foreign cwd lands in the store's log, the re-run refuses there, no stray log appears, and an explicit --log still wins.
+2. docs/hosted-provisioning.md step 2 now writes the render only when the store has no log file at all; --bootstrap is the only attestation guard; step 3 passes --dir; the doc says why a status --json guard is wrong (a torn tail reads not-attested; status exits 1 so pipefail makes the if always false) and that steps 1-3 run before up/serve start.
+3. BOOTSTRAP_REFUSAL_CODES pinned by a deepEqual freeze test (SPEC §11.1 invariant 6, verb-local union per §11.2).
+4. The orphan payload file on a refused append is documented, not removed (core/attest-bootstrap.ts header, cli-reference, the refusal table): removal is unsafe because the record that moved the head may be another attestation of the same bytes, which binds that file. Inert; status counts it under payload_store.orphans.
+SPEC HUNK 4 (added): the §11.2 refusal-code registry gains a verb-local note for approval policy attest --bootstrap: policy-already-attested (the live policy already matches its latest attestation; nothing appended; the expected answer on a provisioning re-run) and policy-amendment-required (the log carries an attestation of other bytes; a change to an attested policy is the approver's act through a channel; nothing appended), exported as BOOTSTRAP_REFUSAL_CODES, frozen, pinned in tests/cli-attest-bootstrap.test.ts. All four SPEC hunks stay pending sign-off and ride APRV-454.
+Verification: tsc 0, lint 0; cli-attest-bootstrap, cli-attest, cli-status, cli-style-render, e2e-demo, cli-long-help, cli-help, docs-guard, cli-doctor: 233/233.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

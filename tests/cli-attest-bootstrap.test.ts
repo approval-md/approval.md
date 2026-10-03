@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { BOOTSTRAP_REFUSAL_CODES } from "../src/core/attest-bootstrap.js";
 import { attestedPolicyPayloadHash, policyBytesHash } from "../src/core/attest.js";
 import { payloadPath, payloadStoreDirFor } from "../src/core/payload-store.js";
 
@@ -265,6 +266,54 @@ test("--bootstrap beside --organ or --path is a usage error, never a guess", () 
     assert.match(body.error.message, /--bootstrap attests a store's first POLICY/u);
   }
   assert.deepEqual(logLines(dir), []);
+});
+
+test("--bootstrap --dir from a foreign cwd attests into the store's log, not a stray one", () => {
+  const dir = provisionedStore();
+  counter += 1;
+  const elsewhere = join(scratch, `elsewhere-${counter}`);
+  mkdirSync(elsewhere, { recursive: true });
+
+  const run = runHeadless(
+    ["policy", "attest", "--bootstrap", "--dir", dir, "--as", OPERATOR, "--json"],
+    elsewhere,
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(logLines(dir).length, 1, "the store's own log carries the attestation");
+  assert.equal(
+    existsSync(logPathOf(elsewhere)),
+    false,
+    "a log appeared beside the caller's cwd instead of in the store",
+  );
+
+  // The re-run from the same foreign cwd reads that same log and refuses.
+  const again = runHeadless(
+    ["policy", "attest", "--bootstrap", "--dir", dir, "--as", OPERATOR, "--json"],
+    elsewhere,
+  );
+  assert.equal(again.code, 1);
+  assert.equal(errorOf(again)["code"], "policy-already-attested");
+  assert.equal(existsSync(logPathOf(elsewhere)), false);
+
+  // An explicit --log still wins: the caller named the file.
+  const other = provisionedStore();
+  const explicit = join(elsewhere, "explicit.jsonl");
+  const named = runHeadless(
+    ["policy", "attest", "--bootstrap", "--dir", other, "--log", explicit, "--as", OPERATOR],
+    elsewhere,
+  );
+  assert.equal(named.code, 0, named.stderr);
+  assert.ok(existsSync(explicit));
+  assert.deepEqual(logLines(other), []);
+});
+
+test("the bootstrap refusal vocabulary is frozen (SPEC.md §11.1 invariant 6, verb-local per §11.2)", () => {
+  // Adding, renaming or removing a code is a contract change a provisioning
+  // step branches on; it must arrive as an edit to this line, never silently.
+  assert.deepEqual(
+    [...BOOTSTRAP_REFUSAL_CODES],
+    ["policy-already-attested", "policy-amendment-required"],
+  );
 });
 
 // ===========================================================================

@@ -80,34 +80,48 @@ cd "$STORE"
 # 1. Scaffold. Idempotent: an existing store reports `existing` and writes nothing.
 runuser -u approvald -- approval init --json
 
-# 2. Write the starting policy, ONLY while the store has never been attested.
-#    (`status` exits 1 while unattested; the JSON on stdout is what is read.)
-if runuser -u approvald -- approval status --json \
-     | grep -q '"attestation":{"state":"not-attested"'; then
+# 2. Write the starting policy ONLY into a store that has no log file at all.
+#    A store with a log has history, and its policy file is not ours to touch.
+if [ ! -e "$STORE/.approval/log/events.jsonl" ]; then
   runuser -u approvald -- install -m 0600 "$RENDERED" "$STORE/APPROVAL.md"
 fi
 
-# 3. Attest it as the operator. Safe to re-run.
-runuser -u approvald -- approval policy attest --bootstrap --as "$OPERATOR" --json
+# 3. Attest it as the operator. Safe to re-run: this is the only attestation guard.
+runuser -u approvald -- approval policy attest --bootstrap --dir "$STORE" \
+  --as "$OPERATOR" --json
 ```
+
+Run all three before the launcher starts `approval up` or `approval serve`
+against the store. A daemon running first could create the log before step 2
+looks for it, and step 3 would then attest the scaffold `init` wrote instead of
+the starting policy.
 
 Three rules the commands above encode:
 
-- **Work from the store.** `policy attest`, `status` and `doctor` resolve the log
-  against the working directory (`.approval/log/events.jsonl`, or `--log`), and
-  `--dir` names only where the policy is discovered. `cd "$STORE"` keeps the log
-  they read and the log they write the same file. `approval up` resolves its log
-  (and `QUEUE.md`) against the working directory the same way, while `approval
-  serve --dir` resolves the log under `--dir`. A launcher that starts both with
-  `--dir "$STORE"` must therefore also start `up` with the store as its working
-  directory (or pass `--log`), or the two processes write two different logs.
-- **Never write over an attested policy.** Step 2 is guarded because a policy
-  file rewritten under an attestation is a policy the gate refuses
-  (`policy-not-attested`, detail `hash-mismatch`) until someone re-attests it, and
-  the operator is exactly who must not. If the template moved, the change goes to
-  the resident as a proposal. Step 3 refuses `policy-amendment-required` if the
-  guard is ever skipped, but by then the file has already changed and the gate is
-  shut, so the guard is the line that keeps the tenant working.
+- **Name the store.** With `--bootstrap`, `policy attest` resolves the log under
+  `--dir` (`$STORE/.approval/log/events.jsonl`) unless `--log` names one, so step
+  3 attests the store's own log from any working directory. Without
+  `--bootstrap`, `policy attest`, `status` and `doctor` resolve the log against
+  the working directory, which is why the sequence also runs from `cd "$STORE"`.
+  `approval up` resolves its log (and `QUEUE.md`) against the working directory
+  too, while `approval serve --dir` resolves it under `--dir`. A launcher that
+  starts both with `--dir "$STORE"` must also start `up` with the store as its
+  working directory (or pass `--log`), or the two processes write two different
+  logs.
+- **Never write over a store with history.** Step 2 is keyed on the log file
+  existing, and on nothing else. `init` never writes the log; its first record is
+  the attestation. So "no log file" means the policy file can only be the
+  scaffold or an earlier, unattested render. A policy file rewritten under an
+  attestation is a policy the gate refuses (`policy-not-attested`, detail
+  `hash-mismatch`) until someone re-attests it, and the operator is exactly who
+  must not. If the template moved, the change goes to the resident as a proposal.
+  Do not guard the write on `approval status --json`. A torn tail makes status
+  report `not-attested`, so the write would overwrite the resident's attested
+  policy. And `status` exits 1 whenever the store needs attention, so under `set
+  -o pipefail` an `if status … | grep …` is always false and step 3 attests the
+  scaffold. Step 3 refuses `policy-amendment-required` if the file ever changes
+  under an attestation, but by then the gate is shut, so step 2's rule is the
+  line that keeps the tenant working.
 - **`--bootstrap`, always.** The plain `approval policy attest` reads no log and
   appends every time it runs: a second `policy.updated` per redeploy, and, after
   the resident has attested or amended their policy, the operator back on record
@@ -121,7 +135,7 @@ Three rules the commands above encode:
 | `{"ok":true,"seq":1,...}` on stdout | 0 | attested; the gate is live | continue |
 | `policy-already-attested` | 1 | this exact policy is in force already (a re-run) | treat as done |
 | `policy-amendment-required` | 1 | the file differs from the attested policy | alarm; do not attest; route the change to the approver |
-| `head-moved` | 1 | another record landed between the read and the append | run step 3 again |
+| `head-moved` | 1 | another record landed between the read and the append (an unbound copy of the policy text may stay in the payload store; it is inert and `status` counts it under `payload_store.orphans`) | run step 3 again |
 | `log-corrupt` | 1 | the log does not verify | stop; nothing may be decided from it |
 | `log-torn-tail` / `corrupt-tail` | 3 | a crashed write left the last line unterminated | stop; a human repairs it |
 | `io`, `log-unreadable` | 4 | a file could not be read or written (ownership, mode, a full disk) | fix the store's permissions and re-run |
