@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 
 import { Ajv2020 } from "ajv/dist/2020.js";
 
+import { main } from "../src/cli/main.js";
 import { VERB_REGISTRY, type JsonSchema } from "../src/cli/verb-registry.js";
 import { PROPOSE_PAYLOAD_MAX_BYTES, proposedTaskId } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -164,6 +165,52 @@ function propose(
     ],
     dir,
   );
+}
+
+/**
+ * `propose` through `main()` in this process, for payloads no exec can carry.
+ * Linux caps ONE argv string at 128 KiB (MAX_ARG_STRLEN), so a spawn with a
+ * 256 KiB `--payload-json` fails E2BIG before the CLI runs. `approval serve`
+ * hands its argv to the same dispatcher in process, which is the path the cap
+ * is written for, so that is the path these cases take.
+ */
+async function proposeInProcess(dir: string, cls: string, key: string, payload: string): Promise<Run> {
+  let stdout = "";
+  let stderr = "";
+  const human = process.env["APPROVAL_HUMAN"];
+  delete process.env["APPROVAL_HUMAN"];
+  try {
+    const code = await main(
+      [
+        "propose",
+        "--class",
+        cls,
+        "--key",
+        key,
+        "--summary",
+        "Publish an intention to Index",
+        "--payload-json",
+        payload,
+        "--as",
+        AGENT,
+        "--json",
+      ],
+      {
+        cwd: dir,
+        streams: {
+          out: (text) => {
+            stdout += text;
+          },
+          err: (text) => {
+            stderr += text;
+          },
+        },
+      },
+    );
+    return { code, stdout, stderr };
+  } finally {
+    if (human !== undefined) process.env["APPROVAL_HUMAN"] = human;
+  }
 }
 
 function policySha256(dir: string): string {
@@ -365,11 +412,11 @@ test("propose refuses on an unattested policy and writes nothing", () => {
 // 4. The payload
 // ---------------------------------------------------------------------------
 
-test("an oversized payload refuses payload-too-large at exit 2; bad JSON and non-objects are usage errors", () => {
+test("an oversized payload refuses payload-too-large at exit 2; bad JSON and non-objects are usage errors", async () => {
   const dir = caseDir();
   const before = events(dir);
   const big = JSON.stringify({ text: "x".repeat(PROPOSE_PAYLOAD_MAX_BYTES) });
-  const oversized = propose(dir, INFERRED, `${INFERRED}:big`, big);
+  const oversized = await proposeInProcess(dir, INFERRED, `${INFERRED}:big`, big);
   assert.equal(oversized.code, 2);
   assert.equal(jsonErr(oversized)["code"], "payload-too-large");
 
@@ -386,7 +433,7 @@ test("an oversized payload refuses payload-too-large at exit 2; bad JSON and non
 
   // Exactly at the limit is admitted (the size is the text as sent).
   const pad = PROPOSE_PAYLOAD_MAX_BYTES - JSON.stringify({ text: "" }).length;
-  const atLimit = propose(dir, INFERRED, `${INFERRED}:edge`, JSON.stringify({ text: "y".repeat(pad) }));
+  const atLimit = await proposeInProcess(dir, INFERRED, `${INFERRED}:edge`, JSON.stringify({ text: "y".repeat(pad) }));
   assert.equal(atLimit.code, 0, atLimit.stderr);
 
   assert.deepEqual(events(dir).slice(0, before.length), before);

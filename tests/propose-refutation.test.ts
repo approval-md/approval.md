@@ -215,15 +215,20 @@ test("B1: a pending proposal under a re-attested policy reads `void`, and propos
 });
 
 test("B1: a grant whose window lapsed reads `expired` (exit 3), and propose re-files", async () => {
-  // The hour-71-of-72 shape, scaled to seconds so a real CLI runs it.
-  const dir = caseDir(policyText("3s"));
+  // The hour-71-of-72 shape, scaled to seconds so a real CLI runs it. The
+  // window is wide enough for a loaded CI runner's spawns to land inside it,
+  // and the lapse is waited out from the moment propose returned (the request
+  // was stamped before then), not by a fixed sleep a slow spawn can eat.
+  const windowMs = 8_000;
+  const dir = caseDir(policyText("8s"));
   const key = `${INFERRED}:lapsed-grant`;
   const task = proposedTaskId(AGENT, INFERRED, key);
   assert.equal(proposeRun(dir, INFERRED, key).code, 0);
+  const proposedAt = Date.now();
   await new Promise((settle) => setTimeout(settle, 1500));
   assert.equal(runCli(["grant", key, "--as", "human:carter"], dir).code, 0);
   assert.equal(runCli(["wait", task, "--timeout", "0", "--json"], dir).code, 0, "inside the window it is granted");
-  await new Promise((settle) => setTimeout(settle, 2500));
+  await new Promise((settle) => setTimeout(settle, Math.max(0, proposedAt + windowMs + 500 - Date.now())));
 
   const waited = runCli(["wait", task, "--timeout", "0", "--json"], dir);
   assert.equal(waited.code, 3, waited.stderr);

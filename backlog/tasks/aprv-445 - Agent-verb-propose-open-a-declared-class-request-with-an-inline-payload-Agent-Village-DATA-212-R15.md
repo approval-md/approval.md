@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-03 05:23'
+updated_date: '2026-10-03 05:39'
 labels: []
 dependencies: []
 references:
@@ -80,6 +80,8 @@ Recheck 3 (2026-10-03). SF1: the organ rules are scoped to the gate's own direct
 Merge 2026-10-02: origin/main 89b8fe54 merged at 4db5f5f6 (conflicts in execute/help/hook/instructions/verb-registry/server resolved keeping both; hermesFailClosed now passes the APRV-427 wait seam). Resume point: run the full npm test in the worktree, then push carter/data-212-propose and watch gh pr checks 569.
 
 Post-merge validation: npm test exit 0, 5461 tests, 5460 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0. Refusal unions unchanged by the merge (origin touched no conformance vectors), so no regeneration. Resume point: push carter/data-212-propose and watch gh pr checks 569 to a verdict; the orchestrator arms the merge.
+
+CI run 37099665754 (first CI verdict this branch ever had): shard 1 red on two branch tests, both Linux-only. (1) cli-propose oversized payload: spawnSync E2BIG, Linux caps one argv string at 128 KiB, so the 256 KiB and at-limit cases now run through main() in process (serve's path). Product consequence for the human: approval propose --payload-json from a Linux shell tops out near 128 KiB; the 256 KiB cap is reachable only through serve. (2) propose-refutation B1 lapsed grant: a 3 s window was eaten by slow CI spawns; now 8 s, lapse waited from when propose returned. protected-paths check red on the branch's own SPEC.md commits (c81817f0, 6958f02b, 4c5c050c, dae522bc: no-evidence), expected while the SPEC hunks await sign-off. Resume point: push the fix and watch gh pr checks 569 again.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
