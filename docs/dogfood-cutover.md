@@ -42,8 +42,11 @@ approval payload run -- <cmd...> \
   | approval request <TASK-ID> --action "<idempotency-key>" \
       --as agent:<session> --payload -
 
-# 3. Block on the decision. Exit code encodes it: 0 granted, and each refusal
-#    shape is its own documented code (approval wait --help).
+# 3. Block on the decision. Exit code encodes it, and each refusal shape is its
+#    own documented code (approval wait --help). Exit 0 is granted OR
+#    nothing-to-wait-for; proceed to step 4 only when `--json` says
+#    status "granted" (an unspent grant). An unregistered task is refused
+#    not-registered at exit 1 (APRV-428).
 approval wait <TASK-ID> --timeout 6h
 
 # 4. On grant, execute through the gate with the token the human's grant

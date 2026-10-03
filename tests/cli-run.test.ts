@@ -832,16 +832,151 @@ test("wait exits 3 when the TTL lapses, and still writes nothing", () => {
   assertClean(dir);
 });
 
-test("wait on a task with no requests returns immediately with 0", () => {
+test("wait on a task with no requests returns immediately with 0, and never says granted", () => {
+  // APRV-428: this asserted `status: "granted"` before, which was a grant
+  // nobody made. The exit code and the immediacy are the contract and stay.
   const dir = ready();
   const run = runCli(["wait", "task-042", "--timeout", "20s", "--json"], dir);
   assert.equal(run.code, 0, run.stderr);
   assert.deepEqual(JSON.parse(run.stdout), {
     ok: true,
     task: "task-042",
-    status: "granted",
+    status: "nothing-to-wait-for",
     actions: [],
   });
+
+  const human = runCli(["wait", "task-042", "--timeout", "20s"], dir);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /task-042 {2}nothing-to-wait-for/u);
+  assert.doesNotMatch(human.stdout, /granted/u);
+});
+
+test("wait on a task the log never registered refuses not-registered at exit 1", () => {
+  // APRV-428, observed on a hosted tenant: this answered
+  // {ok:true,status:"granted",actions:[]} in under a second.
+  const dir = ready();
+  const before = rawLog(dir);
+
+  const run = runCli(["wait", "req-does-not-exist", "--timeout", "20s", "--json"], dir);
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(run.stdout, "", "a refusal printed an answer object");
+  const parsed = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
+  assert.equal(parsed["ok"], false);
+  const error = parsed["error"] as Record<string, unknown>;
+  assert.equal(error["code"], "not-registered");
+  assert.match(String(error["message"]), /req-does-not-exist/u);
+
+  const human = runCli(["wait", "req-does-not-exist", "--timeout", "20s"], dir);
+  assert.equal(human.code, 1);
+  assert.equal(human.stdout, "");
+  assert.match(human.stderr, /not-registered/u);
+  assert.match(human.stderr, /req-does-not-exist/u);
+
+  assert.equal(rawLog(dir), before, "a refused wait wrote to the log");
+  assertClean(dir);
+});
+
+test("wait on an empty log refuses not-registered too, rather than granting", () => {
+  // No attestation and no registration: the log does not exist yet.
+  const dir = caseDir();
+  const run = runCli(["wait", "task-042", "--timeout", "1s", "--json"], dir);
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(jsonErr(run)["code"], "not-registered");
+});
+
+test("wait after the only grant was spent answers nothing-to-wait-for, not granted", () => {
+  const dir = ready();
+  const token = grantChaser(dir);
+  const ran = runCli(
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json", "--", ...exiting(0)],
+    dir,
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+  const before = rawLog(dir);
+
+  const run = runCli(["wait", "task-042", "--timeout", "20s", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const payload = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.equal(payload["status"], "nothing-to-wait-for");
+  // The per-action row is the derivation's, unchanged: the human DID grant it.
+  assert.deepEqual(payload["actions"], [
+    { action_key: "task-042:chaser", state: "granted", seq: 4 },
+  ]);
+  assert.equal(rawLog(dir), before, "wait wrote to the log");
+  assertClean(dir);
+});
+
+test("wait with one grant spent and one still unspent answers granted", () => {
+  const dir = ready();
+  // A second task with two MANUAL actions, bound to the same child the case
+  // runs, so one grant can be spent and the other left standing.
+  const binding = runPayloadHash(exiting(0), dir);
+  writeFileSync(
+    join(dir, "task-043.md"),
+    [
+      "---",
+      "id: task-043",
+      "title: Two chasers",
+      "status: In Progress",
+      "approval:",
+      "  origin:",
+      "    app: example-capture",
+      '    created_by: "human:carter"',
+      "  state: proposed",
+      "  actions:",
+      "    - class: communicate.email.external",
+      '      summary: "First chaser"',
+      "      reversible: false",
+      '      est_cost_usd: "0.02"',
+      '      idempotency_key: "task-043:one"',
+      `      payload_hash: "${binding}"`,
+      "    - class: communicate.email.external",
+      '      summary: "Second chaser"',
+      "      reversible: false",
+      '      est_cost_usd: "0.02"',
+      '      idempotency_key: "task-043:two"',
+      `      payload_hash: "${binding}"`,
+      "---",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  assert.equal(runCli(["register", "task-043.md", "--as", "agent:claude"], dir).code, 0);
+  const tokens: Record<string, string> = {};
+  for (const key of ["task-043:one", "task-043:two"]) {
+    assert.equal(
+      runCli(["request", "task-043", "--action", key, "--as", "agent:claude"], dir).code,
+      0,
+    );
+    const granted = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+    assert.equal(granted.code, 0, granted.stderr);
+    tokens[key] = String((JSON.parse(granted.stdout) as Record<string, unknown>)["token"]);
+  }
+  const ran = runCli(
+    [
+      "run",
+      "task-043:one",
+      "--token",
+      tokens["task-043:one"] ?? "",
+      "--as",
+      "agent:claude",
+      "--json",
+      "--",
+      ...exiting(0),
+    ],
+    dir,
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+
+  const run = runCli(["wait", "task-043", "--timeout", "20s", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const payload = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.equal(payload["status"], "granted");
+  assert.deepEqual(
+    (payload["actions"] as Array<Record<string, unknown>>).map((action) => action["state"]),
+    ["granted", "granted"],
+  );
+  assertClean(dir);
 });
 
 test("wait rejects a missing or malformed --timeout at exit 2", () => {

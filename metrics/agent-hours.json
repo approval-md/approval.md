@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-19T08:26:50.738Z",
+  "generated_at": "2026-09-28T10:30:06.470Z",
   "repo": "approval-md/approval.md",
   "method": {
     "active_time": "sum of gaps between consecutive transcript events, each capped at gap_seconds, attributed to the most recent assistant model",
@@ -17,53 +17,53 @@
   },
   "agents": {
     "claude-fable": {
-      "hours": 193.3,
-      "sessions": 56,
-      "turns": 20038,
-      "output_tokens": 17863852,
-      "input_tokens": 5676601131
+      "hours": 234,
+      "sessions": 76,
+      "turns": 24696,
+      "output_tokens": 22038983,
+      "input_tokens": 7043283086
     },
     "claude-haiku": {
-      "hours": 0.8,
-      "sessions": 293,
-      "turns": 634,
-      "output_tokens": 381425,
-      "input_tokens": 17380930
+      "hours": 0.9,
+      "sessions": 331,
+      "turns": 710,
+      "output_tokens": 426741,
+      "input_tokens": 19517686
     },
     "claude-opus": {
-      "hours": 207.7,
-      "sessions": 442,
-      "turns": 58280,
-      "output_tokens": 18779865,
-      "input_tokens": 10760459171
+      "hours": 264,
+      "sessions": 714,
+      "turns": 77561,
+      "output_tokens": 28821855,
+      "input_tokens": 15329722884
     },
     "claude-sonnet": {
-      "hours": 6.2,
-      "sessions": 57,
-      "turns": 2886,
-      "output_tokens": 647302,
-      "input_tokens": 247415717
+      "hours": 7.4,
+      "sessions": 64,
+      "turns": 3330,
+      "output_tokens": 757192,
+      "input_tokens": 291412967
     },
     "codex-astra": {
-      "hours": 26.5,
-      "sessions": 8,
-      "turns": 126,
-      "output_tokens": 984976,
-      "input_tokens": 434996429
+      "hours": 30.9,
+      "sessions": 14,
+      "turns": 148,
+      "output_tokens": 1156314,
+      "input_tokens": 519770118
     },
     "codex-review": {
-      "hours": 3.5,
-      "sessions": 25,
-      "turns": 325,
-      "output_tokens": 271795,
-      "input_tokens": 355908998
+      "hours": 7.8,
+      "sessions": 42,
+      "turns": 578,
+      "output_tokens": 297084,
+      "input_tokens": 376018748
     },
     "codex-sol": {
-      "hours": 37.5,
-      "sessions": 10,
-      "turns": 218,
-      "output_tokens": 1725704,
-      "input_tokens": 636160232
+      "hours": 40.5,
+      "sessions": 19,
+      "turns": 236,
+      "output_tokens": 1910549,
+      "input_tokens": 725127110
     },
     "cursor": {
       "hours": 1.7,
@@ -74,7 +74,7 @@
       "approx": true
     }
   },
-  "total_hours": 477.2,
+  "total_hours": 587.2,
   "weeks": {
     "2026-W32": {
       "claude-fable": 15.8,
@@ -115,10 +115,18 @@
       "codex-sol": 35
     },
     "2026-W38": {
-      "claude-fable": 15.3,
-      "claude-haiku": 0,
-      "claude-opus": 21.2,
-      "claude-sonnet": 0.8
+      "claude-fable": 35.9,
+      "claude-haiku": 0.1,
+      "claude-opus": 48.6,
+      "claude-sonnet": 1.8
+    },
+    "2026-W39": {
+      "claude-fable": 20.1,
+      "claude-opus": 28.8,
+      "claude-sonnet": 0.2,
+      "codex-astra": 4.4,
+      "codex-review": 4.2,
+      "codex-sol": 3
     }
   }
 }

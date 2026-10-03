@@ -550,9 +550,11 @@ test("wait --timeout 0 reads the current state once and never sleeps", () => {
     assert.equal((JSON.parse(granted.stdout) as Record<string, unknown>)["status"], "granted");
   }
 
-  // A task with no requests is granted vacuously, as before.
+  // A task the log never registered is refused not-registered at exit 1
+  // (APRV-428), on the zero wait exactly as on any other.
   const none = runCli(["wait", "no-such-task", "--timeout", "0", "--json"], dir);
-  assert.equal(none.code, 0);
+  assert.equal(none.code, 1, none.stderr);
+  assert.match(none.stderr, /not-registered/);
 
   // `00` and `-0` are not zero spellings.
   for (const bad of ["00", "-0", "0x"]) {
