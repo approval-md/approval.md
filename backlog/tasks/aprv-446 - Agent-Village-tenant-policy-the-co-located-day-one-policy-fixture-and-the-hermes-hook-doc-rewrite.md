@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-lane'
 created_date: '2026-10-03 03:48'
-updated_date: '2026-10-03 05:56'
+updated_date: '2026-10-03 05:57'
 labels:
   - hermes
   - agent-village
@@ -65,6 +65,8 @@ DOC. docs/hermes-hook.md 'For Agent Village' only (PR 569 also edits this file; 
 NO SPEC CHANGE. Nothing here diverges from SPEC.md.
 
 Validation: full npm test on this branch (APRV-449 + APRV-446): 5405 pass, 0 fail, 2 skipped (one is this file's propose case, skipped for want of #569), exit 0; tsc --noEmit 0; lint 0. AC #1 and #4 are proven verbatim (load with agent_may_request, propose opens a request) on the 569 probe only; on main the test proves the fail-closed reading and the table on the key-stripped text, and CI exercises the verbatim path once #569 is merged into this branch.
+
+Resume point: pushed lane/aprv-446 at 8f22da51 (stacked on #570); next: gh pr create, watch checks.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
