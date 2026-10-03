@@ -464,6 +464,14 @@ export const TELEGRAM_DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const TELEGRAM_SWEEP_INTERVAL_MS = 60_000;
 
 /**
+ * How many refused cards' nonces a channel remembers as dead (APRV-442).
+ *
+ * A bound on memory and nothing else: a nonce that falls off the end reaches
+ * the action-reference fallback, and the gate judges that tap in full.
+ */
+export const TELEGRAM_REFUSED_NONCE_CAP = 1024;
+
+/**
  * The slice of `fetch` this module uses, structurally.
  *
  * Declared here rather than imported so the channel depends on a shape, not on
@@ -2535,6 +2543,40 @@ export class TelegramChannel implements TestableChannel {
   private readonly digests = new Map<DeliveryId, DigestState>();
   /** "All" nonce -> the digest message it was issued for. */
   private readonly allNonces = new Map<string, DeliveryId>();
+  /**
+   * Action keys whose card this process disarmed on a tap the gate did NOT
+   * settle (APRV-442): a refusal (`sender-unmapped`, a budget, an unattested
+   * policy, anything `ok: false`) or a handler that threw. Drained by
+   * {@link takeReleased}.
+   *
+   * The disarm is right and stays, and {@link refusedNonces} keeps it final:
+   * the refused card's bytes resolve to nothing, not even through the
+   * action-reference fallback to the card that replaces it. What the disarm
+   * must not do is leave the listener believing the REQUEST is on the
+   * approver's phone, which is what `DispatchState.delivered` goes on saying
+   * until something tells it otherwise. This set is that something: it names
+   * a card, never an outcome, and the listener re-derives from the verified
+   * log whether the request is still pending before it offers a new card.
+   * Nothing here decides, and losing it to a restart costs nothing, because a
+   * restarted listener re-sends everything pending anyway.
+   */
+  private readonly released = new Set<string>();
+  /**
+   * Nonces of cards a refused or failed tap disarmed (APRV-442), oldest first,
+   * capped at {@link TELEGRAM_REFUSED_NONCE_CAP}.
+   *
+   * Without this, a released request's fresh card would give the refused
+   * card's bytes somewhere to go: the nonce misses, the action reference
+   * resolves to the new live card, and a Telegram redelivery of the refused
+   * tap (a webhook retry) or a client replaying the removed buttons would be
+   * refused again, append again, disarm the new card and cause another
+   * re-send, once per replay. A nonce in this set never takes the fallback, so
+   * a refused card stays exactly as dead as it was before APRV-442 and only
+   * the REQUEST is offered again. Forgetting an entry past the cap degrades to
+   * the fallback, whose tap the gate still judges in full: volume, never a
+   * decision.
+   */
+  private readonly refusedNonces = new Set<string>();
   private rendered: RenderedRequest[] = [];
   private offset = 0;
   private counter = 0;
@@ -3344,6 +3386,52 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * The action keys whose card a refused or failed tap disarmed since the last
+   * call, and forget them (APRV-442).
+   *
+   * The listener's dispatch cycle calls this once per cycle and offers a fresh
+   * card for every key the verified log still calls pending. It is a statement
+   * about this process's cards and nothing else: it carries no decision, no
+   * sender and no outcome, and a key in it that the log has since settled is
+   * simply not offered.
+   */
+  takeReleased(): string[] {
+    const keys = [...this.released];
+    this.released.clear();
+    return keys;
+  }
+
+  /**
+   * Mark `delivery`'s card dead and its request released, BEFORE the
+   * annotation that disarms it (APRV-442).
+   *
+   * Every nonce still armed for this request on this message is recorded in
+   * {@link refusedNonces}, together with the nonce the tap carried (which
+   * differs when the tap came from an earlier copy through the fallback), so
+   * none of those bytes can later resolve to the fresh card. On a digest only
+   * this member's nonce is taken: its siblings stay armed on the digest.
+   */
+  private release(delivery: Delivery, tapNonce: string): void {
+    const dead = [tapNonce];
+    for (const [nonce, entry] of this.deliveries) {
+      if (entry.deliveryId === delivery.deliveryId && entry.actionKey === delivery.actionKey) {
+        dead.push(nonce);
+      }
+    }
+    for (const nonce of dead) {
+      // Re-inserted so a nonce marked again counts as the newest.
+      this.refusedNonces.delete(nonce);
+      this.refusedNonces.add(nonce);
+    }
+    while (this.refusedNonces.size > TELEGRAM_REFUSED_NONCE_CAP) {
+      const oldest = this.refusedNonces.values().next().value;
+      if (oldest === undefined) break;
+      this.refusedNonces.delete(oldest);
+    }
+    this.released.add(delivery.actionKey);
+  }
+
+  /**
    * Send one plain message that carries no question (APRV-196).
    *
    * Used for the re-delivery banner the listener puts in front of a startup
@@ -3897,8 +3985,13 @@ export class TelegramChannel implements TestableChannel {
     // the log when neither is holding the action open.
     let delivery = this.deliveries.get(parsed.nonce);
     let viaStaleCopy = false;
+    // APRV-442. A card a refused tap disarmed stays dead: its bytes take no
+    // fallback to the fresh card the listener sends for the same request, so
+    // a redelivered or replayed refused tap reaches neither the gate nor the
+    // new card, exactly as it did before that card existed.
+    const refusedCard = delivery === undefined && this.refusedNonces.has(parsed.nonce);
 
-    if (delivery === undefined && parsed.actionRef !== null) {
+    if (delivery === undefined && parsed.actionRef !== null && !refusedCard) {
       // The pre-restart copy. Its nonce died with the process that issued it,
       // but the request it names is one THIS process has since re-delivered, so
       // the tap decides that request — on the live copy's message, which is
@@ -3910,7 +4003,7 @@ export class TelegramChannel implements TestableChannel {
     }
 
     if (delivery === undefined) {
-      if (parsed.actionRef !== null) {
+      if (parsed.actionRef !== null && !refusedCard) {
         // Nothing open here for that action. Say what the log says, which is
         // the only thing that knows: decided, lapsed, withdrawn, or unknown.
         const described = this.describeAction?.(parsed.actionRef) ?? null;
@@ -3927,11 +4020,14 @@ export class TelegramChannel implements TestableChannel {
         result,
         callbackId,
         "unknown-callback",
-        `no delivery for nonce ${JSON.stringify(parsed.nonce)} (a restarted listener forgets its buttons; the pending queue is re-sent on start)`,
-        // Two ways to get here, and the reply has to serve both: a button this
-        // process never issued (a restart forgot it), and a button on a message
-        // this process has already annotated (APRV-113 forgets the nonce with
-        // the edit). Either way the message text is the thing to read.
+        refusedCard
+          ? `nonce ${JSON.stringify(parsed.nonce)} is on a card a refused tap disarmed (APRV-442); the request, if still pending, is on a newer card`
+          : `no delivery for nonce ${JSON.stringify(parsed.nonce)} (a restarted listener forgets its buttons; the pending queue is re-sent on start)`,
+        // Three ways to get here, and the reply has to serve all of them: a
+        // button this process never issued (a restart forgot it), a button on a
+        // message this process has already annotated (APRV-113 forgets the
+        // nonce with the edit), and a button on a card a refused tap disarmed
+        // (APRV-442). Either way the message text is the thing to read.
         "This button is no longer live — read the message for the outcome, or the newest message for the request.",
       );
       return;
@@ -3992,6 +4088,9 @@ export class TelegramChannel implements TestableChannel {
     try {
       outcome = this.handler(decision);
     } catch (cause) {
+      // APRV-442: the card is about to be disarmed and nothing settled the
+      // request. Marked BEFORE the annotation, which forgets the nonces.
+      this.release(delivery, parsed.nonce);
       await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
         TELEGRAM_HANDLER_FAILED,
       ]);
@@ -4019,6 +4118,18 @@ export class TelegramChannel implements TestableChannel {
       // message, which is right in both directions: a terminal request has no
       // decision left to collect, and a still-pending one is re-delivered as a
       // fresh prompt by the next dispatch cycle.
+      //
+      // APRV-442. That re-delivery used to be a promise nothing kept: the
+      // disarm forgets the card's nonces, but the listener's own bookkeeping
+      // went on saying the request was on the phone, so the cycle never sent
+      // it again and the original card's action-reference fallback found
+      // nothing live. A wrong account's tap made the prompt dead until a
+      // restart. Releasing names this CARD as gone and nothing else; the cycle
+      // re-derives from the verified log whether the request is still pending
+      // before it offers a new one. Marked BEFORE the annotation, which forgets
+      // the nonces it records. The refusal itself, its record and its wording
+      // are untouched.
+      this.release(delivery, parsed.nonce);
       await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
         this.answerFor(outcome),
       ]);

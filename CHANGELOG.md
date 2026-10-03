@@ -15,6 +15,19 @@ before a tag.
 
 ## Unreleased
 
+- **A refused Telegram tap no longer kills the live prompt (APRV-442).** When a
+  tap was refused (an unmapped account's `sender-unmapped` is the case the
+  hosted smoke found), the card was disarmed as before, but the listener kept
+  believing the request was on the approver's phone: no fresh card went out and
+  the original card's buttons resolved to nothing until the listener restarted.
+  The channel now reports each card a refused or failed tap disarmed, and the
+  next dispatch cycle (polling and webhook alike) re-offers every such request
+  the verified log still calls pending, so the mapped approver can answer on
+  the new card. The refusal is unchanged: still refused, still one
+  `audit.decision_refused` attributed to nobody. The refused card stays dead:
+  a Telegram redelivery of the refused tap, or its bytes replayed, takes no
+  fallback to the new card, so it appends nothing and sends nothing.
+
 - **The Agent Village tenant policy lives here, and the Hermes guide describes
   the co-located shape (APRV-446).** `examples/agent-village/approval-policy.md`
   is the canonical day-one policy the control plane renders into each tenant's
