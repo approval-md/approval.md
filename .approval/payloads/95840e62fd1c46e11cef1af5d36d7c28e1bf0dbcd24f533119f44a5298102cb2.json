@@ -1,0 +1,1 @@
+{"command":"node /private/tmp/claude-501/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/scratchpad/fix-launcher.js; grep -n 'start_relay\\|RELAY_RESTART_S' /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane/scripts/approvald-launcher.sh","cwd":"/Users/carter/dev/approval-md"}

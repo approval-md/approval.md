@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-455 && node cli.js policy --help 2>&1 | head -20; grep -rln 'agent_may_request' src/core/*.ts | head -3; grep -rn 'ttl_remaining_ms' src --include=*.ts -l 2>/dev/null | head -3; ls; ","cwd":"/Users/carter/dev/approval-md"}

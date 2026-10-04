@@ -1,0 +1,1 @@
+{"command":"find /Users/carter/dev -maxdepth 5 -type d \\( -name vitest -o -name next -o -name lucide-react -o -name clsx \\) -path '*/node_modules/*' -not -path '*/node_modules/*/node_modules/*' 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md"}

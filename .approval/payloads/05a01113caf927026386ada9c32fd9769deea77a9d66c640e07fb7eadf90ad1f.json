@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-455 && ls schema* schemas 2>/dev/null | head; grep -rln \"additionalProperties\\\": true\" schema* schemas 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md"}

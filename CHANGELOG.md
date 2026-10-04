@@ -39,6 +39,15 @@ before a tag.
   selected live proposal that a human rejected, or that the agent withdrew or
   let expire, could start with `authorization: policy` and no grant. An
   unselected live proposal still starts on the policy path.
+- **A signal before the wait no longer kills the Hermes hook silently
+  (APRV-445).** `approval hook hermes` used to handle SIGTERM and SIGINT only
+  once it was waiting on a human. A signal that landed earlier (for example
+  just after the request was appended) killed it with nothing on stdout, which
+  Hermes reads as an allow. The CLI hook now guards its whole run: such a
+  signal prints the `hook-interrupted` block directive and exits 2 (a
+  post-event exits 0). The wait's own handler still answers first inside the
+  wait and withdraws as before. Under `approval serve` the process's signals
+  stay the server's.
 - **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
   home's own directories (root, profile homes, `approval/`, `scripts/`) and the
   approval home are organs; `workspace/`, `skills/` and the rest are ordinary

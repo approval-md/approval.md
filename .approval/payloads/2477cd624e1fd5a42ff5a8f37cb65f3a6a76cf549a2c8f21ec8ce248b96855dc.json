@@ -1,0 +1,1 @@
+{"command":"ls /Users/carter/dev/approval-md-wt/lane-455/dist/src/cli | head -5; ls /Users/carter/dev/approval-md-wt/lane-455/dist/src/ | head -20; ls -la /Users/carter/dev/approval-md-wt/lane-455/dist/src/channels/relay.js","cwd":"/Users/carter/dev/approval-md"}

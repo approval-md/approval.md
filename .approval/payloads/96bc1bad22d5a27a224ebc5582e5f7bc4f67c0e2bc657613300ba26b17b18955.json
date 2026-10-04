@@ -1,0 +1,1 @@
+{"command":"F=\"/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/app/(app)/setup/page.tsx\"; grep -n -E 'step !== \"review\" && \\(|</footer>' \"$F\"","cwd":"/Users/carter/dev/approval-md"}

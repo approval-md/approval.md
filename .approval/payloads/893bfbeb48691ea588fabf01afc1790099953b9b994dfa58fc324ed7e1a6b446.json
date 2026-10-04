@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane && grep -n 'TOKEN_FIELDS' src/*.js","cwd":"/Users/carter/dev/approval-md"}
