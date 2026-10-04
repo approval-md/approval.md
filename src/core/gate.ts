@@ -3749,6 +3749,44 @@ export const HARNESS_GRANT_ORIGIN = "grant_origin";
  */
 export const HARNESS_SPENDING_TASK = "spent_by_task";
 
+/**
+ * The policy stamp every harness `execution.started` carries (APRV-447).
+ *
+ * `payload.policy_sha256` names the attested policy the write boundary
+ * re-checked this start's class against: the hash {@link requireAttestation}
+ * returned for the one policy read the appending attempt made, which is the
+ * read the class was resolved from and the attestation was judged on. On the
+ * hook route the verdict itself was drawn from the hook's own, earlier read;
+ * a re-attest landing between that read and this append leaves the stamp
+ * naming the policy in force at the append (the two-read window predates this
+ * field, and is a follow-up to close). Before this field a
+ * policy-authorized start (autonomous, supervised, an unselected live draw)
+ * carried no policy at all, and a reader had to reconstruct the rules in force
+ * from the latest `policy.updated` before the record's seq. A granted start
+ * could recover it through `grant_seq`; it is stamped too, by the same line, so
+ * every harness start answers the question the same way.
+ *
+ * WRITTEN, never accepted. The value is passed in from the attempt's own
+ * attestation check and from nowhere else: neither {@link HarnessStartInput}
+ * nor {@link ConsumeHarnessOptions} has a field for it, and the payload object
+ * is built here from runtime-held values, so a caller's input, option bag or
+ * action payload that happens to carry the same name changes nothing (§11.1
+ * invariant 1: the stamp comes from the verified attestation the gate already
+ * resolved, never from an envelope). An unattested or edited policy never
+ * reaches this line: both write paths refuse `policy-not-attested` first, and
+ * a grant spend under a policy other than the one the grant pinned is refused
+ * `policy-drift` before its payload is built.
+ *
+ * READ by nothing that decides. No verdict, budget, draw, loop floor or
+ * single-use check consults it, and `core/state.ts` reads `policy_sha256` from
+ * `approval.requested` alone. Its readers are downstream followers of the log
+ * that join a start to the rules it ran under, so the field NAME is a stable
+ * contract.
+ */
+function harnessStartPolicyStamp(attestedSha256: string): Record<string, string> {
+  return { [POLICY_HASH_FIELD]: attestedSha256 };
+}
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -4017,6 +4055,11 @@ function attemptHarnessConsume(
     options.spendingTask === derivation.task
       ? "direct"
       : "carried") satisfies HarnessGrantOrigin,
+    // APRV-447: the attested policy this spend was judged under, the same
+    // value `policy-drift` compared against the grant's pin above, so on this
+    // path it equals that pin wherever the grant carries one. See
+    // `harnessStartPolicyStamp` for why it is stamped and who reads it.
+    ...harnessStartPolicyStamp(attested.sha256),
   };
   // APRV-287. A carried spend records WHICH tool call spent it, so the
   // completion counterpart can find this start from the event that reports how
@@ -4310,6 +4353,11 @@ function attemptHarnessStart(
     // APRV-146: unconditional, because a caller that states no bytes was refused
     // above. The record says what ran, not only that something did.
     payload_hash: bytes,
+    // APRV-447: the attested policy this write boundary re-checked the class
+    // against (see `harnessStartPolicyStamp` for the hook's two-read window).
+    // Without it a reader of a policy-authorized start had to reconstruct the
+    // rules in force from the latest `policy.updated` before this seq.
+    ...harnessStartPolicyStamp(attested.sha256),
   };
 
   const appended = append(

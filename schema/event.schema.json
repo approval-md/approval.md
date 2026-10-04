@@ -842,6 +842,36 @@
       }
     },
     {
+      "$comment": "SPEC.md §8 (amended, APRV-447, pending sign-off): a harness `execution.started` carries `policy_sha256`, the SHA-256 of the attested policy the write boundary re-checked the action's class against when it recorded the start (on the hook route the verdict was drawn from the hook's own earlier read, so a re-attest landing between the two leaves the stamp naming the policy in force at the append). Before it, a policy-authorized start (autonomous, supervised, an unselected supervised-live draw) named no policy at all, and a reader had to reconstruct the rules in force from the latest `policy.updated` before the record's seq; a granted start could reach its policy through `grant_seq` and carries the stamp too, written by the same code. The runtime assigns the value at the write boundary from its own attestation check, exactly as it assigns `policy_sha256` on `approval.requested` and `ts` on every gate-typed event: no caller parameter carries it, and a caller-supplied value of the same name is ignored. No verdict, budget, draw or refusal reads it back, so §11.1 invariant 4 is untouched. It is covered by the record hash like every other payload field. OPTIONAL and additive: every record written before the field existed still validates and still verifies, an `execution.started` written by any other path records none, and only the SHAPE is constrained here, a 64-character lowercase hex digest. Whether the hash names an attestation the log actually carries is not expressible in a schema that sees one record. The field name is a stable contract: downstream followers of the log use it to join a start to the rules it ran under.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.started"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "policy_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §8 (amended, APRV-447): SHA-256 (lowercase hex) of the attested policy file's exact bytes the write boundary re-checked this start's class against, stamped by the runtime at the write boundary. Never a caller's parameter and never an input to a verdict.",
+                "examples": ["5f1c0de9a3b7e2d4c6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §10.3 (amended, APRV-38): a decision collected as part of a batch gesture carries the batch's channel delivery id as a first-class payload field. Optional — a unit decision has no batch — and constrained only when present, so the field can never arrive as an empty string or a number that audit would have to guess at.",
       "if": {
         "type": "object",

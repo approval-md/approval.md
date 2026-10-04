@@ -31,6 +31,14 @@ before a tag.
   write boundary's code under `error.append` beside `append-failed`, as
   `approval gate` already did. `ServeOptions.daemonId` is replaced by an
   optional `env` the id is resolved from, and the handle reports `daemonId`.
+- **Every harness start names the policy that authorized it (APRV-447).**
+  `execution.started` written by the hook route and by `approval start` now
+  carries `payload.policy_sha256`, the attested policy hash the gate resolved
+  the class against, on the policy path and the grant path alike. The runtime
+  stamps it at the write boundary; a caller-supplied value is ignored, no
+  verdict reads it, and the schema admits it as optional, so every earlier
+  record still validates. Conformance `schema-validation` is 2.9.0 (two new
+  fixtures, no expectation moved).
 - **`start` never turns a human's no into a policy start (APRV-445, security
   pass).** On the policy path, a proposal's start now refuses `not-granted` when
   the key has a pending or granted request (re-checked inside the append), when
