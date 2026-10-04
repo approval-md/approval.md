@@ -1,0 +1,1 @@
+{"command":"F=/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/lib/server/agent/approval.test.ts; sed -i '' -e '400s/quiet_hours: window }/quiet_hours: quietHours }/' \"$F\"; grep -n -E 'window|quietHours' \"$F\"","cwd":"/Users/carter/dev/approval-md"}

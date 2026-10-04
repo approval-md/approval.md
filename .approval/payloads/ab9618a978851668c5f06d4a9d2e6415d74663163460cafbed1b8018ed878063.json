@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane && grep -n \"runApprovaldStep(\" src/*.js | head -20","cwd":"/Users/carter/dev/approval-md"}

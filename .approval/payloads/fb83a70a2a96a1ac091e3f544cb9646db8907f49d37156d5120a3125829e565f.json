@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-455 && grep -rn \"edgeos\" src/core/*.ts src/channels/*.ts | grep -i \"channels\\b\\|\\.channels\\|channels\\.includes\\|approver.channels\" | head -20; grep -rn \"approver.*channels.*includes\\|channels.includes(\" src | head","cwd":"/Users/carter/dev/approval-md"}
