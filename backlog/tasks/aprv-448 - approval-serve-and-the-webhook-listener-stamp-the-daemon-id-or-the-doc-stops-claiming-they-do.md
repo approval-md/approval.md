@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-c8'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-04 12:38'
+updated_date: '2026-10-04 13:15'
 labels:
   - serve
   - daemon
@@ -85,4 +85,6 @@ Refuter (opus-high) outcome and fixes:
 - Not fixed here, for follow-up: SHOULD-FIX 2 (resolveDaemonAllowlist loads and attests the policy in two reads, a pre-existing APRV-383 race; fix by a single read via checkAttestationOfBytes); SHOULD-FIX 4 (refresh cost inside the store lock: measure or cache on policy mtime/size); nit 1 (no startup warning when the list excludes the id); nit 2 (docs caveat: the derived id hashes the log path string, so a symlinked or differently spelled --log derives a different id). Human decision raised by the refuter: a process RESTARTED while the policy is unattested runs unrestricted (design 4.4); hosted facades restart often, so a fail-closed rule may be wanted.
 
 Merged: PR #588 at head 9f1765b4, 2026-10-04 12:12Z. Follow-ups filed as APRV-468 (allowlist hardening: restart under drift, the two-read race in resolveDaemonAllowlist, refresh cost inside the store lock, nits 1 and 2) and APRV-469 (stamp a standalone channel telegram listen, approval run and adapter starts; error.append in token.ts and audit.ts). AC 3 waits on Carter attesting the 6.6 design amendment (text above, under design amendment text (apply by hand)); the task stays In Progress until then.
+
+Design amendment opened as PR #596 (lane/aprv-448-design, head a32b5064): section 6.6 applied verbatim to design/hosted-daemon-identity.md, digest 8150238d6b441e81591facf462c8cc927e1f420edb095afbb5a38dbdcd493d95. Not armed; protected paths stay red until Carter attests it (the exact attest command is in the PR body and in CLAIMS.md, line "--- 2026-10-04 13:15Z (C8)"). AC 3 can be checked once #596 merges.
 <!-- SECTION:NOTES:END -->
