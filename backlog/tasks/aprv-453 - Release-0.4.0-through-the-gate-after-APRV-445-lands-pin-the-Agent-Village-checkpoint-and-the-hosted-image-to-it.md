@@ -3,11 +3,11 @@ id: APRV-453
 title: >-
   Release 0.4.0 through the gate after APRV-445 lands; pin the Agent Village
   checkpoint and the hosted image to it
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-03 03:50'
-updated_date: '2026-10-04 13:00'
+updated_date: '2026-10-04 20:53'
 labels:
   - release
   - hosting
@@ -28,8 +28,8 @@ The Agent Village checkpoint (agentvillage-data DATA-228) bakes an approval-md i
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 PR 569 is merged into main with a green CI verdict and its three open rulings (exit 7 in the frozen table, credentialReadGate breadth, APPROVAL_HERMES_HOME on the serve process) recorded as decided in APRV-445's notes
-- [ ] #2 0.4.0 is published to npm through the gated release path with a changelog entry that names propose, start, agent_may_request, unix listen, the Hermes rules, APRV-427 and APRV-428
-- [ ] #3 agentvillage-data DATA-228 carries the version string to bake and approval-md-hosted's image pin bump is filed or landed
+- [x] #2 0.4.0 is published to npm through the gated release path with a changelog entry that names propose, start, agent_may_request, unix listen, the Hermes rules, APRV-427 and APRV-428
+- [x] #3 agentvillage-data DATA-228 carries the version string to bake and approval-md-hosted's image pin bump is filed or landed
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -61,4 +61,6 @@ Verification: npm ci 0, build 0, typecheck 0, lint 0; node scripts/run-tests.mjs
 AC2 open: Carter merges #595, then the gated annotated tag v0.4.0 and its push (release.publish, two taps; envelope on this task file by hand, as APRV-371 did, because the Backlog CLI strips it), then Trusted Publishing, then the APRV-371 AC3-style verification. AC3 open: after npm shows 0.4.0, tell DATA-228 the version string and file or land HOSTED-32's Dockerfile pin bump.
 
 Noticed, not fixed: docs/cli-reference.md serve section says the agent allowlist is five verbs, but AGENT_VERBS has seven since #569; docs/README-extended.md version-scope line still says 0.3.0; package-lock.json root license reads MIT against package.json Apache-2.0.
+
+PUBLISHED 2026-10-04. #595 merged as fb0cf987 at 19:57Z; Carter tagged v0.4.0 on it and pushed at 20:22Z; release-candidate run relayed, publish run 37231849205 succeeded (verify, publish to npm, GitHub Release). Read-backs at 20:55Z: npm view approval-md@0.4.0 version 0.4.0, gitHead fb0cf987985c2b9884ebe46b7b3b4419147d057e, dist-tags latest 0.4.0; tarball sha256 b7cf376dd616493f04dfe417a110a463d96c5e10e37265d7864b29a04c1130a4 equals the Release asset approval-md-0.4.0.tgz.sha256; clean install in a scratch directory runs approval --version = 0.4.0; npm audit signatures: 15 packages with verified attestations; provenance in the Sigstore log (logIndex 3078539447). The registry answered 404 for about seven minutes after the publish job printed + approval-md@0.4.0 (replication lag; noted for the runbook). Downstream: DATA-228 told to bake approval-md@0.4.0 at APPROVALD_BIN (note on the task); HOSTED-32's Dockerfile pin bump to v0.4.0 pushed on PR #41's branch for Carter's merge.
 <!-- SECTION:NOTES:END -->
