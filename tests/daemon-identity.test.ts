@@ -28,13 +28,15 @@ import { join } from "node:path";
 import { after, afterEach, test } from "node:test";
 
 import { appendAttestation } from "../src/core/attest.js";
-import { clearDaemonProcess, markDaemonProcess } from "../src/core/daemon-actor.js";
+import { clearDaemonProcess, isDaemonProcess, markDaemonProcess } from "../src/core/daemon-actor.js";
 import {
   DERIVED_DAEMON_ID_PREFIX,
   daemonAllowlistOf,
   declareDaemonIdentityFor,
+  declareResolvedDaemonIdentity,
   derivedDaemonId,
   refreshDaemonAllowlist,
+  refreshDaemonAllowlistFrom,
   resolveDaemonAllowlist,
   resolveDaemonId,
 } from "../src/core/daemon-host.js";
@@ -59,9 +61,10 @@ after(() => {
 });
 
 afterEach(() => {
-  // Module state, so a case that leaves this process marked would make the next
-  // case's plain append a daemon's. Both are cleared, and clearing is always the
-  // stricter direction: an unmarked process stamps nothing.
+  // Module state, so a case that leaves this process declared (or marked) would
+  // make the next case's plain append a daemon's. Both are cleared: since
+  // APRV-448 the declaration alone is what stamps, and a process that has
+  // declared nothing stamps nothing.
   clearDaemonIdentity();
   clearDaemonProcess();
 });
@@ -436,4 +439,68 @@ test("re-declaring the identity does not drop a restriction in force", () => {
   const refused = appendEvent(logPath, DRIFT);
   assert.equal(refused.ok, false);
   if (!refused.ok) assert.equal(refused.error.code, "daemon-not-allowed");
+});
+
+// ---------------------------------------------------------------------------
+// APRV-448 — the declaration stamps; the daemon mark does not have to be held
+// ---------------------------------------------------------------------------
+
+test("a process that declares without marking itself the daemon stamps and is restricted", () => {
+  // `approval serve` and the Telegram webhook listener: they append on the
+  // gate's behalf, so they declare, and they are not the daemon loop, so they
+  // never mark (the mark routes an advance under the daemon's own class).
+  const { logPath, dir } = freshInstance();
+  declareResolvedDaemonIdentity(resolveDaemonId(logPath, { [DAEMON_ID_ENV]: "village-goa-1" }));
+  assert.equal(isDaemonProcess(), false);
+
+  const stamped = appendEvent(logPath, DRIFT);
+  assert.equal(stamped.ok, true);
+  if (stamped.ok) assert.equal(stamped.record.daemon, "village-goa-1");
+
+  const policyPath = writePolicy(dir, logPath, ["village-goa-2"]);
+  attest(logPath, policyPath, "2026-09-20T11:00:00Z");
+  const resolution = refreshDaemonAllowlistFrom(logPath, { file: policyPath });
+  assert.deepEqual(resolution, { ok: true, allowed: ["village-goa-2"] });
+
+  const before = readFileSync(logPath, "utf8");
+  const refused = appendEvent(logPath, { ...DRIFT, ts: "2026-09-20T11:12:00Z" });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.error.code, "daemon-not-allowed");
+  assert.equal(readFileSync(logPath, "utf8"), before);
+});
+
+test("declaring a resolution is exactly the declaration the daemon's constructor makes", () => {
+  const { logPath } = freshInstance();
+  for (const env of [{}, { [DAEMON_ID_ENV]: "village-goa-1" }, { [DAEMON_ID_ENV]: "Not An Id" }]) {
+    declareDaemonIdentityFor(logPath, env);
+    const viaConstructorPath = daemonIdentity();
+    clearDaemonIdentity();
+    declareResolvedDaemonIdentity(resolveDaemonId(logPath, env));
+    assert.deepEqual(daemonIdentity(), viaConstructorPath);
+    clearDaemonIdentity();
+  }
+});
+
+test("refreshing from a path reads the verified log and the attested policy, and never widens", () => {
+  const { logPath, dir } = freshInstance();
+  declareResolvedDaemonIdentity(resolveDaemonId(logPath, { [DAEMON_ID_ENV]: "village-goa-9" }));
+
+  // No log at all: nothing is attested, so nothing resolves and nothing is set.
+  const policyPath = writePolicy(dir, logPath, ["village-goa-1"]);
+  const early = refreshDaemonAllowlistFrom(logPath, { file: policyPath });
+  assert.equal(early.ok, false);
+  assert.equal(daemonIdentity()?.allowed, null);
+
+  attest(logPath, policyPath, "2026-09-20T11:00:00Z");
+  assert.deepEqual(refreshDaemonAllowlistFrom(logPath, { file: policyPath }), {
+    ok: true,
+    allowed: ["village-goa-1"],
+  });
+
+  // An edit nobody re-attested resolves nothing, and the list in force stays.
+  writeFileSync(policyPath, policyText(null), "utf8");
+  const unattested = refreshDaemonAllowlistFrom(logPath, { file: policyPath });
+  assert.equal(unattested.ok, false);
+  if (!unattested.ok) assert.equal(unattested.reason, "policy-not-attested");
+  assert.deepEqual(daemonIdentity()?.allowed, ["village-goa-1"]);
 });

@@ -183,6 +183,11 @@ function emitRefusal(streams: Streams, json: boolean, refusal: GateRefusal): num
     // of a budget refusal must not find queue counts under the same name.
     if (refusal.limits !== undefined) error["limits"] = refusal.limits;
     if (refusal.errors !== undefined) error["errors"] = refusal.errors;
+    // APRV-448: which write-boundary refusal sits under `append-failed`, as
+    // `approval gate` already reports it. `daemon-not-allowed` and a moved head
+    // have nothing in common as repairs, and a caller over `approval serve`
+    // must be able to tell them apart without parsing the message.
+    if (refusal.append !== undefined) error["append"] = refusal.append.code;
     if (refusal.record !== undefined) error["seq"] = refusal.record.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {

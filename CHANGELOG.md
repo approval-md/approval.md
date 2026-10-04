@@ -15,6 +15,22 @@ before a tag.
 
 ## Unreleased
 
+- **`approval serve` and `approval channel telegram webhook` stamp the daemon id
+  (APRV-448).** Records either process appends (serve's verb calls and its hook
+  calls on their worker threads, the webhook's taps and dispatch cycles) now
+  carry the `daemon` field with the id `approval status` reports for the store,
+  resolved by the daemon loop's own rule (`APPROVAL_DAEMON_ID`, or the id
+  derived from the instance), and both are held to the attested policy's
+  `daemons` list at the write boundary: refreshed before every serve call and on
+  every webhook cycle, refused `daemon-not-allowed` with nothing written. Before
+  this only the daemon loop stamped, so in a co-located deployment a tenant saw
+  the id on sweeps and nothing on actions, and an unlisted facade wrote freely.
+  An unusable declared id refuses either verb before it binds (exit 2). Neither
+  process marks itself the daemon, so the daemon's autonomous advance route
+  stays the daemon's. The gate and execution verbs' JSON refusals now carry the
+  write boundary's code under `error.append` beside `append-failed`, as
+  `approval gate` already did. `ServeOptions.daemonId` is replaced by an
+  optional `env` the id is resolved from, and the handle reports `daemonId`.
 - **Every harness start names the policy that authorized it (APRV-447).**
   `execution.started` written by the hook route and by `approval start` now
   carries `payload.policy_sha256`, the attested policy hash the gate resolved

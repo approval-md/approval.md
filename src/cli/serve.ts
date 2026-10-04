@@ -19,6 +19,17 @@
  * both credentials, the bind decision and the daemon id are all settled first,
  * for the reason `cli/mcp.ts` gives about identity: a server that bound first
  * and refused afterwards is a server something had already spoken to.
+ *
+ * **Which processes stamp the `daemon` field (APRV-448).** Three: the daemon
+ * loop (`approval daemon run`, and `approval up`, whose Telegram listener runs
+ * in the daemon's own process), this server (its verb calls and its hook calls
+ * alike), and `approval channel telegram webhook`. Each resolves the id the
+ * same way, `APPROVAL_DAEMON_ID` or the id derived from the store's instance,
+ * which is the id `approval status` reports for that store, and each is held to
+ * the attested policy's `daemons` allowlist at the write boundary. A session's
+ * own CLI calls, `approval hook <harness>` run as a harness's own process, and
+ * a standalone `approval channel telegram listen` declare nothing and stamp
+ * nothing.
  */
 
 import { boolFlag, parseFlags, stringFlag, type ParsedFlags } from "./args.js";
@@ -225,10 +236,12 @@ export async function commandServe(
   const credentials = resolveServeCredentials(env);
   if (!credentials.ok) return usageError(streams, json, credentials.message);
 
-  // The id every record written under this process will carry. A process whose
-  // whole purpose is dispatching verbs that append should not start in order to
-  // find out that it cannot, which is the rule `approval up` and `approval
-  // daemon run` already follow.
+  // The id every record written under this process will carry (APRV-448: the
+  // server declares it on its own thread and on every hook thread, and holds
+  // each append to the attested `daemons` list). A process whose whole purpose
+  // is dispatching verbs that append should not start in order to find out that
+  // it cannot, which is the rule `approval up` and `approval daemon run`
+  // already follow.
   const daemon = resolveDaemonId(logPath, env);
   if (!daemon.ok) return usageError(streams, json, daemon.message);
 
@@ -238,7 +251,10 @@ export async function commandServe(
       actor: identity.actor,
       cwd: root,
       credentials: credentials.credentials,
-      daemonId: daemon.id,
+      // The environment the id above was resolved from, so the server resolves
+      // the same one: it re-resolves rather than being handed a string, which
+      // keeps the source rules in one function.
+      env,
       host: bindHost,
       port: bindPort,
       ...(socketPath === null ? {} : { socketPath }),
@@ -269,7 +285,7 @@ export async function commandServe(
   // Never stdout: an operator piping this server's output somewhere should get
   // bytes that mean one thing, and this process has nothing to say on stdout.
   streams.err(
-    `approval: serve on ${where} as ${identity.actor}, daemon ${daemon.id} (${daemon.source}), store ${root}. Two credentials: the agent surface (/verbs, /verb/<name>, /hook/<harness>) and the tenant surface (/log/follow, /export, /status). TLS is your proxy's; press Ctrl-C to stop.\n`,
+    `approval: serve on ${where} as ${identity.actor}, records stamped daemon ${server.daemonId} (${daemon.source}), store ${root}. Two credentials: the agent surface (/verbs, /verb/<name>, /hook/<harness>) and the tenant surface (/log/follow, /export, /status). TLS is your proxy's; press Ctrl-C to stop.\n`,
   );
 
   return await new Promise<number>((settle) => {

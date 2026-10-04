@@ -247,6 +247,9 @@ function emitRefusal(streams: Streams, json: boolean, refusal: ExecuteRefusal): 
     if (refusal.verdicts !== undefined) error["verdicts"] = refusal.verdicts;
     if (refusal.seq !== undefined) error["seq"] = refusal.seq;
     if (refusal.record !== undefined) error["event_seq"] = refusal.record.seq;
+    // APRV-448: the write-boundary code under `append-failed`, as `approval
+    // gate` and the gate verbs report it.
+    if (refusal.append !== undefined) error["append"] = refusal.append.code;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
     // APRV-102: the one refusal shape — glyph, machine-readable code, message,

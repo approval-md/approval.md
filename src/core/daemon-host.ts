@@ -55,7 +55,8 @@ import {
 } from "./daemon-identity.js";
 import { instanceIdFor } from "./instance.js";
 import type { EventRecord } from "./log.js";
-import type { PolicyLoadResult } from "./policy-load.js";
+import { loadPolicy, type LoadPolicyOptions, type PolicyLoadResult } from "./policy-load.js";
+import { readVerifiedRecords } from "./state.js";
 
 /** The prefix a derived id wears, so the string says what kind of id it is. */
 export const DERIVED_DAEMON_ID_PREFIX = "daemon-";
@@ -121,12 +122,32 @@ export function declareDaemonIdentityFor(
   env: NodeJS.ProcessEnv = process.env,
 ): DaemonIdResolution {
   const resolved = resolveDaemonId(logPath, env);
+  declareResolvedDaemonIdentity(resolved);
+  return resolved;
+}
+
+/**
+ * Declare an identity that was already resolved by {@link resolveDaemonId}
+ * (APRV-448).
+ *
+ * The same declaration {@link declareDaemonIdentityFor} makes, for a process
+ * that resolved its id once at startup and must declare it again somewhere the
+ * environment and the log path are not at hand: `approval serve`'s hook worker
+ * threads, which hold their own copy of this module's state, and the Telegram
+ * webhook listener, whose preparation resolved the id before anything ran. One
+ * resolution, declared in every thread that appends, is what makes the id on a
+ * hook's records the id on a verb's.
+ *
+ * An unusable declared id is declared as an identity with no id, for the reason
+ * {@link declareDaemonIdentityFor} gives: refused at the write boundary rather
+ * than left unmarked and writing.
+ */
+export function declareResolvedDaemonIdentity(resolved: DaemonIdResolution): void {
   if (resolved.ok) {
     declareDaemonIdentity({ id: resolved.id, source: resolved.source });
   } else {
     declareDaemonIdentity({ id: null, declared: resolved.declared, source: null });
   }
-  return resolved;
 }
 
 /**
@@ -146,7 +167,7 @@ export function daemonAllowlistOf(load: PolicyLoadResult): readonly string[] | n
 }
 
 /** Why a resolution could not be made, or `null` when one was. */
-export type DaemonAllowlistRefusal = "policy-unloadable" | "policy-not-attested";
+export type DaemonAllowlistRefusal = "policy-unloadable" | "policy-not-attested" | "log-unverified";
 
 /** The outcome of {@link resolveDaemonAllowlist}. */
 export type DaemonAllowlistResolution =
@@ -203,4 +224,54 @@ export function refreshDaemonAllowlist(
   const resolution = resolveDaemonAllowlist(records, load);
   if (resolution.ok) setDaemonAllowlist(resolution.allowed);
   return resolution;
+}
+
+/**
+ * The stricter of two allowlists, which never admits an id either of them
+ * refuses (APRV-448 review): `null` (no restriction) yields to a list, and two
+ * lists intersect.
+ *
+ * A thread that has never made a successful resolution of its own (a hook
+ * worker spawned after the policy lost its attestation) starts from the
+ * restriction its listener holds, combined this way with whatever it held
+ * before, so a fresh thread is never a way out of the list in force.
+ */
+export function narrowerAllowlist(
+  a: readonly string[] | null,
+  b: readonly string[] | null,
+): readonly string[] | null {
+  if (a === null) return b === null ? null : [...b];
+  if (b === null) return [...a];
+  return a.filter((id) => b.includes(id));
+}
+
+/**
+ * {@link refreshDaemonAllowlist} for a process that has no verified read of its
+ * own in hand (APRV-448): read the store's log through the verified path, load
+ * the policy from `where`, and refresh.
+ *
+ * `approval serve` calls it before every verb call and every hook call, inside
+ * the store lock, and the Telegram webhook listener calls it at startup and on
+ * every dispatch cycle, which is that process's tick. The read is the cached
+ * verified read every other caller in the process shares, so it costs a walk of
+ * what was appended since, never a second walk of the chain.
+ *
+ * A log that does not verify resolves nothing and sets nothing, exactly as an
+ * unattested policy does: the restriction last resolved stays in force, and the
+ * append that follows meets the same unverifiable log on its own path and is
+ * refused there in its own words.
+ */
+export function refreshDaemonAllowlistFrom(
+  logPath: string,
+  where: LoadPolicyOptions,
+): DaemonAllowlistResolution {
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) {
+    return {
+      ok: false,
+      reason: "log-unverified",
+      detail: `the log at ${logPath} did not verify (${read.code}), so no attestation could be checked against it`,
+    };
+  }
+  return refreshDaemonAllowlist(read.records, loadPolicy(where));
 }

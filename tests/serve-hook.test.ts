@@ -96,7 +96,7 @@ async function listener(dir: string): Promise<ServeHandle> {
     actor: SERVE_ACTOR,
     cwd: dir,
     credentials: credentials.credentials,
-    daemonId: "daemon-serve-test",
+    env: { APPROVAL_DAEMON_ID: "daemon-serve-test" },
     port: 0,
   });
 }

@@ -112,7 +112,7 @@ async function listener(
     actor: ACTOR,
     cwd: dir,
     credentials: credentials.credentials,
-    daemonId: "daemon-serve-test",
+    env: { APPROVAL_DAEMON_ID: "daemon-serve-test" },
     port: 0,
     // The hold the acceptance criterion names: a hook nobody answers waits
     // this long. Every test below ends its holds with a decision instead.

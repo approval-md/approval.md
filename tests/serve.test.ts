@@ -134,7 +134,7 @@ async function listener(dir: string, extra: Partial<{ log: string }> = {}): Prom
     actor: ACTOR,
     cwd: dir,
     credentials: credentials.credentials,
-    daemonId: "daemon-serve-test",
+    env: { APPROVAL_DAEMON_ID: "daemon-serve-test" },
     port: 0,
     ...extra,
   });

@@ -4665,9 +4665,30 @@ seconds rather than the channel's usual thirty, for the same reason: a stop an
 operator has asked for twice should not sit behind an unreachable Bot API, and
 a removal that does not land is reported as a webhook still registered.
 
+### The daemon id it stamps (APRV-448)
+
+Every record this process appends (a decision a tap delivers, the refusal of
+one, anything a dispatch cycle writes) carries the `daemon` field, with the id
+`approval status` reports for the same store: `APPROVAL_DAEMON_ID` from the
+launch environment, or `daemon-` plus the instance id derived from the log's
+`.approval` directory, which is the id the daemon loop derives. The started line
+names it (`records stamped daemon <id> (<source>)`) and `webhook_started`
+carries it as `daemon`. A declared id that is not a usable id refuses the verb
+before the bot is claimed or a port is bound, exit 2.
+
+The attested policy's `daemons` list governs this process at the write
+boundary, as it does the daemon and [`approval serve`](#serve). It is re-read at
+startup and at the top of every dispatch cycle, which is this process's tick: a
+list a human narrows and re-attests takes effect within one cycle (a cycle runs
+after every handled update and every `--cycle`), and a resolution that fails
+leaves the previous list standing. A tap whose decision is refused
+`daemon-not-allowed` appends nothing, and the refusal is reported on stderr. The
+process declares the id without marking itself the daemon.
+
 ```json
 {"event":"webhook_started","url":"https://gate.example/telegram/<path redacted>",
- "host":"127.0.0.1","port":4683,"path":"/telegram/<path redacted>","cycle_ms":30000}
+ "host":"127.0.0.1","port":4683,"path":"/telegram/<path redacted>","cycle_ms":30000,
+ "daemon":"daemon-3f2a9c11"}
 {"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
  "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
  "key-mismatch":0},
@@ -7475,9 +7496,10 @@ a second gate. Every verdict, every verb and every batch of records comes from
 the function the CLI dispatches to; nothing under `src/serve/` classifies a
 command, resolves a policy, mints a token or verifies a chain.
 
-STDOUT IS EMPTY. The bound address, the identity, the daemon id and the store
-root go to stderr on one started line. SIGINT and SIGTERM close the listener
-and exit 0.
+STDOUT IS EMPTY. The bound address, the identity, the daemon id every record
+it appends carries (see [Which daemon wrote it](#which-daemon-wrote-it-aprv-448))
+and the store root go to stderr on one started line. SIGINT and SIGTERM close
+the listener and exit 0.
 
 ### The two credentials
 
@@ -7758,12 +7780,48 @@ is refused rather than taken over, one whose probe fails any other way
 path that is not a socket is refused rather than destroyed. Clients speak plain HTTP over the socket, with the same two
 bearer credentials. `--allow-non-loopback` has nothing to say about it.
 
+### Which daemon wrote it (APRV-448)
+
+Every record this server appends, from a verb call and from a hook call alike,
+carries the `daemon` field, and the id is the one on the started line
+(`records stamped daemon <id> (<source>)`). It is resolved once, at startup, by
+the rule the daemon loop uses: `APPROVAL_DAEMON_ID` from the launch environment
+when it is set, otherwise `daemon-` plus the instance id derived from the
+store's `.approval` directory. That is the id `approval status` reports for the
+same store, so a tenant who reads `daemon` on a record can look it up. No
+request names any part of it. A declared id that is not a usable id (lowercase
+letters, digits, `.`, `-`, `_`, at most 64 characters) refuses the server
+before it binds, exit 2.
+
+The attested policy's `daemons` list governs this server at the write boundary,
+exactly as it governs the daemon. It is re-read from the verified log and the
+attested policy inside the store lock before every verb call and every hook
+call, so a list a human narrows and re-attests while the server runs refuses
+the very next call. A refused append writes nothing, and the verb answers
+`append-failed` with the write boundary's code under `error.append`:
+
+```json
+{"ok":false,"error":{"code":"append-failed","append":"daemon-not-allowed",
+ "message":"task.registered could not be appended: this daemon's id is village-goa-1 and the attested policy's `daemons` list admits village-goa-2, …"}}
+```
+
+A hook call whose append is refused blocks, in the harness's own dialect.
+
+The processes that stamp the field are three: the daemon loop (`approval daemon
+run`, and `approval up`, whose Telegram listener runs in the daemon's process),
+this server, and [`channel telegram webhook`](#channel-telegram-webhook). A
+session's own CLI calls, `approval hook <harness>` run as a harness's own
+process, and a standalone `channel telegram listen` stamp nothing. This server
+declares the id without marking itself the daemon: the mark is what routes an
+advance under the daemon's own autonomous class, and a process that dispatches
+the verbs an agent asks for does not hold it.
+
 ### What it never does
 
 It appends no record on its own account. Every event in the log under it was
 written by a verb a caller asked for, under the identity the operator fixed at
-launch, and the daemon id on the started line is the one those records carry.
-It reads no `.approval/env`.
+launch, and stamped with the daemon id on the started line. It reads no
+`.approval/env`.
 
 ### What it serialises, and what it does not (APRV-427)
 
