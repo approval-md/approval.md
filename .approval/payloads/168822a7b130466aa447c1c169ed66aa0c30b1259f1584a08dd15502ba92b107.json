@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-449-446 && grep -rn \"HELP_LINE\\|lines.length <=\\|MAX_LINES\\|help budget\\|<= 40\\|line cap\" tests/*.ts | head -10","cwd":"/Users/carter/dev/approval-md"}

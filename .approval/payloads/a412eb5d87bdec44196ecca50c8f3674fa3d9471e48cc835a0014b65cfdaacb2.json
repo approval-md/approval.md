@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog && ls tasks | head -3; grep -h '^status:' tasks/*.md | sort | uniq -c; grep -h '^milestone:' tasks/*.md | sort | uniq -c; cat milestones/*.md | head -150; ls archive/tasks | wc -l","cwd":"/Users/carter/dev/approval-md"}

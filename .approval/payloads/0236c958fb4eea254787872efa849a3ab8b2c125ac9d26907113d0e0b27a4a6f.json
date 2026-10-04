@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/private/agentvillage-integration && grep -nE \"APRV-(439|440|441|442|445|427|398|399|422|385|383|415|424|371|356|109|433)|DATA-(43|212|215|213|233|234|228|246|247|146|52|53|99)|HOSTED-(1|4|5|6|20|16|17|29|30|15|7|8)\\b\" 00*.md 05*.md 06*.md 07*.md 08*.md 09*.md | cut -c1-300","cwd":"/Users/carter/dev/approval-md"}

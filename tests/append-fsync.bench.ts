@@ -28,7 +28,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -54,6 +54,9 @@ const NO_FSYNC: AppendWriteLayer = {
   fsync: () => {},
   close: (fd) => {
     closeSync(fd);
+  },
+  rename: (from, to) => {
+    renameSync(from, to);
   },
 };
 

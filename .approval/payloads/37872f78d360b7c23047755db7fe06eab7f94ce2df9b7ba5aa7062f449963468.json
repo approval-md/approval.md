@@ -1,0 +1,1 @@
+{"command":"grep -n \"Implementation Notes\" -A 60 \"/Users/carter/.claude-edge/projects/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/tool-results/bw2gk7ak9.txt\" | cut -c1-2500","cwd":"/Users/carter/dev/approval-md"}

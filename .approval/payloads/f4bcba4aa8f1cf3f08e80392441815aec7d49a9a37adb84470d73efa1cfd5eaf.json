@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && ls backlog/tasks | grep aprv-445 && wc -l backlog/tasks/aprv-445*.md && sed -n 1,40p backlog/tasks/aprv-445*.md | cut -c1-600","cwd":"/Users/carter/dev/approval-md"}

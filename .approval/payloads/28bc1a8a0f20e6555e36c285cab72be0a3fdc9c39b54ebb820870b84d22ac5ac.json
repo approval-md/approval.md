@@ -1,0 +1,1 @@
+{"command":"ls -d /Users/carter/dev/*/ 2>/dev/null; echo \"--- hosted ---\"; ls /Users/carter/dev/approval-md/hosted; echo \"--- grep agentvillage dirs ---\"; ls -d /Users/carter/dev/*village* /Users/carter/dev/*/backlog 2>/dev/null","cwd":"/Users/carter/dev/approval-md"}

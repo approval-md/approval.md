@@ -1,0 +1,1 @@
+{"command":"sed -n 195,215p \"/Users/carter/dev/agentvillage/private/context/vault/20260918 Agent Village v2 - Data Infrastructure Design Document.md\"; echo ----; sed -n 580,632p \"/Users/carter/dev/agentvillage/private/context/vault/20260918 Agent Village v2 - Data Infrastructure Design Document.md\"","cwd":"/Users/carter/dev/approval-md"}

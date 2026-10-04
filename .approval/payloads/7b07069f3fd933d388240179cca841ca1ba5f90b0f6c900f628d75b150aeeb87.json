@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog/tasks && cat \"data-97 - \"*.md \"data-52 - \"*.md \"data-53 - \"*.md \"data-41 - \"*.md \"data-57 - \"*.md | cut -c1-1800","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"grep -rn -e \"effectiveReadRoots\" -e \"scratchRoots\" /Users/carter/dev/approval-md-wt/data-212-propose/src/serve /Users/carter/dev/approval-md-wt/data-212-propose/src/cli/hook.ts","cwd":"/Users/carter/dev/approval-md"}

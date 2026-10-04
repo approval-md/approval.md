@@ -1,0 +1,1 @@
+{"command":"grep -n -e '\"cron.manage\"' -e '\"process.write\"' -e '\"browser.exec\"' -e '\"skill.manage\"' -e '\"agent.delegate\"' -e '\"message.send\"' -e \"web_extract\" /Users/carter/dev/approval-md-wt/data-212-propose/src/cli/hook.ts","cwd":"/Users/carter/dev/approval-md"}

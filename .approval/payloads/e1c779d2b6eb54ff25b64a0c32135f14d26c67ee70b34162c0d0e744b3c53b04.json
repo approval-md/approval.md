@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && backlog task view DATA-224 --plain && grep -n \"date\\|priority\" backlog/tasks/data-224*.md | head","cwd":"/Users/carter/dev/approval-md"}

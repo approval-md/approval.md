@@ -1,0 +1,1 @@
+{"command":"grep -A6 \"^labels:\" backlog/tasks/aprv-{109,383,385,394,398,399,400,404,405,410,415,418,419,422,423,424,429,436,437,351}\\ -*.md | grep -E \"  - \" | sed -E 's/^backlog\\/tasks\\/(aprv-[0-9]+) - [^-]*-?/\\1 /' | sed -E 's/^(aprv-[0-9]+)[^ ]* /\\1 /' | head -100","cwd":"/Users/carter/dev/approval-md"}

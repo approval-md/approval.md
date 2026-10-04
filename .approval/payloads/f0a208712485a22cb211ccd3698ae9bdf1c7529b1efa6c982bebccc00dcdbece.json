@@ -1,0 +1,1 @@
+{"command":"grep -n -e \"SKILL.md\" -e \"skills/approval\" /Users/carter/dev/agentvillage-wt/data-250-template/install/tests/install_approval.test.ts /Users/carter/dev/agentvillage-wt/data-250-template/plugins/av-approval/README.md","cwd":"/Users/carter/dev/approval-md"}

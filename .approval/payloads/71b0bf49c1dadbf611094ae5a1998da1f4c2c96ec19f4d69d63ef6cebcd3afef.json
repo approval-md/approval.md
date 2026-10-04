@@ -1,0 +1,1 @@
+{"command":"grep -n \"\\-\\-tasks\\|allow-cross-instance\" examples/web-agent-demo/runbook.md examples/web-agent-demo/provisioning.md | head; echo ---; cat ~/dev/demos/hosted/.approval/channel-owner.json; echo; ls ~/dev/demos/hosted/.approval/daemon 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

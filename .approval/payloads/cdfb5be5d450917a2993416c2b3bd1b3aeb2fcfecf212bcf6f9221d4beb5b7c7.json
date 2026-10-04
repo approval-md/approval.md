@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && grep -H \"^milestone:\\|^status:\\|^priority:\\|^created_date:\" backlog/tasks/data-246*.md backlog/tasks/data-247*.md backlog/tasks/data-248*.md backlog/tasks/data-249*.md | sed 's/ - [^:]*:/:/'","cwd":"/Users/carter/dev/approval-md"}

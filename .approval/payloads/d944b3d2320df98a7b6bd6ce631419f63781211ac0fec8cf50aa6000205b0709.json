@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && head -40 scripts/railway-probe.sh && wc -l scripts/*.sh scripts/*.mjs tests/*.mjs","cwd":"/Users/carter/dev/approval-md"}

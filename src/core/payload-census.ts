@@ -26,9 +26,11 @@
  * its own module rather than teaching the store to read events.
  */
 
+import { readFileSync } from "node:fs";
+
 import type { EventRecord } from "./log.js";
-import { isPayloadHash } from "./payload.js";
-import { listStoredPayloadHashes } from "./payload-store.js";
+import { isPayloadHash, payloadHash } from "./payload.js";
+import { listStoredPayloadHashes, loadPayload, payloadPath } from "./payload-store.js";
 import { payloadOf } from "./state.js";
 
 /** Hashes a `payload.pruned` record already names. */
@@ -160,4 +162,151 @@ export function payloadStoreCensus(records: EventRecord[], storeDir: string): Pa
     else if (!bindings.has(hash)) orphans += 1;
   }
   return { files: present.length, pruned: pruned.size, orphans, awaitingRemoval };
+}
+
+// ---------------------------------------------------------------------------
+// Integrity of the payloads verified records bind (APRV-457)
+// ---------------------------------------------------------------------------
+
+/**
+ * One bound payload the store does not hold intact.
+ *
+ * - `torn`: the file is there and is empty or every byte is NUL. That is what a
+ *   crash before writeback leaves (the name reached the disk, the data did
+ *   not), and it is the only reading this module gives the crash signature. No
+ *   valid payload can look like it: an RFC 8785 serialization is never empty
+ *   and never carries a raw NUL byte.
+ * - `lost`: the file is absent although a record proves the store held it when
+ *   the record was appended (see {@link heldAtAppend}). That is the other half of
+ *   the same crash: the name never reached the disk.
+ * - `mismatch`: the file holds at least one non-NUL byte and does not verify
+ *   against its name. Not the crash signature, by construction: a crash does not
+ *   write bytes nobody wrote. Read as tampering or corruption.
+ * - `unreadable`: the file exists and could not be read (a permission, an I/O
+ *   error); nothing about its bytes is known.
+ */
+export type PayloadDamage =
+  | { kind: "torn"; hash: string; seq: number; bytes: number; path: string }
+  | { kind: "lost"; hash: string; seq: number; event: string; path: string }
+  | { kind: "mismatch"; hash: string; seq: number; detail: string; path: string }
+  | { kind: "unreadable"; hash: string; seq: number; detail: string; path: string };
+
+/**
+ * Hashes a record proves the store HELD when that record was appended, mapped
+ * to the first such record. Only these make an absent file evidence of loss;
+ * every other binding (a `task.registered` declaration, a request made without
+ * material) may name bytes this runtime never held, and its absence says
+ * nothing.
+ *
+ * - `policy.proposed` and `policy.updated` with a `payload_hash`: both verbs
+ *   store the text first and refuse the append when they cannot (SPEC.md
+ *   §10.4, APRV-356).
+ * - `approval.requested` carrying `display_hash`: the runtime assigns it only
+ *   when it held the material, supplied (and stored before the append) or read
+ *   from the store (APRV-119).
+ */
+function heldAtAppend(records: EventRecord[]): Map<string, EventRecord> {
+  const held = new Map<string, EventRecord>();
+  for (const record of records) {
+    const payload = payloadOf(record);
+    const hash = payload["payload_hash"];
+    if (!isPayloadHash(hash) || held.has(hash)) continue;
+    const proves =
+      record.event === "policy.proposed" ||
+      record.event === "policy.updated" ||
+      (record.event === "approval.requested" && typeof payload["display_hash"] === "string");
+    if (proves) held.set(hash, record);
+  }
+  return held;
+}
+
+/**
+ * Whether bytes whose JSON is `{"$ref": …}` are themselves the material bound:
+ * `storePayload` of such a value writes exactly that, and it hashes to its
+ * name. `loadPayload` reports the reference form before hashing, so the check
+ * is made here.
+ */
+function hashesToItsName(bytes: Buffer, hash: string): boolean {
+  try {
+    return payloadHash(JSON.parse(bytes.toString("utf8")) as unknown) === hash;
+  } catch {
+    return false;
+  }
+}
+
+/** The first record that binds each hash, for naming it in a report. */
+function firstBindingSeq(records: EventRecord[]): Map<string, number> {
+  const first = new Map<string, number>();
+  for (const record of records) {
+    if (record.event === "payload.pruned") continue;
+    const mentioned = new Set<string>();
+    hashesWithin(payloadOf(record), mentioned);
+    for (const hash of mentioned) if (!first.has(hash)) first.set(hash, record.seq);
+  }
+  return first;
+}
+
+/**
+ * Every payload a verified record binds that the store does not hold intact,
+ * in log order. Reads files; writes, moves and deletes nothing.
+ *
+ * `records` must be the verified chain (doctor passes the records of its one
+ * verified walk). A hash a `payload.pruned` record names is skipped whatever
+ * its file holds: retention removed it on purpose and the log says so.
+ */
+export function payloadIntegrity(records: EventRecord[], storeDir: string): PayloadDamage[] {
+  const pruned = prunedHashes(records);
+  const held = heldAtAppend(records);
+  const firstSeq = firstBindingSeq(records);
+  const damage: PayloadDamage[] = [];
+
+  for (const [hash, seq] of firstSeq) {
+    if (pruned.has(hash)) continue;
+    const path = payloadPath(storeDir, hash);
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(path);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+        const holder = held.get(hash);
+        if (holder !== undefined) {
+          damage.push({ kind: "lost", hash, seq: holder.seq, event: holder.event, path });
+        }
+        continue;
+      }
+      damage.push({
+        kind: "unreadable",
+        hash,
+        seq,
+        detail: cause instanceof Error ? cause.message : String(cause),
+        path,
+      });
+      continue;
+    }
+
+    if (bytes.every((byte) => byte === 0)) {
+      damage.push({ kind: "torn", hash, seq, bytes: bytes.length, path });
+      continue;
+    }
+
+    const loaded = loadPayload(storeDir, hash);
+    if (loaded.ok) continue;
+    if (loaded.code === "reference") {
+      // A `{"$ref": …}` pointer is a legitimate store form for material this
+      // runtime never held, and `loadPayload` reports it before hashing. Where
+      // a record PROVES the runtime held the real bytes, a pointer under that
+      // name is a replacement, not a reference: tampering, read as such.
+      if (!held.has(hash) || hashesToItsName(bytes, hash)) continue;
+      damage.push({
+        kind: "mismatch",
+        hash,
+        seq,
+        detail: `${path} holds an external reference although a record proves the store held the material itself; the bytes were replaced`,
+        path,
+      });
+      continue;
+    }
+    damage.push({ kind: "mismatch", hash, seq, detail: loaded.message, path });
+  }
+  return damage.sort((a, b) => a.seq - b.seq);
 }

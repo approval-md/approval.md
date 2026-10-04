@@ -1,0 +1,1 @@
+{"command":"ls /Users/carter/dev/agentvillage-data/backlog/tasks/ | grep -i -E \"data-(43|49|212|213|222|224|228|233|234|244|215|231|99|96|58|52|53) \"","cwd":"/Users/carter/dev/approval-md"}

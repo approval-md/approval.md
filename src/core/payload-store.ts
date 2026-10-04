@@ -50,23 +50,35 @@
  * file, atomically (temp + rename in the destination directory), and the store
  * directory is a sibling of the log directory rather than a child, so no
  * conceivable store path collides with the log's.
+ *
+ * ## Durable before ok (APRV-457)
+ *
+ * A write reports ok only once the bytes and the name are on disk: the temp
+ * file is fsynced before the rename and the store directory after it (and,
+ * when this write created the store directory, the parent of every directory
+ * it created). Every caller appends the record that binds the hash only after
+ * that ok, so the order on disk is payload first, record second. Before this,
+ * the log append was fsynced (APRV-440) and the payload beside it was not: a
+ * platform kill before writeback could keep the record and lose its payload,
+ * leaving a verified `payload_hash` pointing at a NUL-filled or missing file.
+ * The calls go through the write layer the log append uses
+ * (`core/log-write-layer.ts`), which is what lets `tests/payload-fsync.test.ts`
+ * prove the order and model the crash.
  */
 
 import {
   chmodSync,
-  closeSync,
+  constants as fsConstants,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
   unlinkSync,
-  writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { canonicalize } from "./jcs.js";
+import { appendWriteLayer, fsyncDirectory } from "./log-write-layer.js";
 import { isPayloadHash, payloadHash } from "./payload.js";
 
 /** The directory name, beside the log's home: `.approval/payloads/`. */
@@ -126,32 +138,106 @@ let tempCounter = 0;
 export const PAYLOAD_FILE_MODE = 0o600;
 export const PAYLOAD_DIR_MODE = 0o700;
 
-function writeAtomic(path: string, bytes: string): { ok: true } | { ok: false; message: string } {
+/**
+ * `"wx"` spelled for the write layer: create, exclusive, write-only. The temp
+ * file opens with {@link PAYLOAD_FILE_MODE}, so the umask can only narrow it.
+ */
+const TEMP_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
+
+/**
+ * The directories whose entries this write made new: the store directory
+ * (which gained the file's name), and, when `mkdir` had to create directories,
+ * the parent of each one it created, up to and including the parent of the
+ * topmost. Innermost first. The same walk `core/log.ts` makes for a log's first
+ * append (APRV-440).
+ */
+function directoriesToSync(directory: string, firstCreatedDir: string | undefined): string[] {
+  const dirs = [directory];
+  if (firstCreatedDir === undefined) return dirs;
+  const stop = dirname(firstCreatedDir);
+  for (let dir = directory; dir !== stop; ) {
+    const parent = dirname(dir);
+    if (parent === dir) break; // the filesystem root: nothing above to sync
+    dirs.push(parent);
+    dir = parent;
+  }
+  return dirs;
+}
+
+/**
+ * Write `bytes` to `path` atomically AND durably: temp file, one write, fsync,
+ * close, rename, then fsync of every directory whose entries changed. Ok means
+ * a crash from here on keeps both the bytes and the name (module header,
+ * "Durable before ok").
+ *
+ * Any failure before the rename removes the temp file and stores nothing. A
+ * failed directory fsync after the rename is a failure too, reported as one
+ * that may have left the file in place: the caller refuses and appends nothing,
+ * and the file is then an orphan, content-addressed and harmless, exactly the
+ * residue a `head-moved` request already leaves.
+ */
+function writeAtomic(
+  path: string,
+  bytes: string,
+): { ok: true } | { ok: false; message: string; mayBePresent: boolean } {
   const directory = dirname(path);
   tempCounter += 1;
   const temp = join(
     directory,
     `.${basename(path)}.tmp-${String(process.pid)}-${String(tempCounter)}`,
   );
+  const writeLayer = appendWriteLayer();
+  const data = Buffer.from(bytes, "utf8");
+  let firstCreatedDir: string | undefined;
   try {
-    mkdirSync(directory, { recursive: true, mode: PAYLOAD_DIR_MODE });
+    firstCreatedDir = mkdirSync(directory, { recursive: true, mode: PAYLOAD_DIR_MODE });
     if ((statSync(directory).mode & 0o777) !== PAYLOAD_DIR_MODE) {
       chmodSync(directory, PAYLOAD_DIR_MODE);
     }
-    const handle = openSync(temp, "wx", PAYLOAD_FILE_MODE);
+    const handle = writeLayer.open(temp, TEMP_FLAGS, PAYLOAD_FILE_MODE);
     try {
-      writeSync(handle, bytes, 0, "utf8");
+      const written = writeLayer.write(handle, data);
+      if (written !== data.length) {
+        throw new Error(
+          `the write was short (${String(written)} of ${String(data.length)} bytes reached ${temp})`,
+        );
+      }
+      // Until this returns the bytes are in the page cache only, and a crash
+      // after the rename leaves the name over blocks that were never written:
+      // a NUL-filled payload under a hash a verified record binds.
+      writeLayer.fsync(handle);
     } finally {
-      closeSync(handle);
+      try {
+        writeLayer.close(handle);
+      } catch {
+        // Nothing actionable: on the ok path the bytes are already synced, and
+        // on a failure path the temp file is removed below.
+      }
     }
-    renameSync(temp, path);
+    writeLayer.rename(temp, path);
   } catch (cause) {
     try {
       unlinkSync(temp);
     } catch {
       // The temp file may never have been created; nothing to clean up.
     }
-    return { ok: false, message: detail(cause) };
+    return { ok: false, message: detail(cause), mayBePresent: false };
+  }
+
+  // The rename changed a directory entry, and fsync of the file does not make
+  // its NAME durable: without this a crash can keep the bytes and lose the file.
+  for (const dir of directoriesToSync(directory, firstCreatedDir)) {
+    try {
+      fsyncDirectory(dir);
+    } catch (cause) {
+      return {
+        ok: false,
+        message: `the file was written, synced and renamed into place but its directory ${dir} could not be synced (${detail(
+          cause,
+        )}), so it is not known to survive a crash: it may be present now and absent after a crash`,
+        mayBePresent: true,
+      };
+    }
   }
   return { ok: true };
 }
@@ -195,7 +281,9 @@ export function storePayload(storeDir: string, value: unknown): StorePayloadResu
     return {
       ok: false,
       code: "write-failed",
-      message: `payload ${hash} could not be written to ${path}: ${written.message}. Nothing was stored and the log was not touched.`,
+      message: written.mayBePresent
+        ? `payload ${hash} could not be made durable at ${path}: ${written.message}. The log was not touched; the file left in place is not known to be durable, and the next manual-path store of the same payload rewrites and re-syncs it.`
+        : `payload ${hash} could not be written to ${path}: ${written.message}. Nothing was stored and the log was not touched.`,
     };
   }
   return { ok: true, hash, path };

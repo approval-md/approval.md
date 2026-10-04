@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog/tasks/ && wc -l data-233\\ -*.md && grep -n -i \"228\\|launcher\\|checkpoint\\|shell_hooks\\|patch\\|python3\\|node\" data-233\\ -*.md | head -60","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"grep -rn \"bot-owned-elsewhere\\|allow-cross-instance\\|already recorded on this machine\" src --include=*.ts -l; echo ---; grep -rn \"bot-registry\\|bots.json\\|botRegistry\\|claimed bot\\|release\" src/cli/*.ts src/channels/telegram*.ts 2>/dev/null | grep -i \"bot\" | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

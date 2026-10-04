@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && ls && ls docs research releases backlog 2>&1 | head -80 && git status --short | head && git branch -a && wc -c README.md CLAUDE.md docs/*.md research/*","cwd":"/Users/carter/dev/approval-md"}

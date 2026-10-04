@@ -1,0 +1,1 @@
+{"command":"ls /Users/carter/dev/ | head -100; ls /Users/carter/dev/agentvillage-data/backlog/tasks 2>/dev/null | grep -i -E 'data-(43|49|58|213|212|222|224|228|233|234|231|99|96)\\b' ","cwd":"/Users/carter/dev/approval-md"}

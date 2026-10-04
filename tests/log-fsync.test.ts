@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeSync,
 } from "node:fs";
@@ -152,6 +153,11 @@ function recordingLayer(
       recorder.calls.push({ op: "close", fd, path: recorder.pathOf.get(fd) ?? "" });
       recorder.pathOf.delete(fd);
       closeSync(fd);
+    },
+    rename(from, to) {
+      // The log append never renames (APRV-457 added this for the payload
+      // store); delegate without recording so the traces above stay exact.
+      renameSync(from, to);
     },
   };
 }

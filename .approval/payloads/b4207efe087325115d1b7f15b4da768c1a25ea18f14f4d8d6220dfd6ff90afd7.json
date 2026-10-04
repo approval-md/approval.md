@@ -1,0 +1,1 @@
+{"command":"grep -n -o \"agent:[a-z0-9_<>.-]*\" /Users/carter/dev/approval-md/private/agentvillage-integration/*.md | sort | uniq -c | sort -rn | head -20; grep -rn \"APPROVAL_AGENT\\|--as agent\" /Users/carter/dev/approval-md/private/agentvillage-integration/ | head","cwd":"/Users/carter/dev/approval-md"}

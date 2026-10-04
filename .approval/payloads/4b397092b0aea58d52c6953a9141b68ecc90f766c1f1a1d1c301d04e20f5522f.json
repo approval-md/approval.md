@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"^#\\|maritime\\|500\\|gemini\\|checkpoint\\|9119\\|volume\\|sidecar\" /Users/carter/dev/agentvillage/private/CONTEXT.md | cut -c1-300 | head -50","cwd":"/Users/carter/dev/approval-md"}

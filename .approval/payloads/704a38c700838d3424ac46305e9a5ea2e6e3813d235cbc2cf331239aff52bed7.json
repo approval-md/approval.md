@@ -1,0 +1,1 @@
+{"command":"sed -n 104,140p \"/Users/carter/.claude-edge/projects/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/tool-results/boqkkezbg.txt\" | cut -c1-3000","cwd":"/Users/carter/dev/approval-md"}

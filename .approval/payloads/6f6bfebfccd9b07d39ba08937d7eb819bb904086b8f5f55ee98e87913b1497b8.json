@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"deployed\\|024bcef\\|ARCHIVE_READ\" /Users/carter/dev/agentvillage/private/handover/2026-10-02-releases-demo-and-team-canaries.md","cwd":"/Users/carter/dev/approval-md"}

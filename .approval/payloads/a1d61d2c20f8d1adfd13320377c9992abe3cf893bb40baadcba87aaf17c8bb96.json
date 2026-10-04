@@ -1,0 +1,1 @@
+{"command":"grep -rn -E \"APPROVAL_TG_WEBHOOK_SECRET\\\"|4683|/telegram/webhook\\\"|8443|APPROVAL_SENDER_KEY\\\"\" src/cli/channel-telegram-webhook.ts src/channels/telegram-webhook.ts src/core/*.ts | head -10","cwd":"/Users/carter/dev/approval-md"}

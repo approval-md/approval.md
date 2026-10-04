@@ -1,0 +1,1 @@
+{"command":"grep -rn -i \"template\\|APPROVAL.md\\|approval_ttl\\|policy\\|network.call\\|read.web\" /Users/carter/dev/agentvillage-wt/data-250-template/install/install_approval.ts /Users/carter/dev/agentvillage-wt/data-250-template/install/tests/install_approval.test.ts","cwd":"/Users/carter/dev/approval-md"}

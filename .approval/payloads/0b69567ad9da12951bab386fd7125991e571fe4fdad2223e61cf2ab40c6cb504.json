@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted/backlog/tasks && grep -n -i '429\\|ledger\\|hourly\\|65c73318\\|approved-tryit\\|vercel\\|t628e112d59\\|two \\(bounded\\|private\\)' hosted-22\\ -* hosted-24\\ -* hosted-23\\ -* | cut -c1-500 | head -20","cwd":"/Users/carter/dev/approval-md"}

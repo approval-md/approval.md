@@ -1,0 +1,1 @@
+{"command":"git show origin/main:backlog/tasks/ | grep -i \"aprv-44\"; echo ---; ls /Users/carter/dev/approval-md-wt/data-212-propose/backlog/tasks/ | grep -i \"aprv-44\"; echo ---; git branch -a | grep -E \"secret-env|everyday\"","cwd":"/Users/carter/dev/approval-md"}

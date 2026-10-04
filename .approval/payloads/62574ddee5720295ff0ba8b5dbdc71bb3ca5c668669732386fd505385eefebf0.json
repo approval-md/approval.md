@@ -1,0 +1,1 @@
+{"command":"grep -n '^#' /Users/carter/dev/approval-md-hosted/docs/02-hosted-daemon-architecture.md | head -60","cwd":"/Users/carter/dev/approval-md"}
