@@ -49,11 +49,35 @@
  * lock (SPEC.md §11.1 invariant 5).
  */
 
-import { parentPort } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
 
 import { commandHook, type HookWaitSeam } from "../cli/hook.js";
+import {
+  declareResolvedDaemonIdentity,
+  refreshDaemonAllowlistFrom,
+  type DaemonIdResolution,
+} from "../core/daemon-host.js";
 import { harnessCapFitsMargin } from "../core/harness-wait.js";
+import type { LoadPolicyOptions } from "../core/policy-load.js";
 import { processReadCache, readVerifiedRecords, useVerifiedSnapshots } from "../core/state.js";
+
+/**
+ * What every thread in the pool writes as (APRV-448), handed over once as the
+ * thread's `workerData`.
+ *
+ * A worker thread holds its own copy of every module, so the identity the
+ * listener declared on its own thread is not declared here: without this, a
+ * hook call's records would carry no `daemon` field and meet no `daemons`
+ * allowlist while a verb call's beside them did. The listener resolves the id
+ * ONCE, from its launch environment and its log path, and every thread declares
+ * that same resolution; no request carries any part of it.
+ */
+export interface HookWriter {
+  /** The listener's own resolution, declared verbatim. */
+  daemon: DaemonIdResolution;
+  /** Where the store's policy is, for the per-call allowlist refresh. */
+  policy: LoadPolicyOptions;
+}
 
 /** One hook call, as the listener hands it over. */
 export interface HookJob {
@@ -115,6 +139,12 @@ if (port === null) {
 // so the warm read and the hook's own reads are one cache under one proof.
 useVerifiedSnapshots(true);
 
+// APRV-448. This thread appends on the gate's behalf exactly as the listener's
+// own thread does, so it declares the same identity before it runs a line of
+// any hook. Declared once: the resolution is the listener's, fixed at startup.
+const writer = workerData as HookWriter;
+declareResolvedDaemonIdentity(writer.daemon);
+
 port.on("message", (job: HookJob) => {
   const flag = new Int32Array(job.flag);
   const post = (message: HookWorkerMessage): void => port.postMessage(message);
@@ -174,6 +204,12 @@ port.on("message", (job: HookJob) => {
       post({ type: "cancelled" });
       return;
     }
+    // The `daemons` allowlist in force for this call (APRV-448), resolved from
+    // the attested policy and this thread's verified read, inside the lock and
+    // before the hook appends anything: the listener's thread does the same
+    // before every verb call. A resolution that fails leaves the previous one
+    // standing, as the daemon's tick does.
+    refreshDaemonAllowlistFrom(job.logPath, writer.policy);
     // The budget, looked at once more now the lock is here (APRV-427 review):
     // a call that had room when it arrived and spent it waiting in line or for
     // the lock would open a question the harness kills its asker before

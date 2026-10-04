@@ -36,6 +36,25 @@
  * log, the export and status, and the agent credential never reads the log it
  * is judged by.
  *
+ * ## Which daemon wrote it (APRV-448)
+ *
+ * Every record this process appends carries the `daemon` field, with the id
+ * `approval status` reports for the same store: `APPROVAL_DAEMON_ID` from the
+ * launch environment, or the id derived from the store's instance, resolved
+ * ONCE at startup by `core/daemon-host.ts`'s `resolveDaemonId`, the function
+ * the daemon loop resolves its own id with. The listener's thread declares it
+ * before it binds, and every hook thread declares the same resolution before
+ * its first job (`serve/hook-worker.ts`), so a verb's records and a hook's
+ * carry one id. No request names any part of it.
+ *
+ * The attested policy's `daemons` allowlist is enforced at the write boundary
+ * exactly as it is for the daemon: refreshed from the verified log inside the
+ * store lock before every verb call and every hook call, and an id the list
+ * does not admit is refused `daemon-not-allowed` with nothing written. This
+ * process does NOT mark itself the daemon (`core/daemon-actor.ts`): that mark
+ * routes an advance under the daemon's own autonomous class, and a process that
+ * dispatches the verbs an agent asks for must never hold it.
+ *
  * ## What it does not do
  *
  * - **No TLS.** There is no certificate handling in this process and there is
@@ -83,9 +102,14 @@ import { StringDecoder } from "node:string_decoder";
 import { effectiveHarnessCapMs, harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
 import { type VerbSpec } from "../cli/verb-registry.js";
+import {
+  declareResolvedDaemonIdentity,
+  refreshDaemonAllowlistFrom,
+  resolveDaemonId,
+} from "../core/daemon-host.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
 import { withAppendLock } from "../core/log.js";
-import { parseDuration } from "../core/policy-load.js";
+import { parseDuration, type LoadPolicyOptions } from "../core/policy-load.js";
 import {
   buildArgv,
   invokeVerb,
@@ -314,8 +338,15 @@ export interface ServeOptions {
   policy?: string;
   /** The two bearer credentials, already resolved from the environment. */
   credentials: ServeCredentials;
-  /** The daemon instance id this gate writes under. Reported, never enforced. */
-  daemonId: string;
+  /**
+   * The launch environment the daemon id is resolved from (APRV-448):
+   * `APPROVAL_DAEMON_ID` when it holds one, otherwise the id derived from the
+   * store's instance. Defaults to `process.env`. Nothing else in this server
+   * reads it; the verbs read the environment the process was launched with, as
+   * before. An unusable declared id makes {@link serveApproval} reject before
+   * it binds, which the CLI has already refused in its own words.
+   */
+  env?: NodeJS.ProcessEnv;
   /** Interface to bind. The CLI owns the widening decision; this defaults to loopback. */
   host?: string;
   /** TCP port. `0` asks the kernel for an ephemeral one, which is what tests use. */
@@ -359,6 +390,8 @@ export interface ServeHandle {
   readonly port: number;
   /** The unix socket this listener is bound to, or `null` for a TCP bind. */
   readonly socketPath: string | null;
+  /** The id every record this process appends carries (APRV-448). */
+  readonly daemonId: string;
   /** How many requests this listener has answered. Diagnostics and tests. */
   requests(): number;
   /** The hook thread pool's state now. Diagnostics and tests. */
@@ -719,13 +752,38 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   // it whole, and a hook call takes it for its mutation sections only. See the
   // header's "What is serialised" for the scope, and `storeLock` for why it is
   // keyed by store.
-  const serialize = storeLock(paths.log ?? logPathOf(options.cwd), options.cwd);
+  const storeLog = paths.log ?? logPathOf(options.cwd);
+  const serialize = storeLock(storeLog, options.cwd);
+
+  // APRV-448: which daemon this process writes as, resolved once by the
+  // function the daemon loop uses and declared before anything can append. The
+  // CLI refused an unusable `APPROVAL_DAEMON_ID` before it got here; an embedder
+  // that did not is refused here, before the bind.
+  const daemon = resolveDaemonId(storeLog, options.env ?? process.env);
+  if (!daemon.ok) throw new Error(daemon.message);
+  const daemonId = daemon.id;
+  declareResolvedDaemonIdentity(daemon);
+  // The store's policy, located exactly as the verbs locate it: the pinned file
+  // when the operator named one, otherwise discovered from the store root.
+  const policyWhere: LoadPolicyOptions =
+    options.policy === undefined ? { dir: options.cwd } : { file: options.policy };
+  /** Put the attested `daemons` list in force; called inside the store lock. */
+  const refreshAllowlist = (): void => {
+    refreshDaemonAllowlistFrom(storeLog, policyWhere);
+  };
+  refreshAllowlist();
+
   // Hook calls run on worker threads, because a hook's wait is a synchronous
-  // `Atomics.wait` and on this thread it would stop the listener itself.
-  const hooks = hookThreads(serialize, {
-    threads: options.hookThreads ?? DEFAULT_HOOK_THREADS,
-    queue: options.hookQueue ?? DEFAULT_HOOK_QUEUE,
-  });
+  // `Atomics.wait` and on this thread it would stop the listener itself. Each
+  // thread declares the resolution above as its own (`serve/hook-worker.ts`).
+  const hooks = hookThreads(
+    serialize,
+    { daemon, policy: policyWhere },
+    {
+      threads: options.hookThreads ?? DEFAULT_HOOK_THREADS,
+      queue: options.hookQueue ?? DEFAULT_HOOK_QUEUE,
+    },
+  );
 
   const byName = new Map(publishedVerbs().map((spec) => [toolName(spec), spec]));
   const sockets = new Set<Socket>();
@@ -751,7 +809,12 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
       refuse(res, 400, built.code, built.message);
       return;
     }
-    const result = await serialize(() => invokeVerb(spec, built.argv, paths));
+    const result = await serialize(() => {
+      // The allowlist this call's appends are judged against, resolved inside
+      // the lock from the verified log and the attested policy (APRV-448).
+      refreshAllowlist();
+      return invokeVerb(spec, built.argv, paths);
+    });
     // The CLI's own streams and the CLI's own exit code. A refusal arrives as
     // the `{"error":{...}}` the verb printed, on the stream it printed it on.
     send(res, 200, streamsBody(result), { "content-type": "application/json" });
@@ -978,7 +1041,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     }
     send(res, 200, archive.bytes, {
       "content-type": "application/gzip",
-      "content-disposition": `attachment; filename="approval-export-${options.daemonId}.tar.gz"`,
+      "content-disposition": `attachment; filename="approval-export-${daemonId}.tar.gz"`,
       "x-approval-export-paths": JSON.stringify(archive.paths),
     });
   }
@@ -1268,6 +1331,7 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     host: boundHost,
     port: boundPort,
     socketPath,
+    daemonId,
     requests: () => requests,
     hookThreads: () => hooks.stats(),
     close: async () => {

@@ -94,7 +94,7 @@ async function listener(dir: string, extra: { socketPath?: string } = {}): Promi
     actor: ACTOR,
     cwd: dir,
     credentials: credentials.credentials,
-    daemonId: "daemon-serve-propose",
+    env: { APPROVAL_DAEMON_ID: "daemon-serve-propose" },
     port: 0,
     ...extra,
   });

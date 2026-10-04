@@ -61,7 +61,13 @@ import {
   redactWebhookUrl,
   TELEGRAM_WEBHOOK_SECRET_ENV,
 } from "../core/telegram-config.js";
-import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import {
+  declareResolvedDaemonIdentity,
+  refreshDaemonAllowlistFrom,
+  resolveDaemonId,
+} from "../core/daemon-host.js";
+import type { DaemonIdSource } from "../core/daemon-identity.js";
+import { loadPolicy, parseDuration, type LoadPolicyOptions } from "../core/policy-load.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -235,11 +241,28 @@ export interface WebhookSetup {
    * verb shares with the poller.
    */
   reclaim: boolean;
+  /**
+   * The daemon id every record this process appends carries (APRV-448),
+   * resolved by {@link prepareWebhook} from the launch environment and the log
+   * path with the function the daemon loop uses, and declared by
+   * {@link runWebhook} before anything can append. An unusable declared id never
+   * reaches a setup: it is refused `daemon-id-invalid` at preparation.
+   */
+  daemon: { ok: true; id: string; source: DaemonIdSource };
 }
 
 export type WebhookPreparation =
   | { ok: true; setup: WebhookSetup }
-  | { ok: false; code: WebhookRefusalCode | ListenRefusalCode; message: string };
+  | {
+      ok: false;
+      /**
+       * This verb's own codes, the listener's, and `daemon-id-invalid`
+       * (APRV-448), which is the write boundary's own code for the same fault,
+       * reported here before anything binds rather than on the first append.
+       */
+      code: WebhookRefusalCode | ListenRefusalCode | "daemon-id-invalid";
+      message: string;
+    };
 
 /** Everything {@link prepareWebhook} needs, already resolved. */
 export interface WebhookRequest {
@@ -342,6 +365,15 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
   if (!listen.ok) return listen;
 
   const environment = request.env ?? process.env;
+
+  // APRV-448. Which daemon this process writes as, resolved by the daemon
+  // loop's own function from this launch environment and this log. A declared
+  // id that is not an id refuses here, before the bot is claimed or a port is
+  // bound, which is the rule `approval up`, `approval daemon run` and `approval
+  // serve` follow: a process whose decisions are appends should not start in
+  // order to find out it cannot append.
+  const daemon = resolveDaemonId(request.logPath, environment);
+  if (!daemon.ok) return { ok: false, code: daemon.code, message: daemon.message };
   const raw = environment[TELEGRAM_WEBHOOK_SECRET_ENV];
   const secret = raw === undefined ? "" : raw.trim();
   if (secret.length === 0) {
@@ -461,8 +493,21 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
       port: request.port,
       cycleMs,
       reclaim: request.reclaim ?? false,
+      daemon,
     },
   };
+}
+
+/**
+ * Where the listener's policy is, as the allowlist refresh loads it: the file
+ * the operator pinned, or the directory it is discovered from (APRV-448).
+ */
+function policyWhereOf(listen: ListenSetup): LoadPolicyOptions {
+  const policy = listen.gateOptions.policy ?? {};
+  const where: LoadPolicyOptions =
+    policy.file !== undefined ? { file: policy.file } : policy.dir !== undefined ? { dir: policy.dir } : {};
+  if (listen.gateOptions.schemaDir !== undefined) where.schemaDir = listen.gateOptions.schemaDir;
+  return where;
 }
 
 /**
@@ -597,6 +642,19 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
   try {
     const state = wireListener(listen, streams);
 
+    // APRV-448. Every record this process appends (a decision a tap delivers, a
+    // refusal of one, whatever a dispatch cycle writes) carries the id the
+    // preparation resolved, and is held to the attested `daemons` list at the
+    // write boundary. Declared before the first cycle can append. The list is
+    // refreshed here and at the top of every cycle, which is this process's
+    // tick: a narrowing takes effect within one cycle, as it does for the
+    // daemon, and a resolution that fails leaves the previous one standing.
+    // This process does NOT mark itself the daemon: it declares a name and a
+    // restriction and takes no route that mark would open.
+    declareResolvedDaemonIdentity(setup.daemon);
+    const policyWhere = policyWhereOf(listen);
+    refreshDaemonAllowlistFrom(listen.logPath, policyWhere);
+
     // The startup cycle, before anything is bound: an operator who has just
     // mistyped a token or pointed at an unreadable log should learn it here
     // rather than watch a receiver sit on a port. Same call, same state and
@@ -613,6 +671,7 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
     }
 
     const cycle = async (): Promise<void> => {
+      refreshDaemonAllowlistFrom(listen.logPath, policyWhere);
       reportCycle(await dispatchPending(listen, streams, state, new Date().toISOString()), streams);
     };
 
@@ -672,7 +731,7 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
     if (!isLoopbackHost(handle.host)) {
       streams.err(webhookNonLoopbackBanner(handle.host, handle.port));
     }
-    const started = `approval: telegram webhook registered ${shownUrl} and bound http://${handle.host}:${String(handle.port)}${shownPath} as ${listen.actor}. Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
+    const started = `approval: telegram webhook registered ${shownUrl} and bound http://${handle.host}:${String(handle.port)}${shownPath} as ${listen.actor}, records stamped daemon ${setup.daemon.id} (${setup.daemon.source}). Every post must carry ${TELEGRAM_SECRET_HEADER}; TLS is your proxy's. Press Ctrl-C to stop, which removes the webhook.`;
     if (json) {
       streams.out(
         `${JSON.stringify({
@@ -687,6 +746,8 @@ export async function runWebhook(setup: WebhookSetup, streams: Streams): Promise
           // line that printed it here would undo the line above.
           path: shownPath,
           cycle_ms: setup.cycleMs,
+          // APRV-448: the id every record this process appends carries.
+          daemon: setup.daemon.id,
         })}\n`,
       );
     }

@@ -48,7 +48,7 @@
 import { SHARE_ENV, Worker } from "node:worker_threads";
 
 import { HARNESS_CAP_MARGIN_MS, harnessCapFitsMargin } from "../core/harness-wait.js";
-import type { HookJob, HookWorkerMessage } from "./hook-worker.js";
+import type { HookJob, HookWorkerMessage, HookWriter } from "./hook-worker.js";
 
 /** How many finished hook threads are kept warm for the next call. */
 export const HOOK_THREADS_IDLE = 4;
@@ -160,8 +160,16 @@ export interface HookThreads {
   stats(): HookThreadStats;
 }
 
+/**
+ * The pool. `writer` is the identity every thread declares and the policy each
+ * call refreshes the `daemons` allowlist from (APRV-448): required rather than
+ * optional, because a thread's module state is its own, and a pool that could be
+ * built without one would append records the listener's own thread stamps and
+ * these threads do not.
+ */
 export function hookThreads(
   lock: StoreLock,
+  writer: HookWriter,
   limits: HookThreadLimits = { threads: DEFAULT_HOOK_THREADS, queue: DEFAULT_HOOK_QUEUE },
 ): HookThreads {
   const idle: Worker[] = [];
@@ -232,6 +240,10 @@ export function hookThreads(
       // with (SPEC.md §11.1 invariant 7), and a warm thread must not answer
       // from an older one.
       env: SHARE_ENV,
+      // The identity the listener resolved at startup, declared by the thread
+      // before its first job (APRV-448). Resolved once, on the listener's
+      // thread, so a hook's records and a verb's carry one id.
+      workerData: writer,
     });
     // Neither an idle thread nor a busy one keeps the process alive on its own:
     // the listener does that, and a closed listener leaves nothing behind.

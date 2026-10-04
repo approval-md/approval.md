@@ -59,6 +59,27 @@
  * a caller that puts the property on its input object anyway is ignored rather
  * than obeyed.
  *
+ * ## Which processes declare, and why the stamp does not ask for the mark
+ *
+ * Three processes append on a gate's behalf without being a session, and since
+ * APRV-448 all three declare the same identity through the same two calls in
+ * `core/daemon-host.ts` (`declareDaemonIdentityFor` or
+ * `declareResolvedDaemonIdentity`, then `refreshDaemonAllowlist*`): the daemon
+ * loop (`daemon/daemon.ts`, at construction), `approval serve` (its verbs on the
+ * listener's thread and its hook calls on their worker threads), and `approval
+ * channel telegram webhook`. In a co-located deployment, where a facade, a
+ * daemon and a channel run in one process per tenant, a tenant reading their
+ * own log therefore sees one id on the sweeps and on the actions.
+ *
+ * The stamp is keyed on the DECLARATION, not on `core/daemon-actor.ts`'s mark.
+ * The two answer different questions: the mark says "this process is the daemon
+ * loop" and is what routes an advance under the autonomous
+ * `log.advance.daemon` class (APRV-382), while the declaration says "records
+ * this process writes name this instance". `approval serve` dispatches verbs an
+ * agent asked for, so marking it the daemon to get the stamp would hand its
+ * process the daemon's advance route, a widening nothing here needs. Declaring
+ * without marking stamps and restricts, and widens nothing.
+ *
  * ## Why this module imports almost nothing
  *
  * `core/log.ts` imports it, and `core/log.ts` is the bottom of this codebase's
@@ -71,8 +92,6 @@
  * reads a policy or a filesystem to ANSWER that question lives in
  * `core/daemon-host.ts`.
  */
-
-import { isDaemonProcess } from "./daemon-actor.js";
 
 /**
  * The environment variable a launch may declare the daemon's id in.
@@ -176,8 +195,17 @@ export interface DaemonIdentity {
 let identity: DaemonIdentity | null = null;
 
 /**
- * Declare the id this process's records carry. Called by the daemon runtime
- * through `core/daemon-host.ts`, and by nothing else.
+ * The pid that made the declaration, for the reason `core/daemon-actor.ts` keeps
+ * one: the stamp answers only while it is still this process's own. Kept beside
+ * {@link identity} rather than inside it, so the reported state is unchanged.
+ */
+let declaredPid: number | null = null;
+
+/**
+ * Declare the id this process's records carry. Called through
+ * `core/daemon-host.ts` by the processes the header names (the daemon loop,
+ * `approval serve` and its hook threads, the Telegram webhook listener), and by
+ * nothing else.
  *
  * Takes the RESOLVED values rather than resolving them, because resolution reads
  * the environment and the filesystem and this module is the one `core/log.ts`
@@ -199,6 +227,7 @@ export function declareDaemonIdentity(state: {
     // cannot silently drop a restriction that was in force.
     allowed: identity === null ? null : identity.allowed,
   };
+  declaredPid = process.pid;
 }
 
 /**
@@ -220,6 +249,7 @@ export function setDaemonAllowlist(allowed: readonly string[] | null): void {
 /** Forget the declaration. For tests, and for a runtime that stops being one. */
 export function clearDaemonIdentity(): void {
   identity = null;
+  declaredPid = null;
 }
 
 /** What this process has declared about itself, or `null`. */
@@ -244,16 +274,19 @@ export type DaemonStamp =
  * are one decision made in one order: a process that cannot name itself is
  * refused before anything asks whether its name is allowed.
  *
- * A process that marked itself the daemon and declared NO identity gets
- * `absent`, not a refusal. That is the pre-APRV-383 daemon, and the records it
- * writes are the records it always wrote; turning an undeclared mark into a dead
- * log would make an unrelated module's `markDaemonProcess` call a stop-the-world
- * bug. The daemon runtime declares both together.
+ * A process that declared NO identity gets `absent`, whether or not it marked
+ * itself the daemon. That is every session, every hook process and the
+ * pre-APRV-383 daemon, and the records they write are the records they always
+ * wrote; turning an undeclared mark into a dead log would make an unrelated
+ * module's `markDaemonProcess` call a stop-the-world bug. The answer is keyed on
+ * the declaration alone (APRV-448, see the header): the daemon loop marks and
+ * declares together, while `approval serve` and the webhook listener declare
+ * without marking, because the mark carries the daemon's advance route and the
+ * declaration carries nothing but a name and a restriction.
  */
 export function daemonStampForAppend(): DaemonStamp {
-  if (!isDaemonProcess()) return { kind: "absent" };
   const state = identity;
-  if (state === null) return { kind: "absent" };
+  if (state === null || declaredPid !== process.pid) return { kind: "absent" };
 
   if (state.id === null) {
     return {
