@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-04 10:59'
+updated_date: '2026-10-04 18:01'
 labels: []
 dependencies: []
 references:
@@ -94,6 +94,8 @@ Open rulings: the three items the PR body left for Carter shipped as merged, and
 Fixes after review: fc3fcfa8 closed the security-pass bypass. start's policy path turned a rejected, withdrawn or expired request for a selected supervised-live proposal into a policy-authorized execution.started; proposalPolicyStartRefusal now refuses it. a4dd89e5 closed a signal-guard fail-open: the Hermes hook handled SIGTERM/SIGINT only from the start of its wait, so an earlier signal killed it with empty stdout. hermesFailClosed now guards the whole CLI run, and the wait's handler is prepended. The same commit fixed the L-d test race that ejected the first queue run (37192542666). The remaining window, a signal during module load before the runtime runs, is APRV-466.
 Conformance: refusal-unions is at 27.0.0 (main's 26.0.0 relay union plus this task's six gate codes, under the collision rule; conformance/README records it).
 Validation at a4dd89e5: npm test exit 0 (5559 tests, 5558 pass, 0 fail, 1 skipped); typecheck, lint and build exit 0; propose-recheck plus cli-hook-hermes-rules 20/20 green in a row; PR CI green, protected paths included.
+
+RULING (Carter, 2026-10-04 17:50Z): the three items the PR body left open are CONFIRMED as shipped: exit 7 (void) stays in the frozen exit table; credentialReadGate covers every read of a path whose class is account.credential, not only writes; APPROVAL_HERMES_HOME must be set on the serve process. Recorded by claude-edge from Carter's reply.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
