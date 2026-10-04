@@ -454,6 +454,28 @@ the block directive at exit 2 as a wait that ran out does. The `approval` bin
 also guards the exit: a Hermes hook that leaves with any non-zero code other than
 2 leaves as 2, printing the directive if nothing was printed.
 
+**Two layers against a signal (APRV-466).** Hermes sends SIGTERM on its hook
+timeout and on gateway shutdown, and a sandbox restart can deliver one at any
+instant. The default disposition of SIGTERM and SIGINT is to die with an empty
+stdout, which a stock Hermes reads as an allow, so each stretch of the hook's
+life has an owner:
+
+| Stretch | Covered by | What Hermes receives |
+| --- | --- | --- |
+| Node's own bootstrap, before the bin's first statement | the gated image's `shell_hooks` patch on Hermes's side (HOSTED-32), which blocks a hook killed by a signal | a block from Hermes itself |
+| loading `dist/`, until the runtime's guard is listening | the `approval` bin (`cli.js`), whose first statements install a guard | `{"action":"block","message":"hook-interrupted: ..."}` at exit 2 |
+| the run, before and after the wait | the runtime's guard (`hermesFailClosed`) | the same directive, byte for byte, at exit 2 (exit 0 on a post event) |
+| the wait | the wait's own handler, which also withdraws the question | the same directive at exit 2, once the synchronous poll yields |
+
+The bin's guard steps aside while either runtime handler is registered, so a
+signal produces one object on stdout and never two. A signal that arrives after
+the hook has answered ends the process with the answer it already gave. Neither
+layer covers the other's stretch: the process guard cannot run before Node runs
+it, and the `shell_hooks` patch exists only in the gated image, so a Hermes built
+from upstream keeps the bootstrap window (tens of milliseconds per call) open.
+SIGKILL reaches no handler in any process; only the Hermes-side layer can answer
+it.
+
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
 session root, so a relative path resolves the way the shell will resolve it. What

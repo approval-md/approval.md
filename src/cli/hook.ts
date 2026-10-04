@@ -1272,6 +1272,25 @@ export function harnessBlockDirective(
   return { stdout: out.join(""), exitCode };
 }
 
+/**
+ * The block directive a Hermes hook prints when a signal arrives before it
+ * reached a verdict (APRV-445, APRV-466), as bytes.
+ *
+ * Two places print it: `hermesFailClosed`'s guard below, once the runtime is
+ * running, and the `approval` bin (`cli.js`), which has to answer a signal that
+ * lands while this module is still loading and so cannot import it. The bin
+ * spells the same bytes by hand, and `tests/hermes-bin-signal-guard.test.ts`
+ * pins the two equal: Hermes reads the message, and an operator reading a
+ * session back should not be able to tell which layer answered.
+ */
+export function hermesInterruptedDirective(signal: NodeJS.Signals): string {
+  return harnessBlockDirective(
+    "hook-interrupted",
+    `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
+    "hermes",
+  ).stdout;
+}
+
 /** The machine-readable code a Hermes `execute_code` call is refused with. */
 export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
@@ -6967,19 +6986,14 @@ function hermesFailClosed(
   // This guard covers the whole run before and after that stretch; the wait's
   // handler is prepended, so inside the wait it answers first and exits. CLI
   // only: under `approval serve` (a wait seam) the process's signals belong to
-  // the server.
+  // the server. Before this guard exists the `approval` bin's own guard answers
+  // (APRV-466); it steps aside while this one is registered, so exactly one of
+  // the two prints.
   const onEarlySignal = (signal: NodeJS.Signals): void => {
     if (raw !== null && isHermesPostEvent(raw)) process.exit(EXIT_OK);
     if (stdout.length === 0) {
       try {
-        writeSync(
-          1,
-          harnessBlockDirective(
-            "hook-interrupted",
-            `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
-            "hermes",
-          ).stdout,
-        );
+        writeSync(1, hermesInterruptedDirective(signal));
       } catch {
         // stdout is gone; the exit code below is the whole verdict.
       }
