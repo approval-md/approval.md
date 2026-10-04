@@ -51,22 +51,34 @@ function hermesInterrupted(signal) {
 // (`hermesFailClosed`), so a signal during the ESM load of dist/ (the longest
 // stretch of a cold start) took the default action.
 //
-// It hands over rather than competing. The runtime's guard is added after this
-// one with `process.on`, and the wait's handler is prepended; Node runs every
-// listener in order, so while either is registered this one returns and the
-// runtime answers, knowing what this file cannot (whether the event is a post
-// event, and what it already printed). Only one of them ever prints. Once
-// `main` has answered, a signal ends the process with the verdict already
-// reached, and with something on stdout but no answer yet it exits 2 without
+// A JS signal listener runs only when the event loop turns. So this guard
+// prints the directive when a signal is dispatched while dist/ is loading and
+// the load yields to the loop (it does on Node 24, which turned the loop about
+// thirty times during the load; on Node 26 the load turned it zero times). A
+// signal that is caught but not dispatched until later is held, and the hook
+// run itself is synchronous end to end (`readFileSync` on stdin, an
+// `Atomics.wait` poll), so a signal held into it is dispatched only after the
+// hook has answered. Then `answered` is set (it is set in the same microtask
+// drain as the run's return) and the process exits with the answer the hook
+// gave. Either way the default disposition, death with an empty stdout, is gone
+// from this file's first statement on.
+//
+// Ownership: the runtime's own guards (`hermesFailClosed`, the wait's handler)
+// raise HERMES_SIGNAL_OWNER while they are registered. They are registered and
+// removed inside that synchronous run, so on the CLI they do not get a turn
+// today; the flag is what keeps the two from both printing if the run ever
+// yields. With something on stdout and no answer yet, this exits 2 without
 // printing a second object (unparseable stdout).
 //
 // What no guard here can cover is the moment before this file's first
 // statement: Node's own bootstrap. A signal there is a death by signal with an
-// empty stdout, and the hosted image's patch to Hermes's `shell_hooks` is the
-// layer that blocks it (docs/hermes-hook.md, "Two layers").
+// empty stdout, and the gated image's patch to Hermes's `shell_hooks`
+// (HOSTED-32) is the layer meant to block it (docs/hermes-hook.md, "Two layers
+// against a signal").
+const HERMES_SIGNAL_OWNER = Symbol.for("approval-md.hermes-signal-owner");
 if (hermesHook) {
   const onSignal = (signal) => {
-    if (process.listenerCount(signal) > 1) return;
+    if (globalThis[HERMES_SIGNAL_OWNER] === true) return;
     if (answered) process.exit();
     if (!printed) {
       try {
