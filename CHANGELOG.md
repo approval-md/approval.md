@@ -15,83 +15,47 @@ before a tag.
 
 ## Unreleased
 
-- **`approval serve` and `approval channel telegram webhook` stamp the daemon id
-  (APRV-448).** Records either process appends (serve's verb calls and its hook
-  calls on their worker threads, the webhook's taps and dispatch cycles) now
-  carry the `daemon` field with the id `approval status` reports for the store,
-  resolved by the daemon loop's own rule (`APPROVAL_DAEMON_ID`, or the id
-  derived from the instance), and both are held to the attested policy's
-  `daemons` list at the write boundary: refreshed before every serve call and on
-  every webhook cycle, refused `daemon-not-allowed` with nothing written. Before
-  this only the daemon loop stamped, so in a co-located deployment a tenant saw
-  the id on sweeps and nothing on actions, and an unlisted facade wrote freely.
-  An unusable declared id refuses either verb before it binds (exit 2). Neither
-  process marks itself the daemon, so the daemon's autonomous advance route
-  stays the daemon's. The gate and execution verbs' JSON refusals now carry the
-  write boundary's code under `error.append` beside `append-failed`, as
-  `approval gate` already did. `ServeOptions.daemonId` is replaced by an
-  optional `env` the id is resolved from, and the handle reports `daemonId`.
-- **Every harness start names the policy that authorized it (APRV-447).**
-  `execution.started` written by the hook route and by `approval start` now
-  carries `payload.policy_sha256`, the attested policy hash the gate resolved
-  the class against, on the policy path and the grant path alike. The runtime
-  stamps it at the write boundary; a caller-supplied value is ignored, no
-  verdict reads it, and the schema admits it as optional, so every earlier
-  record still validates. Conformance `schema-validation` is 2.9.0 (two new
-  fixtures, no expectation moved).
-- **`start` never turns a human's no into a policy start (APRV-445, security
-  pass).** On the policy path, a proposal's start now refuses `not-granted` when
-  the key has a pending or granted request (re-checked inside the append), when
-  its latest request was rejected or revoked under the policy in force, and when
-  the class is `supervised-live` and the draw selects the bytes. Before this a
-  selected live proposal that a human rejected, or that the agent withdrew or
-  let expire, could start with `authorization: policy` and no grant. An
-  unselected live proposal still starts on the policy path.
-- **A signal before the wait no longer kills the Hermes hook silently
-  (APRV-445).** `approval hook hermes` used to handle SIGTERM and SIGINT only
-  once it was waiting on a human. A signal that landed earlier (for example
-  just after the request was appended) killed it with nothing on stdout, which
-  Hermes reads as an allow. The CLI hook now guards its whole run: such a
-  signal prints the `hook-interrupted` block directive and exits 2 (a
-  post-event exits 0). The wait's own handler still answers first inside the
-  wait and withdraws as before. Under `approval serve` the process's signals
-  stay the server's.
-- **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
-  home's own directories (root, profile homes, `approval/`, `scripts/`) and the
-  approval home are organs; `workspace/`, `skills/` and the rest are ordinary
-  work, so `grep -r`, `find`, `rm -f *.tmp` and friends run there again. An
-  unresolvable `cd` makes later relative paths conservative; globs that could
-  name the home or an organ, globbed credential reads and `<` reads are caught;
-  copies into a directory, `tar -x` and `unzip` are judged by where their files
-  land; profile homes carry the home's organs. `propose` ends a lost race with
-  the new refusal `contended` instead of `already-decided`.
-- **Proposals after the recheck (APRV-445).** `wait` voids a grant only where
-  its spend enforces `policy-drift` (harness grants, every proposal): a token
-  grant `approval run` still spends after a re-attest reads `granted`. `propose`
-  re-checks its decision inside the append, so concurrent identical proposals on
-  a void key withdraw it once and ask once, and a stale caller cannot ask again
-  over a fresh grant. The Hermes `terminal` path resolver follows `cd`,
-  `$HERMES_HOME`, heredocs, globs and symlinks, resolves only write positions,
-  and read tools treat a directory under `.hermes`/`.approval` as credentials.
-  `wait` reports `executed` for a policy-path start after a withdrawal; key ids
-  must be printable; the muse registration route refuses `propose:` ids; the
-  bin's Hermes guard covers `--no-color` and any silent non-zero exit.
-- **Proposals after review (APRV-445).** `approval wait` reports what a request
-  still authorizes: a grant whose window lapsed is `expired` (exit 3), and a
-  grant or pending request pinned to a re-attested policy is `void`, a new exit
-  code 7 meaning "ask again". `propose` re-files in exactly those cases instead
-  of answering a dead grant idempotently, and answers `state: executed` after
-  `start`. New refusals `task-is-proposal`, `task-not-proposal` and
-  `key-class-mismatch` (the key must begin with `<class>:`); key and summary
-  caps; lone surrogates and non-finite numbers are usage errors. Proposals are
-  never collapsed, superseded or ordered as stale by the Telegram channel.
-  `cli.js` itself answers `approval hook hermes` with the block directive when
-  the runtime cannot load. Writes to `.hermes/.env`, `.env.*` and `auth.json`
-  are `policy.core` (reads stay `account.credential`, now through `read_file`
-  too), and a Hermes `terminal` call's relative words are also judged against its
-  `workdir`. The unix socket refuses an other-writable directory and only
-  unlinks a socket a connect proves dead.
+## 0.4.0 — 2026-10-04
 
+Written on 2026-10-04 against `main` at `70979abe`, 239 non-merge commits after
+`v0.3.0`. This is the Agent Village build. An agent behind `approval serve` can
+declare and ask in one call (`approval propose`, open to a class through the new
+per-class key `agent_may_request`) and record what it carried out (`approval
+start`); `serve` listens on a unix socket (`--listen unix:<path>`) and runs hook
+calls off its listener thread (APRV-427); `approval wait` refuses a task the log
+never registered (APRV-428). The Hermes adapter classifies the tools it used to
+wave through and blocks on every error path. A human decision gains a new
+arrival: the `edgeos` sender channel over the authenticated `approval channel
+relay` transport, beside the new Telegram webhook. Every log append and every
+stored payload is fsynced before the verb reports ok; `execution.started` names
+the attested policy it ran under (`policy_sha256`); `approval serve` and the
+Telegram webhook stamp the daemon id on what they write; a refused Telegram tap
+no longer kills the live prompt; and `approval policy attest --bootstrap` gives
+a hosted tenant with no shell its first policy. Additive at the package boundary
+apart from the behavior changes listed last, so this is a minor bump. The tag,
+its push and the Trusted Publishing run are gated `release.publish` acts
+(APRV-453).
+
+### The agent surface and `approval serve`
+
+- **`approval serve`, the agent-facing surface over HTTP (APRV-421).** A
+  foreground HTTP server for a harness that has no local log and no local
+  policy: a sandboxed tenant whose daemon runs elsewhere, one process per
+  tenant. It publishes the same registry-derived catalog as `approval mcp
+  serve` (human-only verbs absent, `--as` stripped, identity fixed at launch,
+  refusals returned as results) and adds the three routes the MCP transport
+  withheld: `POST /hook/<harness>` takes the harness envelope as its body and
+  answers the verdict the stdin form prints; `GET /log/follow` pages the
+  verified log by an exclusive `(seq, hash)` cursor with SPEC §8's subscription
+  semantics; `GET /export` returns the store as an archive, taken under the
+  append lock. Two bearer credentials come from the launch environment.
+  `APPROVAL_SERVE_AGENT_TOKEN` opens an allowlist (`instructions`,
+  `hook_classify`, `request`, `wait`, `withdraw`, and since APRV-445 `propose`
+  and `start`); `APPROVAL_SERVE_TENANT_TOKEN` opens follow, export, status and
+  every other published verb, so the agent credential never reads the log it is
+  judged by. Store roots are pinned, every path flag is confined, and the
+  listener binds loopback unless `--allow-non-loopback` says otherwise. It is a
+  transport: every verdict comes from the function the CLI dispatches to.
 - **An agent can declare and ask in one call, with the payload inline
   (APRV-445).** `approval propose --class <c> --key <k> --summary <s>
   --payload-json <json>` registers a one-action envelope and requests it,
@@ -108,225 +72,74 @@ before a tag.
   Both are on the serve agent surface. `policy check` reports `agentRequest`,
   and `policy amend`'s diff reports a change in it. Payloads over 256 KiB refuse
   `payload-too-large` (exit 2).
+- **Proposals after review (APRV-445).** `approval wait` reports what a request
+  still authorizes: a grant whose window lapsed is `expired` (exit 3), and a
+  grant or pending request pinned to a re-attested policy is `void`, a new exit
+  code 7 meaning "ask again". `propose` re-files in exactly those cases instead
+  of answering a dead grant idempotently, and answers `state: executed` after
+  `start`. New refusals `task-is-proposal`, `task-not-proposal` and
+  `key-class-mismatch` (the key must begin with `<class>:`); key and summary
+  caps; lone surrogates and non-finite numbers are usage errors. Proposals are
+  never collapsed, superseded or ordered as stale by the Telegram channel.
+- **Proposals after the recheck (APRV-445).** `wait` voids a grant only where
+  its spend enforces `policy-drift` (harness grants, every proposal): a token
+  grant `approval run` still spends after a re-attest reads `granted`. `propose`
+  re-checks its decision inside the append, so concurrent identical proposals on
+  a void key withdraw it once and ask once, and a stale caller cannot ask again
+  over a fresh grant. `wait` reports `executed` for a policy-path start after a
+  withdrawal; key ids must be printable; the muse registration route refuses
+  `propose:` ids. `propose` ends a lost race with the new refusal `contended`
+  instead of `already-decided`.
+- **`start` never turns a human's no into a policy start (APRV-445, security
+  pass).** On the policy path, a proposal's start now refuses `not-granted` when
+  the key has a pending or granted request (re-checked inside the append), when
+  its latest request was rejected or revoked under the policy in force, and when
+  the class is `supervised-live` and the draw selects the bytes. Before this a
+  selected live proposal that a human rejected, or that the agent withdrew or
+  let expire, could start with `authorization: policy` and no grant. An
+  unselected live proposal still starts on the policy path.
 - **`approval wait --timeout 0` reads the current state and never sleeps
   (APRV-445),** so a poller through `approval serve`, which runs every call
   through one queue, no longer holds the tenant's hook traffic for the length of
   a wait.
-- **The payload store is owner-only (APRV-445).** Every file under
-  `.approval/payloads/` is written 0600 inside a directory narrowed to 0700 on
-  every write, whatever the umask or the directory's earlier mode. `approval
-  init` now lists `.approval/payloads/` in the `.gitignore` lines it writes
-  (it was tracked by default before); remove the line to keep the bytes in
-  history.
+- **`approval wait` refuses a task the log never registered (APRV-428).** It
+  used to answer `granted` with no actions. It now refuses `not-registered`
+  (exit 1). A registered task with no requests, or with every grant already
+  spent, answers `nothing-to-wait-for` (exit 0), and `granted` means an unspent
+  grant exists, with byte-identical output. The refusal passes through
+  `approval serve` unchanged, and the agent-facing text no longer reads a
+  `wait` exit 0 as a grant.
 - **`approval serve --listen unix:<path>` (APRV-445),** also
   `APPROVAL_SERVE_LISTEN`: a unix-domain socket, opened 0666 in a directory the
   serving uid must own (the directory is the access control). A stale socket is
-  replaced, a live one or a non-socket file is refused.
-- **The Hermes adapter classifies the tools it used to wave through
-  (APRV-445).** `cronjob_manage` (and `cronjob`) actions that change the
-  schedule are `cron.manage`, `process_manage` (and `process`) writes are
-  `process.write`, every `browser_*` is `browser.exec`, `skill_manage` is
-  `skill.manage`, `delegate_task` is `agent.delegate`, `send_message` is
-  `message.send`; list/poll/log/wait actions stay reads. Writes under
-  `.hermes/scripts/` are `cron.manage`, and `.hermes/approval/` and the
-  allowlist's `.lock` sidecar join the `policy.core` organs.
-- **The Hermes hook blocks on every error path (APRV-445).** A pre-event answer
-  is either the adapter's own `{}` allow or a `{"action":"block"}` directive at
-  exit 2: a misconfigured hook entry, a throw, a signal mid-wait, a path that
-  reached no verdict, and a module that fails to load all print the directive.
-  Hermes reads any other non-zero exit with an empty stdout as an allow.
-- **The payload store is durable before ok (APRV-457).** `storePayload` now
-  fsyncs the temp file before the rename and the store directory after it
-  (plus the parent of every directory the write created), through the same
-  write layer the log append has used since APRV-440, so the bytes a proposal
-  or grant binds are on disk before the record that binds them is appended.
-  Before this, a platform kill before writeback could keep the (fsynced)
-  record and lose its payload: a verified `payload_hash` pointing at a
-  NUL-filled or missing file. A short write, a failed file fsync or a failed
-  directory fsync is `write-failed` (no new code); a filesystem that cannot
-  sync a directory (EINVAL, EBADF, ENOTSUP, EOPNOTSUPP) is tolerated as the
-  log tolerates it. Hashing, canonicalization and the log append are
-  unchanged. Measured on macOS APFS (opt-in `tests/payload-fsync.bench.ts`):
-  about 7.8 ms per stored payload, on `storePayload`, the propose path and
-  the attestation path alike; not batched.
-- **doctor names a torn payload apart from a tampered one (APRV-457).** The
-  `payload-store` row reads back every payload a verified record binds. An
-  empty or all-NUL file, or a missing one whose record proves the store held
-  it, is the crash-before-writeback signature (nothing tampered, bytes lost);
-  a file with any non-NUL byte that does not verify is tampering or
-  corruption. Each has its own fix text, and an intact store's row is
-  unchanged.
-- **`edgeos` is a sender channel (APRV-455).** `approvers.<id>.senders.edgeos`
-  maps a person's EdgeOS `/humans/me` id, raw (an ASCII letter or digit, then
-  up to 127 letters, digits, `.`, `_` or `-`; colon-free, so it can never be
-  read as the keyed form) or keyed under `APPROVAL_SENDER_KEY` exactly as
-  `telegram` is. It qualifies on the APRV-324 ground: the gesture is attributed
-  to an id the person cannot choose, by a relay the daemon trusts the way it
-  trusts the Bot API's `from.id`. An observed id that already wears the
-  `hmac-sha256:` prefix is never compared raw, so a published digest cannot be
-  replayed as an account. The schema hunk is confined to the `senders` object
-  and the `senderChannel` definition.
-- **`approval channel relay` (APRV-455).** A third arrival for a human
-  gesture: a loopback HTTP listener (port 4684) an operator's control plane
-  posts to, authenticated by `APPROVAL_RELAY_SECRET` from the launch
-  environment in `x-approval-relay-secret`, checked before the path, method
-  or body. `POST /relay/gesture` takes one closed body: `propose`,
-  `attest` or `decline` a policy by sha256, or `grant` or `reject` a
-  request by action key, each with an EdgeOS sender, a nonce and an
-  `issued_at`. Gestures go through `recordChannelDecision` with the new
-  `requireSenderMapping`, so an unmapped account (or a policy mapping none) is
-  refused `sender-unmapped` with one `audit.decision_refused` and the relay
-  never decides as an identity of its own; expiry, policy drift and attestation
-  resolve exactly as for a Telegram tap. A forged post appends nothing; a
-  replayed nonce is refused across restarts by an exclusively linked ledger under
-  `.approval/daemon/relay-nonces/`; a grant's raw token never leaves the
-  process. Every gesture resolves its sender against the policy IN FORCE, so a
-  mapping sitting unattested on disk decides nothing. `propose` (under an
-  `agent:` proposer, with a one-hour deadline) may reaffirm bytes already in force
-  (`ProposeInput.reaffirm`), so an unchanged onboarding review still makes the
-  resident the attester of record. The verb is `human_only` in the registry,
-  so neither `serve` nor MCP publishes it. New frozen union
-  `relay_refusal_codes` (refusal-unions vectors 26.0.0). Trust level: the
-  daemon trusts the relay's attribution, which is operator trust (APRV-422).
-  The SPEC §10.3 and §11.2 hunks are proposed in the task notes, pending
-  sign-off.
-- **An acknowledged append survives the machine dying the next moment
-  (APRV-440).** Every append to `events.jsonl` now fsyncs the descriptor after
-  its single write and before the verb reports ok, and the append that creates
-  the file also fsyncs the log directory (and the parent of any directory it
-  created), so the new name is as durable as its bytes. Before this the append
-  was atomic against other writers and nothing more: on a hosted tenant a
-  platform kill about 30 s after an acknowledged attestation left the file
-  ending in 456 NUL bytes where the record had been. A failed fsync, a failed
-  directory fsync and a short write are each reported as `io` rather than
-  acknowledged, with a message that says the bytes may be on disk; no refusal
-  code was added and compare-and-append is unchanged. Measured on macOS (APFS,
-  Node's fsync is `F_FULLFSYNC` there): 3.7 ms per append, and 84 ms added to a
-  daemon tick that appends 20 records; a tick that appends nothing pays nothing.
-  `APPROVAL_BENCH=1 node --test dist/tests/append-fsync.bench.js` re-measures.
-  `approval log verify` now says which crash tore a tail: `tear: "nul-filled"`
-  is the crash-before-writeback signature (the file grew, its data never reached
-  the disk; nothing was tampered and no record is half-written), and
-  `partial-line` is a writer that died mid-line. `--json` gains `tear`,
-  `tornBytes` and `intactBytes` (the byte offset the verified records end at),
-  the torn-byte count is now UTF-8 bytes rather than string length, and
-  `approval doctor`'s log row names the bytes to keep and the command that
-  keeps them. Nothing truncates on its own.
+  replaced, a live one or a non-socket file is refused. The socket refuses an
+  other-writable directory and only unlinks a socket a connect proves dead.
+- **One waiting hook no longer stalls the tenant's facade (APRV-427).** `approval
+  serve` runs hook calls on a bounded pool of worker threads (`--hook-threads`,
+  default 16; `--hook-queue`, default 64) that hold the per-store lock only
+  while they append and release it during the poll, so verbs, `/status`,
+  `/log/follow` and `/export` answer while a hook waits on a human. Past the
+  pool a call is refused `serve-hook-saturated` (HTTP 503, a hook-dialect block,
+  nothing appended), with the harness-cap budget charged from the call's
+  arrival. A torn-tail read in the poll is read again; a caller that
+  disconnects stops without spending; shutdown cancels before it destroys; the
+  store lock is keyed by the log directory's realpath.
 
-- **A refused Telegram tap no longer kills the live prompt (APRV-442).** When a
-  tap was refused (an unmapped account's `sender-unmapped` is the case the
-  hosted smoke found), the card was disarmed as before, but the listener kept
-  believing the request was on the approver's phone: no fresh card went out and
-  the original card's buttons resolved to nothing until the listener restarted.
-  The channel now reports each card a refused or failed tap disarmed, and the
-  next dispatch cycle (polling and webhook alike) re-offers every such request
-  the verified log still calls pending, so the mapped approver can answer on
-  the new card. The refusal is unchanged: still refused, still one
-  `audit.decision_refused` attributed to nobody. The refused card stays dead:
-  a Telegram redelivery of the refused tap, or its bytes replayed, takes no
-  fallback to the new card, so it appends nothing and sends nothing.
+### Gate and guard
 
-- **The Agent Village tenant policy lives here, and the Hermes guide describes
-  the co-located shape (APRV-446).** `examples/agent-village/approval-policy.md`
-  is the canonical day-one policy the control plane renders into each tenant's
-  `APPROVAL.md`: a recorder (autonomous default), the three gate organs
-  human-only, the Hermes tool classes and `network.call`/`read.web` recorded and
-  never gated, `intent.publish.inferred.index` manual and agent-requestable, a
-  72h proposal window, and the relay credential and resident chat named by env.
-  It is named `approval-policy.md` because any file named `APPROVAL.md`
-  classifies `policy.core`. `tests/agent-village-policy.test.ts` proves it
-  through the real loader, resolver, `policy attest --bootstrap` and `hook
-  hermes`, and runs the propose round once the build carries #569's
-  `agent_may_request`. `docs/hermes-hook.md` "For Agent Village" now covers
-  `serve` on loopback or a unix socket, the agent token file, `up --api-base`
-  against the relay, the operator attestation, the 240 s hook window beside the
-  72 h proposal window, and what the hook never sees.
-
-- **A hosted tenant with no shell gets its starting policy from the operator,
-  once, and can see who set it (APRV-449).** `approval policy attest
-  --bootstrap --as human:<operator>` attests a store's first policy and nothing
-  else: it reads the verified log first, a re-run over the same bytes refuses
-  `policy-already-attested`, changed bytes refuse `policy-amendment-required`,
-  and neither appends anything (exit 1, with `seq` and `attested_by` in the
-  error). The append is compare-and-append against the head it read. The plain
-  verb is unchanged, and needs no TTY either way. `approval status` gains
-  `attestation.attested_by` (the text row reads `attested (seq 1, by
-  human:carter)`) and `approval doctor`'s attestation row names the attester,
-  both read from the verified record. With `--bootstrap` the log resolves under
-  `--dir` unless `--log` names one. `docs/hosted-provisioning.md` is the
-  sequence (init, write the policy only into a store with no log, attest as the
-  store user), every refusal code, and the trust statement: the operator sets the
-  starting policy, and every change needs the approver's act through a channel.
-
-- **A harness probe drives its own matrix, so an operator runs one command
-  instead of typing thirty prompts (APRV-418).**
-  `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human
-  to do in about thirty steps: it reads `hermes --version` BEFORE it writes
-  anything and refuses below the fail-closed floor (a build below it ignores the
-  key silently, which is what made the first Hermes round measure the wrong thing
-  for a day), builds the scratch project and the hook block, then walks a
-  declarative matrix through one one-shot invocation per trial, and prints the
-  report. Each invocation is a fresh harness start, which is what makes the
-  fail-closed PAIR drivable at all: the manual round never got its control pass
-  because switching the key needs a restart a person has to perform. A step label
-  now survives the arm being consumed, so a later call naming the armed artifact
-  is reported as a retry inside that one-shot session or as a different step's
-  file, which is the confound that misread a trial. The round aborts after ONE
-  invocation when nothing reached the hook, and names the causes. The same shape
-  is now on `scripts/probes/grok-build-hook.mjs`, whose runbook no longer asks
-  anybody to add a probe entry to this repository's own `policy.core` settings
-  file: both candidate registrations go in a scratch project, each naming its own
-  `--config-id`, so one round answers which one a session of that harness reads.
-  `docs/probe-driver-convention.md` states the shape, what
-  `approval hook classify` answers for a driver command, and the two credential
-  options for the next harness. That classify answer is the one thing a reader
-  would guess wrong: the Hermes driver command names the harness home, so it
-  classifies `policy.core` under rule `protected-path`, which is human-only. No
-  agent can run it, request it or be granted it, and an operator running it from
-  their own terminal has no hook in the loop, so there is nothing to approve
-  either. That is fail-closed rather than a gap, because the driver rewrites the
-  harness configuration and then launches the harness twenty times, and both are
-  protected acts. The Grok driver names no protected path and comes out
-  `files.write.workspace`, which the docs record as an open question rather than a
-  green light. Both drivers are verified with canned envelopes and a fake harness
-  binary before any install.
-
-- **Drift-append contention is reported as deferred and retried (APRV-403).** A
-  `lock-timeout` or `head-moved` on an `envelope.drift` append used to print
-  `append-refused … was not appended`, which is true and reads as a lost record
-  while the next tick quietly re-derives and writes it. It is now a
-  `drift-deferred` warning naming the task and saying the scan retries, and the
-  `drift` line that lands carries `retry` so the pair closes — the same split
-  APRV-381 made for `audit.sampled`, using the same shared classifier so the two
-  sweeps cannot come to disagree about which failures a retry fixes. Both drift
-  reasons take it. Every other append refusal keeps the `append-refused` form,
-  because `validation`, `canonicalization`, `corrupt-tail` and `io` are facts
-  about the record or the file that no retry repairs. **Write-back no longer
-  repairs a file whose drift record was deferred**: it used to rewrite the
-  `state:` line anyway, so the next tick found the file agreeing with the log,
-  the retry had nothing to re-derive, and the deferral resolved into silence — a
-  correction made off the record, which is what SPEC §6.3's append-then-write
-  order exists to prevent.
-- **A listener restart sends one summary and no re-prompts (APRV-425).** The
-  pending queue has a stated order now, shared by the delivery, the paced
-  walkthrough and `/queue`: live requests newest first (live meaning younger than
-  the hook's wait plus its retry grace), then stale ones oldest first, with
-  attestation prompts last where `approval queue` already put them. A pending
-  request whose payload bytes and class a NEWER pending request also names is
-  collapsed whatever its age — two askings of one question, of which only the
-  newer has an asker — so a live prompt no longer arrives buried behind dead
-  ones, and the collapsed summary says which of its members are there for age and
-  which for supersession instead of claiming all of them are old. A restart with
-  N stale pending went from a banner plus N prompts to one summary and zero
-  prompts, with the next cycle of that process sending nothing. Collapsing is
-  still not deciding: every collapsed request stays pending in the log, is listed
-  by `/queue`, and is decidable from any copy already on the phone. **The literal
-  "zero messages" is held for a SPEC decision**: a listener cannot tell a request
-  a previous process delivered from one that arrived while nothing was running,
-  since both predate its start, so withholding a re-delivery on age alone would
-  produce the one outcome SPEC §10.3 forbids — a pending request nobody is shown.
-  The summary is what keeps it legal; the amendment literal zero would need is
-  written out in APRV-425's notes and deliberately not applied.
+- **A grant over a script binds the script's bytes (APRV-401).** The `approval
+  run` payload now carries the script's argv index, absolute path, byte count
+  and SHA-256 inside the hashed value, when the argv is a known interpreter
+  followed by a path operand or a path at `argv[0]` with a shebang behind it. A
+  script edited between the declaration and the run hashes differently and
+  takes the existing `payload-mismatch` refusal, before the append and before
+  the child. The key is omitted when the argv names no script, so every earlier
+  record and declaration still verifies. New verb `approval payload run`
+  produces those bytes or their hash for the requester; it is withheld from the
+  MCP and HTTP surfaces, because the path it digests is a command word no
+  transport guard confines. No new refusal code, event type or schema.
+  `docs/run-payload-binding.md` carries the SPEC §6.2 hunk for a human to
+  apply.
 - **A workspace write is checked against the disk, and some of them are now
   questions (APRV-402).** `files.write.workspace` used to be decided on the
   command text alone, so a relative destination was the workspace whatever a
@@ -345,60 +158,44 @@ before a tag.
   The pass can only ever narrow, no new class is minted, and the pure
   classifier is unchanged. `rm` of a relative path in the workspace and a shell
   redirect into one still answer from the text.
-- **The SMTP adapter stops sending an address as a server name (APRV-416).**
-  TLS SNI names a virtual host, so a `smtp.host` that is an IP literal is now
-  probed and sent to with no `servername` at all, which Node 26 requires and
-  earlier versions only warned about; verification of an address rests on the
-  certificate's IP SAN entry, and SNI is unchanged for a hostname.
-- **The site version guard binds every version string, and no page claims a
-  publish (APRV-395).** All eight strings across `index.html`,
-  `features/index.html`, `llms.txt` and `llms-full.txt` are now bound to
-  `package.json` and reported in one message, so a bump that moves the package
-  alone is told every file still to move; `llms.txt` states the version this
-  tree carries rather than asserting that it is on npm, which was false for the
-  whole window between a bump merging and the publish run finishing.
-- **The Releases page fills itself from the changelog (APRV-396).** After a
-  successful publish, `publish.yml` creates the GitHub Release for the tag with
-  the matching changelog section as its body, the title `approval-md X.Y.Z`, and
-  the CI tarball plus its `sha256` file attached, so the Releases page and the
-  registry can be compared by hand. `scripts/release-notes.mjs` extracts the
-  section and refuses when the heading is missing, undated, duplicated or empty;
-  that check also runs in the verify job, ahead of `npm publish`, so a tag with
-  no notes never reaches the registry. A rerun updates the one Release rather
-  than duplicating it. The published manifest now also carries
-  `gitHead` (the release commit), which was `null` for 0.2.0 and 0.3.0 because
-  the publish job publishes a downloaded tarball with no repository beside it.
+- **The read-only packaging and archive tools classify (APRV-397).** A
+  package-manager version probe, `npm pack`, `npm init`, `tar`, `gunzip`,
+  `base64` and the `openssl` digests are classified instead of refused: each
+  reads what it names or writes into a destination it names, and a destination
+  outside the workspace and the scratch roots answers
+  `files.delete.out_of_scope` with the path bound. `git tag` with a listing
+  flag reads; every creation, deletion, force-move, signature, bare name and
+  unrecognised flag stays `release.publish` where APRV-305 put it. Conformance
+  `command-class` 1.4.0.
+- **A quoted sentence that opens with a protected path is prose (APRV-409).** A
+  positional word whose protected match comes entirely from a whitespace-free
+  head is skipped by the positional scan, so a task acceptance criterion that
+  begins with a workflow path classifies `files.write.workspace` instead of
+  `policy.edit.ci`. Redirection targets, apply-patch, the protected-path guard
+  and the hook's file-tool pass are untouched. Conformance `command-class`
+  1.5.0.
+- **A decision that lands after the hook's retry grace authorizes nothing
+  (APRV-410).** The abandoned-question sweep now also runs on the hook's
+  autonomous path, from the verified read that call already makes, so the
+  asking actor's next tool call of any class takes back a question nobody
+  holds. A granted request whose decision is later than the request plus the
+  hook's wait and grace no longer carries to a retry, which asks again. The
+  `hook-timeout` deny text and `docs/claude-code-hook.md` say who withdraws and
+  why nobody else may. A distinct refusal at the decision surface for a
+  past-grace tap is still open (APRV-410 AC2).
+- **The harness's own ceiling bounds the question (APRV-423).** The hook states
+  the harness ceiling (`--harness-cap`; Hermes assumes 30 s unless stated,
+  clamped at its 300 s maximum) and records it as `harness_cap_ms` on
+  `approval.requested`. One derivation judges every lapse against the policy
+  TTL or the cap less a 60 s margin, whichever is shorter, so the gate, the
+  sweep, the carry lookup, the queue and the channels agree that a request
+  expires before the harness kills the hook that asked. The hook's own wait is
+  clamped to what the ceiling leaves; a cap with no room for a human is denied
+  `hook-harness-cap-too-short`; `approval serve` gains `--hook-harness-cap`.
+  Conformance `schema-validation` 2.8.0.
 
-- **Every record the daemon writes names the daemon that wrote it (APRV-383).**
-  A daemon-written record carries a new optional top-level `daemon` field holding
-  that daemon instance's id, so a tenant whose daemon is HOSTED by another party can
-  open their own log and tell which host process acted for them; before this they
-  all carried the same generic `system:daemon` actor. The id is
-  `APPROVAL_DAEMON_ID` from the daemon's launch environment where it is set, and
-  otherwise `daemon-` plus the instance id `approval doctor` already prints as its
-  `keychain-scope` suffix, so it is stable across restarts on one machine and
-  keystore with nothing stored anywhere. `approval up` and `approval daemon run`
-  name it on their `started` line, `approval status` reports it as `daemon`, and a
-  new `daemon-identity` doctor row reports it with the allowlist below. The field is
-  OPTIONAL and additive: every record written before it validates and verifies
-  unchanged, and its absence is absence rather than a claim that no daemon wrote the
-  record.
-- **`APPROVAL.md` may list which daemons may write (APRV-383).** A new top-level
-  `daemons` array names the daemon ids permitted to append to that log. ABSENT means
-  no restriction, exactly as every policy written before the key; an empty list
-  admits none. A daemon whose id an attested list does not name is refused at the
-  write boundary with a new `daemon-not-allowed`, and a daemon launched with an
-  `APPROVAL_DAEMON_ID` that is not a usable id is refused with a new
-  `daemon-id-invalid` (and `approval up` / `approval daemon run` decline to start at
-  all). Both join the frozen `append_error_codes` union, so the conformance vectors
-  take a major bump. The id is SELF-REPORTED, so it only ever costs a daemon the
-  ability to write: being listed grants nothing, and no verdict, autonomy, budget,
-  floor, sampling draw or token reads the field or the list (SPEC.md §11.1 invariant
-  4). The list is read only from the attested policy, and a policy that becomes
-  unreadable under a running daemon leaves the restriction it carried standing
-  rather than lapsing. `design/hosted-daemon-identity.md` states the whole hosting
-  model and what is deliberately out of scope: process isolation, token scoping and
-  billing.
+### Harnesses
+
 - **`approval hook hermes`, the Nous Research Hermes Agent adapter (APRV-398,
   corrected against a live probe in APRV-415).** The sixth harness, and the first
   since Claude Code whose hook is a **gate rather than a backstop** — measured, not
@@ -442,6 +239,45 @@ before a tag.
   is now unreadable rather than a completion; and the `hook-read-scope` conformance
   suite goes to **2.0.0**, a major bump, because two expectations moved — a relative
   Hermes read and a Hermes `search_files` naming no path used to allow and now deny.
+- **The Hermes adapter classifies the tools it used to wave through
+  (APRV-445).** `cronjob_manage` (and `cronjob`) actions that change the
+  schedule are `cron.manage`, `process_manage` (and `process`) writes are
+  `process.write`, every `browser_*` is `browser.exec`, `skill_manage` is
+  `skill.manage`, `delegate_task` is `agent.delegate`, `send_message` is
+  `message.send`; list/poll/log/wait actions stay reads. Writes under
+  `.hermes/scripts/` are `cron.manage`, and `.hermes/approval/` and the
+  allowlist's `.lock` sidecar join the `policy.core` organs. Writes to
+  `.hermes/.env`, `.env.*` and `auth.json` are `policy.core` (reads stay
+  `account.credential`, now through `read_file` too), and a Hermes `terminal`
+  call's relative words are also judged against its `workdir`.
+- **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
+  home's own directories (root, profile homes, `approval/`, `scripts/`) and the
+  approval home are organs; `workspace/`, `skills/` and the rest are ordinary
+  work, so `grep -r`, `find`, `rm -f *.tmp` and friends run there again. An
+  unresolvable `cd` makes later relative paths conservative; globs that could
+  name the home or an organ, globbed credential reads and `<` reads are caught;
+  copies into a directory, `tar -x` and `unzip` are judged by where their files
+  land; profile homes carry the home's organs. The `terminal` path resolver
+  follows `cd`, `$HERMES_HOME`, heredocs, globs and symlinks, resolves only
+  write positions, and read tools treat a directory under `.hermes`/`.approval`
+  as credentials.
+- **The Hermes hook blocks on every error path (APRV-445).** A pre-event answer
+  is either the adapter's own `{}` allow or a `{"action":"block"}` directive at
+  exit 2: a misconfigured hook entry, a throw, a signal mid-wait, a path that
+  reached no verdict, and a module that fails to load all print the directive.
+  Hermes reads any other non-zero exit with an empty stdout as an allow.
+  `cli.js` itself answers `approval hook hermes` with the block directive when
+  the runtime cannot load, and the bin's guard covers `--no-color` and any
+  silent non-zero exit.
+- **A signal before the wait no longer kills the Hermes hook silently
+  (APRV-445).** `approval hook hermes` used to handle SIGTERM and SIGINT only
+  once it was waiting on a human. A signal that landed earlier (for example
+  just after the request was appended) killed it with nothing on stdout, which
+  Hermes reads as an allow. The CLI hook now guards its whole run: such a
+  signal prints the `hook-interrupted` block directive and exits 2 (a
+  post-event exits 0). The wait's own handler still answers first inside the
+  wait and withdraws as before. Under `approval serve` the process's signals
+  stay the server's.
 - **`approval doctor`'s harness rows cover every harness (APRV-398).** The
   settings-path list, the hook-command pattern and the organ search are now
   `Record<HarnessKind, …>` and pinned set-equal to the kind list by
@@ -450,14 +286,416 @@ before a tag.
   reported "registers no `approval hook` command", and no test noticed. The
   pattern is derived from the kind list rather than spelled, so the next adapter
   cannot ship without it.
+- **doctor's `harness-hook-wiring` row reads the Claude adapter (APRV-408).**
+  The gated tool roster comes from the adapter instead of a hand list that had
+  drifted (`MultiEdit` and `NotebookEdit` were unchecked). The row names the
+  held read tools (`Read`, `Glob`, `Grep`), names a matched tool the adapter
+  would pass through, and fails a handler whose `--dir` names a different
+  checkout; an unreadable wrapper or a regex matcher is skipped, never passed.
+- **A harness probe drives its own matrix, so an operator runs one command
+  instead of typing thirty prompts (APRV-418).**
+  `node scripts/probes/hermes-hook.mjs run` does what the runbook asked a human
+  to do in about thirty steps: it reads `hermes --version` BEFORE it writes
+  anything and refuses below the fail-closed floor (a build below it ignores the
+  key silently, which is what made the first Hermes round measure the wrong thing
+  for a day), builds the scratch project and the hook block, then walks a
+  declarative matrix through one one-shot invocation per trial, and prints the
+  report. Each invocation is a fresh harness start, which is what makes the
+  fail-closed PAIR drivable at all: the manual round never got its control pass
+  because switching the key needs a restart a person has to perform. A step label
+  now survives the arm being consumed, so a later call naming the armed artifact
+  is reported as a retry inside that one-shot session or as a different step's
+  file, which is the confound that misread a trial. The round aborts after ONE
+  invocation when nothing reached the hook, and names the causes. The same shape
+  is now on `scripts/probes/grok-build-hook.mjs`, whose runbook no longer asks
+  anybody to add a probe entry to this repository's own `policy.core` settings
+  file: both candidate registrations go in a scratch project, each naming its own
+  `--config-id`, so one round answers which one a session of that harness reads.
+  `docs/probe-driver-convention.md` states the shape, what
+  `approval hook classify` answers for a driver command, and the two credential
+  options for the next harness. That classify answer is the one thing a reader
+  would guess wrong: the Hermes driver command names the harness home, so it
+  classifies `policy.core` under rule `protected-path`, which is human-only. No
+  agent can run it, request it or be granted it, and an operator running it from
+  their own terminal has no hook in the loop, so there is nothing to approve
+  either. That is fail-closed rather than a gap, because the driver rewrites the
+  harness configuration and then launches the harness twenty times, and both are
+  protected acts. The Grok driver names no protected path and comes out
+  `files.write.workspace`, which the docs record as an open question rather than a
+  green light. Both drivers are verified with canned envelopes and a fake harness
+  binary before any install.
+- **`approval muse`, a local Muse consumer facade (APRV-437, APRV-436).** A
+  single-tenant loopback listener with distinct read and propose credentials
+  from the launch environment and the store root fixed by `--dir`. The propose
+  scope registers an in-memory envelope and requests its declared action; the
+  read scope sees status, pending requests and the canonical rendering of a
+  live request. It has no grant, reject, execution, token, generic verb or
+  export route; decisions go through the separately configured Telegram
+  listener. It is a prototype: public hosting, native Muse confirmation and the
+  directory listing are APRV-405. `docs/muse-connector.md` and
+  `scripts/probes/muse-connector.mjs` record the consumer contract probe and
+  what is still unknown.
+
+### Channels and identity
+
+- **`edgeos` is a sender channel (APRV-455).** `approvers.<id>.senders.edgeos`
+  maps a person's EdgeOS `/humans/me` id, raw (an ASCII letter or digit, then
+  up to 127 letters, digits, `.`, `_` or `-`; colon-free, so it can never be
+  read as the keyed form) or keyed under `APPROVAL_SENDER_KEY` exactly as
+  `telegram` is. It qualifies on the APRV-324 ground: the gesture is attributed
+  to an id the person cannot choose, by a relay the daemon trusts the way it
+  trusts the Bot API's `from.id`. An observed id that already wears the
+  `hmac-sha256:` prefix is never compared raw, so a published digest cannot be
+  replayed as an account. The schema hunk is confined to the `senders` object
+  and the `senderChannel` definition.
+- **`approval channel relay` (APRV-455).** A third arrival for a human
+  gesture: a loopback HTTP listener (port 4684) an operator's control plane
+  posts to, authenticated by `APPROVAL_RELAY_SECRET` from the launch
+  environment in `x-approval-relay-secret`, checked before the path, method
+  or body. `POST /relay/gesture` takes one closed body: `propose`,
+  `attest` or `decline` a policy by sha256, or `grant` or `reject` a
+  request by action key, each with an EdgeOS sender, a nonce and an
+  `issued_at`. Gestures go through `recordChannelDecision` with the new
+  `requireSenderMapping`, so an unmapped account (or a policy mapping none) is
+  refused `sender-unmapped` with one `audit.decision_refused` and the relay
+  never decides as an identity of its own; expiry, policy drift and attestation
+  resolve exactly as for a Telegram tap. A forged post appends nothing; a
+  replayed nonce is refused across restarts by an exclusively linked ledger under
+  `.approval/daemon/relay-nonces/`; a grant's raw token never leaves the
+  process. Every gesture resolves its sender against the policy IN FORCE, so a
+  mapping sitting unattested on disk decides nothing. `propose` (under an
+  `agent:` proposer, with a one-hour deadline) may reaffirm bytes already in force
+  (`ProposeInput.reaffirm`), so an unchanged onboarding review still makes the
+  resident the attester of record. The verb is `human_only` in the registry,
+  so neither `serve` nor MCP publishes it. New frozen union
+  `relay_refusal_codes` (refusal-unions vectors 26.0.0). Trust level: the
+  daemon trusts the relay's attribution, which is operator trust (APRV-422).
+  The SPEC §10.3 and §11.2 hunks ride the APRV-454 attestation batch, pending
+  sign-off.
+- **`approval channel telegram webhook` (APRV-424).** Decisions arrive by
+  Telegram webhook, so no long-poll process needs to run. The verb registers
+  the webhook with a launch-environment secret (`APPROVAL_TG_WEBHOOK_SECRET`),
+  serves the callback on loopback (127.0.0.1:4683 by default; a wider bind needs
+  `--allow-non-loopback`), checks the secret header first in constant time, and
+  routes every update through the same handler, sender mapping and decision
+  path as long poll. A forged post appends nothing. The poller and the webhook
+  are mutually exclusive per gate through an owned transport lease, refused
+  `telegram-poller-running` or `webhook-registered`.
+- **A refused Telegram tap no longer kills the live prompt (APRV-442).** When a
+  tap was refused (an unmapped account's `sender-unmapped` is the case the
+  hosted smoke found), the card was disarmed as before, but the listener kept
+  believing the request was on the approver's phone: no fresh card went out and
+  the original card's buttons resolved to nothing until the listener restarted.
+  The channel now reports each card a refused or failed tap disarmed, and the
+  next dispatch cycle (polling and webhook alike) re-offers every such request
+  the verified log still calls pending, so the mapped approver can answer on
+  the new card. The refusal is unchanged: still refused, still one
+  `audit.decision_refused` attributed to nobody. The refused card stays dead:
+  a Telegram redelivery of the refused tap, or its bytes replayed, takes no
+  fallback to the new card, so it appends nothing and sends nothing.
+- **A listener restart sends one summary and no re-prompts (APRV-425).** The
+  pending queue has a stated order now, shared by the delivery, the paced
+  walkthrough and `/queue`: live requests newest first (live meaning younger than
+  the hook's wait plus its retry grace), then stale ones oldest first, with
+  attestation prompts last where `approval queue` already put them. A pending
+  request whose payload bytes and class a NEWER pending request also names is
+  collapsed whatever its age — two askings of one question, of which only the
+  newer has an asker — so a live prompt no longer arrives buried behind dead
+  ones, and the collapsed summary says which of its members are there for age and
+  which for supersession instead of claiming all of them are old. A restart with
+  N stale pending went from a banner plus N prompts to one summary and zero
+  prompts, with the next cycle of that process sending nothing. Collapsing is
+  still not deciding: every collapsed request stays pending in the log, is listed
+  by `/queue`, and is decidable from any copy already on the phone. **The literal
+  "zero messages" is held for a SPEC decision**: a listener cannot tell a request
+  a previous process delivered from one that arrived while nothing was running,
+  since both predate its start, so withholding a re-delivery on age alone would
+  produce the one outcome SPEC §10.3 forbids — a pending request nobody is shown.
+  The summary is what keeps it legal; the amendment literal zero would need is
+  written out in APRV-425's notes and deliberately not applied.
+- **`approval status` lists both refusal families (APRV-376).** A `refusals`
+  field keyed `decision` and `gesture`, each with a count and the newest five
+  seqs with their codes and the observed account, in the JSON and the table. It
+  is informational: outside `healthy` and the exit code, derived from the
+  verified read, and absent when there are none.
+- **The SMTP adapter stops sending an address as a server name (APRV-416).**
+  TLS SNI names a virtual host, so a `smtp.host` that is an IP literal is now
+  probed and sent to with no `servername` at all, which Node 26 requires and
+  earlier versions only warned about; verification of an address rests on the
+  certificate's IP SAN entry, and SNI is unchanged for a hostname.
+
+### Daemon and records
+
+- **An acknowledged append survives the machine dying the next moment
+  (APRV-440).** Every append to `events.jsonl` now fsyncs the descriptor after
+  its single write and before the verb reports ok, and the append that creates
+  the file also fsyncs the log directory (and the parent of any directory it
+  created), so the new name is as durable as its bytes. Before this the append
+  was atomic against other writers and nothing more: on a hosted tenant a
+  platform kill about 30 s after an acknowledged attestation left the file
+  ending in 456 NUL bytes where the record had been. A failed fsync, a failed
+  directory fsync and a short write are each reported as `io` rather than
+  acknowledged, with a message that says the bytes may be on disk; no refusal
+  code was added and compare-and-append is unchanged. Measured on macOS (APFS,
+  Node's fsync is `F_FULLFSYNC` there): 3.7 ms per append, and 84 ms added to a
+  daemon tick that appends 20 records; a tick that appends nothing pays nothing.
+  `APPROVAL_BENCH=1 node --test dist/tests/append-fsync.bench.js` re-measures.
+  `approval log verify` now says which crash tore a tail: `tear: "nul-filled"`
+  is the crash-before-writeback signature (the file grew, its data never reached
+  the disk; nothing was tampered and no record is half-written), and
+  `partial-line` is a writer that died mid-line. `--json` gains `tear`,
+  `tornBytes` and `intactBytes` (the byte offset the verified records end at),
+  the torn-byte count is now UTF-8 bytes rather than string length, and
+  `approval doctor`'s log row names the bytes to keep and the command that
+  keeps them. Nothing truncates on its own.
+- **The payload store is durable before ok (APRV-457).** `storePayload` now
+  fsyncs the temp file before the rename and the store directory after it
+  (plus the parent of every directory the write created), through the same
+  write layer the log append has used since APRV-440, so the bytes a proposal
+  or grant binds are on disk before the record that binds them is appended.
+  Before this, a platform kill before writeback could keep the (fsynced)
+  record and lose its payload: a verified `payload_hash` pointing at a
+  NUL-filled or missing file. A short write, a failed file fsync or a failed
+  directory fsync is `write-failed` (no new code); a filesystem that cannot
+  sync a directory (EINVAL, EBADF, ENOTSUP, EOPNOTSUPP) is tolerated as the
+  log tolerates it. Hashing, canonicalization and the log append are
+  unchanged. Measured on macOS APFS (opt-in `tests/payload-fsync.bench.ts`):
+  about 7.8 ms per stored payload, on `storePayload`, the propose path and
+  the attestation path alike; not batched.
+- **doctor names a torn payload apart from a tampered one (APRV-457).** The
+  `payload-store` row reads back every payload a verified record binds. An
+  empty or all-NUL file, or a missing one whose record proves the store held
+  it, is the crash-before-writeback signature (nothing tampered, bytes lost);
+  a file with any non-NUL byte that does not verify is tampering or
+  corruption. Each has its own fix text, and an intact store's row is
+  unchanged.
+- **The payload store is owner-only (APRV-445).** Every file under
+  `.approval/payloads/` is written 0600 inside a directory narrowed to 0700 on
+  every write, whatever the umask or the directory's earlier mode. `approval
+  init` now lists `.approval/payloads/` in the `.gitignore` lines it writes
+  (it was tracked by default before); remove the line to keep the bytes in
+  history.
+- **Every harness start names the policy that authorized it (APRV-447).**
+  `execution.started` written by the hook route and by `approval start` now
+  carries `payload.policy_sha256`, the attested policy hash the gate resolved
+  the class against, on the policy path and the grant path alike. The runtime
+  stamps it at the write boundary; a caller-supplied value is ignored, no
+  verdict reads it, and the schema admits it as optional, so every earlier
+  record still validates. Conformance `schema-validation` is 2.9.0 (two new
+  fixtures, no expectation moved).
+- **Every record the daemon writes names the daemon that wrote it (APRV-383).**
+  A daemon-written record carries a new optional top-level `daemon` field holding
+  that daemon instance's id, so a tenant whose daemon is HOSTED by another party can
+  open their own log and tell which host process acted for them; before this they
+  all carried the same generic `system:daemon` actor. The id is
+  `APPROVAL_DAEMON_ID` from the daemon's launch environment where it is set, and
+  otherwise `daemon-` plus the instance id `approval doctor` already prints as its
+  `keychain-scope` suffix, so it is stable across restarts on one machine and
+  keystore with nothing stored anywhere. `approval up` and `approval daemon run`
+  name it on their `started` line, `approval status` reports it as `daemon`, and a
+  new `daemon-identity` doctor row reports it with the allowlist below. The field is
+  OPTIONAL and additive: every record written before it validates and verifies
+  unchanged, and its absence is absence rather than a claim that no daemon wrote the
+  record.
+- **`APPROVAL.md` may list which daemons may write (APRV-383).** A new top-level
+  `daemons` array names the daemon ids permitted to append to that log. ABSENT means
+  no restriction, exactly as every policy written before the key; an empty list
+  admits none. A daemon whose id an attested list does not name is refused at the
+  write boundary with a new `daemon-not-allowed`, and a daemon launched with an
+  `APPROVAL_DAEMON_ID` that is not a usable id is refused with a new
+  `daemon-id-invalid` (and `approval up` / `approval daemon run` decline to start at
+  all). Both join the frozen `append_error_codes` union, so the conformance vectors
+  take a major bump. The id is SELF-REPORTED, so it only ever costs a daemon the
+  ability to write: being listed grants nothing, and no verdict, autonomy, budget,
+  floor, sampling draw or token reads the field or the list (SPEC.md §11.1 invariant
+  4). The list is read only from the attested policy, and a policy that becomes
+  unreadable under a running daemon leaves the restriction it carried standing
+  rather than lapsing. `design/hosted-daemon-identity.md` states the whole hosting
+  model and what is deliberately out of scope: process isolation, token scoping and
+  billing.
+- **`approval serve` and `approval channel telegram webhook` stamp the daemon id
+  (APRV-448).** Records either process appends (serve's verb calls and its hook
+  calls on their worker threads, the webhook's taps and dispatch cycles) now
+  carry the `daemon` field with the id `approval status` reports for the store,
+  resolved by the daemon loop's own rule (`APPROVAL_DAEMON_ID`, or the id
+  derived from the instance), and both are held to the attested policy's
+  `daemons` list at the write boundary: refreshed before every serve call and on
+  every webhook cycle, refused `daemon-not-allowed` with nothing written. Before
+  this only the daemon loop stamped, so in a co-located deployment a tenant saw
+  the id on sweeps and nothing on actions, and an unlisted facade wrote freely.
+  An unusable declared id refuses either verb before it binds (exit 2). Neither
+  process marks itself the daemon, so the daemon's autonomous advance route
+  stays the daemon's. The gate and execution verbs' JSON refusals now carry the
+  write boundary's code under `error.append` beside `append-failed`, as
+  `approval gate` already did. `ServeOptions` takes an optional `env` the id is
+  resolved from (in place of the earlier `daemonId`), and the handle reports
+  `daemonId`.
+- **Drift-append contention is reported as deferred and retried (APRV-403).** A
+  `lock-timeout` or `head-moved` on an `envelope.drift` append used to print
+  `append-refused … was not appended`, which is true and reads as a lost record
+  while the next tick quietly re-derives and writes it. It is now a
+  `drift-deferred` warning naming the task and saying the scan retries, and the
+  `drift` line that lands carries `retry` so the pair closes — the same split
+  APRV-381 made for `audit.sampled`, using the same shared classifier so the two
+  sweeps cannot come to disagree about which failures a retry fixes. Both drift
+  reasons take it. Every other append refusal keeps the `append-refused` form,
+  because `validation`, `canonicalization`, `corrupt-tail` and `io` are facts
+  about the record or the file that no retry repairs. **Write-back no longer
+  repairs a file whose drift record was deferred**: it used to rewrite the
+  `state:` line anyway, so the next tick found the file agreeing with the log,
+  the retry had nothing to re-derive, and the deferral resolved into silence — a
+  correction made off the record, which is what SPEC §6.3's append-then-write
+  order exists to prevent.
+- **A contended audit sample waits for the next tick (APRV-381).** A
+  `lock-timeout` or `head-moved` on the `audit.sampled` append is reported under
+  a `sample-deferred` warning that names the action key and says it retries on
+  the next tick, and the append that follows carries `retry`, so the pair closes
+  in the window an operator reads. Every other refusal keeps the
+  `append-refused` form.
+- **A log sync under a running daemon no longer stops it as `anchor-diverged`
+  (APRV-389).** The anchor check proved two facts from two reads, so a sync that
+  rewrote the working log left one of them stale and the message contradicted
+  itself. It now compares one triple, treats a view that disagrees with the
+  bytes as moved, re-reads the file once with the cache off before any refusal,
+  and logs one `anchor-reread` line. A real divergence still stops the daemon on
+  byte evidence read twice.
+
+### Policy and setup
+
+- **A hosted tenant with no shell gets its starting policy from the operator,
+  once, and can see who set it (APRV-449).** `approval policy attest
+  --bootstrap --as human:<operator>` attests a store's first policy and nothing
+  else: it reads the verified log first, a re-run over the same bytes refuses
+  `policy-already-attested`, changed bytes refuse `policy-amendment-required`,
+  and neither appends anything (exit 1, with `seq` and `attested_by` in the
+  error). The append is compare-and-append against the head it read. The plain
+  verb is unchanged, and needs no TTY either way. `approval status` gains
+  `attestation.attested_by` (the text row reads `attested (seq 1, by
+  human:carter)`) and `approval doctor`'s attestation row names the attester,
+  both read from the verified record. With `--bootstrap` the log resolves under
+  `--dir` unless `--log` names one. `docs/hosted-provisioning.md` is the
+  sequence (init, write the policy only into a store with no log, attest as the
+  store user), every refusal code, and the trust statement: the operator sets the
+  starting policy, and every change needs the approver's act through a channel.
+- **The Agent Village tenant policy lives here, and the Hermes guide describes
+  the co-located shape (APRV-446).** `examples/agent-village/approval-policy.md`
+  is the canonical day-one policy the control plane renders into each tenant's
+  `APPROVAL.md`: a recorder (autonomous default), the three gate organs
+  human-only, the Hermes tool classes and `network.call`/`read.web` recorded and
+  never gated, `intent.publish.inferred.index` manual and agent-requestable, a
+  72h proposal window, and the relay credential and resident chat named by env.
+  It is named `approval-policy.md` because any file named `APPROVAL.md`
+  classifies `policy.core`. `tests/agent-village-policy.test.ts` proves it
+  through the real loader, resolver, `policy attest --bootstrap` and `hook
+  hermes`, and runs the propose round once the build carries #569's
+  `agent_may_request`. `docs/hermes-hook.md` "For Agent Village" now covers
+  `serve` on loopback or a unix socket, the agent token file, `up --api-base`
+  against the relay, the operator attestation, the 240 s hook window beside the
+  72 h proposal window, and what the hook never sees.
+- **`policy amend --pr` stops racing the records advance (APRV-420).** The
+  amendment commit carries `events.jsonl` only when it is the thing publishing
+  those records. When the base already carries them, or a records advance is
+  live on origin, it carries the policy bytes, the attested text and the pins,
+  which cannot conflict on a file they do not touch. A re-run repairs a pull
+  request a landed advance made unmergeable: the branch is rebuilt on the
+  current trunk, force-updated and re-armed, and only when it is the single
+  commit this ceremony makes, so a peer commit is never lost.
+
+### Demos and docs
+
+- **The site version guard binds every version string, and no page claims a
+  publish (APRV-395).** All eight strings across `index.html`,
+  `features/index.html`, `llms.txt` and `llms-full.txt` are now bound to
+  `package.json` and reported in one message, so a bump that moves the package
+  alone is told every file still to move; `llms.txt` states the version this
+  tree carries rather than asserting that it is on npm, which was false for the
+  whole window between a bump merging and the publish run finishing.
+- **The Releases page fills itself from the changelog (APRV-396).** After a
+  successful publish, `publish.yml` creates the GitHub Release for the tag with
+  the matching changelog section as its body, the title `approval-md X.Y.Z`, and
+  the CI tarball plus its `sha256` file attached, so the Releases page and the
+  registry can be compared by hand. `scripts/release-notes.mjs` extracts the
+  section and refuses when the heading is missing, undated, duplicated or empty;
+  that check also runs in the verify job, ahead of `npm publish`, so a tag with
+  no notes never reaches the registry. A rerun updates the one Release rather
+  than duplicating it. The published manifest now also carries
+  `gitHead` (the release commit), which was `null` for 0.2.0 and 0.3.0 because
+  the publish job publishes a downloaded tarball with no repository beside it.
+- **README split (APRV-412).** `README.md` is a short entry and
+  `docs/README-extended.md` the guide, restoring three sections earlier drafts
+  dropped and shipped in the npm package. The landing page's values example
+  quotes its `communication` string as `APPROVAL.md` does (APRV-413).
+- **The Approved pages.** `/approved` carries the Approved landing page and the
+  17-slide deck, the Get Approved hosted demo entry with an onboarding preview,
+  policy setup that exposes the five approval modes (HOSTED-28), and the live
+  run of 2026-09-30. This work carries no task id in this repository and is
+  listed as such.
+- **A lane ends on a CI verdict (APRV-426, APRV-417).** `docs/ci-verdict.md`
+  states the rule; `scripts/ci-baseline.json` holds the known failures by test
+  id with the task owning each, and `node scripts/run-tests.mjs --baseline`
+  names a run's failures that are not on it. The test runner scrubs terminal
+  colour forcing from every test-file process (APRV-417).
+- **New runbooks and design notes.** `docs/hermes-hook.md` (APRV-398, APRV-415,
+  APRV-446), `docs/hosted-provisioning.md` (APRV-449),
+  `docs/probe-driver-convention.md` (APRV-418), `docs/run-payload-binding.md`
+  (APRV-401), `docs/muse-connector.md` (APRV-436),
+  `design/hosted-daemon-identity.md` (APRV-383), `design/quiet-hours.md`
+  (APRV-450), `design/per-class-ttl.md` (APRV-451, deciding against a per-class
+  `approval_ttl` for now) and `design/chain-continuity.md` (APRV-452, chain
+  continuity across a store recreate).
+
+### Breaking and behavior changes
+
+- **`approval wait` answers what a request still authorizes (APRV-428,
+  APRV-445).** An unregistered task refuses `not-registered` (exit 1) where it
+  used to answer `granted`; a registered task with nothing live answers
+  `nothing-to-wait-for` (exit 0); a lapsed grant is `expired` (exit 3); a grant
+  or pending request pinned to a re-attested policy is `void` (new exit 7).
+  *Migration:* a caller that read exit 0 as a grant reads `state` instead, and
+  treats exit 7 as "ask again".
+- **`approval init` gitignores `.approval/payloads/` (APRV-445).** The payload
+  store was tracked by default. *Migration:* remove the line from `.gitignore`
+  to keep payload bytes in history.
+- **Workspace writes that resolve outside the workspace go to a human
+  (APRV-402).** See the entry above for the commands affected. *Migration:* a
+  session that wrote into another checkout or through a symlink out of the temp
+  root by absolute path now asks, under `files.delete.out_of_scope`, which
+  the policy resolves like any other class.
+- **Relative Hermes paths are refused (APRV-415).** A `terminal` call with no
+  absolute `workdir` and a file-tool call with a relative or missing path deny
+  `hook-unsupported-execution-context`, and `--dir` is mandatory in gateway
+  deployments. *Migration:* a Hermes deployment wired against an earlier build
+  of this adapter passes absolute paths.
+- **Conformance suite versions.** `refusal-unions` 19.0.0 to 27.0.0 (APRV-398,
+  APRV-383, APRV-423, APRV-445, APRV-455, including the new frozen
+  `relay_refusal_codes` union), `schema-validation` 2.5.0 to 2.9.0 (APRV-398,
+  APRV-383, APRV-423, APRV-447), `command-class` 1.3.0 to 1.5.0 (APRV-397,
+  APRV-409) and `hook-read-scope` 1.2.0 to 2.0.0 (APRV-415, two expectations
+  moved). `gate-verdicts` 2.1.0, `policy-resolution` 3.0.0, `bridge-decisions`,
+  `chain-verification` and `jcs-canonicalization` 1.0.0 are unchanged.
+  *Migration:* a second implementation pinned to the `v0.3.0` vector files
+  re-runs the four that moved; the refusal-union majors are added codes, which
+  is a string a caller branching on the union has not seen before.
+- **Schema additions, and no new event type.** The closed event enum is
+  unchanged at thirty-four types. Records gain an optional top-level `daemon`
+  (APRV-383); `payload.harness` gains `hermes` (APRV-398); `approval.requested`
+  gains `harness_cap_ms`, which requires `execution: "harness"` (APRV-423);
+  `execution.started` gains `policy_sha256` (APRV-447). The policy schema gains
+  top-level `daemons` (APRV-383), the per-class `agent_may_request` (APRV-445)
+  and the `edgeos` sender channel (APRV-455). *Migration:* every addition is
+  optional, so every 0.3.0 record and policy validates unchanged; a verifier
+  with its own copy of the schema accepts the new fields before it reads a
+  0.4.0 log.
 
 ## 0.3.0 — 2026-09-20
 
 Written on 2026-09-20 against `main` at `36018dc`, 192 non-merge commits after
 `v0.2.0`, all additive at the package boundary. The deprecated bare `supervised`
-alias still loads with a warning, so this is a minor bump. Not yet tagged or
-published: the version bump, the gated annotated tag and the Trusted Publishing
-run are the remainder of APRV-371.
+alias still loads with a warning, so this is a minor bump. Published to npm as
+`approval-md@0.3.0`, tagged `v0.3.0` at commit
+`f4ebc90c698c7e8d410b184cda73de228d46ec43`. Separately approved tag creation
+and push triggered the protected-main Trusted Publishing workflow. Registry
+bytes, installed behavior and signed provenance were verified (APRV-371).
 
 ### Gate and guard
 

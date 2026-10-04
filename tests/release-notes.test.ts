@@ -4,7 +4,7 @@
  *
  * Two halves, one property. `scripts/release-notes.mjs` turns a tag into the
  * body of a GitHub Release by reading `CHANGELOG.md`, so the first half pins it
- * against the real changelog (0.2.0 and 0.3.0, the two sections that exist and
+ * against the real changelog (0.2.0, 0.3.0 and 0.4.0, the sections that exist and
  * are dated) and against fixtures for every way a section can be unusable. The
  * cases that matter are the refusals: `## Unreleased` must never become a
  * release body, and a heading whose date has not been written yet means the
@@ -124,7 +124,7 @@ test("every dated section in the real changelog is listed, newest first", () => 
   };
   assert.deepEqual(
     dated.map((entry) => `${entry.version} ${entry.date}`),
-    ["0.3.0 2026-09-20", "0.2.0 2026-09-12", "0.1.0 2026-09-08"],
+    ["0.4.0 2026-10-04", "0.3.0 2026-09-20", "0.2.0 2026-09-12", "0.1.0 2026-09-08"],
   );
   assert.deepEqual(
     complaints,
@@ -153,9 +153,9 @@ test("the Unreleased heading is not a version and cannot be released", () => {
 // ---------------------------------------------------------------------------
 
 test("a version with no section refuses with the heading to add", () => {
-  const refused = refusal(CHANGELOG, "0.4.0");
+  const refused = refusal(CHANGELOG, "9.8.7");
   assert.equal(refused.code, "no-section");
-  assert.match(refused.message, /no section for 0\.4\.0/u);
+  assert.match(refused.message, /no section for 9\.8\.7/u);
   assert.match(refused.message, /## X\.Y\.Z — YYYY-MM-DD/u);
 });
 
@@ -250,10 +250,10 @@ test("the CLI prints the section body and exits 0", () => {
 });
 
 test("the CLI exits 1 with the refusal on stderr for a version with no section", () => {
-  const result = run(["0.4.0"]);
+  const result = run(["9.8.7"]);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
-  assert.match(result.stderr, /^release-notes: no-section: CHANGELOG has no section for 0\.4\.0\./u);
+  assert.match(result.stderr, /^release-notes: no-section: CHANGELOG has no section for 9\.8\.7\./u);
 });
 
 test("the CLI exits 1 on an undated section in a named changelog", () => {
@@ -266,7 +266,7 @@ test("the CLI exits 1 on an undated section in a named changelog", () => {
 test("--check lists the dated versions and exits 0 on the real changelog", () => {
   const result = run(["--check"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "0.3.0 2026-09-20\n0.2.0 2026-09-12\n0.1.0 2026-09-08\n");
+  assert.equal(result.stdout, "0.4.0 2026-10-04\n0.3.0 2026-09-20\n0.2.0 2026-09-12\n0.1.0 2026-09-08\n");
   assert.equal(result.stderr, "");
 });
 
