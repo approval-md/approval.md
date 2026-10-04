@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude-c7'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-04 11:06'
+updated_date: '2026-10-04 11:40'
 labels:
   - schema
   - gate
@@ -71,4 +71,6 @@ Refuter (opus-high, fresh, over the diff + ACs + section 11.1): no claim refuted
 SPEC amendment text (apply by hand), REVISED, supersedes the earlier hunk in these notes; for the APRV-454 batch, new bullet in section 8 after 'The provider reference.':
 
 - **The policy a harness start was resolved under.** An `execution.started` that a harness path records (`execution: "harness"`) carries `payload.policy_sha256`, the SHA-256 of the attested policy bytes the write boundary re-checked the action's class against when it recorded the start, taken from the same attestation check and the same single read of the policy file that the write boundary's class resolution used. The runtime writes it at the write boundary, as it writes `ts`, and no caller parameter, option or field of the action's payload supplies it; a value of that name arriving by any of those routes is ignored. A start under a policy that is not attested, or whose bytes changed since attestation, is refused before anything is appended, so no stamp names bytes nobody attested. A policy-authorized start (autonomous, supervised, an unselected supervised-live draw) has no other record naming its policy, and the field lets a reader of the start alone say which rules were in force when it was recorded. A granted start, which could already recover its policy through `grant_seq`, carries it from the same code path, and there it equals the grant's own pin wherever the grant carries one, since a spend under a different attested policy is refused `policy-drift`. Where a harness adapter computes its verdict from an earlier read of the policy than the write boundary's, a re-attestation between the two leaves the stamp naming the policy in force at the append; an implementation SHOULD carry the verdict's attested hash to the write boundary and refuse a mismatch. It authorizes nothing: no verdict, budget, draw, loop floor or refusal reads it back, so section 11.1 invariant 4 is untouched. It is covered by the record hash like every other payload field. It is OPTIONAL and additive: every record written before the field existed still validates and still verifies, a start written by a non-harness path (`approval run`, an adapter's `act`) records none at v0.1, and a reader treats absence as the pre-amendment behaviour, reconstructing the policy from the latest `policy.updated` before the record's seq. (Amended APRV-447, pending sign-off.)
+
+Merged: PR #587 at head df99093c, 2026-10-04 11:39Z. The hook's two-read window (verdict from the hook's own policy read, stamp from the write boundary's) is filed as APRV-467. The SPEC section 8 hunk (REVISED) is carried by APRV-454's PR #590. AC 4 stays open for the follower-side pointer from agentvillage-d4; status stays In Progress until it lands.
 <!-- SECTION:NOTES:END -->
