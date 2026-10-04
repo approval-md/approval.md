@@ -239,6 +239,24 @@ what it is.
 anybody. `payload.est_cost_usd` and the budgets contract measure the TENANT's
 spend against the tenant's own caps, and they are not a host's invoice.
 
+**6.6 Which processes stamp the field (APRV-448).** Three processes declare an
+identity and stamp it: the daemon loop (`approval daemon run`, and `approval up`,
+whose Telegram listener shares the daemon's process), `approval serve` (its verb
+calls on the listener's thread and its hook calls on their worker threads, each of
+which declares the same startup resolution), and `approval channel telegram
+webhook`. All three resolve the id by section 3's rule through `resolveDaemonId`,
+so it is the id `approval status` reports for the store, and all three are held to
+the `daemons` list at the write boundary: the daemon refreshes it once per tick,
+serve before every verb and hook call inside its store lock, and the webhook at
+startup and at the top of every dispatch cycle. Only the daemon loop also marks
+itself the daemon (`core/daemon-actor.ts`), because that mark routes an advance
+under `log.advance.daemon`. The write boundary's stamp is keyed on the declaration
+alone, so serve and the webhook stamp and are restricted without holding that
+route. A session's own CLI calls, `approval hook <harness>` run as a harness's own
+process, and a standalone `approval channel telegram listen` declare nothing and
+write records without the field, which keeps 2.2's reading: absence says nothing
+about which process wrote a record.
+
 ---
 
 ## 7. The two SPEC.md hunks, for a human to decide on
