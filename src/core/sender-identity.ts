@@ -776,7 +776,10 @@ export function senderRefusalLine(code: ChannelDecisionRefusalCode): string {
   if (code === "nonce-not-issued") {
     // APRV-456. It says nothing about the request the button named, because
     // the button may be a forgery and its text may not be the request's.
-    return "Not recorded — this listener did not send that button, so it will not act on it. Tap the newest card this listener sent for the request. The attempt is on the record.";
+    // APRV-456 refutation S3: "not holding" rather than "did not send", because
+    // most taps that reach this are genuine buttons from before a restart, and
+    // no claim about a record, because many of these refusals write none.
+    return "Not recorded — this listener is not holding that button (an earlier copy, or one it never sent), so it will not act on it. Tap the newest card this listener sent for the request.";
   }
   return "Not recorded — the policy maps this account to more than one approver, so the runtime cannot say who decided. Ask the operator to fix the policy.";
 }

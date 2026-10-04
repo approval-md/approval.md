@@ -855,6 +855,8 @@ for (const transport of ["poll", "webhook"] as const) {
     const payload = record.payload as Record<string, unknown>;
     assert.equal(payload["code"], "nonce-not-issued");
     assert.equal(payload["decision"], "grant");
+    // Refutation S4: the forger's nonce bytes never reach the hash-chained log.
+    assert.doesNotMatch(String(payload["message"]), /f0rged/u, "the forged nonce was written into the log");
     assert.equal(record.action_key, key, "the record must name the action this process holds open");
     assert.equal(record.actor, "system:gate");
     assert.equal(payload["actor"], MAPPED_HUMAN, "the mapped approver's spent attention is not named");

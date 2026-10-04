@@ -220,7 +220,7 @@
  * and the log is not opened.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { GLOSS_UNVERIFIED_SUFFIX, refusedDecisionLine } from "./contract.js";
 import type {
@@ -2714,7 +2714,12 @@ export class TelegramChannel implements TestableChannel {
       config.nonce ??
       (() => {
         this.counter += 1;
-        return `${this.counter.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+        // APRV-456 refutation S2. On a relayed channel the nonce is the only
+        // thing binding a button to this process, so it comes from the CSPRNG
+        // (72 bits) rather than `Math.random`, whose state a reader of a few old
+        // buttons could in principle recover. base64url carries no `:`, and the
+        // whole `<verb>:<nonce>:<ref>` stays well inside the 64-byte cap.
+        return `${this.counter.toString(36)}${randomBytes(9).toString("base64url")}`;
       });
   }
 
@@ -4843,7 +4848,11 @@ export class TelegramChannel implements TestableChannel {
       this.unissuedRefused.delete(oldest);
     }
 
-    const message = `${parsed.decision} tap refused: its button carries nonce ${JSON.stringify(parsed.nonce)}, which this listener is not holding, and this listener's stale-copy fallback is off (a relayed channel, or --no-stale-copy). It was not carried to the gate by its action reference, because behind a relay a button with a real request's reference can sit under text this gate never sent. Nothing was decided; the request, if pending, is still open on the newest card this listener sent.`;
+    // APRV-456 refutation S4: the nonce is NOT quoted here. This message becomes
+    // `payload.message` on the audit record, and the nonce is bytes whoever
+    // made the card chose; quoting it would let a forger write text of their
+    // choosing into the hash-chained log, one tap at a time.
+    const message = `${parsed.decision} tap refused: its button carries a nonce this listener is not holding, and this listener's stale-copy fallback is off (a relayed channel, or --no-stale-copy). It was not carried to the gate by its action reference, because behind a relay a button with a real request's reference can sit under text this gate never sent. Nothing was decided; the request, if pending, is still open on the newest card this listener sent.`;
     const refusal: ChannelDecisionRefusal = { ok: false, code: "nonce-not-issued", message };
     result.refused.push({
       code: refusal.code,

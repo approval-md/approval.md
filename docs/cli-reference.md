@@ -4236,8 +4236,8 @@ place in the walkthrough and a duplicate message, never a pending request nobody
 is shown; an approval that depended on a channel's memory would not be an
 acceptable trade.
 
-**Earlier copies, and `--no-stale-copy`** (APRV-196, APRV-456). Every decision
-button carries `<verb>:<nonce>:<action ref>`, where the nonce is issued by this
+**Earlier copies, and `--no-stale-copy`** (APRV-196, APRV-456). Every single-request decision
+button carries `<verb>:<nonce>:<action ref>` (a digest's "all" buttons carry no reference and never had a fallback), where the nonce is issued by this
 process and the reference is the first 16 hex of the action key's SHA-256. On
 the direct-bot shape (no `--api-base`, or one naming `https://api.telegram.org`)
 a tap whose nonce this process is not holding, such as a button on a copy sent
@@ -4255,7 +4255,7 @@ the approver's toast says this listener did not send that button, and the live
 card stays armed. When the tap's reference names a request this process holds
 open, one `audit.decision_refused` records the attempt under that request's key,
 naming the sender the policy resolves; a reference that names nothing open here,
-or a replay of the same button, records nothing. The restart banner says that
+or a replay of the same button within this process, records nothing (the memory of refused buttons is per process and bounded, so a redelivery after a restart can record once more). The restart banner says that
 earlier copies no longer decide. The reason is the relay: anyone holding its
 token can send the approver a card with forged text and a real pending action's
 reference, and on the fallback the approver's genuine tap would pass the chat

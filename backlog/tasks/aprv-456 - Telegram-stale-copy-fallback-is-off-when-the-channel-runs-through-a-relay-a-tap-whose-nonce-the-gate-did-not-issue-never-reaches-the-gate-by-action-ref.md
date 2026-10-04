@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude-lane-C15'
 created_date: '2026-10-03 19:10'
-updated_date: '2026-10-04 22:57'
+updated_date: '2026-10-04 23:14'
 labels:
   - telegram
   - channels
@@ -86,6 +86,8 @@ APRV-196 added a stale-copy fallback in src/channels/telegram.ts (around lines 1
 > | `nonce-not-issued` | A decision tap arrived on a channel whose earlier-copy fallback is disabled (§10.3: a relayed transport, or the explicit launch option) carrying a nonce the listener does not hold. Evaluated before the gate's verbs, so nothing is decided; at most one `audit.decision_refused` is appended, and only when the tap's reference names a request the listener holds open. Distinct from `sender-unmapped`, because the account may be a mapped approver: what is refused is the button. (Amended APRV-456.) |
 
 Validation: npm test exit 0 (5595 tests, 5594 pass, 1 skip, 0 fail) under the CLAIMS lock 22:46Z-22:57Z; npm run typecheck exit 0; npm run lint exit 0 (no warnings). New tests: tests/telegram-webhook.test.ts (forged button on poll and webhook, stale-copy rule via prepareListen, wired listener records the refusal) and tests/channels-telegram.test.ts (relayed restart, direct-shape residual pinned, banner). Existing APRV-196 tests unchanged and green.
+
+Refuter (fresh opus-high, PR #605 at e9307c09): could not refute any of the four claims (relay forged card never decides; direct shape unchanged; at most one record, key from this process; flag not flippable, every verb goes through prepareListen). No must-fix. Should-fixes applied: S2 nonce now counter + randomBytes(9) base64url instead of Math.random; S3 approver line says 'not holding' and no longer claims a record; S4 the attacker-chosen nonce is no longer quoted in payload.message (test asserts it); doc nits (single-request buttons only, per-process replay memory, help wording 'implied by', residual names checkpoint/review cards and the relay allowlist). Deferred, needs a decision: S1 binding a tap to the message_id (and echoed text) this process sent would close the live-bytes residual without trusting the relay's method allowlist; S5 command-level tests for up/webhook flags; N1/N2/N5-N7 nits.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

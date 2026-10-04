@@ -1992,7 +1992,7 @@ Flags:
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
   --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
   --api-base <url> / --poll-timeout <s> / --allow-cross-instance   Bot API base / long-poll seconds (25) / start on another instance's bot
-  --no-stale-copy / --once / --json   refuse a button this process is not holding (ON for any --api-base but the Bot API) / one getUpdates batch then exit / ONE JSON OBJECT PER LINE
+  --no-stale-copy / --once / --json   refuse a button this process is not holding (implied by any --api-base but the Bot API) / one getUpdates batch then exit / ONE JSON OBJECT PER LINE
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
@@ -2015,7 +2015,7 @@ Flags:
   --url <https://...>  REQUIRED: the PUBLIC url registered with setWebhook. https only, on port 443, 80, 88 or 8443 (Telegram's list), and no user:password
   --port <n> / --listen <[host:]port>   this process's own bind. LOOPBACK by default (4683); routable also needs --allow-non-loopback. Never 0
   --path <p> / --cycle <d>   must equal the url's own path / dispatch period (30s)
-  --reclaim / --no-stale-copy   register over the webhook already holding this bot / refuse a button this process is not holding (ON for any --api-base but the Bot API)
+  --reclaim / --no-stale-copy   register over the webhook already holding this bot / refuse a button this process is not holding (implied by any --api-base but the Bot API)
   -h, --help           this text
 
 APPROVAL_TG_WEBHOOK_SECRET is REQUIRED, from the launch environment: it is
@@ -2135,7 +2135,7 @@ Usage:
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
   --payloads <f> / --payload-dir <d>  payload overrides: telegram / web
-  --api-base <url> / --poll-timeout <s> / --no-stale-copy   Bot API base / long-poll seconds / refuse a button this process is not holding (on for any base but the Bot API)
+  --api-base <url> / --poll-timeout <s> / --no-stale-copy   Bot API base / long-poll seconds / refuse a button this process is not holding (implied by any base but the Bot API)
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web / --allow-cross-instance   leave that channel out / start on another instance's bot
   --no-gloss / --restart-backoff <d>   drop gloss / first retry wait

@@ -850,8 +850,12 @@ sandbox (one per resident)
     above it. A token holder who obtains a live card's callback bytes (by reading
     updates through the relay, or through any Bot API method that hands back a
     message with its keyboard) can still put those bytes under forged text, and
-    a tap on that card decides. The relay token's custody (approvald's 0600
-    environment, nowhere else) remains the bound for that. A restart also costs
+    a tap on that card decides (checkpoint and review cards carry the same
+    live-bytes residual). Binding a tap to the message id and text this process
+    sent would close it without trusting the relay; until then the relay's
+    method allowlist (no `forwardMessage`, `getUpdates` or `editMessage*` for
+    anyone but the daemon) and the relay token's custody (approvald's 0600
+    environment, nowhere else) remain the bound for that. A restart also costs
     more here than on the direct shape: buttons on cards sent before it are
     refused, and the restart banner tells the resident to tap the newest copy.
   - *Residual on the direct shape.* The fallback stays on, because there only
