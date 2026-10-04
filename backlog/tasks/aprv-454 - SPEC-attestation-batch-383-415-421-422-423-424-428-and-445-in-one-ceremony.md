@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-03 03:50'
-updated_date: '2026-10-04 11:19'
+updated_date: '2026-10-04 11:24'
 labels:
   - spec
   - policy.edit
@@ -77,4 +77,21 @@ Open for a human (pre-existing text the hunks now strain, not applied):
 - 447's code (PR 587) is not merged, so attesting now ratifies its bullet ahead of its behaviour.
 
 Full suite (node scripts/run-tests.mjs --baseline, started before the verifier's prose fixes): 5559 tests, 5558 pass, 0 fail, 1 skipped, exit 0; ci-baseline: 0 failing. The targeted re-run above covers the final bytes. AC 3 stays open for Carter's attestation.
+
+Consistency edits (second commit; the coordinator asked that Carter not attest the inconsistencies as truth). Each edit carries one (Amended APRV-454.) marker.
+
+1. §5.2 gains a bullet for the daemons key. Reason: the section 8 daemon bullet cites daemons in §5.2, and §5.2 never named the key. The wording follows design/hosted-daemon-identity.md 4.1: an absent key is no restriction, and an empty list admits none. The brief's paraphrase, empty or absent means any, contradicts that design and the applied daemon-not-allowed row, so the design wins.
+2. §10.5: five withheld verbs becomes nine. Reason: EXCLUDED_VERBS in src/mcp/server.ts holds consume, payload run, log follow, and the claude-code, cursor, codex, grok, muse and hermes hooks. Six, as the brief suggested, would still be false.
+3. §10.7: the three transport-withheld verbs become the harness hooks and log follow, plus an archive export, which §10.5 never withheld. Reason: export is not in EXCLUDED_VERBS; log export is a published tool.
+4. §10.7 gains one sentence naming the agent credential's reach, from AGENT_VERBS and scopeOf in src/serve/server.ts. The agent credential reaches instructions, hook_classify, request, wait, withdraw, propose, start and the hook endpoint; everything else is tenant-only. Note: log_verify is NOT on the agent allowlist; it was narrowed off during 421's review. The existing rule that the agent credential cannot read the log was therefore already accurate, and the verifier's concern came from stale pre-review notes.
+5. §10.3 v0.1 ships, and §13 channel breadth: three channels become four (cli, web, telegram, and edgeos, the relay-only channel APRV-455 added).
+6. §5.2 senders gains one sentence. The configured-identity fallback holds only for a channel with no mapping. A mapped channel, raw or keyed, never falls back (APRV-370), and neither does a relay, even unmapped (APRV-455).
+7. The policy-already-attested row gains the edgeos relay reaffirmation exception (APRV-455).
+8. The gate_refusal_codes preamble names propose and start beside wait.
+9. §13 now carries APRV-422's full wording: the §11 cross-reference (cryptographic identity), a GOVERNANCE.md cross-reference (it discloses the hosted implementation that exists), and the Below that level sentence. This satisfies 422's own AC1. The GOVERNANCE.md clause was written for this edit, because 422's description asked for the cross-reference but gave no words.
+
+Left as notes:
+(1) 447's code is PR #587, which is unmerged. The morning order is: #587 lands, then Carter attests #590.
+(3) attest --organ takes repository-relative paths only, so it cannot attest the Hermes organs.
+(9) 455's Classifier line has no SPEC table to land in.
 <!-- SECTION:NOTES:END -->
