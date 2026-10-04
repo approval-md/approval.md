@@ -134,6 +134,12 @@ export const GITIGNORE_ENTRIES: readonly string[] = [
   ".approval/keys/",
   ".approval/**/*.tmp-*",
   ".approval-journal/",
+  // APRV-445. The payload store holds the exact bytes each approval bound to,
+  // which for a proposal is someone's own words, and a scaffolded directory is
+  // as often a hosted tenant's store as an operator's repository. Ignored by
+  // default since then; an operator who wants the bytes in history removes the
+  // line, and the log keeps every payload_hash either way.
+  ".approval/payloads/",
 ];
 
 /** The same entries, indented for the help text so the two cannot disagree. */

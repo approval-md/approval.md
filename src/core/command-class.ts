@@ -158,6 +158,15 @@ export const GATE_SELF_CLASS = "gate.self";
 export type ProtectedPathClass = "log.mutate" | "policy.core" | "policy.edit";
 
 /**
+ * The class a write under `$HERMES_HOME/scripts/` takes (APRV-445): scheduling
+ * code that Hermes's cron runs later with no hook in front of it. Returned by
+ * {@link protectedPathClass} beside the organs, ranked with `policy.edit`, and
+ * deliberately not a {@link ProtectedPathClass}: it is a side effect an
+ * operator prices, not a surface of the gate itself.
+ */
+export const HERMES_SCHEDULED_SCRIPT_CLASS = "cron.manage";
+
+/**
  * The `policy.edit` sub-class namespace a `protected_paths` entry may route to
  * (APRV-266).
  *
@@ -442,18 +451,50 @@ export function protectedPathClass(
     // session state and transcripts are ordinary bookkeeping, and pricing those
     // at a human's attention is the failure mode §11 asks to avoid, the same
     // reasoning that keeps `.muse/worktrees/` out of the entry above.
+    //
+    // APRV-445 adds three rows from the Agent Village DATA-234 survey of Hermes
+    // v2026.9.24. `shell-hooks-allowlist.json.lock` is the allowlist's flock
+    // sidecar: an agent that makes it unwritable makes the gateway's consent
+    // write raise at start, so it is the allowlist's organ as much as the file
+    // is (matched by prefix, so the sidecar and the file are one row).
+    // `approval/` is where a hosted install keeps the hook's own configuration
+    // beside the harness. And `scripts/` is `cron.manage`, not an organ: Hermes
+    // runs a scheduled job's script from `$HERMES_HOME/scripts/` with no
+    // `pre_tool_call` at all, so WRITING one is scheduling code that will run
+    // ungated later, which is the same act as `cronjob_manage create` and is
+    // priced by the same policy line.
+    //
+    // `.env` (and `.env.*`) and `auth.json` are organs too, for WRITES (APRV-445
+    // refutation, B2). `isCredentialPath` makes a READ of them
+    // `account.credential`, but that tier is consulted for reads only, so before
+    // this a `write_file`, a `patch`, a `>>`, a `sed -i` or a `tee -a` onto
+    // `$HERMES_HOME/.env` classified as an ordinary `files.write.workspace` and
+    // ran unattended: and Hermes loads that file with `override=True` into every
+    // process it starts, which makes it the switch for the gate itself
+    // (`HERMES_ACCEPT_HOOKS`) as well as a secret store. Reads stay
+    // `account.credential`.
     if (segment === ".hermes") {
-      const next = segments[index + 1];
+      // Recheck 3 (lows): a profile home, `.hermes/profiles/<p>/`, is a home of
+      // its own with the same organs, so its paths are judged one level down.
+      const next =
+        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
+          ? segments[index + 3]
+          : segments[index + 1];
       if (
         next === undefined ||
         next === "config.yaml" ||
         next === "config.yml" ||
         next === "agent-hooks" ||
-        next === "shell-hooks-allowlist.json" ||
+        next === "approval" ||
+        next === ".env" ||
+        next.startsWith(".env.") ||
+        next === "auth.json" ||
+        next.startsWith("shell-hooks-allowlist.json") ||
         next.startsWith("hooks")
       ) {
         return "policy.core";
       }
+      if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
     }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
@@ -604,7 +645,7 @@ const CREDENTIAL_CLASS = "account.credential";
  * kin), which is the environment map holding the Telegram token, the vault
  * passphrase and the sampling secret.
  */
-function isCredentialPath(candidate: string): boolean {
+export function isCredentialPath(candidate: string): boolean {
   if (candidate.length === 0) return false;
   const segments = pathSegments(candidate);
   for (let index = 0; index < segments.length; index += 1) {
@@ -621,7 +662,10 @@ function isCredentialPath(candidate: string): boolean {
     // not, would be a Never-list item the classifier does not enforce — which is
     // exactly the hole APRV-194 was filed for, one harness along.
     if (segment === ".hermes") {
-      const next = segments[index + 1];
+      const next =
+        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
+          ? segments[index + 3]
+          : segments[index + 1];
       if (next === ".env" || next?.startsWith(".env.") === true) return true;
       if (next === "auth.json") return true;
       continue;
@@ -4121,6 +4165,59 @@ export interface CommandSegmentWords {
  * `classifyCommand` answers `unparseable` for. Segments carrying no binary (a
  * bare assignment, a lone redirection) are omitted: they have no verb to show.
  */
+/**
+ * The paths each segment WRITES through a redirection, from the same parse
+ * (APRV-445). `<` is a read and is left out, as are the discard devices.
+ * `null` when the tokenizer refuses the string.
+ */
+export function commandSegmentWriteTargets(command: string): string[][] | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+  return lexed.segments.map((segment) =>
+    segment.redirects
+      .filter((redirect) => redirect.op !== "<")
+      .map((redirect) => redirect.target.text)
+      .filter((target) => !isDiscardTarget(target)),
+  );
+}
+
+/**
+ * Every segment of `command` with its binary (or `null`), its arguments and the
+ * paths it writes through a redirection, from ONE lex of the whole command
+ * (APRV-445 recheck). Lexing a segment's text on its own fails for a heredoc,
+ * whose body lives outside the segment's text; this keeps the body attached.
+ */
+export interface CommandSegmentShape {
+  text: string;
+  bin: string | null;
+  args: string[];
+  writes: string[];
+  /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
+  reads: string[];
+}
+
+export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+  return lexed.segments.map((segment) => {
+    const words = segment.words.map((word) => word.text);
+    let cursor = 0;
+    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    return {
+      text: segment.text,
+      bin: words[cursor] ?? null,
+      args: words.slice(cursor + 1),
+      writes: segment.redirects
+        .filter((redirect) => redirect.op !== "<")
+        .map((redirect) => redirect.target.text)
+        .filter((target) => !isDiscardTarget(target)),
+      reads: segment.redirects
+        .filter((redirect) => redirect.op === "<")
+        .map((redirect) => redirect.target.text),
+    };
+  });
+}
+
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
   const lexed = lex(command);
   if (!lexed.ok) return null;

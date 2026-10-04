@@ -200,6 +200,15 @@ export interface PolicyClassRule {
    */
   allow_irreversible?: boolean;
   /**
+   * Amended SPEC.md §5.2 (APRV-445): whether an agent may open a request in
+   * this class through `approval propose`, naming the class itself and carrying
+   * the payload inline. Absent and false mean no. The schema refuses `true` on
+   * a `human-only` rule. Read by `agentRequestability` in `core/policy-match.ts`,
+   * on an exact key and on a declared `<prefix>.*` family, never through
+   * ordinary wildcard resolution.
+   */
+  agent_may_request?: boolean;
+  /**
    * Amended SPEC.md §5.2 (APRV-127): the fraction of `supervised-live` actions
    * that block on the human gate, in (0, 1]. Required by the schema for
    * `supervised-live` and forbidden for every other level, `human-only`

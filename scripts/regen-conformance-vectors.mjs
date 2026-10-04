@@ -2306,6 +2306,20 @@ const SUITES = [
     // harness's own timeout rather than anything about this command or this
     // approver. A caller that collapsed it into either neighbour would retry a
     // command that cannot be answered under this configuration, forever.
+    //
+    // 23.0.0 (APRV-445): `gate_refusal_codes` gains `class-not-agent-requestable`
+    // and `payload-too-large`, the two refusals `approval propose` adds. Major
+    // for the reason 22.0.0 was: a longer union is a changed expectation. The
+    // first is the operator's bound on a class the requester names itself (an
+    // exact `classes` key opened by `agent_may_request`), and a caller that read
+    // it as `class-human-only` would stop for good where a policy edit fixes it.
+    // 24.0.0 (APRV-445 refutation): `gate_refusal_codes` gains
+    // `task-is-proposal`, `task-not-proposal` and `key-class-mismatch`. Major
+    // for the same reason: a longer union is a changed expectation.
+    // 25.0.0 (APRV-445 recheck 3): `gate_refusal_codes` gains `contended`,
+    // the refusal a proposal's bounded retry ends on instead of borrowing
+    // `already-decided`.
+    //
     // 26.0.0 (APRV-455): a new union, `relay_refusal_codes`, for the
     // authenticated relay transport an operator's control plane posts gestures
     // to. Major for the reason 7.0.0 was: a new union is a new pinned array a
@@ -2319,7 +2333,18 @@ const SUITES = [
     // collision rule this takes one major above the highest version either
     // side had seen. Whichever of the two merges second regenerates on top of
     // the other and takes the next major again.
-    vectors_version: "26.0.0",
+    //
+    // 27.0.0 (APRV-445 merging main after APRV-455): the collision that rule
+    // names. Main shipped 26.0.0 with the relay union and without the six
+    // gate codes; this branch's 23.0.0 to 25.0.0 had the gate codes and not the
+    // relay union. Neither set was ever the merged suite, so the merge takes
+    // one major above the highest either side saw: `gate_refusal_codes` with
+    // `class-not-agent-requestable`, `payload-too-large`, `task-is-proposal`,
+    // `task-not-proposal`, `key-class-mismatch` and `contended`, beside
+    // `relay_refusal_codes`. A second implementation holds itself to 27.0.0;
+    // one reporting 23.0.0, 24.0.0 or 25.0.0 is reporting a set main never
+    // carried, and one reporting 26.0.0 lacks the six gate codes.
+    vectors_version: "27.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

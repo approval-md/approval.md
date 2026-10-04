@@ -4121,10 +4121,11 @@ function trackedPrivateKeys(root: string, keyDir: string): string[] {
  * `token_sealed` for as long as the token is unspent and inside its TTL, so the
  * whole design of sealed delivery rests on the key never being committed.
  *
- * Nothing enforced that. `.approval/payloads/` is deliberately TRACKED (evidence
- * belongs in the history), so `.approval/` is a directory an operator adds from
- * during a records or ceremony commit, and a key store with no ignore line is
- * swept in by the same `git add` that carries the payloads.
+ * Nothing enforced that. `.approval/payloads/` was TRACKED by default until
+ * APRV-445 (and still is wherever an operator keeps it in history, as this
+ * repository does), so `.approval/` is a directory an operator adds from during
+ * a records or ceremony commit, and a key store with no ignore line is swept in
+ * by the same `git add` that carries the payloads.
  *
  * Two questions, in the order of what stays wrong the longest, the same reading
  * the vault and environment rows use:
@@ -4176,7 +4177,7 @@ function checkSealedKeys(logPath: string, dir: string): DoctorCheck {
       return {
         check,
         status: "fail",
-        detail: `${String(present.length)} sealed-delivery private key(s) in ${keyDir} are NOT gitignored in ${dir}: one \`git add .approval/\` — the command a records or ceremony commit uses, because \`.approval/payloads/\` is deliberately tracked — publishes a live key beside the ciphertext it opens`,
+        detail: `${String(present.length)} sealed-delivery private key(s) in ${keyDir} are NOT gitignored in ${dir}: one \`git add .approval/\` — the command a records or ceremony commit uses, wherever \`.approval/payloads/\` is kept in history — publishes a live key beside the ciphertext it opens`,
         fix: `echo '${KEYS_IGNORE_LINE}' >> ${join(dir, ".gitignore")} — the line \`approval init\` writes; and treat every action whose token is still unspent inside its TTL as disclosed`,
       };
     }
@@ -4428,9 +4429,10 @@ export function commandDoctor(
       checkGateOrgans(dir, verified.records),
       // APRV-285: appended, eighteenth time, same reason. The sibling of the
       // vault and environment rows for the one file under `.approval/` that is
-      // a raw private key: `.approval/payloads/` is tracked on purpose, so
-      // `.approval/` is a directory people `git add` from, and the key store had
-      // nothing telling them it must not come along.
+      // a raw private key: wherever `.approval/payloads/` is tracked (the
+      // default before APRV-445, and this repository's choice), `.approval/` is
+      // a directory people `git add` from, and the key store had nothing
+      // telling them it must not come along.
       checkSealedKeys(logPath, dir),
       // APRV-313: appended, nineteenth time, same reason. Configuration on
       // disk is distinct from Codex trust, loading and observed execution.

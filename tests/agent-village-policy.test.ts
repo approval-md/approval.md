@@ -26,6 +26,10 @@
  * is in, the same file runs the full assertions against the fixture verbatim,
  * including the agent-requestable bit and the propose round. Which branch ran is
  * decided by reading the build's own policy schema, never by a flag.
+ *
+ * #569 is now in the build, so a test below asserts both detections are true:
+ * a later change that dropped the key or the verb fails here instead of
+ * quietly falling back to the key-stripped text or skipping the propose round.
  */
 
 import assert from "node:assert/strict";
@@ -64,6 +68,11 @@ const HAS_PROPOSE = VERB_REGISTRY.some((verb) => verb.name === "propose");
 const LOADABLE = HAS_AGENT_MAY_REQUEST
   ? RENDERED
   : RENDERED.replaceAll(", agent_may_request: true", "");
+
+test("this build carries #569's agent_may_request key and propose verb, so no fallback runs", () => {
+  assert.equal(HAS_AGENT_MAY_REQUEST, true, "schema/policy.schema.json lost classRule.agent_may_request");
+  assert.equal(HAS_PROPOSE, true, "the verb registry lost `propose`");
+});
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-agent-village-")));
 let counter = 0;

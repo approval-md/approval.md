@@ -112,7 +112,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import type { DecideOptions } from "../core/gate.js";
+import { isProposalTask, type DecideOptions } from "../core/gate.js";
 import { assembleBatch } from "../channels/batch.js";
 import {
   recordChannelDecision,
@@ -2372,6 +2372,10 @@ export function supersededPending(requests: ChannelRequest[]): Set<string> {
     // the policy bytes it proposes, two proposals of the same bytes are refused
     // upstream, and one that reached here is the live one.
     if (request.policy_diff !== undefined) continue;
+    // APRV-445 refutation (S2). A proposal is its own asking, held for days by
+    // design and keyed by the intention it names; another request over the
+    // same bytes is not a newer copy of it, and it is not a newer copy of one.
+    if (isProposalTask(request.task.value)) continue;
     const identity = JSON.stringify([request.payload_hash.value, request.class.value]);
     const key = request.action_key.value;
     const at = Date.parse(request.requested_ts.value);
@@ -2439,7 +2443,12 @@ export function orderPending(requests: ChannelRequest[], now: string): ChannelRe
     // requests nobody is waiting on. That is the strict side: a request whose
     // age cannot be established must not displace one whose age is known.
     const at = Number.isNaN(parsed) ? 0 : parsed;
-    (nowMs - at >= COLLAPSE_STALE_AFTER_MS ? stale : live).push({ request, at, index });
+    // APRV-445 refutation (S2): a proposal waits on a human for as long as its
+    // TTL says (days), and its requester polls rather than blocks, so the
+    // hook's wait-plus-grace boundary says nothing about whether anyone is
+    // still holding it. It is always live.
+    const stalePosition = nowMs - at >= COLLAPSE_STALE_AFTER_MS && !isProposalTask(request.task.value);
+    (stalePosition ? stale : live).push({ request, at, index });
   });
 
   live.sort((a, b) => b.at - a.at || a.index - b.index);
@@ -2541,6 +2550,27 @@ export function staleLines(
  * cycle shows the requests again, which is the degradation SPEC.md §10.3
  * requires and the one this code takes.
  */
+/**
+ * The members a first-cycle collapse would put into one message: stale or
+ * superseded, and never a proposal (APRV-445 refutation, S2). Proposals are
+ * long-lived by design, so after a six-minute outage every one of them would
+ * otherwise land in one digest whose only bulk answer is reject-all.
+ */
+export function collapsibleStale(
+  undecided: readonly ChannelRequest[],
+  now: string,
+  superseded: ReadonlySet<string> = supersededPending([...undecided]),
+): ChannelRequest[] {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return [];
+  return undecided.filter((request) => {
+    if (isProposalTask(request.task.value)) return false;
+    const at = Date.parse(request.requested_ts.value);
+    const age = Number.isNaN(at) ? 0 : nowMs - at;
+    return age >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value);
+  });
+}
+
 async function collapseStale(
   setup: ListenSetup,
   streams: Streams,
@@ -2558,10 +2588,7 @@ async function collapseStale(
   // Computed over the WHOLE pending set rather than over `undecided`, so a
   // request this process has already delivered still supersedes an older twin.
   const superseded = supersededPending(undecided);
-  const stale = undecided.filter(
-    (request) =>
-      age(request) >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value),
-  );
+  const stale = collapsibleStale(undecided, now, superseded);
   if (stale.length < COLLAPSE_MIN) return undecided;
 
   let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;

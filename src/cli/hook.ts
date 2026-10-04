@@ -73,7 +73,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
@@ -89,10 +89,12 @@ import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
+  commandSegmentShapes,
   commandSegmentWords,
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   GATE_SELF_CLASS,
+  isCredentialPath,
   protectedPathClass,
   type ClassifiedSegment,
   type CommandClassification,
@@ -102,6 +104,7 @@ import {
   consumeHarnessGrant,
   findHarnessCarry,
   finishHarnessExecution,
+  isProposalTask,
   register,
   request,
   startHarnessExecution,
@@ -547,6 +550,18 @@ type Permission = "allow" | "deny";
  */
 
 /**
+ * What a harness's own non-shell, non-file tool asks for (APRV-445).
+ *
+ * `gated` names the class the call is judged under and the headline the
+ * approver reads; the payload is always the WHOLE call (`{tool, input}`), so a
+ * grant binds every argument the harness will act on. `read` is a call that
+ * touches nothing and is allowed without a record, exactly as an in-scope read
+ * tool is. A rule returns `null` for a tool it does not know, and that tool
+ * keeps the not-a-gated-tool allow every unknown tool has.
+ */
+type ToolRuleVerdict = { kind: "gated"; cls: string; headline: string } | { kind: "read"; reason: string };
+
+/**
  * The ceiling a harness puts on its hook process, in milliseconds, or `null`
  * (APRV-423): the operator's stated `--harness-cap` clamped to the adapter's
  * contractual maximum, or, with nothing stated, the adapter's documented
@@ -571,6 +586,12 @@ interface HarnessAdapter {
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /**
+   * The harness's own tools that carry a side effect of their own, by name and
+   * arguments (APRV-445). Consulted after the shell, file and read tools, for
+   * the calls none of those owns.
+   */
+  toolRules?: (toolName: string, toolInput: Record<string, unknown>) => ToolRuleVerdict | null;
   /**
    * Tools that READ a named path (APRV-347).
    *
@@ -851,6 +872,68 @@ export const HERMES_POST_TOOL_EVENT = "post_tool_call";
 const HERMES_READ_TOOLS: readonly string[] = ["read_file", "search_files"];
 
 /**
+ * The classes Hermes's own side-effecting tools are judged under (APRV-445,
+ * from the Agent Village DATA-234 survey of Hermes v2026.9.24).
+ *
+ * Before this table every one of these reached the not-a-gated-tool allow,
+ * because the adapter knew `terminal`, `write_file`, `patch` and the two read
+ * tools and nothing else, so a policy line for `cron.manage` or `message.send`
+ * was a line no Hermes call could ever reach. They are code, not policy: the
+ * classifier decides what a call IS and the policy decides what happens to it,
+ * so an operator prices these classes with ordinary `classes:` lines.
+ *
+ * - `cronjob_manage` (legacy alias `cronjob`): every action that changes the
+ *   schedule or runs a job is `cron.manage`; `list` is a read. A scheduled job
+ *   runs later with no `pre_tool_call` at all, so the schedule is the one place
+ *   a human can see it.
+ * - `process_manage` (legacy alias `process`): `write`, `submit`, `kill`,
+ *   `close` and `handoff` act on a running process and are `process.write`;
+ *   `list`, `poll`, `log` and `wait` are reads.
+ * - `browser_exec`, `browser_cdp` and every other `browser_*`: `browser.exec`.
+ * - `skill_manage`: `skill.manage`. `delegate_task`: `agent.delegate`.
+ *   `send_message`: `message.send` (not agent-callable at v2026.9.24; the rule
+ *   stands so the day it is, it is already gated).
+ *
+ * An action this table does not recognise on a tool it does know is judged
+ * under the tool's side-effecting class rather than allowed: a new verb on a
+ * tool that schedules or drives processes is a new way to do that, and the
+ * strict reading is the safe one.
+ */
+const HERMES_CRON_READ_ACTIONS: ReadonlySet<string> = new Set(["list"]);
+const HERMES_PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log", "wait"]);
+
+function hermesToolRule(toolName: string, toolInput: Record<string, unknown>): ToolRuleVerdict | null {
+  const action = readString(toolInput, "action");
+  const headline = (cls: string): string =>
+    `${toolName}${action === null ? "" : ` ${action}`} (${cls})`;
+  if (toolName === "cronjob_manage" || toolName === "cronjob") {
+    if (action !== null && HERMES_CRON_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads the schedule and changes nothing` };
+    }
+    return { kind: "gated", cls: "cron.manage", headline: headline("cron.manage") };
+  }
+  if (toolName === "process_manage" || toolName === "process") {
+    if (action !== null && HERMES_PROCESS_READ_ACTIONS.has(action)) {
+      return { kind: "read", reason: `${toolName} ${action} reads a process and changes nothing` };
+    }
+    return { kind: "gated", cls: "process.write", headline: headline("process.write") };
+  }
+  if (toolName.startsWith("browser_")) {
+    return { kind: "gated", cls: "browser.exec", headline: headline("browser.exec") };
+  }
+  if (toolName === "skill_manage") {
+    return { kind: "gated", cls: "skill.manage", headline: headline("skill.manage") };
+  }
+  if (toolName === "delegate_task") {
+    return { kind: "gated", cls: "agent.delegate", headline: headline("agent.delegate") };
+  }
+  if (toolName === "send_message") {
+    return { kind: "gated", cls: "message.send", headline: headline("message.send") };
+  }
+  return null;
+}
+
+/**
  * Hermes Agent by Nous Research (APRV-398).
  *
  * The harness Agent Village v2 runs every resident agent on, one per tenant in
@@ -973,7 +1056,18 @@ const HERMES_ADAPTER: HarnessAdapter = {
   fileTools: ["write_file", "patch"],
   readTools: HERMES_READ_TOOLS,
   shellCwdKey: "workdir",
+  toolRules: hermesToolRule,
 };
+
+/** The adapter's rule-table verdict for this call, or `null` (APRV-445). */
+function toolRuleOf(adapter: HarnessAdapter, input: HookInput): ToolRuleVerdict | null {
+  if (adapter.toolRules === undefined) return null;
+  if (input.toolName === adapter.shellTool) return null;
+  if (adapter.fileTools.includes(input.toolName) || adapter.readTools.includes(input.toolName)) {
+    return null;
+  }
+  return adapter.toolRules(input.toolName, input.toolInput);
+}
 
 /**
  * Every harness this runtime speaks a hook protocol for, by kind (APRV-358).
@@ -2990,6 +3084,37 @@ function readToolGate(
   };
 }
 
+/**
+ * A read tool call naming a credential file (APRV-445 refutation, B2): the
+ * Hermes home's `.env` and `auth.json`, and the approval home's vault, keys and
+ * environment map. `null` for anything else.
+ */
+function credentialReadGate(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  cwd: string,
+): { payload: unknown; summary: string } | null {
+  const declared =
+    readString(toolInput, "file_path") ??
+    readString(toolInput, "notebook_path") ??
+    readString(toolInput, "path");
+  if (declared === null) return null;
+  // APRV-445 recheck SF2(e, f): judged through realpath, so a symlinked
+  // parent cannot launder the path, and a directory of credentials handed to a
+  // read tool (a search, a glob, a grep) is gated as the credentials are.
+  const file = canonicalPath(absolute(declared, cwd));
+  // Recheck 3 (SF1a): only a directory that holds credentials (a home root, an
+  // approval home, a home's `approval/`, or a directory under a home holding a
+  // credential file); `skills/`, `workspace/` and the like are ordinary.
+  if (!isCredentialPath(file) && !holdsCredentials(file)) return null;
+  const input: Record<string, unknown> = { ...toolInput };
+  delete input["description"];
+  return {
+    payload: { tool: toolName, rule: "credential", file, input },
+    summary: `${toolName} ${file} (credential)`,
+  };
+}
+
 /** The verdict note for a gated read: what was asked for, and against what. */
 function readScopeNote(gated: ReadGate, roots: readonly string[]): string {
   return `read-scope: ${gated.declared} resolves to ${gated.file}, which is outside the read scope (${renderReadRoots(roots)})`;
@@ -3298,6 +3423,11 @@ function abandonedRequests(
   for (const record of records) {
     if (record.event !== "approval.requested") continue;
     if (record.actor !== run.actor) continue;
+    // APRV-445. Under `approval serve` the hook and `propose` act as ONE actor,
+    // and a proposal's request is harness-executed too, so without this every
+    // proposal pending past the hook's wait plus grace (minutes) would be swept
+    // as abandoned by the next gated tool call, days before its TTL.
+    if (isProposalTask(record.task)) continue;
     const key = record.action_key;
     if (typeof key !== "string" || key.length === 0) continue;
     const payload = payloadOf(record);
@@ -4162,12 +4292,31 @@ export function gateHarnessCall(
       ownKeys,
       `the requesting hook process received ${signal} while waiting; the session is ending, so no retry will adopt this request`,
     );
+    // APRV-445. On Hermes an exit with nothing on stdout is an ALLOW unless the
+    // exit is 2, and a harness tearing down may still read the verdict. So the
+    // block directive goes out first, written synchronously because
+    // `process.exit` below does not wait for a stream to drain.
+    if (run.harness === "hermes") {
+      const directive = harnessBlockDirective(
+        "hook-interrupted",
+        `the hook received ${signal} while waiting for a decision; nothing authorizes this call`,
+        "hermes",
+      );
+      try {
+        writeSync(1, directive.stdout);
+      } catch {
+        // stdout is gone; the exit code below is the whole verdict.
+      }
+      process.exit(HERMES_DENY_EXIT);
+    }
     process.exit(EXIT_USAGE);
   };
   const onTerm = (): void => onSignal("SIGTERM");
   const onInt = (): void => onSignal("SIGINT");
-  process.on("SIGTERM", onTerm);
-  process.on("SIGINT", onInt);
+  // Prepended: under Hermes an earlier guard (`hermesFailClosed`) listens for
+  // the same signals, and this handler, which also withdraws, must answer first.
+  process.prependListener("SIGTERM", onTerm);
+  process.prependListener("SIGINT", onInt);
 
   /**
    * Has this invocation already said, on stderr, that the verified view lags
@@ -4811,7 +4960,9 @@ function runPostToolUse(
     // APRV-347: a read tool MAY have had a start written for it (one outside
     // the scope), so it belongs in this set. A read inside the scope wrote
     // nothing, and the close below finds no start and says so in its own words.
-    !adapter.readTools.includes(input.toolName)
+    !adapter.readTools.includes(input.toolName) &&
+    // APRV-445: a tool the rule table gated wrote a start like any other.
+    toolRuleOf(adapter, input)?.kind !== "gated"
   ) {
     return report(
       streams,
@@ -5043,6 +5194,19 @@ function describeToolCall(
       };
     }
     const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    // APRV-445 refutation (B2, L10). The classifier matches protected paths by
+    // their SEGMENTS, and a relative word carries only the segments it was
+    // written with: `echo X >> .env` run in `$HERMES_HOME` names `.env`, not
+    // `.hermes/.env`, and classified as a workspace write. Where the harness
+    // states the per-call directory the command runs in, every relative word
+    // and every write target is ALSO judged resolved against it: a write that
+    // lands on an organ takes the organ's class, and a read that lands on a
+    // credential takes `account.credential`. It only ever adds a class.
+    if (shellCwd !== null) {
+      for (const cls of resolvedPathClasses(raw, classified.segments, shellCwd, protectedPaths)) {
+        if (!classes.includes(cls)) classes.push(cls);
+      }
+    }
     if (adapter.kind === "codex") {
       // The pure shell classifier sees each segment independently. Preserve
       // Codex hook organs when an earlier simple `cd` changes the directory or
@@ -5127,10 +5291,37 @@ function describeToolCall(
     };
   }
 
+  // APRV-445: the harness's own side-effecting tools, by name and arguments.
+  // The payload is the whole call, so a grant binds every argument.
+  const ruled = toolRuleOf(adapter, input);
+  if (ruled !== null) {
+    if (ruled.kind === "read") return { kind: "allow", reason: ruled.reason };
+    return {
+      kind: "gated",
+      classes: [ruled.cls],
+      payload: { tool: input.toolName, input: input.toolInput },
+      headline: ruled.headline,
+      notes: [],
+    };
+  }
+
   // APRV-347, above the file-tool branch because the two lists are disjoint and
   // a read is the cheaper question to answer: a read inside the scope, or one
   // naming no path at all, returns `null` here and takes the allow below.
   if (adapter.readTools.includes(input.toolName)) {
+    // APRV-445 refutation (B2): a read tool naming a credential file is
+    // `account.credential` wherever the file sits, inside the read scope
+    // included, as the same read through the shell already was.
+    const credential = credentialReadGate(input.toolName, input.toolInput, cwd);
+    if (credential !== null) {
+      return {
+        kind: "gated",
+        classes: ["account.credential"],
+        payload: credential.payload,
+        headline: credential.summary,
+        notes: [],
+      };
+    }
     const read = readToolGate(input.toolName, input.toolInput, readRoots, cwd);
     if (read === null) {
       return {
@@ -5160,6 +5351,438 @@ function describeToolCall(
     // `allow` says which checkout it authorized (APRV-124).
     notes: gated.protectedPath ? [fileTierNote(gated)] : [],
   };
+}
+
+/**
+ * The classes a shell command's PATHS take once they are resolved the way the
+ * shell and the filesystem will resolve them (APRV-445 refutation B2 and L10,
+ * recheck SF2 and L-e), for a harness that states the directory each call runs
+ * in.
+ *
+ * The classifier matches organs and credentials by path SEGMENTS of the words
+ * as written. A word written relative (`.env` run in `$HERMES_HOME`), through a
+ * variable (`$HERMES_HOME/.env`), after a `cd`, or through a symlinked parent
+ * (`h/.env` where `h -> .hermes`) carries none of the segments that matter. So
+ * each path a segment touches is also judged here:
+ *
+ * - WRITTEN paths are the redirect targets (heredocs included) and the
+ *   write-argument positions of the binaries whose writes are known (L-e):
+ *   never the binary, never a word that is merely an argument. A written path
+ *   resolving to an organ takes its class; one carrying a glob or a variable
+ *   this hook cannot expand is `policy.core` when it lands in one of the gate's
+ *   own directories ({@link gateRootKind}) or a pattern in it could name the
+ *   home or an organ (recheck 3); an unexpanded `$HERMES_HOME` in a written
+ *   path is `policy.core` wherever it is written from. A copy into a directory
+ *   writes `<dir>/<source name>`; an extraction writes into its directory.
+ * - READ paths (a read segment's arguments, `<` targets, a copy's sources) that
+ *   resolve to a credential take `account.credential`, and so does a directory
+ *   that holds credentials ({@link holdsCredentials}) handed to a binary that
+ *   reads directories recursively (`grep -r`, `rg`, `find`, `tar`, ...).
+ * - After a `cd` this hook cannot resolve, every later relative write is
+ *   `policy.core` and every later relative read `account.credential`.
+ * - `cd` moves the directory for the segments after it. Like the Codex arm, a
+ *   `cd` may or may not have run (`||`, a failed `cd`), so the directories
+ *   before and after it are both kept and every later path is judged from each.
+ * - Every path is resolved through `realpath` on its deepest existing ancestor,
+ *   so a symlinked parent or working directory is judged by where it lands.
+ * - `$HERMES_HOME` / `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
+ *   `HERMES_HOME`, from this hook process's environment; `~`, `$HOME` and
+ *   `${HOME}` to `HOME`. Under `approval serve` the process is the daemon, so a
+ *   hosted operator sets `APPROVAL_HERMES_HOME` there; without it, the
+ *   conservative rules above apply to the unexpanded spelling.
+ *
+ * What stays out of reach is listed in `docs/hermes-hook.md`: inline programs
+ * (`python -c`, which the classifier already refuses as opaque), `dd`/`install`
+ * (unclassified, so already denied), and a recursive search of an ANCESTOR of
+ * the home with a filename filter.
+ *
+ * It only ever adds classes.
+ */
+function resolvedPathClasses(
+  raw: string,
+  segments: readonly ClassifiedSegment[],
+  cwd: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const found: string[] = [];
+  const add = (cls: string | null): void => {
+    if (cls !== null && !found.includes(cls)) found.push(cls);
+  };
+  const shapes = commandSegmentShapes(raw) ?? [];
+  // Trusted as given: the operator sets it (under co-location, the control
+  // plane sets it from the tenant's home), and nothing the agent writes reaches
+  // this process's environment.
+  const hermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
+  const home = env["HOME"] ?? null;
+
+  /** The word with the variables this hook can know expanded. */
+  const expand = (word: string): { text: string; hermesUnknown: boolean; unresolved: boolean } => {
+    let text = word;
+    let hermesUnknown = false;
+    const hermesRef = /^\$(?:\{HERMES_HOME\}|HERMES_HOME)(?=\/|$)/u;
+    if (hermesRef.test(text)) {
+      if (hermesHome !== null && hermesHome.length > 0) text = text.replace(hermesRef, hermesHome);
+      else hermesUnknown = true;
+    }
+    const homeRef = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/u;
+    if (homeRef.test(text) && home !== null && home.length > 0) text = text.replace(homeRef, home);
+    return { text, hermesUnknown, unresolved: hermesUnknown || /[$`]/u.test(text) };
+  };
+
+  // After a `cd` this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`), the
+  // directory every later relative path lands in is unknown (recheck 3, SF2).
+  let cwdUnknown = false;
+  let cwds = [canonicalPath(cwd)];
+  for (const [index, segment] of segments.entries()) {
+    const shape =
+      shapes.length === segments.length
+        ? shapes[index]
+        : shapes.find((candidate) => candidate.text === segment.text);
+    if (shape === undefined) continue;
+    const bin = shape.bin === null ? null : basename(shape.bin);
+    const operands = shape.args.filter((arg) => !arg.startsWith("-"));
+
+    if (bin === "cd" || bin === "pushd") {
+      const target = operands[0];
+      if (target === undefined) {
+        // A bare `cd` goes HOME; `cd -` and `pushd` with no operand go to a
+        // directory recorded earlier in a shell this hook never saw.
+        if (bin === "cd" && !shape.args.includes("-") && home !== null) {
+          cwds = [...new Set([...cwds, canonicalPath(home)])];
+        } else {
+          cwdUnknown = true;
+        }
+      } else {
+        const expanded = expand(target);
+        if (expanded.unresolved || hasGlobChars(expanded.text)) {
+          cwdUnknown = true;
+        } else {
+          const next = cwds.map((from) => canonicalPath(resolvePathSegments(from, expanded.text)));
+          cwds = [...new Set([...cwds, ...next])];
+        }
+      }
+      continue;
+    }
+    if (bin === null && shape.writes.length === 0 && shape.reads.length === 0) continue;
+
+    const judgeWrite = (word: string): void => {
+      const target = expand(word);
+      if (target.hermesUnknown) {
+        add("policy.core");
+        return;
+      }
+      if (!isAbsolute(target.text) && cwdUnknown) {
+        add("policy.core");
+        return;
+      }
+      const globbed = target.unresolved || hasGlobChars(target.text);
+      for (const from of cwds) {
+        const absoluteTarget = resolvePathSegments(from, target.text);
+        if (globbed) {
+          // SF3a: a pattern in any component that could name the home, the
+          // approval home or an organ is an organ write; a pattern written
+          // into one of the gate's own directories (SF1b) may be any file
+          // there. Anywhere else it is a workspace write.
+          if (globCouldNameOrgan(absoluteTarget) || writesIntoGateRoot(canonicalPath(dirname(absoluteTarget)))) {
+            add("policy.core");
+          }
+          continue;
+        }
+        add(protectedPathClass(canonicalPath(absoluteTarget), protectedPaths));
+      }
+    };
+    /** A copy or move INTO a directory writes `<dir>/<basename of source>`. */
+    const judgeWriteInto = (directory: string, sources: readonly string[]): void => {
+      for (const source of sources) {
+        const name = basename(expand(source).text);
+        if (name.length === 0 || name === "." || name === "..") {
+          // `cp -r stuff/. dir`: the contents land in the directory itself.
+          judgeExtractInto(directory);
+          continue;
+        }
+        judgeWrite(join(directory, name));
+      }
+    };
+    /** An extraction or a contents-copy writes unknown names into `directory`. */
+    const judgeExtractInto = (directory: string): void => {
+      const target = expand(directory);
+      if (target.hermesUnknown || (cwdUnknown && !isAbsolute(target.text))) {
+        add("policy.core");
+        return;
+      }
+      if (target.unresolved) return;
+      for (const from of cwds) {
+        if (writesIntoGateRoot(canonicalPath(resolvePathSegments(from, target.text)))) add("policy.core");
+      }
+    };
+    const judgeRead = (word: string, recursive: boolean): void => {
+      const target = expand(word);
+      if (target.hermesUnknown) {
+        add("account.credential");
+        return;
+      }
+      if (!isAbsolute(target.text) && cwdUnknown) {
+        add("account.credential");
+        return;
+      }
+      if (target.unresolved) return;
+      for (const from of cwds) {
+        const absoluteTarget = resolvePathSegments(from, target.text);
+        if (hasGlobChars(target.text)) {
+          // SF3b: expand against the directory when it is known; otherwise a
+          // pattern that could name a credential is read as one.
+          const candidates = expandGlob(absoluteTarget);
+          if (candidates === null) {
+            if (globCouldNameCredential(absoluteTarget)) add("account.credential");
+          } else {
+            for (const candidate of candidates) {
+              if (isCredentialPath(canonicalPath(candidate))) add("account.credential");
+            }
+          }
+          continue;
+        }
+        const resolved = canonicalPath(absoluteTarget);
+        if (isCredentialPath(resolved)) add("account.credential");
+        else if (recursive && holdsCredentials(resolved)) add("account.credential");
+      }
+    };
+
+    for (const target of shape.writes) judgeWrite(target);
+    for (const source of shape.reads) judgeRead(source, false);
+    if (bin === null) continue;
+
+    // `-t DIR` / `--target-directory=DIR` names the destination up front.
+    const targetDirFlag = (): string | null => {
+      for (const [at, arg] of shape.args.entries()) {
+        if (arg === "-t") return shape.args[at + 1] ?? null;
+        if (arg.startsWith("--target-directory=")) return arg.slice("--target-directory=".length);
+      }
+      return null;
+    };
+
+    if (WRITE_EVERY_OPERAND.has(bin)) {
+      for (const operand of operands) judgeWrite(operand);
+    } else if (WRITE_LAST_OPERAND.has(bin)) {
+      const targetDir = targetDirFlag();
+      const sources = targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
+      const destination = targetDir ?? operands[operands.length - 1];
+      for (const source of sources) judgeRead(source, true);
+      if (destination !== undefined) {
+        const expanded = expand(destination);
+        const intoDirectory =
+          targetDir !== null ||
+          destination.endsWith("/") ||
+          (!expanded.unresolved &&
+            cwds.some((from) => isDirectoryPath(canonicalPath(resolvePathSegments(from, expanded.text)))));
+        if (intoDirectory) judgeWriteInto(destination, sources);
+        else judgeWrite(destination);
+      }
+    } else if (WRITE_AFTER_FIRST_OPERAND.has(bin)) {
+      for (const operand of operands.slice(1)) judgeWrite(operand);
+    } else if (bin === "sed" && shape.args.some((arg) => arg === "--in-place" || /^-[a-zA-Z]*i/u.test(arg))) {
+      const scripted = shape.args.some((arg) => arg === "-e" || arg === "-f");
+      for (const operand of scripted ? operands : operands.slice(1)) judgeWrite(operand);
+    } else if (bin === "dd") {
+      for (const arg of shape.args) {
+        if (arg.startsWith("of=")) judgeWrite(arg.slice(3));
+        if (arg.startsWith("if=")) judgeRead(arg.slice(3), false);
+      }
+    } else if (bin === "tar" && isTarExtract(shape.args)) {
+      // Lows: an extraction writes the archive's names into `-C DIR` or the
+      // working directory.
+      judgeExtractInto(flagValue(shape.args, "-C", "--directory") ?? ".");
+    } else if (bin === "unzip") {
+      judgeExtractInto(flagValue(shape.args, "-d", null) ?? ".");
+    }
+
+    if (segment.class.startsWith("read.") || RECURSIVE_READERS.has(bin)) {
+      for (const operand of operands) judgeRead(operand, RECURSIVE_READERS.has(bin));
+    }
+  }
+  return found;
+}
+
+/** `*`, `?` or `[` in a path word. */
+function hasGlobChars(text: string): boolean {
+  return /[*?[]/u.test(text);
+}
+
+/** A shell glob component as an anchored regular expression. */
+function globRegex(component: string): RegExp {
+  let source = "";
+  for (const char of component) {
+    if (char === "*") source += ".*";
+    else if (char === "?") source += ".";
+    else if (char === "[" || char === "]") source += char;
+    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+  }
+  try {
+    return new RegExp(`^${source}$`, "u");
+  } catch {
+    return /^.*$/u;
+  }
+}
+
+/** Names a credential file goes by, for a pattern to be tested against. */
+const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", "auth.json", "env", "vault.enc", "keys"];
+/** Names an organ goes by, beyond the credentials. */
+const ORGAN_NAMES: readonly string[] = [
+  ...CREDENTIAL_NAMES,
+  "config.yaml",
+  "config.yml",
+  "shell-hooks-allowlist.json",
+  "shell-hooks-allowlist.json.lock",
+  "agent-hooks",
+  "approval",
+  "scripts",
+];
+
+/** Could some component of `path`'s pattern name the home or the approval home? */
+function globCouldNameGateHome(path: string): boolean {
+  return path
+    .split(/[/\\]+/u)
+    .some((component) => hasGlobChars(component) && [".hermes", ".approval"].some((name) => globRegex(component).test(name)));
+}
+
+/** SF3a: a written pattern that could land on an organ. */
+function globCouldNameOrgan(path: string): boolean {
+  if (globCouldNameGateHome(path)) return true;
+  const last = basename(path);
+  if (!hasGlobChars(last)) return false;
+  const pattern = globRegex(last);
+  const parent = dirname(path);
+  const parentIsHome =
+    parent.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") ||
+    hasGlobChars(parent);
+  return parentIsHome && ORGAN_NAMES.some((name) => pattern.test(name));
+}
+
+/** SF3b: a read pattern whose directory is unknown, that could name a credential. */
+function globCouldNameCredential(path: string): boolean {
+  const last = basename(path);
+  if (!hasGlobChars(last)) return globCouldNameGateHome(path);
+  const pattern = globRegex(last);
+  return CREDENTIAL_NAMES.some((name) => pattern.test(name)) || globCouldNameGateHome(path);
+}
+
+/** The entries a final-component glob matches, or `null` when the directory is unknown. */
+function expandGlob(path: string): string[] | null {
+  const parent = dirname(path);
+  if (hasGlobChars(parent)) return null;
+  try {
+    const pattern = globRegex(basename(path));
+    return readdirSync(canonicalPath(parent))
+      .filter((name) => pattern.test(name))
+      .map((name) => join(parent, name));
+  } catch {
+    return null;
+  }
+}
+
+function isDirectoryPath(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The gate's own directories (recheck 3, SF1): a Hermes home (or profile home)
+ * root, an approval home, a home's `approval/`, and its `scripts/`. Everything
+ * else under a home (`workspace/`, `skills/`, `memories/`, `sessions/`) is
+ * ordinary work, which matters because a hosted image runs ALL agent work under
+ * `$HERMES_HOME`.
+ */
+function gateRootKind(directory: string): "home" | "approval-home" | "home-approval" | "scripts" | null {
+  const segments = directory.split(/[/\\]+/u).filter((segment) => segment.length > 0);
+  const last = segments[segments.length - 1];
+  const isHome = (at: number): boolean =>
+    segments[at] === ".hermes" ||
+    (segments[at - 2] === ".hermes" && segments[at - 1] === "profiles" && segments[at] !== undefined);
+  if (last === undefined) return null;
+  if (isHome(segments.length - 1)) return "home";
+  if (last === ".approval") return "approval-home";
+  if (last === "approval" && isHome(segments.length - 2)) return "home-approval";
+  if (last === "scripts" && isHome(segments.length - 2)) return "scripts";
+  return null;
+}
+
+/** A glob or an unknown name written here may be an organ (SF1b). */
+function writesIntoGateRoot(directory: string): boolean {
+  return gateRootKind(directory) !== null;
+}
+
+/**
+ * A directory a recursive read of which reads credentials (SF1a): the home
+ * root, the approval home, a home's `approval/`, and any directory under a home
+ * that directly holds a credential file.
+ */
+function holdsCredentials(directory: string): boolean {
+  if (!isDirectoryPath(directory)) return false;
+  const kind = gateRootKind(directory);
+  if (kind === "home" || kind === "approval-home" || kind === "home-approval") return true;
+  if (!directory.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval")) return false;
+  return CREDENTIAL_FILE_NAMES.some((name) => existsSync(join(directory, name)));
+}
+
+const CREDENTIAL_FILE_NAMES: readonly string[] = [
+  ".env",
+  "auth.json",
+  "config.yaml",
+  "config.yml",
+  "shell-hooks-allowlist.json",
+  "shell-hooks-allowlist.json.lock",
+];
+
+function isTarExtract(args: readonly string[]): boolean {
+  const first = args[0] ?? "";
+  return args.some((arg) => arg === "--extract" || arg === "--get" || /^-[a-zA-Z]*x/u.test(arg)) ||
+    (!first.startsWith("-") && first.includes("x"));
+}
+
+function flagValue(args: readonly string[], short: string, long: string | null): string | null {
+  for (const [at, arg] of args.entries()) {
+    if (arg === short) return args[at + 1] ?? null;
+    if (arg.startsWith(short) && arg.length > short.length && !arg.startsWith("--")) return arg.slice(short.length);
+    if (long !== null && arg.startsWith(`${long}=`)) return arg.slice(long.length + 1);
+    if (long !== null && arg === long) return args[at + 1] ?? null;
+  }
+  return null;
+}
+
+/** Binaries every operand of which is a path they create, change or remove. */
+const WRITE_EVERY_OPERAND: ReadonlySet<string> = new Set([
+  "touch", "truncate", "mkdir", "rm", "rmdir", "shred", "tee", "unlink",
+]);
+/** Binaries whose LAST operand is the destination and the rest are sources. */
+const WRITE_LAST_OPERAND: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
+/** Binaries whose first operand is a mode or owner and the rest are paths. */
+const WRITE_AFTER_FIRST_OPERAND: ReadonlySet<string> = new Set(["chmod", "chown", "chgrp"]);
+/** Readers that walk a directory they are handed. */
+const RECURSIVE_READERS: ReadonlySet<string> = new Set([
+  "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "tar", "zip", "du", "tree",
+]);
+
+/**
+ * `path` resolved through the realpath of its deepest existing ancestor, so a
+ * symlinked parent is judged by where it lands and a path that does not exist
+ * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
+ */
+function canonicalPath(path: string): string {
+  let current = path;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return resolvePathSegments(realpathSync(current), ...tail.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolvePathSegments(path);
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 /** The environment variable that turns the sandbox requirement on (APRV-193). */
@@ -5467,8 +6090,13 @@ function runHarnessHook(
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
 ): number {
+  // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
+  // on both a usage error's empty stdout is a harness that runs the call, and
+  // on Hermes a non-zero exit with an empty stdout is an allow outright.
   const configurationError = (message: string): number =>
-    adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
+    adapter.kind === "codex" || adapter.kind === "hermes"
+      ? deny(streams, "hook-io", message, adapter.kind)
+      : usageError(streams, message);
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
     ...POLICY_FLAGS,
@@ -5749,7 +6377,18 @@ function runHarnessHook(
     }
   }
 
-  if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
+  // APRV-445: a tool the adapter's own rule table gates goes on to the gated
+  // path below; one it reads is allowed here, with no policy load, exactly as
+  // an in-scope read is.
+  const ruledEarly = toolRuleOf(adapter, input);
+  if (ruledEarly?.kind === "read") {
+    return allow(streams, ruledEarly.reason, adapter.kind, codexCommand);
+  }
+  if (
+    ruledEarly === null &&
+    input.toolName !== adapter.shellTool &&
+    !adapter.fileTools.includes(input.toolName)
+  ) {
     if (!adapter.readTools.includes(input.toolName)) {
       return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
     }
@@ -5770,7 +6409,10 @@ function runHarnessHook(
     // spawn, provided the hook is configured with `--dir` as the docs show
     // (otherwise `hookScope` runs `git rev-parse` to find the primary).
     const early = hookScope(parsed.flags, cwd);
-    if (readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null) {
+    if (
+      credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
+      readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
+    ) {
       return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
     }
   }
@@ -6254,6 +6896,9 @@ function commandHarnessHook(
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
 ): number {
+  if (adapter.kind === "hermes") {
+    return hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam);
+  }
   try {
     return runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
   } catch (cause) {
@@ -6267,6 +6912,146 @@ function commandHarnessHook(
       `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       adapter.kind,
     );
+  }
+}
+
+/**
+ * The Hermes hook's last line of defence (APRV-445): whatever happened inside,
+ * a `pre_tool_call` answer leaves this function as a verdict Hermes blocks on or
+ * as an explicit allow, and never as anything Hermes would read as an allow by
+ * default.
+ *
+ * Hermes (v2026.9.24, `agent/shell_hooks.py`) blocks on exit 2 whatever stdout
+ * says, and blocks on any other non-zero exit only when stdout carries a block
+ * directive; ANY OTHER NON-ZERO EXIT WITH AN EMPTY STDOUT IS AN ALLOW, with a
+ * warning in a log nobody reads. So this enforces two rules on every path:
+ *
+ * - a non-zero exit always carries the `{action:"block"}` directive on stdout
+ *   and is always exactly 2;
+ * - exit 0 on a pre-event is only ever the adapter's own `{}` allow. A path that
+ *   returned 0 having printed nothing is a path nobody wrote a verdict for, and
+ *   it blocks.
+ *
+ * A post-event is untouched: it never blocks (see the post path), and it prints
+ * nothing on stdout by design. A throw becomes the same block the other
+ * adapters' catch produces.
+ */
+function hermesFailClosed(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string,
+  adapter: HarnessAdapter,
+  /** APRV-427: serve's wait seam, passed through untouched (null on the CLI). */
+  waitSeam: HookWaitSeam | null,
+): number {
+  let stdout = "";
+  const tracked: Streams = {
+    out: (text) => {
+      stdout += text;
+      streams.out(text);
+    },
+    err: (text) => streams.err(text),
+  };
+  // The post-event question is answered from the raw input, once, before the
+  // run: the run itself may be what fails to read it.
+  let raw: string | null = null;
+  const reading = (): string => {
+    raw ??= readStdin();
+    return raw;
+  };
+  // A signal before the wait installs its own handler. The default disposition
+  // of SIGTERM and SIGINT is to die with nothing on stdout, which Hermes reads
+  // as an allow, and the wait's handler (which withdraws and prints
+  // `hook-interrupted`) exists only from the moment the hook starts waiting.
+  // This guard covers the whole run before and after that stretch; the wait's
+  // handler is prepended, so inside the wait it answers first and exits. CLI
+  // only: under `approval serve` (a wait seam) the process's signals belong to
+  // the server.
+  const onEarlySignal = (signal: NodeJS.Signals): void => {
+    if (raw !== null && isHermesPostEvent(raw)) process.exit(EXIT_OK);
+    if (stdout.length === 0) {
+      try {
+        writeSync(
+          1,
+          harnessBlockDirective(
+            "hook-interrupted",
+            `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
+            "hermes",
+          ).stdout,
+        );
+      } catch {
+        // stdout is gone; the exit code below is the whole verdict.
+      }
+    }
+    process.exit(HERMES_DENY_EXIT);
+  };
+  const onEarlyTerm = (): void => onEarlySignal("SIGTERM");
+  const onEarlyInt = (): void => onEarlySignal("SIGINT");
+  if (waitSeam === null) {
+    process.on("SIGTERM", onEarlyTerm);
+    process.on("SIGINT", onEarlyInt);
+  }
+  try {
+    return hermesVerdict();
+  } finally {
+    if (waitSeam === null) {
+      process.off("SIGTERM", onEarlyTerm);
+      process.off("SIGINT", onEarlyInt);
+    }
+  }
+
+  function hermesVerdict(): number {
+    let code: number;
+    try {
+      code = runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
+    } catch (cause) {
+      // A post-event never blocks: the call already ran (see the post path).
+      if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
+      if (stdout.length > 0) {
+        // A verdict was already printed; one more object would be unparseable.
+        return HERMES_DENY_EXIT;
+      }
+      return deny(
+        tracked,
+        "hook-io",
+        `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        adapter.kind,
+      );
+    }
+    const post = raw !== null && isHermesPostEvent(raw);
+    if (post) return code;
+    const blocked = /"action"\s*:\s*"block"/u.test(stdout);
+    if (code === EXIT_OK && stdout.length > 0) return code;
+    if (code === EXIT_OK || !blocked) {
+      if (stdout.length > 0) {
+        // Something that is not a block is already on stdout, and a second
+        // object after it is unparseable stdout, which `fail_closed` blocks and a
+        // build without it allows. The exit code is the verdict that cannot be
+        // misread, so it carries the block.
+        return HERMES_DENY_EXIT;
+      }
+      return deny(
+        tracked,
+        "hook-io",
+        code === EXIT_OK
+          ? "the hook reached no verdict for this call; nothing authorizes it"
+          : `the hook exited ${String(code)} without a verdict; nothing authorizes this call`,
+        adapter.kind,
+      );
+    }
+    return HERMES_DENY_EXIT;
+  }
+}
+
+/** Is this raw Hermes event a `post_tool_call`? Unreadable input is not. */
+function isHermesPostEvent(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return false;
+    return (parsed as Record<string, unknown>)["hook_event_name"] === HERMES_POST_TOOL_EVENT;
+  } catch {
+    return false;
   }
 }
 

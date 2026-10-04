@@ -439,7 +439,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["autonomy"],
-      "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form may add rates, `allow_irreversible`, `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
+      "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form may add rates, `allow_irreversible`, `agent_may_request`, `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
       "allOf": [
         {
           "$comment": "SPEC.md §5.2 (amended, APRV-127): `live_rate` belongs to `supervised-live` and to nothing else. Required there, because a live mode with no fraction declares a control without saying how much of it runs, and the runtime would have to invent the number an author did not write. Forbidden everywhere else, because a rate sitting on a `manual`, `supervised-retro` or `autonomous` rule is a fraction its author believes is in force that nothing reads — the same silent no-op this schema's closed shape exists to prevent. APRV-185 adds `human-only` to that everywhere-else, and the `else` branch below already carries it with no new clause: a level whose actions no agent may take has no fraction of them to gate, so a `live_rate` written there is a control its author believes is running over a population of size zero.",
@@ -491,6 +491,22 @@
               }
             }
           }
+        },
+        {
+          "$comment": "SPEC.md §5.2 (amended, APRV-445): `agent_may_request: true` opens the `propose` verb to a class an operator declared, so the level it sits on must be one an agent may ask about. Refused on `human-only` as a load error: a human-only class is inert to agents (SPEC.md §11.1 invariant 9), and a flag saying an agent may file a request for one is a door the gate would only slam. False is admitted everywhere as the explicit spelling of the default.",
+          "if": {
+            "type": "object",
+            "properties": { "agent_may_request": { "const": true } },
+            "required": ["agent_may_request"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "autonomy": {
+                "enum": ["supervised-live", "supervised", "supervised-retro", "autonomous", "manual"]
+              }
+            }
+          }
         }
       ],
       "properties": {
@@ -503,6 +519,10 @@
         "allow_irreversible": {
           "type": "boolean",
           "description": "SPEC.md §5.2/§7 (amended, APRV-317): explicit permission for truthful `reversible: false` actions matching this rule to retain its nonmanual autonomy. Omission or false preserves the manual floor. Every equally most-specific matching rule must say true; defaults and action metadata cannot supply it."
+        },
+        "agent_may_request": {
+          "type": "boolean",
+          "description": "SPEC.md §5.2 (amended, APRV-445): whether an agent may open a request in this class with `approval propose`, naming the class itself and carrying its payload inline. Absent and false mean no. It is read two ways and only these two: on a key that names the class EXACTLY, and on a declared family key `<prefix>.*` the class falls under. `propose` additionally requires the class to be an exact key of `classes`, so a wildcard rule alone never makes a class proposable; the exact key's own value wins when it states one, and otherwise the most specific family that states one decides. Adding or changing it is a policy edit like any other and takes a human re-attestation, which voids pending requests (`policy-drift`)."
         },
         "approvers": {
           "type": "array",

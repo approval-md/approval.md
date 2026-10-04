@@ -26,7 +26,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,8 @@ import {
   payloadStoreDirFor,
   storePayload,
   storeReference,
+  PAYLOAD_DIR_MODE,
+  PAYLOAD_FILE_MODE,
   PAYLOAD_STORE_DIRNAME,
 } from "../src/core/payload-store.js";
 import { register, request } from "./clock-adapters.js";
@@ -575,4 +577,43 @@ test("request --payload - reads the material from stdin", () => {
     existsSync(join(world.dir, ".approval", PAYLOAD_STORE_DIRNAME, `${HASH}.json`)),
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Owner-only (APRV-445)
+// ---------------------------------------------------------------------------
+
+test("every store write is 0600 inside a 0700 directory, whatever the umask or the directory's old mode", () => {
+  assert.equal(PAYLOAD_FILE_MODE, 0o600);
+  assert.equal(PAYLOAD_DIR_MODE, 0o700);
+  const previous = process.umask(0o000);
+  try {
+    // A fresh store under a permissive umask.
+    const fresh = join(scratch.root, "owner-only-fresh", PAYLOAD_STORE_DIRNAME);
+    const stored = storePayload(fresh, { text: "private words" });
+    assert.equal(stored.ok, true);
+    if (!stored.ok) throw new Error("unreachable");
+    assert.equal(statSync(stored.path).mode & 0o777, 0o600);
+    assert.equal(statSync(fresh).mode & 0o777, 0o700);
+
+    // A store an older build, git or a person left world-readable is narrowed
+    // by the next write, and a re-store of old bytes is narrowed too.
+    const open = join(scratch.root, "owner-only-open", PAYLOAD_STORE_DIRNAME);
+    mkdirSync(open, { recursive: true, mode: 0o755 });
+    chmodSync(open, 0o755);
+    const old = payloadPath(open, payloadHash({ text: "old" }));
+    writeFileSync(old, JSON.stringify({ text: "old" }), { mode: 0o644 });
+    const again = storePayload(open, { text: "old" });
+    assert.equal(again.ok, true);
+    assert.equal(statSync(open).mode & 0o777, 0o700);
+    assert.equal(statSync(old).mode & 0o777, 0o600);
+
+    // The reference writer shares the boundary.
+    const ref = storeReference(open, "a".repeat(64), "agentmail:inbox/draft");
+    assert.equal(ref.ok, true);
+    if (!ref.ok) throw new Error("unreachable");
+    assert.equal(statSync(ref.path).mode & 0o777, 0o600);
+  } finally {
+    process.umask(previous);
+  }
 });

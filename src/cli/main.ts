@@ -1020,6 +1020,9 @@ async function settle(
  * can print, and the long-lived verbs (`channel`, `daemon`, `up`, `mcp`) report
  * their eventual code through `process.exitCode` exactly as they did.
  */
+/** Hermes blocks on exit 2 whatever stdout says (APRV-398, APRV-445). */
+const HERMES_HOOK_BLOCK_EXIT = 2;
+
 export async function main(argv: string[], options: MainOptions = {}): Promise<number> {
   const streams = options.streams ?? defaultStreams();
   const cwd = options.cwd ?? process.cwd();
@@ -1109,6 +1112,18 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     case "request": {
       const { commandRequest } = await import("./gate.js");
       return commandRequest(rest, streams, cwd);
+    }
+    // APRV-445. `propose` registers and requests in one call for a requester
+    // whose payload is a flag value rather than a file, in a class the policy
+    // declares by name and opens to agents; `start` records that its requester
+    // is carrying a proposed action out. Both enforce in core.
+    case "propose": {
+      const { commandPropose } = await import("./gate.js");
+      return commandPropose(rest, streams, cwd);
+    }
+    case "start": {
+      const { commandStart } = await import("./gate.js");
+      return commandStart(rest, streams, cwd);
     }
     case "grant":
     case "reject":
@@ -1331,6 +1346,26 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       // The latency-critical case (APRV-209): a session pays this load on every
       // command it runs, so `hook.ts` and its core dependencies are the only
       // verb graph a pass-through invocation brings in.
+      //
+      // APRV-445. The Hermes hook must block on every error path, including
+      // the ones before `hook.ts` exists: a module that fails to load (a broken
+      // install, a half-written `dist/`) throws out of this import, and an
+      // uncaught throw exits 1 with nothing on stdout, which Hermes reads as an
+      // ALLOW. So for that one harness the import and the call are caught here,
+      // and the block directive is spelled inline because the module that
+      // normally spells it is the one that may not have loaded.
+      if (rest[0] === "hermes") {
+        try {
+          const { commandHook } = await import("./hook.js");
+          return commandHook(rest, streams, cwd);
+        } catch (cause) {
+          const message = `hook-io: the hook could not run: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }; nothing authorizes this call`;
+          streams.out(`${JSON.stringify({ action: "block", message })}\n`);
+          return HERMES_HOOK_BLOCK_EXIT;
+        }
+      }
       const { commandHook } = await import("./hook.js");
       return commandHook(rest, streams, cwd);
     }

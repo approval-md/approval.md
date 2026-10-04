@@ -67,10 +67,12 @@
  */
 
 import {
+  chmodSync,
   constants as fsConstants,
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   unlinkSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -118,10 +120,29 @@ function detail(cause: unknown): string {
 /** Distinguishes concurrent writers' temp files within one process. */
 let tempCounter = 0;
 
-/** `"wx"` spelled for the write layer: create, exclusive, write-only. */
+/**
+ * The store's file and directory modes (APRV-445): owner-only.
+ *
+ * A payload is the exact material a human approves, and for a proposal that is
+ * someone's own words. Until this the store took the process umask, so on a
+ * shared host every file was world-readable under a world-listable directory.
+ * The file is created 0600 (the umask can only remove bits from that), and the
+ * store directory is made 0700 on EVERY write, including a directory that
+ * already existed with a wider mode, because a store created by an older build,
+ * by `git checkout` or by hand is exactly the one that is open. A directory that
+ * cannot be narrowed refuses the write rather than storing into it: the request
+ * that needed the bytes is refused `payload-store-failed` and nothing is
+ * appended. Only the store's own directory is touched; its parents are the
+ * operator's.
+ */
+export const PAYLOAD_FILE_MODE = 0o600;
+export const PAYLOAD_DIR_MODE = 0o700;
+
+/**
+ * `"wx"` spelled for the write layer: create, exclusive, write-only. The temp
+ * file opens with {@link PAYLOAD_FILE_MODE}, so the umask can only narrow it.
+ */
 const TEMP_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
-/** The mode Node's `"wx"` opens with; the umask applies as it always did. */
-const TEMP_MODE = 0o666;
 
 /**
  * The directories whose entries this write made new: the store directory
@@ -169,8 +190,11 @@ function writeAtomic(
   const data = Buffer.from(bytes, "utf8");
   let firstCreatedDir: string | undefined;
   try {
-    firstCreatedDir = mkdirSync(directory, { recursive: true });
-    const handle = writeLayer.open(temp, TEMP_FLAGS, TEMP_MODE);
+    firstCreatedDir = mkdirSync(directory, { recursive: true, mode: PAYLOAD_DIR_MODE });
+    if ((statSync(directory).mode & 0o777) !== PAYLOAD_DIR_MODE) {
+      chmodSync(directory, PAYLOAD_DIR_MODE);
+    }
+    const handle = writeLayer.open(temp, TEMP_FLAGS, PAYLOAD_FILE_MODE);
     try {
       const written = writeLayer.write(handle, data);
       if (written !== data.length) {

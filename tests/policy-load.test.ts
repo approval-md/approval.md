@@ -496,3 +496,48 @@ test("parseHardenedYaml is the shared implementation both paths call", () => {
     assert.match(tagged.message, /a task envelope/u);
   }
 });
+
+// ---------------------------------------------------------------------------
+// agent_may_request (APRV-445)
+// ---------------------------------------------------------------------------
+
+test("agent_may_request loads on a family key and on members, true and false", () => {
+  const result = expectOk(loadFixture("valid", "agent-may-request.md"));
+  const classes = result.policy.classes ?? {};
+  assert.equal(classes["intent.publish.*"]?.agent_may_request, true);
+  assert.equal(classes["intent.publish.closed"]?.agent_may_request, false);
+  assert.equal(classes["intent.publish.inferred.index"]?.agent_may_request, undefined);
+});
+
+test("a non-boolean agent_may_request, or true on a human-only rule, fails closed as schema-invalid", () => {
+  const result = expectFail(
+    loadFixture("invalid", "schema-invalid-agent-may-request.md"),
+    "schema-invalid",
+  );
+  const paths = (result.errors ?? []).map((error) => error.path).join("\n");
+  assert.match(paths, /intent\.publish\.inferred\.index/u, paths);
+  assert.match(paths, /account\.credential/u, paths);
+
+  // Each spelling alone is enough.
+  for (const rule of [
+    "  x.y:\n    autonomy: manual\n    agent_may_request: 1",
+    "  x.y:\n    autonomy: human-only\n    agent_may_request: true",
+  ]) {
+    const file = join(scratch, `amr-${String(rule.length)}.md`);
+    writeFileSync(
+      file,
+      ["```yaml approval-policy", 'version: "0.1"', "defaults:", "  autonomy: manual", "classes:", rule, "```", ""].join("\n"),
+      "utf8",
+    );
+    expectFail(loadPolicy({ file }), "schema-invalid");
+  }
+
+  // `false` on human-only is the explicit default and loads.
+  const file = join(scratch, "amr-false-human-only.md");
+  writeFileSync(
+    file,
+    ["```yaml approval-policy", 'version: "0.1"', "defaults:", "  autonomy: manual", "classes:", "  x.y:\n    autonomy: human-only\n    agent_may_request: false", "```", ""].join("\n"),
+    "utf8",
+  );
+  expectOk(loadPolicy({ file }));
+});

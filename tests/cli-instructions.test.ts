@@ -481,6 +481,11 @@ const AGENT_FACING: readonly string[] = [
   // it to agents cannot let one clear someone else's queue.
   "withdraw",
   "wait",
+  // APRV-445. `propose` asks, in a class the operator opened to agents by name;
+  // `start` records the execution a grant or the policy already authorized,
+  // requester-only. Neither decides anything.
+  "propose",
+  "start",
   "run",
   // APRV-193. It REMOVES a capability from a command and establishes nothing:
   // no record, no token, no authority. Withholding it from agents would leave

@@ -223,19 +223,19 @@ test("the sealed-token key store is one of the lines init writes, by name", () =
   assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /^\.approval\/keys\/$/mu);
 });
 
-test(".approval/payloads/ is NOT ignored, and both halves of the choice are printed", () => {
+test(".approval/payloads/ IS ignored (APRV-445), and both halves of the choice are printed", () => {
   const dir = caseDir();
   const { run, parsed } = initJson(dir);
 
   assert.ok(
-    !readFileSync(join(dir, ".gitignore"), "utf8").includes("payloads"),
-    "init ignored the payload store. Payloads are the bytes an approval bound to; evidence defaults to tracked.",
+    readFileSync(join(dir, ".gitignore"), "utf8").split("\n").includes(".approval/payloads/"),
+    "init left the payload store tracked. Since APRV-445 the bytes an approval bound to (for a proposal, a person's own words) are ignored by default.",
   );
   const note = parsed.next_steps.find((step) => step.includes(".approval/payloads/"));
   assert.ok(note !== undefined, "no next step explains the payload-tracking choice");
   assert.ok(
-    note.includes("TRACKED") && note.includes(".gitignore"),
-    "the payload note must state the default AND the one-line alternative",
+    note.includes("IGNORED") && note.includes("payload_retention") && note.includes("remove that line"),
+    "the payload note must state the default, the retention key, AND the one-line alternative",
   );
   assert.equal(run.stderr, "", "a successful init prints nothing on stderr");
 });

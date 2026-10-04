@@ -15,6 +15,102 @@ before a tag.
 
 ## Unreleased
 
+- **`start` never turns a human's no into a policy start (APRV-445, security
+  pass).** On the policy path, a proposal's start now refuses `not-granted` when
+  the key has a pending or granted request (re-checked inside the append), when
+  its latest request was rejected or revoked under the policy in force, and when
+  the class is `supervised-live` and the draw selects the bytes. Before this a
+  selected live proposal that a human rejected, or that the agent withdrew or
+  let expire, could start with `authorization: policy` and no grant. An
+  unselected live proposal still starts on the policy path.
+- **A signal before the wait no longer kills the Hermes hook silently
+  (APRV-445).** `approval hook hermes` used to handle SIGTERM and SIGINT only
+  once it was waiting on a human. A signal that landed earlier (for example
+  just after the request was appended) killed it with nothing on stdout, which
+  Hermes reads as an allow. The CLI hook now guards its whole run: such a
+  signal prints the `hook-interrupted` block directive and exits 2 (a
+  post-event exits 0). The wait's own handler still answers first inside the
+  wait and withdraws as before. Under `approval serve` the process's signals
+  stay the server's.
+- **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
+  home's own directories (root, profile homes, `approval/`, `scripts/`) and the
+  approval home are organs; `workspace/`, `skills/` and the rest are ordinary
+  work, so `grep -r`, `find`, `rm -f *.tmp` and friends run there again. An
+  unresolvable `cd` makes later relative paths conservative; globs that could
+  name the home or an organ, globbed credential reads and `<` reads are caught;
+  copies into a directory, `tar -x` and `unzip` are judged by where their files
+  land; profile homes carry the home's organs. `propose` ends a lost race with
+  the new refusal `contended` instead of `already-decided`.
+- **Proposals after the recheck (APRV-445).** `wait` voids a grant only where
+  its spend enforces `policy-drift` (harness grants, every proposal): a token
+  grant `approval run` still spends after a re-attest reads `granted`. `propose`
+  re-checks its decision inside the append, so concurrent identical proposals on
+  a void key withdraw it once and ask once, and a stale caller cannot ask again
+  over a fresh grant. The Hermes `terminal` path resolver follows `cd`,
+  `$HERMES_HOME`, heredocs, globs and symlinks, resolves only write positions,
+  and read tools treat a directory under `.hermes`/`.approval` as credentials.
+  `wait` reports `executed` for a policy-path start after a withdrawal; key ids
+  must be printable; the muse registration route refuses `propose:` ids; the
+  bin's Hermes guard covers `--no-color` and any silent non-zero exit.
+- **Proposals after review (APRV-445).** `approval wait` reports what a request
+  still authorizes: a grant whose window lapsed is `expired` (exit 3), and a
+  grant or pending request pinned to a re-attested policy is `void`, a new exit
+  code 7 meaning "ask again". `propose` re-files in exactly those cases instead
+  of answering a dead grant idempotently, and answers `state: executed` after
+  `start`. New refusals `task-is-proposal`, `task-not-proposal` and
+  `key-class-mismatch` (the key must begin with `<class>:`); key and summary
+  caps; lone surrogates and non-finite numbers are usage errors. Proposals are
+  never collapsed, superseded or ordered as stale by the Telegram channel.
+  `cli.js` itself answers `approval hook hermes` with the block directive when
+  the runtime cannot load. Writes to `.hermes/.env`, `.env.*` and `auth.json`
+  are `policy.core` (reads stay `account.credential`, now through `read_file`
+  too), and a Hermes `terminal` call's relative words are also judged against its
+  `workdir`. The unix socket refuses an other-writable directory and only
+  unlinks a socket a connect proves dead.
+
+- **An agent can declare and ask in one call, with the payload inline
+  (APRV-445).** `approval propose --class <c> --key <k> --summary <s>
+  --payload-json <json>` registers a one-action envelope and requests it,
+  for a requester with no file on the gate's machine (an agent behind
+  `approval serve`, which refuses every path flag). The class must be an exact
+  key of the policy's `classes`, opened to agents with the new per-class key
+  `agent_may_request: true` on itself or on a declared `<prefix>.*` family;
+  anything else refuses the new code `class-not-agent-requestable` and registers
+  nothing. The task id is derived from the actor, class and key, so a retry with
+  the same bytes appends nothing (`idempotent: true`). `approval start <task>
+  --action <k> --payload-json <json>` records the `execution.started` for a
+  proposed action its requester carries out, requester-only and bound to the
+  proposed bytes, through the existing harness-grant and policy-start paths.
+  Both are on the serve agent surface. `policy check` reports `agentRequest`,
+  and `policy amend`'s diff reports a change in it. Payloads over 256 KiB refuse
+  `payload-too-large` (exit 2).
+- **`approval wait --timeout 0` reads the current state and never sleeps
+  (APRV-445),** so a poller through `approval serve`, which runs every call
+  through one queue, no longer holds the tenant's hook traffic for the length of
+  a wait.
+- **The payload store is owner-only (APRV-445).** Every file under
+  `.approval/payloads/` is written 0600 inside a directory narrowed to 0700 on
+  every write, whatever the umask or the directory's earlier mode. `approval
+  init` now lists `.approval/payloads/` in the `.gitignore` lines it writes
+  (it was tracked by default before); remove the line to keep the bytes in
+  history.
+- **`approval serve --listen unix:<path>` (APRV-445),** also
+  `APPROVAL_SERVE_LISTEN`: a unix-domain socket, opened 0666 in a directory the
+  serving uid must own (the directory is the access control). A stale socket is
+  replaced, a live one or a non-socket file is refused.
+- **The Hermes adapter classifies the tools it used to wave through
+  (APRV-445).** `cronjob_manage` (and `cronjob`) actions that change the
+  schedule are `cron.manage`, `process_manage` (and `process`) writes are
+  `process.write`, every `browser_*` is `browser.exec`, `skill_manage` is
+  `skill.manage`, `delegate_task` is `agent.delegate`, `send_message` is
+  `message.send`; list/poll/log/wait actions stay reads. Writes under
+  `.hermes/scripts/` are `cron.manage`, and `.hermes/approval/` and the
+  allowlist's `.lock` sidecar join the `policy.core` organs.
+- **The Hermes hook blocks on every error path (APRV-445).** A pre-event answer
+  is either the adapter's own `{}` allow or a `{"action":"block"}` directive at
+  exit 2: a misconfigured hook entry, a throw, a signal mid-wait, a path that
+  reached no verdict, and a module that fails to load all print the directive.
+  Hermes reads any other non-zero exit with an empty stdout as an allow.
 - **The payload store is durable before ok (APRV-457).** `storePayload` now
   fsyncs the temp file before the rename and the store directory after it
   (plus the parent of every directory the write created), through the same
