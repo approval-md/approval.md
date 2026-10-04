@@ -994,6 +994,162 @@ test("doctor: an existing payload store that cannot be written fails with a fix"
 });
 
 // ---------------------------------------------------------------------------
+// payload-store: the bytes verified records bind (APRV-457)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one payload a fresh home's store holds: the attested policy text, which
+ * the fixture's real `policy attest` stored and bound on its `policy.updated`
+ * record (APRV-356). That record proves the store held the bytes, so it is the
+ * natural subject for every damage shape below; nothing here hand-writes a log
+ * line, only the store file the record points at.
+ */
+function attestedPayload(home: string): { path: string; hash: string; bytes: Buffer } {
+  const storeDir = join(home, ".approval", "payloads");
+  const files = readdirSync(storeDir).filter((name) => name.endsWith(".json"));
+  assert.equal(files.length, 1, files.join(" "));
+  const name = files[0] as string;
+  const path = join(storeDir, name);
+  return { path, hash: name.slice(0, -".json".length), bytes: readFileSync(path) };
+}
+
+test("doctor: a NUL-filled payload a verified record binds is the crash-before-writeback signature, not tampering (APRV-457)", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const payload = attestedPayload(home);
+  // What a crash before writeback leaves: the name, over blocks never written.
+  writeFileSync(payload.path, Buffer.alloc(payload.bytes.length));
+  const logBefore = readFileSync(logPathOf(home));
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /1 payload\(s\) a verified record binds are empty or NUL-filled, the crash-before-writeback signature/u);
+  assert.match(check.detail, /nothing was tampered/u);
+  assert.ok(
+    check.detail.includes(`${payload.hash.slice(0, 12)}… bound at seq 1, ${String(payload.bytes.length)} NUL byte(s)`),
+    check.detail,
+  );
+  assert.doesNotMatch(check.detail, /tampered or corrupted/u);
+  const fix = check.fix ?? "";
+  assert.ok(fix.startsWith(`mv ${payload.path} ${payload.path}.torn`), fix);
+  assert.ok(fix.includes(`\`approval payload hash\` prints ${payload.hash}`), fix);
+  assert.match(fix, /Doctor moves, restores and deletes nothing/u);
+  // A report: the torn file and the log are exactly as they were.
+  assert.deepEqual(readFileSync(payload.path), Buffer.alloc(payload.bytes.length));
+  assert.deepEqual(readFileSync(logPathOf(home)), logBefore);
+});
+
+test("doctor: an EMPTY payload file is the same crash signature (APRV-457)", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const payload = attestedPayload(home);
+  writeFileSync(payload.path, "");
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /empty or NUL-filled, the crash-before-writeback signature/u);
+  assert.ok(check.detail.includes(", 0 NUL byte(s)"), check.detail);
+});
+
+test("doctor: a payload missing although its record proves the store held it is named as the crash signature (APRV-457)", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const payload = attestedPayload(home);
+  rmSync(payload.path);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "fail");
+  assert.ok(
+    check.detail.includes(
+      `1 payload(s) are missing although the record that bound them proves the store held them (${payload.hash.slice(0, 12)}…, policy.updated at seq 1)`,
+    ),
+    check.detail,
+  );
+  assert.match(check.detail, /the crash-before-writeback signature when this store has always lived beside this log/u);
+  assert.doesNotMatch(check.detail, /tampered or corrupted/u);
+  assert.ok((check.fix ?? "").startsWith("approval payload hash <copy> — restore"), String(check.fix));
+});
+
+test("doctor: a store directory missing under records that prove it held bytes is not 'not created yet' (APRV-457)", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const payload = attestedPayload(home);
+  rmSync(join(home, ".approval", "payloads"), { recursive: true });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "fail");
+  assert.doesNotMatch(check.detail, /is not created until the first request/u);
+  assert.ok(check.detail.includes(`(${payload.hash.slice(0, 12)}…, policy.updated at seq 1)`), check.detail);
+  assert.ok((check.fix ?? "").startsWith("approval payload hash <copy> — restore"), String(check.fix));
+});
+
+test("doctor: a payload holding any byte that is not NUL is tampering, never the crash signature (APRV-457)", async () => {
+  // Shapes that are not the pure crash signature, each of which must read as
+  // tampered or corrupted: other JSON, a valid prefix with a NUL tail (a
+  // partial writeback could leave it, and the stricter reading wins), a $ref
+  // pointer in place of material the record proves was held, and a single
+  // non-NUL byte in a sea of NULs.
+  const shapes: Array<{ name: string; bytes: (original: Buffer) => Buffer }> = [
+    { name: "other JSON", bytes: () => Buffer.from('{"text":"not the attested policy"}', "utf8") },
+    {
+      name: "a $ref replacing held material",
+      bytes: () => Buffer.from('{"$ref":"https://attacker.example/x"}', "utf8"),
+    },
+    {
+      name: "valid prefix, NUL tail",
+      bytes: (original) =>
+        Buffer.concat([original.subarray(0, 8), Buffer.alloc(original.length - 8)]),
+    },
+    {
+      name: "one stray byte",
+      bytes: (original) => {
+        const forged = Buffer.alloc(original.length);
+        forged[original.length - 1] = 0x20;
+        return forged;
+      },
+    },
+  ];
+
+  for (const shape of shapes) {
+    const home = await makeHome({ port: await freePort() });
+    const payload = attestedPayload(home);
+    writeFileSync(payload.path, shape.bytes(payload.bytes));
+
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+    assert.equal(run.code, 1, `${shape.name}: ${run.stdout}${run.stderr}`);
+    const check = checkNamed(run, "payload-store");
+    assert.equal(check.status, "fail", shape.name);
+    assert.match(check.detail, /do not hash to their name and are NOT the crash signature/u, shape.name);
+    assert.match(check.detail, /treat them as tampered or corrupted/u, shape.name);
+    assert.doesNotMatch(check.detail, /crash-before-writeback signature/u, shape.name);
+    assert.ok(
+      (check.fix ?? "").startsWith(`mv ${payload.path} ${payload.path}.suspect`),
+      `${shape.name}: ${String(check.fix)}`,
+    );
+  }
+});
+
+test("doctor: an intact store's row reads exactly as it did before the integrity read (APRV-457)", async () => {
+  // The bound payload is present and verifies, so the row is the pre-APRV-457
+  // pass, word for word. (A pruned payload's absence is retention, not damage:
+  // tests/prune.test.ts pins that against a real prune.)
+  const home = await makeHome({ port: await freePort() });
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "pass", check.detail);
+  assert.equal(check.fix, undefined);
+  assert.match(check.detail, /is writable and holds 1 payload file\(s\)/u);
+});
+
+// ---------------------------------------------------------------------------
 // Shape and hygiene
 // ---------------------------------------------------------------------------
 
@@ -1935,6 +2091,14 @@ test("doctor: every failing check's fix begins with a runnable command", async (
   const plaintextEnv = await homeWithEnvFile(port, [`APPROVAL_TG_TOKEN=${ENV_FILE_TOKEN}`]);
   const badScheme = await homeWithEnvFile(port, ["APPROVAL_TG_TOKEN=keyring:nope"]);
 
+  // payload-store (APRV-457): a torn payload and a tampered one.
+  const tornPayload = await makeHome({ port });
+  writeFileSync(attestedPayload(tornPayload).path, Buffer.alloc(64));
+  const tamperedPayload = await makeHome({ port });
+  writeFileSync(attestedPayload(tamperedPayload).path, '{"text":"tampered"}');
+  const lostPayload = await makeHome({ port });
+  rmSync(attestedPayload(lostPayload).path);
+
   counter += 1;
   const emptyRoot = join(scratch, `root-${counter}-empty-fixes`);
   mkdirSync(emptyRoot, { recursive: true });
@@ -1982,6 +2146,10 @@ test("doctor: every failing check's fix begins with a runnable command", async (
     { args: ["doctor", "--json", "--root", fresh], cwd: openEnv, env: GREEN_ENV },
     { args: ["doctor", "--json", "--root", fresh], cwd: plaintextEnv, env: GREEN_ENV },
     { args: ["doctor", "--json", "--root", fresh], cwd: badScheme, env: GREEN_ENV },
+    // payload-store: torn and tampered bound payloads.
+    { args: ["doctor", "--json", "--root", fresh], cwd: tornPayload, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: tamperedPayload, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: lostPayload, env: GREEN_ENV },
   ];
 
   const seen = new Set<string>();

@@ -2919,7 +2919,17 @@ The checks, at length:
   `--payload` request creates it); an existing directory this process cannot
   write FAILS, because a request already accepted by the gate would refuse
   `payload-store-failed` mid ceremony. The probe creates and removes one empty
-  file and reads no payload.
+  file. Since APRV-457 the row also reads back every payload a verified record
+  binds (pruned ones excepted) and FAILS on two distinct readings. An empty or
+  all-NUL file, or a missing file whose record proves the store held it
+  (`policy.proposed`, `policy.updated`, or `approval.requested` carrying
+  `display_hash`), is the crash-before-writeback signature: nothing was
+  tampered and the bytes are gone from this store; the fix moves a torn file
+  aside and restores a copy that `approval payload hash` confirms. A file
+  holding any non-NUL byte that does not verify is NOT the crash signature
+  (a partial writeback leaving a valid prefix and a NUL tail lands here too, the stricter reading) and reads as tampering or
+  corruption; the fix moves it aside as `.suspect`. Doctor moves, restores and
+  deletes nothing.
 - **audit-sampling** — sampling fails open by design (SPEC.md §5.2), so an
   unconfigured sampler silently audits nothing; this states the disabled reason
   out loud. A sampler nobody configured skips; a half-configured one fails,

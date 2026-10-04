@@ -25,7 +25,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
@@ -33,7 +33,7 @@ import { Daemon, type DaemonEvent } from "../src/daemon/daemon.js";
 import { planPrune, prunePayloads } from "../src/daemon/prune.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
-import { payloadStoreCensus } from "../src/core/payload-census.js";
+import { payloadIntegrity, payloadStoreCensus } from "../src/core/payload-census.js";
 import { inForcePolicyText } from "../src/core/policy-proposal.js";
 import { payloadPath, payloadStoreDirFor, storePayload } from "../src/core/payload-store.js";
 import {
@@ -226,6 +226,27 @@ test("a rejected payload older than the retention is pruned exactly once", () =>
   assert.deepEqual(again.removed, []);
   assert.equal(prunedEvents(unit).length, 1);
   assertClean(unit);
+});
+
+test("a pruned payload's absence is retention, while the same absence unrecorded is named lost (APRV-457)", () => {
+  // The request carries display_hash (the runtime held the bytes when it
+  // appended), so a missing file is evidence of loss UNLESS the log says why
+  // it is gone.
+  const pruned = setup("1h");
+  settled(pruned, "reject");
+  assert.deepEqual(payloadIntegrity(eventsOf(pruned), pruned.storeDir), []);
+  prune(pruned, at(200));
+  assert.equal(stored(pruned), false);
+  assert.deepEqual(payloadIntegrity(eventsOf(pruned), pruned.storeDir), []);
+
+  const vanished = setup("1h");
+  settled(vanished, "reject");
+  rmSync(payloadPath(vanished.storeDir, HASH));
+  const damage = payloadIntegrity(eventsOf(vanished), vanished.storeDir);
+  assert.equal(damage.length, 1, JSON.stringify(damage));
+  assert.equal(damage[0]?.kind, "lost");
+  assert.equal(damage[0]?.hash, HASH);
+  assert.equal(damage[0]?.kind === "lost" && damage[0].event, "approval.requested");
 });
 
 test("revoked and executed are terminal too, and executed is dated from the log", () => {
