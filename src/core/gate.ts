@@ -3752,10 +3752,14 @@ export const HARNESS_SPENDING_TASK = "spent_by_task";
 /**
  * The policy stamp every harness `execution.started` carries (APRV-447).
  *
- * `payload.policy_sha256` names the attested policy the gate resolved this
- * start's class against: the hash {@link requireAttestation} returned for the
- * one policy read the appending attempt made, which is the read the class was
- * resolved from and the attestation was judged on. Before this field a
+ * `payload.policy_sha256` names the attested policy the write boundary
+ * re-checked this start's class against: the hash {@link requireAttestation}
+ * returned for the one policy read the appending attempt made, which is the
+ * read the class was resolved from and the attestation was judged on. On the
+ * hook route the verdict itself was drawn from the hook's own, earlier read;
+ * a re-attest landing between that read and this append leaves the stamp
+ * naming the policy in force at the append (the two-read window predates this
+ * field, and is a follow-up to close). Before this field a
  * policy-authorized start (autonomous, supervised, an unselected live draw)
  * carried no policy at all, and a reader had to reconstruct the rules in force
  * from the latest `policy.updated` before the record's seq. A granted start
@@ -3768,15 +3772,16 @@ export const HARNESS_SPENDING_TASK = "spent_by_task";
  * is built here from runtime-held values, so a caller's input, option bag or
  * action payload that happens to carry the same name changes nothing (§11.1
  * invariant 1: the stamp comes from the verified attestation the gate already
- * resolved, never from an envelope). An unattested or drifted policy never
- * reaches this line, because both write paths refuse `policy-not-attested`
- * first.
+ * resolved, never from an envelope). An unattested or edited policy never
+ * reaches this line: both write paths refuse `policy-not-attested` first, and
+ * a grant spend under a policy other than the one the grant pinned is refused
+ * `policy-drift` before its payload is built.
  *
  * READ by nothing that decides. No verdict, budget, draw, loop floor or
  * single-use check consults it, and `core/state.ts` reads `policy_sha256` from
- * `approval.requested` alone. Its reader is the agentvillage-data follower
- * (DATA-212 Lane C), which maps it to `policy_version` on `action.*` events, so
- * the field NAME is a cross-repository contract.
+ * `approval.requested` alone. Its readers are downstream followers of the log
+ * that join a start to the rules it ran under, so the field NAME is a stable
+ * contract.
  */
 function harnessStartPolicyStamp(attestedSha256: string): Record<string, string> {
   return { [POLICY_HASH_FIELD]: attestedSha256 };
@@ -4348,7 +4353,8 @@ function attemptHarnessStart(
     // APRV-146: unconditional, because a caller that states no bytes was refused
     // above. The record says what ran, not only that something did.
     payload_hash: bytes,
-    // APRV-447: the attested policy whose resolution authorized this start.
+    // APRV-447: the attested policy this write boundary re-checked the class
+    // against (see `harnessStartPolicyStamp` for the hook's two-read window).
     // Without it a reader of a policy-authorized start had to reconstruct the
     // rules in force from the latest `policy.updated` before this seq.
     ...harnessStartPolicyStamp(attested.sha256),
