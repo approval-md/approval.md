@@ -3,11 +3,11 @@ id: APRV-454
 title: >-
   SPEC attestation batch: 383, 415, 421, 422, 423, 424, 428 and 445 in one
   ceremony
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-03 03:50'
-updated_date: '2026-10-04 11:30'
+updated_date: '2026-10-04 18:03'
 labels:
   - spec
   - policy.edit
@@ -28,7 +28,7 @@ The 2026-09-22 handover asked for one SPEC attestation batch (383 plus 421 plus 
 <!-- AC:BEGIN -->
 - [x] #1 One branch carries every listed hunk applied verbatim from its source (design/hosted-daemon-identity.md section 7, APRV-421 notes, APRV-423 notes, APRV-424 notes, APRV-428 notes, docs/hermes-hook.md SPEC status section, PR 569's spec diff, the 422 wording) with the pending-sign-off markers removed and one Amended marker per task
 - [x] #2 The diff is reviewed against each source hunk by a verifier and the docs guard and conformance suites pass
-- [ ] #3 Carter attests with approval policy attest --path and the policy.updated record for the spec file lands; the task notes record the seq
+- [x] #3 Carter attests with approval policy attest --path and the policy.updated record for the spec file lands; the task notes record the seq
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -105,4 +105,6 @@ Nits left as they are:
 The third commit exists because the hook refuses an amend of the local commit (vcs.history.rewrite is human-only).
 
 Final SPEC.md sha256 at head (supersedes d6732aa0… above): 59212c6d7497caba1d11777fe7c2171bb18457998bd7a8b57b1fc1a17a1abe49. Targeted suites on these bytes: docs-guard, conformance, conformance-regen, attest-path-signoff, protected-path-guard*, cli-attest, mcp-server and serve, 281/281, exit 0.
+
+DONE: Carter attested SPEC.md at digest 59212c6d7497caba1d11777fe7c2171bb18457998bd7a8b57b1fc1a17a1abe49 as gate.path.signed_off seq 82687 (2026-10-04 17:4xZ), carried by records PR #598; PR #590 merged after the guard re-ran green. Remaining pending-sign-off markers after this batch: APRV-317 x11, 309 x2, 322 x2, 325.1, 325.2 (next batch).
 <!-- SECTION:NOTES:END -->
