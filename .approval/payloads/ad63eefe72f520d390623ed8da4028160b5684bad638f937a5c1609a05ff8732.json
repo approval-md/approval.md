@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted/backlog/tasks && grep -n -i 'slide\\b\\|slides\\|17\\b\\|placeholder\\|PR #1[0-9]\\|QR_LINK\\|third pass' hosted-21\\ -* | cut -c1-600","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && head -80 CLAUDE.md && ls research releases 2>/dev/null | head -40 && grep -li \"approval\" backlog/tasks/* docs/* 2>/dev/null | head -40","cwd":"/Users/carter/dev/approval-md"}

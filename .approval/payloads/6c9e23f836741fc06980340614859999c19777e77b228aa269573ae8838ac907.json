@@ -1,0 +1,1 @@
+{"command":"grep -rn \"templates/APPROVAL\\|approval-policy\\|APPROVAL_RELAY\\|HOSTED_<TENANT>\\|approval_ttl\" /Users/carter/dev/agentvillage-wt/data-250-template --include=*.ts --include=*.py --include=*.md --include=*.yml --include=*.yaml --include=*.json -l","cwd":"/Users/carter/dev/approval-md"}

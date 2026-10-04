@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && cp backlog/tasks/data-25[0-6]\\ -\\ *.md backlog/tasks/data-259\\ -\\ *.md /Users/carter/dev/agentvillage-data-wt/approval-backlog/backlog/tasks/ && ls /Users/carter/dev/agentvillage-data-wt/approval-backlog/backlog/tasks | grep -c \"data-25[0-9]\"","cwd":"/Users/carter/dev/approval-md"}

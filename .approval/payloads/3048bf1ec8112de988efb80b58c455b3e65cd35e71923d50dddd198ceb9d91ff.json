@@ -1,0 +1,1 @@
+{"command":"grep -n \"^| 1b\\.\\|^| Control-plane deploy path\\|^\\* Carter owns\\|^\\* Building the two\" \"/Users/carter/dev/agentvillage/private/context/vault/20260918 Agent Village v2 - Data Infrastructure Design Document.md\" | cut -c1-80","cwd":"/Users/carter/dev/approval-md"}

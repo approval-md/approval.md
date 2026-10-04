@@ -1,0 +1,1 @@
+{"command":"grep -n \"grant_seq\" src/cli/hook.ts src/core/*.ts schema/event.schema.json | head -20; grep -n \"\\\"execution.started\\\"\" src/cli/hook.ts | head","cwd":"/Users/carter/dev/approval-md"}

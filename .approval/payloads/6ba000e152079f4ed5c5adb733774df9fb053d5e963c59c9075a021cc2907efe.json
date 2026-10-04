@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-449-446 && sed -n 280,370p src/core/log.ts; grep -rn \"expectedHead:\" src/core/*.ts | head -8; grep -n \"export function readVerifiedRecords\" -A 30 src/core/*.ts | head -50","cwd":"/Users/carter/dev/approval-md"}

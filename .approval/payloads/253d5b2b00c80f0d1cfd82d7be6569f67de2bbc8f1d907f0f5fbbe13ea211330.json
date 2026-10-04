@@ -1,0 +1,1 @@
+{"command":"grep -m1 -H \"^# \" docs/*.md | cut -c1-200; ls docs/proposals docs/upstream","cwd":"/Users/carter/dev/approval-md"}

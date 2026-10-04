@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && sed -n 157,175p tests/cli-propose.test.ts; grep -rn \"async function capture\\|await main(\" tests/*.test.ts | grep -v long-help | head -5","cwd":"/Users/carter/dev/approval-md"}

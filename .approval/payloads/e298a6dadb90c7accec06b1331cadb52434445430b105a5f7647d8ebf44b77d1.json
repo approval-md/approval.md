@@ -1,0 +1,1 @@
+{"command":"grep -n \"serve\\|'up'\\|\\\"up\\\"\\|--as\\|APPROVAL_AGENT\\|DAEMON_ID\\|HERMES_HOME\\|api-base\\|--dir\\|init\" /Users/carter/dev/approval-md-hosted/hermes-image/supervisor.mjs | head -60","cwd":"/Users/carter/dev/approval-md"}

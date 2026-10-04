@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/private/agentvillage-integration && grep -ohE '`[^` ]*[/][^` ]*\\.(ts|md|py|sh|js|json|yml|yaml|sql|toml)`|`[^` ]+/`' 00*.md 05*.md 06*.md 07*.md 08*.md 09*.md | sort -u | tr '\\n' ' '","cwd":"/Users/carter/dev/approval-md"}

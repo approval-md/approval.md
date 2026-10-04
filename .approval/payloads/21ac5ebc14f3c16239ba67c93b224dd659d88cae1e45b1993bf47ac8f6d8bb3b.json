@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && grep -n -i -E 'approval' dbt/models/core/*.sql dbt/models/marts/*.sql dbt/models/staging/stg_decision_requested.sql dbt/macros/av_envelope_columns.sql dbt/seeds/outcome_classes.csv | cut -c1-240 | head -50","cwd":"/Users/carter/dev/approval-md"}

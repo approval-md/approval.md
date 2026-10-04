@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data-wt/approval-backlog && gh pr merge 171 --squash --delete-branch --auto 2>&1 | tail -2","cwd":"/Users/carter/dev/approval-md"}

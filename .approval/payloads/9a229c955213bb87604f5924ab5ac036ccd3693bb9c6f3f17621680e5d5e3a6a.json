@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-449-446 && grep -rn \"proposal-stale\\|\\\"already-granted\\\"\\|case \\\"expired\\\"\" src/cli/*.ts | head -10","cwd":"/Users/carter/dev/approval-md"}

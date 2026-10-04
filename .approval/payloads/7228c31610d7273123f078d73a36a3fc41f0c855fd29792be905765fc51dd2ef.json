@@ -1,0 +1,1 @@
+{"command":"grep -rln -e \"cron.manage\" -e \"agent.delegate\" -e \"browser.exec\" /Users/carter/dev/approval-md-wt/data-212-propose/src","cwd":"/Users/carter/dev/approval-md"}

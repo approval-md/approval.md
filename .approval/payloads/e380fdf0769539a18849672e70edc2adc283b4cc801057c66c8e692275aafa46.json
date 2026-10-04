@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && git checkout -- backlog/tasks && rm backlog/tasks/data-25[0-6]\\ -\\ *.md backlog/tasks/data-259\\ -\\ *.md && git status --short | head -5; echo \"clean-check: $(git status --short | wc -l)\"","cwd":"/Users/carter/dev/approval-md"}

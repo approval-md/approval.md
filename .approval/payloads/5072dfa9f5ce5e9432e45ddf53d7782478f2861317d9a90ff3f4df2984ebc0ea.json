@@ -1,0 +1,1 @@
+{"command":"grep -n \"^Status\\|^Created\\|^Updated\\|^Labels\\|^Dependencies\\|^Milestone\\|^- \\[\" /Users/carter/.claude-edge/projects/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/tool-results/bpcsw27g1.txt | sed -n '1,80p'","cwd":"/Users/carter/dev/approval-md"}

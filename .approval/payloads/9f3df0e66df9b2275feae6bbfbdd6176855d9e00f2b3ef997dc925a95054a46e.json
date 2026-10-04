@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && grep -rln -E \"columns|80 col|width\" tests/cli-help*.ts tests/cli-long-help.test.ts 2>/dev/null; grep -rn -E \"> ?(80|100|120)\\b\" tests/cli-help*.test.ts 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md"}

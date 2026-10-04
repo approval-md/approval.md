@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"bounded_agent_led\\|platform_record\\|agent_report\\|backbone\\|cannot edit\\|RQ4\" /Users/carter/dev/agentvillage/private/updated-updated-direction.md | cut -c1-500 | head -40","cwd":"/Users/carter/dev/approval-md"}

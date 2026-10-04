@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && grep -n \"which runs every verb and every hook call through one queue\" docs/cli-reference.md src/cli/*.ts SPEC.md CHANGELOG.md","cwd":"/Users/carter/dev/approval-md"}

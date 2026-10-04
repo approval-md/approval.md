@@ -1,0 +1,1 @@
+{"command":"sed -n 104,130p /Users/carter/dev/approval-md-wt/data-212-propose/schema/policy.schema.json; sed -n 164,178p /Users/carter/dev/approval-md-wt/data-212-propose/schema/policy.schema.json","cwd":"/Users/carter/dev/approval-md"}

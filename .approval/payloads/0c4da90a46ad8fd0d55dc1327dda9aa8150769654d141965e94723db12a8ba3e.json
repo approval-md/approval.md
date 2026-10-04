@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"Proposed for discussion\\|bounded_agent_led\\|platform_record\\|agent_report\\|100 to 150\\|100-150\\|three years\\|maritime\" \"/Users/carter/dev/agentvillage/private/context/vault/20260918 Agent Village v2 - Data Infrastructure Design Document.md\" | cut -c1-400 | head -40","cwd":"/Users/carter/dev/approval-md"}

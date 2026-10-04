@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-228-launcher && grep -rn \"approvaldCountCmd\\|approvaldMatch\\|--dir /var/lib/approvald\" control-plane/tests/*.js | head -20","cwd":"/Users/carter/dev/approval-md"}

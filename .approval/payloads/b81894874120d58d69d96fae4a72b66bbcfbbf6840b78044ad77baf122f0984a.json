@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && ls docs/design/ && grep -n -i \"digest.share\\|approval\\|propose\\|agent_may_request\\|odin\" docs/design/*.md | head -50","cwd":"/Users/carter/dev/approval-md"}

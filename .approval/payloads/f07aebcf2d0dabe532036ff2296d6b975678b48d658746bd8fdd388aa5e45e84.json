@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog/tasks && grep -c . /dev/null; head -30 \"data-233 - \"*.md","cwd":"/Users/carter/dev/approval-md"}

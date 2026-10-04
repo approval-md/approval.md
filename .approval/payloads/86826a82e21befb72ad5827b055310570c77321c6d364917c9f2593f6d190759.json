@@ -1,0 +1,1 @@
+{"command":"tail -20 /Users/carter/dev/agentvillage/private/journal/2026-10-02.md; echo ======; grep -n -i \"deploy\\|release\\|ARCHIVE_READ\\|approvald\" /Users/carter/dev/agentvillage/private/handover/2026-10-02-releases-demo-and-team-canaries.md | cut -c1-400","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted/backlog/tasks && head -16 hosted-5\\ -* && grep -n -i 'accept\\|limit\\|PR #' hosted-5\\ -* | head -30","cwd":"/Users/carter/dev/approval-md"}

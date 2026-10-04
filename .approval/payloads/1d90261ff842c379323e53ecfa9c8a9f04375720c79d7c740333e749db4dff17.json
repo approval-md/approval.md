@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"approval\" \"/Users/carter/dev/agentvillage/private/context/vault/20260918 Agent Village v2 - Data Infrastructure Design Document.md\" | head -80","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"sed -n 106,140p \"/Users/carter/.claude-edge/projects/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/tool-results/bw2gk7ak9.txt\" | cut -c1-1500; ls backlog; ls backlog/tasks | grep -E \"aprv-4(3[5-9]|4[0-9])\"","cwd":"/Users/carter/dev/approval-md"}

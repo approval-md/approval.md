@@ -1,0 +1,1 @@
+{"command":"grep -rln -e \"templates/APPROVAL\" -e \"approval-policy\" -e \"APPROVAL_RELAY\" -e \"HOSTED_<TENANT>\" -e \"approval_ttl\" /Users/carter/dev/agentvillage-wt/data-250-template --exclude-dir=node_modules --exclude-dir=.git","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && git log --oneline -8 2>/dev/null; ls docs backlog/tasks | head -80; grep -n -i 'D16' docs/05* | head -20","cwd":"/Users/carter/dev/approval-md"}

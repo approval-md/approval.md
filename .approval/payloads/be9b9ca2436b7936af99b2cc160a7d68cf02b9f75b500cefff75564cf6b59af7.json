@@ -1,0 +1,1 @@
+{"command":"grep -n -i -e \"templates/APPROVAL\" -e \"approval-policy\" -e \"policy\" -e \"approval.md\" /Users/carter/dev/agentvillage-wt/data-250-template/README.md","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/private/agentvillage-integration && grep -noE \"#[0-9]{2,3}\\b[^|]{0,60}\" 00*.md 05*.md 06*.md 07*.md 08*.md 09*.md | grep -E \"#(569|550|549|547|523|553|552|164|166|168|161|54|58|59)\\b\" | cut -c1-200 | head -60","cwd":"/Users/carter/dev/approval-md"}
