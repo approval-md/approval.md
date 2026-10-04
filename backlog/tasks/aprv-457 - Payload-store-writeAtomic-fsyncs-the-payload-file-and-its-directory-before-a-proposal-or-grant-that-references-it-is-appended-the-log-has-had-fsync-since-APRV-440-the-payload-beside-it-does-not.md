@@ -4,9 +4,11 @@ title: >-
   Payload store: writeAtomic fsyncs the payload file and its directory before a
   proposal or grant that references it is appended (the log has had fsync since
   APRV-440, the payload beside it does not)
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-10-04 01:39'
+updated_date: '2026-10-04 05:03'
 labels:
   - agent-village
 dependencies:
@@ -23,7 +25,58 @@ Found by the merge refuter on PR #569 (APRV-445) on 2026-10-04. src/core/payload
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 writeAtomic fsyncs the temp file before rename and the containing directory after, proven with an injected write layer that drops unsynced bytes
-- [ ] #2 approval doctor (or log verify) names a verified record whose payload is missing or NUL-filled as crash-before-writeback, distinct from a tampered payload
-- [ ] #3 propose and grant paths measured before and after; the per-call cost recorded in the implementation notes
+- [x] #1 writeAtomic fsyncs the temp file before rename and the containing directory after, proven with an injected write layer that drops unsynced bytes
+- [x] #2 approval doctor (or log verify) names a verified record whose payload is missing or NUL-filled as crash-before-writeback, distinct from a tampered payload
+- [x] #3 propose and grant paths measured before and after; the per-call cost recorded in the implementation notes
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Extend the APRV-440 write layer (src/core/log-write-layer.ts) with rename(from,to), and add an exported fsyncDirectory helper there that goes through the layer with the same unsupported-errno tolerance log.ts uses (EINVAL/EBADF/ENOTSUP/EOPNOTSUPP); log.ts itself stays byte-for-byte unchanged. Update the two existing layer implementers (tests/log-fsync.test.ts, tests/append-fsync.bench.ts) with a delegating rename.
+2. payload-store.ts writeAtomic: open the temp O_EXCL through the layer, one write with a byte-count check (short write fails), fsync the temp fd, close, rename through the layer, then fsync the store directory and, when mkdir created directories, the parent of each one created (innermost first). Any failure before the rename unlinks the temp and returns write-failed (nothing stored, log untouched, callers unchanged); a failed directory fsync after the rename returns write-failed saying the file may be in place (a content-addressed orphan at worst). Hashing, canonicalization and every caller's append are unchanged.
+3. tests/payload-fsync.test.ts: (a) call-order trace through a recording layer (open excl, write, fsync, close, rename, dir fsyncs) captured at return; (b) a crash-simulating layer that tracks what was fsynced and, at a simulated crash, drops unsynced data (NUL-fill at the written length) and undurable directory entries (name removed); storePayload through it survives the crash and loads ok, while the pre-APRV-457 sequence (open, write, close, rename, no fsync) replayed through the same layer loses the payload; also confirm the new test fails against the old source before implementing; (c) fsync/short-write/dir-fsync failure cases; (d) production layer spy via syncBuiltinESMExports.
+4. Doctor: new pure function in src/core/payload-census.ts (payloadIntegrity) reading verified records + store: for each bound, unpruned hash, a present file that is empty or all NUL is torn (crash-before-writeback); a present file with any non-NUL byte that fails verification is tampered/corrupt; an absent file is lost only when a record proves the store held the bytes at append time (policy.proposed, policy.updated with payload_hash, approval.requested carrying display_hash). checkPayloadStore in src/cli/doctor.ts reports torn/lost as the crash-before-writeback signature and mismatched as tampering, each with its own fix text; no new row, pass detail unchanged when clean. Tests in tests/cli-doctor.test.ts (records built through the real append path).
+5. Opt-in bench tests/payload-fsync.bench.ts (APPROVAL_BENCH=1): request-with-payload (approval.requested), policy propose (policy.proposed) and attestation (policy.updated) paths with a layer that skips only the payload store's fsyncs vs the real layer; record medians in the notes.
+6. CHANGELOG Unreleased entry; docs/cli-reference.md doctor row text if it describes payload-store; npm test via the CLAIMS protocol, typecheck, lint; PR, CI watch, refuter, merge queue.
+
+Revision to step 5: the bench measures storePayload alone, the propose path as approval.requested with inline material (the intake every propose verb reaches), and the grant path for policy text as an attestation (policy.updated storing the attested bytes); policy.proposed stores exactly as attestation does and was not measured separately. Control arm = pre-APRV-457 store (no temp fsync, no directory open/fsync/close) with the log's APRV-440 fsync left real.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+What was done (APRV-457).
+
+Durability. src/core/payload-store.ts writeAtomic now goes through the APRV-440 write layer (src/core/log-write-layer.ts): open the temp O_WRONLY|O_CREAT|O_EXCL (what "wx" meant, mode 0o666 as before), one write with a byte-count check (a short write fails), fsync the temp fd, close, rename, then fsync the store directory and, when mkdir created directories, the parent of every directory it created (innermost first, the same walk log.ts makes on a first append). Only then does it report ok, and every caller (gate.ts request intake and the nonmanual retain path, policy-proposal.ts propose, attest.ts attestation) appends the binding record only after that ok, so on disk the payload precedes the record. A failure before the rename unlinks the temp and returns write-failed as before; a failed directory fsync after the rename returns write-failed with a message saying the file may be present now and absent after a crash (storePayload no longer says "Nothing was stored" in that one case). Directory fsync errors EINVAL/EBADF/ENOTSUP/EOPNOTSUPP are tolerated exactly as the log tolerates them; Windows skips directory fsync as the log does. No new refusal code: callers still surface payload-store-failed.
+
+Seam. The layer interface gained rename(from, to) and the module gained an exported fsyncDirectory(dir) that uses the current layer and the same unsupported-errno set. src/core/log.ts is byte-for-byte unchanged (it keeps its own private copy of fsyncDirectory and the errno set) so the append path is exactly what APRV-440 shipped; the duplication is deliberate and small. The two existing layer implementers (tests/log-fsync.test.ts, tests/append-fsync.bench.ts) gained a delegating rename; the log traces are unchanged because the log never renames.
+
+Tests. tests/payload-fsync.test.ts installs a CrashDisk layer that delegates every call and keeps a durability ledger for the store directory: data survives only after its fd was fsynced, a name only after its directory was fsynced, and a file never written through the layer is treated as lost. crash() rewrites the store into the post-crash image (unsynced data -> NUL bytes at the written length, unsynced name -> gone). Cases: call order at return (open excl, write, fsync, close, rename, dir open/fsync/close); first store that creates .approval/payloads syncs payloads/, .approval/ and the root; a crash after ok keeps a payload that loads and verifies; the pre-APRV-457 sequence replayed through the same layer loses the payload (lost alone, NUL-filled when someone else later syncs the directory); end to end, approval.requested with inline material, crash, the log verifies clean and the bound payload loads, and the store's directory fsync precedes the log write in the trace; temp fsync EIO, short write, directory fsync EIO, directory fsync EINVAL; the production layer spied through syncBuiltinESMExports (exactly two fsyncSync calls: the file at its full length, then a directory). Run against the OLD payload-store.ts before the fix: 9 of 10 failed (crash case reported "lost", end-to-end case showed the log fsynced and no store fsync), and the legacy-replay case passed, as it should on both.
+
+Doctor. New pure payloadIntegrity(records, storeDir) in src/core/payload-census.ts (the module whose job is comparing the log with the store; #569 does not touch it). For every hash a verified record binds (deep scan, as bindingsOf does), pruned hashes skipped: empty or all-NUL file -> torn; absent file -> lost ONLY when a record proves the store held the bytes at append (policy.proposed, policy.updated with payload_hash, approval.requested carrying display_hash), since other bindings (task.registered declarations, requests without material) may name bytes never held; any non-NUL byte that fails loadPayload's verification -> mismatch; a read error other than ENOENT -> unreadable; a $ref reference file is not damage. src/cli/doctor.ts checkPayloadStore calls it after the census and, only when there is damage, returns a failing payload-store row from payloadDamageCheck; an intact store's row is word for word what it was (no new row, so tests/doctor-rows.ts is untouched). Torn and lost are named "the crash-before-writeback signature" (lost also names the other reading: a store not carried with the log); mismatch is named "NOT the crash signature ... treat them as tampered or corrupted". Fix text leads with the most serious reading: mismatch -> mv <file> <file>.suspect (keep it, investigate, restore from a trusted source); torn -> mv <file> <file>.torn then restore a copy `approval payload hash` confirms; lost -> approval payload hash <copy> then restore. Doctor moves, restores and deletes nothing.
+
+Decision: why the torn signature cannot swallow a tampered payload. torn requires the file to be empty or every byte NUL. An RFC 8785 serialization is never empty and never contains a raw NUL (JCS escapes control characters), so no valid payload can read as torn, and any file with even one non-NUL byte reads as mismatch. A valid prefix followed by a NUL tail (a partial multi-page writeback) is deliberately reported as mismatch, the stricter reading. A file someone zeroed by hand reads as torn; that is honest, since its bytes carry no information either way and the material is lost either way. Pinned in tests/cli-doctor.test.ts with three tampered shapes (other JSON, valid prefix plus NUL tail, one stray byte among NULs), each asserted to fail as tampered and never to mention the crash signature.
+
+Decision: lost needs proof the store held the bytes. Without that rule every request made without material and every task.registered declaration would read as lost. With it, a fresh clone of a repository that keeps payloads out of git (the default after APRV-445) and that has a store directory would still fail the row for every policy.updated binding; the text names that reading, and the row is honest that the in-force policy text is not recoverable there. A clone with no store directory at all keeps the pre-existing early pass.
+
+Bench (AC #3). Opt-in tests/payload-fsync.bench.ts (APPROVAL_BENCH=1 node --test dist/tests/payload-fsync.bench.js), macOS APFS, this machine, n=100 per arm, control arm = the pre-APRV-457 store (no temp fsync, no directory open/fsync/close) with the log's APRV-440 fsync left real:
+- storePayload alone: 7.997 ms median (p95 9.066) vs 0.150 ms (p95 0.500): +7.85 ms per payload.
+- propose path, approval.requested with inline material: 13.095 ms (p95 16.107) vs 5.029 ms (p95 6.341): +8.07 ms per call.
+- grant path for policy text, attestation storing the attested bytes (policy.updated): 11.697 ms (p95 13.914) vs 3.897 ms (p95 6.540): +7.80 ms per call.
+About 3.9 ms per fsync, two fsyncs per payload, consistent with APRV-440's 3.7 ms per append. Inside the 25 ms per-call budget APRV-440 recorded, so the store is not batched. A grant of an action (approval.granted) stores no payload and is unchanged.
+
+SPEC §11.1. This task touches no §11.1 invariant. Enforcement paths are unchanged (doctor is a report and reads only the records of its one verified walk); no refusal code is added or changed (write-failed and payload-store-failed as before); compare-and-append, the log append path, payload hashing and canonicalization are untouched.
+
+For whoever merges next to PR #569: both touch writeAtomic's mkdir and open lines (#569 adds PAYLOAD_DIR_MODE/PAYLOAD_FILE_MODE). The resolution is mechanical: keep `firstCreatedDir = mkdirSync(directory, { recursive: true, mode: PAYLOAD_DIR_MODE })` plus #569's chmod check, and pass PAYLOAD_FILE_MODE as the layer open's mode in place of TEMP_MODE.
+
+Not verified: doctor was not run against the primary checkout's live log and store (the hook classifies any read of the log directory from a script as log.mutate, and the task forbids touching .approval/). After merge, `approval doctor` in the primary will read back every bound payload; if any are torn or missing there, the payload-store row will now fail where it passed before.
+
+Validation: npm test exit 0 (5483 tests, 5481 pass, 0 fail, 2 skipped) on the uncommitted tree over 2873203d; npm run typecheck exit 0; npm run lint exit 0 (no warnings); targeted node --test of payload-fsync, payload-store, log-fsync, cli-doctor and prune exit 0 (135 pass).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+writeAtomic now fsyncs the temp file before the rename and the store directory (plus every parent a first store created) after it, through the APRV-440 write layer, before storePayload reports ok, so a payload is durable before the record binding it is appended. doctor's payload-store row reads back every bound payload and names an empty/all-NUL file, or a missing one whose record proves the store held it, as the crash-before-writeback signature, distinct from any file with a non-NUL byte that fails verification (tampering). Verified by tests/payload-fsync.test.ts (crash-model layer: 9/10 cases fail on the old store, all pass now), new cli-doctor and prune cases, the full suite (5481 pass, 0 fail), and the opt-in bench (+7.8 to +8.1 ms per payload on APFS).
+<!-- SECTION:FINAL_SUMMARY:END -->

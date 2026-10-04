@@ -111,7 +111,7 @@ import { describeOwners, otherOwnersOf, ownedBot } from "../core/channel-owner.j
 import type { EventRecord } from "../core/log.js";
 import { checkLogAnchor } from "./log-anchor.js";
 import { checkLogCheckpoints, checkpointPolicyOf } from "../core/checkpoint.js";
-import { payloadStoreCensus } from "../core/payload-census.js";
+import { payloadIntegrity, payloadStoreCensus, type PayloadDamage } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
@@ -681,8 +681,12 @@ const PAYLOAD_STORE_WARNING =
  * The probe is a real create-and-remove in the store directory, not a `statSync`
  * mode test: mode bits do not answer the question on a read-only mount, under an
  * ACL, or in a container whose uid mapping differs from the one that made the
- * directory. Nothing is left behind, and no payload file is read, written or
- * verified here.
+ * directory. Nothing is left behind, and no payload file is written here.
+ *
+ * Since APRV-457 the bound payloads are read back and verified (see
+ * {@link payloadDamageCheck}): a store that is writable but holds a torn,
+ * missing or tampered payload a verified record binds fails, each reading with
+ * its own text.
  */
 function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck {
   const storeDir = payloadStoreDirFor(logPath);
@@ -756,10 +760,120 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
       ? ""
       : `, ${census.awaitingRemoval} already recorded as pruned and awaiting removal by the daemon`;
 
+  // APRV-457: the bytes verified records bind, read back. Only a damaged store
+  // changes the row; an intact one reads exactly as it did before.
+  const damage = payloadIntegrity(records, storeDir);
+  if (damage.length > 0) return payloadDamageCheck(damage);
+
   return {
     check: "payload-store",
     status: "pass",
     detail: `${storeDir} is writable and holds ${files} payload file(s), ${census.pruned} pruned by the log, ${census.orphans} bound to no record${residue}; ${PAYLOAD_STORE_WARNING}`,
+  };
+}
+
+/** At most this many payloads are named per kind; the count covers the rest. */
+const DAMAGE_NAMED = 5;
+
+function namedDamage<T extends PayloadDamage>(items: T[], describe: (item: T) => string): string {
+  const named = items.slice(0, DAMAGE_NAMED).map(describe).join("; ");
+  const more = items.length > DAMAGE_NAMED ? `; and ${String(items.length - DAMAGE_NAMED)} more` : "";
+  return `${named}${more}`;
+}
+
+/**
+ * The payload-store row when bound payloads are not intact (APRV-457).
+ *
+ * Two readings, kept apart because they call for opposite reactions:
+ *
+ * - **The crash-before-writeback signature.** A file that is empty or all NUL
+ *   (`torn`), or a file that is absent although its record proves the store
+ *   held it (`lost`). A crash leaves exactly these and nothing else: it can drop
+ *   bytes and names, never write bytes nobody wrote. Before APRV-457 the store
+ *   did not fsync, so a platform kill could keep the (fsynced) record and drop
+ *   its payload. Nothing was tampered; the bytes are gone from this store.
+ * - **Tampering or corruption** (`mismatch`). The file holds at least one
+ *   non-NUL byte and does not verify. No crash produces that, so it is never
+ *   read as one, and its fix moves the file aside for investigation.
+ *
+ * The torn reading cannot swallow a tampered file that still carries content:
+ * it requires every byte to be NUL. A file someone zeroed by hand reads as torn,
+ * which is honest, because its bytes say nothing either way and the material is
+ * lost either way. A partially written payload (valid prefix, NUL tail) is
+ * reported as a mismatch, the stricter of the two readings.
+ *
+ * Doctor moves, restores and deletes nothing; every fix is the operator's.
+ */
+function payloadDamageCheck(damage: PayloadDamage[]): DoctorCheck {
+  const torn = damage.filter((item): item is Extract<PayloadDamage, { kind: "torn" }> => item.kind === "torn");
+  const lost = damage.filter((item): item is Extract<PayloadDamage, { kind: "lost" }> => item.kind === "lost");
+  const mismatch = damage.filter(
+    (item): item is Extract<PayloadDamage, { kind: "mismatch" }> => item.kind === "mismatch",
+  );
+  const unreadable = damage.filter(
+    (item): item is Extract<PayloadDamage, { kind: "unreadable" }> => item.kind === "unreadable",
+  );
+  const short = (hash: string): string => `${hash.slice(0, 12)}…`;
+
+  const parts: string[] = [];
+  if (mismatch.length > 0) {
+    parts.push(
+      `${String(mismatch.length)} payload(s) a verified record binds hold bytes that do not hash to their name and are NOT the crash signature (a crash leaves NUL bytes or nothing, never other bytes): treat them as tampered or corrupted (${namedDamage(
+        mismatch,
+        (item) => `${short(item.hash)} bound at seq ${String(item.seq)}`,
+      )}); every read re-verifies, so no channel renders them`,
+    );
+  }
+  if (torn.length > 0) {
+    parts.push(
+      `${String(torn.length)} payload(s) a verified record binds are empty or NUL-filled, the crash-before-writeback signature: the name reached the disk and the bytes did not, so nothing was tampered and the material is lost from this store (${namedDamage(
+        torn,
+        (item) => `${short(item.hash)} bound at seq ${String(item.seq)}, ${String(item.bytes)} NUL byte(s)`,
+      )})`,
+    );
+  }
+  if (lost.length > 0) {
+    parts.push(
+      `${String(lost.length)} payload(s) are missing although the record that bound them proves the store held them (${namedDamage(
+        lost,
+        (item) => `${short(item.hash)}, ${item.event} at seq ${String(item.seq)}`,
+      )}): the crash-before-writeback signature when this store has always lived beside this log (the name never reached the disk), or a store that was not carried with the log`,
+    );
+  }
+  if (unreadable.length > 0) {
+    parts.push(
+      `${String(unreadable.length)} payload(s) a verified record binds could not be read (${namedDamage(
+        unreadable,
+        (item) => `${short(item.hash)} bound at seq ${String(item.seq)}: ${item.detail}`,
+      )})`,
+    );
+  }
+
+  // One command leads the fix, for the reading that matters most: suspected
+  // tampering first, then a torn file (which must be moved before a copy can go
+  // back), then a lost one, then an unreadable one.
+  const restore = (hash: string, path: string): string =>
+    `restore ${hash}.json from wherever else it lives (another checkout, a backup, the git history of the store) once \`approval payload hash\` prints ${hash} for the copy, and put it at ${path}; the log records the binding and never the material, so nothing rebuilds it`;
+  let fix: string;
+  const firstMismatch = mismatch[0];
+  const firstTorn = torn[0];
+  const firstLost = lost[0];
+  if (firstMismatch !== undefined) {
+    fix = `mv ${shellWord(firstMismatch.path)} ${shellWord(`${firstMismatch.path}.suspect`)} — move each payload that does not verify aside (do not delete it), find out what wrote it, and ${restore(firstMismatch.hash, firstMismatch.path)}`;
+  } else if (firstTorn !== undefined) {
+    fix = `mv ${shellWord(firstTorn.path)} ${shellWord(`${firstTorn.path}.torn`)} — move each torn payload aside (the nonmanual intake refuses to replace a file that does not verify), then ${restore(firstTorn.hash, firstTorn.path)}`;
+  } else if (firstLost !== undefined) {
+    fix = `approval payload hash <copy> — ${restore(firstLost.hash, firstLost.path)}`;
+  } else {
+    const first = unreadable[0] as PayloadDamage;
+    fix = `chmod u+r ${shellWord(first.path)} — make each payload readable by the user running approval, check its ownership and the disk, then run approval doctor again`;
+  }
+
+  return {
+    check: "payload-store",
+    status: "fail",
+    detail: `${parts.join("; ")}; ${PAYLOAD_STORE_WARNING}`,
+    fix: `${fix}. Doctor moves, restores and deletes nothing`,
   };
 }
 

@@ -15,6 +15,27 @@ before a tag.
 
 ## Unreleased
 
+- **The payload store is durable before ok (APRV-457).** `storePayload` now
+  fsyncs the temp file before the rename and the store directory after it
+  (plus the parent of every directory the write created), through the same
+  write layer the log append has used since APRV-440, so the bytes a proposal
+  or grant binds are on disk before the record that binds them is appended.
+  Before this, a platform kill before writeback could keep the (fsynced)
+  record and lose its payload: a verified `payload_hash` pointing at a
+  NUL-filled or missing file. A short write, a failed file fsync or a failed
+  directory fsync is `write-failed` (no new code); a filesystem that cannot
+  sync a directory (EINVAL, EBADF, ENOTSUP, EOPNOTSUPP) is tolerated as the
+  log tolerates it. Hashing, canonicalization and the log append are
+  unchanged. Measured on macOS APFS (opt-in `tests/payload-fsync.bench.ts`):
+  about 7.8 ms per stored payload, on `storePayload`, the propose path and
+  the attestation path alike; not batched.
+- **doctor names a torn payload apart from a tampered one (APRV-457).** The
+  `payload-store` row reads back every payload a verified record binds. An
+  empty or all-NUL file, or a missing one whose record proves the store held
+  it, is the crash-before-writeback signature (nothing tampered, bytes lost);
+  a file with any non-NUL byte that does not verify is tampering or
+  corruption. Each has its own fix text, and an intact store's row is
+  unchanged.
 - **`edgeos` is a sender channel (APRV-455).** `approvers.<id>.senders.edgeos`
   maps a person's EdgeOS `/humans/me` id, raw (an ASCII letter or digit, then
   up to 127 letters, digits, `.`, `_` or `-`; colon-free, so it can never be
