@@ -27,7 +27,7 @@ approvers:
   carter:
     channels: [telegram, cli]
     senders:
-      telegram: "hmac-sha256:86f6206b50381ab42def752accc83b1bf8afe94bf23a96ea8e0adb2ce23958fe"   # HMAC-SHA-256 of the account id under APPROVAL_SENDER_KEY (APRV-370)
+      telegram: "hmac-sha256:ebbe49e73cb198cdb0197270e39fb1476c5562beadfe0bb1a87b5d8570a1e33b"   # HMAC-SHA-256 of the account id under APPROVAL_SENDER_KEY (APRV-370)
 
 protected_paths:            # widens policy.edit; the built-ins hold regardless
   - { path: SPEC.md, class: policy.edit.spec }
