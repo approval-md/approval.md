@@ -1,0 +1,1 @@
+{"command":"grep -n -A3 '\"bin\"' /Users/carter/dev/approval-md-wt/data-212-propose/package.json; ls -la /Users/carter/dev/approval-md-wt/data-212-propose/dist/src/cli | head -5","cwd":"/Users/carter/dev/approval-md"}

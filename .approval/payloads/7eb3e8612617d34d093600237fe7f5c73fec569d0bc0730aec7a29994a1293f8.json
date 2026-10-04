@@ -1,0 +1,1 @@
+{"command":"grep -rn \"CANONICAL_POLICY\" src/cli/*.ts | head -3; grep -n -A3 \"^defaults:\" src/cli/scaffold.ts | head -8","cwd":"/Users/carter/dev/approval-md"}

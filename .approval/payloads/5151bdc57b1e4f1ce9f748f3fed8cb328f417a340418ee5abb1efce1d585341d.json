@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"2026-09-28\\|2026-10-01\\|NOT be mid\\|mid-village\\|shell-hook shim\\|status:\\|milestone:\\|title:\" \"/Users/carter/dev/agentvillage-data/backlog/tasks/data-43 - Build-the-approval.md-daemon-Hermes-adapter-policy-UI-and-ingest-follower.md\" | cut -c1-700","cwd":"/Users/carter/dev/approval-md"}

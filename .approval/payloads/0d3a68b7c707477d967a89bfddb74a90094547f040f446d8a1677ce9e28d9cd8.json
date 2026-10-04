@@ -1,0 +1,1 @@
+{"command":"grep -n \"senders\" schema/policy.schema.json | head -12 && grep -n \"attest-requires-terminal\" -r src/core/*.ts src/cli/*.ts | head -5 && grep -n \"resolveAttestationSender\" src/cli/attest.ts src/core/*.ts 2>/dev/null | head -5","cwd":"/Users/carter/dev/approval-md"}

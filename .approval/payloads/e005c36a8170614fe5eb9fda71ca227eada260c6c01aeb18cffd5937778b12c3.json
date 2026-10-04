@@ -1,0 +1,1 @@
+{"command":"wc -l private/hosted-runtime.md private/handover/HANDOVER-2026-09-20.md private/handover/HANDOVER-2026-09-21.md private/handovers/*.md private/LAUNCH.md design/*.md docs/probe-driver-convention.md hosted/README.md","cwd":"/Users/carter/dev/approval-md"}

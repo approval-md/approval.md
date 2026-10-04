@@ -1,0 +1,1 @@
+{"command":"grep -n -i 'fail.open\\|0\\.14\\|three ways\\|v2026.5.16\\|first-post\\|Use Maritime LLM' \"/Users/carter/dev/approval-md-hosted/backlog/tasks/hosted-10 - Paired-Hermes-on-Maritime-test-a-Hermes-template-machine-gated-by-a-daemon-machine-without-Agent-Village.md\" | cut -c1-900","cwd":"/Users/carter/dev/approval-md"}

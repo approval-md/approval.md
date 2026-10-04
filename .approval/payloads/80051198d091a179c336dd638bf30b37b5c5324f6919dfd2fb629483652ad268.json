@@ -1,0 +1,1 @@
+{"command":"grep -n -e '\"read_scope\"' -e '\"out_of_scope\"' -e '\"roots\"' /Users/carter/dev/approval-md-wt/data-212-propose/schema/policy.schema.json /Users/carter/dev/approval-md/schema/policy.schema.json","cwd":"/Users/carter/dev/approval-md"}

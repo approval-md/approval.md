@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data-wt/approval-backlog && cp /Users/carter/dev/agentvillage-data/backlog/tasks/data-25*.md backlog/tasks/ && ls backlog/tasks | grep -c \"data-25[0-9]\" && git status --short | wc -l","cwd":"/Users/carter/dev/approval-md"}

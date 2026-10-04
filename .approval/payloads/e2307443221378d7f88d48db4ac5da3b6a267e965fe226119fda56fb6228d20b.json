@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/private/agentvillage-integration && grep -l \"DATA-257\" *.md | tr '\\n' ' ' && sed -i '' 's/DATA-257/DATA-258/g' 00-README.md 05-integration-architecture.md 06-gap-register.md 08-decisions-for-carter.md && grep -c \"DATA-258\" 05-integration-architecture.md","cwd":"/Users/carter/dev/approval-md"}

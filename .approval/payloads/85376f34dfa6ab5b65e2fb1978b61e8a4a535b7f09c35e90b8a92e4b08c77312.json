@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && grep -rniE \"deadline|due 2026|submission|judges?\\b\" backlog/tasks/hosted-2[0-9]* docs/handoffs/2026-09-29-session-handover.md | cut -c1-240 | head -30; sed -n 1,60p scripts/gate-placement/README.md","cwd":"/Users/carter/dev/approval-md"}

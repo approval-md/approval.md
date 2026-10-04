@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && grep -n \"SECTION:NOTES:END\\|2026-10-02 late\\|updated_date\\|^priority\" backlog/tasks/data-233*.md backlog/tasks/data-234*.md","cwd":"/Users/carter/dev/approval-md"}

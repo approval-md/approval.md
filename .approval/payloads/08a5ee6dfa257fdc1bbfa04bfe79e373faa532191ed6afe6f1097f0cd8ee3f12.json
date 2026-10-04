@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"approval\" /Users/carter/dev/agentvillage/private/drafts/timour-asks-20261001.md /Users/carter/dev/agentvillage/private/drafts/timour-brief-pack.md /Users/carter/dev/agentvillage/private/drafts/2026-09-28-timour-consent-and-asks.md /Users/carter/dev/agentvillage/private/partner-asks-20260928.md | cut -c1-500","cwd":"/Users/carter/dev/approval-md"}

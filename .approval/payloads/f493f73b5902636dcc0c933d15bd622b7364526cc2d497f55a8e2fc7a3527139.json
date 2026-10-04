@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted/backlog/tasks && sed -n '/^id:/p;/^status:/p;/^created_date/p;/^updated_date/p;/^priority/p;/^labels:/,/^[a-z_]*:/p;/^dependencies:/,/^[a-z_]*:/p;/AC:BEGIN/,/AC:END/p;/FINAL_SUMMARY:BEGIN/,/FINAL_SUMMARY:END/p' hosted-25\\ -* hosted-27\\ -* hosted-28\\ -* hosted-29\\ -*","cwd":"/Users/carter/dev/approval-md"}

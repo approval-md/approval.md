@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage && git fetch --dry-run 2>&1 | head -3; ls skills skills/hooks plugins plugins/* install controlplane controlplane/docs docs 2>&1 | head -120; echo; cat skills/marketplace.json 2>/dev/null | head -60","cwd":"/Users/carter/dev/approval-md"}

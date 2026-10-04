@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && grep -rn \"PROPOSE_PAYLOAD_MAX_BYTES\\|repeat(2[0-9][0-9]_\\?[0-9]*\\|256 \\* 1024\" tests/*.ts | head; npx tsc --noEmit; echo \"tsc exit $?\"","cwd":"/Users/carter/dev/approval-md"}

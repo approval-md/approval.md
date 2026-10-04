@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && grep -rn -i -E 'draft 1\\.[12]|spec 1\\.[12]|spec-1\\.|contract v1|contract-v1|event contract' research/README.md research/overview.md research/context.md research/catalogue.md research/dictionary.ts docs/*.md CLAUDE.md | cut -c1-220 | head -40","cwd":"/Users/carter/dev/approval-md"}

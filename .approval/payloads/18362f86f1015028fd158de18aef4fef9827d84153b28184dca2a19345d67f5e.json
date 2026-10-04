@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog/tasks && grep -n -i 'daemon' \"data-82 - \"*.md | cut -c1-500; grep -n -i -E 'moralmod' \"data-105 - \"*.md \"data-107 - \"*.md \"data-127 - \"*.md \"data-27 - \"*.md \"data-114 - \"*.md | cut -c1-400","cwd":"/Users/carter/dev/approval-md"}

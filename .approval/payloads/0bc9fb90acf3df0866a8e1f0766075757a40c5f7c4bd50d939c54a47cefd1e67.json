@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && sed -n '/SECTION:NOTES:END/,$p' backlog/tasks/data-96*.md && grep -n \"updated_date\\|status:\" backlog/tasks/data-96*.md","cwd":"/Users/carter/dev/approval-md"}

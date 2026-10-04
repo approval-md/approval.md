@@ -1,0 +1,1 @@
+{"command":"grep -rn -i \"readRoots\\|read_roots\\|read root\" /Users/carter/dev/approval-md-wt/data-212-propose/src --include=*.ts -l","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/private/agentvillage-integration && grep -nE \"(APRV|DATA|HOSTED)-[0-9]+.{0,80}(To Do|In Progress|Done|done|in progress|to do)|(To Do|In Progress|Done|done).{0,40}(APRV|DATA|HOSTED)-[0-9]+\" 00*.md 05*.md 06*.md 07*.md 08*.md 09*.md | cut -c1-260","cwd":"/Users/carter/dev/approval-md"}

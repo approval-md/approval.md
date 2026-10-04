@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && wc -c CLAUDE.md docs/*.md docs/handoffs/* backlog/tasks/* | tail -60","cwd":"/Users/carter/dev/approval-md"}

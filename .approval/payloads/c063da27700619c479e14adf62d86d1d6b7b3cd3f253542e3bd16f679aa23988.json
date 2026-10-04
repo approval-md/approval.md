@@ -1,0 +1,1 @@
+{"command":"sed -n 15,30p \"/Users/carter/dev/agentvillage/private/context/vault/20261001 Context update from Microsoft Call; Team Weekly; Research; WorldID.md\"; echo ----; sed -n 82,100p \"/Users/carter/dev/agentvillage/private/context/vault/20261001 Context update from Microsoft Call; Team Weekly; Research; WorldID.md\"","cwd":"/Users/carter/dev/approval-md"}

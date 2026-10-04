@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-228-launcher && ls .github/workflows 2>/dev/null; grep -n \"bun test\\|runs-on\\|working-directory\\|shellcheck\" .github/workflows/*.yml | head -20; which shellcheck python3 bun bash","cwd":"/Users/carter/dev/approval-md"}

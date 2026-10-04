@@ -1,0 +1,1 @@
+{"command":"grep -n '\"engines\"' -A3 package.json; grep -n '\"version\"' package.json; npm view approval-md version engines dist-tags --json 2>&1 | head -30","cwd":"/Users/carter/dev/approval-md"}

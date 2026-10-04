@@ -1,0 +1,1 @@
+{"command":"wc -l src/serve/*.ts src/cli/serve.ts src/cli/hook.ts src/channels/*.ts src/muse/*.ts src/core/harness-wait.ts src/core/daemon-identity.ts src/core/payload-store.ts","cwd":"/Users/carter/dev/approval-md"}

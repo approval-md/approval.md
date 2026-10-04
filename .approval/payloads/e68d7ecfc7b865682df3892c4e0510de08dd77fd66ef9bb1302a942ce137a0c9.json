@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data/backlog/tasks && grep -il 'budget' *.md | sed -E 's/ - .*//' | tr '\\n' ' '","cwd":"/Users/carter/dev/approval-md"}

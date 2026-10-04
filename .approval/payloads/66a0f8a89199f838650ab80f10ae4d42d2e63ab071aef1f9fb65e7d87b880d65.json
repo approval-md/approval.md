@@ -1,0 +1,1 @@
+{"command":"grep -n -e \"agent_may_request\" -e \"token_delivery\" -e \"senders\" -e \"chat_id_env\" -e \"approval_ttl\" -e \"on_expiry\" -e \"additionalProperties\" -e \"patternProperties\" /Users/carter/dev/approval-md-wt/data-212-propose/schema/policy.schema.json","cwd":"/Users/carter/dev/approval-md"}

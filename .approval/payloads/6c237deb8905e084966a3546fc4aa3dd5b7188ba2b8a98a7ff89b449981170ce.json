@@ -1,0 +1,1 @@
+{"command":"ls /Users/carter/dev/ | head -80; ls -d /Users/carter/dev/*/hermes-agent /Users/carter/.hermes/hermes-agent 2>/dev/null","cwd":"/Users/carter/dev/approval-md"}

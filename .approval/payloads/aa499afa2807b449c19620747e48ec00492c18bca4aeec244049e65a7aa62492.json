@@ -1,0 +1,1 @@
+{"command":"grep -n -i \"oct\\|approval\\|pilot\\|checkpoint\\|milestone\" \"/Users/carter/dev/agentvillage/private/context/vault/20260929 Microsoft Call, Team Weekly.md\" | cut -c1-300 | head -30","cwd":"/Users/carter/dev/approval-md"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && ls -la && ls docs docs/handoffs private private/hosted-16 hermes-image image scripts tests backlog backlog/tasks 2>&1 | head -200 && wc -c CLAUDE.md docs/*.md docs/handoffs/*","cwd":"/Users/carter/dev/approval-md"}

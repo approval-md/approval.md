@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted && grep -rn -i 'D17\\|DATA-233\\|enforced on' docs/*.md backlog/tasks/hosted-15* backlog/tasks/hosted-6* | cut -c1-400 | head -20; sed -n '/^## 6/,/^## 7/p' docs/03-hermes-plugin-and-agent-village.md | cut -c1-900 | head -40","cwd":"/Users/carter/dev/approval-md"}

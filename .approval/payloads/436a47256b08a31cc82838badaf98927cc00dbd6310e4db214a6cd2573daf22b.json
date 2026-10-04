@@ -1,0 +1,1 @@
+{"command":"grep -rn -e \"Classifier follow-up\" -e \"four minutes\" -e \"unjudged\" /Users/carter/dev/agentvillage-wt/data-250-template --exclude-dir=node_modules --exclude-dir=.git","cwd":"/Users/carter/dev/approval-md"}

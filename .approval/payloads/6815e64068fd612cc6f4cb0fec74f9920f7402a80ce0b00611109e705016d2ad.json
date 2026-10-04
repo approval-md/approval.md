@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/lane-449-446 && grep -rn \"function emitJson\" -A 4 src/cli/*.ts | head -8","cwd":"/Users/carter/dev/approval-md"}

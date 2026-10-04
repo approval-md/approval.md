@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-hosted/backlog/tasks && cat hosted-3\\ -* && sed -n '1,22p;/AC:BEGIN/,/AC:END/p;/FINAL_SUMMARY:BEGIN/,/FINAL_SUMMARY:END/p' hosted-4\\ -* hosted-5\\ -*","cwd":"/Users/carter/dev/approval-md"}

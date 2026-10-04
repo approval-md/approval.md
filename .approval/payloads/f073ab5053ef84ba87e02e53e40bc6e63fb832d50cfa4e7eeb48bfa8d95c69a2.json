@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage/private/context/vault && F=\"20260918 Agent Village v2 - Data Infrastructure Design Document.md\"; sed -n 1,12p \"$F\" | cut -c1-600; grep -n '^#' \"$F\" | head -150","cwd":"/Users/carter/dev/approval-md"}

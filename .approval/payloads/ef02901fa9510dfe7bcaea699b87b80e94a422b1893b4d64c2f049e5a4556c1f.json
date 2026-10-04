@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-data && grep -l \"^status: Done\" backlog/tasks/*.md | wc -l && grep -l \"^status: In Progress\" backlog/tasks/*.md | wc -l && grep -l \"^status: To Do\" backlog/tasks/*.md | wc -l && grep -l \"^status: In Progress\" backlog/tasks/*.md | sed 's/.*tasks\\///' | cut -c1-9","cwd":"/Users/carter/dev/approval-md"}
