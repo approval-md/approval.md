@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-03 03:50'
-updated_date: '2026-10-04 11:29'
+updated_date: '2026-10-04 11:30'
 labels:
   - spec
   - policy.edit
@@ -103,4 +103,6 @@ Nits left as they are:
 - §10.7 keeps the existing phrase One credential reaches the agent-facing verbs; the next sentence states the exact list.
 - The CLI-label spelling (hook classify) is used for verbs, beside §10.5's tool names.
 The third commit exists because the hook refuses an amend of the local commit (vcs.history.rewrite is human-only).
+
+Final SPEC.md sha256 at head (supersedes d6732aa0… above): 59212c6d7497caba1d11777fe7c2171bb18457998bd7a8b57b1fc1a17a1abe49. Targeted suites on these bytes: docs-guard, conformance, conformance-regen, attest-path-signoff, protected-path-guard*, cli-attest, mcp-server and serve, 281/281, exit 0.
 <!-- SECTION:NOTES:END -->
