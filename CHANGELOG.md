@@ -15,6 +15,14 @@ before a tag.
 
 ## Unreleased
 
+- **`start` never turns a human's no into a policy start (APRV-445, security
+  pass).** On the policy path, a proposal's start now refuses `not-granted` when
+  the key has a pending or granted request (re-checked inside the append), when
+  its latest request was rejected or revoked under the policy in force, and when
+  the class is `supervised-live` and the draw selects the bytes. Before this a
+  selected live proposal that a human rejected, or that the agent withdrew or
+  let expire, could start with `authorization: policy` and no grant. An
+  unselected live proposal still starts on the policy path.
 - **The Hermes path rules fit a hosted home (APRV-445, recheck 3).** Only the
   home's own directories (root, profile homes, `approval/`, `scripts/`) and the
   approval home are organs; `workspace/`, `skills/` and the rest are ordinary

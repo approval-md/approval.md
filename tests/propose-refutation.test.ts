@@ -467,6 +467,106 @@ test("L9: start refuses a task propose did not register", () => {
   assert.equal(err(run)["code"], "task-not-proposal");
 });
 
+// ---------------------------------------------------------------------------
+// S5-live (security pass): the policy path never stands in for a human
+// ---------------------------------------------------------------------------
+
+const LIVE = "intent.publish.live";
+const LIVE_SECRET_ENV = "APPROVAL_TEST_PROPOSE_LIVE_SECRET";
+
+function livePolicyText(rate: string, secretEnv?: string): string {
+  return [
+    "# Policy",
+    "",
+    "```yaml approval-policy",
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: manual",
+    '  approval_ttl: "72h"',
+    "  on_expiry: reject",
+    ...(secretEnv === undefined ? [] : ["audit:", `  sampling_secret_env: ${secretEnv}`]),
+    "classes:",
+    `  ${LIVE}:`,
+    "    autonomy: supervised-live",
+    `    live_rate: ${rate}`,
+    "    agent_may_request: true",
+    "```",
+    "",
+  ].join("\n");
+}
+
+test("S5-live: a selected supervised-live proposal that was rejected or withdrawn cannot start on the policy path", () => {
+  for (const ending of ["reject", "withdraw"] as const) {
+    const dir = caseDir(livePolicyText("1"));
+    const key = `${LIVE}:s5-${ending}`;
+    const task = proposedTaskId(AGENT, LIVE, key);
+    const proposed = proposeRun(dir, LIVE, key);
+    assert.equal(proposed.code, 0, proposed.stderr);
+    assert.equal(events(dir).includes("approval.requested"), true, ending);
+
+    const pending = startRun(dir, task, key);
+    assert.equal(pending.code, 1, ending);
+    assert.equal(err(pending)["code"], "not-granted", ending);
+
+    const ended =
+      ending === "reject"
+        ? runCli(["reject", key, "--note", "no", "--as", "human:carter"], dir)
+        : runCli(["withdraw", task, "--action", key, "--as", AGENT], dir);
+    assert.equal(ended.code, 0, ended.stderr);
+
+    const before = events(dir).length;
+    const after = startRun(dir, task, key);
+    assert.equal(after.code, 1, `${ending}: ${after.stdout}`);
+    assert.equal(err(after)["code"], "not-granted", ending);
+    assert.equal(events(dir).length, before, ending);
+    assert.equal(events(dir).includes("execution.started"), false, ending);
+
+    // What a waiter sees is still the human's (or the agent's) answer.
+    const waited = runCli(["wait", task, "--timeout", "0", "--as", AGENT, "--json"], dir);
+    assert.notEqual(waited.code, 0, ending);
+  }
+});
+
+test("S5-live: a human's rejection under the policy in force stands; a re-attest re-judges it", () => {
+  const dir = caseDir();
+  const key = `${INFERRED}:s5-rejected`;
+  const task = proposedTaskId(AGENT, INFERRED, key);
+  assert.equal(proposeRun(dir, INFERRED, key).code, 0);
+  assert.equal(runCli(["reject", key, "--note", "no", "--as", "human:carter"], dir).code, 0);
+  // Under the policy that asked, the no stands. After a re-attest that makes
+  // the class autonomous, the rules that asked are gone and the start is the
+  // policy's (S5's rule, kept by the security fix).
+  const refused = startRun(dir, task, key);
+  assert.equal(refused.code, 1);
+  assert.equal(err(refused)["code"], "not-granted");
+  writeFileSync(join(dir, "APPROVAL.md"), policyText("72h", "autonomous", "autonomous"), "utf8");
+  reattest(dir);
+  const started = startRun(dir, task, key);
+  assert.equal(started.code, 0, started.stderr);
+  assert.equal(out(started)["authorization"], "policy");
+});
+
+test("S5-live: an unselected supervised-live proposal still starts on the policy path", () => {
+  const previous = process.env[LIVE_SECRET_ENV];
+  process.env[LIVE_SECRET_ENV] = "s5-live-test-secret-0123456789abcdef";
+  try {
+    // A rate this small leaves these bytes unselected under this secret (the
+    // draw is deterministic over secret and payload hash, so this is stable).
+    const dir = caseDir(livePolicyText("0.0001", LIVE_SECRET_ENV));
+    const key = `${LIVE}:s5-unselected`;
+    const task = proposedTaskId(AGENT, LIVE, key);
+    const proposed = proposeRun(dir, LIVE, key);
+    assert.equal(proposed.code, 0, proposed.stderr);
+    assert.equal(events(dir).includes("approval.requested"), false);
+    const started = startRun(dir, task, key);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(out(started)["authorization"], "policy");
+  } finally {
+    if (previous === undefined) delete process.env[LIVE_SECRET_ENV];
+    else process.env[LIVE_SECRET_ENV] = previous;
+  }
+});
+
 test("L8: a re-run of init in an older scaffold says it appended the payload-store ignore line", () => {
   counter += 1;
   const dir = join(scratch, `init-${String(counter)}`);

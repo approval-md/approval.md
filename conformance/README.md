@@ -154,6 +154,14 @@ head this log does not carry. The anchor and the checkpoint are independent
 witnesses against the same forger, and a runtime that implements one of them
 has not implemented the other.
 
+`refusal-unions` has no merged 23.0.0, 24.0.0 or 25.0.0, and 26.0.0 is
+superseded. APRV-445's branch minted 23.0.0 to 25.0.0 for six new
+`gate_refusal_codes` while APRV-455 shipped 26.0.0 on main with a new
+`relay_refusal_codes` union, each without the other's change. The merge took
+**27.0.0**, which carries both, by the collision rule below: a second
+implementation holds itself to 27.0.0, and a run reporting 26.0.0 lacks the six
+gate codes.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:

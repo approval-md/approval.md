@@ -4241,6 +4241,26 @@ function attemptHarnessStart(
     );
   }
 
+  // APRV-445 security pass. A proposal's start reaches this function only when
+  // its key holds no live request, and the task id alone says it is a proposal
+  // (read from the task, never from a caller flag). Re-judged here, inside the
+  // attempt that appends, so a request filed or decided after `startProposed`
+  // looked cannot slip past. Checked before the budget verdict, which writes.
+  if (isProposalTask(input.task)) {
+    const refusal = proposalPolicyStartRefusal(
+      logPath,
+      read.records,
+      input.actionKey,
+      bytes,
+      load,
+      resolution,
+      attested.sha256,
+      ts,
+      options,
+    );
+    if (refusal !== null) return refusal;
+  }
+
   const cost = costOf(input.est_cost_usd);
   const budget = evaluateBudgetsWithTask(
     read.records,
@@ -4309,6 +4329,76 @@ function attemptHarnessStart(
   );
   if (!appended.ok) return appended;
   return { ok: true, record: appended.record };
+}
+
+/**
+ * Why a proposal may NOT start on the policy path, or `null` when it may
+ * (APRV-445 security pass).
+ *
+ * The policy path records an execution the policy itself authorizes. For a
+ * proposal that is true only when no human question about these bytes is open
+ * or answered no under the policy in force, and when the class would not have
+ * put this action in front of a human at all. Three refusals, all `not-granted`:
+ *
+ * - a request for the key is pending or granted and unspent: the key is bound to
+ *   the grant path, and `start` must spend the grant (or wait for the decision);
+ * - the key's latest request was rejected or revoked under the attested policy
+ *   (or pinned no policy): a human's no under the rules in force stands. After a
+ *   re-attest the rules that asked are gone, and the action is judged afresh;
+ * - the class is `supervised-live` and the draw selects these bytes: the draw is
+ *   deterministic over the policy and the payload hash, so it reproduces the
+ *   intake answer, and a selected action is authorized by a grant, never by the
+ *   policy. Without this a withdrawn, expired, rejected or never-filed request
+ *   for a selected live action turned into a policy-authorized start.
+ *
+ * Asking the draw appends nothing; a draw that cannot be made gates, so this
+ * fails closed.
+ */
+function proposalPolicyStartRefusal(
+  logPath: string,
+  records: EventRecord[],
+  actionKey: string,
+  payloadHash: string,
+  load: PolicyLoadResult,
+  resolution: Resolution,
+  attestedSha256: string,
+  ts: string,
+  options: GateOptions,
+): GateRefusal | null {
+  const derivation = requestState(records, actionKey, ts, ttlOf(load));
+  if (
+    derivation.execution.started === null &&
+    (derivation.state === "requested" || derivation.state === "granted")
+  ) {
+    return refuse(
+      "not-granted",
+      `action ${actionKey} has a ${derivation.state} request (seq ${String(derivation.requestSeq)}), so it is bound to the grant path: a pending request is decided by a human and a granted one is spent by start through the grant. Start it again; nothing was appended.`,
+    );
+  }
+  if (derivation.state === "rejected" || derivation.state === "revoked") {
+    const pinned = derivation.declared.policy_sha256;
+    if (pinned === null || pinned === attestedSha256) {
+      return refuse(
+        "not-granted",
+        `action ${actionKey} was ${derivation.state} by a human (seq ${String(derivation.decisionSeq)}) under the policy in force, and a human's no is not turned into a policy-authorized start. Propose it again only after the policy changes; nothing was appended.`,
+      );
+    }
+  }
+  if (resolution.supervision === "live") {
+    const live = liveVerdict(load, resolution, payloadHash, options.env, {
+      logPath,
+      policyHash: attestedSha256,
+      actionKey,
+      ask: options.drawAsk ?? askDaemonDraw,
+    });
+    if (live.gated) {
+      return refuse(
+        "not-granted",
+        `class ${String(derivation.declared.class)} of ${actionKey} is supervised-live and the draw put these bytes in front of a human (${live.reason}); a selected action is authorized by a human's grant, never by the policy. Propose it and spend the grant; nothing was appended.`,
+      );
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -5230,6 +5320,9 @@ export function startProposed(
   // human decides) or granted and unspent. A withdrawn, expired, rejected or
   // revoked request says nothing about an action the policy authorizes on its
   // own now, so after a re-tiering to autonomous the start is the policy's.
+  // This read only routes; the policy path re-judges inside its own append
+  // (`proposalPolicyStartRefusal`): a live request, a human's no under the
+  // policy in force, and a selected supervised-live draw each refuse there.
   const derivation = requestState(
     read.records,
     actionKey,

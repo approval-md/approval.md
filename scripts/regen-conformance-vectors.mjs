@@ -2306,6 +2306,7 @@ const SUITES = [
     // harness's own timeout rather than anything about this command or this
     // approver. A caller that collapsed it into either neighbour would retry a
     // command that cannot be answered under this configuration, forever.
+    //
     // 23.0.0 (APRV-445): `gate_refusal_codes` gains `class-not-agent-requestable`
     // and `payload-too-large`, the two refusals `approval propose` adds. Major
     // for the reason 22.0.0 was: a longer union is a changed expectation. The
