@@ -3,11 +3,11 @@ id: APRV-448
 title: >-
   approval serve and the webhook listener stamp the daemon id, or the doc stops
   claiming they do
-status: In Progress
+status: Done
 assignee:
   - '@claude-c8'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-04 13:15'
+updated_date: '2026-10-04 18:03'
 labels:
   - serve
   - daemon
@@ -30,7 +30,7 @@ APRV-383 added the daemon field to records and the daemons allowlist to the poli
 <!-- AC:BEGIN -->
 - [x] #1 Records appended through approval serve verbs and the hook route carry the daemon field with the same id approval status reports for that store, and a daemons list that excludes it refuses the append with daemon-not-allowed, both under test
 - [x] #2 The Telegram webhook listener behaves the same way, under test with the fake Bot API
-- [ ] #3 src/cli/serve.ts, docs/cli-reference.md and design/hosted-daemon-identity.md section 6 say exactly which processes stamp the field
+- [x] #3 src/cli/serve.ts, docs/cli-reference.md and design/hosted-daemon-identity.md section 6 say exactly which processes stamp the field
 - [ ] #4 If the decision is not to stamp, the doc and the serve startup line are corrected instead and the implementation notes say why
 <!-- AC:END -->
 
@@ -87,4 +87,6 @@ Refuter (opus-high) outcome and fixes:
 Merged: PR #588 at head 9f1765b4, 2026-10-04 12:12Z. Follow-ups filed as APRV-468 (allowlist hardening: restart under drift, the two-read race in resolveDaemonAllowlist, refresh cost inside the store lock, nits 1 and 2) and APRV-469 (stamp a standalone channel telegram listen, approval run and adapter starts; error.append in token.ts and audit.ts). AC 3 waits on Carter attesting the 6.6 design amendment (text above, under design amendment text (apply by hand)); the task stays In Progress until then.
 
 Design amendment opened as PR #596 (lane/aprv-448-design, head a32b5064): section 6.6 applied verbatim to design/hosted-daemon-identity.md, digest 8150238d6b441e81591facf462c8cc927e1f420edb095afbb5a38dbdcd493d95. Not armed; protected paths stay red until Carter attests it (the exact attest command is in the PR body and in CLAIMS.md, line "--- 2026-10-04 13:15Z (C8)"). AC 3 can be checked once #596 merges.
+
+DONE: design/hosted-daemon-identity.md 6.6 attested by Carter at digest 8150238d6b441e81591facf462c8cc927e1f420edb095afbb5a38dbdcd493d95 as gate.path.signed_off seq 82688, carried by records PR #598; PR #596 merged.
 <!-- SECTION:NOTES:END -->
