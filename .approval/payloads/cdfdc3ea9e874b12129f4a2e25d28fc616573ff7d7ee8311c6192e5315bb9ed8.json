@@ -1,0 +1,1 @@
+{"command":"F=/private/tmp/claude-501/-Users-carter-dev-approval-md/32aa850e-8f45-4bf8-a200-96548f82ae03/scratchpad/ContextForm.tsx; grep -n -E 'const (label|card|input)|function Field' $F; sed -n '370,404p' $F; gh api -H \"Accept: application/vnd.github.raw+json\" \"repos/Edge-City/agentvillage-app/contents/src/app/globals.css\" | head -80","cwd":"/Users/carter/dev/approval-md"}

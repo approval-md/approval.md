@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane && grep -n \"TENANT_ID\\b\\|const TENANT_ID\" src/approval-relay-mount.js | head -5; grep -n \"function quietDefault\" -A15 src/approval-relay-mount.js; grep -n \"quietWindowFor\" -B3 -A10 src/approval-relay/*.js | head -40","cwd":"/Users/carter/dev/approval-md"}

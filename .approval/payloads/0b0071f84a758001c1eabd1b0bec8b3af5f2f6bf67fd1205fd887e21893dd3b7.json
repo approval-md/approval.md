@@ -1,0 +1,1 @@
+{"command":"find /Users/carter/dev -maxdepth 3 -type d -name node_modules 2>/dev/null | head -30","cwd":"/Users/carter/dev/approval-md"}

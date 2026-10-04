@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane && grep -rln 'policy check\\|APPROVAL_CLI\\|approval-md' tests | head; grep -rn 'APPROVAL_MD_CLI\\|APPROVAL_CORE_CLI\\|CORE_CLI' tests src ../docs 2>/dev/null | head","cwd":"/Users/carter/dev/approval-md"}

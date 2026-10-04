@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md-wt/data-212-propose && git log --oneline -3; grep -c 'agent_may_request' dist/src/core/*.js | grep -v ':0' | head -3; grep -lc 'edgeos' dist/src/core/sender-identity.js; node cli.js channel relay --help >/dev/null 2>&1; echo relay_help=$?","cwd":"/Users/carter/dev/approval-md"}

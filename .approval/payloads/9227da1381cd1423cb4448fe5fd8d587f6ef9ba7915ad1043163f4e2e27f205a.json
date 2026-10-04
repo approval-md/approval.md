@@ -1,0 +1,1 @@
+{"command":"F=\"/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/app/(app)/setup/page.tsx\"; grep -n -E 'ConsentChoices\"|type Step|label: \"Telegram\"|Finish setup|run: \\(\\) => go\\(\"ready\"\\)|connect: \\{|const action|<footer|</footer>|\\{step === \"connect\" && \\(' \"$F\"","cwd":"/Users/carter/dev/approval-md"}

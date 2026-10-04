@@ -1,0 +1,1 @@
+{"command":"F=\"/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/app/(app)/setup/page.tsx\"; sed -i '' -e '337,367s/^/  /' -e '368s/^      )}$/      )}/' \"$F\"; sed -n '320,372p' \"$F\"","cwd":"/Users/carter/dev/approval-md"}

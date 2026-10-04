@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/agentvillage-cp-wt/data-259-review/control-plane && grep -n 'async function approvalTokensFor' -A30 src/tenants.js; grep -n 'newApprovalTokens\\|fillTokens\\|pickTokens\\|TOKEN_FIELDS\\|approvalRelayToken' src/*.js src/approval-relay/*.js | grep -v '^src/approvald.js'","cwd":"/Users/carter/dev/approval-md"}

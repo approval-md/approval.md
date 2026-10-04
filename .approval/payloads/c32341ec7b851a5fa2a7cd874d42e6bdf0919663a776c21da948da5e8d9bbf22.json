@@ -1,0 +1,1 @@
+{"command":"F=\"/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/app/(app)/page.tsx\"; grep -n -E 'Connect Telegram\", body|n=\\{4\\}|title=\"Hermes Desktop\"' \"$F\"","cwd":"/Users/carter/dev/approval-md"}
