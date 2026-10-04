@@ -696,6 +696,13 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
     stats = statSync(storeDir);
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      // APRV-457: an absent store is only "not created yet" when no verified
+      // record proves the store already held bytes. When one does, the whole
+      // directory is missing under it: the crash signature of a first store
+      // whose directory entry never reached the disk, or a store not carried
+      // with the log. Every such binding reads as lost.
+      const damage = payloadIntegrity(records, storeDir);
+      if (damage.length > 0) return payloadDamageCheck(damage);
       return {
         check: "payload-store",
         status: "pass",
@@ -793,8 +800,8 @@ function namedDamage<T extends PayloadDamage>(items: T[], describe: (item: T) =>
  *   did not fsync, so a platform kill could keep the (fsynced) record and drop
  *   its payload. Nothing was tampered; the bytes are gone from this store.
  * - **Tampering or corruption** (`mismatch`). The file holds at least one
- *   non-NUL byte and does not verify. No crash produces that, so it is never
- *   read as one, and its fix moves the file aside for investigation.
+ *   non-NUL byte and does not verify. That is not the pure crash shape, so it is never
+ *   read as one (a partial writeback, valid prefix and NUL tail, lands here too: the stricter reading), and its fix moves the file aside for investigation.
  *
  * The torn reading cannot swallow a tampered file that still carries content:
  * it requires every byte to be NUL. A file someone zeroed by hand reads as torn,
@@ -818,7 +825,7 @@ function payloadDamageCheck(damage: PayloadDamage[]): DoctorCheck {
   const parts: string[] = [];
   if (mismatch.length > 0) {
     parts.push(
-      `${String(mismatch.length)} payload(s) a verified record binds hold bytes that do not hash to their name and are NOT the crash signature (a crash leaves NUL bytes or nothing, never other bytes): treat them as tampered or corrupted (${namedDamage(
+      `${String(mismatch.length)} payload(s) a verified record binds hold bytes that do not hash to their name and are NOT the crash signature (that is an empty or all-NUL file; a partial writeback can also leave a valid prefix with a NUL tail, so the stricter reading applies until shown otherwise): treat them as tampered or corrupted (${namedDamage(
         mismatch,
         (item) => `${short(item.hash)} bound at seq ${String(item.seq)}`,
       )}); every read re-verifies, so no channel renders them`,

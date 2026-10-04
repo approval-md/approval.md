@@ -1075,13 +1075,33 @@ test("doctor: a payload missing although its record proves the store held it is 
   assert.ok((check.fix ?? "").startsWith("approval payload hash <copy> — restore"), String(check.fix));
 });
 
+test("doctor: a store directory missing under records that prove it held bytes is not 'not created yet' (APRV-457)", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const payload = attestedPayload(home);
+  rmSync(join(home, ".approval", "payloads"), { recursive: true });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "fail");
+  assert.doesNotMatch(check.detail, /is not created until the first request/u);
+  assert.ok(check.detail.includes(`(${payload.hash.slice(0, 12)}…, policy.updated at seq 1)`), check.detail);
+  assert.ok((check.fix ?? "").startsWith("approval payload hash <copy> — restore"), String(check.fix));
+});
+
 test("doctor: a payload holding any byte that is not NUL is tampering, never the crash signature (APRV-457)", async () => {
-  // Three shapes a crash cannot produce, each of which must read as tampered or
-  // corrupted: other JSON, a valid prefix with a NUL tail (a crash would leave
-  // NULs or nothing, and the stricter reading wins), and a single non-NUL byte
-  // in a sea of NULs.
+  // Shapes that are not the pure crash signature, each of which must read as
+  // tampered or corrupted: other JSON, a valid prefix with a NUL tail (a
+  // partial writeback could leave it, and the stricter reading wins), a $ref
+  // pointer in place of material the record proves was held, and a single
+  // non-NUL byte in a sea of NULs.
   const shapes: Array<{ name: string; bytes: (original: Buffer) => Buffer }> = [
     { name: "other JSON", bytes: () => Buffer.from('{"text":"not the attested policy"}', "utf8") },
+    {
+      name: "a $ref replacing held material",
+      bytes: () => Buffer.from('{"$ref":"https://attacker.example/x"}', "utf8"),
+    },
     {
       name: "valid prefix, NUL tail",
       bytes: (original) =>
@@ -2076,6 +2096,8 @@ test("doctor: every failing check's fix begins with a runnable command", async (
   writeFileSync(attestedPayload(tornPayload).path, Buffer.alloc(64));
   const tamperedPayload = await makeHome({ port });
   writeFileSync(attestedPayload(tamperedPayload).path, '{"text":"tampered"}');
+  const lostPayload = await makeHome({ port });
+  rmSync(attestedPayload(lostPayload).path);
 
   counter += 1;
   const emptyRoot = join(scratch, `root-${counter}-empty-fixes`);
@@ -2127,6 +2149,7 @@ test("doctor: every failing check's fix begins with a runnable command", async (
     // payload-store: torn and tampered bound payloads.
     { args: ["doctor", "--json", "--root", fresh], cwd: tornPayload, env: GREEN_ENV },
     { args: ["doctor", "--json", "--root", fresh], cwd: tamperedPayload, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: lostPayload, env: GREEN_ENV },
   ];
 
   const seen = new Set<string>();

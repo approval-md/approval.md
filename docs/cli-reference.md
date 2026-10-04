@@ -2927,7 +2927,7 @@ The checks, at length:
   tampered and the bytes are gone from this store; the fix moves a torn file
   aside and restores a copy that `approval payload hash` confirms. A file
   holding any non-NUL byte that does not verify is NOT the crash signature
-  (a crash never writes bytes nobody wrote) and reads as tampering or
+  (a partial writeback leaving a valid prefix and a NUL tail lands here too, the stricter reading) and reads as tampering or
   corruption; the fix moves it aside as `.suspect`. Doctor moves, restores and
   deletes nothing.
 - **audit-sampling** — sampling fails open by design (SPEC.md §5.2), so an

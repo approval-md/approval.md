@@ -29,7 +29,7 @@
 import { readFileSync } from "node:fs";
 
 import type { EventRecord } from "./log.js";
-import { isPayloadHash } from "./payload.js";
+import { isPayloadHash, payloadHash } from "./payload.js";
 import { listStoredPayloadHashes, loadPayload, payloadPath } from "./payload-store.js";
 import { payloadOf } from "./state.js";
 
@@ -220,6 +220,20 @@ function heldAtAppend(records: EventRecord[]): Map<string, EventRecord> {
   return held;
 }
 
+/**
+ * Whether bytes whose JSON is `{"$ref": …}` are themselves the material bound:
+ * `storePayload` of such a value writes exactly that, and it hashes to its
+ * name. `loadPayload` reports the reference form before hashing, so the check
+ * is made here.
+ */
+function hashesToItsName(bytes: Buffer, hash: string): boolean {
+  try {
+    return payloadHash(JSON.parse(bytes.toString("utf8")) as unknown) === hash;
+  } catch {
+    return false;
+  }
+}
+
 /** The first record that binds each hash, for naming it in a report. */
 function firstBindingSeq(records: EventRecord[]): Map<string, number> {
   const first = new Map<string, number>();
@@ -276,9 +290,22 @@ export function payloadIntegrity(records: EventRecord[], storeDir: string): Payl
     }
 
     const loaded = loadPayload(storeDir, hash);
-    // A `reference` is a pointer the store keeps on purpose; it verifies nothing
-    // and claims nothing, so it is not damage.
-    if (loaded.ok || loaded.code === "reference") continue;
+    if (loaded.ok) continue;
+    if (loaded.code === "reference") {
+      // A `{"$ref": …}` pointer is a legitimate store form for material this
+      // runtime never held, and `loadPayload` reports it before hashing. Where
+      // a record PROVES the runtime held the real bytes, a pointer under that
+      // name is a replacement, not a reference: tampering, read as such.
+      if (!held.has(hash) || hashesToItsName(bytes, hash)) continue;
+      damage.push({
+        kind: "mismatch",
+        hash,
+        seq,
+        detail: `${path} holds an external reference although a record proves the store held the material itself; the bytes were replaced`,
+        path,
+      });
+      continue;
+    }
     damage.push({ kind: "mismatch", hash, seq, detail: loaded.message, path });
   }
   return damage.sort((a, b) => a.seq - b.seq);

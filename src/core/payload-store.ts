@@ -258,7 +258,7 @@ export function storePayload(storeDir: string, value: unknown): StorePayloadResu
       ok: false,
       code: "write-failed",
       message: written.mayBePresent
-        ? `payload ${hash} could not be made durable at ${path}: ${written.message}. The log was not touched; the next store of the same payload rewrites and re-syncs it.`
+        ? `payload ${hash} could not be made durable at ${path}: ${written.message}. The log was not touched; the file left in place is not known to be durable, and the next manual-path store of the same payload rewrites and re-syncs it.`
         : `payload ${hash} could not be written to ${path}: ${written.message}. Nothing was stored and the log was not touched.`,
     };
   }

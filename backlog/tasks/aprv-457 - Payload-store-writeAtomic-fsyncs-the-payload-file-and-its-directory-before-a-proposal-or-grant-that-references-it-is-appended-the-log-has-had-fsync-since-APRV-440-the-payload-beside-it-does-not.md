@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-04 01:39'
-updated_date: '2026-10-04 05:03'
+updated_date: '2026-10-04 05:18'
 labels:
   - agent-village
 dependencies:
@@ -73,6 +73,8 @@ For whoever merges next to PR #569: both touch writeAtomic's mkdir and open line
 Not verified: doctor was not run against the primary checkout's live log and store (the hook classifies any read of the log directory from a script as log.mutate, and the task forbids touching .approval/). After merge, `approval doctor` in the primary will read back every bound payload; if any are torn or missing there, the payload-store row will now fail where it passed before.
 
 Validation: npm test exit 0 (5483 tests, 5481 pass, 0 fail, 2 skipped) on the uncommitted tree over 2873203d; npm run typecheck exit 0; npm run lint exit 0 (no warnings); targeted node --test of payload-fsync, payload-store, log-fsync, cli-doctor and prune exit 0 (135 pass).
+
+Refuter (fresh opus-high, PR #580 at 27748725): no blockers; durability claim, crash model, log path untouched and torn-cannot-swallow-tampered all held. Fixed in the second commit: (1) SHOULD-FIX: a {"$ref": …} file replacing material a record proves was held passed the integrity read (loadPayload reports references before hashing); payloadIntegrity now reports it as mismatch unless the bytes themselves hash to the name, and the tampered-shapes doctor test gains that shape. (2) SHOULD-FIX: an absent store directory short-circuited to 'not created until the first request' even when verified records prove the store held bytes; the ENOENT branch now runs the integrity read first and reports every held binding as lost (new doctor test). (3) NIT: the mismatch text no longer claims a crash never leaves other bytes; it says a partial writeback (valid prefix, NUL tail) lands in the stricter reading. (4) NIT: the may-be-present message now says 'the next manual-path store' re-syncs, since the nonmanual retain path skips a store whose file already verifies. (7) the every-fix shape battery gains a lost home. Left as is, with reasons: (5) two processes racing the first mkdir of the store: the loser syncs only payloads/, the same narrow pattern log.ts has, not worth diverging from APRV-440's walk here; (6) doctor reads each bound file twice; fine at today's sizes; (7) CrashDisk does not model overwriting a durable name and the production spy does not pin WHICH directory was synced; the trace tests pin both orders. (8) Hook cost: the nonmanual retain path stores a new payload on a gated hook request, so each gated command with a payload not yet in the store pays the same ~8 ms (two fsyncs) on APFS; AC #3 asked for propose and grant only, recorded here so the hook-latency history has it. Outside this task, for the orchestrator: src/cli/log-sync.ts placeAtomically (restorePayloads, the log restore) still writes store files temp+rename without fsync; a candidate follow-up task, not filed. Validation after fixes: tsc exit 0, typecheck exit 0, lint exit 0 (no warnings); node --test cli-doctor, prune, payload-fsync, payload-store exit 0 (126 pass); every other doctor-invoking test file (17 files) exit 0 (480 pass). CI on the first commit: all required checks pass (full gate shards 1-3, protected paths).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
