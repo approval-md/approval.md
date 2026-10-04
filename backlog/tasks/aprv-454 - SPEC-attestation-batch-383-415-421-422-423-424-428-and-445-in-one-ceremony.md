@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-03 03:50'
-updated_date: '2026-10-04 11:24'
+updated_date: '2026-10-04 11:29'
 labels:
   - spec
   - policy.edit
@@ -94,4 +94,13 @@ Left as notes:
 (1) 447's code is PR #587, which is unmerged. The morning order is: #587 lands, then Carter attests #590.
 (3) attest --organ takes repository-relative paths only, so it cannot attest the Hermes organs.
 (9) 455's Classifier line has no SPEC table to land in.
+
+A second opus verifier checked the consistency commit item by item: (2), (4), (5), (6), (7) and (8) are all OK. Two of its nits are handled in a third commit:
+- The policy-already-attested row now says the accepting approver instead of resident, because SPEC does not use Agent Village vocabulary.
+- Correction to the note above: edit 9 (the §13 422 completion) carries no APRV-454 marker. It is 422's own wording and sits under the existing (Amended APRV-422.). The other eight edits each carry one marker; §10.7 holds two, for edits 3 and 4.
+Nits left as they are:
+- §10.3 still says v0.1 ships, though edgeos arrived later; the sentence names it as APRV-455's addition.
+- §10.7 keeps the existing phrase One credential reaches the agent-facing verbs; the next sentence states the exact list.
+- The CLI-label spelling (hook classify) is used for verbs, beside §10.5's tool names.
+The third commit exists because the hook refuses an amend of the local commit (vcs.history.rewrite is human-only).
 <!-- SECTION:NOTES:END -->
