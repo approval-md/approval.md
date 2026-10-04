@@ -568,6 +568,12 @@ Each event chains to its predecessor. Gate decisions use verified records, and d
 
 Keep these facts distinct: an agent proposed something; policy permitted it; a human granted it; execution started; an outcome was reported; an independent system witnessed an effect. They are related records, not synonyms.
 
+### Which policy authorized a start
+
+Every `execution.started` a harness path writes (the hook route, including `approval serve`'s, and `approval start` for a proposal) carries `payload.policy_sha256`: the SHA-256 of the attested policy bytes the gate resolved the action's class against when it recorded the start. It is the same value `approval.requested` and `approval.granted` carry, and it equals the hash of the `policy.updated` attestation `approval status` names. A policy-authorized start (autonomous, supervised, or an unselected supervised-live draw) previously named no policy, so a reader had to find the latest attestation before the record's seq; a granted start reached its policy through `grant_seq` and now carries the stamp as well.
+
+The runtime writes the field at the write boundary. No caller parameter carries it, a same-named value in a request, an option, or the action's own payload is ignored, and an unattested or edited policy produces no start at all. Nothing that decides reads it back: verdicts, budgets, draws, and the single-use rule are computed exactly as before. Records written before the field existed (APRV-447) simply lack it and still validate. Downstream consumers may use it as a join key; the agentvillage-data follower maps it to `policy_version` on its `action.*` events, so the field name is stable.
+
 ### Checkpoints and external witnesses
 
 A chain can reveal inconsistent edits, reordering, and other integrity failures. It cannot, on its own, reveal a valid suffix removed without an external anchor, or defeat an attacker able to replace the entire chain and its trusted context.
