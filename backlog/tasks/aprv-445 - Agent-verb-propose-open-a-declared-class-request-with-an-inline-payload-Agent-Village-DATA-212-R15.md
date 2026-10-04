@@ -3,11 +3,11 @@ id: APRV-445
 title: >-
   Agent verb propose: open a declared-class request with an inline payload
   (Agent Village DATA-212 R15)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-04 01:38'
+updated_date: '2026-10-04 10:59'
 labels: []
 dependencies: []
 references:
@@ -88,10 +88,26 @@ Merge 2026-10-04: origin/main 7f2fd996 (#570 attest --bootstrap, #571 AV policy 
 Security pass 2026-10-04 (orchestrator-requested after a background review flagged gate.ts): one real bypass, fixed. startProposed's policy path (startHarnessExecution) refused only manual and human-only and never re-ran the supervised-live draw, so a selected live proposal that a human rejected, or that the agent withdrew or let expire, started with authorization: policy and no grant (reproduced with a PoC). Fix: proposalPolicyStartRefusal in src/core/gate.ts, run inside attemptHarnessStart for propose: tasks (task id decides, not a caller flag), before the budget write: refuses not-granted for a pending/granted request (re-check inside the append), a rejection/revocation under the attested policy (or one that pinned none), and a supervised-live class whose deterministic draw selects the bytes. No SPEC change. Tests: three S5-live tests in tests/propose-refutation.test.ts. Also: agent-village-policy test asserts the #569 key and verb are present (no silent fallback); conformance/README records 27.0.0 superseding 23-26. npm test exit 0 (5542, 5541 pass, 0 fail, 1 skipped). Open: protected paths (grant cross-check) red because records-log-2026-10-04 carries no gate.path.signed_off for SPEC.md sha256 bb092166...; the only such record is seq 72713 in this worktree's own stale log copy (uncommitted). Follow-ups to file: proposal payload store has no fsync (payload-store.ts writeAtomic) while the log does since APRV-440. Resume point: the SPEC sign-off must reach the primary's log and a records branch; then re-run the protected-paths job, merge-arm #569.
 
 Resume point (2026-10-04, C1 lane stopped, #569 NOT armed): head fc3fcfa8 plus this note's commit. Carter: approval policy attest --path SPEC.md --dir /Users/carter/dev/approval-md-wt/data-212-propose --log /Users/carter/dev/approval-md/.approval/log --as human:carter (must hash to bb09216600026185f0f6380c9ca556bd35fbba5fea1c36a07e294766681550f4), then approval log advance --pr from the primary, then gh pr merge 569 --merge. The stray uncommitted seq 72713 sign-off in this worktree's .approval/log/events.jsonl was appended to a stale copy of the log and forks it; it must never be committed.
+
+Done 2026-10-04: PR #569 merged at 10:56:58Z from head a4dd89e5 (merge commit af3e591a on main). The SPEC.md hunks were signed off by Carter as gate.path.signed_off at seq 81682, digest bb09216600026185f0f6380c9ca556bd35fbba5fea1c36a07e294766681550f4 (carried by records PR #584), so the (Amended APRV-445, pending sign-off.) markers in the merged SPEC bytes are now signed-off text. The stray seq 72713 copy in the data-212-propose worktree's stale log was never committed.
+Open rulings: the three items the PR body left for Carter shipped as merged, and the notes record no separate ruling on any of them. (1) exit 7 `void` is in the exit table. (2) credentialReadGate breadth: .approval/env.example and Glob on .approval/keys read as credential reads. (3) APPROVAL_HERMES_HOME must be set on the serve process. Decisions (a) through (d) from the 2026-10-02 note stand as built: init gitignores payloads, the SPEC amendments are signed off, the start verb exists, and .hermes/.env writes are policy.core.
+Fixes after review: fc3fcfa8 closed the security-pass bypass. start's policy path turned a rejected, withdrawn or expired request for a selected supervised-live proposal into a policy-authorized execution.started; proposalPolicyStartRefusal now refuses it. a4dd89e5 closed a signal-guard fail-open: the Hermes hook handled SIGTERM/SIGINT only from the start of its wait, so an earlier signal killed it with empty stdout. hermesFailClosed now guards the whole CLI run, and the wait's handler is prepended. The same commit fixed the L-d test race that ejected the first queue run (37192542666). The remaining window, a signal during module load before the runtime runs, is APRV-466.
+Conformance: refusal-unions is at 27.0.0 (main's 26.0.0 relay union plus this task's six gate codes, under the collision rule; conformance/README records it).
+Validation at a4dd89e5: npm test exit 0 (5559 tests, 5558 pass, 0 fail, 1 skipped); typecheck, lint and build exit 0; propose-recheck plus cli-hook-hermes-rules 20/20 green in a row; PR CI green, protected paths included.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the agent verbs propose and start, the policy key agent_may_request, wait --timeout 0 and the void standing (exit 7), owner-only payload store files, init gitignoring payloads, serve --listen unix:<path>, and Hermes classifier rows. Added a Hermes fail-closed path at three levels (adapter, main, cli.js). Writes to the Hermes home's secrets are now policy.core. Proposals are excluded from the hook's sweep and carry and from the Telegram stale collapse. Refutation findings B1, B2, S1-S5 and L1-L11 are addressed. Verified: npm test exit 0 (5418 tests), tsc and lint clean.
+This task added:
+- the agent verbs propose and start, and the policy key agent_may_request;
+- wait --timeout 0 and the void standing (exit 7);
+- owner-only payload store files, with init gitignoring .approval/payloads/;
+- serve --listen unix:<path>;
+- Hermes classifier rows, with writes to the Hermes home's secrets classified policy.core;
+- a Hermes fail-closed path at every level: adapter, main, cli.js, and a signal guard over the whole CLI run.
+
+Proposals are excluded from the hook's sweep and carry, and from the Telegram stale collapse. Refutation findings B1, B2, S1-S5 and L1-L11 are addressed, as is the security-pass bypass on start's policy path (fc3fcfa8). SPEC hunks are signed off (seq 81682, bb092166...), and the refusal-unions vectors are at 27.0.0.
+
+Merged as PR #569 at a4dd89e5 on 2026-10-04. Verified: npm test exit 0 (5559 tests, 0 fail), tsc and lint clean, PR CI green.
 <!-- SECTION:FINAL_SUMMARY:END -->
