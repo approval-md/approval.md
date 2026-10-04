@@ -1272,6 +1272,40 @@ export function harnessBlockDirective(
   return { stdout: out.join(""), exitCode };
 }
 
+/**
+ * Raised on `globalThis` while the runtime's own Hermes signal guards are
+ * registered (APRV-466). The `approval` bin reads the same registry symbol and
+ * steps aside while it is `true`, so the bin and the runtime never both print.
+ * An explicit flag rather than a listener count: an unrelated listener that
+ * does not exit must not switch the bin's guard off.
+ */
+export const HERMES_SIGNAL_OWNER: unique symbol = Symbol.for("approval-md.hermes-signal-owner");
+
+/**
+ * The block directive a Hermes hook prints when a signal arrives before it
+ * reached a verdict (APRV-445, APRV-466), as bytes.
+ *
+ * Two places print it: `hermesFailClosed`'s guard below, and the `approval` bin
+ * (`cli.js`), which has to answer a signal that lands while this module is
+ * still loading and so cannot import it. The bin spells the same bytes by hand,
+ * and `tests/hermes-bin-signal-guard.test.ts` pins the two equal, so the
+ * early-signal answer is one code with one spelling (SPEC.md §11.1 invariant
+ * 6). The wait's own handler words its message differently ("while waiting for
+ * a decision") under the same code.
+ *
+ * On the CLI the hook run is synchronous from the stdin read to the verdict, so
+ * a JS signal listener registered inside it does not get a turn; in practice
+ * the bin is the layer that prints this (docs/hermes-hook.md, "Two layers
+ * against a signal").
+ */
+export function hermesInterruptedDirective(signal: NodeJS.Signals): string {
+  return harnessBlockDirective(
+    "hook-interrupted",
+    `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
+    "hermes",
+  ).stdout;
+}
+
 /** The machine-readable code a Hermes `execute_code` call is refused with. */
 export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
@@ -6968,18 +7002,21 @@ function hermesFailClosed(
   // handler is prepended, so inside the wait it answers first and exits. CLI
   // only: under `approval serve` (a wait seam) the process's signals belong to
   // the server.
+  //
+  // APRV-466, read before trusting any of the above on the CLI: this run is
+  // synchronous from the stdin read through the wait's `Atomics.wait` poll to
+  // the verdict, and a JS listener runs only when the event loop turns, so
+  // neither this guard nor the wait's handler gets a turn there. A signal is
+  // held and dispatched after the run returns, to the `approval` bin's own
+  // guard, which exits with the answer this run gave. The guards are kept for
+  // a run that yields (and for what a later async wait would need), and while
+  // they are registered HERMES_SIGNAL_OWNER tells the bin's guard to step aside
+  // so the two never both print.
   const onEarlySignal = (signal: NodeJS.Signals): void => {
     if (raw !== null && isHermesPostEvent(raw)) process.exit(EXIT_OK);
     if (stdout.length === 0) {
       try {
-        writeSync(
-          1,
-          harnessBlockDirective(
-            "hook-interrupted",
-            `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
-            "hermes",
-          ).stdout,
-        );
+        writeSync(1, hermesInterruptedDirective(signal));
       } catch {
         // stdout is gone; the exit code below is the whole verdict.
       }
@@ -6988,14 +7025,18 @@ function hermesFailClosed(
   };
   const onEarlyTerm = (): void => onEarlySignal("SIGTERM");
   const onEarlyInt = (): void => onEarlySignal("SIGINT");
+  const owner = globalThis as Record<symbol, unknown>;
+  const ownerBefore = owner[HERMES_SIGNAL_OWNER];
   if (waitSeam === null) {
     process.on("SIGTERM", onEarlyTerm);
     process.on("SIGINT", onEarlyInt);
+    owner[HERMES_SIGNAL_OWNER] = true;
   }
   try {
     return hermesVerdict();
   } finally {
     if (waitSeam === null) {
+      owner[HERMES_SIGNAL_OWNER] = ownerBefore;
       process.off("SIGTERM", onEarlyTerm);
       process.off("SIGINT", onEarlyInt);
     }

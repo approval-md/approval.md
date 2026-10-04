@@ -454,6 +454,47 @@ the block directive at exit 2 as a wait that ran out does. The `approval` bin
 also guards the exit: a Hermes hook that leaves with any non-zero code other than
 2 leaves as 2, printing the directive if nothing was printed.
 
+**Two layers against a signal (APRV-466).** Hermes sends SIGTERM on its hook
+timeout and on gateway shutdown, and a sandbox restart can deliver one at any
+instant. The default disposition of SIGTERM and SIGINT is to die with an empty
+stdout, which a stock Hermes reads as an allow. Two layers stand against that:
+the `approval` bin's own guard, and on Hermes's side the gated image's
+`shell_hooks` patch (HOSTED-32), which blocks a hook killed by a signal.
+
+The bin (`cli.js`) registers its SIGTERM/SIGINT guard in its first statements
+when argv names the Hermes hook, so from then on the process no longer dies of
+the signal. A JS listener runs only when the event loop turns, which decides
+what Hermes then receives:
+
+| The signal arrives | What Hermes receives |
+| --- | --- |
+| during Node's own bootstrap, before the bin's first statement | a death by signal with an empty stdout: the Hermes-side layer's to block |
+| while `dist/` loads, and the load yields to the event loop | `{"action":"block","message":"hook-interrupted: ..."}` at exit 2, from the bin; byte for byte what the runtime's own guard prints. On a post event too, where Hermes ignores the exit code |
+| while `dist/` loads without yielding, or during the hook run | the hook's own verdict, then an exit with that verdict. The run is synchronous from the stdin read through the wait's poll, so the signal is held until it returns |
+| after the hook answered | the answer already given |
+
+Whether a cold load of `dist/` yields depends on the Node release: measured on
+this repository, the load turned the event loop about thirty times on Node 24
+and none on Node 26. Either way a pre event ends in a verdict, `{}` at exit 0
+or a block at exit 2, and never in an empty stdout. The runtime's own guards
+(`hermesFailClosed`, and the wait's handler that withdraws the question) are
+registered and removed inside the synchronous run, so on the CLI they never get
+a turn; while they are registered they raise a flag the bin's guard steps aside
+for, so the two can never both print. Run the hook through the `approval` bin:
+`node dist/src/cli/main.js hook hermes` has neither of the bin's guards.
+
+A signal held through the wait does not withdraw the question. If a human
+grants it before the wait ends, the hook answers `{}` and records
+`execution.started` for a call Hermes may already have abandoned on its own
+timeout. That is older than this guard (APRV-445) and needs a wait that yields
+to the event loop.
+
+Neither layer covers the other's stretch: the bin's guard cannot run before Node
+runs it, and the `shell_hooks` patch exists only in the gated image, so a Hermes
+built from upstream keeps the bootstrap window (tens of milliseconds per call)
+open. SIGKILL reaches no handler in any process; only the Hermes-side layer can
+answer it.
+
 **`terminal` carries a per-call working directory**, which Codex does not
 (APRV-310). The command is classified against `tool_input.workdir` rather than the
 session root, so a relative path resolves the way the shell will resolve it. What

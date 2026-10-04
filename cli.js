@@ -16,18 +16,84 @@
  * static import that throws) must still answer with a block. That is the only
  * thing this file can do that the runtime cannot: it runs before the runtime
  * exists. For `approval hook hermes` it prints `{"action":"block",...}` and
- * exits 2 on any failure to load or run; every other invocation keeps its old
- * behaviour exactly.
+ * exits 2 on any failure to load or run, and on a SIGTERM or SIGINT that lands
+ * before the runtime's own guard is listening (APRV-466); every other
+ * invocation keeps its old behaviour exactly.
  */
 
 import { existsSync, writeSync } from "node:fs";
 
-const entry = new URL("./dist/src/cli/main.js", import.meta.url);
 const argv = process.argv.slice(2);
 // Matched the way `main` dispatches it: `--no-color` is the one global flag it
 // strips, wherever it appears (APRV-445 recheck L-d).
 const dispatched = argv.filter((word) => word !== "--no-color");
 const hermesHook = dispatched[0] === "hook" && dispatched[1] === "hermes";
+
+/** Has anything reached stdout? Tracked only for the Hermes hook. */
+let printed = false;
+/** Has `main` returned its verdict to this file? */
+let answered = false;
+
+/**
+ * The runtime's `hook-interrupted` directive, byte for byte
+ * (`hermesInterruptedDirective` in src/cli/hook.ts). Spelled by hand because a
+ * signal can land before that module exists in this process;
+ * `tests/hermes-bin-signal-guard.test.ts` pins the two equal.
+ */
+function hermesInterrupted(signal) {
+  return `${JSON.stringify({ action: "block", message: `hook-interrupted: the hook received ${signal} before it reached a verdict; nothing authorizes this call` })}\n`;
+}
+
+// The first guard (APRV-466), installed before anything else runs. The default
+// disposition of SIGTERM and SIGINT is to die with nothing on stdout, which
+// Hermes reads as an ALLOW, and Hermes sends SIGTERM on its hook timeout and on
+// gateway shutdown. Until now the earliest handler was the runtime's own
+// (`hermesFailClosed`), so a signal during the ESM load of dist/ (the longest
+// stretch of a cold start) took the default action.
+//
+// A JS signal listener runs only when the event loop turns. So this guard
+// prints the directive when a signal is dispatched while dist/ is loading and
+// the load yields to the loop (it does on Node 24, which turned the loop about
+// thirty times during the load; on Node 26 the load turned it zero times). A
+// signal that is caught but not dispatched until later is held, and the hook
+// run itself is synchronous end to end (`readFileSync` on stdin, an
+// `Atomics.wait` poll), so a signal held into it is dispatched only after the
+// hook has answered. Then `answered` is set (it is set in the same microtask
+// drain as the run's return) and the process exits with the answer the hook
+// gave. Either way the default disposition, death with an empty stdout, is gone
+// from this file's first statement on.
+//
+// Ownership: the runtime's own guards (`hermesFailClosed`, the wait's handler)
+// raise HERMES_SIGNAL_OWNER while they are registered. They are registered and
+// removed inside that synchronous run, so on the CLI they do not get a turn
+// today; the flag is what keeps the two from both printing if the run ever
+// yields. With something on stdout and no answer yet, this exits 2 without
+// printing a second object (unparseable stdout).
+//
+// What no guard here can cover is the moment before this file's first
+// statement: Node's own bootstrap. A signal there is a death by signal with an
+// empty stdout, and the gated image's patch to Hermes's `shell_hooks`
+// (HOSTED-32) is the layer meant to block it (docs/hermes-hook.md, "Two layers
+// against a signal").
+const HERMES_SIGNAL_OWNER = Symbol.for("approval-md.hermes-signal-owner");
+if (hermesHook) {
+  const onSignal = (signal) => {
+    if (globalThis[HERMES_SIGNAL_OWNER] === true) return;
+    if (answered) process.exit();
+    if (!printed) {
+      try {
+        writeSync(1, hermesInterrupted(signal));
+      } catch {
+        // stdout is gone; the exit code below is the whole verdict.
+      }
+    }
+    process.exit(2);
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+}
+
+const entry = new URL("./dist/src/cli/main.js", import.meta.url);
 
 /** Hermes's own block directive, spelled here because the runtime may not load. */
 function hermesBlock(message) {
@@ -41,7 +107,6 @@ function hermesBlock(message) {
 // an ALLOW to Hermes. Such an exit leaves as 2, with the directive when nothing
 // was printed. Exit 0 with nothing on stdout is the post-event answer and is
 // left alone; the adapter itself never answers a pre-event that way.
-let printed = false;
 if (hermesHook) {
   const write = process.stdout.write.bind(process.stdout);
   process.stdout.write = (chunk, ...rest) => {
@@ -66,6 +131,7 @@ if (hermesHook) {
 if (!existsSync(entry)) {
   if (hermesHook) {
     hermesBlock("the approval runtime is not built (dist/src/cli/main.js is missing)");
+    answered = true;
   } else {
     // Exit 4 = I/O error in the frozen exit-code table (src/cli/exit-codes.ts).
     process.stderr.write(
@@ -80,6 +146,7 @@ if (!existsSync(entry)) {
   } catch (cause) {
     hermesBlock(`the hook could not run: ${cause instanceof Error ? cause.message : String(cause)}`);
   }
+  answered = true;
 } else {
   const { main } = await import(entry.href);
   // `main` is asynchronous since APRV-209: every verb is loaded on demand, and
