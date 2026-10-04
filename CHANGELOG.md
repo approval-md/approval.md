@@ -94,6 +94,107 @@ before a tag.
   exit 2: a misconfigured hook entry, a throw, a signal mid-wait, a path that
   reached no verdict, and a module that fails to load all print the directive.
   Hermes reads any other non-zero exit with an empty stdout as an allow.
+- **`edgeos` is a sender channel (APRV-455).** `approvers.<id>.senders.edgeos`
+  maps a person's EdgeOS `/humans/me` id, raw (an ASCII letter or digit, then
+  up to 127 letters, digits, `.`, `_` or `-`; colon-free, so it can never be
+  read as the keyed form) or keyed under `APPROVAL_SENDER_KEY` exactly as
+  `telegram` is. It qualifies on the APRV-324 ground: the gesture is attributed
+  to an id the person cannot choose, by a relay the daemon trusts the way it
+  trusts the Bot API's `from.id`. An observed id that already wears the
+  `hmac-sha256:` prefix is never compared raw, so a published digest cannot be
+  replayed as an account. The schema hunk is confined to the `senders` object
+  and the `senderChannel` definition.
+- **`approval channel relay` (APRV-455).** A third arrival for a human
+  gesture: a loopback HTTP listener (port 4684) an operator's control plane
+  posts to, authenticated by `APPROVAL_RELAY_SECRET` from the launch
+  environment in `x-approval-relay-secret`, checked before the path, method
+  or body. `POST /relay/gesture` takes one closed body: `propose`,
+  `attest` or `decline` a policy by sha256, or `grant` or `reject` a
+  request by action key, each with an EdgeOS sender, a nonce and an
+  `issued_at`. Gestures go through `recordChannelDecision` with the new
+  `requireSenderMapping`, so an unmapped account (or a policy mapping none) is
+  refused `sender-unmapped` with one `audit.decision_refused` and the relay
+  never decides as an identity of its own; expiry, policy drift and attestation
+  resolve exactly as for a Telegram tap. A forged post appends nothing; a
+  replayed nonce is refused across restarts by an exclusively linked ledger under
+  `.approval/daemon/relay-nonces/`; a grant's raw token never leaves the
+  process. Every gesture resolves its sender against the policy IN FORCE, so a
+  mapping sitting unattested on disk decides nothing. `propose` (under an
+  `agent:` proposer, with a one-hour deadline) may reaffirm bytes already in force
+  (`ProposeInput.reaffirm`), so an unchanged onboarding review still makes the
+  resident the attester of record. The verb is `human_only` in the registry,
+  so neither `serve` nor MCP publishes it. New frozen union
+  `relay_refusal_codes` (refusal-unions vectors 26.0.0). Trust level: the
+  daemon trusts the relay's attribution, which is operator trust (APRV-422).
+  The SPEC §10.3 and §11.2 hunks are proposed in the task notes, pending
+  sign-off.
+- **An acknowledged append survives the machine dying the next moment
+  (APRV-440).** Every append to `events.jsonl` now fsyncs the descriptor after
+  its single write and before the verb reports ok, and the append that creates
+  the file also fsyncs the log directory (and the parent of any directory it
+  created), so the new name is as durable as its bytes. Before this the append
+  was atomic against other writers and nothing more: on a hosted tenant a
+  platform kill about 30 s after an acknowledged attestation left the file
+  ending in 456 NUL bytes where the record had been. A failed fsync, a failed
+  directory fsync and a short write are each reported as `io` rather than
+  acknowledged, with a message that says the bytes may be on disk; no refusal
+  code was added and compare-and-append is unchanged. Measured on macOS (APFS,
+  Node's fsync is `F_FULLFSYNC` there): 3.7 ms per append, and 84 ms added to a
+  daemon tick that appends 20 records; a tick that appends nothing pays nothing.
+  `APPROVAL_BENCH=1 node --test dist/tests/append-fsync.bench.js` re-measures.
+  `approval log verify` now says which crash tore a tail: `tear: "nul-filled"`
+  is the crash-before-writeback signature (the file grew, its data never reached
+  the disk; nothing was tampered and no record is half-written), and
+  `partial-line` is a writer that died mid-line. `--json` gains `tear`,
+  `tornBytes` and `intactBytes` (the byte offset the verified records end at),
+  the torn-byte count is now UTF-8 bytes rather than string length, and
+  `approval doctor`'s log row names the bytes to keep and the command that
+  keeps them. Nothing truncates on its own.
+
+- **A refused Telegram tap no longer kills the live prompt (APRV-442).** When a
+  tap was refused (an unmapped account's `sender-unmapped` is the case the
+  hosted smoke found), the card was disarmed as before, but the listener kept
+  believing the request was on the approver's phone: no fresh card went out and
+  the original card's buttons resolved to nothing until the listener restarted.
+  The channel now reports each card a refused or failed tap disarmed, and the
+  next dispatch cycle (polling and webhook alike) re-offers every such request
+  the verified log still calls pending, so the mapped approver can answer on
+  the new card. The refusal is unchanged: still refused, still one
+  `audit.decision_refused` attributed to nobody. The refused card stays dead:
+  a Telegram redelivery of the refused tap, or its bytes replayed, takes no
+  fallback to the new card, so it appends nothing and sends nothing.
+
+- **The Agent Village tenant policy lives here, and the Hermes guide describes
+  the co-located shape (APRV-446).** `examples/agent-village/approval-policy.md`
+  is the canonical day-one policy the control plane renders into each tenant's
+  `APPROVAL.md`: a recorder (autonomous default), the three gate organs
+  human-only, the Hermes tool classes and `network.call`/`read.web` recorded and
+  never gated, `intent.publish.inferred.index` manual and agent-requestable, a
+  72h proposal window, and the relay credential and resident chat named by env.
+  It is named `approval-policy.md` because any file named `APPROVAL.md`
+  classifies `policy.core`. `tests/agent-village-policy.test.ts` proves it
+  through the real loader, resolver, `policy attest --bootstrap` and `hook
+  hermes`, and runs the propose round once the build carries #569's
+  `agent_may_request`. `docs/hermes-hook.md` "For Agent Village" now covers
+  `serve` on loopback or a unix socket, the agent token file, `up --api-base`
+  against the relay, the operator attestation, the 240 s hook window beside the
+  72 h proposal window, and what the hook never sees.
+
+- **A hosted tenant with no shell gets its starting policy from the operator,
+  once, and can see who set it (APRV-449).** `approval policy attest
+  --bootstrap --as human:<operator>` attests a store's first policy and nothing
+  else: it reads the verified log first, a re-run over the same bytes refuses
+  `policy-already-attested`, changed bytes refuse `policy-amendment-required`,
+  and neither appends anything (exit 1, with `seq` and `attested_by` in the
+  error). The append is compare-and-append against the head it read. The plain
+  verb is unchanged, and needs no TTY either way. `approval status` gains
+  `attestation.attested_by` (the text row reads `attested (seq 1, by
+  human:carter)`) and `approval doctor`'s attestation row names the attester,
+  both read from the verified record. With `--bootstrap` the log resolves under
+  `--dir` unless `--log` names one. `docs/hosted-provisioning.md` is the
+  sequence (init, write the policy only into a store with no log, attest as the
+  store user), every refusal code, and the trust statement: the operator sets the
+  starting policy, and every change needs the approver's act through a channel.
 
 - **A harness probe drives its own matrix, so an operator runs one command
   instead of typing thirty prompts (APRV-418).**

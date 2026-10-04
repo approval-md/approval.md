@@ -1632,8 +1632,10 @@ export interface DispatchResult {
    * Action keys dropped from the delivery bookkeeping this cycle (APRV-196),
    * with why. Neither kind can cost a re-send: the pending queue is the log's
    * answer, and a dropped key that is still pending is simply re-delivered.
+   * `released` (APRV-442) is the one kind that is dropped BECAUSE it is still
+   * pending: a refused tap disarmed its card, and this cycle re-offers it.
    */
-  pruned: { action_key: string; reason: "settled" | "stale" }[];
+  pruned: { action_key: string; reason: "settled" | "stale" | "released" }[];
   /**
    * The collapsed re-delivery this cycle sent, when it sent one (APRV-287):
    * the one message that stood in for a batch of requests nobody is waiting on
@@ -1722,9 +1724,14 @@ function terminalDeliveries(
     // `granted`, a declined one `rejected`, a superseded one `withdrawn`
     // (a newer proposal is the live question now), and a lapsed one `expired`.
     if (isAttestationActionKey(actionKey)) {
-      const proposal = proposalRecords(read.records).find(
-        (entry) => entry.action_key === actionKey,
-      );
+      // The LATEST proposal under this key (APRV-455 refuter M2). Every
+      // proposal of one policy hash shares `policy.attest:<sha256>`, and since
+      // a relay may propose bytes already in force a second proposal of an
+      // attested hash is ordinary: settling the live one by the first one's
+      // answer would retire an open prompt as "granted" by somebody else.
+      const proposal = proposalRecords(read.records)
+        .filter((entry) => entry.action_key === actionKey)
+        .at(-1);
       const derived =
         proposal === undefined ? null : proposalState(read.records, proposal.seq, now);
       if (derived === null || derived.state === "open") continue;
@@ -1937,6 +1944,26 @@ export async function dispatchPending(
     if (Number.isNaN(nowMs) || nowMs - sentAtMs < DISPATCH_RETENTION_MS) continue;
     forget(state, actionKey);
     result.pruned.push({ action_key: actionKey, reason: "stale" });
+  }
+
+  // APRV-442. A tap the gate refused (a wrong account's, `sender-unmapped`, is
+  // the case that found this) disarms its card, and the channel says which
+  // cards it disarmed that way. The card is gone; the REQUEST is not, unless
+  // the verified log says so. A released key the log still calls pending loses
+  // its delivery bookkeeping here, so the sends below offer it again as a
+  // fresh card in this same cycle. One the log has settled is left exactly
+  // where it is, for the terminal annotation pass above to finish on the next
+  // cycle as it always has. Nothing about the refusal changes: it was recorded
+  // by the gate before this ran, and the new card's buttons reach the same gate.
+  for (const actionKey of setup.channel.takeReleased()) {
+    if (!pendingNow.has(actionKey) || !state.delivered.has(actionKey)) continue;
+    forget(state, actionKey);
+    // Under `paced` the released card WAS the question in front of the
+    // approver, and a selection that still believed it was showing would
+    // decline to show anything. Clearing it lets the walkthrough re-offer the
+    // request, which is the first pending key in its order not on the phone.
+    if (state.paced.current?.includes(actionKey) === true) state.paced.current = null;
+    result.pruned.push({ action_key: actionKey, reason: "released" });
   }
 
   for (const skipped of queue.skipped) {

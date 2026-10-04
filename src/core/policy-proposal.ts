@@ -197,6 +197,29 @@ export interface ProposeInput {
    * can only raise urgency: see `ChannelRequest.waiting`.
    */
   waitUntil?: string;
+  /**
+   * Propose bytes that are ALREADY the policy in force, so that a different
+   * human can become the attester of record without changing a rule
+   * (APRV-455).
+   *
+   * Off by default, and every existing caller leaves it off: `policy amend`
+   * still refuses `policy-already-attested`, because a terminal amendment of
+   * bytes already in force asks a human to sign for nothing. The one caller
+   * that sets it is `approval channel relay`'s `propose` gesture, and the
+   * case it exists for is the onboarding review: the operator attested the
+   * starting policy (APRV-449), the resident read it in the app and accepted
+   * it unchanged, and that acceptance is the resident's attestation. Without
+   * this the unchanged review, which is the common one, could only ever be
+   * recorded outside the log.
+   *
+   * What it changes is the attester, never the rules: the proposal names the
+   * same hash the attestation in force names, its diff is taken against the
+   * verified in-force text and reads "no semantic change", and an acceptance
+   * appends a `policy.updated` of the same bytes. Who may accept is decided
+   * exactly as for any other proposal, against the policy in force, so it can
+   * widen nobody's authority.
+   */
+  reaffirm?: boolean;
 }
 
 /** Options for both verbs: the append's, plus the clock and the schema dir. */
@@ -483,14 +506,21 @@ export function proposeAttestation(
   }
 
   const status: AttestationStatus = checkAttestationOfBytes(read.records, bytes);
-  if (status.status === "attested") {
+  if (status.status === "attested" && input.reaffirm !== true) {
     return refuse(
       "policy-already-attested",
       `${input.policyPath} already matches its attestation at seq ${String(status.seq)}; there is no amendment to sign, and a prompt for one would ask a human to re-attest bytes that are already in force`,
     );
   }
   const sha256 = policyBytesHash(bytes);
-  const attestedSha256 = status.status === "hash-mismatch" ? status.attestedSha256 : null;
+  // APRV-455: a reaffirmation names the attested hash as its own baseline, so
+  // its diff is taken against the verified in-force text like any other.
+  const attestedSha256 =
+    status.status === "hash-mismatch"
+      ? status.attestedSha256
+      : status.status === "attested"
+        ? status.sha256
+        : null;
 
   const diff = summarizeDiff(
     input.policyPath,

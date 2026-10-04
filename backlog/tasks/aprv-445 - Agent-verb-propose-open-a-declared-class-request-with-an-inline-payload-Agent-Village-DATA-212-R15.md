@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-02 19:53'
-updated_date: '2026-10-03 05:39'
+updated_date: '2026-10-04 01:01'
 labels: []
 dependencies: []
 references:
@@ -82,6 +82,8 @@ Merge 2026-10-02: origin/main 89b8fe54 merged at 4db5f5f6 (conflicts in execute/
 Post-merge validation: npm test exit 0, 5461 tests, 5460 pass, 0 fail, 1 skipped; tsc --noEmit exit 0; npm run lint exit 0. Refusal unions unchanged by the merge (origin touched no conformance vectors), so no regeneration. Resume point: push carter/data-212-propose and watch gh pr checks 569 to a verdict; the orchestrator arms the merge.
 
 CI run 37099665754 (first CI verdict this branch ever had): shard 1 red on two branch tests, both Linux-only. (1) cli-propose oversized payload: spawnSync E2BIG, Linux caps one argv string at 128 KiB, so the 256 KiB and at-limit cases now run through main() in process (serve's path). Product consequence for the human: approval propose --payload-json from a Linux shell tops out near 128 KiB; the 256 KiB cap is reachable only through serve. (2) propose-refutation B1 lapsed grant: a 3 s window was eaten by slow CI spawns; now 8 s, lapse waited from when propose returned. protected-paths check red on the branch's own SPEC.md commits (c81817f0, 6958f02b, 4c5c050c, dae522bc: no-evidence), expected while the SPEC hunks await sign-off. Resume point: push the fix and watch gh pr checks 569 again.
+
+Merge 2026-10-04: origin/main 7f2fd996 (#570 attest --bootstrap, #571 AV policy fixture and hermes-hook doc, #572 refused tap, #573 fsync, #577 edgeos relay channel) merged onto fe10ffd4. Conflicts: CHANGELOG.md Unreleased (both entry sets kept, APRV-445 first, then main's APRV-455/440/442/446/449); conformance refusal-unions and manifest (main's 26.0.0 taken, then regenerated: the merged suite is 27.0.0 under conformance/README.md's collision rule, carrying the six APRV-445 gate codes and APRV-455's relay_refusal_codes; the regen script's history comment keeps both sides and adds 27.0.0); scripts/regen-conformance-vectors.mjs (that comment). Auto-merged: docs/cli-reference.md, docs/hermes-hook.md (three 'once #569 lands' phrases updated by hand), verb-registry, help, main. SPEC.md byte-identical to fe10ffd4 (Carter's 2026-10-03 sign-off, sha256 bb092166..., carried by records-log-2026-10-04 f2e60c20). The worktree's uncommitted events.jsonl line (that sign-off appended to this worktree's stale log copy) stays out of the commit: log lines never ride feature branches. Validation: npm run build exit 0, tsc --noEmit exit 0, lint exit 0, targeted 313/313, npm test exit 0 (5538 tests, 5537 pass, 0 fail, 1 skipped). Resume point: push carter/data-212-propose, watch gh pr checks 569, refute the merge diff, arm the merge.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

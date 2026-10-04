@@ -521,6 +521,9 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
         records: result.records,
         head: null,
         intactThroughSeq: result.intactThroughSeq,
+        tear: result.tear,
+        tornBytes: result.tornBytes,
+        intactBytes: result.intactBytes,
         message: result.message,
         ...anomalyField(result.anomalies),
       });

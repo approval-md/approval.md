@@ -730,21 +730,21 @@ export const POLICY_TEST_HELP = policyVerbHelp("test", "check");
 export const POLICY_ATTEST_HELP = `approval policy attest — record a human's sign-off on the policy file
 
 Usage:
-  approval policy attest [--policy <path>] [--dir <path>] [--organ <path>]
-                         [--path <path>] [--as human:<id>] [--log <path>] [--json]
+  approval policy attest [--policy|--dir <path>] [--organ|--path <path>]
+                         [--bootstrap] [--as human:<id>] [--log <path>] [--json]
 
 Flags:
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --organ <path>   attest a GATE ORGAN instead; one path per call, under --dir
   --path <path>    sign off a PROTECTED path's current bytes; one path per call
+  --bootstrap      a store's FIRST policy only; re-run: policy-already-attested
   --as human:<id>  the human attesting; overrides APPROVAL_HUMAN
   --log <path>     log file to append to (default .approval/log/events.jsonl)
   --json / -h, --help   machine-readable output / this text
 
-Appends one policy.updated event with the policy file's exact SHA-256; gate
-operations refuse while it differs ("policy-not-attested"). Bytes, not parse.
-Human-only, identity CONFIG-DECLARED. What attestation proves is bounded: the
-trust boundary is the local machine, so someone with local control, not who.
+Appends policy.updated with the file's exact SHA-256; gates refuse while it
+differs ("policy-not-attested"). Bytes, not parse. Human-only, CONFIG-DECLARED:
+the trust boundary is the local machine (local control, not who). No TTY needed.
 --organ appends gate.organ.attested (policy.core); --path gate.path.signed_off.
 
 JSON shape: docs/cli-reference.md#policy-attest
@@ -1449,14 +1449,13 @@ Usage:
   approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
                        [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
+  approval channel relay [--listen [host:]port | --port <n>] [--proposer <a>] [--json]
 
 Subcommands:
-  cli        render the pending queue in this terminal and, when it IS a
-             terminal, collect decisions with a prompt
-  web        serve the pending queue as a page on 127.0.0.1 ONLY, with
-             Grant/Reject forms and a batch gesture
-  telegram   deliver the queue to a Telegram chat and long-poll for
-             Approve/Reject taps
+  cli        render the pending queue here; on a terminal, collect decisions
+  web        the queue as a page on 127.0.0.1 ONLY, with Grant/Reject forms
+  telegram   deliver the queue to a Telegram chat; collect Approve/Reject taps
+  relay      take gestures an operator's authenticated relay carries (EdgeOS)
 
 A channel is TRANSPORT: it renders what the runtime derived and reports the
 gesture a human made. Every decision collected here is recorded by the same
@@ -2028,6 +2027,31 @@ JSON shape: docs/cli-reference.md#channel-telegram-webhook
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("channel-telegram-webhook")}`;
+
+export const CHANNEL_RELAY_HELP = `approval channel relay — gestures an operator's authenticated relay carries
+
+Usage:
+  approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
+        [--proposer agent:<id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --port <n> / --listen <[host:]port>   LOOPBACK by default (4684); routable also needs --allow-non-loopback
+  --proposer <actor>   who a propose gesture is recorded under (default agent:edgeos-relay)
+  -h, --help           this text
+
+APPROVAL_RELAY_SECRET is REQUIRED, from the launch environment: the control
+plane sends it in x-approval-relay-secret, and a post without it is refused
+and never written to the log. POST /relay/gesture takes one closed JSON body:
+propose, attest or decline a policy by sha256, or grant or reject a request by
+action key, each with a nonce and issued_at. The sender is an EdgeOS id, and
+it is resolved against approvers.<id>.senders.edgeos in the policy in force:
+an unmapped account is refused sender-unmapped. This process holds NO human
+identity and NO TLS. Trust: the daemon trusts the relay's attribution.
+
+JSON shape: docs/cli-reference.md#channel-relay
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("channel-relay")}`;
 
 export const TELEGRAM_HEALTH_HELP = `approval channel telegram health — is this runtime configured for Telegram?
 

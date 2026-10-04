@@ -308,6 +308,11 @@ const FIXTURES: readonly Fixture[] = [
   { command: "approval gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "approval" },
   { command: "approval --json gate open", class: "policy.core", rule: "approval-gate-open", row: "approval" },
   { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
+  // APRV-455: an agent that could start a relay with a secret of its own could
+  // write records reading as an EdgeOS session's gestures. Operator ceremony.
+  { command: "APPROVAL_RELAY_SECRET=abc approval channel relay --port 4999", class: "policy.core", rule: "approval-channel-relay", row: "approval" },
+  { command: "approval channel relay", class: "policy.core", rule: "approval-channel-relay", row: "approval" },
+  { command: "approval channel telegram listen", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
   { command: "node dist/src/cli/main.js gate close", class: "policy.core", rule: "approval-gate-close", row: "node" },
   // APRV-338: the protected-path sign-off, and the one refinement that reads a

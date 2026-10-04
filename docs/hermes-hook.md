@@ -787,12 +787,123 @@ refusal, so it is worth a second confirming round before anything depends on it.
 ## For Agent Village
 
 Agent Village v2 (Edge City Goa, October to November 2026) runs every resident
-agent on Hermes Agent inside a Railway sandbox, one tenant per resident. Its
-design document names an optional approval.md Hermes skill as the Sprint 3
-deliverable. The adapter is the part this repository owns; the skill and the
-hosted daemon are not.
+agent on Hermes Agent inside a Railway sandbox, one tenant per resident. The
+approval.md daemon runs in the same sandbox as the agent it records
+(co-located), under its own unix user, so the hook never leaves the box. This
+repository owns the adapter, the daemon, the starting policy
+([examples/agent-village/approval-policy.md](../examples/agent-village/approval-policy.md))
+and the provisioning step ([docs/hosted-provisioning.md](hosted-provisioning.md)).
+The control plane, the relay and the overlay's skill and plugin are not ours.
 
-What follows from the sections above, for that deployment:
+### The shape of one tenant
+
+```
+sandbox (one per resident)
+  uid hermes     hermes gateway; pre_tool_call -> agent-hooks shim
+                   reads ~/.hermes/approval/agent-token (the agent credential, 0600)
+                   POSTs http://127.0.0.1:4682/hook/hermes   (or a unix socket)
+  uid approvald  /var/lib/approvald/<tenant>/  (0700): data/ is the store
+                   approval up    (TTL sweep, QUEUE.md, the Telegram channel via --api-base)
+                   approval serve --dir data --listen <loopback or unix> --hook-harness-cap 300s
+  root           the control plane's provisioning step (init, policy, operator attestation)
+```
+
+- **`approval serve` on loopback, or a unix socket.** The hook reaches the daemon
+  over `POST /hook/hermes` with the agent credential and nothing else. Loopback
+  and the unix listener both work (`--listen unix:<path>`, APRV-445, with the
+  tenant directory and `run/` at 0711 so the hermes user can reach the socket
+  without listing or writing). The shim checks that the loopback listener
+  belongs to the approvald user before it posts, which is the port-squat
+  defence.
+- **The agent token file is the hermes user's only secret from us.** `serve`
+  reads `APPROVAL_SERVE_AGENT_TOKEN` and `APPROVAL_SERVE_TENANT_TOKEN` from its
+  own 0600 environment; the control plane writes the agent value a second time
+  into `~/.hermes/approval/agent-token` for the shim. The agent credential opens
+  the hook route and the agent verbs (the five, plus `propose` and `start` from
+  APRV-445) and never reads the log it is judged by
+  ([cli-reference#serve](cli-reference.md#serve)). The tenant token, the relay
+  token and the store stay with approvald.
+- **`approval up --api-base` against the relay.** `serve` runs no Telegram
+  channel. The daemon that does is `approval up --no-preflight --no-web
+  --api-base <control plane>/approval-relay`, which speaks Bot API to the
+  control plane's relay; the relay forces the chat to the paired resident and
+  forwards Telegram's own `callback_query`, and core maps `from.id` against the
+  policy's `approvers.resident.senders.telegram`. An unmapped tap is refused
+  `sender-unmapped`. `up` resolves its log against its working directory, so the
+  launcher starts it from the store (or passes `--log`); `serve --dir` resolves
+  the log under `--dir`. Both must name the same file.
+- **The operator attests the starting policy at provisioning.** `approval init`
+  scaffolds the canonical policy unattested, and until a human attests, every
+  gated call refuses `policy-not-attested`, which `fail_closed: true` turns into
+  a blocked tool. The resident has no shell, so the control plane's root step
+  writes the rendered starting policy and runs `approval policy attest
+  --bootstrap --as human:<operator>` as the store user. A re-run refuses
+  `policy-already-attested`; changed bytes refuse `policy-amendment-required`.
+  The operator sets the starting policy; every change after that needs the
+  resident's own act through the channel. The sequence, the refusal codes and
+  that trust statement are [docs/hosted-provisioning.md](hosted-provisioning.md).
+- **The resident attests in the onboarding review (APRV-455).** The Edge City
+  app shows the resident their policy and the few settings they may change; the
+  control plane writes the rendered bytes into the store and posts `propose`
+  to `approval channel relay` (a third listener under approvald, on its own
+  loopback port with its own `APPROVAL_RELAY_SECRET`), then posts the
+  resident's `attest` with their EdgeOS `/humans/me` id. The relay resolves
+  that id against `approvers.resident.senders.edgeos` in the policy IN FORCE,
+  so the operator's bootstrap must already map it, and appends `policy.updated`
+  with `actor: human:resident` and `payload.sender {channel: edgeos, id}`. An
+  unchanged review is a reaffirmation of the same bytes, so the resident becomes
+  the attester of record either way. The trust level is the Telegram relay's:
+  the daemon trusts the control plane's attribution of the gesture to that id,
+  which is operator trust, and no hosted service has authority over decisions
+  (APRV-422). The relay is reachable through neither serve credential, holds no
+  human identity of its own, and refuses an unmapped id `sender-unmapped`.
+  Until the resident accepts, the new bytes are unattested and gated calls
+  refuse, so the control plane proposes and collects the acceptance in one
+  screen and restores the in-force bytes on a decline; it also checks that the
+  listener on the relay's port belongs to approvald before it posts the secret
+  ([cli-reference#channel-relay](cli-reference.md#channel-relay)).
+- **Two windows, and they never meet.** The policy's `approval_ttl` is 72 h: that
+  is how long a proposal (the inferred-intent flow, `approval propose`) waits for
+  the resident's tap. A request the HOOK opens is clamped to the harness cap
+  minus 60 s, 240 s under the 300 s cap, whatever the policy says, because the
+  agent is blocked on that call for as long as it stays open. The starting policy
+  makes nothing on the hook path manual, so on day one no hook call waits at
+  all; the 240 s window matters only to a class a resident later makes manual.
+
+### What the starting policy says
+
+A recorder: `defaults.autonomy: autonomous`, so every hooked tool call is
+written to the resident's own hash-chained log and none waits. The three gate
+organs (`policy.core`, `log.mutate`, `account.credential`) are human-only, which
+is mandatory under an autonomous default because the Hermes home's
+`config.yaml`, `agent-hooks/` and consent allowlist classify `policy.core`, and
+`.env` and `auth.json` classify `account.credential`. The Hermes tool classes
+(`cron.manage`, `process.write`, `browser.exec`, `skill.manage`,
+`agent.delegate`, `message.send`) and `network.call` and `read.web` have
+explicit autonomous rows. The one live gate is on the propose path:
+`intent.publish.inferred.index` is manual and agent-requestable, and
+`intent.publish.stated.index` is autonomous. That last row stays autonomous only
+for a request that does not declare `reversible: false`, since no row sets
+`allow_irreversible`; proposals carry no `reversible` field today. The fixture's
+own prose carries the reasoning row by row, and
+`tests/agent-village-policy.test.ts` proves the table through the real loader.
+
+The template the overlay merged first (`skills/approval/templates/APPROVAL.md`,
+overlay PR 164) is the hosted shape: a 4 m TTL and `network.call`, `read.web`
+and nine other classes manual. Under `fail_closed` that gates every resident
+shut on day one. The fixture here replaces it.
+
+### What the hook never sees
+
+The record is complete for the tool surface Hermes routes through hooks and
+partial for the rest, and the consent copy has to say so: cron `no_agent`
+scripts, `HERMES_SAFE_MODE` or a plugin disable, MCP tools, subagents, native
+tool families that bypass the hook, and a process killed by a signal before the
+hook answers. Proposals never pass through the hook either: the overlay's plugin
+calls `propose` and `start` over the same loopback surface, and the hook's 240 s
+clamp does not apply to them.
+
+### The adapter facts that still bind every tenant
 
 - **One `HERMES_HOME` per tenant, and start that tenant's gateway from it.** The
   hook config, the consent allowlist and the provider key all live there, so
@@ -802,56 +913,37 @@ What follows from the sections above, for that deployment:
   its environment rather than inheriting whatever `$HOME` is in a container. A
   gateway started from the wrong home reads the wrong consent allowlist and the
   wrong hooks block, and neither mistake announces itself.
-
-  On this machine that matters today rather than in October: the 2026-09-20
-  install's launchd service (`ai.hermes.gateway-<id>`) runs against the DEFAULT home
-  under `$HOME`, not against `/Users/carter/dev/hermes/.hermes`, so it is a gateway
-  this repository's hooks block does not cover. It had to be stopped for the gateway
-  pass of the probe and was restarted afterwards.
-- **`--dir` on every entry.** The gateway pass showed a session whose envelope `cwd`
-  was the user's HOME, so a hook without `--dir` would resolve its policy and log
-  from there. In a sandbox that is the tenant's container root, which holds neither.
+- **`--dir` on every local entry.** The gateway pass showed a session whose
+  envelope `cwd` was the user's HOME, so a hook command run locally without
+  `--dir` resolves its policy and log from there. Through `serve` the store is
+  pinned by the server's own launch flags and a caller cannot name it.
 - **`hooks_auto_accept: true` or `HERMES_ACCEPT_HOOKS=1` is mandatory.** A sandbox
   has no TTY, and without one of these the hook is silently never registered. This
   is the single most likely way a tenant ends up ungated while looking gated. The
-  gateway pass ran with consent already recorded from a terminal, so the headless
-  first-use case is still unprobed and this line is still the load-bearing one.
+  headless first-use case is still unprobed, so this line is still the
+  load-bearing one.
 - **`fail_closed: true` on every entry, above the version floor.** Plus, on the
   `pre_tool_call` entry, all three of: `plugins.hook_callback_timeout` raised
-  above the entry's `timeout` (the config above uses 600 over 300), `--timeout`
-  under 300s, and `--harness-cap` set to the smaller of the two (`--harness-cap
-  300s` for that config). Without the flag the hook assumes Hermes's 30s default
-  callback timeout and refuses every manual-class call
-  `hook-harness-cap-too-short`, so a tenant whose hook command omits it is gated
-  shut rather than gated. With it the effective answering window the resident
-  gets is 240s: the 300s cap less APRV-423's 60s margin, which is what keeps the
-  `approval.expired` record inside the cap in the common case (the lazy `expired`
-  refusal covers the rest). Pin the Hermes build at or after `main` `118984d7`: an
-  older image ignores the key and every tenant on it has a backstop rather than a
-  gate.
-- **Absolute paths, or a refusal.** A tenant's agent that sends a `terminal` call
-  with no `workdir`, or a relative path, gets
-  `hook-unsupported-execution-context` and a reason telling it to retry absolutely.
-  Residents should be told this once rather than discovering it as a wall.
-- **`execute_code` is refused**, so a resident's agent cannot run arbitrary Python
-  through this gate at all. That is a real loss of capability and it is the honest
-  trade while its in-process tool calls are unverified.
-- **Reaching the hosted daemon from a sandbox is still unsolved here.** The hook
-  writes to a log and reads a policy; a sandboxed tenant has neither locally.
-  APRV-383 has since landed the part of that a tenant reads: every record the
-  hosted daemon appends names the daemon instance that wrote it, and the tenant's
+  above the entry's `timeout` (600 over 300), `--timeout` under 300 s, and the
+  harness cap set to the smaller of the two (`--harness-cap 300s` on a local
+  entry, `--hook-harness-cap 300s` on `serve`). Without it the hook assumes
+  Hermes's 30 s default callback timeout and refuses every manual-class call
+  `hook-harness-cap-too-short`. Pin the Hermes build at or after `main`
+  `118984d7`: an older image ignores `fail_closed` and every tenant on it has a
+  backstop rather than a gate. With `fail_closed` on, a dead daemon stops the
+  resident's agent, so the control plane's liveness check is part of the gate.
+- **Absolute paths, or a refusal.** A `terminal` call with no `workdir`, or a
+  relative path, gets `hook-unsupported-execution-context` and a reason telling
+  the agent to retry absolutely. Residents should be told this once rather than
+  discovering it as a wall.
+- **`execute_code` is refused**, so a resident's agent cannot run arbitrary
+  Python through this gate at all. That is a real loss of capability and it is the
+  honest trade while its in-process tool calls are unverified.
+- **Every record names the daemon that wrote it** (APRV-383): the tenant's
   attested policy may list which daemon ids may write at all
-  (`design/hosted-daemon-identity.md`). What it deliberately did NOT do is give a
-  sandbox a route to that daemon, so per-tenant deployment still waits on the
-  transport, the process isolation and the token scoping that document lists as out
-  of scope.
-
-What a future skill would install: the `hooks:` block above with the tenant's own
-`--dir`, the consent setting, and whatever route to the hosted daemon that work
-settles on. Filed as its own task rather than sketched here. What it can already
-rely on: a record a resident's grant produces carries the id of the daemon that
-wrote it, so a resident reading their own log can tell which village process acted
-for them.
+  (`design/hosted-daemon-identity.md`), and the launcher can set
+  `APPROVAL_DAEMON_ID` to the tenant id so a resident reading their own log can
+  tell which village process acted for them.
 
 ## SPEC status: two hunks PROPOSED, with the evidence, for a human to apply
 

@@ -70,16 +70,20 @@ import {
 } from "../src/cli/channel-telegram-webhook.js";
 import {
   claimListenerBot,
+  dispatchPending,
+  newDispatchState,
   prepareListen,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
 import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
+import type { Streams } from "../src/cli/main.js";
 import { SERVE_REFUSAL_CODES } from "../src/serve/server.js";
 import {
   normaliseWebhookUrl,
   redactWebhookPath,
   redactWebhookUrl,
   TELEGRAM_WEBHOOK_SECRET_ENV,
+  type TelegramDelivery,
 } from "../src/core/telegram-config.js";
 import {
   channelLeasePathFor,
@@ -584,6 +588,177 @@ test("an unmapped account is refused identically on both transports (APRV-424)",
   }
   assert.deepEqual(right, left, "the two transports refused an unmapped account differently");
 });
+
+// ---------------------------------------------------------------------------
+// A refused tap does not kill the live prompt (APRV-442)
+// ---------------------------------------------------------------------------
+
+/** The listener's setup over this suite's mapped policy, as `prepareListen` builds it. */
+function cycleSetupFor(
+  world: Live,
+  channel: TelegramChannel,
+  delivery: TelegramDelivery,
+): ListenSetup {
+  return {
+    channel,
+    logPath: world.unit.logPath,
+    actor: LAUNCH_HUMAN,
+    json: false,
+    once: false,
+    crossInstance: [],
+    allowCrossInstance: false,
+    apiBase: assertLocal(mock.url),
+    delivery,
+    gateOptions: world.unit.options,
+    tagOptions: world.tagOptions,
+    // Inert: this policy declares no checkpoint cadence, so no cycle offers one.
+    checkpoint: {
+      logPath: world.unit.logPath,
+      policy: world.tagOptions.policy ?? {},
+      keyFile: null,
+      vault: null,
+    },
+  };
+}
+
+/**
+ * The observed failure (hosted smoke HOSTED-4, 2026-09-25): an unmapped account
+ * taps a live prompt, the tap is refused `sender-unmapped`, and from then on the
+ * prompt's buttons are dead and nothing is re-sent until the listener restarts.
+ *
+ * Each case runs the listener's own dispatch cycle (`dispatchPending`, the call
+ * both `listen` and `webhook` make) around taps delivered through one
+ * transport. The webhook arm wires the cycle exactly as `runWebhook` does, as
+ * the receiver's `afterUpdate`; the poll arm runs it once after the poll, which
+ * is `startListener`'s `beforePoll` for the next poll.
+ *
+ * The refused card itself stays dead (the brief's "final for that card"): a
+ * Telegram redelivery of the refused update, and a replay of its bytes under a
+ * fresh callback id, by the unmapped account and by the mapped one, append
+ * nothing and send nothing, because those bytes take no action-reference
+ * fallback to the fresh card. The mapped approver answers on the fresh card.
+ */
+for (const transport of ["poll", "webhook"] as const) {
+  for (const delivery of ["burst", "paced"] as const) {
+    test(`a refused tap leaves the request answerable within one cycle: ${transport}, ${delivery} (APRV-442)`, async () => {
+      const now = at(2);
+      const world = live(1, false, `refused-${transport}-${delivery}`);
+      const key = world.keys[0] as string;
+      const channel = channelFor();
+      channel.onDecision(handlerFor(world, now));
+      const setup = cycleSetupFor(world, channel, delivery);
+      const state = newDispatchState();
+      const streams: Streams = { out: () => undefined, err: () => undefined };
+
+      const startup = await dispatchPending(setup, streams, state, now);
+      assert.deepEqual(
+        startup.delivered.map((entry) => entry.action_key),
+        [key],
+        "the startup cycle did not deliver the request",
+      );
+      const originalData = mock.callbackDataFor(key, "grant");
+
+      const cycles: string[][] = [];
+      const cycle = async (): Promise<void> => {
+        const result = await dispatchPending(setup, streams, state, now);
+        cycles.push(result.delivered.map((entry) => entry.action_key));
+      };
+
+      let nextUpdateId = 44_200;
+      /** One tap; `redeliver` re-sends an earlier update byte for byte, ids and all. */
+      const tap = async (
+        data: string,
+        fromId: string,
+        redeliver?: number,
+      ): Promise<EventRecord[]> => {
+        const updateId = redeliver ?? (nextUpdateId += 1);
+        const update = callbackUpdate({
+          data,
+          chatId: CHAT,
+          id: `cb-442-${transport}-${delivery}-${String(updateId)}`,
+          fromId,
+        });
+        const before = recordsOf(world.unit.logPath).length;
+        if (transport === "poll") {
+          mock.queueUpdate(update);
+          await channel.pollOnce();
+          await cycle();
+        } else {
+          const handle = await receiverFor(channel, { afterUpdate: cycle });
+          try {
+            const answer = await post(handle, JSON.stringify({ update_id: updateId, ...update }));
+            assert.equal(answer.status, 200, `the webhook refused a valid post: ${JSON.stringify(answer)}`);
+          } finally {
+            await handle.close();
+          }
+        }
+        return recordsOf(world.unit.logPath).slice(before);
+      };
+
+      const assertRefusedUnmapped = (appended: EventRecord[], where: string): void => {
+        assert.deepEqual(
+          appended.map((record) => record.event),
+          ["audit.decision_refused"],
+          `${where}: expected exactly one refusal record`,
+        );
+        const record = appended[0] as EventRecord;
+        const payload = record.payload as Record<string, unknown>;
+        assert.equal(payload["code"], "sender-unmapped", `${where}: the wrong refusal code`);
+        // Attributed to nobody: the gate wrote it, and no person is named.
+        assert.equal(record.actor, "system:gate", `${where}: the refusal names an actor`);
+        assert.equal("actor" in payload, false, `${where}: ${JSON.stringify(payload)}`);
+        assert.deepEqual(payload["sender"], { channel: "telegram", id: UNMAPPED_ACCOUNT });
+        assert.ok(
+          queueOf(world, now).some((request) => request.action_key.value === key),
+          `${where}: a refused tap took the request out of the pending queue`,
+        );
+      };
+
+      // 1. The unmapped tap: refused, recorded once, the request still pending,
+      //    and the very next cycle puts a fresh card in front of the approver.
+      assertRefusedUnmapped(await tap(originalData, UNMAPPED_ACCOUNT), "the first unmapped tap");
+      const refusedUpdate = nextUpdateId;
+      assert.deepEqual(
+        cycles.at(-1),
+        [key],
+        "the cycle after a refused tap did not offer the still-pending request again",
+      );
+      const freshData = mock.callbackDataFor(key, "grant");
+      assert.notEqual(freshData, originalData, "no fresh card was sent");
+
+      // 2. The refused card stays dead. Telegram redelivering the refused
+      //    update (a webhook retry), and its bytes replayed under a new
+      //    callback id by either account, append nothing, send nothing, and
+      //    leave the fresh card armed.
+      for (const [where, appended] of [
+        ["a redelivery of the refused update", await tap(originalData, UNMAPPED_ACCOUNT, refusedUpdate)],
+        ["the refused bytes replayed by the unmapped account", await tap(originalData, UNMAPPED_ACCOUNT)],
+        ["the refused bytes replayed by the mapped account", await tap(originalData, MAPPED_ACCOUNT)],
+      ] as const) {
+        assert.deepEqual(appended, [], `${where} reached the gate`);
+        assert.deepEqual(cycles.at(-1), [], `${where} caused a re-send`);
+      }
+      assert.equal(mock.callbackDataFor(key, "grant"), freshData, "a replay replaced the fresh card");
+
+      // 3. The mapped approver answers on the fresh card, which went out in the
+      //    one cycle after the refusal.
+      const answered = await tap(freshData, MAPPED_ACCOUNT);
+      assert.deepEqual(
+        answered.map((record) => record.event),
+        ["approval.granted"],
+        "the mapped approver could not answer after a refused tap",
+      );
+      const granted = answered[0] as EventRecord;
+      assert.equal(granted.actor, MAPPED_HUMAN, "the grant is not the mapped human's");
+      assert.deepEqual((granted.payload as Record<string, unknown>)["sender"], {
+        channel: "telegram",
+        id: MAPPED_ACCOUNT,
+      });
+      assert.deepEqual(cycles.at(-1), [], "a decided request was offered again");
+      assertClean(world.unit);
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The secret

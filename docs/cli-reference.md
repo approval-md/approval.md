@@ -65,10 +65,19 @@ tampering.
 ```
 clean      {"status":"clean","records":3,"head":{"seq":3,"hash":"<64 hex>"}}
 torn-tail  {"status":"torn-tail","records":3,"head":null,
-            "intactThroughSeq":3,"message":"..."}
+            "intactThroughSeq":3,"tear":"nul-filled","tornBytes":456,
+            "intactBytes":2817,"message":"..."}
 corrupt    {"status":"corrupt","records":null,"head":null,
             "firstBadSeq":2,"reason":"hash-mismatch","message":"..."}
 ```
+
+On a torn tail, `tear` says which crash left it (APRV-440). `nul-filled` means
+every byte of the unterminated tail is NUL: the crash-before-writeback
+signature, where the file grew but its data never reached the disk, so nothing
+was tampered and no record was half-written. `partial-line` is a writer that
+died mid-line. `intactBytes` is where the verified records end, which is the
+length to truncate the file to; `tornBytes` is what that removes. Nothing is
+truncated by this verb.
 
 `head` is null for an empty log. `reason` is one of `malformed-line`,
 `schema-invalid`, `bad-alg`, `hash-mismatch`, `prev-mismatch`, `seq-gap`,
@@ -754,6 +763,62 @@ are absent is a worse artifact than no record. Records written before this
 existed still validate and verify; a reader treats the absent field as the
 pre-amendment state, where the in-force bytes are unrecoverable and the
 fail-closed fallback applies.
+
+**No terminal is needed.** The identity is declared, so the verb runs the same
+from a provisioning script with stdin at `/dev/null` as from a shell. The
+`attest-requires-terminal` refusal belongs to the channel path (a tap cannot
+attest a policy that maps no sender for that channel), never to this verb.
+
+### `--bootstrap`: a store's first policy, safe to re-run (APRV-449)
+
+The plain verb is an unconditional assertion: it reads no log and appends a
+`policy.updated` every time it runs. That is right for a human at a terminal and
+wrong for a provisioning step that runs again on every update and recreate of a
+hosted tenant, where a re-run would add an attestation per redeploy and, once
+the tenant has attested or amended their own policy, would put the operator back
+on record as its attester. `--bootstrap` reads the VERIFIED log first:
+
+```
+approval policy attest --bootstrap --as human:<operator> [--json]
+```
+
+| the log carries | answer | exit |
+|---|---|---|
+| no attestation | attests, exactly as the plain verb | 0 |
+| an attestation of these exact bytes | `policy-already-attested`, nothing appended | 1 |
+| an attestation of other bytes | `policy-amendment-required`, nothing appended | 1 |
+
+Both refusals add `seq` and `attested_by` (the attestation in force and who made
+it) to the error object:
+
+```
+refusal  {"ok":false,"error":{"code":"policy-already-attested","message":"...",
+          "seq":1,"attested_by":"human:carter"}}  on stderr
+```
+
+`policy-already-attested` is the expected answer on a re-run, so a provisioning
+step branches on `error.code` and treats that one code as done.
+`policy-amendment-required` means the bytes on disk moved after the store was
+attested. The operator does not attest that change: a change to an attested
+policy is an amendment, and an amendment is the approver's act through a channel
+(SPEC.md §10.3). The append is compare-and-append against the head the decision
+was read from, and binds the digest it checked, so an attestation landing in
+between, or a file rewritten in between, refuses (`head-moved`, or `io` naming
+the changed bytes) rather than stacking an operator attestation on top. A torn
+log is exit 3 and a log that does not verify is `log-corrupt` at exit 1.
+
+With `--bootstrap` the log is the store's: it resolves under `--dir`
+(`<dir>/.approval/log/events.jsonl`) unless `--log` names one, so `approval
+policy attest --bootstrap --dir "$STORE"` attests the store's own log from any
+working directory. The plain verb keeps its working-directory default. A
+refused append can leave one unbound copy of the policy text in the payload
+store, because the text is stored before the append (APRV-356). It is not
+removed: the record that moved the head may be another attestation of the same
+bytes, which binds that very file. An unbound file is inert, and `approval
+status` counts it under `payload_store.orphans`.
+
+`--bootstrap` beside `--organ` or `--path` is a usage error. The whole
+provisioning sequence is [docs/hosted-provisioning.md](hosted-provisioning.md).
 
 ### `--organ <path>`: the gate's organs (APRV-272)
 
@@ -2695,6 +2760,17 @@ informational: it moves neither the health verdict nor the exit code. An empty
 store is the normal state of a repo that has never made a request carrying
 `--payload`. (`approval doctor` is where an unwritable store is a failure.)
 
+**attestation** names the policy in force: its state, the seq of the attestation
+the log last recorded, and `attested_by`, the actor of that record (APRV-449).
+The identity is read from the verified record and never from the file, so a
+hosted tenant can see whether their starting policy is the operator's
+bootstrap or their own later act (docs/hosted-provisioning.md). It is the
+identity the attesting process declared, which the runtime does not
+authenticate. `attested_by` is `null` when nothing was attested; on
+`hash-mismatch` it names who attested the bytes the live file no longer
+matches. The text row reads `attested (seq 1, by human:carter)`, and `approval
+doctor`'s attestation row carries the same name.
+
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
@@ -2745,7 +2821,7 @@ does not know the flag exists.
 **What it reports**, in one object:
 
 - `attestation` — attested | hash-mismatch | not-attested | unreadable, with the
-  seq of the governing `policy.updated` record.
+  seq of the governing `policy.updated` record and `attested_by`, its actor.
 - `verification` — the latest chain verdict, and the record count (null when
   corrupt).
 - `dangling` — executions the runtime meant to watch and never closed. Not
@@ -2786,7 +2862,7 @@ does not know the flag exists.
 
 ```
 {"ok":true,"healthy":false,
- "attestation":{"state":"attested","seq":1},
+ "attestation":{"state":"attested","seq":1,"attested_by":"human:carter"},
  "verification":{"status":"clean","records":6},
  "dangling":[{"action_key":"...","task":"...","ts":"...","seq":5}],
  "budgets":[{"limit":"global.daily_usd","scope":"global",
@@ -2805,9 +2881,9 @@ does not know the flag exists.
  "daemon":{"id":"daemon-3f2a9c11","source":"derived","allowed":null}}
 ```
 
-`ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
-null for not-attested and unreadable. `note` carries the unrebuildable warning
-verbatim.
+`ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` and
+`attestation.attested_by` are null for not-attested and unreadable. `note`
+carries the unrebuildable warning verbatim.
 
 ## coverage
 
@@ -2999,7 +3075,8 @@ The checks, at length:
   `--as`: this reports what the next command will find.
 - **attestation** — anything other than "the live bytes match" makes every gated
   operation refuse, and that refusal reads like "the policy says no" when it
-  means "the policy is unverified".
+  means "the policy is unverified". A pass names the seq and the attester read
+  from that record (`attested at seq 1 by human:carter`, APRV-449).
 - **log** — a torn tail and a corrupt log are both failures here; neither is
   repaired, and doctor never truncates a torn line.
 - **telegram** — `getMe` against `--api-base`, when both variables are set;
@@ -4599,6 +4676,194 @@ belong to a RUNNING listener: they are on its stderr as they happen, in its
 
 Which variables are read comes from the policy, so a renamed variable reads back
 as the name you set.
+
+## channel relay
+
+A third arrival for a human gesture, beside a Telegram tap and a terminal
+(APRV-455). An operator's control plane holds an authenticated session for a
+person (the Agent Village control plane holds an EdgeOS session for each
+resident), shows them a request or their policy, and posts what they did to
+this verb. The post carries the gesture, the EdgeOS `/humans/me` id of the
+session that made it, the policy hash or the action key it answers, a nonce and
+an `issued_at`. The daemon resolves the id against the attested policy exactly
+as it resolves a Telegram `from.id`, and records the gesture through the same
+`recordChannelDecision` a tap goes through.
+
+```
+approval channel relay [--listen [host:]port | --port <n>] [--allow-non-loopback]
+                       [--proposer agent:<id>] [--policy <p>] [--dir <p>]
+                       [--log <p>] [--json]
+```
+
+### Trust level
+
+**The daemon trusts the relay's attribution.** A post that carries the relay
+secret is the operator's control plane reporting which EdgeOS account acted,
+and the daemon believes that report the way it believes the Telegram Bot API's
+report of `callback_query.from.id`. That is operator trust, stated in
+APRV-422's words: no hosted service has authority over decisions. The relay
+carries a person's gesture and decides nothing. Which approver the account is,
+whether that approver may decide this request or attest this policy, and
+whether the request is still answerable are all decided by the runtime, from
+the verified log and the attested policy, with the same codes a tap gets.
+
+What the relay cannot do, by construction:
+
+- **Act as anyone of its own.** It takes no `--as` and reads no
+  `APPROVAL_HUMAN`. Every gesture is attributed to the account
+  `approvers.<id>.senders.edgeos` maps, or refused `sender-unmapped` with one
+  `audit.decision_refused`. A policy that maps no EdgeOS account refuses every
+  gesture the same way; there is no fallback to a configured identity.
+- **Read a mapping nobody has attested.** Every gesture, decisions included,
+  resolves its sender against the policy IN FORCE: the verified bytes the
+  latest attestation names, recovered from the payload store. A mapping
+  sitting unattested on disk (the relay's own `propose` puts one there) decides
+  nothing until a human attests it. Where the in-force bytes cannot be
+  recovered, a decision is refused `policy-not-attested` (an attestation,
+  `attest-requires-terminal`) and nothing is appended; a log that cannot be
+  read keeps its own code.
+- **Choose who may sign for a policy change.** An attestation is resolved
+  against the policy IN FORCE, never the one being attested, so an account a
+  proposal adds or repoints cannot accept the proposal that names it, and an
+  amendment that introduces the EdgeOS mapping is refused
+  `attest-requires-terminal` (the operator bootstrap of APRV-449 is what maps
+  the resident the first time).
+- **Hold a token.** A grant that mints a token for the deciding surface has it
+  dropped unread; the response says only `token_issued`. Requests in the Agent
+  Village are harness-executed or sealed, so none is lost; a manual-delivery
+  request granted here has a token nobody holds and is asked again.
+- **Be reached through `approval serve` or `approval mcp serve`.** It is its
+  own process, port and credential. The registry marks it `human_only`, so no
+  wrapper publishes it, and neither serve credential reaches it.
+- **Be started by an agent.** The attribution a relay records is exactly as
+  strong as control over who launches it, because its launcher chooses the
+  secret. The hook classifier holds `approval channel relay` as `policy.core`
+  (human-only in the reference policy), so an agent session cannot start one; a
+  deployment starts it from its own launcher as the store's user. A keyed
+  `senders.edgeos` mapping adds a second lock: a process without
+  `APPROVAL_SENDER_KEY` cannot resolve any account.
+
+### The secret
+
+`APPROVAL_RELAY_SECRET` is REQUIRED and is read from the launch environment,
+never from a file in the tree (SPEC.md §11.1 invariant 7). At least 24
+characters of `A-Z a-z 0-9 _ -` (generate it: `openssl rand -hex 32`), with the
+same value given to the control plane; surrounding whitespace is stripped at
+start, so the control plane sends the trimmed value. Under the `APPROVAL_`
+prefix it is withheld from every child `approval run` spawns. The control plane sends it
+in `x-approval-relay-secret`; it is compared in constant time over SHA-256
+digests, BEFORE the path, the method or the body, and a duplicate header is
+refused rather than resolved. **A refusal never reaches the gate and appends
+nothing to the log**: it is counted, written to stderr, and answered with its
+code. The secret appears in no response, no log record and no stderr line.
+
+Loopback by default (port 4684). There is no TLS here; a routable bind takes
+`--listen <host:port> --allow-non-loopback` and prints a banner every start.
+
+### The body
+
+`POST /relay/gesture`, one JSON object, closed: an unknown field is refused, so
+nothing that looks like authority (an `actor`, a second sender, a `ts`) rides
+along on a valid post.
+
+```json
+{"gesture":"propose","policy_sha256":"<64 hex>","nonce":"<16..128 of A-Za-z0-9_->","issued_at":"2026-10-03T12:00:00Z"}
+{"gesture":"attest","policy_sha256":"<64 hex>","sender":{"channel":"edgeos","id":"<EdgeOS id>"},"nonce":"...","issued_at":"..."}
+{"gesture":"decline","policy_sha256":"<64 hex>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+{"gesture":"grant","action_key":"<the request's key>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+{"gesture":"reject","action_key":"<the request's key>","sender":{"channel":"edgeos","id":"..."},"nonce":"...","issued_at":"..."}
+```
+
+- `sender.channel` is `edgeos` and nothing else. `sender.id` is the raw
+  `/humans/me` id: an ASCII letter or digit, then up to 127 letters, digits,
+  `.`, `_` or `-`, the grammar `senders.edgeos` pins. Never a digest (a keyed
+  policy is resolved with `APPROVAL_SENDER_KEY` in the relay's environment) and
+  never an email address.
+- `issued_at` is RFC 3339 in UTC ending in `Z`, within five minutes of the
+  relay's clock either side. It is used for that window and recorded nowhere;
+  every record's `ts` is the runtime's own.
+- `nonce` is claimed before the gesture is applied, in a ledger of exclusively
+  linked files under the gate's `.approval/daemon/relay-nonces/`, kept for eleven
+  minutes. A replay is refused `relay-nonce-replayed` at this process, after a
+  restart, or at a second relay on the same gate. A retry is a new post with a
+  new nonce, and the gate answers a repeated decision `already-decided`.
+
+`propose` is the control plane's half of the onboarding review. It writes the
+rendered policy into the store, then posts its hash: the relay re-hashes the
+file and refuses `relay-policy-mismatch` when the bytes are not the ones named,
+then appends a `policy.proposed` under `--proposer` (an `agent:` id, default
+`agent:edgeos-relay`: the relay is a machine, and a `human:` proposer would say
+a person proposed what nobody typed) with the semantic diff against the
+verified in-force text and a deadline one hour out, after which the prompt
+retires from every queue. A retry of an open proposal of the same bytes returns it with
+`"existing":true`. It also admits bytes ALREADY in force (`"reaffirm":true`):
+the review most residents make is "accept, unchanged", and that acceptance is
+still their attestation. A reaffirmation changes the attester of record and
+nothing else. The prompt also reaches Telegram, where the resident's tap
+answers it equally.
+
+**Until a proposal is attested, the bytes on disk are not the policy in
+force.** Every gated call refuses `policy-not-attested` in that window (a
+grant through the relay included), exactly as during any amendment. So the
+control plane proposes and collects the acceptance in the same screen, and
+restores the in-force bytes when the resident declines or the proposal lapses.
+A `decline` appends `policy.declined` and leaves the attestation in force
+where it was, the operator's included: it is a refusal to adopt the proposed
+bytes, never a withdrawal of the policy already attested.
+
+`attest` / `decline` answer the open proposal of that hash. `attest` appends
+`policy.updated` with `actor: human:<approver>` and `payload.sender
+{channel: edgeos, id}`. A hash that names no open proposal (superseded,
+answered, never proposed) is refused `proposal-not-found`, and a file changed
+under the proposal is refused `proposal-stale`; neither attests anything.
+
+`grant` / `reject` answer a pending request exactly as a Telegram tap does,
+including `expired`, `policy-drift` (with its `audit.decision_refused` and
+withdrawal), `already-decided` and `actor-not-approver`.
+
+### Responses
+
+| status | body | meaning |
+| --- | --- | --- |
+| 200 | `{"ok":true,"gesture":…,"event":…,"seq":…,"actor":…}` | recorded (`propose` returns `sha256`, `seq`, `existing`, `reaffirm`, `changes`, `loads`) |
+| 409 | `{"ok":false,"gesture":…,"refusal":{"code","message"}}` | the gate or the decision surface refused; the code is from `gate_refusal_codes` or `channel_decision_refusal_codes` |
+| 4xx/5xx | `{"error":{"code","message"}}` | the relay refused the post; the code is from `relay_refusal_codes`, and nothing was appended |
+
+`relay_refusal_codes` (frozen, pinned in `conformance/vectors/refusal-unions.v1.json`):
+`relay-secret-mismatch`, `relay-duplicate-secret-header` (401),
+`relay-malformed-request` (400), `relay-unknown-path` (404),
+`relay-method-not-allowed` (405), `relay-body-too-large` (413),
+`relay-body-unreadable`, `relay-body-invalid`, `relay-sender-invalid`,
+`relay-gesture-stale` (400), `relay-nonce-replayed` (409),
+`relay-nonce-unavailable` (503, the ledger could not record the nonce, so
+nothing was decided), `relay-policy-mismatch` (409), `relay-handler-failed`
+(500).
+
+Start-up refusals (exit 2, `{"error":{"code"}}` under `--json`):
+`relay-secret-missing`, `relay-secret-weak`, `relay-secret-charset`,
+`relay-proposer-invalid`, `relay-bind-invalid`. An unreadable log exits 4, a
+torn tail 3, a corrupt chain 1.
+
+With `--json`, stdout carries one object per line: `relay_started` (`host`,
+`port`, `path`, `proposer`), one `relay_gesture` per gesture that reached the
+gate (`gesture`, `ok`, and `seq`/`record`/`actor` or `code`), and `stopped`
+with the counters. Never a body, a sender id or the secret.
+
+There is no transport lease. A Telegram bot admits one receiver; a relay has no
+such constraint, because compare-and-append, the gate's idempotency and the
+nonce ledger (each claim written whole and linked into place, so exactly one
+claimant wins) make two relays on one gate safe. A second relay on the same
+port fails to bind.
+
+**Who is listening on the port is the caller's check.** The secret travels in a
+header, so whoever holds the loopback port when the control plane posts
+receives it. In a sandbox where another uid can bind loopback (the Agent
+Village's `hermes` user), the control plane checks that the listener on 4684
+belongs to the relay's own user before it posts, the same foreign-listener
+rule the hook applies to `serve`, and posts to the literal `127.0.0.1`, never
+`localhost`, which another uid could answer on `[::1]`. A unix socket in a directory only the relay's
+user can write, or a signature over the body in place of a bearer secret, would
+remove the check; neither is in this version.
 
 ## quickstart
 

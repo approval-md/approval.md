@@ -54,7 +54,12 @@ import { readdirSync, rmSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePathSegments } from "node:path";
 
-import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import {
+  HUMAN_ACTOR_ENV,
+  attesterAt,
+  checkAttestation,
+  resolveHumanActor,
+} from "../core/attest.js";
 import {
   RESOLVE_DANGLING_COMMAND,
   proveDanglingAdvances,
@@ -1590,6 +1595,14 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   const records = read.ok ? read.records : [];
 
   const attestation = checkAttestation(records, policyPathFor(flags, cwd));
+  // APRV-449: who made the attestation the state names, read from the verified
+  // record at that seq, never from the file. On `hash-mismatch` it is the
+  // attester of the bytes the log last vouched for, which is the policy a
+  // re-attestation would replace.
+  const attestedBy =
+    attestation.status === "attested" || attestation.status === "hash-mismatch"
+      ? attesterAt(records, attestation.seq)
+      : null;
   // APRV-120. `dangling` is now the `open` custody state only: a harness
   // execution is terminal by design and never gains an outcome, so listing it
   // as debris trained operators to ignore this list (the reference repository's
@@ -1749,6 +1762,9 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
           attestation.status === "attested" || attestation.status === "hash-mismatch"
             ? attestation.seq
             : null,
+        // APRV-449, additive and always present: the identity the attesting
+        // record declared, `null` when there is no attestation to name.
+        attested_by: attestedBy,
       },
       verification: verificationSummary,
       dangling,
@@ -1811,7 +1827,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         // beside it still carries the colour.
         right: `${st.paint(attestation.status === "attested" ? "ok" : "warn", attestation.status)}${
           attestation.status === "attested" || attestation.status === "hash-mismatch"
-            ? ` (seq ${attestation.seq})`
+            ? ` (seq ${attestation.seq}${attestedBy === null ? "" : `, by ${attestedBy}`})`
             : ""
         }`,
       },

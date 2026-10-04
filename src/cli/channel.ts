@@ -116,6 +116,7 @@ import {
 import { CHANNEL_CLI_HELP, CHANNEL_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { commandChannelRelay } from "./channel-relay.js";
 import { commandTelegram } from "./channel-telegram.js";
 import { commandWeb } from "./channel-web.js";
 import { refusal as renderRefusal, style, tokenPanel, TOKEN_NOTICE } from "./style.js";
@@ -538,7 +539,7 @@ async function interactiveLoop(
   return refused ? EXIT_INTEGRITY : EXIT_OK;
 }
 
-/** `approval channel <subcommand>` — `cli`, `web` (APRV-25), `telegram`. */
+/** `approval channel <subcommand>` — `cli`, `web` (APRV-25), `telegram`, `relay` (APRV-455). */
 export function commandChannel(argv: string[], streams: Streams, cwd: string): number | Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -555,6 +556,8 @@ export function commandChannel(argv: string[], streams: Streams, cwd: string): n
   // APRV-25: the local queue page. Long-lived, like `telegram listen`.
   if (sub === "web") return commandWeb(rest, streams, cwd);
   if (sub === "telegram") return commandTelegram(rest, streams, cwd);
+  // APRV-455: the authenticated relay. Long-lived, like `telegram listen`.
+  if (sub === "relay") return commandChannelRelay(rest, streams, cwd);
   return usageError(
     streams,
     json,

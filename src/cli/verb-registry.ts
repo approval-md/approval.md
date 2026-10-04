@@ -487,6 +487,9 @@ const VERBS: VerbSpec[] = [
         records: nullable(INTEGER),
         head: HEAD,
         intactThroughSeq: INTEGER,
+        tear: { enum: ["nul-filled", "partial-line"] },
+        tornBytes: INTEGER,
+        intactBytes: INTEGER,
         firstBadSeq: nullable(INTEGER),
         reason: STRING,
         message: STRING,
@@ -728,13 +731,14 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime.",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272). With --path <path> it signs off an ordinary PROTECTED path (policy.edit or a policy.edit.* sub-class) as one gate.path.signed_off event, which is what resolves SPEC.md's `(Amended APRV-n, pending sign-off.)` suffix: whole-file evidence that a human read those bytes, weaker than the hunk a grant binds, and read by the protected-path guard only after its grant search has failed (APRV-338). All three routes are human-only, refuse an agent actor with a machine-readable code, and compute their digest in the runtime. With --bootstrap it attests a store's FIRST policy only, reading the verified log first: a re-run over the same bytes refuses policy-already-attested and changed bytes refuse policy-amendment-required, both at exit 1 with nothing appended, which is the operator's provisioning step for a tenant with no shell (APRV-449).",
     human_only: true,
     input: input({
       flags: {
         ...POLICY_FLAGS,
         "--organ": "string",
         "--path": "string",
+        "--bootstrap": "boolean",
         ...AS_FLAG,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -1790,7 +1794,12 @@ const VERBS: VerbSpec[] = [
       {
         ok: { const: true },
         healthy: BOOLEAN,
-        attestation: object({ state: STRING, seq: nullable(INTEGER) }, ["state", "seq"]),
+        // APRV-449: `attested_by` is the actor of the attesting record at `seq`,
+        // read from the verified log, `null` when there is none. Always present.
+        attestation: object(
+          { state: STRING, seq: nullable(INTEGER), attested_by: nullable(STRING) },
+          ["state", "seq", "attested_by"],
+        ),
         verification: object({ status: STRING, records: nullable(INTEGER) }, ["status", "records"]),
         dangling: arrayOf(OPEN_OBJECT),
         indeterminate: arrayOf(OPEN_OBJECT),
@@ -2096,6 +2105,31 @@ const VERBS: VerbSpec[] = [
     ),
     error: ERROR_SCHEMA,
     exit_codes: [OK, { code: 1, meaning: "a credential variable is unset" }, USAGE],
+  },
+
+  {
+    name: "channel",
+    subcommand: "relay",
+    purpose:
+      "Serve POST /relay/gesture on loopback for an operator's control plane (APRV-455): propose, attest or decline a policy by sha256, or grant or reject a request by action key, attributed to the EdgeOS account the attested policy maps. Authenticated by APPROVAL_RELAY_SECRET from the launch environment; a post without it is refused and never logged. It holds no human identity: an unmapped account is refused sender-unmapped. The raw execution token of a grant never leaves the process.",
+    human_only: true,
+    human_only_note:
+      "It records human decisions and attestations on the word of whoever holds a secret its launcher chose, so starting it is the operator's ceremony: no wrapper publishes it, neither serve credential reaches it, and the hook classifier holds the command line `policy.core` (human-only in the reference policy). The attribution it records is exactly as strong as control over who launches it.",
+    input: input({
+      flags: {
+        "--listen": "string",
+        "--port": "string",
+        "--allow-non-loopback": "boolean",
+        "--proposer": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
   },
 
   {

@@ -396,6 +396,10 @@ const HUMAN_ONLY: readonly string[] = [
   "channel cli",
   "channel web",
   "channel telegram listen",
+  // APRV-455. It records human decisions and attestations, and it holds the
+  // relay credential: an agent that could start or call it would hold the door
+  // the relay secret keeps shut.
+  "channel relay",
   "daemon run",
   // APRV-110. The ambient runtime is `daemon run` and `channel telegram listen`
   // in one process, so it inherits both refusals and cannot be weaker than
