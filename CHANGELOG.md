@@ -15,6 +15,24 @@ before a tag.
 
 ## Unreleased
 
+### Harnesses
+
+- **`approval hook hermes`: a signal while the runtime is still loading no
+  longer kills the hook silently (APRV-466).** The runtime's SIGTERM/SIGINT
+  guard exists only once `dist/` has loaded, so a signal during that load
+  (Hermes sends SIGTERM on its hook timeout and on gateway shutdown) took the
+  default action: death with an empty stdout, which a stock Hermes reads as an
+  allow. The `approval` bin now installs a guard in its first statements when
+  argv names the Hermes hook. A signal it hears during the load gets the
+  runtime's own `hook-interrupted` block directive, byte for byte, at exit 2; a
+  signal held until the synchronous hook run returns ends the process with the
+  verdict that run reached. The runtime raises a flag while its own guards are
+  registered and the bin steps aside for it, so the two never both print. Every
+  other verb and every other harness hook keeps the default disposition. What
+  remains is Node's own bootstrap before the bin's first statement, which the
+  gated image's `shell_hooks` patch is there to cover on Hermes's side
+  (docs/hermes-hook.md, "Two layers against a signal").
+
 ## 0.4.0 — 2026-10-04
 
 Written on 2026-10-04 against `main` at `70979abe`, 239 non-merge commits after
