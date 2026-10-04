@@ -1724,9 +1724,14 @@ function terminalDeliveries(
     // `granted`, a declined one `rejected`, a superseded one `withdrawn`
     // (a newer proposal is the live question now), and a lapsed one `expired`.
     if (isAttestationActionKey(actionKey)) {
-      const proposal = proposalRecords(read.records).find(
-        (entry) => entry.action_key === actionKey,
-      );
+      // The LATEST proposal under this key (APRV-455 refuter M2). Every
+      // proposal of one policy hash shares `policy.attest:<sha256>`, and since
+      // a relay may propose bytes already in force a second proposal of an
+      // attested hash is ordinary: settling the live one by the first one's
+      // answer would retire an open prompt as "granted" by somebody else.
+      const proposal = proposalRecords(read.records)
+        .filter((entry) => entry.action_key === actionKey)
+        .at(-1);
       const derived =
         proposal === undefined ? null : proposalState(read.records, proposal.seq, now);
       if (derived === null || derived.state === "open") continue;

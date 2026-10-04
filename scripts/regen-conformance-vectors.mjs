@@ -370,6 +370,10 @@ const unionVectors = [
     "bridge_stop_codes",
     "every way `approval codex bridge` STOPS a session rather than declining one request: a refused `thread/start`, a server reporting an effective approval policy that is not the pinned one, a preflight turn that ran no command so nothing was established, and a harness auto-reviewer notification saying something else answered a question before this client was asked. Separate from `bridge_refusal_codes` because the two boundaries differ: a decline answers one approval request and the turn carries on, a stop ends the run. A second implementation answers BOTH unions or has left a door open",
   ],
+  [
+    "relay_refusal_codes",
+    "every way `approval channel relay` refuses an operator relay's post before or instead of applying the gesture it carries: a missing, wrong or duplicated secret header, a request this transport does not serve, a body too large, unreadable or outside the closed gesture shape, a sender that is not an EdgeOS id in the pinned grammar, an issued_at outside the freshness window, a nonce already claimed or a ledger that could not claim it, a propose whose hash is not the file on disk, and a gesture that threw. None of them appends to the log. Refusals the gate or the decision surface makes reach the caller verbatim from their own unions and are not members here",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -2302,7 +2306,20 @@ const SUITES = [
     // harness's own timeout rather than anything about this command or this
     // approver. A caller that collapsed it into either neighbour would retry a
     // command that cannot be answered under this configuration, forever.
-    vectors_version: "22.0.0",
+    // 26.0.0 (APRV-455): a new union, `relay_refusal_codes`, for the
+    // authenticated relay transport an operator's control plane posts gestures
+    // to. Major for the reason 7.0.0 was: a new union is a new pinned array a
+    // second implementation must answer. The relay's other side IS a second
+    // implementation (the Agent Village control plane), and it branches on
+    // these strings, which is why a transport union is registered here when
+    // the Telegram webhook's is not.
+    //
+    // 23.0.0, 24.0.0 and 25.0.0 are carried by PR #569 (APRV-445) on its
+    // branch and were not merged when this was cut; by `conformance/README.md`'s
+    // collision rule this takes one major above the highest version either
+    // side had seen. Whichever of the two merges second regenerates on top of
+    // the other and takes the next major again.
+    vectors_version: "26.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

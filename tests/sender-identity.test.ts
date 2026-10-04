@@ -626,7 +626,11 @@ test("10. a web form post carrying a sender field is ignored entirely", () => {
   );
   assert.equal(load.ok, false, "a web sender mapping loaded");
   assert.equal(load.ok === false ? load.code : "", "schema-invalid");
-  assert.deepEqual([...SENDER_CHANNELS], ["telegram"]);
+  // APRV-455 widened the closed set by one transport that attributes a gesture
+  // to an account (an EdgeOS session, carried by an authenticated relay). The
+  // web page is still not one of them, and never will be.
+  assert.deepEqual([...SENDER_CHANNELS], ["telegram", "edgeos"]);
+  assert.equal((SENDER_CHANNELS as readonly string[]).includes("web"), false);
   assertClean(w.unit);
 });
 

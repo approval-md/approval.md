@@ -2749,6 +2749,19 @@ function refineApprovalVerb(
     if (sub === "checkpoint") return { class: "policy.core", rule: "approval-log-checkpoint" };
     return null;
   }
+  // APRV-455. `channel relay` records gestures attributed to an EdgeOS account
+  // on the word of whoever holds a secret the LAUNCHER chose. An agent that
+  // could start one with a secret of its own, and post to it, would write
+  // records that read as transport-authenticated evidence from a person's
+  // session, which a Telegram listener cannot be made to do without the bot
+  // token. So starting it is the operator's ceremony: `policy.core`, held
+  // human-only by the reference policy, and the hook denies it with
+  // `hook-class-human-only`. A deployment starts it from its own launcher, as
+  // the store's user, outside any agent's hook. It mints no new class (SPEC.md
+  // §11.1 invariant 9).
+  if (verb === "channel" && sub === "relay") {
+    return { class: "policy.core", rule: "approval-channel-relay" };
+  }
   if (verb === "gate") {
     if (sub === "open") return { class: "policy.core", rule: "approval-gate-open" };
     if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };

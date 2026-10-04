@@ -135,13 +135,24 @@
                     "12345678",
                     "hmac-sha256:3f2a9c11b4d7e6085a1c2f9d8e7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a"
                   ]
+                },
+                "edgeos": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|hmac-sha256:[0-9a-f]{64})$",
+                  "description": "The EdgeOS account this person decides from, in one of two forms (SPEC.md §5.2/§10.3, APRV-455, on the ground APRV-324 laid for `telegram`).\n\nRAW: the stable human id the EdgeOS identity service returns from `/humans/me` for the session the person authenticated in, as a string. The runtime treats it as OPAQUE and compares it byte for byte; the grammar admits what such an id is made of (an ASCII letter or digit, then up to 127 letters, digits, `.`, `_` or `-`), which covers a UUID and a decimal id alike. It holds no `:` and no whitespace, so a raw id can never be mistaken for the keyed form and can never contain the separator the runtime's sender index uses. Never an email address or a display name: those are chosen or changed by the person, and a mapping keyed on one would transfer an identity with an edit.\n\nKEYED: `hmac-sha256:<64 lowercase hex>`, the HMAC-SHA-256 of that same id under the operator-held `APPROVAL_SENDER_KEY`, exactly as for `telegram` and for the same reason: a published policy and a published log otherwise disclose the account.\n\nThe id reaches the runtime through `approval channel relay`, whose authenticated caller (the operator's control plane, holding `APPROVAL_RELAY_SECRET`) reports which EdgeOS session made the gesture. The daemon trusts that report the way it trusts the Telegram Bot API's `from.id`: it is operator trust in a relay, stated as such, and the resident cannot choose the id the relay attributes to them.",
+                  "examples": [
+                    "4f1c2a9e-7b3d-4e8a-9c21-5d6e7f8a9b0c",
+                    "hmac-sha256:3f2a9c11b4d7e6085a1c2f9d8e7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a"
+                  ]
                 }
               },
               "examples": [
                 { "telegram": "12345678" },
                 {
                   "telegram": "hmac-sha256:3f2a9c11b4d7e6085a1c2f9d8e7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a"
-                }
+                },
+                { "telegram": "12345678", "edgeos": "4f1c2a9e-7b3d-4e8a-9c21-5d6e7f8a9b0c" }
               ]
             }
           }
@@ -415,9 +426,9 @@
     },
     "senderChannel": {
       "type": "string",
-      "enum": ["telegram"],
-      "description": "SPEC.md §10.3 (amended, APRV-324): a channel whose transport attributes a gesture to an account id, and therefore the only kind of channel an `approvers.<id>.senders` entry may name. `telegram` qualifies because the Bot API reports `callback_query.from.id`, which the sender cannot choose. `web` and `cli` are deliberately absent: an unauthenticated form post names nobody and a local process names whoever runs it, so a sender mapping for either would be a binding the runtime cannot check and an identity key the channel cannot support.",
-      "examples": ["telegram"]
+      "enum": ["telegram", "edgeos"],
+      "description": "SPEC.md §10.3 (amended, APRV-324; widened, APRV-455): a channel whose transport attributes a gesture to an account id, and therefore the only kind of channel an `approvers.<id>.senders` entry may name. `telegram` qualifies because the Bot API reports `callback_query.from.id`, which the sender cannot choose. `edgeos` qualifies on the same ground: the gesture arrives through `approval channel relay`, authenticated by a shared secret from the daemon's launch environment, from a control plane that attributes it to the EdgeOS `/humans/me` id of the session the person signed in with, which the person cannot choose either. In both cases the daemon trusts the relay's report of who acted, and that is operator trust (APRV-422: no hosted service has authority over decisions; the relay carries a person's gesture and decides nothing). `web` and `cli` are deliberately absent: an unauthenticated form post names nobody and a local process names whoever runs it, so a sender mapping for either would be a binding the runtime cannot check and an identity key the channel cannot support.",
+      "examples": ["telegram", "edgeos"]
     },
     "classPattern": {
       "type": "string",

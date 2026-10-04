@@ -789,6 +789,85 @@ export interface ChannelActorOptions {
   actor: string;
   /** The channel that collected the gesture, for audit context in the note. */
   channel?: string;
+  /**
+   * Refuse every gesture whose actor would come from {@link actor} rather than
+   * from the sender mapping (APRV-455).
+   *
+   * A listener that holds a human identity of its own (a Telegram listener
+   * launched `--as human:carter`) keeps it for the modes `resolveSender` calls
+   * `configured`: no sender observed, or a policy that maps no sender for the
+   * channel. That fallback is the migration path for a person's own phone, and
+   * it is exactly wrong for a RELAY. A relay holds no human identity at all; the
+   * only thing it can honestly attribute a gesture to is the account the
+   * operator mapped, so where the attested policy maps nobody on the channel,
+   * the answer is `sender-unmapped` and one `audit.decision_refused`, never a
+   * decision recorded under whatever `actor` the relay was started with.
+   *
+   * Applies to decisions and attestations alike. A gesture with no sender at
+   * all under this flag is refused without a record: there is nobody to
+   * attribute the attempt to, and the relay never builds one.
+   */
+  requireSenderMapping?: boolean;
+}
+
+/**
+ * The policy IN FORCE, loaded from its verified bytes (APRV-455 refuter H1).
+ *
+ * `inForcePolicyText` recovers the attested text from the payload store and
+ * checks it against the attested digest from the verified log; this loads it
+ * under the path this process enforces, so a load failure reads the way the
+ * file's own would.
+ */
+function inForceLoad(
+  logPath: string,
+  gateOptions: DecideOptions,
+):
+  | { ok: true; load: ReturnType<typeof readGatePolicy> }
+  | { ok: false; reason: string; log?: { code: GateRefusal["code"]; message: string } } {
+  const read = readVerifiedRecords(
+    logPath,
+    gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+  );
+  // A log that cannot be read keeps its own code (SPEC.md §11.1 invariant 6):
+  // a torn tail is not an unattested policy, and the repairs differ.
+  if (!read.ok) return { ok: false, reason: read.message, log: { code: read.code, message: read.message } };
+  const inForce = inForcePolicyText(
+    read.records,
+    gateOptions.payloadStoreDir ?? payloadStoreDirFor(logPath),
+  );
+  if (!inForce.ok) return { ok: false, reason: inForce.reason };
+  return {
+    ok: true,
+    load: loadPolicyText(
+      listenerPolicyPath(gateOptions) ?? "APPROVAL.md",
+      inForce.text,
+      gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+    ),
+  };
+}
+
+/**
+ * The refusal {@link ChannelActorOptions.requireSenderMapping} turns a
+ * configured-actor fallback into (APRV-455).
+ *
+ * `sender-unmapped`, the existing member of the surface's union, because the
+ * fact is the same one: the attested policy names nobody for this account on
+ * this channel. The recorded form follows the file, as every refusal that does
+ * not reach a mapping does (`recordedSenderFor`).
+ */
+function mappingRequiredRefusal(
+  sender: ChannelSender,
+  load: ReturnType<typeof readGatePolicy>,
+  subject: string,
+): { refusal: ChannelDecisionRefusal; recorded: ReturnType<typeof recordedSenderFor> } {
+  return {
+    refusal: {
+      ok: false,
+      code: "sender-unmapped",
+      message: `${subject} refused: the ${sender.channel} sender this gesture arrived from is not mapped to an approver in the attested policy, and this surface records no gesture it cannot attribute to a mapped account. It holds no human identity of its own to fall back on, by design: a relay that decided as its launch identity whenever the policy mapped nobody would let whoever holds its secret decide as that identity. Nothing was decided; the observed account is on the audit.decision_refused record. An operator who recognizes it adds it to that approver's \`senders\` block and re-attests.`,
+    },
+    recorded: recordedSenderFor(load, sender, senderKeyFrom()),
+  };
 }
 
 /**
@@ -866,8 +945,33 @@ export function recordChannelDecision(
   // mapping the operator attested, and the gate's own authorization logic is
   // untouched by it. `namesApprover` and `actor-not-approver` then run exactly
   // as they always have, over an identity that is better evidenced.
+  // APRV-455 refuter H1. A relay resolves the sender against the policy IN
+  // FORCE (the verified bytes the latest attestation names), never against the
+  // file on disk. Its own `propose` gesture puts unattested bytes on disk as a
+  // matter of course, and a mapping in those bytes must not decide who may
+  // answer anything until a human has attested them. Where the in-force bytes
+  // cannot be recovered the gesture is refused `policy-not-attested` and
+  // nothing is appended: the rule SPEC.md §10.3 already sets for checkpoint
+  // signatures and reviews, for the same reason.
+  let load = readGatePolicy(gateOptions);
+  if (actorOptions.requireSenderMapping === true) {
+    const inForce = inForceLoad(logPath, gateOptions);
+    if (!inForce.ok && inForce.log !== undefined) {
+      return { outcome: { ok: false, code: inForce.log.code, message: inForce.log.message } };
+    }
+    if (!inForce.ok) {
+      return {
+        outcome: {
+          ok: false,
+          code: "policy-not-attested",
+          message: `decision on ${decision.action_key} refused: this surface resolves a sender only against the policy in force, and ${inForce.reason}. Nothing was decided and nothing was recorded.`,
+        },
+      };
+    }
+    load = inForce.load;
+  }
   const resolution = actorForSender(
-    readGatePolicy(gateOptions),
+    load,
     actorOptions.actor,
     decision.sender,
     // APRV-370. The operator's sender key, where the policy's mapping is keyed.
@@ -876,6 +980,29 @@ export function recordChannelDecision(
     // the reasoning.
     senderKeyFrom(),
   );
+  // APRV-455. A surface that holds no human identity (the relay) never falls
+  // back to its configured actor: an actor that did not come from the mapping
+  // is a refusal here, before the gate is called.
+  if (resolution.ok && resolution.sender === undefined && actorOptions.requireSenderMapping === true) {
+    if (decision.sender === undefined) {
+      return {
+        outcome: {
+          ok: false,
+          code: "sender-unmapped",
+          message: `decision on ${decision.action_key} refused: this surface records only gestures attributed to a mapped account, and this one carried no sender. Nothing was decided and nothing was recorded, because there is no party to attribute the attempt to.`,
+        },
+      };
+    }
+    const { refusal, recorded } = mappingRequiredRefusal(
+      decision.sender,
+      load,
+      `decision on ${decision.action_key}`,
+    );
+    noteRefusedDecision(logPath, decision, { ...actorOptions, actor: null }, gateOptions, refusal, {
+      sender: recorded,
+    });
+    return { outcome: refusal };
+  }
   if (!resolution.ok) {
     const refusal: ChannelDecisionRefusal = {
       ok: false,
@@ -1233,6 +1360,29 @@ export function recordAttestationDecision(
       refusal,
       { sender: resolved.sender },
     );
+    return { outcome: refusal };
+  }
+  // APRV-455. The relay rule, on the privileged gesture: an attestation whose
+  // actor did not come from the mapping in force is refused, whichever rung of
+  // the ladder above produced the configured actor.
+  if (resolved.sender === undefined && actorOptions.requireSenderMapping === true) {
+    if (decision.sender === undefined) {
+      return {
+        outcome: {
+          ok: false,
+          code: "sender-unmapped",
+          message: `attestation of ${sha256} refused: this surface attests only for a mapped account, and this gesture carried no sender. Nothing was attested and nothing was recorded.`,
+        },
+      };
+    }
+    const { refusal, recorded } = mappingRequiredRefusal(
+      decision.sender,
+      readGatePolicy(gateOptions),
+      `attestation of ${sha256}`,
+    );
+    noteRefusedDecision(logPath, decision, { ...actorOptions, actor: null }, gateOptions, refusal, {
+      sender: recorded,
+    });
     return { outcome: refusal };
   }
   if (resolved.sender !== undefined) {

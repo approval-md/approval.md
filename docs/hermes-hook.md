@@ -745,6 +745,26 @@ sandbox (one per resident)
   The operator sets the starting policy; every change after that needs the
   resident's own act through the channel. The sequence, the refusal codes and
   that trust statement are [docs/hosted-provisioning.md](hosted-provisioning.md).
+- **The resident attests in the onboarding review (APRV-455).** The Edge City
+  app shows the resident their policy and the few settings they may change; the
+  control plane writes the rendered bytes into the store and posts `propose`
+  to `approval channel relay` (a third listener under approvald, on its own
+  loopback port with its own `APPROVAL_RELAY_SECRET`), then posts the
+  resident's `attest` with their EdgeOS `/humans/me` id. The relay resolves
+  that id against `approvers.resident.senders.edgeos` in the policy IN FORCE,
+  so the operator's bootstrap must already map it, and appends `policy.updated`
+  with `actor: human:resident` and `payload.sender {channel: edgeos, id}`. An
+  unchanged review is a reaffirmation of the same bytes, so the resident becomes
+  the attester of record either way. The trust level is the Telegram relay's:
+  the daemon trusts the control plane's attribution of the gesture to that id,
+  which is operator trust, and no hosted service has authority over decisions
+  (APRV-422). The relay is reachable through neither serve credential, holds no
+  human identity of its own, and refuses an unmapped id `sender-unmapped`.
+  Until the resident accepts, the new bytes are unattested and gated calls
+  refuse, so the control plane proposes and collects the acceptance in one
+  screen and restores the in-force bytes on a decline; it also checks that the
+  listener on the relay's port belongs to approvald before it posts the secret
+  ([cli-reference#channel-relay](cli-reference.md#channel-relay)).
 - **Two windows, and they never meet.** The policy's `approval_ttl` is 72 h: that
   is how long a proposal (the inferred-intent flow, `approval propose`) waits for
   the resident's tap. A request the HOOK opens is clamped to the harness cap

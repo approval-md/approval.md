@@ -90,6 +90,7 @@ import {
   type BridgeOutcome,
 } from "../src/cli/codex-bridge.js";
 import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
+import { RELAY_REFUSAL_CODES } from "../src/channels/relay.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate, type ValidationMode } from "../src/core/validate.js";
 import { verifyText } from "../src/core/verify.js";
@@ -365,6 +366,10 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   // declines would think it had the whole vocabulary and would have left a
   // door open. Each union's own description says the other exists.
   bridge_stop_codes: BRIDGE_STOP_CODES,
+  // APRV-455. The authenticated relay's transport refusals: the control plane
+  // on the other side of the hop is a second implementation that branches on
+  // them, so they are pinned here although the Telegram webhook's are not.
+  relay_refusal_codes: RELAY_REFUSAL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {
