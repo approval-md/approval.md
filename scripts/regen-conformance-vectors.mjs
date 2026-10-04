@@ -2505,7 +2505,14 @@ const SUITES = [
     // additive, so every record written before it validates exactly as it did,
     // and an implementation that passed 2.7.0 fails this only by not knowing a
     // field that has been added and the two rules that bound it.
-    vectors_version: "2.8.0",
+    // 2.9.0 (APRV-447): a MINOR bump, the same shape. Two new fixtures for
+    // `payload.policy_sha256` on `execution.started`: one accepted (a harness
+    // start carrying the attested policy hash the gate resolved its class
+    // against) and one refused (a truncated digest). No existing expectation
+    // moves: the field is OPTIONAL and additive, so every record written before
+    // it validates exactly as it did, and an implementation that passed 2.8.0
+    // fails this only by not knowing a field that has been added.
+    vectors_version: "2.9.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
