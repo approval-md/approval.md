@@ -1983,16 +1983,16 @@ export const TELEGRAM_LISTEN_HELP = `approval channel telegram listen — delive
 Usage:
   approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
                                    [--policy <p>] [--dir <p>] [--log <p>] [--no-gloss]
-                                   [--gloss-provider <claude|codex>] [--gloss-model <id>] [--api-base <url>] [--poll-timeout <s>] [--json]
+                                   [--gloss-provider <claude|codex>] [--gloss-model <id>] [--api-base <url>] [--no-stale-copy] [--poll-timeout <s>] [--json]
 
 Flags:
-  --once / --json  one getUpdates batch then exit / ONE JSON OBJECT PER LINE
   --no-gloss / --gloss-provider <p>   drop gloss (ON by default) / choose claude|codex (default claude)
   --gloss-model <id>   model to request; required with Codex; no fallback
   --as human:<id>  the approver every decision is recorded against. REQUIRED
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
   --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
   --api-base <url> / --poll-timeout <s> / --allow-cross-instance   Bot API base / long-poll seconds (25) / start on another instance's bot
+  --no-stale-copy / --once / --json   refuse a button this process is not holding (implied by any --api-base but the Bot API) / one getUpdates batch then exit / ONE JSON OBJECT PER LINE
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
@@ -2009,13 +2009,13 @@ Usage:
   approval channel telegram webhook --url <https://host/path> [--path <p>]
         [--listen [host:]port | --port <n>] [--allow-non-loopback] [--cycle <d>]
         [--reclaim] [--as human:<id>] [--policy <p>] [--dir <p>] [--log <p>]
-        [--payloads <f>] [--api-base <url>] [--no-gloss] [--json]
+        [--payloads <f>] [--api-base <url>] [--no-stale-copy] [--no-gloss] [--json]
 
 Flags:
   --url <https://...>  REQUIRED: the PUBLIC url registered with setWebhook. https only, on port 443, 80, 88 or 8443 (Telegram's list), and no user:password
   --port <n> / --listen <[host:]port>   this process's own bind. LOOPBACK by default (4683); routable also needs --allow-non-loopback. Never 0
   --path <p> / --cycle <d>   must equal the url's own path / dispatch period (30s)
-  --reclaim            register over the webhook already holding this bot
+  --reclaim / --no-stale-copy   register over the webhook already holding this bot / refuse a button this process is not holding (implied by any --api-base but the Bot API)
   -h, --help           this text
 
 APPROVAL_TG_WEBHOOK_SECRET is REQUIRED, from the launch environment: it is
@@ -2129,13 +2129,13 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
-              [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--poll-timeout <s>] [--no-gloss]
+              [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-stale-copy] [--poll-timeout <s>] [--no-gloss]
               [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight] [--no-build]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
   --payloads <f> / --payload-dir <d>  payload overrides: telegram / web
-  --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds
+  --api-base <url> / --poll-timeout <s> / --no-stale-copy   Bot API base / long-poll seconds / refuse a button this process is not holding (implied by any base but the Bot API)
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web / --allow-cross-instance   leave that channel out / start on another instance's bot
   --no-gloss / --restart-backoff <d>   drop gloss / first retry wait

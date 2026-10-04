@@ -4236,6 +4236,34 @@ place in the walkthrough and a duplicate message, never a pending request nobody
 is shown; an approval that depended on a channel's memory would not be an
 acceptable trade.
 
+**Earlier copies, and `--no-stale-copy`** (APRV-196, APRV-456). Every single-request decision
+button carries `<verb>:<nonce>:<action ref>` (a digest's "all" buttons carry no reference and never had a fallback), where the nonce is issued by this
+process and the reference is the first 16 hex of the action key's SHA-256. On
+the direct-bot shape (no `--api-base`, or one naming `https://api.telegram.org`)
+a tap whose nonce this process is not holding, such as a button on a copy sent
+before a restart, falls back to its reference: when this process holds that
+action open on a newer card, the tap decides it there, and the gate judges it
+exactly as it judges any other tap. That fallback is safe because only the bot
+token can put a button in front of the approver.
+
+The fallback is **off** when `--api-base` names anything other than the Bot API
+(a relay, or a self-hosted Bot API server, which this rule treats as a relay)
+and when `--no-stale-copy` is passed. Then a decision tap whose nonce this
+process is not holding is refused `nonce-not-issued` (a member of the channel
+decision refusal union, beside `sender-unmapped`): it never reaches the gate,
+the approver's toast says this listener did not send that button, and the live
+card stays armed. When the tap's reference names a request this process holds
+open, one `audit.decision_refused` records the attempt under that request's key,
+naming the sender the policy resolves; a reference that names nothing open here,
+or a replay of the same button within this process, records nothing (the memory of refused buttons is per process and bounded, so a redelivery after a restart can record once more). The restart banner says that
+earlier copies no longer decide. The reason is the relay: anyone holding its
+token can send the approver a card with forged text and a real pending action's
+reference, and on the fallback the approver's genuine tap would pass the chat
+check and the sender mapping. The flag is launch configuration only: no policy
+key and nothing in an update can set it or clear it. `approval up` and
+[`channel telegram webhook`](#channel-telegram-webhook) take the same flag and
+apply the same rule.
+
 **The execution token is printed on this terminal's stdout and is never sent to
 Telegram.** A chat transcript is stored on someone else's servers, backed up to
 phones, and readable by anyone later added to the chat — it is not a credential
@@ -4459,7 +4487,10 @@ a gate.
 
 **Only the arrival changes, and that is the whole claim.** The pending queue is
 re-derived from the verified log every cycle by the same `dispatchPending`. The
-handlers are the same four function objects `listen` registers. A tap becomes a
+handlers are the same function objects `listen` registers (since APRV-456 that
+includes the recorder for a `nonce-not-issued` refusal, and `--no-stale-copy`
+or a relayed `--api-base` turns the earlier-copy fallback off here exactly as it
+does there). A tap becomes a
 decision through the same `handleUpdate`, the same `callback_query.from.id`
 reading, the same `approvers.<id>.senders` resolution, the same
 `recordChannelDecision` and the same annotate-after-decision edit. There is no
@@ -6162,6 +6193,13 @@ that cannot conflict with anything.
 A 409 that still happens at runtime — another machine, or a poller started
 outside this runtime — is reported once, with the instances the registry knows
 about, and its repeats are counted rather than reprinted.
+
+**A relayed Telegram channel refuses buttons it is not holding** (APRV-456). An
+`--api-base` that is not `https://api.telegram.org`, or `--no-stale-copy`, turns
+off the earlier-copy fallback, and a decision tap whose nonce this process is
+not holding is refused `nonce-not-issued` instead of reaching the gate. The rule
+and its reason are under [`channel telegram listen`](#channel-telegram-listen)
+("Earlier copies, and `--no-stale-copy`").
 
 **The ambient runtime: the daemon loop and every configured channel in one
 supervised foreground process.** `approval daemon run --with-channels` is the

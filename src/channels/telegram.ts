@@ -220,12 +220,13 @@
  * and the log is not opened.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { GLOSS_UNVERIFIED_SUFFIX, refusedDecisionLine } from "./contract.js";
 import type {
   ChannelBatch,
   ChannelDecision,
+  ChannelDecisionRefusal,
   ChannelHealth,
   ChannelRequest,
   DecisionOutcome,
@@ -571,6 +572,41 @@ export interface TelegramConfig {
    * what it rendered before the key existed.
    */
   layout?: PromptLayout;
+  /**
+   * Whether APRV-196's stale-copy fallback is on (APRV-456). Defaults to `true`,
+   * the direct-bot shape.
+   *
+   * On, a decision tap whose nonce this process is not holding falls back to
+   * its action reference, and is carried to the gate when this process holds
+   * that action open. The bound that makes that safe is that only the bot token
+   * can put a button in front of the approver, so any button carrying a live
+   * reference was put there by some process of this gate.
+   *
+   * Off, that tap is refused `nonce-not-issued` before the gate is called and
+   * never reaches the decision handler; at most one `audit.decision_refused` is
+   * written for it, through {@link TelegramChannel.onRefusedDecision}. The verb
+   * turns it off when the channel runs through a relay (an `--api-base` other
+   * than the Bot API), where anyone holding the relay's token can send the
+   * approver a card with forged text and a real action's reference, and when
+   * the operator passes `--no-stale-copy`. It is launch configuration and
+   * nothing else: no policy key and nothing in an update can set it.
+   */
+  staleCopy?: boolean;
+}
+
+/**
+ * A decision tap the channel refused on its own, before any handler ran
+ * (APRV-456), handed to {@link TelegramChannel.onRefusedDecision} so the
+ * runtime can record that a human's attention was spent.
+ *
+ * `decision.action_key` and `decision.deliveryId` come from the delivery THIS
+ * process holds open for the reference the bytes carried, never from the bytes
+ * themselves; a tap whose reference names nothing open here produces no
+ * {@link TelegramRefusedDecision} at all.
+ */
+export interface TelegramRefusedDecision {
+  decision: ChannelDecision;
+  refusal: ChannelDecisionRefusal;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +671,14 @@ export interface TelegramStats {
    * restart is costing the approver a wrong tap.
    */
   staleCopyDecisions: number;
+  /**
+   * Taps refused `nonce-not-issued` because the stale-copy fallback is off
+   * (APRV-456): a decision button whose nonce this process is not holding, on
+   * a relayed channel or one started with `--no-stale-copy`. Counted whether or
+   * not a record was written, because a rising number here on a relayed gate
+   * is either restarts or somebody putting cards in front of the approver.
+   */
+  staleCopyRefusals: number;
   /**
    * Bot commands handed to the runtime's command handler (APRV-216). Never a
    * decision and never a log event: a command reorders what this process shows
@@ -2336,11 +2380,18 @@ export interface TelegramPollResult {
    * runtime returned — the card says which code — and nothing was appended.
    */
   reviews: { tap: ReviewTap; ok: boolean }[];
+  /**
+   * Decision taps the channel itself refused before any handler ran (APRV-456),
+   * in order. `action_key` is the action this process holds open for the
+   * reference the tap carried, or `null` when it holds nothing for it; only a
+   * non-null one can have produced an `audit.decision_refused`.
+   */
+  refused: { code: ChannelDecisionRefusal["code"]; action_key: string | null; detail: string }[];
 }
 
 /** A fresh, empty batch report. One shape for both transports (APRV-424). */
 function emptyPollResult(): TelegramPollResult {
-  return { updates: 0, outcomes: [], ignored: [], commands: [], reviews: [] };
+  return { updates: 0, outcomes: [], ignored: [], commands: [], reviews: [], refused: [] };
 }
 
 /**
@@ -2494,6 +2545,25 @@ export class TelegramChannel implements TestableChannel {
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
   /**
+   * APRV-196's stale-copy fallback, on or off (APRV-456). Fixed at
+   * construction from {@link TelegramConfig.staleCopy}; nothing an update
+   * carries can change it.
+   */
+  private readonly staleCopy: boolean;
+  /**
+   * Where a `nonce-not-issued` refusal is recorded (APRV-456). The runtime's,
+   * like every other handler here; absent, the refusal still happens and only
+   * the record is missing.
+   */
+  private refusedDecisionHandler: ((refused: TelegramRefusedDecision) => void) | null = null;
+  /**
+   * Nonces already refused `nonce-not-issued` (APRV-456), oldest first, capped
+   * at {@link TELEGRAM_REFUSED_NONCE_CAP}. A redelivered or replayed tap on the
+   * same button is refused again with the same toast and records nothing, so
+   * one button costs the log at most one record.
+   */
+  private readonly unissuedRefused = new Set<string>();
+  /**
    * What to do with a bot command (APRV-216). Absent unless the runtime asked
    * for commands, and its absence is what keeps `message` out of
    * `allowed_updates` — see {@link onCommand}.
@@ -2612,6 +2682,7 @@ export class TelegramChannel implements TestableChannel {
       "unknown-command": 0,
     },
     staleCopyDecisions: 0,
+    staleCopyRefusals: 0,
     commands: 0,
     reviews: 0,
   };
@@ -2636,11 +2707,19 @@ export class TelegramChannel implements TestableChannel {
     this.now = config.now ?? (() => Date.now());
     this.describeAction = config.describeAction ?? null;
     this.layout = config.layout ?? TELEGRAM_PROMPT_LAYOUT;
+    // APRV-456. Only an explicit `true` or an absent key leaves the fallback on;
+    // anything else a caller passes turns it off, the stricter direction.
+    this.staleCopy = config.staleCopy === undefined || config.staleCopy === true;
     this.makeNonce =
       config.nonce ??
       (() => {
         this.counter += 1;
-        return `${this.counter.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+        // APRV-456 refutation S2. On a relayed channel the nonce is the only
+        // thing binding a button to this process, so it comes from the CSPRNG
+        // (72 bits) rather than `Math.random`, whose state a reader of a few old
+        // buttons could in principle recover. base64url carries no `:`, and the
+        // whole `<verb>:<nonce>:<ref>` stays well inside the 64-byte cap.
+        return `${this.counter.toString(36)}${randomBytes(9).toString("base64url")}`;
       });
   }
 
@@ -2650,6 +2729,27 @@ export class TelegramChannel implements TestableChannel {
 
   onDecision(handler: (decision: ChannelDecision) => DecisionOutcome): void {
     this.handler = handler;
+  }
+
+  /**
+   * Register where a tap this channel refused on its own is recorded
+   * (APRV-456).
+   *
+   * Separate from {@link onDecision} on purpose: that handler's job is to call
+   * the gate, and a `nonce-not-issued` tap must never reach the gate. The
+   * runtime wires this to an audit-tier append that grants nothing.
+   */
+  onRefusedDecision(handler: (refused: TelegramRefusedDecision) => void): void {
+    this.refusedDecisionHandler = handler;
+  }
+
+  /**
+   * Whether APRV-196's stale-copy fallback is on (APRV-456). Read by the
+   * listener for the restart banner, which must not promise that earlier
+   * copies still decide when they do not.
+   */
+  staleCopyEnabled(): boolean {
+    return this.staleCopy;
   }
 
   /**
@@ -3991,6 +4091,16 @@ export class TelegramChannel implements TestableChannel {
     // new card, exactly as it did before that card existed.
     const refusedCard = delivery === undefined && this.refusedNonces.has(parsed.nonce);
 
+    // APRV-456. With the fallback off, a nonce this process is not holding is
+    // the end of the road: no action-reference lookup, no log probe, and never
+    // the decision handler. Behind a relay, a button carrying a real action's
+    // reference may sit under text this gate never wrote, and the approver's
+    // genuine tap would otherwise pass the chat check and the sender mapping.
+    if (delivery === undefined && !refusedCard && !this.staleCopy) {
+      await this.refuseUnissued(parsed, callbackId, result, sender);
+      return;
+    }
+
     if (delivery === undefined && parsed.actionRef !== null && !refusedCard) {
       // The pre-restart copy. Its nonce died with the process that issued it,
       // but the request it names is one THIS process has since re-delivered, so
@@ -4686,6 +4796,92 @@ export class TelegramChannel implements TestableChannel {
       // it. The sample's state is the log's answer, never this card's text.
       this.complain(
         `approval: telegram could not redraw the review card for sample seq ${String(state.card.sampleSeq)} (message ${state.deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
+      );
+    }
+  }
+
+  /**
+   * Refuse a decision tap whose nonce this process is not holding, with the
+   * stale-copy fallback off (APRV-456).
+   *
+   * What it does, in order, and what it never does:
+   *
+   * - It never calls the decision handler, so the gate is never asked. That is
+   *   the property: a button this process did not put on the screen cannot
+   *   carry a human's tap to `decide()`, whatever reference it carries.
+   * - It looks the reference up among the deliveries THIS process holds open,
+   *   and only to name the action on the audit record. A reference that names
+   *   nothing open here produces no record: there is no action key this
+   *   process could truthfully write, and inventing one from bytes that came
+   *   off the network is the self-report §11.1 invariant 4 forbids.
+   * - It hands at most one record per nonce to {@link onRefusedDecision}: a
+   *   redelivered or replayed tap on the same button is refused with the same
+   *   toast and records nothing.
+   * - It leaves the live card alone. The request stays pending, and the card
+   *   this process did send still decides it.
+   *
+   * "Not holding" covers a nonce this process never issued and one it issued
+   * and has since forgotten (an annotated card, a swept delivery, a restart).
+   * It does not try to tell them apart: a set of every nonce ever issued would
+   * reopen the hole for anyone who has seen one genuine button's bytes, because
+   * an old nonce with a new reference would pass it. The cost is that a tap on
+   * an earlier copy after a restart is refused on this shape and the approver
+   * taps the newest card, which the restart banner says.
+   */
+  private async refuseUnissued(
+    parsed: ParsedCallback,
+    callbackId: string,
+    result: TelegramPollResult,
+    sender: ChannelSender | undefined,
+  ): Promise<void> {
+    this.counters.staleCopyRefusals += 1;
+    const live = parsed.actionRef === null ? undefined : this.liveDeliveryFor(parsed.actionRef);
+    const repeat = this.unissuedRefused.has(parsed.nonce);
+    // Re-inserted so a nonce refused again counts as the newest, and capped:
+    // memory, never a decision. A nonce that falls off the end is refused again
+    // and may record again, which is volume and nothing else.
+    this.unissuedRefused.delete(parsed.nonce);
+    this.unissuedRefused.add(parsed.nonce);
+    while (this.unissuedRefused.size > TELEGRAM_REFUSED_NONCE_CAP) {
+      const oldest = this.unissuedRefused.values().next().value;
+      if (oldest === undefined) break;
+      this.unissuedRefused.delete(oldest);
+    }
+
+    // APRV-456 refutation S4: the nonce is NOT quoted here. This message becomes
+    // `payload.message` on the audit record, and the nonce is bytes whoever
+    // made the card chose; quoting it would let a forger write text of their
+    // choosing into the hash-chained log, one tap at a time.
+    const message = `${parsed.decision} tap refused: its button carries a nonce this listener is not holding, and this listener's stale-copy fallback is off (a relayed channel, or --no-stale-copy). It was not carried to the gate by its action reference, because behind a relay a button with a real request's reference can sit under text this gate never sent. Nothing was decided; the request, if pending, is still open on the newest card this listener sent.`;
+    const refusal: ChannelDecisionRefusal = { ok: false, code: "nonce-not-issued", message };
+    result.refused.push({
+      code: refusal.code,
+      action_key: live?.actionKey ?? null,
+      detail: message,
+    });
+    this.complain(
+      `approval: telegram refused a callback (nonce-not-issued): nonce ${JSON.stringify(parsed.nonce)}${
+        live === undefined ? "" : ` for ${live.actionKey}`
+      }${repeat ? " (again; not recorded twice)" : ""}`,
+    );
+    // The toast first: it is the only answer this query gets, and the record
+    // below changes nothing about what the person is told.
+    await this.safeAnswer(callbackId, refusedDecisionLine(refusal.code));
+
+    if (live === undefined || repeat || this.refusedDecisionHandler === null) return;
+    const decision: ChannelDecision = {
+      action_key: live.actionKey,
+      decision: parsed.decision,
+      deliveryId: live.deliveryId,
+      ...(sender === undefined ? {} : { sender }),
+    };
+    try {
+      this.refusedDecisionHandler({ decision, refusal });
+    } catch (cause) {
+      // Best effort by contract: the refusal has happened and been told; only
+      // the record is lost, and the operator hears that here.
+      this.complain(
+        `approval: telegram could not record a nonce-not-issued refusal for ${live.actionKey}: ${this.describe(cause)}`,
       );
     }
   }

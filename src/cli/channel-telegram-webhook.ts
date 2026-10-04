@@ -104,6 +104,8 @@ const WEBHOOK_FLAGS: Record<string, FlagKind> = {
   "--as": "string",
   "--payloads": "string",
   "--api-base": "string",
+  /** APRV-456: refuse a tap on a button this process is not holding. */
+  "--no-stale-copy": "boolean",
   "--allow-cross-instance": "boolean",
   "--gloss": "boolean",
   "--no-gloss": "boolean",
@@ -271,6 +273,8 @@ export interface WebhookRequest {
   as: string | null;
   payloads: string | null;
   apiBase: string | null;
+  /** `--no-stale-copy` (APRV-456); see `staleCopyFor` in channel-telegram.ts. */
+  noStaleCopy?: boolean;
   json: boolean;
   allowCrossInstance?: boolean;
   /** `--url` as typed, or `null`. */
@@ -351,6 +355,10 @@ export function prepareWebhook(request: WebhookRequest): WebhookPreparation {
     as: request.as,
     payloads: request.payloads,
     apiBase: request.apiBase,
+    // APRV-456. The same rule as the poller, through the same function: a
+    // relayed webhook refuses a nonce it is not holding exactly as a relayed
+    // poller does.
+    ...(request.noStaleCopy === undefined ? {} : { noStaleCopy: request.noStaleCopy }),
     // No `getUpdates` runs under this transport, so there is no long poll to
     // time out. The channel keeps its default and never issues one.
     pollTimeout: null,
@@ -873,6 +881,7 @@ export async function commandTelegramWebhook(
     as: stringFlag(flags, "--as"),
     payloads: payloadsFlag === null ? null : absolute(payloadsFlag, cwd),
     apiBase: stringFlag(flags, "--api-base"),
+    noStaleCopy: boolFlag(flags, "--no-stale-copy"),
     json,
     allowCrossInstance: boolFlag(flags, "--allow-cross-instance"),
     url: stringFlag(flags, "--url"),

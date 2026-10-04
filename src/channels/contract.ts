@@ -1082,6 +1082,70 @@ export function recordChannelDecision(
 }
 
 /**
+ * Record a decision the SURFACE refused before the gate was asked (APRV-456),
+ * and do nothing else.
+ *
+ * The first caller is the Telegram listener's `nonce-not-issued` refusal: a tap
+ * on a button this process is not holding, on a channel whose stale-copy
+ * fallback is off. The tap never reaches {@link recordChannelDecision}, because
+ * that function's whole job is to call `decide()`, and this one never does. It
+ * appends one audit-tier `audit.decision_refused` through the same
+ * {@link noteRefusedDecision} every other refused human decision goes through,
+ * which grants nothing, settles nothing, charges nothing and is never sampled.
+ *
+ * Who the record names follows the rule a refused decision has followed since
+ * APRV-324: the sender the transport authenticated, resolved against the
+ * policy, in the form the record takes (raw or keyed, APRV-370). A sender the
+ * policy maps to an approver names that approver; one it maps to nobody is
+ * recorded with no `actor` and its account; a channel the policy maps no
+ * senders for falls back to the surface's configured identity, as a decision
+ * would. None of these widens anything: the record is an observation, and the
+ * refusal it describes has already happened.
+ *
+ * Best effort, like every refusal record: a failure is swallowed, and the
+ * caller has already told the human what happened to their tap.
+ */
+export function recordSurfaceRefusal(
+  logPath: string,
+  decision: ChannelDecision,
+  refusal: ChannelDecisionRefusal,
+  actorOptions: ChannelActorOptions,
+  gateOptions: DecideOptions = {},
+): void {
+  const options = { ...actorOptions, channel: actorOptions.channel ?? "cli" };
+  let resolution: SenderActorResolution;
+  try {
+    resolution = actorForSender(
+      readGatePolicy(gateOptions),
+      actorOptions.actor,
+      decision.sender,
+      senderKeyFrom(),
+    );
+  } catch {
+    return;
+  }
+  if (resolution.ok) {
+    noteRefusedDecision(
+      logPath,
+      decision,
+      { ...options, actor: resolution.actor },
+      gateOptions,
+      refusal,
+      resolution.sender === undefined
+        ? {}
+        : {
+            sender: resolution.sender,
+            ...(resolution.source === undefined ? {} : { senderSource: resolution.source }),
+          },
+    );
+    return;
+  }
+  noteRefusedDecision(logPath, decision, { ...options, actor: null }, gateOptions, refusal, {
+    sender: resolution.sender,
+  });
+}
+
+/**
  * Append the audit trail of a refused human decision, and swallow whatever goes
  * wrong doing it (APRV-235).
  *

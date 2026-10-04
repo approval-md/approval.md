@@ -32,6 +32,8 @@ import {
   claimed,
   computed,
   recordChannelDecision,
+  recordSurfaceRefusal,
+  refusedDecisionLine,
   type ChannelDecision,
   type ChannelRequest,
   type DecisionOutcome,
@@ -105,6 +107,7 @@ import {
   type ReviewChoice,
   type TelegramConfig,
   type TelegramPollResult,
+  type TelegramRefusedDecision,
 } from "../src/channels/telegram.js";
 import { openReviewCards } from "../src/cli/audit-card.js";
 import {
@@ -4396,6 +4399,112 @@ test("an ack the Bot API refuses costs the decision nothing (APRV-196)", async (
     "a failed ack was not reported to the operator",
   );
   assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// The stale-copy fallback, off behind a relay (APRV-456)
+//
+// APRV-196's fallback is safe because only the bot token can put a button in
+// front of the approver. Behind a relay that bound is gone, so the fallback is
+// off there: a nonce this process is not holding is refused `nonce-not-issued`
+// and never carried to the gate by its action reference. These pin both
+// shapes side by side, so the direct shape's behaviour stays exactly APRV-196's.
+// ---------------------------------------------------------------------------
+
+/** The runtime's refusal recorder, as the listener wires it. */
+function refusalRecorderFor(world: Live, now: string) {
+  return ({ decision, refusal }: TelegramRefusedDecision): void =>
+    recordSurfaceRefusal(
+      world.unit.logPath,
+      decision,
+      refusal,
+      { actor: HUMAN, channel: "telegram" },
+      { ...world.unit.options, clock: fixedClock(now) },
+    );
+}
+
+test("relayed: a tap on a pre-restart copy is refused nonce-not-issued, and the live copy decides (APRV-456)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+
+  const before = channelFor({ staleCopy: false });
+  before.onDecision(handlerFor(world, at(2)));
+  await before.notify(request_);
+  const oldButton = mock.callbackDataFor(key, "grant");
+
+  const after = channelFor({ staleCopy: false });
+  let decided = 0;
+  const decide = handlerFor(world, at(3));
+  after.onDecision((decision) => {
+    decided += 1;
+    return decide(decision);
+  });
+  after.onRefusedDecision(refusalRecorderFor(world, at(3)));
+  await after.notify(request_);
+  const newButton = mock.callbackDataFor(key, "grant");
+
+  const from = mock.answerTexts().length;
+  const recordsBefore = recordsOf(world.unit.logPath).length;
+  mock.queueUpdate(callbackUpdate({ data: oldButton, chatId: CHAT }));
+  const poll = await after.pollOnce();
+
+  assert.equal(decided, 0, "the older copy's tap reached the decision handler");
+  assert.deepEqual(poll.outcomes, [], "the older copy's tap produced a decision outcome");
+  assert.deepEqual(
+    poll.refused.map((entry) => [entry.code, entry.action_key]),
+    [["nonce-not-issued", key]],
+  );
+  assert.deepEqual(answersSince(from), [refusedDecisionLine("nonce-not-issued")]);
+  const appended = recordsOf(world.unit.logPath).slice(recordsBefore);
+  assert.deepEqual(appended.map((record) => record.event), ["audit.decision_refused"]);
+  assert.equal(((appended[0] as EventRecord).payload as Record<string, unknown>)["code"], "nonce-not-issued");
+  assert.equal(after.stats().staleCopyDecisions, 0);
+  assert.equal(after.stats().staleCopyRefusals, 1);
+
+  // The live copy is untouched by the refusal and decides the request once.
+  mock.queueUpdate(callbackUpdate({ data: newButton, chatId: CHAT }));
+  const live_ = await after.pollOnce();
+  assert.equal(live_.outcomes.find((entry) => entry.action_key === key)?.outcome.ok, true);
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "approval.granted").length,
+    1,
+  );
+  assertClean(world.unit);
+});
+
+test("direct: the same forged bytes are carried by APRV-196's fallback, the residual the docs name (APRV-456)", async () => {
+  // The direct shape is unchanged on purpose. This pins what the residual IS,
+  // so a reader of docs/hermes-hook.md can see it in a test: a button with a
+  // live reference and a nonce nobody issued decides, because on this shape
+  // only the bot token could have put it in the chat.
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+  const channel = channelFor();
+  assert.equal(channel.staleCopyEnabled(), true, "the default must stay APRV-196's shape");
+  channel.onDecision(handlerFor(world, at(2)));
+  let recorded = 0;
+  channel.onRefusedDecision(() => {
+    recorded += 1;
+  });
+  await channel.notify(request_);
+
+  mock.queueUpdate(callbackUpdate({ data: `g:f0rged:${actionRefOf(key)}`, chatId: CHAT }));
+  const poll = await channel.pollOnce();
+  assert.deepEqual(poll.refused, []);
+  assert.equal(poll.outcomes.find((entry) => entry.action_key === key)?.outcome.ok, true);
+  assert.equal(channel.stats().staleCopyDecisions, 1);
+  assert.equal(recorded, 0);
+  assertClean(world.unit);
+});
+
+test("the restart banner stops promising earlier copies when the fallback is off (APRV-456)", () => {
+  assert.match(bannerLines(2)[1] as string, /its buttons still decide the same request/u);
+  const relayed = bannerLines(2, false);
+  assert.equal(relayed[0], "LISTENER STARTED — re-sending 2 pending requests.");
+  assert.doesNotMatch(relayed[1] as string, /still decide/u);
+  assert.match(relayed[1] as string, /no longer decide anything on this listener/u);
 });
 
 test("a startup batch is preceded by one banner naming how many are coming (APRV-196)", async () => {

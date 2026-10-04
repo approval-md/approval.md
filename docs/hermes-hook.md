@@ -873,6 +873,37 @@ sandbox (one per resident)
   `sender-unmapped`. `up` resolves its log against its working directory, so the
   launcher starts it from the store (or passes `--log`); `serve --dir` resolves
   the log under `--dir`. Both must name the same file.
+- **Behind the relay, a button the daemon did not send never reaches the gate
+  (APRV-456).** The relay cannot tell the daemon's Bot API calls from anyone
+  else's who holds the relay token, so a token holder can send the resident a
+  card with forged text whose `callback_data` carries the reference of a real
+  pending action. On the direct-bot shape APRV-196's earlier-copy fallback would
+  carry the resident's genuine tap on that card to the gate by its reference.
+  Because `--api-base` names the relay, `up` turns that fallback off: a decision
+  tap whose nonce this process is not holding is refused `nonce-not-issued`, the
+  decision handler is never called, at most one `audit.decision_refused` records
+  the attempt (under the request's key, when the reference names a request the
+  daemon holds open), and the card the daemon did send still decides. The rule
+  is in [cli-reference#channel-telegram-listen](cli-reference.md#channel-telegram-listen);
+  `--no-stale-copy` applies it on any shape.
+  - *Residual on the relay shape.* The fix closes the reference path, and the
+    nonce check binds a button to this process's issuance, never to the text
+    above it. A token holder who obtains a live card's callback bytes (by reading
+    updates through the relay, or through any Bot API method that hands back a
+    message with its keyboard) can still put those bytes under forged text, and
+    a tap on that card decides (checkpoint and review cards carry the same
+    live-bytes residual). Binding a tap to the message id and text this process
+    sent would close it without trusting the relay; until then the relay's
+    method allowlist (no `forwardMessage`, `getUpdates` or `editMessage*` for
+    anyone but the daemon) and the relay token's custody (approvald's 0600
+    environment, nowhere else) remain the bound for that. A restart also costs
+    more here than on the direct shape: buttons on cards sent before it are
+    refused, and the restart banner tells the resident to tap the newest copy.
+  - *Residual on the direct shape.* The fallback stays on, because there only
+    the bot token can put a button in front of the approver. Anyone holding the
+    bot token can make the same forged card and have a genuine tap decide by
+    reference, so the bot token's custody is the whole bound. An operator who
+    wants the stricter rule without a relay passes `--no-stale-copy`.
 - **The operator attests the starting policy at provisioning.** `approval init`
   scaffolds the canonical policy unattested, and until a human attests, every
   gated call refuses `policy-not-attested`, which `fail_closed: true` turns into

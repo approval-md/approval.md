@@ -162,6 +162,14 @@ superseded. APRV-445's branch minted 23.0.0 to 25.0.0 for six new
 implementation holds itself to 27.0.0, and a run reporting 26.0.0 lacks the six
 gate codes.
 
+It is **28.0.0** since APRV-456, which added `nonce-not-issued` to
+`channel_decision_refusal_codes`: the refusal a Telegram listener gives a
+decision button whose nonce it is not holding when its stale-copy fallback is
+off (a relayed channel, or `--no-stale-copy`). It is a surface code because
+`decide` is never called for it, which is the property it exists for. If
+another branch claims 28.0.0 first, the collision rule below gives this change
+the next major at merge.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:
