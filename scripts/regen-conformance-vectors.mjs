@@ -360,7 +360,7 @@ const unionVectors = [
   ],
   [
     "channel_decision_refusal_codes",
-    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the attested policy maps that channel's senders in the keyed form and the process holds no key to compute a digest with, or the gesture is an attestation whose in-force policy cannot say who is tapping",
+    "every way a decision SURFACE can refuse a human's gesture before the gate sees it: the sender the transport authenticated resolves to nobody, or to more than one person, in the attested policy, or the attested policy maps that channel's senders in the keyed form and the process holds no key to compute a digest with, or the gesture is an attestation whose in-force policy cannot say who is tapping, or the gesture is a decision button whose nonce the listener is not holding while its stale-copy fallback is off (a relayed channel, or one started with --no-stale-copy)",
   ],
   [
     "bridge_refusal_codes",
@@ -2344,7 +2344,22 @@ const SUITES = [
     // `relay_refusal_codes`. A second implementation holds itself to 27.0.0;
     // one reporting 23.0.0, 24.0.0 or 25.0.0 is reporting a set main never
     // carried, and one reporting 26.0.0 lacks the six gate codes.
-    vectors_version: "27.0.0",
+    //
+    // 28.0.0 (APRV-456): `channel_decision_refusal_codes` gains
+    // `nonce-not-issued`, the refusal a Telegram listener whose stale-copy
+    // fallback is off (a relayed channel, or `--no-stale-copy`) gives a
+    // decision button whose nonce it is not holding. Major because the vector
+    // pins each whole array in definition order, so a longer union is a
+    // changed expectation.
+    //
+    // A surface code and not a gate code: `decide` is never called for it,
+    // which is the whole property. Its own code rather than an ignored
+    // callback, because a human's attention was spent and the log records it,
+    // and rather than `sender-unmapped`, because the account may be the very
+    // approver the policy names: what was wrong is the button, not the person.
+    // If another lane's major merges first, the collision rule above applies
+    // and this takes the next major on regeneration.
+    vectors_version: "28.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

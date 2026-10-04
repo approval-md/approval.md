@@ -116,6 +116,7 @@ import { isProposalTask, type DecideOptions } from "../core/gate.js";
 import { assembleBatch } from "../channels/batch.js";
 import {
   recordChannelDecision,
+  recordSurfaceRefusal,
   refusedDecisionLine,
   type ChannelDecision,
   type ChannelRequest,
@@ -155,6 +156,7 @@ import {
   type ReviewTapResponse,
   type TelegramCommand,
   type TelegramConfig,
+  type TelegramRefusedDecision,
   type TelegramTerminalState,
 } from "../channels/telegram.js";
 import { openReviewCards } from "./audit-card.js";
@@ -233,6 +235,8 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--as": "string",
   "--payloads": "string",
   "--api-base": "string",
+  /** APRV-456: refuse a tap on a button this process is not holding. */
+  "--no-stale-copy": "boolean",
   "--poll-timeout": "string",
   "--once": "boolean",
   /** APRV-390: start on a credential this instance did not configure. */
@@ -820,6 +824,11 @@ export interface ListenRequest {
   payloads: string | null;
   /** `--api-base`, or `null` for the Bot API. */
   apiBase: string | null;
+  /**
+   * `--no-stale-copy` (APRV-456). The fallback is also off whenever
+   * {@link apiBase} names anything but the Bot API; see {@link staleCopyFor}.
+   */
+  noStaleCopy?: boolean;
   /** `--poll-timeout` as typed, or `null` for the channel's own default. */
   pollTimeout: string | null;
   once: boolean;
@@ -960,6 +969,11 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // default, because a layout is not a permission and an unrelated typo in a
     // class rule must not silently redecorate a phone screen.
     layout: promptLayoutFor(policyLoad, "telegram"),
+    // APRV-456. From the launch flags alone: a relayed channel (an --api-base
+    // that is not the Bot API) or --no-stale-copy turns APRV-196's fallback
+    // off. The policy loaded above is deliberately not consulted, so nothing
+    // an agent can propose into a policy file can turn it back on.
+    staleCopy: staleCopyFor(request.apiBase, request.noStaleCopy === true),
   };
 
   return {
@@ -1105,6 +1119,8 @@ function setUp(
     as: stringFlag(flags, "--as"),
     payloads: payloadsFlag === null ? null : absolute(payloadsFlag, cwd),
     apiBase: stringFlag(flags, "--api-base"),
+    // APRV-456.
+    noStaleCopy: boolFlag(flags, "--no-stale-copy"),
     pollTimeout: stringFlag(flags, "--poll-timeout"),
     once: boolFlag(flags, "--once"),
     json,
@@ -1188,14 +1204,45 @@ export const DISPATCH_RETENTION_MS = 24 * 60 * 60 * 1000;
  * two apart, having deliberately kept nothing that would let it, and a first
  * start that claimed to be a restart would be this channel's own text lying
  * about the system's history.
+ *
+ * **With the stale-copy fallback off (APRV-456)** the second line says the
+ * opposite, because the earlier copies' buttons no longer decide anything: a
+ * relayed listener refuses a nonce it is not holding (`nonce-not-issued`), so
+ * the banner tells the approver to use the copies below it. A banner that kept
+ * promising working older copies would be this channel's own text sending the
+ * approver to a button that refuses them.
  */
-export function bannerLines(pending: number): string[] {
+export function bannerLines(pending: number, staleCopy = true): string[] {
   const plural = pending === 1 ? "request" : "requests";
+  const live = `The ${pending === 1 ? "message" : "messages"} below ${pending === 1 ? "is" : "are"} the live ${pending === 1 ? "copy" : "copies"}.`;
   return [
     `LISTENER STARTED — re-sending ${pending} pending ${plural}.`,
-    `The ${pending === 1 ? "message" : "messages"} below ${pending === 1 ? "is" : "are"} the live ${pending === 1 ? "copy" : "copies"}. If an earlier copy of the same request is further up this chat, its buttons still decide the same request; nothing is decided twice.`,
+    staleCopy
+      ? `${live} If an earlier copy of the same request is further up this chat, its buttons still decide the same request; nothing is decided twice.`
+      : `${live} Buttons on earlier copies further up this chat no longer decide anything on this listener; tap the ${pending === 1 ? "copy" : "copies"} below.`,
     "Which requests are pending is read from the log on every cycle, never from this chat.",
   ];
+}
+
+/**
+ * Whether APRV-196's stale-copy fallback is on for a listener launched with
+ * this `--api-base` and this `--no-stale-copy` (APRV-456).
+ *
+ * On only for the direct-bot shape: no `--api-base`, or one that names the
+ * Bot API itself, and no `--no-stale-copy`. Any other base is treated as a
+ * relay, because the fallback's safety rests on only the bot token being able
+ * to put a button in front of the approver, and a base this process does not
+ * recognise as Telegram's own is one where that cannot be assumed. A
+ * self-hosted Bot API server is therefore treated as a relay too: the strict
+ * reading, and the cost is only that earlier copies stop deciding.
+ *
+ * Launch configuration and nothing else. No policy key reads into it and
+ * nothing in an update can reach it.
+ */
+export function staleCopyFor(apiBase: string | null, noStaleCopy: boolean): boolean {
+  if (noStaleCopy) return false;
+  if (apiBase === null) return true;
+  return apiBase.replace(/\/+$/u, "") === TELEGRAM_DEFAULT_API_BASE;
 }
 
 // ---------------------------------------------------------------------------
@@ -2092,7 +2139,9 @@ export async function dispatchPending(
   state.banner.sent = true;
   if (announcing) {
     try {
-      const deliveryId = await setup.channel.announce(bannerLines(undelivered.length));
+      const deliveryId = await setup.channel.announce(
+        bannerLines(undelivered.length, setup.channel.staleCopyEnabled()),
+      );
       result.banner = { delivery_id: deliveryId, pending: undelivered.length };
     } catch (cause) {
       // Cosmetic, and never a reason to withhold the requests it introduces.
@@ -2868,6 +2917,43 @@ export function reportCycle(result: DispatchResult, streams: Streams): void {
   }
 }
 
+/**
+ * Where a tap the channel refused on its own is recorded (APRV-456).
+ *
+ * One `audit.decision_refused`, through `recordSurfaceRefusal`, which never
+ * calls the gate. The operator's terminal says what happened either way,
+ * because a card nobody here sent being tapped on a relayed gate is the line
+ * an operator most needs to see.
+ */
+function refusedDecisionHandlerFor(
+  setup: ListenSetup,
+  streams: Streams,
+): (refused: TelegramRefusedDecision) => void {
+  return ({ decision, refusal }) => {
+    recordSurfaceRefusal(
+      setup.logPath,
+      decision,
+      refusal,
+      { actor: setup.actor, channel: "telegram" },
+      setup.gateOptions,
+    );
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "decision",
+          action_key: decision.action_key,
+          decision: decision.decision,
+          ok: false,
+          code: refusal.code,
+          token_issued: false,
+        })}\n`,
+      );
+    } else {
+      streams.err(`approval: telegram decision refused (${refusal.code}): ${refusal.message}\n`);
+    }
+  };
+}
+
 /** The decision handler: the only thing this process does with a button press. */
 function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) => DecisionOutcome {
   return (decision) => {
@@ -3489,6 +3575,10 @@ export interface RunningListener {
 export function wireListener(setup: ListenSetup, streams: Streams): DispatchState {
   const { channel } = setup;
   channel.onDecision(handlerFor(setup, streams));
+  // APRV-456. Where a tap the channel refused on its own (`nonce-not-issued`)
+  // is recorded. A separate function from the decision handler because that
+  // one calls the gate and this one must not.
+  channel.onRefusedDecision(refusedDecisionHandlerFor(setup, streams));
   // APRV-257. Registered unconditionally, because whether a checkpoint is ever
   // OFFERED is the policy's answer and a handler that exists for a prompt
   // nobody sends costs nothing. Registering it here is also what makes the

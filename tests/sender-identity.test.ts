@@ -957,6 +957,10 @@ test("the sender index inverts the policy's person-to-sender map and the refusal
       // recognize one, and the two want opposite repairs.
       "sender-key-unavailable",
       "attest-requires-terminal",
+      // APRV-456: a decision button whose nonce the listener is not holding,
+      // with the stale-copy fallback off. A surface refusal: decide() is never
+      // called for it.
+      "nonce-not-issued",
     ],
   );
 

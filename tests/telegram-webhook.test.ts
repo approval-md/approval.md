@@ -36,15 +36,21 @@ import { after, before, test } from "node:test";
 
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import type { ChannelDecision, ChannelRequest, DecisionOutcome } from "../src/channels/contract.js";
-import { recordChannelDecision } from "../src/channels/contract.js";
+import {
+  recordChannelDecision,
+  recordSurfaceRefusal,
+  refusedDecisionLine,
+} from "../src/channels/contract.js";
 import {
   runChannelConformance,
   type ConformanceCase,
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
 import {
+  actionRefOf,
   TelegramChannel,
   TelegramTransportError,
+  TELEGRAM_DEFAULT_API_BASE,
   type TelegramConfig,
 } from "../src/channels/telegram.js";
 import {
@@ -73,6 +79,8 @@ import {
   dispatchPending,
   newDispatchState,
   prepareListen,
+  staleCopyFor,
+  wireListener,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
 import { TELEGRAM_WEBHOOK_HELP } from "../src/cli/help.js";
@@ -759,6 +767,205 @@ for (const transport of ["poll", "webhook"] as const) {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// A button this process is not holding, behind a relay (APRV-456)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Agent Village relay finding (agentvillage-controlplane PR 67, refuter,
+ * 2026-10-03). The daemon speaks Bot API to a control-plane relay through
+ * `--api-base`, and anyone holding the relay token can put a card in front of
+ * the approver: forged text, and `callback_data` carrying the reference of a
+ * REAL pending action under a nonce this process never issued. The approver's
+ * genuine tap passes the chat check and the sender mapping, so APRV-196's
+ * stale-copy fallback would carry it to the gate.
+ *
+ * With the fallback off, each transport must refuse it the same way: the
+ * decision handler is never called (so `decide()` never runs), the log gains
+ * exactly one `audit.decision_refused` with `nonce-not-issued`, a replay gains
+ * nothing, and the card this process DID send still decides the request.
+ */
+for (const transport of ["poll", "webhook"] as const) {
+  test(`a forged button for a real pending action never reaches the gate on a relayed channel: ${transport} (APRV-456)`, async () => {
+    const now = at(2);
+    const world = live(1, false, `forged-relay-${transport}`);
+    const key = world.keys[0] as string;
+    const [pending] = queueOf(world, now);
+    assert.ok(pending !== undefined, "the fixture produced no pending request");
+
+    const channel = channelFor({ staleCopy: false });
+    let decided = 0;
+    const decide = handlerFor(world, now);
+    channel.onDecision((decision) => {
+      decided += 1;
+      return decide(decision);
+    });
+    channel.onRefusedDecision(({ decision, refusal }) =>
+      recordSurfaceRefusal(
+        world.unit.logPath,
+        decision,
+        refusal,
+        { actor: LAUNCH_HUMAN, channel: "telegram" },
+        { ...world.unit.options, clock: fixedClock(now) },
+      ),
+    );
+    await channel.notify(pending);
+    const liveData = mock.callbackDataFor(key, "grant");
+
+    let nextUpdateId = 45_600;
+    const tap = async (data: string, extra: { spoofMessageText?: string } = {}): Promise<EventRecord[]> => {
+      nextUpdateId += 1;
+      const update = callbackUpdate({
+        data,
+        chatId: CHAT,
+        id: `cb-456-${transport}-${String(nextUpdateId)}`,
+        fromId: MAPPED_ACCOUNT,
+        ...extra,
+      });
+      const before = recordsOf(world.unit.logPath).length;
+      if (transport === "poll") {
+        mock.queueUpdate(update);
+        await channel.pollOnce();
+      } else {
+        const handle = await receiverFor(channel);
+        try {
+          const answer = await post(handle, JSON.stringify({ update_id: nextUpdateId, ...update }));
+          assert.equal(answer.status, 200, `the webhook refused a valid post: ${JSON.stringify(answer)}`);
+        } finally {
+          await handle.close();
+        }
+      }
+      return recordsOf(world.unit.logPath).slice(before);
+    };
+
+    // 1. The forged card: a real action's reference, a nonce nobody here
+    //    issued, and text the gate never wrote. Tapped by the very approver
+    //    the policy maps, which is the case the sender mapping cannot catch.
+    const forged = `g:f0rged:${actionRefOf(key)}`;
+    const answersBefore = mock.answerTexts().length;
+    const appended = await tap(forged, { spoofMessageText: "Approve: a harmless reminder (forged)" });
+    assert.equal(decided, 0, "a forged button reached the decision handler");
+    assert.deepEqual(
+      appended.map((record) => record.event),
+      ["audit.decision_refused"],
+      "expected exactly the refusal's audit record and nothing else",
+    );
+    const record = appended[0] as EventRecord;
+    const payload = record.payload as Record<string, unknown>;
+    assert.equal(payload["code"], "nonce-not-issued");
+    assert.equal(payload["decision"], "grant");
+    assert.equal(record.action_key, key, "the record must name the action this process holds open");
+    assert.equal(record.actor, "system:gate");
+    assert.equal(payload["actor"], MAPPED_HUMAN, "the mapped approver's spent attention is not named");
+    assert.deepEqual(payload["sender"], { channel: "telegram", id: MAPPED_ACCOUNT });
+    assert.deepEqual(mock.answerTexts().slice(answersBefore), [refusedDecisionLine("nonce-not-issued")]);
+    assert.ok(
+      queueOf(world, now).some((request_) => request_.action_key.value === key),
+      "a refused forged tap took the request out of the pending queue",
+    );
+
+    // 2. At most one record per button: the same bytes again append nothing.
+    assert.deepEqual(await tap(forged), [], "a replayed forged button was recorded twice");
+    // A reference that names nothing open here, and a nonce with no
+    // reference at all, are refused without a record: there is no action key
+    // this process could truthfully write.
+    assert.deepEqual(await tap(`g:f0rged2:${actionRefOf("task-999:elsewhere")}`), []);
+    assert.deepEqual(await tap("r:f0rged3"), []);
+    assert.equal(decided, 0, "a refused tap reached the decision handler");
+    assert.equal(channel.stats().staleCopyRefusals, 4);
+    assert.equal(channel.stats().staleCopyDecisions, 0);
+
+    // 3. The card this process did send still decides the request.
+    const granted = await tap(liveData);
+    assert.deepEqual(granted.map((entry) => entry.event), ["approval.granted"]);
+    assert.equal((granted[0] as EventRecord).actor, MAPPED_HUMAN);
+    assert.equal(decided, 1);
+    assertClean(world.unit);
+  });
+}
+
+/** `prepareListen` over this suite's policy, with the launch flags a case names. */
+function listenSetupWith(world: Live, apiBase: string | null, noStaleCopy?: boolean): ListenSetup {
+  process.env["APPROVAL_TG_TOKEN"] = TOKEN;
+  process.env["APPROVAL_TG_CHAT"] = CHAT;
+  process.env["APPROVAL_HUMAN"] = LAUNCH_HUMAN;
+  try {
+    const prepared = prepareListen({
+      logPath: world.unit.logPath,
+      policy: { file: world.unit.policyPath },
+      as: null,
+      payloads: null,
+      apiBase,
+      ...(noStaleCopy === undefined ? {} : { noStaleCopy }),
+      pollTimeout: null,
+      once: true,
+      json: false,
+      allowCrossInstance: true,
+      log: (message) => complaints.push(message),
+    });
+    if (!prepared.ok) assert.fail(`prepareListen refused a complete configuration: ${JSON.stringify(prepared)}`);
+    return prepared.setup;
+  } finally {
+    delete process.env["APPROVAL_TG_TOKEN"];
+    delete process.env["APPROVAL_TG_CHAT"];
+    delete process.env["APPROVAL_HUMAN"];
+  }
+}
+
+test("the stale-copy fallback is off for a relayed api base or --no-stale-copy, and only then (APRV-456)", () => {
+  // The rule, from the launch flags alone.
+  assert.equal(staleCopyFor(null, false), true);
+  assert.equal(staleCopyFor(TELEGRAM_DEFAULT_API_BASE, false), true);
+  assert.equal(staleCopyFor(`${TELEGRAM_DEFAULT_API_BASE}/`, false), true);
+  assert.equal(staleCopyFor("https://control.example/approval-relay", false), false);
+  assert.equal(staleCopyFor(null, true), false);
+  assert.equal(staleCopyFor(TELEGRAM_DEFAULT_API_BASE, true), false);
+
+  // And the channel the verb builds carries it.
+  const world = live(1, false, "stale-copy-rule");
+  assert.equal(listenSetupWith(world, null).channel.staleCopyEnabled(), true);
+  assert.equal(listenSetupWith(world, TELEGRAM_DEFAULT_API_BASE).channel.staleCopyEnabled(), true);
+  assert.equal(listenSetupWith(world, assertLocal(mock.url)).channel.staleCopyEnabled(), false);
+  assert.equal(listenSetupWith(world, null, true).channel.staleCopyEnabled(), false);
+});
+
+test("the listener's own wiring records a relayed refusal and never decides it (APRV-456)", async () => {
+  const now = at(2);
+  const world = live(1, false, "forged-wired");
+  const key = world.keys[0] as string;
+  // `prepareListen` against the mock, which is a non-default api base: the
+  // relay shape, as `approval up --api-base` builds it.
+  const setup = listenSetupWith(world, assertLocal(mock.url));
+  const errors: string[] = [];
+  wireListener(setup, { out: () => undefined, err: (text) => errors.push(text) });
+  const [pending] = queueOf(world, now);
+  assert.ok(pending !== undefined);
+  await setup.channel.notify(pending);
+
+  const handle = await receiverFor(setup.channel);
+  const before = recordsOf(world.unit.logPath).length;
+  try {
+    const update = callbackUpdate({
+      data: `g:f0rged:${actionRefOf(key)}`,
+      chatId: CHAT,
+      id: "cb-456-wired",
+      fromId: MAPPED_ACCOUNT,
+    });
+    const answer = await post(handle, JSON.stringify({ update_id: 45_700, ...update }));
+    assert.equal(answer.status, 200, JSON.stringify(answer));
+  } finally {
+    await handle.close();
+  }
+  const appended = recordsOf(world.unit.logPath).slice(before);
+  assert.deepEqual(appended.map((record) => record.event), ["audit.decision_refused"]);
+  assert.equal(((appended[0] as EventRecord).payload as Record<string, unknown>)["code"], "nonce-not-issued");
+  assert.ok(
+    errors.some((line) => line.includes("telegram decision refused (nonce-not-issued)")),
+    `the operator was not told: ${errors.join("")}`,
+  );
+  assertClean(world.unit);
+});
 
 // ---------------------------------------------------------------------------
 // The secret

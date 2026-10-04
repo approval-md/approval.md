@@ -289,6 +289,29 @@ export const CHANNEL_DECISION_REFUSAL_CODES = [
    * `policy.core` edit happens anyway.
    */
   "attest-requires-terminal",
+  /**
+   * A decision button whose nonce this process never issued, on a listener
+   * whose stale-copy fallback is OFF (APRV-456): the channel runs through a
+   * relay (`--api-base` names something other than the Bot API) or was started
+   * with `--no-stale-copy`.
+   *
+   * APRV-196's fallback carries such a tap to the gate by its action reference
+   * when this process holds that action open, and the bound that made it safe
+   * is that only the bot token can put a button in front of the approver.
+   * Behind a relay that bound is gone: anyone holding the relay token can send
+   * the approver a card with forged text whose `callback_data` carries the
+   * reference of a real pending action, and the approver's genuine tap would
+   * pass the chat check and the sender mapping. So the surface refuses the tap
+   * before the gate is called, appends at most one `audit.decision_refused`
+   * (when the reference names a delivery this process holds open, which is
+   * where the action key on the record comes from), and the request stays
+   * pending on the card this process did send.
+   *
+   * Its own code rather than an ignored callback, because a human's attention
+   * was spent and the log is where an operator learns that a card nobody here
+   * sent was tapped. The repair is the newest card this listener sent.
+   */
+  "nonce-not-issued",
 ] as const;
 
 export type ChannelDecisionRefusalCode = (typeof CHANNEL_DECISION_REFUSAL_CODES)[number];
@@ -749,6 +772,11 @@ export function senderRefusalLine(code: ChannelDecisionRefusalCode): string {
     // shared chat; this one is about the listener process, whose environment is
     // the operator's own and whose repair is one line they can act on at once.
     return `Not recorded — this gate's sender mapping is keyed and the listener has no ${SENDER_KEY_ENV}, so it can resolve no account at all. This says nothing about your account. The operator sets that variable and restarts the listener.`;
+  }
+  if (code === "nonce-not-issued") {
+    // APRV-456. It says nothing about the request the button named, because
+    // the button may be a forgery and its text may not be the request's.
+    return "Not recorded — this listener did not send that button, so it will not act on it. Tap the newest card this listener sent for the request. The attempt is on the record.";
   }
   return "Not recorded — the policy maps this account to more than one approver, so the runtime cannot say who decided. Ask the operator to fix the policy.";
 }

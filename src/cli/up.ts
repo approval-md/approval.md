@@ -292,6 +292,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--payloads": "string",
   "--payload-dir": "string",
   "--api-base": "string",
+  /** APRV-456: refuse a Telegram tap on a button this process is not holding. */
+  "--no-stale-copy": "boolean",
   "--poll-timeout": "string",
   "--port": "string",
   "--no-telegram": "boolean",
@@ -562,6 +564,9 @@ export function commandUp(
       as: asFlag,
       payloads: payloadsFlag === null ? null : absolute(payloadsFlag, cwd),
       apiBase: stringFlag(flags, "--api-base"),
+      // APRV-456. A relayed --api-base already turns the stale-copy fallback
+      // off; this is the explicit form for any other shape.
+      noStaleCopy: boolFlag(flags, "--no-stale-copy"),
       pollTimeout: stringFlag(flags, "--poll-timeout"),
       once,
       json,

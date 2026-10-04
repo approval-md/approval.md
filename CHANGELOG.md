@@ -15,6 +15,21 @@ before a tag.
 
 ## Unreleased
 
+- **A relayed Telegram channel refuses a button it did not send (APRV-456).**
+  With `--api-base` naming anything but the Bot API, or with the new
+  `--no-stale-copy` flag (on `approval channel telegram listen`, `channel
+  telegram webhook` and `approval up`), a decision tap whose nonce the listener
+  is not holding is refused `nonce-not-issued` and is never carried to the gate
+  by its action reference. Behind a relay anyone holding its token could put a
+  card with forged text and a real pending action's reference in front of the
+  approver, and APRV-196's earlier-copy fallback would have decided it on the
+  approver's genuine tap. The refusal appends at most one
+  `audit.decision_refused` and leaves the live card armed, and the restart
+  banner stops promising that earlier copies still decide. The direct-bot shape
+  is unchanged. `nonce-not-issued` joins `channel_decision_refusal_codes`, so
+  `refusal-unions` is 28.0.0. Behavior change: a relayed listener (the Agent
+  Village shape) no longer honours taps on cards sent before a restart.
+
 ## 0.4.0 — 2026-10-04
 
 Written on 2026-10-04 against `main` at `70979abe`, 239 non-merge commits after
