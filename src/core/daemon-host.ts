@@ -227,6 +227,25 @@ export function refreshDaemonAllowlist(
 }
 
 /**
+ * The stricter of two allowlists, which never admits an id either of them
+ * refuses (APRV-448 review): `null` (no restriction) yields to a list, and two
+ * lists intersect.
+ *
+ * A thread that has never made a successful resolution of its own (a hook
+ * worker spawned after the policy lost its attestation) starts from the
+ * restriction its listener holds, combined this way with whatever it held
+ * before, so a fresh thread is never a way out of the list in force.
+ */
+export function narrowerAllowlist(
+  a: readonly string[] | null,
+  b: readonly string[] | null,
+): readonly string[] | null {
+  if (a === null) return b === null ? null : [...b];
+  if (b === null) return [...a];
+  return a.filter((id) => b.includes(id));
+}
+
+/**
  * {@link refreshDaemonAllowlist} for a process that has no verified read of its
  * own in hand (APRV-448): read the store's log through the verified path, load
  * the policy from `where`, and refresh.

@@ -102,11 +102,13 @@ import { StringDecoder } from "node:string_decoder";
 import { effectiveHarnessCapMs, harnessBlockDirective, HARNESS_ADAPTERS } from "../cli/hook.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "../cli/paths.js";
 import { type VerbSpec } from "../cli/verb-registry.js";
+import { isDaemonProcess } from "../core/daemon-actor.js";
 import {
   declareResolvedDaemonIdentity,
   refreshDaemonAllowlistFrom,
   resolveDaemonId,
 } from "../core/daemon-host.js";
+import { clearDaemonIdentity, daemonIdentity } from "../core/daemon-identity.js";
 import { isHarnessKind, type HarnessKind } from "../core/harness-version.js";
 import { withAppendLock } from "../core/log.js";
 import { parseDuration, type LoadPolicyOptions } from "../core/policy-load.js";
@@ -762,6 +764,17 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
   const daemon = resolveDaemonId(storeLog, options.env ?? process.env);
   if (!daemon.ok) throw new Error(daemon.message);
   const daemonId = daemon.id;
+  // The declaration is the PROCESS's, so one process writes as one daemon
+  // (APRV-448 review). A second listener for a store whose id differs from the
+  // one already declared here (by another listener, or by a daemon loop in the
+  // same process) would restamp the first store's records with the second's
+  // id; it is refused before it binds instead.
+  const prior = daemonIdentity();
+  if (prior !== null && prior.id !== null && prior.id !== daemonId) {
+    throw new Error(
+      `this process already writes as daemon ${prior.id}, and this store's id is ${daemonId}: one process stamps one daemon id, so serve a second store from its own process`,
+    );
+  }
   declareResolvedDaemonIdentity(daemon);
   // The store's policy, located exactly as the verbs locate it: the pinned file
   // when the operator named one, otherwise discovered from the store root.
@@ -846,6 +859,9 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
     res.once("close", () => {
       if (!res.writableFinished) gone.abort();
     });
+    // The listener's own list, brought up to date before the call is handed to
+    // a thread (APRV-448 review): the thread starts no wider than it.
+    refreshAllowlist();
     let outcome;
     try {
       outcome = await hooks.run(
@@ -1356,6 +1372,11 @@ export async function serveApproval(options: ServeOptions): Promise<ServeHandle>
           // Already gone: the platform removed it on close.
         }
       }
+      // APRV-448 review: a closed listener stops stamping the embedding
+      // process's appends. Left alone when a daemon loop runs in this process
+      // (it declared the same id for the same store and still writes), and when
+      // the declaration in force is no longer this listener's.
+      if (!isDaemonProcess() && daemonIdentity()?.id === daemonId) clearDaemonIdentity();
     },
   };
 }

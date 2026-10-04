@@ -47,6 +47,7 @@
 
 import { SHARE_ENV, Worker } from "node:worker_threads";
 
+import { daemonIdentity } from "../core/daemon-identity.js";
 import { HARNESS_CAP_MARGIN_MS, harnessCapFitsMargin } from "../core/harness-wait.js";
 import type { HookJob, HookWorkerMessage, HookWriter } from "./hook-worker.js";
 
@@ -393,7 +394,11 @@ export function hookThreads(
 
       worker.on("message", onMessage);
       worker.once("exit", onExit);
-      const job: HookJob = { argv, cwd, body, logPath, budget, flag: shared };
+      // The allowlist the listener holds in force right now (APRV-448 review):
+      // the thread never runs wider than this, even when its own resolution
+      // fails because the policy lost its attestation.
+      const allowed = daemonIdentity()?.allowed ?? null;
+      const job: HookJob = { argv, cwd, body, logPath, budget, allowed, flag: shared };
       // The thread warms its read cache first and then asks for its first
       // section with `resume`, so no cold walk of the log is ever made inside
       // the lock (see `hook-worker.ts`).

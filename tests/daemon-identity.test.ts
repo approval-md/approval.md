@@ -61,9 +61,10 @@ after(() => {
 });
 
 afterEach(() => {
-  // Module state, so a case that leaves this process marked would make the next
-  // case's plain append a daemon's. Both are cleared, and clearing is always the
-  // stricter direction: an unmarked process stamps nothing.
+  // Module state, so a case that leaves this process declared (or marked) would
+  // make the next case's plain append a daemon's. Both are cleared: since
+  // APRV-448 the declaration alone is what stamps, and a process that has
+  // declared nothing stamps nothing.
   clearDaemonIdentity();
   clearDaemonProcess();
 });

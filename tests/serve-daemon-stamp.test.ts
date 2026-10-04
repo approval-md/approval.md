@@ -28,7 +28,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, test } from "node:test";
@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { main } from "../src/cli/main.js";
 import { isDaemonProcess } from "../src/core/daemon-actor.js";
 import { derivedDaemonId } from "../src/core/daemon-host.js";
-import { clearDaemonIdentity, DAEMON_ID_ENV } from "../src/core/daemon-identity.js";
+import { clearDaemonIdentity, DAEMON_ID_ENV, daemonIdentity } from "../src/core/daemon-identity.js";
 import type { EventRecord } from "../src/core/log.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import {
@@ -403,5 +403,58 @@ test("serve declares an identity without marking itself the daemon", async () =>
     assert.equal(isDaemonProcess(), false);
   } finally {
     await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. Review findings: a fresh hook thread under drift, and one id per process
+// ---------------------------------------------------------------------------
+
+test("a hook thread spawned after the policy lost its attestation writes nothing an excluding list forbids", async () => {
+  const { dir, logPath } = await ready(["village-goa-2"]);
+  const server = await listener(dir, { [DAEMON_ID_ENV]: "village-goa-1" });
+  try {
+    // A human edits the policy and has not re-attested it: every resolution
+    // fails from here on. The listener still holds the list it resolved; no
+    // hook thread exists yet, so the first call spawns one.
+    appendFileSync(join(dir, "APPROVAL.md"), "\n<!-- an edit nobody attested -->\n", "utf8");
+    const before = digestOf(logPath);
+    const answer = await hook(server, "claude-code", {
+      hook_event_name: "PreToolUse",
+      session_id: "stamp-session",
+      tool_use_id: "stamp-drift",
+      cwd: dir,
+      tool_name: "Bash",
+      tool_input: { command: "npm install left-pad" },
+    });
+    assert.equal(answer.status, 200);
+    assert.equal(digestOf(logPath), before, "a fresh hook thread wrote under an excluded id");
+    assert.ok(
+      !recordsOf(logPath).some((record) => record.daemon === "village-goa-1"),
+      "a record carries the excluded id",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("a closed listener stops stamping, and one process stamps one id", async () => {
+  const first = await ready();
+  const second = await ready();
+  const server = await listener(first.dir, { [DAEMON_ID_ENV]: "village-goa-1" });
+  try {
+    await assert.rejects(
+      listener(second.dir, { [DAEMON_ID_ENV]: "village-goa-2" }),
+      /already writes as daemon village-goa-1/u,
+    );
+  } finally {
+    await server.close();
+  }
+  assert.equal(daemonIdentity(), null, "a closed listener left its declaration in force");
+  const next = await listener(second.dir, { [DAEMON_ID_ENV]: "village-goa-2" });
+  try {
+    assert.equal(next.daemonId, "village-goa-2");
+  } finally {
+    await next.close();
   }
 });

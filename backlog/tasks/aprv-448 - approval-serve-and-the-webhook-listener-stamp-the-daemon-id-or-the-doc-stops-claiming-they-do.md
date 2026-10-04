@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-c8'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-04 10:59'
+updated_date: '2026-10-04 11:29'
 labels:
   - serve
   - daemon
@@ -76,4 +76,11 @@ AC3: src/cli/serve.ts and docs/cli-reference.md updated; design/hosted-daemon-id
 design amendment text (apply by hand), design/hosted-daemon-identity.md, new 6.6:
 
 **6.6 Which processes stamp the field (APRV-448).** Three processes declare an identity and stamp it: the daemon loop (`approval daemon run`, and `approval up`, whose Telegram listener shares the daemon's process), `approval serve` (its verb calls on the listener's thread and its hook calls on their worker threads, each of which declares the same startup resolution), and `approval channel telegram webhook`. All three resolve the id by section 3's rule through `resolveDaemonId`, so it is the id `approval status` reports for the store, and all three are held to the `daemons` list at the write boundary: the daemon refreshes it once per tick, serve before every verb and hook call inside its store lock, and the webhook at startup and at the top of every dispatch cycle. Only the daemon loop also marks itself the daemon (`core/daemon-actor.ts`), because that mark routes an advance under `log.advance.daemon`. The write boundary's stamp is keyed on the declaration alone, so serve and the webhook stamp and are restricted without holding that route. A session's own CLI calls, `approval hook <harness>` run as a harness's own process, and a standalone `approval channel telegram listen` declare nothing and write records without the field, which keeps 2.2's reading: absence says nothing about which process wrote a record.
+
+Refuter (opus-high) outcome and fixes:
+- MUST-FIX fixed: a hook worker spawned after an unattested policy edit started with no list and wrote task.registered under an excluded id. Each HookJob now carries the listener's in-force list; the worker starts each call from the stricter of that and its own (narrowerAllowlist) before refreshing, and the listener refreshes its own list before handing a hook call over. Test: serve-daemon-stamp "a hook thread spawned after the policy lost its attestation...".
+- SHOULD-FIX 1 fixed: the worker refreshes the allowlist again in leaveWait, so appends after a hook's wait are judged against the list in force then.
+- SHOULD-FIX 3 fixed: one process stamps one id (a second listener for a store with a different id is refused before it binds), and close() clears the declaration unless a daemon loop runs in the process or the declaration is no longer this listener's. Test added.
+- Nit 3 fixed (stale test comment).
+- Not fixed here, for follow-up: SHOULD-FIX 2 (resolveDaemonAllowlist loads and attests the policy in two reads, a pre-existing APRV-383 race; fix by a single read via checkAttestationOfBytes); SHOULD-FIX 4 (refresh cost inside the store lock: measure or cache on policy mtime/size); nit 1 (no startup warning when the list excludes the id); nit 2 (docs caveat: the derived id hashes the log path string, so a symlinked or differently spelled --log derives a different id). Human decision raised by the refuter: a process RESTARTED while the policy is unattested runs unrestricted (design 4.4); hosted facades restart often, so a fail-closed rule may be wanted.
 <!-- SECTION:NOTES:END -->
