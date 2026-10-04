@@ -1,0 +1,1 @@
+{"command":"F=/Users/carter/dev/agentvillage/private/drafts/data-277-app-draft/src/lib/server/agent/approval.test.ts; sed -i '' -e 's/const window = /const quietHours = /' -e 's/: window\\([,}]\\)/: quietHours\\1/g' -e 's/: window$/: quietHours/' -e 's/\\.\\.\\.window,/...quietHours,/g' \"$F\"; grep -n 'window' \"$F\"","cwd":"/Users/carter/dev/approval-md"}

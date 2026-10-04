@@ -1,0 +1,1 @@
+{"command":"grep -c \"agent_may_request\" schema/policy.schema.json; ls dist/src/channels/relay.js 2>/dev/null; ls /Users/carter/dev/approval-md-wt/ | head -40","cwd":"/Users/carter/dev/approval-md"}

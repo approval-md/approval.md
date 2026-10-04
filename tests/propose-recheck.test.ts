@@ -317,11 +317,16 @@ test("L-d: cli.js matches `hook hermes` after --no-color, and turns a silent non
   assert.equal(colorless.code, 2, colorless.stderr);
   assert.equal((JSON.parse(colorless.stdout) as Record<string, unknown>)["action"], "block");
 
-  // Something exits 1 before the runtime says anything: Hermes would read that
-  // as an allow, so the bin's exit guard answers instead.
+  // Something forces exit 1 on the way out: Hermes would read a bare exit 1 as
+  // an allow, so the bin's exit guard makes it exit 2.
   const dir = caseDir();
   const preload = join(scratch, "exit-one.mjs");
-  writeFileSync(preload, "setTimeout(() => process.exit(1), 0);\n", "utf8");
+  // `beforeExit`, not a timer. A `setTimeout(0)` in a preload can fire while the
+  // ESM loader is still fetching cli.js under load, before the bin's exit guard
+  // exists (merge-queue run 37192542666: exit 1). Nothing runs before the bin in
+  // production, so that exit was a test artefact. `beforeExit` fires only once
+  // the hook has answered and the loop is empty, which is the case named here.
+  writeFileSync(preload, 'process.once("beforeExit", () => process.exit(1));\n', "utf8");
   const silent = runCli(["hook", "hermes", "--as", "agent:h"], dir, {
     entry: BIN,
     node: ["--import", pathToFileURL(preload).href],

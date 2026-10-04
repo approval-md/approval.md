@@ -4313,8 +4313,10 @@ export function gateHarnessCall(
   };
   const onTerm = (): void => onSignal("SIGTERM");
   const onInt = (): void => onSignal("SIGINT");
-  process.on("SIGTERM", onTerm);
-  process.on("SIGINT", onInt);
+  // Prepended: under Hermes an earlier guard (`hermesFailClosed`) listens for
+  // the same signals, and this handler, which also withdraws, must answer first.
+  process.prependListener("SIGTERM", onTerm);
+  process.prependListener("SIGINT", onInt);
 
   /**
    * Has this invocation already said, on stderr, that the verified view lags
@@ -6958,45 +6960,88 @@ function hermesFailClosed(
     raw ??= readStdin();
     return raw;
   };
-  let code: number;
+  // A signal before the wait installs its own handler. The default disposition
+  // of SIGTERM and SIGINT is to die with nothing on stdout, which Hermes reads
+  // as an allow, and the wait's handler (which withdraws and prints
+  // `hook-interrupted`) exists only from the moment the hook starts waiting.
+  // This guard covers the whole run before and after that stretch; the wait's
+  // handler is prepended, so inside the wait it answers first and exits. CLI
+  // only: under `approval serve` (a wait seam) the process's signals belong to
+  // the server.
+  const onEarlySignal = (signal: NodeJS.Signals): void => {
+    if (raw !== null && isHermesPostEvent(raw)) process.exit(EXIT_OK);
+    if (stdout.length === 0) {
+      try {
+        writeSync(
+          1,
+          harnessBlockDirective(
+            "hook-interrupted",
+            `the hook received ${signal} before it reached a verdict; nothing authorizes this call`,
+            "hermes",
+          ).stdout,
+        );
+      } catch {
+        // stdout is gone; the exit code below is the whole verdict.
+      }
+    }
+    process.exit(HERMES_DENY_EXIT);
+  };
+  const onEarlyTerm = (): void => onEarlySignal("SIGTERM");
+  const onEarlyInt = (): void => onEarlySignal("SIGINT");
+  if (waitSeam === null) {
+    process.on("SIGTERM", onEarlyTerm);
+    process.on("SIGINT", onEarlyInt);
+  }
   try {
-    code = runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
-  } catch (cause) {
-    // A post-event never blocks: the call already ran (see the post path).
-    if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
-    if (stdout.length > 0) {
-      // A verdict was already printed; one more object would be unparseable.
-      return HERMES_DENY_EXIT;
+    return hermesVerdict();
+  } finally {
+    if (waitSeam === null) {
+      process.off("SIGTERM", onEarlyTerm);
+      process.off("SIGINT", onEarlyInt);
     }
-    return deny(
-      tracked,
-      "hook-io",
-      `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-      adapter.kind,
-    );
   }
-  const post = raw !== null && isHermesPostEvent(raw);
-  if (post) return code;
-  const blocked = /"action"\s*:\s*"block"/u.test(stdout);
-  if (code === EXIT_OK && stdout.length > 0) return code;
-  if (code === EXIT_OK || !blocked) {
-    if (stdout.length > 0) {
-      // Something that is not a block is already on stdout, and a second
-      // object after it is unparseable stdout, which `fail_closed` blocks and a
-      // build without it allows. The exit code is the verdict that cannot be
-      // misread, so it carries the block.
-      return HERMES_DENY_EXIT;
+
+  function hermesVerdict(): number {
+    let code: number;
+    try {
+      code = runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
+    } catch (cause) {
+      // A post-event never blocks: the call already ran (see the post path).
+      if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
+      if (stdout.length > 0) {
+        // A verdict was already printed; one more object would be unparseable.
+        return HERMES_DENY_EXIT;
+      }
+      return deny(
+        tracked,
+        "hook-io",
+        `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        adapter.kind,
+      );
     }
-    return deny(
-      tracked,
-      "hook-io",
-      code === EXIT_OK
-        ? "the hook reached no verdict for this call; nothing authorizes it"
-        : `the hook exited ${String(code)} without a verdict; nothing authorizes this call`,
-      adapter.kind,
-    );
+    const post = raw !== null && isHermesPostEvent(raw);
+    if (post) return code;
+    const blocked = /"action"\s*:\s*"block"/u.test(stdout);
+    if (code === EXIT_OK && stdout.length > 0) return code;
+    if (code === EXIT_OK || !blocked) {
+      if (stdout.length > 0) {
+        // Something that is not a block is already on stdout, and a second
+        // object after it is unparseable stdout, which `fail_closed` blocks and a
+        // build without it allows. The exit code is the verdict that cannot be
+        // misread, so it carries the block.
+        return HERMES_DENY_EXIT;
+      }
+      return deny(
+        tracked,
+        "hook-io",
+        code === EXIT_OK
+          ? "the hook reached no verdict for this call; nothing authorizes it"
+          : `the hook exited ${String(code)} without a verdict; nothing authorizes this call`,
+        adapter.kind,
+      );
+    }
+    return HERMES_DENY_EXIT;
   }
-  return HERMES_DENY_EXIT;
 }
 
 /** Is this raw Hermes event a `post_tool_call`? Unreadable input is not. */

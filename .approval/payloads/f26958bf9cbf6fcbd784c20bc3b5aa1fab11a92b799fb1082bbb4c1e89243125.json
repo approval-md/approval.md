@@ -1,0 +1,1 @@
+{"command":"gh api \"repos/Edge-City/agentvillage-data/contents/backlog/tasks\" --jq '.[].name' | grep -i -E 'data-27[0-9]|data-259|data-25' ; ls -la /Users/carter/dev/agentvillage/private/drafts/ | grep -i -E '259|277'; ls /Users/carter/dev/agentvillage/private/handover/ | head -30","cwd":"/Users/carter/dev/approval-md"}

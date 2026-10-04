@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/backlog/tasks && for_file=\"\"; cat aprv-447*.md; echo \"=====SEP447=====\"; cat aprv-448*.md; echo \"=====SEP448=====\"; cat aprv-453*.md; echo \"=====SEP453=====\"; cat aprv-454*.md; echo \"=====SEP454=====\"; cat aprv-456*.md","cwd":"/Users/carter/dev/approval-md"}

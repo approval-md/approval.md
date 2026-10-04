@@ -1,0 +1,1 @@
+{"command":"find /Users/carter/dev -maxdepth 4 -type d -name lucide-react -path '*node_modules*' 2>/dev/null | head -20","cwd":"/Users/carter/dev/approval-md"}

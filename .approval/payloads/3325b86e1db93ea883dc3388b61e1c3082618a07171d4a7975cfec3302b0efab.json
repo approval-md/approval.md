@@ -1,0 +1,1 @@
+{"command":"cat /Users/carter/dev/approval-md/node_modules/zod/package.json | grep '\"version\"'; cat /Users/carter/dev/finance/web/node_modules/clsx/package.json | grep '\"version\"'; ls /Users/carter/dev/agentvillage-landing-wt/DATA-13/node_modules/.bin | grep -E '^(vitest|tsc)$'","cwd":"/Users/carter/dev/approval-md"}

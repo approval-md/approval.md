@@ -1,0 +1,1 @@
+{"command":"F=/Users/carter/dev/agentvillage/private/drafts/data-259-onboarding-review-contract-20261004.md; ls -la $F; grep -n -E 'operator_mismatch|superseded_by_acceptance|retry|edgeos_sender_unmapped' $F","cwd":"/Users/carter/dev/approval-md"}

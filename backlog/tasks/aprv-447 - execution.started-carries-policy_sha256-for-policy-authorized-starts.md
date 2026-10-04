@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude-c7'
 created_date: '2026-10-03 03:49'
-updated_date: '2026-10-04 09:59'
+updated_date: '2026-10-04 10:58'
 labels:
   - schema
   - gate
@@ -63,4 +63,6 @@ SPEC amendment text (apply by hand), for the APRV-454 batch, as a new bullet in 
 Branch note: the lane was cut from origin/carter/data-212-propose (PR #569), which predates #581, so this task file was brought into the branch from origin/main with git checkout origin/main -- <file>; merging main later shows an add/add on this file, resolved by keeping the lane's version.
 
 Validation (local, 2026-10-04): npm run build exit 0; npm run typecheck exit 0; npm run lint exit 0; tests/execution-policy-stamp.test.ts 10/10 exit 0; targeted run (execution-policy-stamp gate execute cli-propose propose-recheck propose-refutation serve-propose evidence-append human-only conformance conformance-regen event-schema fixtures concurrency audit budgets clock state) 628/628 exit 0; full npm test exit 1 with 5571 tests, 5569 pass, 1 skip, 1 fail: tests/cli-hook-hermes-rules 'SIGTERM mid-wait still ends in the block directive at exit 2' (child exit null under load; the file and behaviour come from #569 and this diff does not touch the hermes path), rerun alone 17/17 exit 0. approval log verify over the committed 79713-record log: clean. AC 4: docs/README-extended.md names the field (new subsection 'Which policy authorized a start'); the agentvillage-data side has no pointer filed from this lane (other repository), so AC 4 stays open for the orchestrator to tick once the follower note lands.
+
+AC 4 follow-up: the follower-side pointer in agentvillage-data is requested from agentvillage-d4 in private/handover/lanes/CLAIMS.md (the D3 follower half, R21 policy_version on action.* events, builds against payload.policy_sha256 on execution.started). AC 4 is ticked once that pointer lands. Merged origin/main after #569 landed (10:56:58Z); task-file add/add resolved with the lane's version.
 <!-- SECTION:NOTES:END -->
