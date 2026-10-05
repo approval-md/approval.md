@@ -268,7 +268,7 @@ function fixture(): Case {
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       "this should not have been written at all",
-      { clock: fixedClock(at(12)), verdict: "denied", reaction: "disliked" },
+      { policy: { file: unit.policyPath }, clock: fixedClock(at(12)), verdict: "denied", reaction: "disliked" },
     ),
     "review draft",
   );
@@ -278,7 +278,7 @@ function fixture(): Case {
       { kind: "action-key", actionKey: "task-042:draft2" },
       "human:carter",
       "read it; nothing to say beyond that",
-      { clock: fixedClock(at(13)) },
+      { policy: { file: unit.policyPath }, verdict: "ok", clock: fixedClock(at(13)) },
     ),
     "review draft2",
   );

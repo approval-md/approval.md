@@ -444,12 +444,16 @@ function runChainVerification(input: Record<string, unknown>): Expectation {
 
 /**
  * The failure taxonomy for a write-boundary refusal: `schema-<keyword>` of the
- * first reported error, plus every (path, keyword) pair.
+ * first reported error, plus every (path, keyword) pair, and for a `required`
+ * failure the property that is missing (`missing`, schema-validation 3.0.0).
  *
  * The keyword is the vocabulary of JSON Schema itself rather than of Ajv, so a
  * second implementation validating with a different library reports the same
- * class for the same violation. The pairs are sorted, because error ORDER is a
- * library's business and conformance is not.
+ * class for the same violation. So is the missing property: `required` names
+ * properties, and a review refused for lacking its verdict is a different
+ * refusal from one lacking its subject hash, though both are `required` at
+ * `/payload` (PR #614 refutation F6). The pairs are sorted, because error ORDER
+ * is a library's business and conformance is not.
  */
 function runSchemaValidation(input: Record<string, unknown>): Expectation {
   const mode = input["mode"] === "historical" ? "historical" : "write";
@@ -459,13 +463,36 @@ function runSchemaValidation(input: Record<string, unknown>): Expectation {
   });
   if (result.ok) return { valid: true };
   const errors = result.errors
-    .map((error) => ({ path: error.path, keyword: error.keyword }))
-    .sort((a, b) => `${a.path} ${a.keyword}`.localeCompare(`${b.path} ${b.keyword}`));
+    .map((error): { path: string; keyword: string; missing?: string } =>
+      error.keyword === "required"
+        ? { path: error.path, keyword: error.keyword, missing: missingProperty(error.message) }
+        : { path: error.path, keyword: error.keyword },
+    )
+    .sort((a, b) =>
+      `${a.path} ${a.keyword} ${a.missing ?? ""}`.localeCompare(
+        `${b.path} ${b.keyword} ${b.missing ?? ""}`,
+      ),
+    );
   return {
     valid: false,
     failure_class: `schema-${errors[0]?.keyword ?? "unknown"}`,
     errors,
   };
+}
+
+/**
+ * The property a `required` failure names. This harness validates with Ajv,
+ * whose message for the keyword is `must have required property '<name>'`; a
+ * message in any other shape is a harness failure, thrown rather than reported
+ * as a vector with no `missing`, so a library upgrade that rewords it cannot
+ * quietly weaken every `required` expectation.
+ */
+function missingProperty(message: string): string {
+  const match = /^must have required property '(.+)'$/u.exec(message);
+  if (match === null || match[1] === undefined) {
+    throw new Error(`conformance harness: a required failure named no property: ${JSON.stringify(message)}`);
+  }
+  return match[1];
 }
 
 // --- gate-verdicts ----------------------------------------------------------

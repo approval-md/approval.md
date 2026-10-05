@@ -228,6 +228,31 @@ object entry) is refused by Ajv's `strictTypes`, which requires a declared type
 for those keywords. A suite whose premise is that a refusal for the wrong reason
 is a failure cannot call a renamed refusal a minor.
 
+`schema-validation` reached **3.0.0** at APRV-481, a major because existing
+expectations move. An `audit.reviewed` record now requires `payload.subject_seq`,
+`payload.sampled_subject_hash` and `payload.verdict` at the write boundary, so
+the five review fixtures gained those fields and a review without them is
+refused (`audit-reviewed-no-subject-hash`). The read boundary is not in the
+suite and did not move: historical validation swaps in
+`audit_reviewed_record_historical`, so a review written before the change still
+verifies. The same release requires an `audit.sampled` record to pin the
+attested policy it was taken under (`payload.policy_sha256`, PR #614 refutation
+F2), so the sample fixture gained the field and a sample without it is refused
+(`audit-sampled-no-policy-hash`); historical validation swaps in
+`audit_sampled_record_historical` for the samples already in logs. A review
+also requires `payload.verdict_source: "explicit"` (PR #614 refutation F5), so
+the review fixtures gained it and `audit-reviewed-no-verdict-source` is
+refused. Every `required` error in an expectation now also names the property
+that is missing (`missing`, PR #614 refutation F6), which moves every existing
+expectation that carries one: before it, a review refused for lacking its
+verdict and one refused for lacking its subject hash had the same signature
+(`required` at `/payload`), so an implementation refusing for the wrong reason
+passed. `audit-reviewed-no-verdict`, `audit-reviewed-no-subject-seq` and
+`audit-reviewed-bad-payload-hash` pin the remaining required fields and the
+hash shape, each with its own signature. If another
+branch claims 3.0.0 first, the collision rule below gives this change the next
+major at merge.
+
 `schema-validation` has no 1.5.0. Two branches minted that number without seeing
 each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
 fixtures on its own branch), so the same version named two different vector sets

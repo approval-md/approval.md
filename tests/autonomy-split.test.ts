@@ -778,7 +778,7 @@ test("an ordinary review obliges nothing", async () => {
   ]);
   const sample = sampleOne(unit, key, 1);
 
-  const review = await runCli(unit, ["audit", "review", String(sample), "--json", ...AS_CARTER]);
+  const review = await runCli(unit, ["audit", "review", String(sample), "--ok", "--json", ...AS_CARTER]);
   assert.equal(review.code, 0, review.err);
   const answer = JSON.parse(review.out) as { verdict: string; obligation_seq: number | null };
   assert.equal(answer.verdict, "ok");

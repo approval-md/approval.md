@@ -89,8 +89,10 @@ export const DEFAULT_SCHEMA_DIR = fileURLToPath(
  *   decimal string and nothing else.
  * - `historical` — the read boundary. The log is append-only, so a verifier
  *   walking records written before APRV-121 meets JSON-number amounts that were
- *   valid when they were appended and must stay valid forever. This mode makes
- *   exactly one substitution, described in {@link WIDENED_DEFS}, and no other.
+ *   valid when they were appended and must stay valid forever, and one walking
+ *   reviews written before APRV-481 (or samples written before PR #614's F2
+ *   fix) meets records without the fields those changes made required. This mode makes exactly the substitutions
+ *   {@link WIDENED_DEFS} lists, and no other.
  *
  * The asymmetry is the point: a document only ever gets *more* permissive by a
  * caller explicitly naming the read boundary, and the callers that do are
@@ -114,13 +116,27 @@ export interface ValidateOptions {
  *
  * Pinned as a list rather than derived from a naming convention, so widening
  * the read boundary is always a reviewable diff in this file and never a side
- * effect of adding a definition to a schema. `usd_amount` is the only entry:
- * the pre-APRV-121 write boundary typed monetary fields as `{"type": "number",
- * "minimum": 0}`, and `usd_amount_historical` is exactly that union with the
- * decimal string.
+ * effect of adding a definition to a schema. Three entries:
+ *
+ * - `usd_amount`: the pre-APRV-121 write boundary typed monetary fields as
+ *   `{"type": "number", "minimum": 0}`, and `usd_amount_historical` is exactly
+ *   that union with the decimal string.
+ * - `audit_reviewed_record` (APRV-481): the write boundary requires a review to
+ *   carry `subject_seq`, `sampled_subject_hash` and `verdict`, and
+ *   `audit_reviewed_record_historical` is the same record shape without those
+ *   three requirements (nor `verdict_source`, required since PR #614's F5
+ *   fix), so every review written before either change still validates and
+ *   verifies unchanged.
+ * - `audit_sampled_record` (PR #614 refutation F2): the write boundary
+ *   requires a sample to pin the attested policy it was taken under
+ *   (`payload.policy_sha256`), and `audit_sampled_record_historical` drops
+ *   that requirement, so a sample written before it still verifies and reads
+ *   as not pinned.
  */
 export const WIDENED_DEFS: Readonly<Record<string, string>> = {
   usd_amount: "usd_amount_historical",
+  audit_reviewed_record: "audit_reviewed_record_historical",
+  audit_sampled_record: "audit_sampled_record_historical",
 };
 
 /**

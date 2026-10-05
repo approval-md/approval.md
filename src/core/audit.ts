@@ -71,8 +71,20 @@
  * party being audited does not author the clock it is judged by.
  */
 
+import { readFileSync } from "node:fs";
+
 import { tick, type ClockOptions } from "./clock.js";
-import { findDeclaration, indexDeclarations } from "./execute.js";
+import { declaringTasks, findDeclaration, indexDeclarations } from "./execute.js";
+import { namesApprover, policyPathOf } from "./gate.js";
+import {
+  attestationRefusal,
+  attestationSha256,
+  checkAttestationOfBytes,
+  isPolicySha256,
+  POLICY_HASH_FIELD,
+  policyBytesHash,
+  unreadablePolicyStatus,
+} from "./attest.js";
 import {
   appendEvent,
   type AppendError,
@@ -80,8 +92,15 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { loadPolicy, type LoadPolicyOptions, type PolicyLoadResult } from "./policy-load.js";
+import {
+  loadPolicy,
+  loadPolicyText,
+  type LoadPolicyOptions,
+  type PolicyLoadResult,
+} from "./policy-load.js";
 import { resolve } from "./policy-match.js";
+import { payloadStoreDirFor } from "./payload-store.js";
+import { storedPolicyText } from "./policy-proposal.js";
 import { resolveSampler, type Sampler } from "./sampler.js";
 import { payloadOf, readVerifiedRecords } from "./state.js";
 import type { ValidateOptions } from "./validate.js";
@@ -104,12 +123,54 @@ const HUMAN_ACTOR = /^human:.+/u;
 export const AUDIT_REFUSAL_CODES = [
   /** Review was attempted by an actor that is not `human:<id>`. */
   "actor-not-human",
+  /**
+   * The reviewer is a person the class's `approvers` roster does not name
+   * (APRV-483). Same comparison and same code as a grant's (`core/gate.ts`
+   * `namesApprover`), because under supervised-retro a review IS the approval,
+   * and a roster that bound the grant and not the review would be a roster the
+   * retrospective path walks around, including through `--as`. A rule that
+   * names no roster restricts nobody, exactly as for grants. Evaluated once the
+   * sample (and so its class) is located; nothing is appended.
+   */
+  "actor-not-approver",
+  /**
+   * The policy the reviewer's roster would be read from is not the attested
+   * one: never attested, edited since, or unreadable (APRV-483 refutation).
+   * Same spelling as the gate's, with the attestation module's message. Before
+   * this a review read no policy and needed no attestation; once a review is
+   * held to a roster, a roster read from an unattested file (or from any file a
+   * terminal reviewer names with `--policy`) is a roster the reviewer chose,
+   * and a policy that fails to load would restrict nobody. Evaluated once the
+   * sample is located; nothing is appended.
+   */
+  "policy-not-attested",
+  /**
+   * The attested policy bytes do not load (schema-invalid, a YAML error, no
+   * policy block), so no roster can be read from them (PR #614 refutation F1).
+   * A gate meeting the same bytes resolves every class `manual`, which
+   * compensates; a review has nothing that compensates, because the action
+   * already ran and this record is its approval. So a policy that names nobody
+   * because it failed to load is refused here rather than read as "no roster".
+   * Distinct from `policy-not-attested`: the bytes ARE the attested ones, and
+   * the repair is a corrected policy and a new attestation, not re-attesting
+   * what is on disk. Evaluated once the sample is located; nothing is appended.
+   */
+  "policy-invalid",
   /** No `audit.sampled` record matches the subject named. */
   "not-sampled",
   /** That sample already has a later `audit.reviewed`. */
   "already-reviewed",
   /** An action key with more than one unreviewed sample; name the seq instead. */
   "ambiguous-subject",
+  /**
+   * The reviewing surface said it rendered the payload whole and named a hash
+   * that is not the sampled execution's recorded binding (APRV-481). Nothing is
+   * appended: a review's `payload_hash` says which bytes the reviewer read, and
+   * one naming bytes the execution did not bind to would claim a reading of
+   * something that never ran. Evaluated after the sample is located, before
+   * anything is written.
+   */
+  "rendered-payload-mismatch",
   /** No `reconciliation.required` record at the seq named (APRV-127). */
   "not-obliged",
   /** That obligation already has a `reconciliation.satisfied` (APRV-127). */
@@ -134,6 +195,17 @@ export const AUDIT_REFUSAL_CODES = [
    * operator is pleased. The reviewer is asked to say which they meant.
    */
   "reaction-conflicts-verdict",
+  /**
+   * A review that names no verdict (APRV-482). Under supervised-retro a review
+   * counts as the individual approval nobody gave before the action ran, and an
+   * approval is an affirmative act: a reaction tap on a card, or a bare
+   * `approval audit review <seq>`, used to write verdict `ok` on the reviewer's
+   * behalf. Now the verdict is said or nothing is written. Evaluated once the
+   * sample is located and the reviewer has passed the roster check (PR #614
+   * refutation N6: who may review is said before what the review lacks);
+   * nothing is appended.
+   */
+  "verdict-required",
   /**
    * A `gated-revert` obligation whose satisfaction names no completed revert
    * (APRV-127). The obligation is to undo the action THROUGH THE GATE, and the
@@ -287,6 +359,12 @@ export interface SampledSubject {
   subjectHash: string | null;
   /** `seq` of the subject record the sample named, when it named one. */
   subjectSeq: number | null;
+  /**
+   * The attested policy hash the sample pinned (`payload.policy_sha256`, PR
+   * #614 refutation F2), or `null` for a sample written before samples pinned
+   * one. A review reads its roster only from bytes that hash to this value.
+   */
+  policySha256: string | null;
   /** `seq` of the later `audit.reviewed`, or `null` when still open. */
   reviewedSeq: number | null;
 }
@@ -321,6 +399,7 @@ export function sampledSubjects(records: readonly EventRecord[]): SampledSubject
       subjectHash: stringOrNull(payload["subject_hash"]),
       subjectSeq:
         typeof subjectSeq === "number" && Number.isInteger(subjectSeq) ? subjectSeq : null,
+      policySha256: isPolicySha256(payload[POLICY_HASH_FIELD]) ? payload[POLICY_HASH_FIELD] : null,
       reviewedSeq: null,
     });
   }
@@ -346,6 +425,37 @@ export function sampledSubjects(records: readonly EventRecord[]): SampledSubject
 /** Samples with no later review, oldest first. The human's audit backlog. */
 export function openSamples(records: readonly EventRecord[]): SampledSubject[] {
   return sampledSubjects(records).filter((subject) => subject.reviewedSeq === null);
+}
+
+/**
+ * The payload hash the sampled execution bound to, or `null` when the log
+ * records none (APRV-480).
+ *
+ * Read off the `execution.started` the sample names, whose `payload_hash` is the
+ * executor's recomputation of the bytes it ran; failing that, off the
+ * registration's declared binding. Both are records the log already holds, so
+ * nothing here takes a payload hash from the party under review, and the review
+ * card (`cli/audit-card.ts`) and the review record (APRV-481) derive the same
+ * answer from the same records.
+ */
+export function boundPayloadHash(
+  records: readonly EventRecord[],
+  subject: SampledSubject,
+): string | null {
+  const start =
+    subject.subjectSeq === null
+      ? undefined
+      : records.find(
+          (record) => record.seq === subject.subjectSeq && record.event === "execution.started",
+        );
+  const started = start === undefined ? null : stringOrNull(payloadOf(start)["payload_hash"]);
+  if (started !== null) return started;
+  if (subject.actionKey === null) return null;
+  // PR #614 refutation N7: findDeclaration's contract. A key two tasks declare
+  // is a collision registration refuses, so a log holding one cannot say which
+  // binding governs, and no binding is the fail-closed answer.
+  if (declaringTasks(records as EventRecord[], subject.actionKey).length > 1) return null;
+  return findDeclaration(records as EventRecord[], subject.actionKey)?.payload_hash ?? null;
 }
 
 /** The candidates a sweep would sample now: eligible, selected, not yet sampled. */
@@ -500,7 +610,27 @@ export function sampleSupervised(
     );
     if (next === undefined) break;
 
-    const result = appendSample(logPath, next, sampler, read.head, options);
+    // PR #614 refutation F2, recheck NF-3. The sample pins the attested policy
+    // the action RAN under (see `executionPolicySha256`), so the review is held
+    // to that policy's roster and not to one attested between the execution and
+    // this sweep. Only an execution older than every attestation in the log
+    // falls back to the latest attestation, the reading before NF-3. A log with
+    // no attestation cannot have run a supervised action (the executor refuses
+    // `policy-not-attested` on that path), so meeting one here is a fact about
+    // the log an operator must look at, never a sample written unpinned.
+    const policySha256 =
+      executionPolicySha256(read.records, next) ?? latestAttestedSha256(read.records);
+    if (policySha256 === null) {
+      refusals.push(
+        refuse(
+          "policy-not-attested",
+          `audit.sampled for ${next.actionKey} was not appended: the log holds no policy attestation, so the sample could not name the policy it was taken under, and its review would have no roster to be held to. A human must run \`approval policy attest\`.`,
+        ),
+      );
+      break;
+    }
+
+    const result = appendSample(logPath, next, sampler, read.head, policySha256, options);
     if (!result.ok) {
       // One failure ends the sweep either way, transient or not. A held lock or a
       // moved head means another writer is mid-transaction, and walking the rest
@@ -520,11 +650,57 @@ export function sampleSupervised(
   return { ok: true, sampler, appended, refusals, deferred };
 }
 
+/**
+ * The `sha256` the latest policy attestation in `records` names, or `null`
+ * when the log holds none (PR #614 refutation F2). The same record
+ * `checkAttestationOfBytes` compares against: the latest attestation is the
+ * policy in force.
+ */
+function latestAttestedSha256(records: readonly EventRecord[]): string | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const sha = attestationSha256(records[index] as EventRecord);
+    if (sha !== null) return sha;
+  }
+  return null;
+}
+
+/**
+ * The attested policy the sampled execution ran under, or `null` when the log
+ * cannot say (PR #614 recheck NF-3).
+ *
+ * The latest attestation BEFORE the execution's seq. The log is append-only,
+ * so the attestations before a record's seq are exactly the ones that existed
+ * when it was written, and the latest of them is the policy in force at that
+ * append. That is the value the gate stamps on a harness `execution.started`
+ * (APRV-447: the attestation its write boundary checked, under the same
+ * compare-and-append), so the two agree by construction; reading it from the
+ * log rather than from the stamp also covers the starts no stamp is written on
+ * (`approval run`'s path, and every start older than APRV-447). `null` only
+ * for an execution older than every attestation in the log; the caller then
+ * pins the latest one, the reading samples had before NF-3.
+ *
+ * Read from verified records only, at the moment the sample is drawn, and
+ * never from a caller: the pin is a runtime-written fact about the log.
+ */
+function executionPolicySha256(
+  records: readonly EventRecord[],
+  candidate: AuditCandidate,
+): string | null {
+  let before: string | null = null;
+  for (const record of records) {
+    if (record.seq >= candidate.seq) break;
+    const sha = attestationSha256(record);
+    if (sha !== null) before = sha;
+  }
+  return before;
+}
+
 function appendSample(
   logPath: string,
   candidate: AuditCandidate,
   sampler: Sampler & { enabled: true },
   head: LogHead | null,
+  policySha256: string,
   options: AuditOptions,
 ): { ok: true; record: EventRecord } | AuditRefusal {
   const payload: Record<string, unknown> = {
@@ -548,6 +724,10 @@ function appendSample(
     // was in force.
     rate: sampler.rateFor(candidate.class).rate ?? sampler.rate,
     autonomy: "supervised",
+    // PR #614 refutation F2, recheck NF-3: the attested policy the sampled
+    // execution ran under. Its review reads the class's roster from these
+    // bytes only.
+    [POLICY_HASH_FIELD]: policySha256,
   };
 
   const result = appendEvent(
@@ -654,9 +834,13 @@ export type Obligation = "gated-revert" | "policy-finding";
 
 export interface ReviewOptions extends AuditOptions {
   /**
-   * The verdict. Defaults to `"ok"`: a review whose caller says nothing about
-   * what it concluded records the observation it always did, and the ABSENCE of
-   * a verdict is never read as a denial.
+   * The verdict, REQUIRED in effect since APRV-482: a review whose caller does
+   * not state one is refused `verdict-required` and appends nothing. It used to
+   * default to `"ok"`, which let a reaction tap or a bare terminal review count
+   * as an approval nobody affirmatively gave. Optional in the type only so a
+   * caller that omits it meets the named refusal rather than a compile error in
+   * some other language's binding; the ABSENCE of a verdict is still never read
+   * as a denial, and is no longer read as `ok` either.
    */
   verdict?: ReviewVerdict;
   /**
@@ -679,6 +863,19 @@ export interface ReviewOptions extends AuditOptions {
    */
   sender?: { channel: string; id: string; hashed?: true };
   senderSource?: "policy";
+  /**
+   * The payload binding the reviewing surface rendered WHOLE in front of the
+   * reviewer before this verdict was given (APRV-481), recorded as
+   * `payload.payload_hash`.
+   *
+   * Set only by a surface that showed the bytes: a review card in its `bytes`
+   * view (`channels/telegram.ts` `reviewPayloadView`). Absent for a card that
+   * showed a hash or nothing, and for a terminal review, so the record never
+   * claims more than the reviewer read. It is checked, never trusted: a value
+   * that is not the sampled execution's recorded binding is refused
+   * `rendered-payload-mismatch` and nothing is appended.
+   */
+  renderedPayloadHash?: string;
 }
 
 /**
@@ -723,9 +920,10 @@ export function obligationFor(reversible: boolean | null): Obligation {
  * would be the party under oversight closing its own audit item, and a backlog
  * that can be emptied by the thing it supervises measures nothing.
  *
- * No attestation is required, for the reason `execution resolve` states: review
- * records an observation and exercises no policy authority. It authorizes
- * nothing, spends no budget, and mints no token.
+ * It needs the ATTESTED policy since APRV-483 (it needed none before): under
+ * supervised-retro a review is the approval, so the reviewer is held to the
+ * class's `approvers` roster, and that roster is read only from bytes a human
+ * attested ({@link reviewerRoster}). It spends no budget and mints no token.
  *
  * `--note` is optional and recorded verbatim when present. It is not mandatory
  * the way `execution resolve`'s is, because that verb writes an *outcome* the
@@ -738,7 +936,6 @@ export function reviewSample(
   note: string | null,
   options: ReviewOptions = {},
 ): ReviewResult | AuditRefusal {
-  const verdict: ReviewVerdict = options.verdict ?? "ok";
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
@@ -746,14 +943,25 @@ export function reviewSample(
     );
   }
 
+  // APRV-482. The verdict is an affirmative act or it is nothing. Read here and
+  // REFUSED after the roster check (PR #614 refutation N6): who may review comes
+  // before what the review lacks, so a reviewer off the roster who taps a grade
+  // is told `actor-not-approver` at once rather than `verdict-required` first
+  // and the roster only on their next tap.
+  const verdict = options.verdict;
+  const hasVerdict = verdict === "ok" || verdict === "denied";
+
   // APRV-239, and deliberately here: after the actor check and BEFORE the log is
   // read. Both rules are properties of the two arguments in front of this
   // function, so neither needs a log to decide, and a refusal that had already
   // read (and verified) a log would report a log failure for an invocation that
   // was malformed before it ever touched one. Nothing is appended on either
-  // path; the reviewer fixes the invocation and reviews again.
+  // path; the reviewer fixes the invocation and reviews again. Both judge a
+  // grade beside a verdict, so a review with no verdict skips them and meets
+  // `verdict-required` below: a card's lone `loved` is told it lacks a verdict,
+  // not a note it will be asked for once the verdict comes.
   const reaction = options.reaction;
-  if (reaction !== undefined) {
+  if (hasVerdict && reaction !== undefined) {
     if (verdict === "denied" && (reaction === "liked" || reaction === "loved")) {
       return refuse(
         "reaction-conflicts-verdict",
@@ -779,13 +987,68 @@ export function reviewSample(
   if (!located.ok) return located;
   const subject = located.subject;
 
+  // APRV-481. A review names the execution it judged, by the hash the sample
+  // recorded for it. Every sample the runtime writes carries one; a sample that
+  // does not names nothing a review could be about, and the write boundary
+  // requires the field, so this says so in the audit vocabulary rather than as
+  // a schema failure.
+  const sampledSubjectHash = subject.subjectHash;
+  if (sampledSubjectHash === null) {
+    return refuse(
+      "not-sampled",
+      `the sample at seq ${String(subject.seq)} names no subject hash, so a review of it could not say which execution it judged. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+
+  // APRV-483. The roster check a grant makes, made of the reviewer. The class
+  // and reversibility come from the registration (never from the review or the
+  // execution's own payload, global invariant 4), failing that from the
+  // runtime-written sample; the rule is the single winner `resolve` picks, as
+  // for a grant; and a rule with no `approvers` restricts nobody. The roster is
+  // read from the ATTESTED policy bytes, as a grant's is.
+  const rosterRefusal = reviewerRoster(logPath, read.records, subject, actor, options);
+  if (rosterRefusal !== null) return rosterRefusal;
+
+  if (!hasVerdict) {
+    return refuse(
+      "verdict-required",
+      `a review must say its verdict: under supervised-retro it counts as the approval nobody gave before the action ran, so a grade alone, or a review that names nothing, records nothing. At a terminal pass --ok or --deny; on a review card tap OK, or Deny twice. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+
+  // APRV-481. The surface's word that it showed the bytes is checked against
+  // the binding the log holds, never copied on trust (SPEC.md §11.1 invariant 4
+  // in spirit: a field that claims more scrutiny than happened is the same
+  // defect as one that lowers it).
+  const rendered = options.renderedPayloadHash;
+  if (rendered !== undefined) {
+    const bound = boundPayloadHash(read.records, subject);
+    if (bound === null || bound !== rendered) {
+      return refuse(
+        "rendered-payload-mismatch",
+        `the reviewing surface says it showed the payload with sha256 ${rendered}, and the execution the sample at seq ${String(subject.seq)} names is bound to ${bound === null ? "no payload hash at all" : bound}. A review's payload_hash says which bytes the reviewer read; one naming bytes that never ran would claim a reading of something else. Nothing was appended.`,
+        { seq: subject.seq },
+      );
+    }
+  }
+
   const payload: Record<string, unknown> = {
     subject_seq: subject.seq,
     subject_event: "audit.sampled",
     reviewed: true,
     verdict,
+    // PR #614 refutation F5: the discriminator a follower reads. Since APRV-482
+    // every verdict is the reviewer's own word; a review written before then
+    // may carry an `ok` the runtime filled in, and only this field (absent
+    // there) tells the two apart.
+    verdict_source: "explicit",
+    sampled_subject_hash: sampledSubjectHash,
   };
-  if (subject.subjectHash !== null) payload["sampled_subject_hash"] = subject.subjectHash;
+  // Only when the bytes were on the screen (APRV-481): absent says the
+  // reviewer saw a hash, nothing, or a terminal.
+  if (rendered !== undefined) payload["payload_hash"] = rendered;
   if (note !== null && note.trim().length > 0) payload["note"] = note;
   // Written only when it was given. An omitted reaction leaves no key, which is
   // the difference between "the human said nothing" and "the human said
@@ -843,6 +1106,221 @@ export function reviewSample(
   const obliged = appendObligation(logPath, read.records, subject, result.record, options);
   if (!obliged.ok) return obliged;
   return { ok: true, record: result.record, subject, obligation: obliged.record };
+}
+
+/**
+ * `actor-not-approver` when the class's roster does not name `actor`,
+ * `policy-not-attested` when the roster cannot be read from the attested
+ * policy, else `null` (APRV-483).
+ *
+ * Fail-closed in every input it does not control (APRV-483 refutation):
+ *
+ * - the policy is read ONCE from the file a grant would read
+ *   (`core/gate.ts` `policyPathOf`), its bytes must be the policy the sample
+ *   pinned, the one its execution ran under (PR #614 refutation F2, recheck
+ *   NF-3; for an unpinned pre-fix sample, the latest attestation's), and the
+ *   roster is parsed from those same bytes, so neither
+ *   an edited file, an unreadable one, a later re-attestation, nor a
+ *   `--policy` pointed elsewhere can supply the roster;
+ * - a class that matches no rule in that policy is refused
+ *   `actor-not-approver` (F2): the defaults carry no roster, and for a review
+ *   "no roster" would mean "anyone";
+ * - a sample whose class cannot be named (no registration and no class on the
+ *   runtime-written sample) is refused rather than resolved as "no rule, no
+ *   roster", because that reading would let anyone review it;
+ * - attested bytes the loader refuses are refused `policy-invalid` (PR #614
+ *   refutation F1): their fail-closed resolution names no roster, and for a
+ *   review "no roster" would mean "anyone".
+ *
+ * What still restricts nobody, by design and exactly as for a grant: an
+ * attested rule that names no `approvers`.
+ */
+function reviewerRoster(
+  logPath: string,
+  records: readonly EventRecord[],
+  subject: SampledSubject,
+  actor: string,
+  options: AuditOptions,
+): AuditRefusal | null {
+  const path = policyPathOf(options.policy === undefined ? {} : { policy: options.policy });
+  // PR #614 refutation F2 (ruling), recheck NF-3: the roster is the one in
+  // force when the action RAN, which the sample pins. A sample that pinned its
+  // policy is reviewed only against bytes hashing to that pin, so a later
+  // re-attestation that renames, re-rosters or drops the class's rule neither
+  // opens the review to a new reviewer nor leaves it with no roster; a sample
+  // written before samples pinned one keeps the latest-attestation reading.
+  // Fix round 3: the pinned bytes come from the payload store first, so a
+  // re-attestation does not strand the older open samples.
+  let bytes: Uint8Array;
+  if (subject.policySha256 === null) {
+    try {
+      bytes = readFileSync(path);
+    } catch (cause) {
+      return attestationRefused(
+        unreadablePolicyStatus(path, cause instanceof Error ? cause.message : String(cause)),
+        subject,
+      );
+    }
+    const attested = attestationRefused(checkAttestationOfBytes(records as EventRecord[], bytes), subject);
+    if (attested !== null) return attested;
+  } else {
+    const pinned = pinnedPolicyBytes(logPath, records, subject, subject.policySha256, path);
+    if (!pinned.ok) return pinned;
+    bytes = pinned.bytes;
+  }
+
+  // PR #614 refutation N7: findDeclaration's contract on an enforcement path.
+  // A key two tasks declare is a collision registration refuses (APRV-138), so
+  // a log holding one cannot say which class, and so which roster, governs.
+  if (
+    subject.actionKey !== null &&
+    declaringTasks(records as EventRecord[], subject.actionKey).length > 1
+  ) {
+    return refuse(
+      "actor-not-approver",
+      `action ${subject.actionKey} is declared by more than one task, a collision registration refuses, so the log cannot say which class (and so which approvers roster) governs the sample at seq ${String(subject.seq)}. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+  const declared =
+    subject.actionKey === null ? null : findDeclaration(records as EventRecord[], subject.actionKey);
+  const sampleRecord = records.find((record) => record.seq === subject.seq);
+  const sampledClass = sampleRecord === undefined ? null : stringOrNull(payloadOf(sampleRecord)["class"]);
+  const cls = stringOrNull(declared?.class) ?? sampledClass;
+  if (cls === null) {
+    return refuse(
+      "actor-not-approver",
+      `the sample at seq ${String(subject.seq)} names no class, so no approvers roster can be checked for it and no reviewer can be shown to be on one. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+  const load = loadPolicyText(
+    path,
+    Buffer.from(bytes).toString("utf8"),
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  // PR #614 refutation F1. Attested is not the same as valid: `policy attest`
+  // hashes bytes and never parses them, so a policy the loader refuses can be
+  // attested. The fail-closed resolution such bytes produce carries
+  // `approvers: null`, which reads as "no restriction"; for a review that is
+  // the opposite of failing closed. Both checks, because the provenance is the
+  // resolution's own word for the same fact and a second spelling of it should
+  // not be able to slip past the first.
+  if (!load.ok) return policyInvalid(path, `${load.code}: ${load.message}`, subject);
+  const resolution = resolve(
+    load,
+    cls,
+    declared?.reversible === null || declared?.reversible === undefined
+      ? {}
+      : { reversible: declared.reversible },
+  );
+  if (resolution.provenance === "fail-closed") {
+    return policyInvalid(path, "the policy resolved on its fail-closed path", subject);
+  }
+  // PR #614 refutation F2. A class no rule matches resolves to the defaults,
+  // which carry no roster; for a grant that is "restricts nobody", and for a
+  // review it would be "anyone may approve". Refused instead, with the reason.
+  if (resolution.matched === null) {
+    return refuse(
+      "actor-not-approver",
+      `class ${cls} matches no rule in the policy ${
+        subject.policySha256 === null ? "in force" : `the action sampled at seq ${String(subject.seq)} ran under (sha256 ${subject.policySha256})`
+      }, so that policy names no approvers roster for it and no reviewer can be shown to be on one. Under supervised-retro a review is the approval, and a class with no rule would otherwise be approvable by anyone. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+  const approvers = resolution.approvers;
+  if (approvers === null || namesApprover(approvers, actor)) return null;
+  return refuse(
+    "actor-not-approver",
+    `${actor} is not named in the approvers list for class ${cls}: the rule ${
+      resolution.matched === null ? "in force" : `\`${resolution.matched.pattern}\``
+    } names ${approvers.length === 0 ? "nobody" : approvers.map((name) => `\`${name}\``).join(", ")}. Under supervised-retro a review is the approval, so it is held to the roster a grant is. Ask a named approver to review it, or amend the policy and re-attest. Nothing was appended.`,
+    { seq: subject.seq },
+  );
+}
+
+/**
+ * The bytes of the policy the sample pinned, or `policy-not-attested` (PR #614
+ * refutation F2, recheck NF-3, fix round 3).
+ *
+ * Authority first: a human must have attested the pinned hash before the
+ * sample was taken. The sampler copies the hash from the log, so a pin no
+ * earlier attestation names is a record nobody attested, refused like
+ * unattested bytes.
+ *
+ * Then the bytes, from two places, each verified against the pin and neither
+ * trusted otherwise:
+ *
+ * 1. the APRV-356 payload store beside the log, where every attestation since
+ *    APRV-356 (and every phone proposal) leaves the attested text, read by
+ *    `storedPolicyText`, which hashes what it reads. This is what keeps a
+ *    re-attestation, a settings save included, from stranding the samples
+ *    pinned to the earlier policy;
+ * 2. the policy file on disk, only when its bytes hash to the pin (a chain last
+ *    attested before APRV-356 stored nothing).
+ *
+ * Bytes in neither place are refused, naming the hash needed. The pin is never
+ * compared with the latest attestation: the question is which roster governed
+ * the action when it ran, whether or not a later policy has been attested.
+ */
+function pinnedPolicyBytes(
+  logPath: string,
+  records: readonly EventRecord[],
+  subject: SampledSubject,
+  pinned: string,
+  path: string,
+): { ok: true; bytes: Uint8Array } | AuditRefusal {
+  const attestedBefore = records.some(
+    (record) => record.seq < subject.seq && attestationSha256(record) === pinned,
+  );
+  if (!attestedBefore) {
+    return refuse(
+      "policy-not-attested",
+      `the sample at seq ${String(subject.seq)} pins policy sha256 ${pinned}, and no attestation before it names that hash, so the roster it pins is one nobody attested. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+  const stored = storedPolicyText(records, payloadStoreDirFor(logPath), pinned);
+  if (stored !== null) return { ok: true, bytes: Buffer.from(stored, "utf8") };
+
+  let onDisk: string;
+  try {
+    const bytes = readFileSync(path);
+    const live = policyBytesHash(bytes);
+    if (live === pinned) return { ok: true, bytes };
+    onDisk = `bytes hashing to ${live}`;
+  } catch (cause) {
+    onDisk = `nothing readable (${cause instanceof Error ? cause.message : String(cause)})`;
+  }
+  return refuse(
+    "policy-not-attested",
+    `the action sampled at seq ${String(subject.seq)} ran under the policy attested as sha256 ${pinned}. Its bytes are not in the payload store beside the log (an attestation made before APRV-356 stored none), and ${path} holds ${onDisk}. A review is held to the approvers roster in force when the action ran, so it needs the policy bytes hashing to ${pinned}: restore them to ${path}. Nothing was appended.`,
+    { seq: subject.seq },
+  );
+}
+
+/** `policy-invalid`: attested bytes the loader refuses name no roster (F1). */
+function policyInvalid(path: string, cause: string, subject: SampledSubject): AuditRefusal {
+  return refuse(
+    "policy-invalid",
+    `the attested policy ${path} does not load (${cause}), so no approvers roster can be read from it for the sample at seq ${String(subject.seq)}. A gate meeting these bytes would hold every class for a human; a review has nothing that compensates, because the action already ran and the review is its approval. Correct the policy and attest the corrected bytes, then review again. Nothing was appended.`,
+    { seq: subject.seq },
+  );
+}
+
+/** `policy-not-attested` for a non-attested status, else `null`. */
+function attestationRefused(
+  status: Parameters<typeof attestationRefusal>[0],
+  subject: SampledSubject,
+): AuditRefusal | null {
+  const refusal = attestationRefusal(status);
+  if (refusal === null) return null;
+  return refuse(
+    "policy-not-attested",
+    `${refusal.message}. A review is held to the class's approvers roster, and a roster read from a policy nobody attested is one the reviewer could have chosen. Nothing was appended.`,
+    { seq: subject.seq },
+  );
 }
 
 /**
@@ -1044,9 +1522,9 @@ export interface SatisfyInput {
  *   ceremony with its own `policy.updated` record — so the note is the discharge
  *   there, and the note is required.
  *
- * No attestation is required, for the reason `audit review` and `execution
- * resolve` state: this record exercises no policy authority, authorizes nothing,
- * spends no budget, and mints no token.
+ * No attestation is required, for the reason `execution resolve` states: this
+ * record exercises no policy authority, authorizes nothing, spends no budget,
+ * and mints no token.
  */
 export function satisfyObligation(
   logPath: string,
