@@ -530,12 +530,19 @@ test("a sampled action with no later review is listed; a reviewed one is not", (
   assert.match(both, /2 sampled action\(s\) with no later `audit\.reviewed`/u);
   assert.ok(both.includes("task-100:other:2026-08-05"));
 
+  // APRV-481: a review written today names its sample, the execution that
+  // sample named, and its verdict, or the write boundary refuses it.
   const reviewed = appendEvent(world.unit.logPath, {
     ts: at(5),
     event: "audit.reviewed",
     actor: HUMAN,
     task: TASK,
     action_key: world.keys[0] as string,
+    payload: {
+      subject_seq: sampledOne.ok ? sampledOne.record.seq : 0,
+      sampled_subject_hash: "e".repeat(64),
+      verdict: "ok",
+    },
   });
   assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
 

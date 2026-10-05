@@ -17,6 +17,18 @@ before a tag.
 
 ### Channels
 
+- **`audit.reviewed` names its sample, the execution and the verdict
+  (APRV-481).** New reviews must carry `payload.subject_seq`,
+  `payload.sampled_subject_hash` and `payload.verdict`; the write boundary
+  refuses one without them, and `validate(..., { mode: "historical" })` reads
+  older reviews unchanged (`audit_reviewed_record` joins `WIDENED_DEFS`).
+  `payload.payload_hash` is written only when the surface showed the bytes
+  whole, and `reviewSample` refuses a shown hash that is not the execution's
+  binding with the new audit code `rendered-payload-mismatch`. The follower's
+  field list lives in one place, `docs/cli-reference.md#the-review-record`.
+  Conformance: `schema-validation` is 3.0.0 (existing expectations moved).
+  Behavior change for anything that appends reviews by hand.
+
 - **A Telegram review card shows the payload that ran (APRV-480).** Under
   supervised-retro the review is the individual approval, and the card showed a
   key and the agent's own summary of what it did. `ReviewCardFields` now

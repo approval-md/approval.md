@@ -2023,6 +2023,14 @@ export interface ReviewTap {
    * policy, refuses an account it does not name, and records the one it does.
    */
   sender?: ChannelSender;
+  /**
+   * The payload binding this card showed WHOLE (APRV-481), present only when
+   * {@link reviewPayloadView} put the bytes on the screen. Set by the channel
+   * from the card it is holding, never from anything the network sent; the
+   * runtime checks it against the log before recording it as the review's
+   * `payload_hash`.
+   */
+  payloadHash?: string;
 }
 
 /** What the runtime did with a review tap, as it reports it back. */
@@ -4867,9 +4875,15 @@ export class TelegramChannel implements TestableChannel {
     const handler = this.reviewHandler;
     if (handler === null) return;
 
+    // APRV-481: whether the bytes were on this card is the card's own fact,
+    // decided by the same pure view that drew it, so the record's payload hash
+    // can never name more than the reviewer was shown.
+    const view = reviewPayloadView(state.card);
+    const sent: ReviewTap = view.kind === "bytes" ? { ...tap, payloadHash: view.hash } : tap;
+
     let response: ReviewTapResponse;
     try {
-      response = await handler(tap);
+      response = await handler(sent);
     } catch (cause) {
       state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [TELEGRAM_HANDLER_FAILED] };
       await this.redrawReview(state);
@@ -4877,7 +4891,7 @@ export class TelegramChannel implements TestableChannel {
     }
 
     this.counters.reviews += 1;
-    result.reviews.push({ tap, ok: response.ok });
+    result.reviews.push({ tap: sent, ok: response.ok });
 
     if (response.ok) {
       state.settled = { headline: response.headline, detail: response.detail };

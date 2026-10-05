@@ -2527,7 +2527,16 @@ const SUITES = [
     // moves: the field is OPTIONAL and additive, so every record written before
     // it validates exactly as it did, and an implementation that passed 2.8.0
     // fails this only by not knowing a field that has been added.
-    vectors_version: "2.9.0",
+    // 3.0.0 (APRV-481): a MAJOR bump, because existing expectations move.
+    // `audit.reviewed` now REQUIRES `payload.subject_seq`,
+    // `payload.sampled_subject_hash` and `payload.verdict` at the write
+    // boundary, so the five audit.reviewed fixtures gained those fields and a
+    // review without them (the new `audit-reviewed-no-subject-hash` fixture) is
+    // refused. An implementation that passed 2.9.0 accepts that record and so
+    // fails here. The read boundary is unchanged: `mode: "historical"` swaps in
+    // `audit_reviewed_record_historical`, so a pre-APRV-481 review still
+    // verifies; the vectors pin the write boundary only, as they always have.
+    vectors_version: "3.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

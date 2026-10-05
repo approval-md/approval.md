@@ -228,6 +228,16 @@ object entry) is refused by Ajv's `strictTypes`, which requires a declared type
 for those keywords. A suite whose premise is that a refusal for the wrong reason
 is a failure cannot call a renamed refusal a minor.
 
+`schema-validation` reached **3.0.0** at APRV-481, a major because existing
+expectations move. An `audit.reviewed` record now requires `payload.subject_seq`,
+`payload.sampled_subject_hash` and `payload.verdict` at the write boundary, so
+the five review fixtures gained those fields and a review without them is
+refused (`audit-reviewed-no-subject-hash`). The read boundary is not in the
+suite and did not move: historical validation swaps in
+`audit_reviewed_record_historical`, so a review written before the change still
+verifies. If another branch claims 3.0.0 first, the collision rule below gives
+this change the next major at merge.
+
 `schema-validation` has no 1.5.0. Two branches minted that number without seeing
 each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
 fixtures on its own branch), so the same version named two different vector sets

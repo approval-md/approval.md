@@ -48,7 +48,7 @@ import {
   sampledSubjects,
   supervisedExecutions,
 } from "../src/core/audit.js";
-import type { EventRecord } from "../src/core/log.js";
+import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { verify } from "../src/core/verify.js";
 import { resetAuditSweepNotices, sweepAuditSampling } from "../src/daemon/audit.js";
@@ -272,6 +272,10 @@ test("the audit refusal-code union is frozen public API", async () => {
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
+      // APRV-481. Beside the subject codes because, like them, it is a fact
+      // about the sample the log holds: the surface named bytes the sampled
+      // execution did not bind to.
+      "rendered-payload-mismatch",
       // APRV-127's reconciliation codes. Additive: every code above kept its
       // name and its meaning, so a supervisor branching on the pre-split union
       // is unaffected, and the new ones only ever come from the new verbs.
@@ -925,6 +929,119 @@ test("the reviewed event names the sample and carries the note", async () => {
   assert.equal(payload["reviewed"], true);
   assert.equal(payload["note"], "the file matches what was declared");
   assertClean(unit);
+});
+
+test("APRV-481: a new review names its sample, the execution it judged, and its verdict", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  const sampled = sample.payload as Record<string, unknown>;
+
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+    clock: fixedClock(at(9)),
+    verdict: "ok",
+  });
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) return;
+  const payload = result.record.payload as Record<string, unknown>;
+  assert.equal(payload["subject_seq"], sample.seq, "subject_seq is not the sample's seq");
+  assert.equal(
+    payload["sampled_subject_hash"],
+    sampled["subject_hash"],
+    "sampled_subject_hash is not the hash the sample recorded",
+  );
+  const started = records(unit).find((record) => record.seq === sampled["subject_seq"]) as EventRecord;
+  assert.equal(started.event, "execution.started");
+  assert.equal(payload["sampled_subject_hash"], started.hash, "the hash does not join to the execution");
+  assert.equal(payload["verdict"], "ok");
+  // No surface said it showed the bytes, so the record claims no reading of them.
+  assert.equal("payload_hash" in payload, false, "a review nobody showed bytes recorded a payload hash");
+  assertClean(unit);
+});
+
+test("APRV-481: the payload hash is recorded only when the surface showed the bound bytes", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+  const samples = records(unit).filter((record) => record.event === "audit.sampled");
+  const before = records(unit).length;
+
+  // Bytes that are not the binding: refused, and nothing written.
+  const wrong = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[0] as EventRecord).seq },
+    "human:carter",
+    null,
+    { clock: fixedClock(at(9)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft2") },
+  );
+  assert.equal(wrong.ok, false);
+  if (!wrong.ok) assert.equal(wrong.code, "rendered-payload-mismatch");
+  assert.equal(records(unit).length, before, "a mismatched payload hash wrote to the log");
+
+  // The binding itself: recorded.
+  const shown = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[0] as EventRecord).seq },
+    "human:carter",
+    null,
+    { clock: fixedClock(at(10)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft") },
+  );
+  assert.equal(shown.ok, true, shown.ok ? "" : shown.message);
+  if (shown.ok) {
+    assert.equal((shown.record.payload as Record<string, unknown>)["payload_hash"], bindingFor("task-042:draft"));
+  }
+
+  // Shown nothing: absent.
+  const unseen = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[1] as EventRecord).seq },
+    "human:carter",
+    null,
+    { clock: fixedClock(at(11)), verdict: "ok" },
+  );
+  assert.equal(unseen.ok, true, unseen.ok ? "" : unseen.message);
+  if (unseen.ok) assert.equal("payload_hash" in (unseen.record.payload as Record<string, unknown>), false);
+  assertClean(unit);
+});
+
+test("APRV-481: a review written before the fields were required still verifies", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  // An old review, written under the pre-APRV-481 schema: no verdict and no
+  // subject hash. Appended through the real writer with that schema, so the
+  // chain is a real chain and the only thing under test is the read boundary.
+  const oldSchemaDir = join(unit.dir, "schema-pre-481");
+  mkdirSync(oldSchemaDir, { recursive: true });
+  const schemaRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "schema");
+  for (const name of readdirSync(schemaRoot)) {
+    if (!name.endsWith(".schema.json")) continue;
+    let text = readFileSync(join(schemaRoot, name), "utf8");
+    if (name === "event.schema.json") {
+      const parsed = JSON.parse(text) as { $defs: Record<string, unknown> };
+      parsed.$defs["audit_reviewed_record"] = parsed.$defs["audit_reviewed_record_historical"];
+      text = JSON.stringify(parsed);
+    }
+    writeFileSync(join(oldSchemaDir, name), text, "utf8");
+  }
+  const appended = appendEvent(
+    unit.logPath,
+    {
+      ts: at(6),
+      event: "audit.reviewed",
+      actor: "human:carter",
+      task: "task-042",
+      action_key: "task-042:draft",
+      payload: { subject_seq: sample.seq, subject_event: "audit.sampled", reviewed: true },
+    },
+    { schemaDir: oldSchemaDir },
+  );
+  assert.equal(appended.ok, true, JSON.stringify(appended));
+  assertClean(unit);
+  assert.deepEqual(openSamples(records(unit)), [], "the old review no longer closes its sample");
 });
 
 test("the note is optional", async () => {

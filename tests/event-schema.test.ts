@@ -84,7 +84,9 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "policy.declined": ["payload"],
   "envelope.drift": ["task"],
   "audit.sampled": [],
-  "audit.reviewed": [],
+  // APRV-481. A review must name the sample it answers, the execution that
+  // sample named, and its verdict, so the payload carrying them is required.
+  "audit.reviewed": ["payload"],
   // APRV-127. The obligation must name the action it concerns, in the record
   // AND in the payload: a reconciliation nobody can attach to an action is one
   // nobody can discharge. The satisfaction names the obligation by seq instead,
@@ -217,6 +219,52 @@ test("audit review must come from a human actor (SPEC.md §5.2)", () => {
       `audit.reviewed accepted a non-human actor "${actor}"`,
     );
   }
+});
+
+test("APRV-481: a new review names its sample, the execution, and its verdict; an old one still reads", () => {
+  const record = fixture("audit.reviewed");
+  const payload = record["payload"] as Record<string, unknown>;
+  assert.equal(validate("event", record).ok, true);
+
+  for (const field of ["subject_seq", "sampled_subject_hash", "verdict"]) {
+    const stripped = { ...record, payload: without(payload, field) };
+    const strict = validate("event", stripped);
+    assert.equal(strict.ok, false, `the write boundary accepted a review without ${field}`);
+    if (!strict.ok) {
+      assert.ok(
+        strict.errors.some((error) => error.keyword === "required" && error.message.includes(field)),
+        `the refusal does not name ${field}: ${JSON.stringify(strict.errors)}`,
+      );
+    }
+    // The read boundary: a review written before APRV-481 verifies unchanged.
+    assert.equal(
+      validate("event", stripped, { mode: "historical" }).ok,
+      true,
+      `the read boundary refused a pre-APRV-481 review without ${field}`,
+    );
+  }
+
+  // The shape a v0.1 review actually had: a verdict at most, and no subject.
+  const old = { ...record, payload: { verdict: "ok" } };
+  assert.equal(validate("event", old).ok, false);
+  assert.equal(validate("event", old, { mode: "historical" }).ok, true);
+  assert.equal(validate("event", { ...record, payload: {} }, { mode: "historical" }).ok, true);
+
+  // Historical is a widening of the three requirements and nothing else: the
+  // actor rule, the reaction enum and the hash shapes still hold on read.
+  for (const bad of [
+    { ...record, actor: "agent:chaser" },
+    { ...record, payload: { ...payload, reaction: "meh" } },
+    { ...record, payload: { ...payload, sampled_subject_hash: "not-a-hash" } },
+    { ...record, payload: { ...payload, payload_hash: "ABC" } },
+  ]) {
+    assert.equal(validate("event", bad).ok, false, JSON.stringify(bad));
+    assert.equal(validate("event", bad, { mode: "historical" }).ok, false, JSON.stringify(bad));
+  }
+
+  // The payload hash is optional, and when present it is a digest.
+  const shown = { ...record, payload: { ...payload, payload_hash: "a".repeat(64) } };
+  assert.equal(validate("event", shown).ok, true);
 });
 
 test("an organ attestation names a relative path, a digest, and a human (APRV-272)", () => {

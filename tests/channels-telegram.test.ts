@@ -6419,6 +6419,14 @@ test("APRV-299: OK records a review through the real path, and settles the card"
   assert.equal(payload["verdict"], "ok");
   assert.equal(payload["subject_seq"], card.sampleSeq);
   assert.equal("reaction" in payload, false, "an omitted reaction wrote a key");
+  // APRV-481: the card showed the bytes whole, so the review says which bytes
+  // the reviewer read, and names the execution it judged.
+  assert.equal(
+    payload["payload_hash"],
+    payloadHash(world.payloads.get(world.keys[0] as string)),
+    "a card that showed the bytes did not record their hash",
+  );
+  assert.equal(typeof payload["sampled_subject_hash"], "string");
 
   // The card says so, and its buttons are gone in the same call.
   const edits = editsFor(deliveryId);
@@ -6428,6 +6436,25 @@ test("APRV-299: OK records a review through the real path, and settles the card"
 
   // The sample is closed, so nothing offers it again.
   assert.deepEqual(openSamples(recordsOf(world.unit.logPath)), []);
+  assertClean(world.unit);
+});
+
+test("APRV-481: a review from a hash-only card records no payload hash", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const built = openReviewCards(world.unit.logPath, { payloadStoreDir: null });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  assert.equal(reviewPayloadView(card).kind, "hash");
+  await channel.offerReview(card);
+
+  const polled = await tapReview(channel, "ok");
+  assert.equal(polled.reviews[0]?.ok, true);
+  assert.equal(polled.reviews[0]?.tap.payloadHash, undefined, "a hash-only card claimed it showed the bytes");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal("payload_hash" in payload, false, "the record claims a reading the card never offered");
+  assert.equal(payload["subject_seq"], card.sampleSeq);
+  assert.equal(typeof payload["sampled_subject_hash"], "string");
   assertClean(world.unit);
 });
 

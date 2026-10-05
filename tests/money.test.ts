@@ -142,11 +142,20 @@ test("the schemas and the CLI's frozen shapes carry the runtime's own pattern", 
       `${name}.schema.json drifted from core/money.ts`,
     );
     // Every widened definition names a replacement that actually exists, or a
-    // historical validation would silently stay strict.
+    // historical validation would silently stay strict. `usd_amount` lives in
+    // both schemas; APRV-481's `audit_reviewed_record` only in the event schema,
+    // so the pairing is checked wherever the strict definition appears.
+    assert.ok(schema.$defs["usd_amount"] !== undefined, `${name}.schema.json lost $defs.usd_amount`);
     for (const [strict, widened] of Object.entries(WIDENED_DEFS)) {
-      assert.ok(schema.$defs[strict] !== undefined, `${name}.schema.json lost $defs.${strict}`);
+      if (schema.$defs[strict] === undefined) continue;
       assert.ok(schema.$defs[widened] !== undefined, `${name}.schema.json lost $defs.${widened}`);
     }
+  }
+  // And every entry is defined somewhere: a widening whose strict definition no
+  // schema carries is a list entry that does nothing.
+  const event = readJson("schema", "event.schema.json") as { $defs: Record<string, unknown> };
+  for (const strict of Object.keys(WIDENED_DEFS)) {
+    assert.ok(event.$defs[strict] !== undefined, `event.schema.json lost $defs.${strict}`);
   }
   const registry = readFileSync(join(REPO_ROOT, "src", "cli", "verb-registry.ts"), "utf8");
   assert.ok(

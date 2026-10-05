@@ -3259,6 +3259,7 @@ export function reviewHandlerFor(
   reaction?: "disliked" | "indifferent" | "liked" | "loved";
   note?: string;
   sender?: ChannelSender;
+  payloadHash?: string;
 }) => ReviewTapResponse {
   return (tap) => {
     // APRV-324 follow-up. A review confers no authority and is still a HUMAN's
@@ -3296,6 +3297,9 @@ export function reviewHandlerFor(
         ...(setup.gateOptions.policy === undefined ? {} : { policy: setup.gateOptions.policy }),
         verdict: tap.verdict,
         ...(tap.reaction === undefined ? {} : { reaction: tap.reaction }),
+        // APRV-481: the card's own statement that it showed the bytes whole,
+        // which `reviewSample` checks against the log before recording it.
+        ...(tap.payloadHash === undefined ? {} : { renderedPayloadHash: tap.payloadHash }),
         ...(resolved.sender === undefined
           ? {}
           : {

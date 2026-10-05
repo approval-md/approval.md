@@ -3548,10 +3548,40 @@ records an observation, exercises no policy authority, authorizes nothing, and
 spends no budget. A review blocked because a policy file was edited afterwards
 would be a supervision backlog held open by an unrelated fact.
 
-What it appends is `audit.reviewed`, naming the sample's action key and task, with
-payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"...",
-"reaction"?:"disliked"|"indifferent"|"liked"|"loved"}`.
-An action key with several open samples refuses `ambiguous-subject`.
+What it appends is `audit.reviewed`, naming the sample's action key and task; its
+payload is listed field by field under [the review record](#the-review-record),
+which is the one place those names are defined. An action key with several open
+samples refuses `ambiguous-subject`.
+
+### The review record
+
+The field names a follower reads (the data pipeline's follower and the dbt
+models built on it read reviews as approvals under supervised-retro). This
+table is the single definition; other docs link here rather than restating it.
+Every `audit.reviewed` written since APRV-481 carries the three required fields,
+and the write boundary refuses one that does not. A review written before then
+may lack them and still verifies (the read boundary is the schema's
+`audit_reviewed_record_historical`), so a follower treats their absence on an
+old record as "not recorded", never as a default.
+
+| Field | Where | Required | Meaning |
+| --- | --- | --- | --- |
+| `event` | record | yes | `audit.reviewed`. |
+| `seq`, `ts`, `hash` | record | yes | The review's own chain position and runtime-assigned time. |
+| `actor` | record | yes | `human:<id>`, the reviewer. Since APRV-483 a person on the class's `approvers` roster wherever the rule names one. |
+| `action_key`, `task` | record | when the sample named them | The reviewed action and its task. |
+| `channel` | record | no | The surface, when the writer recorded one. |
+| `payload.subject_seq` | payload | yes (APRV-481) | The `seq` of the `audit.sampled` record this review answers. Not the execution's seq. |
+| `payload.sampled_subject_hash` | payload | yes (APRV-481) | The `hash` of the `execution.started` record the sample named: the join key from a review to the execution it judged. |
+| `payload.verdict` | payload | yes (APRV-481) | `ok` or `denied`, given explicitly (APRV-482). The enforcement field. |
+| `payload.payload_hash` | payload | no | The SHA-256/JCS binding of the bytes the execution ran, present ONLY when the surface showed those bytes whole before the verdict (a Telegram card's `bytes` view). Absent when the reviewer saw a hash, nothing, or a terminal. Checked against the execution's binding before it is written. |
+| `payload.reaction` | payload | no | `disliked`, `indifferent`, `liked` or `loved`. Guidance, never enforcement; absent is absent. |
+| `payload.note` | payload | with `loved`/`disliked` | The reviewer's words, verbatim. |
+| `payload.sender`, `payload.sender_source` | payload | no | The authenticated account the review arrived from, when a transport authenticated one. |
+| `payload.subject_event`, `payload.reviewed` | payload | no | Constants (`audit.sampled`, `true`) kept for older readers. |
+
+A denial is followed by a runtime-authored `reconciliation.required` whose
+`payload.review_seq` is the review's `seq`.
 
 **`--json`** (one object on stdout):
 
@@ -4334,8 +4364,8 @@ The bytes are shown whole or not at all: a card is one message edited in place,
 so it cannot spill a payload over several messages the way a request prompt
 does, and a review over half the bytes would claim more than the reviewer read.
 Only the first case lets the review record carry a `payload_hash` (see
-[audit review](#audit-review)). A terminal review (`approval audit review`)
-shows no payload and so never records one.
+[the review record](#the-review-record)). A terminal review (`approval audit
+review`) shows no payload and so never records one.
 
 Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
 first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,

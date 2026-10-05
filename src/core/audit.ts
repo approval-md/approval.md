@@ -110,6 +110,15 @@ export const AUDIT_REFUSAL_CODES = [
   "already-reviewed",
   /** An action key with more than one unreviewed sample; name the seq instead. */
   "ambiguous-subject",
+  /**
+   * The reviewing surface said it rendered the payload whole and named a hash
+   * that is not the sampled execution's recorded binding (APRV-481). Nothing is
+   * appended: a review's `payload_hash` says which bytes the reviewer read, and
+   * one naming bytes the execution did not bind to would claim a reading of
+   * something that never ran. Evaluated after the sample is located, before
+   * anything is written.
+   */
+  "rendered-payload-mismatch",
   /** No `reconciliation.required` record at the seq named (APRV-127). */
   "not-obliged",
   /** That obligation already has a `reconciliation.satisfied` (APRV-127). */
@@ -706,6 +715,19 @@ export interface ReviewOptions extends AuditOptions {
    */
   sender?: { channel: string; id: string; hashed?: true };
   senderSource?: "policy";
+  /**
+   * The payload binding the reviewing surface rendered WHOLE in front of the
+   * reviewer before this verdict was given (APRV-481), recorded as
+   * `payload.payload_hash`.
+   *
+   * Set only by a surface that showed the bytes: a review card in its `bytes`
+   * view (`channels/telegram.ts` `reviewPayloadView`). Absent for a card that
+   * showed a hash or nothing, and for a terminal review, so the record never
+   * claims more than the reviewer read. It is checked, never trusted: a value
+   * that is not the sampled execution's recorded binding is refused
+   * `rendered-payload-mismatch` and nothing is appended.
+   */
+  renderedPayloadHash?: string;
 }
 
 /**
@@ -806,13 +828,46 @@ export function reviewSample(
   if (!located.ok) return located;
   const subject = located.subject;
 
+  // APRV-481. A review names the execution it judged, by the hash the sample
+  // recorded for it. Every sample the runtime writes carries one; a sample that
+  // does not names nothing a review could be about, and the write boundary
+  // requires the field, so this says so in the audit vocabulary rather than as
+  // a schema failure.
+  const sampledSubjectHash = subject.subjectHash;
+  if (sampledSubjectHash === null) {
+    return refuse(
+      "not-sampled",
+      `the sample at seq ${String(subject.seq)} names no subject hash, so a review of it could not say which execution it judged. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+
+  // APRV-481. The surface's word that it showed the bytes is checked against
+  // the binding the log holds, never copied on trust (SPEC.md §11.1 invariant 4
+  // in spirit: a field that claims more scrutiny than happened is the same
+  // defect as one that lowers it).
+  const rendered = options.renderedPayloadHash;
+  if (rendered !== undefined) {
+    const bound = boundPayloadHash(read.records, subject);
+    if (bound === null || bound !== rendered) {
+      return refuse(
+        "rendered-payload-mismatch",
+        `the reviewing surface says it showed the payload with sha256 ${rendered}, and the execution the sample at seq ${String(subject.seq)} names is bound to ${bound === null ? "no payload hash at all" : bound}. A review's payload_hash says which bytes the reviewer read; one naming bytes that never ran would claim a reading of something else. Nothing was appended.`,
+        { seq: subject.seq },
+      );
+    }
+  }
+
   const payload: Record<string, unknown> = {
     subject_seq: subject.seq,
     subject_event: "audit.sampled",
     reviewed: true,
     verdict,
+    sampled_subject_hash: sampledSubjectHash,
   };
-  if (subject.subjectHash !== null) payload["sampled_subject_hash"] = subject.subjectHash;
+  // Only when the bytes were on the screen (APRV-481): absent says the
+  // reviewer saw a hash, nothing, or a terminal.
+  if (rendered !== undefined) payload["payload_hash"] = rendered;
   if (note !== null && note.trim().length > 0) payload["note"] = note;
   // Written only when it was given. An omitted reaction leaves no key, which is
   // the difference between "the human said nothing" and "the human said
