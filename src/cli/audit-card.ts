@@ -30,7 +30,11 @@
  */
 
 import { claimed, computed, type PayloadRendering } from "../channels/contract.js";
-import type { ReviewCard, ReviewCardFields } from "../channels/telegram.js";
+import {
+  REVIEW_RENDER_INPUT_MAX,
+  type ReviewCard,
+  type ReviewCardFields,
+} from "../channels/telegram.js";
 import { openSamples, type SampledSubject } from "../core/audit.js";
 import { indexDeclarations } from "../core/execute.js";
 import type { EventRecord } from "../core/log.js";
@@ -141,6 +145,12 @@ function renderingFor(material: unknown, boundHash: string): PayloadRendering | 
     const hash = payloadHash(material);
     if (hash !== boundHash) return null;
     const text = JSON.stringify(material, null, 2) ?? String(material);
+    // A card is held in the listener's memory until it settles, and a payload
+    // past this length can only ever be shown by hash, so the card keeps a
+    // bounded prefix marked truncated rather than the whole text.
+    if (text.length > REVIEW_RENDER_INPUT_MAX) {
+      return { value: material, text: text.slice(0, REVIEW_RENDER_INPUT_MAX), hash, truncated: true };
+    }
     return { value: material, text, hash, truncated: false };
   } catch {
     return null;

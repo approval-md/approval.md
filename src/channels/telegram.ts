@@ -2212,6 +2212,23 @@ function trimNotice(text: string): string {
  */
 export const REVIEW_PAYLOAD_BUDGET = 2000;
 
+/**
+ * The longest payload text, in characters, a review card will even try to
+ * render (APRV-480 refutation: review-delivery resource cap).
+ *
+ * Supervised payloads carry no size cap of their own (`PROPOSE_PAYLOAD_MAX_BYTES`
+ * binds proposals only), and the party under review writes them. Without this
+ * bound every render of a card, every redraw after a tap, and every tap's
+ * {@link reviewPayloadView} would run the canonical renderer and HTML escaping
+ * over the whole payload only to conclude "too long", so an agent could make
+ * each review gesture cost work proportional to bytes it chose. Text past this
+ * length is `too-long` without being rendered at all; the card builder
+ * (`cli/audit-card.ts`) keeps no more than this much text in the card it holds.
+ * Eight times the card budget, because a canonical rendering is never that much
+ * shorter than the JSON it renders, and erring here only ever shows the hash.
+ */
+export const REVIEW_RENDER_INPUT_MAX = REVIEW_PAYLOAD_BUDGET * 8;
+
 /** The heading over a payload the card shows whole (APRV-480). */
 export const TELEGRAM_REVIEW_PAYLOAD_BYTES =
   "PAYLOAD — the bytes that ran, shown whole; this review covers them";
@@ -2248,7 +2265,11 @@ export type ReviewPayloadView =
 export function reviewPayloadView(card: ReviewCard): ReviewPayloadView {
   const rendering = card.fields.fullPayload.value;
   const bound = card.fields.payload_hash?.value ?? rendering?.hash ?? null;
-  if (rendering !== null && !rendering.truncated && (bound === null || bound === rendering.hash)) {
+  if (rendering !== null && (bound === null || bound === rendering.hash)) {
+    // Bounded before any rendering work: see REVIEW_RENDER_INPUT_MAX.
+    if (rendering.truncated || rendering.text.length > REVIEW_RENDER_INPUT_MAX) {
+      return { kind: "hash", hash: rendering.hash, reason: "too-long" };
+    }
     const text = payloadRegionText(rendering, card.fields.class.value);
     if (escapeHtml(text).length <= REVIEW_PAYLOAD_BUDGET) {
       return { kind: "bytes", hash: rendering.hash, text };

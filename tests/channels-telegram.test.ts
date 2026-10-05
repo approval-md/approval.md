@@ -107,6 +107,7 @@ import {
   TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY,
   TELEGRAM_REVIEW_PAYLOAD_NONE,
   REVIEW_PAYLOAD_BUDGET,
+  REVIEW_RENDER_INPUT_MAX,
   renderReviewCard,
   reviewPayloadView,
   type ReviewCard,
@@ -5955,7 +5956,11 @@ interface Sampled extends Live {
  * have refused, and the cards are built from the same verified log the CLI
  * reads.
  */
-function sampledWorld(count: number, policyText: string = REVIEW_POLICY): Sampled {
+function sampledWorld(
+  count: number,
+  policyText: string = REVIEW_POLICY,
+  payloadFor?: (index: number) => unknown,
+): Sampled {
   fixtureCounter += 1;
   const prefix = `sampled${fixtureCounter}`;
   const unit = newScenario(scratch.root, policyText);
@@ -5966,7 +5971,7 @@ function sampledWorld(count: number, policyText: string = REVIEW_POLICY): Sample
   const actions = [];
   for (let index = 0; index < count; index += 1) {
     const key = actionKeyFor(prefix, index);
-    const payload = {
+    const payload = payloadFor?.(index) ?? {
       command: `git add -A && git commit -m "wip ${index}"`,
       cwd: "/repo",
     };
@@ -6316,6 +6321,54 @@ test("APRV-480: bytes longer than one card carries are named by hash, whole or n
   assert.equal(drawn.text.includes("y".repeat(50)), false, "a too-long payload was shown in part");
   assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
   assertClean(world.unit);
+});
+
+test("APRV-480: an agent-sized payload costs a review card bounded work (refutation: resource cap)", () => {
+  // The party under review chooses the payload's size, and supervised payloads
+  // have no cap of their own. A rendering past REVIEW_RENDER_INPUT_MAX must be
+  // judged too long WITHOUT the renderer touching its value: this one throws on
+  // any access, so a view that rendered it first fails here.
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const hash = "c".repeat(64);
+  const poisoned = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("the review card rendered a payload past its input bound");
+      },
+      ownKeys() {
+        throw new Error("the review card rendered a payload past its input bound");
+      },
+    },
+  );
+  const card: ReviewCard = {
+    ...base,
+    fields: {
+      ...base.fields,
+      payload_hash: computed(hash, "log"),
+      fullPayload: computed(
+        { value: poisoned, text: "q".repeat(REVIEW_RENDER_INPUT_MAX + 1), hash, truncated: false },
+        "payload-binding",
+      ),
+    },
+  };
+  assert.deepEqual(reviewPayloadView(card), { kind: "hash", hash, reason: "too-long" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY));
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS);
+
+  // And the card builder holds no more than the bound of a large payload's
+  // text, marked truncated, so a held card is not a copy of an agent's bytes.
+  const big = sampledWorld(1, REVIEW_POLICY, () => ({ command: `echo ${"w".repeat(REVIEW_RENDER_INPUT_MAX * 4)}`, cwd: "/repo" }));
+  const held = cardsFor(big)[0] as ReviewCard;
+  const rendering = held.fields.fullPayload.value;
+  assert.ok(rendering !== null, "the builder dropped bytes it holds");
+  assert.equal(rendering?.truncated, true, "a payload past the bound was held whole");
+  assert.equal(rendering?.text.length, REVIEW_RENDER_INPUT_MAX);
+  assert.equal(reviewPayloadView(held).kind, "hash");
+  assertClean(world.unit);
+  assertClean(big.unit);
 });
 
 test("APRV-480: bytes that fit are shown whole, and the card stays one message", () => {
