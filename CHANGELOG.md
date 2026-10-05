@@ -52,9 +52,27 @@ before a tag.
   later grant is refused `request-withdrawn`; a grant that landed first is left
   unspent. The pause before every spend is the one APRV-473 added, shared by
   all six harnesses. Same poll cadence, same `--timeout`. A signal before the
-  wait still takes the default disposition on these five (APRV-477), and a
-  signal during the spend's own lock wait is answered by the verdict reached
-  (APRV-478).
+  wait still takes the default disposition on these five (APRV-477); a signal
+  while the spend waits for the log's lock is covered by APRV-478, below.
+- **Every harness hook: a signal while the spend waits for the log's lock blocks
+  instead of being dropped (APRV-478).** After the wait found a grant and passed
+  its pause, the spend still waited for `events.jsonl.lock` synchronously (up
+  to two seconds per attempt, behind the daemon or any other writer), so a
+  SIGTERM in that stretch was held, the grant was recorded as
+  `execution.started`, the allow was printed, and the signal was then discarded
+  with the wait's listener; the same on all six harnesses. The wait for the
+  lock now runs on the event loop: while another writer holds it the hook
+  sleeps on a timer and tries every 20 ms, and the pause before the spend comes
+  after that wait, immediately before the spend's one try at the lock. A signal
+  during the wait gets the harness's `hook-interrupted` block, nothing is
+  spent, and the grant stays standing for a retry to carry. The same applies to
+  the unattended and autonomous charges and to an open window's `gate.bypassed`.
+  What remains between the last pause and the record is the spend's own read
+  and its single try at the lock. A lock held past the two-second bound still
+  denies with `append-failed` (`lock-timeout`). `approval serve` and the Codex
+  bridge run the same steps synchronously and still block on a held lock for
+  as long as before; the bound there is now counted per round of the spend
+  rather than per head-moved attempt inside the writer.
 - **`approval hook hermes`: a SIGTERM mid-wait withdraws the question, and a
   grant after Hermes gave up starts nothing (APRV-473).** The CLI hook run was
   synchronous end to end, so a SIGTERM during the wait (Hermes's own hook

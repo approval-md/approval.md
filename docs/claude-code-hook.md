@@ -1253,10 +1253,16 @@ the log.
   tracks a guard for this stretch.
 - **The spend.** From that last pause until the start record lands, plus the
   verification read after it, the hook runs synchronously: the spend's own read
-  of the log, its wait for the log's lock (up to two seconds per attempt behind
-  another writer, the daemon included), and its append. A signal there is
-  answered by the verdict the hook already reached, an allow included. APRV-478
-  tracks moving the lock wait onto the event loop.
+  of the log, one try at the log's lock, and its append. A signal there is
+  answered by the verdict the hook already reached, an allow included. The
+  wait for the lock sits before that pause, on the event loop (APRV-478):
+  while another writer holds the lock (the daemon does, routinely), the hook
+  sleeps on a timer and tries again every 20 ms, so a signal during that wait
+  is answered with the deny and nothing is spent. If another writer takes the
+  lock in the instant between the last pause and the try, the hook goes back to
+  waiting on the event loop. A lock held for the whole two-second bound every
+  writer has denies the call with `hook-gate-refused:append-failed`
+  (`lock-timeout`) and appends nothing, as it did before.
 
 What Claude Code does with a hook it killed on its own timeout is its own rule
 (see "When the grant can follow the write" below); `--harness-cap` is what keeps

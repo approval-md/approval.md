@@ -73,6 +73,7 @@ import { createHash } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -367,8 +368,14 @@ export interface AppendOptions extends ValidateOptions {
   expectedHead?: LogHead | null;
 }
 
-const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
-const DEFAULT_LOCK_RETRY_MS = 20;
+/**
+ * How long an append waits for `<log>.lock` before refusing `lock-timeout`, and
+ * how often it tries. Exported (APRV-478) so a caller that waits for the lock
+ * itself, on the event loop rather than in {@link acquireLock}'s synchronous
+ * retry, keeps the same bound and cadence as every other writer.
+ */
+export const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
+export const DEFAULT_LOCK_RETRY_MS = 20;
 
 /** How long a whole-operation lock holder waits before reporting `lock-timeout`. */
 export interface LockOptions {
@@ -543,6 +550,24 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number): LockO
       sleepSync(retryMs);
     }
   }
+}
+
+/**
+ * Is `<logPath>.lock` present right now (APRV-478)?
+ *
+ * ADVISORY, and nothing else. It takes no lock, writes nothing, and authorizes
+ * nothing: the answer can be stale the instant it is returned. It exists so a
+ * caller that must not block its event loop (a harness hook between a grant and
+ * its spend, which has to stay answerable to a signal) can wait out another
+ * writer by sleeping on a timer, and only then make its one synchronous attempt
+ * (`lockTimeoutMs: 0`). That attempt is still {@link acquireLock}'s atomic
+ * create-or-fail, and the head is still compared under the lock, so a probe
+ * that said "free" and was wrong costs a refused attempt and never a shared
+ * `seq`. A probe that cannot stat the path answers `false`, and the attempt
+ * then meets the real error.
+ */
+export function appendLockHeld(logPath: string): boolean {
+  return existsSync(`${logPath}.lock`);
 }
 
 function releaseLock(path: string): void {

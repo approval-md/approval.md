@@ -507,9 +507,10 @@ for (const harness of HARNESSES) {
         // The legitimate allow: the hook read the grant and passed its pause
         // before the spend with no signal dispatched. The signal then landed
         // after the spend, or inside the spend's own synchronous stretch (its
-        // read, its lock wait, its append), which is the documented residue
-        // (APRV-478 tracks the lock wait). The pause itself is pinned
-        // deterministically by the stepped test below, not by this race.
+        // read and its single try at the lock and append), which is the
+        // documented residue; a wait for the lock yields since APRV-478 and is
+        // pinned in tests/harness-spend-lock-wait.test.ts. The pause itself is
+        // pinned deterministically by the stepped test below, not by this race.
         allowed += 1;
         assert.equal(outcome.code, 0, outcome.stderr);
         assert.equal(count(dir, "execution.started"), 1);

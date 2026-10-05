@@ -139,7 +139,14 @@ import {
   type HarnessLoopState,
 } from "../core/loop.js";
 import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
-import type { EventRecord } from "../core/log.js";
+import { HEAD_MOVED_ATTEMPTS, type HeadRetryable } from "../core/head-retry.js";
+import {
+  appendLockHeld,
+  DEFAULT_LOCK_RETRY_MS,
+  DEFAULT_LOCK_TIMEOUT_MS,
+  type AppendOptions,
+  type EventRecord,
+} from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
@@ -2792,8 +2799,112 @@ async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
  * moment it arrives (the process dies with nothing printed and nothing spent),
  * and this pause matters for them at the post-wait spend, where the wait's
  * handler is registered.
+ *
+ * Taken inside {@link spendUnderLock} since APRV-478, immediately before the
+ * spend's one attempt and after any wait for the log's lock, so nothing that can
+ * wait sits between the last pause and the append.
  */
 const BEFORE_SPEND = 0;
+
+/** Did this writer's result fail only because another writer held the lock? */
+function lockTimedOut(result: HeadRetryable): boolean {
+  return !result.ok && result.code === "append-failed" && result.append?.code === "lock-timeout";
+}
+
+/**
+ * Run one spend (an append that authorizes a harness call) without ever waiting
+ * for the log's lock synchronously (APRV-478).
+ *
+ * ## The hole
+ *
+ * Every writer waits for `<log>.lock` inside `core/log.ts`, retrying with an
+ * `Atomics.wait` sleep for up to {@link DEFAULT_LOCK_TIMEOUT_MS}. On the gate
+ * path that wait came AFTER the last pause ({@link BEFORE_SPEND}), so a signal
+ * that arrived while another writer (the daemon, routinely) held the lock was
+ * held by the wait's listener through the whole stretch, the spend appended
+ * `execution.started` and the allow went out, and the wait's `finally` then
+ * removed the listener and the held signal was discarded with it: a start
+ * recorded after the harness had abandoned the call, on every harness.
+ *
+ * ## What this does instead
+ *
+ * The wait for the lock becomes yields of the same generator chain. Each round:
+ *
+ * 1. While the lockfile is present ({@link appendLockHeld}, advisory) and the
+ *    round's budget (the writer's own `lockTimeoutMs`, default
+ *    {@link DEFAULT_LOCK_TIMEOUT_MS}) is not spent, yield the retry interval
+ *    (`lockRetryMs`, default {@link DEFAULT_LOCK_RETRY_MS}). Under
+ *    {@link driveYielding} each is a timer, so the loop's poll phase runs and a
+ *    signal reaches the listener in force: the wait's handler blocks, withdraws
+ *    what it can and exits, and nothing below runs.
+ * 2. {@link BEFORE_SPEND}: the one zero pause, now immediately before the
+ *    attempt, so a signal that landed during the probe itself is dispatched too.
+ * 3. One attempt with `lockTimeoutMs: 0`: the whole spend (a fresh verified read,
+ *    every check, compare-and-append against the head that read saw), whose
+ *    append tries the lock exactly ONCE and never sleeps. The lock protocol is
+ *    `core/log.ts`'s, untouched: atomic create-or-fail, never stolen, the head
+ *    compared under it, so this changes when a writer tries and never what a
+ *    try may do.
+ *
+ * An attempt refused `lock-timeout` after the lock was seen free (another writer
+ * took it between the probe and the try) starts a new round, up to
+ * {@link HEAD_MOVED_ATTEMPTS} rounds, the same patience the head-moved retry has.
+ * One refused after the budget ran out with the lock held the whole time is
+ * final, exactly as a writer's own `lock-timeout` is: the caller denies, and
+ * nothing was appended (fail closed, §11.1 invariant 8).
+ *
+ * What is left between the last pause and the append is the spend's own read
+ * of the log and its single try at the lock: milliseconds, never a wait on
+ * another process. A signal there is answered by the verdict the spend reaches.
+ *
+ * Under {@link driveSync} (`commandHook` in process and in the serve worker,
+ * `decideHarnessCall` for the Codex bridge) the yields are `Atomics.wait`
+ * sleeps of the same length, so those callers still block on a held lock
+ * exactly as long and as often as before. The one difference is accounting:
+ * the bound is per round here, where it was per head-moved attempt inside the
+ * writer, so a log under sustained contention is refused no later than before
+ * and sometimes sooner (the stricter direction).
+ *
+ * `attempt` receives the append options to use, which are the caller's own with
+ * `lockTimeoutMs: 0`, and the round number (1-based), for a caller whose first
+ * attempt may reuse a read it already holds and whose later ones may not.
+ */
+function* spendUnderLock<R extends HeadRetryable>(
+  logPath: string,
+  append: AppendOptions | undefined,
+  attempt: (once: AppendOptions, round: number) => R,
+): GateSteps<R> {
+  const budgetMs = Math.max(0, append?.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
+  // Never a zero retry: under `driveSync` a zero pause is no pause, and the
+  // probe loop would spin.
+  const retryMs = Math.max(1, append?.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS);
+  const once: AppendOptions = { ...append, lockTimeoutMs: 0 };
+  for (let round = 1; ; round += 1) {
+    const deadline = Date.now() + budgetMs;
+    let sawFree = false;
+    for (;;) {
+      if (!appendLockHeld(logPath)) {
+        sawFree = true;
+        break;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      yield Math.min(retryMs, left);
+    }
+    yield BEFORE_SPEND;
+    const result = attempt(once, round);
+    if (!lockTimedOut(result)) return result;
+    if (sawFree && round < HEAD_MOVED_ATTEMPTS) continue;
+    const why = sawFree
+      ? `another writer took the lock first in each of ${String(round)} rounds`
+      : `another writer held it for the whole ${String(budgetMs)} ms this spend waits`;
+    // A copy, as `core/head-retry.ts` makes its own: only the message changes.
+    return {
+      ...result,
+      message: `${result.message ?? "lock-timeout"}; the spend waited for the log's lock on the event loop, trying it once every ${String(retryMs)} ms, and ${why} (APRV-478). Nothing was appended.`,
+    } as R;
+  }
+}
 
 function truncate(text: string, limit: number): string {
   const collapsed = text.replace(/\s+/gu, " ").trim();
@@ -3692,8 +3803,12 @@ function withdrawAbandoned(
  * is about (APRV-146). The gate requires it and compares it against what the
  * human answered: the same value keyed the carryover that found these grants, so
  * presenting it states, at the spend, the fact the match was made on.
+ *
+ * Steps since APRV-478: each key is spent through {@link spendUnderLock}, so a
+ * wait for the log's lock is a yield and the shared pause before the spend
+ * ({@link BEFORE_SPEND}) is taken there, immediately before each append.
  */
-function consumeGrants(
+function* consumeGrants(
   run: HookRun,
   keys: readonly string[],
   hash: string,
@@ -3703,13 +3818,16 @@ function consumeGrants(
    * when they are the same tool call; anything else records `carried`.
    */
   task: string,
-): { code: string; message: string } | null {
+): GateSteps<{ code: string; message: string } | null> {
   for (const key of keys) {
-    const spent = consumeHarnessGrant(run.logPath, key, run.actor, {
-      ...run.options,
-      presentedPayloadHash: hash,
-      spendingTask: task,
-    });
+    const spent = yield* spendUnderLock(run.logPath, run.options.append, (append) =>
+      consumeHarnessGrant(run.logPath, key, run.actor, {
+        ...run.options,
+        append,
+        presentedPayloadHash: hash,
+        spendingTask: task,
+      }),
+    );
     if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
   }
   return null;
@@ -3897,19 +4015,24 @@ function harnessFloor(
  * declaration would buy no oversight and would double the volume of exactly the
  * traffic this is trying not to drown the log in. The supervised classes are
  * registered already, by the caller, which is what makes them sampleable.
+ *
+ * Steps since APRV-478, for the reason {@link consumeGrants} gives: each class
+ * is recorded through {@link spendUnderLock}, which takes the shared pause.
  */
-function recordUnattended(
+function* recordUnattended(
   run: HookRun,
   task: string,
   classes: readonly string[],
   hash: string,
-): { code: string; message: string } | null {
+): GateSteps<{ code: string; message: string } | null> {
   for (const cls of classes) {
-    const started = startHarnessExecution(
-      run.logPath,
-      { task, actionKey: `${task}:${cls}`, cls, payload_hash: hash },
-      run.actor,
-      run.options,
+    const started = yield* spendUnderLock(run.logPath, run.options.append, (append) =>
+      startHarnessExecution(
+        run.logPath,
+        { task, actionKey: `${task}:${cls}`, cls, payload_hash: hash },
+        run.actor,
+        { ...run.options, append },
+      ),
     );
     if (!started.ok) return { code: started.code, message: `${cls}: ${started.message}` };
   }
@@ -4429,9 +4552,9 @@ function* gateHarnessSteps(
       // SPEC.md §6.3), so there is nothing to wait for and nothing to spend.
       // What there is, since APRV-141, is something to charge: the start event
       // is this execution's authorization, and the registration `fresh` just
-      // wrote is what makes it a sampleable one.
-      yield BEFORE_SPEND;
-      const charged = recordUnattended(run, task, classes, hash);
+      // wrote is what makes it a sampleable one. The shared pause before the
+      // spend is taken inside (APRV-473, APRV-478).
+      const charged = yield* recordUnattended(run, task, classes, hash);
       if (charged !== null) {
         return sayDeny(`hook-gate-refused:${charged.code}`, charged.message);
       }
@@ -4441,8 +4564,7 @@ function* gateHarnessSteps(
     }
     // Every gated class carried an unspent grant: a human already answered this
     // exact question about these exact bytes, and nobody is asked again.
-    yield BEFORE_SPEND;
-    const failed = consumeGrants(run, spendKeys, hash, task);
+    const failed = yield* consumeGrants(run, spendKeys, hash, task);
     if (failed !== null) {
       return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
     }
@@ -4731,19 +4853,20 @@ function* gateHarnessSteps(
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
           //
-          // APRV-473. One turn of the event loop first: a signal that arrived
-          // while this read ran is dispatched here, to the handler above, which
-          // withdraws (a no-op now the request is decided, refused
-          // `already-decided`), blocks and exits. The grant is then left
-          // unspent rather than recorded as the start of a call the harness gave
-          // up on.
-          yield BEFORE_SPEND;
+          // APRV-473, APRV-478. `consumeGrants` turns the event loop before it
+          // spends: once per retry while another writer holds the log's lock,
+          // and once more (`BEFORE_SPEND`) immediately before each append. A
+          // signal that arrived while this read ran, or while the spend waited
+          // for the lock, is dispatched there, to the handler above, which
+          // blocks, withdraws (a no-op now the request is decided, refused
+          // `already-decided`) and exits. The grant is then left unspent rather
+          // than recorded as the start of a call the harness gave up on.
           leaveWait();
           // Looked at again now the lock is held: re-taking it may have waited,
           // and a caller that left meanwhile must not have its grant spent on a
           // verdict nobody will receive. The retry is who spends it.
           if (callerGone()) return sayGone();
-          const failed = consumeGrants(run, spendKeys, hash, task);
+          const failed = yield* consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
           }
@@ -6261,29 +6384,35 @@ function* runBypass(
 
   // APRV-473 refuter: the bypass record is this path's authorization, exactly
   // as `execution.started` is the gated path's, so a signal held through the
-  // stdin read is dispatched before it is written (`BEFORE_SPEND`).
-  yield BEFORE_SPEND;
-  const recorded = recordGateBypass(
-    logPath,
-    {
-      tool: input.toolName,
-      summary: truncate(described.headline, SUMMARY_LIMIT),
-      classes,
-      payloadHash: payloadHash(described.payload),
-      ...(input.sessionId === UNKNOWN_SESSION ? {} : { sessionId: input.sessionId }),
-      ...(input.toolUseId === null ? {} : { toolUseId: input.toolUseId }),
-      ...(input.cwd.length === 0 ? {} : { cwd: input.cwd }),
-      ...(provenance === null ? {} : { harness: provenance }),
-    },
-    actor,
-    {},
-    // APRV-294: the window this verdict was decided under, and the read it was
-    // decided on. The append uses both, so a window that ended in between is
-    // reported as the thing that happened rather than as "no window is open".
-    {
-      openedSeq: window.seq,
-      ...(decidedOn === null ? {} : { read: decidedOn }),
-    },
+  // stdin read is dispatched before it is written (`BEFORE_SPEND`, taken
+  // inside `spendUnderLock`, after any wait for the log's lock, which yields:
+  // APRV-478).
+  const recorded = yield* spendUnderLock(logPath, undefined, (append, round) =>
+    recordGateBypass(
+      logPath,
+      {
+        tool: input.toolName,
+        summary: truncate(described.headline, SUMMARY_LIMIT),
+        classes,
+        payloadHash: payloadHash(described.payload),
+        ...(input.sessionId === UNKNOWN_SESSION ? {} : { sessionId: input.sessionId }),
+        ...(input.toolUseId === null ? {} : { toolUseId: input.toolUseId }),
+        ...(input.cwd.length === 0 ? {} : { cwd: input.cwd }),
+        ...(provenance === null ? {} : { harness: provenance }),
+      },
+      actor,
+      { append },
+      // APRV-294: the window this verdict was decided under, and the read it
+      // was decided on. The append uses both, so a window that ended in
+      // between is reported as the thing that happened rather than as "no
+      // window is open". The read seeds the FIRST round only: a later round
+      // exists because another writer took the lock, so that read's head is
+      // already known to be stale, and `recordGateBypass` re-reads.
+      {
+        openedSeq: window.seq,
+        ...(decidedOn === null || round > 1 ? {} : { read: decidedOn }),
+      },
+    ),
   );
   if (!recorded.ok) {
     // Invariant 8: the record lands before the allow, so a refusal here is a
@@ -7091,9 +7220,9 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     // since APRV-141 is the execution record itself — the moment the policy
     // authorized this command — because a budget the busiest path does not
     // charge is not a budget. See `recordUnattended`. A held signal is
-    // dispatched first (APRV-473, `BEFORE_SPEND`).
-    yield BEFORE_SPEND;
-    const charged = recordUnattended(run, task, classes, payloadHash(payload));
+    // dispatched first, at the pause it takes before the append (APRV-473,
+    // `BEFORE_SPEND`), and a wait for the log's lock yields (APRV-478).
+    const charged = yield* recordUnattended(run, task, classes, payloadHash(payload));
     if (charged !== null) {
       return {
         permission: "deny",
