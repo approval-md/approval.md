@@ -453,10 +453,12 @@ sends SIGTERM on its own hook timeout and on gateway shutdown, and from that
 moment it has abandoned the tool call. So a SIGTERM or SIGINT that reaches the
 hook while it waits on a human ends the wait at once, in this order:
 
-1. the question this invocation opened is withdrawn (`approval.withdrawn`,
+1. stdout carries `{"action":"block","message":"hook-interrupted: the hook
+   received SIGTERM while waiting for a decision; nothing authorizes this call"}`,
+   written first since APRV-475 so the block is out before the withdrawal can
+   wait on the log's lock;
+2. the question this invocation opened is withdrawn (`approval.withdrawn`,
    reason `cancelled`, the note naming the signal);
-2. stdout carries `{"action":"block","message":"hook-interrupted: the hook
-   received SIGTERM while waiting for a decision; nothing authorizes this call"}`;
 3. the process exits 2.
 
 A grant that arrives afterwards is refused `request-withdrawn`, and nothing

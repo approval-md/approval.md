@@ -1185,10 +1185,11 @@ second retry after the grant has been spent is refused through the ordinary path
 it files a fresh request and waits like any other.
 
 **What still withdraws.** Every path where nothing can adopt the question: a
-`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending), an
-unexpected failure mid-wait, and an intake refusal partway through a multi-class
-command. Withdrawal remains requester-only, so an adopted request is never
-withdrawn by the process that adopted it.
+`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending; see
+"When a signal ends the wait" below), an unexpected failure mid-wait, and an
+intake refusal partway through a multi-class command. Withdrawal remains
+requester-only, so an adopted request is never withdrawn by the process that
+adopted it.
 
 **What the human sees.** A pending prompt stays live and keeps its buttons until
 it is answered or the TTL lapses, and every terminal state still annotates the
@@ -1198,6 +1199,68 @@ reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is 
 deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
+
+### When a signal ends the wait (APRV-475)
+
+A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
+Claude Code has stopped waiting for this tool call: its own hook timeout, the
+session ending, a Ctrl-C. The hook ends the wait at once, in this order:
+
+1. stdout carries Claude Code's ordinary deny,
+   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`,
+   written before anything else so a harness that follows its SIGTERM with a
+   SIGKILL is already holding the block;
+2. the question this invocation opened is withdrawn (`approval.withdrawn`,
+   reason `cancelled`, the note naming the signal). The withdrawal can wait up
+   to the log's lock timeout behind another writer; one that does not land
+   leaves the question open, as a timed-out one is;
+3. the process exits 0, the code at which Claude Code reads that verdict. If
+   stdout could not take the whole line (a closed pipe, a short write), it exits
+   2 instead, which Claude Code reads as a blocking error on its own.
+
+A grant that arrives afterwards is refused `request-withdrawn`, and nothing
+records `execution.started` for the call. If the human's grant landed in the log
+first, between two polls, the withdrawal is refused `already-decided` and writes
+nothing over the decision; the hook still denies and the grant stays unspent, so
+a retry inside the grace can carry it like any grant. A question this invocation
+adopted from an earlier tool call is left alone, because a withdrawal belongs to
+the requester.
+
+Until APRV-475 the wait was a synchronous poll, so a signal was held until the
+wait returned and then discarded with the wait's listener: the hook answered
+whatever the wait reached, and a grant that landed meanwhile was recorded as the
+start of a call Claude Code had abandoned. The pauses between polls now run on the event
+loop, on the same `--interval` cadence and inside the same `--timeout`, so a
+signal is dispatched within one pause. The hook also passes through a poll phase
+of the loop before it records the spend of a grant the wait found, so a signal
+that landed while the poll read that grant is answered with the deny before
+anything is spent. That pause is the same code for every harness this runtime
+gates (`BEFORE_SPEND` in `src/cli/hook.ts`); `docs/hermes-hook.md` explains why
+it is two `setImmediate` hops.
+
+Two stretches are outside that rule. Neither lets a start follow a signal the
+hook had already seen, and only the first is safe for the call as well as for
+the log.
+
+- **Before the wait.** The hook registers no signal listener until it starts
+  polling, so a signal before that, including the stretch in which it appends
+  its requests, ends the process at once by its default disposition, with
+  nothing printed and nothing spent. A request already opened stays open as a
+  timed-out one does, under the retry grace below. Claude Code reads a killed
+  hook as a non-blocking error, so the tool call then proceeds with nothing in
+  the log authorizing it (the reading the `--harness-cap` section above
+  describes for a killed hook). APRV-477
+  tracks a guard for this stretch.
+- **The spend.** From that last pause until the start record lands, plus the
+  verification read after it, the hook runs synchronously: the spend's own read
+  of the log, its wait for the log's lock (up to two seconds per attempt behind
+  another writer, the daemon included), and its append. A signal there is
+  answered by the verdict the hook already reached, an allow included. APRV-478
+  tracks moving the lock wait onto the event loop.
+
+What Claude Code does with a hook it killed on its own timeout is its own rule
+(see "When the grant can follow the write" below); `--harness-cap` is what keeps
+the hook answering before that kill.
 
 ### How long the question outlives the wait (APRV-287)
 

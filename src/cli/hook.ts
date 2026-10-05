@@ -1307,6 +1307,66 @@ export function hermesInterruptedDirective(signal: NodeJS.Signals): string {
   ).stdout;
 }
 
+/**
+ * The block directive a harness wait answers when a SIGTERM or SIGINT ends it
+ * (APRV-473 for Hermes, APRV-475 for every harness), as bytes and exit code.
+ *
+ * It is the harness's ORDINARY deny, built by {@link harnessBlockDirective}
+ * and so by {@link deny}, under the `hook-interrupted` code: the nested
+ * `hookSpecificOutput` deny at exit 0 for Claude Code, Codex and Muse,
+ * `{permission:"deny"}` at exit 0 for Cursor, `{decision:"deny"}` at exit 2
+ * for Grok, `{action:"block"}` at exit 2 for Hermes. One construction site per
+ * harness, so the answer to an interruption is spelled exactly as every other
+ * refusal that harness receives from this hook, and a harness that blocks on
+ * those blocks on this. `tests/harness-wait-interrupt.test.ts` pins the bytes
+ * per harness.
+ */
+export function interruptedWaitDirective(
+  signal: NodeJS.Signals,
+  harness: HarnessKind,
+): { stdout: string; exitCode: number } {
+  return harnessBlockDirective(
+    "hook-interrupted",
+    `the hook received ${signal} while waiting for a decision; nothing authorizes this call`,
+    harness,
+  );
+}
+
+/**
+ * The exit code an interrupted wait leaves with when stdout would not take its
+ * directive whole (APRV-475): a closed pipe, or a short write.
+ *
+ * 2, because with an empty or torn stdout the exit code is the whole verdict,
+ * and 2 is the one code these harnesses read as a block on its own: Claude Code
+ * documents it as a blocking error, Grok as its deny, Hermes blocks on it
+ * unconditionally, Muse's live probe blocked on it with an empty stdout, and a
+ * Cursor entry with `failClosed` blocks on any non-zero exit. Exiting 0 there
+ * would be the one wrong answer on the harnesses whose deny is exit 0 with a
+ * body: an exit 0 with no body is no verdict, and those harnesses run the call.
+ */
+const INTERRUPTED_BARE_EXIT = 2;
+
+/**
+ * Answer an interrupted wait (APRV-475), and return the code to exit with.
+ *
+ * Writes {@link interruptedWaitDirective} synchronously to fd 1, because the
+ * `process.exit` that follows does not wait for a stream to drain. Returns the
+ * directive's own exit code, or {@link INTERRUPTED_BARE_EXIT} when the write
+ * threw or came up short. Called by the wait's signal handler only, BEFORE its
+ * withdrawal, so the block is on stdout however long the withdrawal waits for
+ * the log's lock.
+ */
+function writeInterruptedWait(signal: NodeJS.Signals, harness: HarnessKind): number {
+  const directive = interruptedWaitDirective(signal, harness);
+  let whole = false;
+  try {
+    whole = writeSync(1, directive.stdout) === Buffer.byteLength(directive.stdout);
+  } catch {
+    // stdout is gone; the exit code is the whole verdict.
+  }
+  return whole ? directive.exitCode : INTERRUPTED_BARE_EXIT;
+}
+
 /** The machine-readable code a Hermes `execute_code` call is refused with. */
 export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
@@ -2653,11 +2713,16 @@ function sleepSync(ms: number): void {
  *   callers and the serve worker, `decideHarnessCall` for the Codex bridge. A
  *   zero pause is no pause, so their behaviour is what it was.
  * - {@link driveYielding} sleeps each pause on a timer, so the event loop turns
- *   while the hook waits and a JS signal listener runs then. The
- *   `approval hook hermes` CLI route runs through it: Hermes sends SIGTERM on
- *   its hook timeout and on gateway shutdown, and a signal held through a
- *   synchronous wait let a grant that landed afterwards record
- *   `execution.started` for a call Hermes had already abandoned.
+ *   while the hook waits and a JS signal listener runs then. Every
+ *   `approval hook <harness>` CLI route runs through it: Hermes first
+ *   (APRV-473), which sends SIGTERM on its hook timeout and on gateway
+ *   shutdown, then Claude Code, Cursor, Codex, Grok and Muse (APRV-475). A
+ *   signal held through a synchronous wait let a grant that landed afterwards
+ *   record `execution.started` for a call the harness had already abandoned.
+ *   The harness makes no difference to the steps: the pause before a spend
+ *   ({@link BEFORE_SPEND}) and the wait's withdrawing handler are the same code
+ *   for all six, and only the directive the handler prints is the harness's
+ *   own ({@link interruptedWaitDirective}).
  *
  * The pauses are the same durations under either driver, so the deadline
  * arithmetic and the poll cadence do not depend on which one runs them.
@@ -2719,6 +2784,14 @@ async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
  * up on. With it, the listener in force runs first: the wait's handler
  * withdraws the question and blocks, the early guard (`hermesFailClosed`)
  * blocks, and either one exits the process before the spend is reached.
+ *
+ * Shared by every harness (APRV-475): it is a yield inside the one gate chain,
+ * so there is no per-harness copy to drift. A signal is HELD only while some
+ * JS listener for it is registered. Outside the wait, the harnesses other than
+ * Hermes register none, so there a signal takes its default disposition the
+ * moment it arrives (the process dies with nothing printed and nothing spent),
+ * and this pause matters for them at the post-wait spend, where the wait's
+ * handler is registered.
  */
 const BEFORE_SPEND = 0;
 
@@ -4411,16 +4484,31 @@ function* gateHarnessSteps(
   // these signals is to die, and a handler that only withdrew would leave the
   // hook wedged in its poll loop with the harness waiting on it.
   //
-  // APRV-473. On the `approval hook hermes` CLI route this handler now gets its
-  // turn: the wait yields to the event loop between polls (`driveYielding`), so
-  // a signal is dispatched within one pause of its arrival instead of being
-  // held until the wait returns. It exits, so nothing after it in this function
-  // runs: no poll reads the grant a human gives afterwards, and nothing spends
-  // it. Every other route drives these steps synchronously, where the handler
-  // still runs only after the wait (the CLI) or never (a serve worker thread,
-  // which signals do not reach; its caller's departure is `callerGone`).
+  // APRV-473, APRV-475. On every `approval hook <harness>` CLI route this
+  // handler gets its turn: the wait yields to the event loop between polls
+  // (`driveYielding`), so a signal is dispatched within one pause of its
+  // arrival instead of being held until the wait returns. It exits, so nothing
+  // after it in this function runs: no poll reads the grant a human gives
+  // afterwards, and nothing spends it. The synchronous callers (`commandHook`
+  // in process, the Codex bridge's `decideHarnessCall`, a serve worker thread)
+  // drive these steps with `driveSync`, under which this listener is
+  // registered and removed without the loop ever turning, so it never runs
+  // there and never writes into a stdout that is not a hook's (the bridge's is
+  // a JSON-RPC channel). A serve thread's caller departing is `callerGone`.
   const onSignal = (signal: NodeJS.Signals): void => {
     leaveWait();
+    // APRV-445, APRV-475. A harness tearing down may still read the verdict,
+    // and on several harnesses an exit with nothing on stdout is not a block
+    // (Hermes reads it as an ALLOW unless the exit is 2; Claude Code, Codex
+    // and Muse read most such exits as a failed hook and run the call). So the
+    // harness's own block directive goes out FIRST, in its own dialect,
+    // written synchronously, before the withdrawal: the withdrawal is a
+    // compare-and-append that can wait up to the lock timeout behind another
+    // writer, and a harness that escalates SIGTERM to SIGKILL inside that wait
+    // must already be holding the block (APRV-475 refuter). The directive does
+    // not depend on the withdrawal's outcome, and a withdrawal that never lands
+    // leaves the question open as a timed-out one is.
+    const exitCode = writeInterruptedWait(signal, run.harness);
     try {
       withdrawPending(
         run,
@@ -4430,30 +4518,13 @@ function* gateHarnessSteps(
       );
     } catch (cause) {
       // The withdrawal failed outright (an I/O fault inside the append). The
-      // verdict below still goes out: a block with the question left standing
+      // block is already on stdout: a block with the question left standing
       // is the stricter of the two outcomes this handler can still reach.
       streams.err(
         `approval: the hook could not withdraw its request after ${signal}: ${cause instanceof Error ? cause.message : String(cause)}\n`,
       );
     }
-    // APRV-445. On Hermes an exit with nothing on stdout is an ALLOW unless the
-    // exit is 2, and a harness tearing down may still read the verdict. So the
-    // block directive goes out first, written synchronously because
-    // `process.exit` below does not wait for a stream to drain.
-    if (run.harness === "hermes") {
-      const directive = harnessBlockDirective(
-        "hook-interrupted",
-        `the hook received ${signal} while waiting for a decision; nothing authorizes this call`,
-        "hermes",
-      );
-      try {
-        writeSync(1, directive.stdout);
-      } catch {
-        // stdout is gone; the exit code below is the whole verdict.
-      }
-      process.exit(HERMES_DENY_EXIT);
-    }
-    process.exit(EXIT_USAGE);
+    process.exit(exitCode);
   };
   const onTerm = (): void => onSignal("SIGTERM");
   const onInt = (): void => onSignal("SIGINT");
@@ -7254,13 +7325,15 @@ export function commandHook(
 /**
  * {@link commandHook}, with its pauses on the event loop (APRV-473).
  *
- * The `approval hook hermes` CLI route, from `main`. The same steps as the
- * synchronous form; the difference is that a SIGTERM or SIGINT reaches the
- * listener in force within one pause of arriving, instead of after the run
- * returns. In the wait that listener withdraws the question this invocation
- * opened, prints the `hook-interrupted` block directive and exits 2, so a grant
- * that lands after Hermes abandoned the call is never spent on it. See
- * {@link GateSteps} and {@link BEFORE_SPEND}.
+ * Every `approval hook` CLI route, from `main`: Hermes since APRV-473, the
+ * other five harnesses (and `classify`, which never pauses) since APRV-475.
+ * The same steps as the synchronous form; the difference is that a SIGTERM or
+ * SIGINT reaches the listener in force within one pause of arriving, instead
+ * of after the run returns. In the wait that listener withdraws the question
+ * this invocation opened, prints the harness's own `hook-interrupted` block
+ * directive ({@link interruptedWaitDirective}) and exits with that directive's
+ * exit code, so a grant that lands after the harness abandoned the call is
+ * never spent on it. See {@link GateSteps} and {@link BEFORE_SPEND}.
  */
 export function commandHookYielding(
   argv: string[],
@@ -7275,6 +7348,25 @@ export function commandHookYielding(
   // so its failure is swallowed (APRV-473 refuter).
   process.stderr.on("error", () => undefined);
   return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
+}
+
+/**
+ * The steps {@link commandHook} and {@link commandHookYielding} drive, for a
+ * test that drives them itself (APRV-475 refuter).
+ *
+ * A test seam and nothing more: it exists so a test can stop at each pause and
+ * look at the log, which is the only deterministic way to pin that the pause
+ * before a spend ({@link BEFORE_SPEND}) sits between the read that found a
+ * grant and the append that spends it, on every harness. No CLI route and no
+ * embedding caller uses it; the one entry for those is the two drivers above.
+ */
+export function commandHookSteps(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string,
+): Generator<number, number, undefined> {
+  return hookSteps(argv, streams, cwd, readStdin, null);
 }
 
 function* hookSteps(

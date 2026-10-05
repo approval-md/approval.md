@@ -181,6 +181,33 @@ covers the launch and never what the launched session then does, which is what
 this adapter exists to bring back inside the gate. See
 [docs/claude-code-hook.md](claude-code-hook.md#launching-an-agent-harness-aprv-354).
 
+## When a signal ends the wait (APRV-475)
+
+A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
+Grok has stopped waiting for the call. The hook ends the wait at once: it
+first prints Grok's deny,
+`{"decision":"deny","reason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}`,
+then withdraws the question this invocation opened (`approval.withdrawn`,
+reason `cancelled`, the note naming the signal), and exits **2**, the code Grok
+reads as the deny. If stdout cannot take the
+whole line it still exits 2, so on this harness the verdict survives a closed
+pipe. A grant that arrives afterwards is refused `request-withdrawn`, and
+nothing records `execution.started` for the call. A grant that landed first,
+between two polls, is left standing and unspent (the withdrawal is refused
+`already-decided`), and the hook still denies.
+
+The pauses between polls run on the event loop on the same cadence and inside
+the same `--timeout`, and the hook passes through a poll phase of the loop
+before it spends a grant the wait found, the same code for every harness.
+`docs/claude-code-hook.md` ("When a signal ends the wait") states the two
+stretches outside the rule. One of them matters more here: before the wait the
+hook registers no signal listener, so a signal there ends the process by its
+default disposition with nothing printed and nothing spent, and Grok reads a
+hook that died as a crash, which its contract treats as "no opinion" (the list
+this page opens with). The call then runs with nothing in the log authorizing
+it. A runtime guard for that stretch on the non-Hermes harnesses is filed as a
+follow-up (APRV-477).
+
 ## Running the probe
 
 APRV-243 AC1 is the one criterion still open, it is Carter's, and since APRV-418
