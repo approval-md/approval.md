@@ -311,6 +311,43 @@ that is due to a refusal of anything: it is a warning on `log verify`, a
 doctor`'s `checkpoint` row. A gate that held up an action for want of a tap is a
 gate whose operator turns the check off.
 
+## log unlock
+
+Takes over `events.jsonl.lock` from a writer that died holding it, when no
+writer could do that itself, and records it.
+
+```
+approval log unlock --pid <n|none> --as human:<id> [--log <path>] [--json]
+```
+
+**Why a person.** Every writer that finds the lock held waits out its whole
+lock timeout (two seconds) and then judges the holder once. It takes the lock
+back by itself only when it can prove the holder gone: the holder ran in this
+writer's own pid namespace and boot, and `kill(pid, 0)` answers ESRCH (on Linux
+also with `/proc/<pid>` absent or a zombie, or the pid now names a process that
+started later), or the lockfile names no holder and is ten minutes old. Any
+other holder (another container, another boot, a pid answering EPERM, a `/proc`
+it cannot read) is never taken automatically, because a wrong reclaim forks the
+chain. The writer's `lock-timeout` refusal then names the pid and this command.
+
+**What it does.** It reads the lockfile strictly, refuses a `--pid` that is not
+the one the record names (`none` for a lockfile with no holder record), refuses
+a holder it sees running (Linux: the same start time in this namespace;
+elsewhere: the pid on this host in this boot), and refuses beside a `log sync`
+snapshot. It then takes the lock exactly as a writer's reclaim does (an
+exclusive `link(2)` to `<lock>.stale.<pid>.<created ms>`, then a `rename(2)` of
+its own lockfile over the lock's path) and appends `audit.lock_reclaimed` as the
+first record under it, with your `human:` actor, the strictly parsed holder and
+the lock's age. A stale name a dead reclaimer or anyone else left is cleared
+first. Anything at the lock's path that is not a lockfile (a FIFO, a link, a
+malformed file) is not taken: the refusal says to `rm -v` it.
+
+**Run it only when no writer is running.** The verb asserts, on your word, that
+the holder is gone. Human-only: the actor comes from `--as` or `APPROVAL_HUMAN`,
+the schema refuses an `agent:` actor on the record, and `core/command-class.ts`
+classifies the invocation `policy.core`, so the harness hook denies an agent
+that tries it. Exit 0 when it unlocked or there was no lock; 4 when it refused.
+
 ## log follow
 
 `approval log follow --from <seq> --json` is the channel-independent decision

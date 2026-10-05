@@ -496,43 +496,39 @@ A hook killed in the middle of an append no longer wedges the gate (APRV-479).
 Under the `approval` bin a Hermes hook always has a signal listener, so a
 SIGTERM during an append waits for the lock to be released; what used to wedge
 the gate is the kill that cannot be caught (a gateway restart that escalates to
-SIGKILL, a sandbox stopped under it), which left `events.jsonl.lock` behind and
-every later writer, the daemon included, refusing `lock-timeout` until a human
-removed the file. The lockfile now names its holder, and the next writer that
-finds it held takes it back when that holder is provably gone (on Linux: the same
-boot id and pid namespace, and `/proc/<pid>` absent with `kill(pid, 0)` answering
-ESRCH, a zombie, or a later process under the same pid), and the record of the
-reclaim, `audit.lock_reclaimed`, is appended by whichever writer takes the lock
-next, before its own record. A live holder's lock is never taken, nor one this
-process cannot check: a `/proc` entry hidden or unreadable to it (hidepid, the
-daemon and the hook under different uids), a `/proc` that is not its own pid
-namespace's, a holder in another container's pid namespace, or one under another
-boot id (an earlier boot of the host, or another sandbox kernel sharing the
-volume). A lockfile with no holder record (an older version's) is taken only
-once it is ten minutes old. The first spend that meets such a lock waits out its
-two-second bound on the event loop and then reclaims it on its single try, so
-the self-heal costs that one call two seconds.
+SIGKILL), which left `events.jsonl.lock` behind and every later writer, the
+daemon included, refusing `lock-timeout` until a human removed the file. The
+lockfile now names its holder. A writer that has waited out its whole
+two-second lock timeout judges that holder once, and takes the lock only when it
+can prove the holder gone in its own pid namespace and boot: `kill(pid, 0)`
+answers ESRCH with `/proc/<pid>` absent or a zombie, or the pid now names a
+process that started later. It claims the lock with one exclusive `link(2)`,
+takes it with one `rename(2)` of its own lockfile, and appends
+`audit.lock_reclaimed` as the first record under it. That is the village's
+ordinary kill: a hook SIGKILLed while its container stays up. A Railway
+recreate gives the service a fresh filesystem, so it leaves no lock behind. The
+first spend that meets a dead holder's lock waits out its two-second bound on
+the event loop and then takes it on its single try, so the self-heal costs that
+one call two seconds.
 
-What still wedges is a lock no writer can prove gone; each costs a human one
-command, run from the store root once they have checked that no writer named in
-`cat .approval/log/events.jsonl.lock` is still running. A hand removal is not
-recorded in the log.
+Anything a writer cannot judge stays locked for a person, and the
+`lock-timeout` refusal says which case it is and names the pid. Each costs one
+command from the store root, run once nothing that could hold the lock is
+running:
 
 | what happened | why no writer takes the lock | the command |
 | --- | --- | --- |
-| A Linux host rebooted, or the volume moved to another host, while a writer held the lock | another boot id is live | `rm -v .approval/log/events.jsonl.lock` |
-| A container or sandbox was recreated mid-append (the village's common kill) | another pid namespace is live | the same |
-| A microVM or gVisor sandbox restarted (a kernel per sandbox) | another boot id, every time | the same |
-| A macOS host rebooted and the pid was reused, or the hostname changed | a running pid, or another host, is live | the same |
-| A writer was killed between creating the lockfile and writing its record | an empty lockfile ages out after ten minutes | wait, or the same |
-| Sixteen reclaimers of one lockfile were killed mid-reclaim | the claim chain is exhausted | the same |
-| A FIFO, link or oversized file sits at the lock's path | it is never read, so never judged | the same |
-| A writer refuses `reclaim-pending-unreadable` | `events.jsonl.lock.d/pending` cannot be listed | `chmod u+rwx .approval/log/events.jsonl.lock.d/pending` |
-| A writer refuses `lock-timeout` beside a sync snapshot | a sync may have stopped part way (by design) | `approval log verify`, then `approval log sync` |
+| A writer in another container sharing the volume, or before a host reboot, died holding the lock | another pid namespace or boot id is never judged | `approval log unlock --pid <n>` |
+| macOS: the host rebooted, or the clock was stepped by more than 60 s, since the lock was taken | the boot readings differ, so the pid proves nothing | the same |
+| A writer was killed between creating the lockfile and writing its record | an empty lockfile ages out after ten minutes | wait, or `approval log unlock --pid none` |
+| A reclaimer was SIGKILLed between its claim and its take, or a file sits at `events.jsonl.lock.stale.<pid>.<ms>` | that name is the one claim a writer may make, and it is never judged | `approval log unlock --pid <n>` |
+| A FIFO, a link or a malformed file sits at the lock's path | it is not a lockfile, so it is never judged | `rm -v .approval/log/events.jsonl.lock` |
+| A writer refuses `lock-timeout` beside a sync snapshot | a sync may have stopped part way (by design) | `approval log verify`, `approval log sync`, then `approval log unlock --pid <n>` |
 
-`rm -v` prints `removed '.approval/log/events.jsonl.lock'` on Linux. What a
-writer recorded as `unverified` sits in `events.jsonl.lock.d/quarantine/`,
-named by the record's `reclaim_id`, for a human to look at; nothing reads it.
+`approval log unlock` is human-only (the hook denies it to an agent). It refuses
+a pid that is not the lockfile's and a holder it can see running, takes the
+lock the way a writer's reclaim does, and records `audit.lock_reclaimed` under
+the person's own `human:` actor. A hand `rm` is not recorded in the log.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was

@@ -114,68 +114,58 @@ before a tag.
 
 ### Log
 
-- **A lock left by a writer that died holding it is reclaimed, and only from a
+- **A lock left by a writer that died holding it is taken back, and only from a
   holder that is provably gone (APRV-479).** `events.jsonl.lock` was never
   stolen, so a writer killed mid-append (a hook under SIGTERM with no listener,
   any verb under SIGKILL, a Hermes gateway restart) wedged every later writer on
   `append-failed` / `lock-timeout`, the daemon included, until a human removed
   the file. The lockfile now carries its holder's record (pid, host, boot, on
   Linux the pid and time namespaces and the process start time, when, which kind
-  of holder, a nonce). A writer that finds it held judges the holder once per
-  wait, and a holder is live unless it is proved gone. On Linux the proof needs
-  `/proc` to be this process's own pid namespace's, the same boot id and pid
-  namespace as the holder, and then `/proc/<pid>` absent with `kill(pid, 0)`
-  answering ESRCH, a zombie, or a different start time read in the same time
-  namespace; a `/proc` entry that cannot be read (hidepid, another uid) or that
-  is hidden while `kill(pid, 0)` still finds the pid is live, and so is a holder
-  under another boot id (an earlier boot and another kernel sharing the volume
-  cannot be told apart). On macOS and elsewhere the proof is the same host and
-  `kill(pid, 0)` answering ESRCH; a running pid is the holder, and a boot reading
-  that moved proves nothing. A lockfile that is not a regular file of at most 4
-  KiB (a FIFO, a link, a device) is never opened in a way that can block or
-  follow it, and is kept. A lock whose holder is gone is claimed with an
-  exclusive `link(2)` of a file naming the claimant, passed over only when that
-  claimant is provably gone, never because of its age. The claimant re-checks
-  the lockfile and its claim and renames the lockfile into
-  `events.jsonl.lock.d/pending/` (the commit point, which frees the lock and
-  keeps the evidence in one step); a reclaim whose record would not pass the
-  schema is not made. Whichever writer takes the lock next records every pending
-  file, before anything else, as the new audit-tier `audit.lock_reclaimed`
-  (`system:log`; lockfile, reason, age, holder pid, kind and start of hold, and a
-  `reclaim_id` that stops a duplicate when a writer is killed between recording
-  and clearing). A pending file it cannot judge (another pid namespace or boot,
-  unreadable, malformed, not a regular file) is still recorded, as
-  `unverified` with nothing taken from it, and moved to `quarantine/`, so a
-  planted file can neither silence a real reclaim nor block appends. A writer
-  that cannot list `pending/` appends nothing and refuses with the new append
-  code `reclaim-pending-unreadable`. One hold reads at most 64 pending names and
-  records at most 16, oldest first; claims and quarantined files live in
-  directories no scan reads. A live holder's lock is never taken, however old,
-  and neither is one this process cannot check; a lockfile with no holder record
-  is taken only once it is ten minutes old; a lock beside a `log sync` snapshot
-  or an absent log is kept. The `lock-timeout` message names the holder and why
-  its lock was kept. A process that holds the lock with no listener for SIGTERM,
-  SIGINT or SIGHUP gets one for the hold only: the signal waits for the release
-  and kills the process when the event loop next turns. `approval run` turns
-  the loop between appending `execution.started` and spawning the command, so a
-  stop request during that append ends the process before the command exists;
-  a verb that waits synchronously after its append (`approval policy amend`'s
-  prompt, `approval wait`, `approval codex bridge`'s human wait) drops the
-  listener before it blocks, so a signal during the wait ends it at once (one
-  that landed in the append's own milliseconds is lost there: Node shows a
-  caught signal to JavaScript only when the event loop turns). The reclaim's
-  files (`events.jsonl.lock.d/`) are excluded from the tenant export. Schema
-  change: the closed event enum gains `audit.lock_reclaimed` (thirty-five
-  types; `schema-validation` vectors 2.10.0), and the append-error union gains
-  `reclaim-pending-unreadable` (`refusal-unions` vectors regenerated). SPEC.md
-  §8, §11.1 and §11.2 are amended in their own commit, pending the owner's
-  sign-off. Behavior change for older writers: a lockfile an older version left
-  (empty) is reclaimed after ten minutes, and an older writer still holding one
-  that long would lose it. Still a human's (one command each, in
-  docs/hermes-hook.md): a lock left by a holder in another pid namespace or under
-  another boot id (a recreated sandbox, a rebooted host, any microVM restart),
-  one whose pid was reused on macOS, and one that sixteen claimants died
-  reclaiming.
+  of holder, a nonce). A writer that has waited out its whole lock timeout
+  judges the holder once, and only a regular file that parses strictly is
+  judged: a FIFO, a link, an oversized or malformed lockfile is never opened in
+  a way that can block or follow it, and is kept. The holder is gone only when
+  it ran in the writer's own pid namespace and boot (Linux: `/proc` is this
+  namespace's, the same boot id and pid-namespace inode, then `kill(pid, 0)`
+  answering ESRCH with `/proc/<pid>` absent or a zombie, or a later start time
+  under the same pid; macOS: the same hostname, boot readings within 60 s, and
+  ESRCH); EPERM, another namespace or boot or host, and anything unreadable are
+  live. An empty lockfile (an older version's) is taken once it is ten minutes
+  old. The reclaim is two atomic steps and writes nothing else: an exclusive
+  `link(2)` of the lock's path to `events.jsonl.lock.stale.<pid>.<created ms>`
+  (one claimant per dead lockfile; a second reclaimer's link fails and it waits
+  again), read back to prove it is the judged file, then a `rename(2)` of the
+  writer's own complete lockfile over the lock's path, so the path is never
+  empty. The writer appends the new audit-tier `audit.lock_reclaimed`
+  (`system:log`; lockfile, reason `holder-dead` or `legacy-aged`, age, and the
+  strictly parsed holder pid, kind and start of hold, nothing else from the
+  file) as the first record under the lock it took, then removes the stale name.
+  A lock beside a `log sync` snapshot or an absent log is kept. A lock from
+  another container or boot is never taken automatically: the `lock-timeout`
+  message names the pid and the new human-only verb `approval log unlock --pid
+  <n|none>`, which refuses a pid that is not the lockfile's or a holder it sees
+  running, takes the lock the same way, and records `audit.lock_reclaimed`
+  under the person's `human:` actor (classified `policy.core`, so the hook
+  denies it to an agent). For the village: a Railway recreate gives the service
+  a fresh filesystem, so the case this covers is the same-container restart, a
+  hook SIGKILLed while its container stays up. A process with no listener for
+  SIGTERM, SIGINT or SIGHUP gets one from just before it creates the lockfile
+  until just after it removes it: the signal waits for the release and kills the
+  process when the event loop next turns. `approval run` turns the loop between
+  appending `execution.started` and spawning the command, so a stop request
+  during that append ends the process before the command exists; a verb that
+  waits synchronously after its append (`approval policy amend`'s prompt,
+  `approval wait`, `approval codex bridge`'s human wait) drops the listener
+  before it blocks, so a signal during the wait ends it at once (one that landed
+  in the append's own milliseconds is lost there: Node shows a caught signal to
+  JavaScript only when the event loop turns). The names the reclaim writes
+  beside the lock are excluded from the tenant export. Schema change: the closed
+  event enum gains `audit.lock_reclaimed` (thirty-five types; `schema-validation`
+  vectors 3.1.0, a minor bump numbered above #614's 3.0.0 by the collision
+  rule). No append-error code is added. SPEC.md §8 and §11.1 hunks are pending
+  the owner's sign-off. Behavior change for older writers: an empty lockfile an
+  older version left is taken after ten minutes, and an older writer still
+  holding one that long would lose it.
 
 ## 0.4.0 — 2026-10-04
 
