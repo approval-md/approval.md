@@ -1,0 +1,15 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "delegation": {
+    "model": "anthropic/claude-judge@1.0.0",
+    "classes": [],
+    "max_autonomy": "manual",
+    "daily_cap": 0,
+    "escalate_on": [],
+    "advice": false,
+    "reviewers": []
+  }
+}

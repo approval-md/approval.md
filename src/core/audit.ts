@@ -116,6 +116,23 @@ export const AUDIT_ACTOR = "system:audit";
 const HUMAN_ACTOR = /^human:.+/u;
 
 /**
+ * The `verdict_source` vocabulary of `audit.reviewed` (PR #614 F5): the
+ * values this runtime WRITES. One, `explicit`: the reviewer said the verdict.
+ */
+export const VERDICT_SOURCES = ["explicit"] as const;
+
+/**
+ * `verdict_source` values RESERVED for a later core and never written by this
+ * one (APRV-500, amended SPEC.md §10.3 proposed). `model` will mark a review
+ * given by the judge (`model:<name>@<version>`, `delegation.reviewers`).
+ * Registered here so the word cannot be taken for anything else; refused at the
+ * write boundary (`event.schema.json` keeps `const: "explicit"` and a
+ * `^human:` actor), and a follower that meets it MAY ignore it, which is the
+ * safe failure: a model review is then never counted as a human approval.
+ */
+export const RESERVED_VERDICT_SOURCES = ["model"] as const;
+
+/**
  * The closed set of audit refusal codes. Frozen public API in the same sense the
  * gate's and the executor's are: a supervisor branches on these strings, so
  * adding one is a spec change and renaming one is a breaking change.

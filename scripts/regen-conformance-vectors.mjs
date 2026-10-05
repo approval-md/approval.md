@@ -211,6 +211,28 @@ function toolMapPolicy({ defaults = [], classes = [], tools = null } = {}) {
   ].join("\n");
 }
 
+/**
+ * {@link POLICY} with a `delegation` block appended (APRV-500), RESERVED in
+ * this core: the off form loads and changes nothing, anything else fails the
+ * load with `delegation-not-supported`, and the block's relationships to the
+ * rest of the file (exact class keys, the max_autonomy pin) are checked first
+ * and fail as `schema-invalid`.
+ */
+function delegationPolicy(lines) {
+  const fence = "\n```\n";
+  return POLICY.replace(fence, `\n${["delegation:", ...lines].join("\n")}${fence}`);
+}
+
+const POLICY_DELEGATION_OFF = delegationPolicy([
+  "  model: null",
+  "  classes: []",
+  "  max_autonomy: manual",
+  "  daily_cap: 0",
+  "  escalate_on: []",
+  "  advice: false",
+  "  reviewers: []",
+]);
+
 const POLICY_TOOLS = toolMapPolicy();
 const POLICY_TOOLS_RECORD = toolMapPolicy({ defaults: ["  unmapped_tool: record"] });
 const POLICY_TOOLS_ASK = toolMapPolicy({ defaults: ["  unmapped_tool: ask"] });
@@ -628,6 +650,58 @@ const policyVectors = [
       }),
       class: "read.file",
     },
+  },
+  // --- APRV-500: the delegation block, reserved -------------------------------
+  {
+    id: "delegation-off-block-changes-nothing",
+    description:
+      "a `delegation` block in its off form (model null, every list empty, max_autonomy manual, daily_cap 0, advice false) loads, and the policy answers exactly as it does without the block: `read.file` is still autonomous under `read.*`. An implementation that refused it would make the reserved key unusable by the template that carries it",
+    input: { policy: POLICY_DELEGATION_OFF, class: "read.file" },
+  },
+  {
+    id: "delegation-empty-block-loads",
+    description: "`delegation: {}` is the off form with every key absent, and loads unchanged",
+    input: { policy: delegationPolicy([]).replace("delegation:\n", "delegation: {}\n"), class: "files.write.local" },
+  },
+  {
+    id: "fail-closed-delegation-model-not-supported",
+    description:
+      "a judge named in `delegation.model` is refused at load with `delegation-not-supported`, so every class, unrelated ones included, resolves manual. An implementation that loaded it and did nothing would hold a setting its author believes is in force and silently ignore it",
+    control: true,
+    input: { policy: delegationPolicy(['  model: "model:judge@0.3.0"']), class: "read.file" },
+  },
+  {
+    id: "fail-closed-delegation-reviewer-not-supported",
+    description:
+      "a human reviewer listed in `delegation.reviewers` (an approver the policy declares) is not off either: refused with `delegation-not-supported`",
+    control: true,
+    input: {
+      policy: delegationPolicy(['  reviewers: ["human:alice"]']).replace(
+        "classes:\n",
+        "approvers:\n  alice:\n    channels: [cli]\nclasses:\n",
+      ),
+      class: "read.file",
+    },
+  },
+  {
+    id: "fail-closed-delegation-max-autonomy-pin",
+    description:
+      "the max_autonomy pin: a delegated class must declare an autonomy at least as strict as `delegation.max_autonomy` (manual by default), so delegating the supervised `files.write.remote` row fails the load as `schema-invalid` before the reservation is consulted",
+    control: true,
+    input: {
+      policy: delegationPolicy(["  classes: [files.write.remote]"]).replace(
+        "  files.write.local:\n",
+        "  files.write.remote:\n    autonomy: supervised\n  files.write.local:\n",
+      ),
+      class: "read.file",
+    },
+  },
+  {
+    id: "fail-closed-delegation-class-undeclared",
+    description:
+      "a delegated class must be an EXACT key of `classes`: `financial.spend` is reached only through `financial.*`, so the load fails as `schema-invalid`",
+    control: true,
+    input: { policy: delegationPolicy(["  classes: [financial.spend]"]), class: "read.file" },
   },
 ];
 
@@ -2653,9 +2727,14 @@ const SUITES = [
     // fails `unmapped-tool-record-resolves-autonomous`. Two controls pin the new
     // load-time refusals of a `tools` entry (an undeclared class, the reserved
     // unmapped class), each failing the whole policy closed.
-    vectors_version: "4.0.0",
+    // 4.1.0 (APRV-500): new vectors, no moved expectation. The reserved
+    // `delegation` block: its off form loads and changes nothing, any other
+    // value fails the load with the new code `delegation-not-supported`, and
+    // its relationship checks (exact class keys, the max_autonomy pin) fail as
+    // `schema-invalid`.
+    vectors_version: "4.1.0",
     algorithm:
-      "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, §7 irreversibility floor",
+      "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, the reserved delegation block, §7 irreversibility floor",
     description:
       "Which rule governs an action, what autonomy it resolves to, where a routed policy.edit sub-class inherits from, and where the floor, the protected-path routing floor and the fail-closed rule bind.",
     vectors: policyVectors,
@@ -2838,7 +2917,17 @@ const SUITES = [
     // `payload.harness_tool` (the refused one carries a space and a line
     // break). No existing expectation moves: both policy keys and the payload
     // field are OPTIONAL and additive.
-    vectors_version: "3.2.0",
+    // 3.3.0 (APRV-500): a MINOR bump. Twenty-one new fixtures for the reserved
+    // `delegation` block and the reserved judge identity: three accepted
+    // policies (the off form, an empty mapping, the design's enabled form,
+    // which the schema admits and the LOAD refuses), sixteen refused policies
+    // (a null block, an unknown key, malformed model identities, a wildcard or
+    // duplicate class, an out-of-enum max_autonomy, bad caps, bad escalations,
+    // a non-boolean advice, malformed reviewers), and two refused
+    // `audit.reviewed` records (`verdict_source: model`, a `model:` actor),
+    // which pin that the reserved values are not admitted at the write
+    // boundary. No existing expectation moves: the key is OPTIONAL.
+    vectors_version: "3.3.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

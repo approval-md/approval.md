@@ -124,6 +124,79 @@
         ]
       ]
     },
+    "delegation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2 (APRV-500, proposed; RESERVED in 0.4.2, no behaviour): the judge, a pinned model that may later review supervised samples, advise on manual cards, and decide manual cards in named classes within bounds. This release parses and validates the block and does nothing with it. It loads only in its OFF form (`model` null or absent, `classes` empty, `max_autonomy: manual`, `daily_cap: 0`, `escalate_on` empty, `advice: false`, `reviewers` empty; an empty mapping is the same thing), and the off form changes no resolution, no request and no record. ANY other value fails the policy closed with the load code `delegation-not-supported`, so every class resolves `manual`: a core that accepted `daily_cap: 10` and did nothing would be a setting its author believed was in force and the runtime silently ignored, which this closed schema exists to prevent. The relationships between keys (classes are exact keys of `classes`, the `max_autonomy` pin, the escalation floors, reviewer identities) are checked at load before the off-form check and fail closed as `schema-invalid`. Absent: the behaviour of every policy written before the key existed.",
+      "properties": {
+        "model": {
+          "anyOf": [{ "$ref": "#/$defs/modelIdentity" }, { "type": "null" }],
+          "description": "The judge identity whose records a later core would accept, `model:<name>@<major>.<minor>.<patch>`. The version pins the judge release (prompt, rubric and model snapshot). `null` or absent: no judge, and every other key is inert. RESERVED: any non-null value is `delegation-not-supported` in 0.4.2.",
+          "examples": [null, "model:judge@0.3.0"]
+        },
+        "classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[a-z0-9][a-z0-9_-]*(?:\\.[a-z0-9][a-z0-9_-]*)*$"
+          },
+          "description": "The classes the judge may act on. Each entry is a concrete class (no wildcard, no `*`) and must be an EXACT key of `classes` whose own autonomy is neither `human-only` nor `autonomous` (checked at load): the delegated set is a set of lines the operator wrote by name, the reasoning `agent_may_request` uses. RESERVED: a non-empty list is `delegation-not-supported` in 0.4.2.",
+          "examples": [[], ["intent.publish.inferred.index"]]
+        },
+        "max_autonomy": {
+          "type": "string",
+          "enum": ["manual", "supervised-live", "supervised-retro"],
+          "default": "manual",
+          "description": "A non-loosening PIN between this block and the class rows. Every class listed in `classes` must declare an autonomy at least as strict as this value in SPEC.md §5.2's strictness order (checked at load, `schema-invalid` otherwise). It is a tamper pin rather than a dial: loosening a delegated class's row without rewriting this block fails the load, so the judge's scope never grows as a side effect of an unrelated edit. Absent means `manual`. RESERVED: any value other than `manual` is `delegation-not-supported` in 0.4.2.",
+          "examples": ["manual"]
+        },
+        "daily_cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 0,
+          "description": "The most judge grants in any rolling 24 hours, across every delegated class together. 0 means the delegated approver is off. A value above 0 requires `escalate_on` to contain `irreversible` and `unknown_class` and requires `model` (checked at load). RESERVED: any value other than 0 is `delegation-not-supported` in 0.4.2.",
+          "examples": [0]
+        },
+        "escalate_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["deny", "low_confidence", "irreversible", "unknown_class"]
+          },
+          "description": "The judge outcomes that go to a human instead of standing, from a fixed set. RESERVED: a non-empty list is `delegation-not-supported` in 0.4.2.",
+          "examples": [[], ["deny", "low_confidence", "irreversible", "unknown_class"]]
+        },
+        "advice": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the judge writes advice on manual cards in `classes`. `true` requires `model` (checked at load). RESERVED: `true` is `delegation-not-supported` in 0.4.2.",
+          "examples": [false]
+        },
+        "reviewers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/delegationReviewer" },
+          "description": "Identities admitted to review samples of `classes`, in addition to each class's `approvers` roster: `human:<approver id>`, naming a key of `approvers`, or `model:<name>@<version>`, which must equal `model` exactly (both checked at load). This list is the ONLY place a `model:` identity is admitted: grants, attestations, reviews and channel decisions still require `human:`. RESERVED: a non-empty list is `delegation-not-supported` in 0.4.2.",
+          "examples": [[], ["model:judge@0.3.0", "human:alice"]]
+        }
+      },
+      "examples": [
+        {
+          "model": null,
+          "classes": [],
+          "max_autonomy": "manual",
+          "daily_cap": 0,
+          "escalate_on": [],
+          "advice": false,
+          "reviewers": []
+        }
+      ]
+    },
     "read_scope": {
       "type": "object",
       "additionalProperties": false,
@@ -372,6 +445,20 @@
     }
   },
   "$defs": {
+    "modelIdentity": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^model:[a-z0-9][a-z0-9-]{0,63}@[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "SPEC.md §5.2 (APRV-500, proposed; RESERVED): a judge identity, `model:<name>@<major>.<minor>.<patch>`. `<name>` is the judge service (lowercase alphanumerics and `-`, at most 64 characters) and the version pins one judge release. No record written by this release carries one: the event schema's actor patterns are unchanged, so a `model:` actor is refused at the write boundary.",
+      "examples": ["model:judge@0.3.0"]
+    },
+    "delegationReviewer": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(?:human:[a-z0-9][a-z0-9_-]*|model:[a-z0-9][a-z0-9-]{0,63}@[0-9]+\\.[0-9]+\\.[0-9]+)$",
+      "description": "SPEC.md §5.2 (APRV-500, proposed; RESERVED): a reviewer identity in `delegation.reviewers`. `human:<approver id>` (the approver identifier grammar) or a `modelIdentity`.",
+      "examples": ["human:alice", "model:judge@0.3.0"]
+    },
     "promptRow": {
       "type": "string",
       "enum": [

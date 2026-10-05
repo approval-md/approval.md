@@ -1,0 +1,16 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "delegation": {
+    "model": null,
+    "classes": [],
+    "max_autonomy": "manual",
+    "daily_cap": 0,
+    "escalate_on": [],
+    "advice": false,
+    "reviewers": [],
+    "judge": "model:judge@0.3.0"
+  }
+}

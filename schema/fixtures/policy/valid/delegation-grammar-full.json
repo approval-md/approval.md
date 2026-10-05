@@ -1,0 +1,41 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "approvers": {
+    "resident": {
+      "channels": [
+        "telegram"
+      ]
+    }
+  },
+  "classes": {
+    "intent.publish.inferred.index": {
+      "autonomy": "manual"
+    },
+    "digest.share": {
+      "autonomy": "manual"
+    }
+  },
+  "delegation": {
+    "model": "model:judge@0.3.0",
+    "classes": [
+      "intent.publish.inferred.index",
+      "digest.share"
+    ],
+    "max_autonomy": "manual",
+    "daily_cap": 10,
+    "escalate_on": [
+      "deny",
+      "low_confidence",
+      "irreversible",
+      "unknown_class"
+    ],
+    "advice": true,
+    "reviewers": [
+      "model:judge@0.3.0",
+      "human:resident"
+    ]
+  }
+}
