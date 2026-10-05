@@ -42,6 +42,21 @@ import type { ValidationError } from "./validate.js";
  */
 export const UNMAPPED_TOOL_CLASS = "harness.tool.unmapped";
 
+/**
+ * Can this tool name be recorded? (APRV-499, refutation S4.)
+ *
+ * The shape the event schema admits for `harness_tool` on an
+ * `execution.started` (letters, digits, `_`, `.`, `:`, `-`, at most 256),
+ * which is also every literal a `tools` match may spell. The hook asks this
+ * BEFORE it classifies a call under a mapped or unmapped class, so a name
+ * outside it is refused by name rather than at the write boundary as an opaque
+ * `append-failed`. Model APIs already cap tool names well inside this set, so
+ * the refusal is a corner; what it buys is a message that says what is wrong.
+ */
+export function isRecordableToolName(name: string): boolean {
+  return /^[A-Za-z0-9_.:-]{1,256}$/u.test(name);
+}
+
 /** What `defaults.unmapped_tool` may say. */
 export type UnmappedToolMode = "record" | "ask";
 

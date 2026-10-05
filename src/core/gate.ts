@@ -3735,6 +3735,16 @@ export interface ConsumeHarnessOptions extends GateOptions {
    * else, absence included, records `carried`.
    */
   spendingTask?: string;
+  /**
+   * The harness tool NAME of the call doing the spending, when its class came
+   * from the policy's tool mapping (APRV-499, refutation S3): written to the
+   * start as `harness_tool`, exactly as the policy-authorized start writes it,
+   * so every start a mapped or unmapped harness call produces names its tool.
+   * It authorizes nothing: the spend is bound by `presentedPayloadHash`, whose
+   * payload already carries the name, so a name that disagreed with the
+   * approved bytes would have been refused `payload-mismatch` first.
+   */
+  harnessTool?: string;
 }
 
 /**
@@ -4112,6 +4122,8 @@ function attemptHarnessConsume(
     payload[HARNESS_SPENDING_TASK] = options.spendingTask;
   }
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
+  // APRV-499 (refutation S3): which tool a mapped or unmapped spend was.
+  if (options.harnessTool !== undefined) payload["harness_tool"] = options.harnessTool;
 
   const appended = append(
     logPath,
