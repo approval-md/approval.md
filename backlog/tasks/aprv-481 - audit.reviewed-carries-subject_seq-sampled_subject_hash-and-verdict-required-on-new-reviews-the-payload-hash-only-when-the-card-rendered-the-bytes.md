@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 10:26'
+updated_date: '2026-10-05 10:45'
 labels:
   - agentvillage
 dependencies: []
@@ -72,4 +72,9 @@ Fix round 2 (impact-scoped recheck of PR #614).
 - NF-4 (regen-conformance-vectors can silently flip a valid fixture to an expected refusal) is filed as APRV-490; nothing added here.
 
 UPDATED PROPOSED SPEC HUNK (NF-3, replacing the §8 audit.sampled sentence above): '`audit.sampled` records written since PR #614 MUST carry `payload.policy_sha256`, the hash named by the latest policy attestation before the sampled `execution.started` (the policy the action ran under); verifiers MUST accept earlier samples without it.' SPEC.md is not edited.
+
+Fix round 3 (recheck 2 of PR #614).
+- F2 consequence (recheck 2, decision item 1) FIXED in c9e4ff57 (code in core/audit.ts under APRV-483; recorded here because it changes how audit.sampled.policy_sha256 is read). A review of a pinned sample reads the pinned policy's bytes from the APRV-356 content-addressed payload store (storedPolicyText, factored out of inForcePolicyText with no behaviour change; every copy is verified against the pin), and falls back to the policy file only when its bytes hash to the pin. The attested-before-the-sample check stays and runs first. Bytes in neither place are refused policy-not-attested, naming the hash. So a re-attestation, a settings save from the app included, no longer strands older open samples. Tests: 'PR #614 fix round 3 (probe R2-N3d): a prose-only re-attestation does not strand an open sample'; '... a pin whose bytes are neither stored nor on disk is refused policy-not-attested'. F2, F2c and the 'file the reviewer chose' tests now get the pinned roster from the store (bob actor-not-approver, carter records).
+- NF-5 FIXED in d1e0eece (APRV-480 code): the review retry wait is min(max(backoff, retry_after), 3_600_000 ms); a retry_after of 1e13 no longer throws RangeError out of dispatchReviews. Test: 'PR #614 recheck NF-5: a retry_after of 1e13 seconds does not throw, and the pause is capped at an hour'.
+- SPEC hunk §5.2 addition (pending sign-off): 'The pinned bytes are read from the payload store the attestation filled, or from the policy file when its bytes hash to the pin.'
 <!-- SECTION:NOTES:END -->
