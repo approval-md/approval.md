@@ -43,6 +43,24 @@ before a tag.
   are amended (pending sign-off). **Rollout order:** an older core refuses the
   new keys and fails the whole policy closed to all-`manual`, so a policy may
   carry them only once every daemon reading it runs this release.
+- **A doubled review tap no longer loses the note prompt (APRV-492).** On a
+  Telegram review card, a second OK (or a doubled second Deny) tapped while a
+  `loved`/`disliked` note was still awaited asked for a second prompt and
+  forgot the first before sending it; the relay licenses one prompt per grade
+  tap and refused the second, so the reply to the prompt on screen recorded
+  nothing. A tap that asks the same question (same verdict, grade and account)
+  now sends nothing and leaves the prompt on screen live. A prompt for a
+  different verdict on the same held grade (OK then a confirmed Deny, or a Deny
+  corrected to OK) retires the old prompt before it is sent, as before: the
+  relay refuses that send, and the old prompt must never record the verdict
+  the human changed (PR #619 refutation B1). A prompt for the same verdict and
+  a different grade retires the old one only after the new send succeeds, so
+  a network failure leaves the old prompt live, and a reply to it records the
+  grade that prompt names (accepted residual S2). A prompt that cannot be sent
+  now says so on the card, with how to be asked again. The fields a recorded
+  review carries are unchanged; what changed is which reply records one: the
+  reply to the prompt on screen after a doubled tap, and, after a failed
+  same-verdict replacement, the reply to the old prompt.
 
 - **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
   An attested policy that does not load is refused with the new audit code
@@ -206,6 +224,75 @@ before a tag.
   remains is Node's own bootstrap before the bin's first statement, which the
   gated image's `shell_hooks` patch is there to cover on Hermes's side
   (docs/hermes-hook.md, "Two layers against a signal").
+
+### Log
+
+- **A lock left by a writer that died holding it is taken back, and only from a
+  holder that is provably gone (APRV-479).** `events.jsonl.lock` was never
+  stolen, so a writer killed mid-append (a hook under SIGTERM with no listener,
+  any verb under SIGKILL, a Hermes gateway restart) wedged every later writer on
+  `append-failed` / `lock-timeout`, the daemon included, until a human removed
+  the file. The lockfile now carries its holder's record (pid, host, boot, on
+  Linux the pid and time namespaces and the process start time, when, which kind
+  of holder, a nonce). A writer that has waited out its whole lock timeout
+  judges the holder once, and only a regular file that parses strictly is
+  judged: a FIFO, a link, an oversized or malformed lockfile is never opened in
+  a way that can block or follow it, and is kept. The holder is gone only when
+  it ran in the writer's own pid namespace and boot (Linux: `/proc` is this
+  namespace's, the same boot id and pid-namespace inode, then `kill(pid, 0)`
+  answering ESRCH with `/proc/<pid>` absent or a zombie, or a later start time
+  under the same pid; macOS: the same hostname, boot readings within 60 s, and
+  ESRCH); EPERM, another namespace or boot or host, and anything unreadable are
+  live. An empty lockfile (an older version's) is taken once it is ten minutes
+  old. The reclaim is two atomic steps and writes nothing else: an exclusive
+  `link(2)` of the lock's path to `events.jsonl.lock.stale.<pid>.<created ms>`
+  (one claimant per dead lockfile; a second reclaimer's link fails and it waits
+  again), read back to prove it is the judged file, then a `rename(2)` of the
+  writer's own complete lockfile over the lock's path, so the path is never
+  empty. The writer appends the new audit-tier `audit.lock_reclaimed`
+  (`system:log`; lockfile, reason `holder-dead` or `legacy-aged`, age, and the
+  strictly parsed holder pid, kind and start of hold, nothing else from the
+  file) as the first record under the lock it took, then removes the stale name.
+  A lock beside a `log sync` snapshot or an absent log is kept. A lock from
+  another container or boot is never taken automatically: the `lock-timeout`
+  message names the pid and the new human-only verb `approval log unlock --pid
+  <n|none>`, which refuses a pid that is not the lockfile's or a holder it sees
+  running, takes the lock the same way, and records `audit.lock_reclaimed`
+  with reason `operator-cleared` (a person's word, never recorded as proof;
+  the schema binds that reason to a `human:` actor and no other) under the
+  person's `human:` actor (classified `policy.core`, so the hook
+  denies it to an agent, as spelled `approval log unlock`; package-runner and
+  script spellings escape that classification for every human-only verb, which
+  APRV-491 takes up). For the village: a Railway recreate gives the service
+  a fresh filesystem, so the case this covers is the same-container restart, a
+  hook SIGKILLed while its container stays up. A process with no listener for
+  SIGTERM, SIGINT or SIGHUP gets one from just before it creates the lockfile
+  until just after it removes it: the signal waits for the release and kills the
+  process when the event loop next turns. `approval run` turns the loop between
+  appending `execution.started` and spawning the command, so a stop request
+  during that append ends the process before the command exists; a verb that
+  waits synchronously after its append (`approval policy amend`'s prompt,
+  `approval wait`, `approval codex bridge`'s human wait) drops the listener
+  before it blocks, so a signal during the wait ends it at once (one that landed
+  in the append's own milliseconds is lost there: Node shows a caught signal to
+  JavaScript only when the event loop turns). The names the reclaim writes
+  beside the lock are excluded from the tenant export. Hardening (round 4): a
+  reclaimer writes its own `events.jsonl.lock.take.<pid>.<nonce>` before it
+  claims and holds the signal guard from the claim on, and `approval log
+  unlock` refuses while one is seen running; a reclaim is not made when its
+  record could not be appended (a refused daemon id, a torn tail); a holder
+  `created` more than a day before the log's last record or more than five
+  minutes ahead is recorded as `null` with no age; an empty lockfile is taken
+  only by a writer that watched it unchanged through its wait; `/proc` counts
+  as this namespace's only when `/proc/self/status` `NSpid:` has one field; a
+  claim refused EPERM names the lockfile's owner uid, and a directory at the
+  stale name names `rm -r`. Schema change: the closed
+  event enum gains `audit.lock_reclaimed` (thirty-five types; `schema-validation`
+  vectors 3.1.0, a minor bump numbered above #614's 3.0.0 by the collision
+  rule; `holder.created` may be `null`, and `age_ms` is absent exactly then). No append-error code is added. SPEC.md §8 and §11.1 hunks are pending
+  the owner's sign-off. Behavior change for older writers: an empty lockfile an
+  older version left is taken after ten minutes, and an older writer still
+  holding one that long would lose it.
 
 ## 0.4.0 — 2026-10-04
 

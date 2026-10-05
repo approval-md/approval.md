@@ -78,6 +78,7 @@ import {
   policyBytesHash,
   resolveHumanActor,
 } from "../core/attest.js";
+import { settleTerminationGuards } from "../core/log-lock.js";
 import { compareChains } from "../core/log-reconcile.js";
 import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "../core/policy-diff.js";
 import {
@@ -176,8 +177,14 @@ const DEFAULT_ATTESTATION_INTERVAL_MS = 2000;
 /** An agent identity, the one `--as` form that routes to the channel path. */
 const AGENT_ACTOR = /^agent:.+/u;
 
-/** Synchronous sleep with no dependency and no busy-spin (as `cli/execute.ts`). */
+/**
+ * Synchronous sleep with no dependency and no busy-spin (as `cli/execute.ts`).
+ * The poll follows this verb's own append, so the log lock's signal guard is
+ * settled first: Ctrl-C or a supervisor's SIGTERM during the wait ends the
+ * process at once (APRV-479, S2).
+ */
 function sleepSync(ms: number): void {
+  settleTerminationGuards();
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

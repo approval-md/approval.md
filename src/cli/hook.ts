@@ -147,6 +147,7 @@ import {
   type AppendOptions,
   type EventRecord,
 } from "../core/log.js";
+import { settleTerminationGuards } from "../core/log-lock.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
@@ -2703,6 +2704,10 @@ interface GatedAction {
 }
 
 function sleepSync(ms: number): void {
+  // A synchronous wait never runs with termination signals held by the log
+  // lock's guard (APRV-479 round 2, RS2: `approval codex bridge` waits for a
+  // human here through `driveSync`).
+  settleTerminationGuards();
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

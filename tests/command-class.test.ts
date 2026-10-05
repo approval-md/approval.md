@@ -296,6 +296,10 @@ const FIXTURES: readonly Fixture[] = [
   { command: "approval log advance --pr", class: "log.advance", rule: "approval-log-advance", row: "approval" },
   { command: "node ./cli.js log sync", class: "log.sync", rule: "approval-log-sync", row: "node" },
   { command: "node dist/src/cli/main.js log advance", class: "log.advance", rule: "approval-log-advance", row: "node" },
+  // APRV-479: taking over the log's lock is a person's assertion, held like
+  // `log checkpoint` (policy.core), whichever spelling reaches the verb.
+  { command: "approval log unlock --pid 4242 --as human:carter", class: "policy.core", rule: "approval-log-unlock", row: "approval" },
+  { command: "node ./cli.js log unlock --pid none", class: "policy.core", rule: "approval-log-unlock", row: "node" },
   // The neighbours, which stay pass-through: reading the log is the gate's own
   // business, and `approval log` with no subcommand names no ritual at all.
   { command: "approval log verify", class: GATE_SELF_CLASS, rule: "approval" },

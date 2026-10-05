@@ -916,6 +916,14 @@ async function commandLog(
       const { commandLogCheckpoint } = await import("./log-checkpoint.js");
       return commandLogCheckpoint(rest, streams, cwd);
     }
+    // APRV-479. Taking over a lock a dead writer left, which no writer could
+    // judge itself (another container or boot): a person's assertion that the
+    // holder is gone, recorded under their own name. Human-only, and the hook
+    // denies it (`policy.core`, `core/command-class.ts`).
+    case "unlock": {
+      const { commandLogUnlock } = await import("./log-unlock.js");
+      return commandLogUnlock(rest, streams, cwd);
+    }
     default:
       return usageError(
         streams,
@@ -1160,8 +1168,8 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // health — deliberately two verbs, because they answer to two different
     // people (the human who decides, the operator who repairs).
     case "run": {
-      const { commandRun } = await import("./execute.js");
-      return commandRun(rest, streams, cwd);
+      const { commandRunYielding } = await import("./execute.js");
+      return commandRunYielding(rest, streams, cwd);
     }
     // The starving verb (APRV-193). It authorizes nothing and appends nothing:
     // it runs a command with outbound network denied, which is what the hook

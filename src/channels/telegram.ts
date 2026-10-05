@@ -2107,6 +2107,19 @@ export const TELEGRAM_REVIEW_NOTE_TOAST =
   "Heard — reply to the prompt with why. Nothing is recorded until it arrives.";
 
 /**
+ * The card line for a note prompt that could not be sent (APRV-492). The toast
+ * went out before the send and told the human to reply to a prompt, so the
+ * card says the prompt is not coming and how to be asked again: a grade tap is
+ * what the relay licenses a prompt for. With Deny armed the grade alone asks;
+ * otherwise the grade is held and OK asks.
+ */
+export function telegramReviewNoteUnasked(verdict: ReviewVerdict): string {
+  return verdict === "denied"
+    ? "The prompt asking why could not be sent, so nothing was recorded. Tap your grade again to be asked."
+    : "The prompt asking why could not be sent, so nothing was recorded. Tap your grade again, then OK, to be asked.";
+}
+
+/**
  * What the ForceReply prompt asks for.
  *
  * A separate message rather than a second keyboard, because Telegram's inline
@@ -5457,9 +5470,32 @@ export class TelegramChannel implements TestableChannel {
    * stays open, and a fresh card is offered — and can never cost a record
    * nobody asked for.
    *
-   * A second prompt replaces the first: only one grade can be outstanding on
-   * one card, and the older prompt stops resolving so a late reply to it lands
-   * nowhere rather than recording a grade the human moved on from.
+   * Only one grade can be outstanding on one card, so a second prompt that is
+   * SENT replaces the first, and the older prompt stops resolving: a late reply
+   * to it lands nowhere rather than recording a grade the human moved on from.
+   *
+   * APRV-492, and the relay licenses one prompt per GRADE tap, so which taps
+   * get a prompt sent is not this method's choice alone. Three rules:
+   *
+   * - A tap that would ask the SAME question again (same verdict, same grade,
+   *   same account: a doubled OK or a doubled second Deny) sends nothing. The
+   *   prompt on screen already collects those words, and a second send would
+   *   be refused.
+   * - A prompt for a DIFFERENT VERDICT retires the old one BEFORE the send. A
+   *   verdict change is not a grade tap, so the relay refuses that send, and an
+   *   old prompt left live would record the verdict the human just changed. A
+   *   note may be lost this way; a wrong verdict is never recorded.
+   * - A prompt for the same verdict and a different grade follows a grade tap,
+   *   which the relay licenses, and retires the old one only once the new send
+   *   has succeeded. A send that fails anyway (the network, not the relay)
+   *   leaves the old prompt live, and a reply to it records the grade the old
+   *   prompt names in its own text, not the one the card now holds: an
+   *   accepted residual (PR #619 refutation S2).
+   *
+   * A send that fails says so on the card, because the toast already told the
+   * human to reply to a prompt: the note was not asked for, nothing was
+   * recorded, and a grade tap asks again. Then it throws, so the operator hears
+   * of it. A later prompt that is sent clears that line.
    */
   private async askForNote(
     state: ReviewCardState,
@@ -5467,20 +5503,49 @@ export class TelegramChannel implements TestableChannel {
     reaction: Reaction,
     sender?: ChannelSender,
   ): Promise<void> {
-    if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
+    const waiting = state.awaitingNote;
+    if (
+      waiting !== null &&
+      waiting.verdict === verdict &&
+      waiting.reaction === reaction &&
+      waiting.sender?.id === sender?.id &&
+      this.reviewNotePrompts.get(waiting.promptId) === state.deliveryId
+    ) {
+      return;
+    }
+    if (waiting !== null && waiting.verdict !== verdict) {
+      this.reviewNotePrompts.delete(waiting.promptId);
+      state.awaitingNote = null;
+    }
     const lines = reviewNotePromptLines(reaction, verdict, state.card.fields.action_key.value);
-    const sent = await this.call<{ message_id: number }>("sendMessage", {
-      chat_id: this.chatId,
-      text: lines
-        .map((entry, index) => (index === 0 ? `<b>${escapeHtml(entry)}</b>` : escapeHtml(entry)))
-        .join("\n"),
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: { force_reply: true },
-    });
+    let sent: { message_id: number };
+    try {
+      sent = await this.call<{ message_id: number }>("sendMessage", {
+        chat_id: this.chatId,
+        text: lines
+          .map((entry, index) => (index === 0 ? `<b>${escapeHtml(entry)}</b>` : escapeHtml(entry)))
+          .join("\n"),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: { force_reply: true },
+      });
+    } catch (cause) {
+      state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [telegramReviewNoteUnasked(verdict)] };
+      await this.redrawReview(state);
+      throw cause;
+    }
     const promptId = String(sent.message_id);
+    if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
     state.awaitingNote = { promptId, verdict, reaction, ...(sender === undefined ? {} : { sender }) };
     this.reviewNotePrompts.set(promptId, state.deliveryId);
+    const unasked = state.notice?.lines;
+    if (
+      unasked?.length === 1 &&
+      (unasked[0] === telegramReviewNoteUnasked("ok") || unasked[0] === telegramReviewNoteUnasked("denied"))
+    ) {
+      state.notice = null;
+      await this.redrawReview(state);
+    }
   }
 
   /**
