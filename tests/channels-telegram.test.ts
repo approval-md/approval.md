@@ -98,6 +98,7 @@ import {
   TELEGRAM_COMMANDS,
   TELEGRAM_REVIEW_ACK,
   TELEGRAM_REVIEW_ARMED,
+  TELEGRAM_REVIEW_OTHER_SENDER,
   TELEGRAM_REVIEW_ARM_TOAST,
   TELEGRAM_REVIEW_DENIED,
   TELEGRAM_REVIEW_NOTE_TOAST,
@@ -6245,6 +6246,8 @@ function reviewStateFor(card: ReviewCard): ReviewCardState {
     nonce: "n",
     denyArmed: false,
     heldReaction: null,
+    armedBy: null,
+    heldBy: null,
     settled: null,
     notice: null,
     awaitingNote: null,
@@ -6501,6 +6504,58 @@ test("APRV-482: a held grade rides with a two-tap denial", async () => {
   const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
   assert.equal(payload["verdict"], "denied");
   assert.equal(payload["reaction"], "indifferent");
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F3: a grade one account holds never rides on another account's OK", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A taps a grade; B taps OK. B's OK is refused on the card: recording it
+  // would put A's grade in B's record.
+  await tapReview(channel, "liked", CHAT, "1001");
+  const other = await tapReview(channel, "ok", CHAT, "42");
+  assert.equal(other.reviews.length, 0, "a refused tap reached the runtime");
+  assert.deepEqual(reviewsIn(world), [], "B's OK recorded A's grade");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_OTHER_SENDER), `the card does not say why: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused tap took the buttons away");
+
+  // B's own grade replaces A's (a grade finishes nothing), and B's OK then
+  // records B's grade and nobody else's.
+  await tapReview(channel, "indifferent", CHAT, "42");
+  await tapReview(channel, "ok", CHAT, "42");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "indifferent", "the record carries a grade its reviewer did not tap");
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F3: a Deny one account armed is never finished by another account's tap", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A arms Deny; B's grade, B's OK and B's Deny are each refused, because
+  // each would finish A's denial (or undo it) under B's name.
+  await tapReview(channel, "deny", CHAT, "1001");
+  for (const choice of ["indifferent", "ok", "deny"] as const) {
+    const tapped = await tapReview(channel, choice, CHAT, "42");
+    assert.equal(tapped.reviews.length, 0, `B's ${choice} reached the runtime`);
+  }
+  assert.deepEqual(reviewsIn(world), [], "B's tap recorded A's armed denial");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string };
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_OTHER_SENDER), `the card does not say why: ${last.text}`);
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_ARMED), "a refused tap disarmed the card");
+
+  // The account that armed it finishes it.
+  await tapReview(channel, "deny", CHAT, "1001");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal("reaction" in payload, false, "a grade nobody on this denial tapped rode with it");
   assertClean(world.unit);
 });
 

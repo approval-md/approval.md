@@ -4423,6 +4423,15 @@ first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disli
 | 🛑 twice | verdict `denied` with the held grade if any, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
 
+**A held grade and an armed Deny belong to the account that tapped them (PR #614
+refutation F3).** The card remembers the transport's sender id with each. A tap
+that would finish another account's half-finished review records nothing and is
+refused on the card with one line: any ✅ or 🛑 while another account holds the
+grade or armed Deny, and any reaction while another account armed Deny. A
+reaction tapped with nothing armed only replaces the held grade, and its tapper
+then holds it. A record therefore never carries a grade or a denial its reviewer
+did not tap.
+
 **A verdict is an explicit act (APRV-482).** Under supervised-retro a review
 counts as the individual approval nobody gave before the action ran, so nothing
 records `ok` on a reviewer's behalf. The explicit forms per surface:

@@ -1978,6 +1978,14 @@ export const TELEGRAM_REVIEW_ACK =
 export const TELEGRAM_REVIEW_ARM_TOAST =
   "Deny armed — nothing recorded. Tap Deny again to record it, or a reaction to record it with a grade.";
 
+/**
+ * The card line and toast for a tap that would finish another account's
+ * half-finished review (PR #614 refutation F3): an armed Deny or a held grade
+ * belongs to the account that tapped it, and nothing is recorded.
+ */
+export const TELEGRAM_REVIEW_OTHER_SENDER =
+  "Another account armed Deny or holds a grade on this card; only that account's tap can finish it. Nothing was recorded.";
+
 /** The toast a reaction that needs the human's own words gets. */
 export const TELEGRAM_REVIEW_NOTE_TOAST =
   "Heard — reply to the prompt with why. Nothing is recorded until it arrives.";
@@ -2114,6 +2122,16 @@ export interface ReviewCardState {
    * appends nothing, the card states it, and losing it to a restart costs a tap.
    */
   heldReaction: Reaction | null;
+  /**
+   * Who armed Deny and who holds the grade, as the transport attributed the tap
+   * (PR #614 refutation F3): the sender's id, or `null` for a tap that carried
+   * none. A held grade or an armed Deny is one person's half-finished review,
+   * so it rides only on that person's next verdict tap; another account's tap
+   * is refused on the card rather than recording someone else's grade or
+   * denial under its own name. Process memory, cleared with the state it owns.
+   */
+  armedBy: string | null;
+  heldBy: string | null;
   /**
    * The outcome, once the runtime has recorded one. Written only from the
    * handler's answer, never inferred here.
@@ -2999,6 +3017,8 @@ export class TelegramChannel implements TestableChannel {
       nonce,
       denyArmed: false,
       heldReaction: null,
+      armedBy: null,
+      heldBy: null,
       settled: null,
       notice: null,
       awaitingNote: null,
@@ -4714,10 +4734,28 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // PR #614 refutation F3. An armed Deny and a held grade are one account's
+    // unfinished review. A tap that would finish either (any verdict, or a
+    // grade landing on an armed Deny) from a different account is refused on
+    // the card, so a record never carries a grade or a denial its reviewer did
+    // not tap. A grade tapped with nothing armed only replaces the held grade
+    // and is not refused: it finishes nothing, and its new holder is the tapper.
+    const tapper = sender === undefined ? null : sender.id;
+    const finishes = tap.choice === "ok" || tap.choice === "deny" || state.denyArmed;
+    const othersArm = state.denyArmed && state.armedBy !== tapper;
+    const othersGrade = state.heldReaction !== null && state.heldBy !== tapper;
+    if (finishes && (othersArm || (othersGrade && (tap.choice === "ok" || tap.choice === "deny")))) {
+      state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [TELEGRAM_REVIEW_OTHER_SENDER] };
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_OTHER_SENDER);
+      await this.redrawReview(state);
+      return;
+    }
+
     // The first Deny tap arms and writes nothing. Stated on the card, so the
     // approver reads the state rather than inferring it from a toast.
     if (tap.choice === "deny" && !state.denyArmed) {
       state.denyArmed = true;
+      state.armedBy = tapper;
       state.notice = null;
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ARM_TOAST);
       await this.redrawReview(state);
@@ -4730,6 +4768,7 @@ export class TelegramChannel implements TestableChannel {
       // between for the change of mind to contradict.
       const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
       state.denyArmed = chosen === "denied";
+      if (!state.denyArmed) state.armedBy = null;
       // APRV-482: a grade held from before the verdict rides with it, and a
       // grade that wants words asks for them now, exactly as a grade tapped
       // after an armed Deny always has. The pair core refuses outright is sent
@@ -4767,6 +4806,7 @@ export class TelegramChannel implements TestableChannel {
       // says the same. No note is asked for: words for a record that is about
       // to be refused would be attention spent on nothing.
       state.heldReaction = reaction;
+      state.heldBy = tapper;
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
       await this.recordReview(
         state,
@@ -4961,6 +5001,8 @@ export class TelegramChannel implements TestableChannel {
       state.notice = null;
       state.denyArmed = false;
       state.heldReaction = null;
+      state.armedBy = null;
+      state.heldBy = null;
       this.reviewNonces.delete(state.nonce);
       if (state.awaitingNote !== null) {
         this.reviewNotePrompts.delete(state.awaitingNote.promptId);
