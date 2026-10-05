@@ -21,6 +21,7 @@
  */
 
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { after, test } from "node:test";
 
 import {
@@ -30,7 +31,7 @@ import {
   LIVE_TOOL_CALL,
   type ChannelRequest,
 } from "../src/channels/contract.js";
-import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
+import { attestedPromptOf, buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   minimalSettleText,
   renderTelegram,
@@ -1206,4 +1207,66 @@ test("the deadline line never says there is time when there is none", () => {
     "Time is up: this request has closed, and an answer now will not count.",
   );
   assert.match(deadlineLine(requestOf("x.y", "k", { a: 1 }, { ttl: 30_000 })), /less than a minute/u);
+});
+
+// ---------------------------------------------------------------------------
+// 9. Security follow-up on S4: style and say come only from ATTESTED bytes
+// ---------------------------------------------------------------------------
+
+const MINIMAL_POLICY = POLICY.replace(
+  "classes:",
+  [
+    "channels:",
+    "  telegram:",
+    "    prompt:",
+    "      style: minimal",
+    "      say:",
+    "        intent.publish.inferred.index:",
+    '          does: "post a wish to Index in your name"',
+    '          quote: { text: "" }',
+    "          note: none",
+    "classes:",
+  ].join("\n"),
+);
+
+test("S4 security: an unattested edit to the policy file never changes the card; only attested bytes choose style and say", async () => {
+  const unit = newScenario(scratch.root, MINIMAL_POLICY);
+  attest(unit, T0);
+  const payload = { text: "Sell my bike for 5 rupees" };
+  registered(unit, [{ key: "intent:toctou", cls: "intent.publish.inferred.index", payload }]);
+  assert.equal(
+    requestAt(unit.logPath, { task: "task-489", actionKey: "intent:toctou", cls: "intent.publish.inferred.index", payload_hash: payloadHash(payload) }, at(1), AGENT, unit.options).ok,
+    true,
+  );
+  const tagOptions: TagOptions = { policy: { file: unit.policyPath } };
+  const queued = buildPendingQueue(unit.logPath, { ...tagOptions, payload: () => payload }, at(2));
+  assert.equal(queued.ok, true, JSON.stringify(queued));
+  const [request] = queued.ok ? queued.requests : [];
+  assert.ok(request !== undefined);
+
+  // Attested: minimal, with the attested phrase.
+  const attested = attestedPromptOf(unit.logPath, tagOptions, "telegram");
+  assert.equal(attested.style, "minimal");
+  assert.equal(attested.say["intent.publish.inferred.index"]?.does, "post a wish to Index in your name");
+
+  // The file is edited after attestation (nobody attests the edit) to a misleading phrase.
+  writeFileSync(unit.policyPath, MINIMAL_POLICY.replace("post a wish to Index in your name", "say hello to a friend"), "utf8");
+  const edited = attestedPromptOf(unit.logPath, tagOptions, "telegram");
+  assert.deepEqual(edited, { style: "technical", say: {}, fallback: "policy-unattested" });
+  const { channel, sent } = recordingChannel({
+    promptFor: () => attestedPromptOf(unit.logPath, tagOptions, "telegram"),
+  });
+  await channel.notify(request);
+  assert.equal(sends(sent).length, 3, "an unattested policy drew a minimal card");
+  assert.ok(sends(sent).every((entry) => !textOf(entry).includes("say hello to a friend")));
+  assert.ok(sends(sent).every((entry) => !textOf(entry).includes("<blockquote expandable>")));
+
+  // An attested TECHNICAL policy edited on disk to minimal stays technical, and adds no record field.
+  const plain = newScenario(scratch.root, POLICY);
+  attest(plain, T0);
+  writeFileSync(plain.policyPath, MINIMAL_POLICY, "utf8");
+  assert.deepEqual(attestedPromptOf(plain.logPath, { policy: { file: plain.policyPath } }, "telegram"), {
+    style: "technical",
+    say: {},
+  });
 });

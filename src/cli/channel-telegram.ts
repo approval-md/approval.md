@@ -125,6 +125,7 @@ import {
 } from "../channels/contract.js";
 import {
   ageText,
+  attestedPromptOf,
   buildPendingQueue,
   type ChannelTagRefusalCode,
   type TagOptions,
@@ -969,19 +970,17 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // default, because a layout is not a permission and an unrelated typo in a
     // class rule must not silently redecorate a phone screen.
     layout: promptLayoutFor(policyLoad, "telegram"),
-    // APRV-489. The card style and the operator's plain-words declarations, with
-    // the layout's fail direction: a policy that did not load declares nothing,
-    // and the technical card is what nothing means. Fix round 2 (S4): read for
-    // EACH delivery from the same policy file the tagger reads per cycle, so a
-    // re-attested style or `say` reaches the next card without a restart. An
-    // edited but unattested file cannot slip a style in: its requests show an
-    // attestation anomaly, and an anomaly always draws the technical card.
+    // APRV-489. The card style and the operator's plain-words declarations.
+    // Fix round 2 (S4, and the security follow-up on it): resolved for EACH
+    // delivery, and only from ATTESTED bytes: `attestedPromptOf` reads the
+    // policy file once, requires those bytes to hash to the latest attestation
+    // in the verified log, and parses style and `say` from the same buffer. A
+    // re-attested setting reaches the next card without a restart; an edited,
+    // unattested file draws the technical card. The two fixed values below are
+    // only what a channel without the resolver would use.
     promptStyle: promptStyleFor(policyLoad, "telegram"),
     say: promptSayFor(policyLoad, "telegram"),
-    promptFor: () => {
-      const live = loadPolicy(request.policy);
-      return { style: promptStyleFor(live, "telegram"), say: promptSayFor(live, "telegram") };
-    },
+    promptFor: () => attestedPromptOf(request.logPath, { policy: request.policy }, "telegram"),
     // APRV-456. From the launch flags alone: a relayed channel (an --api-base
     // that is not the Bot API) or --no-stale-copy turns APRV-196's fallback
     // off. The policy loaded above is deliberately not consulted, so nothing

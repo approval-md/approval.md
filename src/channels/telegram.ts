@@ -618,7 +618,7 @@ export interface TelegramConfig {
    * {@link TelegramConfig.promptStyle} and {@link TelegramConfig.say} are used.
    * A resolver that throws means `technical`.
    */
-  promptFor?: () => { style: PromptStyle; say: PromptSay };
+  promptFor?: () => { style: PromptStyle; say: PromptSay; fallback?: string };
 }
 
 /**
@@ -2661,7 +2661,7 @@ export class TelegramChannel implements TestableChannel {
   /** The policy's `say` declarations (APRV-489). Pure input to the minimal renderer. */
   private readonly say: PromptSay;
   /** The per-delivery resolver (fix round 2, S4), or null for the fixed values above. */
-  private readonly promptFor: (() => { style: PromptStyle; say: PromptSay }) | null;
+  private readonly promptFor: (() => { style: PromptStyle; say: PromptSay; fallback?: string }) | null;
   /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
   private lastSweepMs = Number.NEGATIVE_INFINITY;
 
@@ -3337,7 +3337,9 @@ export class TelegramChannel implements TestableChannel {
     // Fix round 2, B2: a request delivered as part of a batch is always the
     // technical card, as SPEC §10.3 (amended) says of a grouped delivery.
     const minimal =
-      prompt.style !== "minimal"
+      prompt.fallback !== undefined
+        ? ({ ok: false, reason: prompt.fallback } as const)
+        : prompt.style !== "minimal"
         ? null
         : batchDeliveryId !== undefined
           ? ({ ok: false, reason: "batch" } as const)
@@ -3454,7 +3456,7 @@ export class TelegramChannel implements TestableChannel {
    * round 2, S4): the resolver's answer when the verb gave one, else the fixed
    * configuration. A resolver that throws is `technical`, the side that shows more.
    */
-  private currentPrompt(): { style: PromptStyle; say: PromptSay } {
+  private currentPrompt(): { style: PromptStyle; say: PromptSay; fallback?: string } {
     if (this.promptFor === null) return { style: this.promptStyle, say: this.say };
     try {
       return this.promptFor();

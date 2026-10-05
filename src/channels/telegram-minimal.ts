@@ -157,6 +157,7 @@ export const MINIMAL_FALLBACKS = [
   "stale-summary",
   "batch",
   "send-refused",
+  "policy-unattested",
 ] as const;
 
 export type MinimalFallback = (typeof MINIMAL_FALLBACKS)[number];
