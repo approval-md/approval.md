@@ -124,8 +124,9 @@ export interface ValidateOptions {
  * - `audit_reviewed_record` (APRV-481): the write boundary requires a review to
  *   carry `subject_seq`, `sampled_subject_hash` and `verdict`, and
  *   `audit_reviewed_record_historical` is the same record shape without those
- *   three requirements, so every review written before the change still
- *   validates and verifies unchanged.
+ *   three requirements (nor `verdict_source`, required since PR #614's F5
+ *   fix), so every review written before either change still validates and
+ *   verifies unchanged.
  * - `audit_sampled_record` (PR #614 refutation F2): the write boundary
  *   requires a sample to pin the attested policy it was taken under
  *   (`payload.policy_sha256`), and `audit_sampled_record_historical` drops

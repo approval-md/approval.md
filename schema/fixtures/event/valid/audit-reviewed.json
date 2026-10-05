@@ -11,7 +11,8 @@
     "subject_event": "audit.sampled",
     "reviewed": true,
     "sampled_subject_hash": "6c1d3f0b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817060504",
-    "verdict": "ok"
+    "verdict": "ok",
+    "verdict_source": "explicit"
   },
   "alg": "sha256/jcs",
   "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",

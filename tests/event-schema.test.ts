@@ -269,6 +269,30 @@ test("APRV-481: a new review names its sample, the execution, and its verdict; a
   assert.equal(validate("event", shown).ok, true);
 });
 
+test("PR #614 F5: a new review says its verdict was explicit; an old one without the field still reads", () => {
+  const record = fixture("audit.reviewed");
+  const payload = record["payload"] as Record<string, unknown>;
+  assert.equal(payload["verdict_source"], "explicit");
+  assert.equal(validate("event", record).ok, true);
+
+  const stripped = { ...record, payload: without(payload, "verdict_source") };
+  const strict = validate("event", stripped);
+  assert.equal(strict.ok, false, "the write boundary accepted a review that does not say how its verdict was given");
+  if (!strict.ok) {
+    assert.ok(
+      strict.errors.some((error) => error.keyword === "required" && error.message.includes("verdict_source")),
+      `the refusal does not name verdict_source: ${JSON.stringify(strict.errors)}`,
+    );
+  }
+  // The read boundary: a review written before the field (whose `ok` may have
+  // been defaulted) verifies unchanged through the widening entry.
+  assert.equal(validate("event", stripped, { mode: "historical" }).ok, true);
+  // `explicit` is the only value, on write and on read.
+  const other = { ...record, payload: { ...payload, verdict_source: "default" } };
+  assert.equal(validate("event", other).ok, false);
+  assert.equal(validate("event", other, { mode: "historical" }).ok, false);
+});
+
 test("PR #614 F2: a new sample pins its attested policy; an old one still reads, as not pinned", () => {
   const record = fixture("audit.sampled");
   const payload = record["payload"] as Record<string, unknown>;

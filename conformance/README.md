@@ -239,7 +239,10 @@ verifies. The same release requires an `audit.sampled` record to pin the
 attested policy it was taken under (`payload.policy_sha256`, PR #614 refutation
 F2), so the sample fixture gained the field and a sample without it is refused
 (`audit-sampled-no-policy-hash`); historical validation swaps in
-`audit_sampled_record_historical` for the samples already in logs. If another
+`audit_sampled_record_historical` for the samples already in logs. A review
+also requires `payload.verdict_source: "explicit"` (PR #614 refutation F5), so
+the review fixtures gained it and `audit-reviewed-no-verdict-source` is
+refused. If another
 branch claims 3.0.0 first, the collision rule below gives this change the next
 major at merge.
 

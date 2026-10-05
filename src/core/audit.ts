@@ -989,6 +989,11 @@ export function reviewSample(
     subject_event: "audit.sampled",
     reviewed: true,
     verdict,
+    // PR #614 refutation F5: the discriminator a follower reads. Since APRV-482
+    // every verdict is the reviewer's own word; a review written before then
+    // may carry an `ok` the runtime filled in, and only this field (absent
+    // there) tells the two apart.
+    verdict_source: "explicit",
     sampled_subject_hash: sampledSubjectHash,
   };
   // Only when the bytes were on the screen (APRV-481): absent says the

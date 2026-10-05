@@ -1754,6 +1754,27 @@ test("PR #614 refutation F2: a sample written before samples pinned a policy rea
   assert.equal(subjects[0]?.policySha256, null);
 });
 
+test("PR #614 refutation F5: every review the runtime writes says its verdict was explicit", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+  const ok = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(6)),
+    verdict: "ok",
+  });
+  assert.equal(ok.ok, true, ok.ok ? "" : ok.message);
+  const cli = await runCli(unit, ["audit", "review", "task-042:draft2", "--deny", "--as", "human:carter"]);
+  assert.equal(cli.code, 0, cli.err);
+  const reviews = records(unit).filter((record) => record.event === "audit.reviewed");
+  assert.equal(reviews.length, 2);
+  for (const review of reviews) {
+    assert.equal((review.payload as Record<string, unknown>)["verdict_source"], "explicit");
+  }
+  assertClean(unit);
+});
+
 test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {
   const unit = ready();
   withRoster(unit, true);

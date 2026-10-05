@@ -3602,7 +3602,11 @@ The field names a follower reads (the data pipeline's follower and the dbt
 models built on it read reviews as approvals under supervised-retro). This
 table is the single definition; other docs link here rather than restating it.
 Every `audit.reviewed` written since APRV-481 carries the three required fields,
-and the write boundary refuses one that does not. A review written before then
+and since PR #614's F5 fix a fourth, `verdict_source`; the write boundary refuses
+one that does not. The verdict alone cannot say whether the reviewer gave it:
+before APRV-482 the runtime wrote `ok` for a grade-only tap or a bare
+`audit review`, and such a record may carry all three APRV-481 fields, so
+`verdict_source` is the field that separates the two. A review written before then
 may lack them and still verifies (the read boundary is the schema's
 `audit_reviewed_record_historical`), so a follower treats their absence on an
 old record as "not recorded", never as a default.
@@ -3616,7 +3620,8 @@ old record as "not recorded", never as a default.
 | `channel` | record | no | The surface, when the writer recorded one. |
 | `payload.subject_seq` | payload | yes (APRV-481) | The `seq` of the `audit.sampled` record this review answers. Not the execution's seq. |
 | `payload.sampled_subject_hash` | payload | yes (APRV-481) | The `hash` of the `execution.started` record the sample named: the join key from a review to the execution it judged. |
-| `payload.verdict` | payload | yes (APRV-481) | `ok` or `denied`, given explicitly (APRV-482). The enforcement field. |
+| `payload.verdict` | payload | yes (APRV-481) | `ok` or `denied`. The enforcement field. Explicit only on records that carry `verdict_source`. |
+| `payload.verdict_source` | payload | yes (PR #614 F5) | Always `explicit`: the reviewer said the verdict (`--ok`/`--deny`, a card's OK or second Deny). The discriminator for a follower: a review WITHOUT it predates APRV-482 or was written by an older build, and its `ok` may have been defaulted for a grade-only tap or a bare terminal review. Count only reviews carrying it as explicit approvals. |
 | `payload.payload_hash` | payload | no | The SHA-256/JCS binding of the bytes the execution ran, present ONLY when the surface showed those bytes whole before the verdict (a Telegram card's `bytes` view). Absent when the reviewer saw a hash, nothing, or a terminal. Checked against the execution's binding before it is written. |
 | `payload.reaction` | payload | no | `disliked`, `indifferent`, `liked` or `loved`. Guidance, never enforcement; absent is absent. |
 | `payload.note` | payload | with `loved`/`disliked` | The reviewer's words, verbatim. |

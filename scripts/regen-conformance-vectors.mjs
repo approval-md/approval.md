@@ -2539,7 +2539,9 @@ const SUITES = [
     // Same unreleased major (PR #614 refutation F2): `audit.sampled` now
     // REQUIRES `payload.policy_sha256`, so the sample fixture gained it and
     // `audit-sampled-no-policy-hash` is refused; historical validation swaps
-    // in `audit_sampled_record_historical`.
+    // in `audit_sampled_record_historical`. And (F5) `audit.reviewed`
+    // REQUIRES `payload.verdict_source: "explicit"`: the review fixtures
+    // gained it and `audit-reviewed-no-verdict-source` is refused.
     vectors_version: "3.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:

@@ -545,6 +545,7 @@ test("a sampled action with no later review is listed; a reviewed one is not", (
       subject_seq: sampledOne.ok ? sampledOne.record.seq : 0,
       sampled_subject_hash: "e".repeat(64),
       verdict: "ok",
+      verdict_source: "explicit",
     },
   });
   assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
