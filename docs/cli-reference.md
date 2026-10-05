@@ -4426,12 +4426,22 @@ until it fits. A notice shows at most 600 characters, the rest on the
 listener's stderr. The payload budget is what the card's own rows leave under
 Telegram's 4096-character limit after the longest heading and the largest
 notice a tap can add, capped at 2000, and it is computed from the card alone,
-so the card a reviewer saw and the view a tap records cannot disagree. If a
-card still cannot be sent, the listener prints a coded
-`approval: telegram review-offer-failed:` line naming
-`approval audit review <seq> --ok` (or `--deny`), leaves that sample for a
-terminal review, and offers the next one: the sample stays open in
-`approval audit list` and QUEUE.md, and the queue behind it no longer waits.
+so the card a reviewer saw and the view a tap records cannot disagree.
+
+**A card that fails to send (PR #614 recheck NF-2).** When Telegram refuses the
+card itself (HTTP 400 `message is too long`, `can't parse entities`,
+`message text is empty` or `text must be non-empty`, `reply markup is too long`,
+`BUTTON_DATA_INVALID`, `ENTITIES_TOO_LONG`), resending it can only fail again:
+the listener prints a coded `approval: telegram review-offer-failed:` line
+naming `approval audit review <seq> --ok` (or `--deny`), leaves that sample for
+a terminal review, and offers the next one. Every other failure (a 429, a
+timeout, a 5xx, a network error) prints `approval: telegram review-offer-retry:`
+and pauses review cards for Telegram's `retry_after` or the backoff, whichever
+is longer (one minute, doubling per attempt), then offers the same sample again.
+After five failed attempts the sample is left for a terminal review with the
+`review-offer-failed` line. Either way the sample stays open in
+`approval audit list` and QUEUE.md, the queue behind it no longer waits, and a
+restarted listener offers it afresh.
 
 Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
 first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,
