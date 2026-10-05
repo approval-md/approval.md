@@ -527,8 +527,8 @@ const VILLAGE_SAY = [
   '          does: "share a note about you"',
   '          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: ~ }',
   "          note: none",
-  "        intent.publish.*:",
-  '          does: "post something to Index in your name"',
+  "        intent.publish.stated.index:",
+  '          does: "post something you said to Index in your name"',
   '          quote: { text: "" }',
 ];
 
@@ -559,12 +559,36 @@ test("style minimal and a say map load under channels.telegram.prompt and resolv
   assert.equal(promptLayoutFor(result, "telegram").visibility.ttl_remaining_ms, "always");
 });
 
-test("a say entry is chosen like a class rule: the most specific pattern wins", () => {
+test("a say entry names exactly one class: no pattern can rename several (fix round 2, S6)", () => {
   const result = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", ...VILLAGE_SAY]);
+  assert.equal(result.ok, true, JSON.stringify(result));
   const say = promptSayFor(result, "telegram");
   assert.equal(sayEntryFor(say, "intent.publish.inferred.index")?.pattern, "intent.publish.inferred.index");
-  assert.equal(sayEntryFor(say, "intent.publish.stated.index")?.pattern, "intent.publish.*");
+  assert.equal(sayEntryFor(say, "intent.publish.stated.index")?.pattern, "intent.publish.stated.index");
+  assert.equal(sayEntryFor(say, "intent.publish.other"), null, "an exact key matched another class");
   assert.equal(sayEntryFor(say, "village.vote"), null);
+  for (const pattern of ["files.*", "*", "files.*.out"]) {
+    const lines = ["      say:", `        "${pattern}": { does: "tidy up a little", quote: { text: "" } }`];
+    const typed = load(["channels:", "  telegram:", "    prompt:", ...lines]);
+    assert.equal(typed.ok, false, `${pattern} loaded on telegram`);
+    const untyped = load(["channels:", "  matrix:", "    prompt:", ...lines]);
+    assert.deepEqual(keywordsOf(untyped), ["prompt-say-wildcard"], pattern);
+  }
+});
+
+test("say mistakes that would load silently are load errors (fix round 2, S6)", () => {
+  const cases: [string, string[]][] = [
+    ["quote shows nothing", ["      say:", "        digest.share: { does: share, quote: { digest_id: ~ } }"]],
+    ["empty quote", ["      say:", "        digest.share: { does: share, quote: {} }"]],
+    ["does carries the notice mark", ["      say:", '        digest.share: { does: "⚠ share now", quote: { text: Note } }']],
+    ["label carries the notice mark", ["      say:", '        digest.share: { does: share, quote: { text: "⚠ There is more than fits here" } }']],
+  ];
+  for (const [label, lines] of cases) {
+    const typed = load(["channels:", "  telegram:", "    prompt:", ...lines]);
+    assert.equal(typed.ok, false, `${label}: loaded on telegram`);
+    const untyped = load(["channels:", "  matrix:", "    prompt:", ...lines]);
+    assert.deepEqual([...new Set(keywordsOf(untyped))], ["prompt-say-shape"], label);
+  }
 });
 
 test("style is IGNORED on web and cli: it loads and they stay technical (documented rule)", () => {

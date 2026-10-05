@@ -396,9 +396,9 @@
         },
         "say": {
           "type": "object",
-          "propertyNames": { "$ref": "#/$defs/classPattern" },
+          "propertyNames": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*(?:\\.[a-z0-9][a-z0-9_-]*)*$" },
           "additionalProperties": { "$ref": "#/$defs/promptSay" },
-          "description": "SPEC.md §5.2 (APRV-489): what the minimal card says about a class, keyed by class pattern and resolved like a class rule (most specific first). Operator text the approver attests, never agent text. Read only under `style: minimal`.",
+          "description": "SPEC.md §5.2 (APRV-489): what the minimal card says about a class, keyed by EXACT class name (no wildcard: one friendly phrase must never stand for several classes). Operator text the approver attests, never agent text. Read only under `style: minimal`.",
           "examples": [
             {
               "digest.share": {

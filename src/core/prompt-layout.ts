@@ -60,7 +60,6 @@
  */
 
 import type { Policy, PolicyLoadResult } from "./policy-load.js";
-import { matchesPattern, specificityOf } from "./policy-match.js";
 import type { ValidationError } from "./validate.js";
 
 /**
@@ -468,7 +467,7 @@ export function promptSayFor(load: PolicyLoadResult, channel: string): PromptSay
   if (say === null || typeof say !== "object" || Array.isArray(say)) return {};
   const out: Record<string, PromptSayEntry> = {};
   for (const [pattern, entry] of Object.entries(say as Record<string, unknown>)) {
-    if (sayEntryErrors(entry, "").length > 0 || !CLASS_PATTERN.test(pattern)) continue;
+    if (sayEntryErrors(entry, "").length > 0 || !EXACT_CLASS.test(pattern)) continue;
     const record = entry as Record<string, unknown>;
     const quote = record["quote"] as Record<string, string | null> | undefined;
     const note = record["note"] as PromptSayNote | undefined;
@@ -482,34 +481,35 @@ export function promptSayFor(load: PolicyLoadResult, channel: string): PromptSay
 }
 
 /**
- * The declaration that applies to `actionClass`, or `null` (APRV-489).
+ * The declaration for exactly `actionClass`, or `null` (APRV-489).
  *
- * Resolved the way a class rule is (SPEC.md §5.2): every matching pattern, the
- * most specific first, and among a full specificity tie the lexicographically
- * smallest pattern, so the answer never depends on YAML key order. The class
- * is the one the LOG records; nothing a payload or an agent says chooses it.
+ * EXACT class names only (fix round 2, S6). A pattern such as `files.*` would
+ * let one friendly phrase ("tidy up a little") stand for every class under it,
+ * dangerous ones included, so `say` keys are refused at load unless they name
+ * one class. The class is the one the LOG records; nothing a payload or an
+ * agent says chooses it.
  */
 export function sayEntryFor(
   say: PromptSay,
   actionClass: string,
 ): { pattern: string; entry: PromptSayEntry } | null {
-  let best: { pattern: string; entry: PromptSayEntry } | null = null;
-  for (const pattern of Object.keys(say).sort()) {
-    const entry = say[pattern];
-    if (entry === undefined || !matchesPattern(pattern, actionClass)) continue;
-    if (best === null) {
-      best = { pattern, entry };
-      continue;
-    }
-    const [a0, a1] = specificityOf(pattern);
-    const [b0, b1] = specificityOf(best.pattern);
-    if (a0 > b0 || (a0 === b0 && a1 < b1)) best = { pattern, entry };
-  }
-  return best;
+  if (!Object.prototype.hasOwnProperty.call(say, actionClass)) return null;
+  const entry = say[actionClass];
+  return entry === undefined ? null : { pattern: actionClass, entry };
 }
 
-/** `$defs.classPattern` in `schema/policy.schema.json`, mirrored for the unknown-channel net. */
+/** A `say` key: one exact class name, no wildcard segment (`$defs.exactClass` in the policy schema). */
+const EXACT_CLASS = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/u;
+
+/** A `say` key that is a class PATTERN: well-formed, but carrying a `*` segment. */
 const CLASS_PATTERN = /^(?:[a-z0-9][a-z0-9_-]*|\*)(?:\.(?:[a-z0-9][a-z0-9_-]*|\*))*$/u;
+
+/**
+ * The marker the minimal card reserves for its own computed notices. An
+ * operator's phrase or label may not carry it, so attested operator text cannot
+ * look like the runtime's warning that a quotation was cut (fix round 2, S6).
+ */
+const RESERVED_NOTICE_MARK = "⚠";
 
 /** Characters an operator's phrase or label may not carry: controls, format (bidi, zero-width) and line separators. */
 const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -539,11 +539,12 @@ function sayEntryErrors(entry: unknown, at: string): { path: string; message: st
     typeof does !== "string" ||
     does.trim().length === 0 ||
     [...does].length > PROMPT_SAY_DOES_MAX ||
-    INVISIBLE.test(does)
+    INVISIBLE.test(does) ||
+    does.includes(RESERVED_NOTICE_MARK)
   ) {
     errors.push({
       path: `${at}/does`,
-      message: `expected a one-line phrase of 1 to ${String(PROMPT_SAY_DOES_MAX)} characters with no control, format or line-separator characters`,
+      message: `expected a one-line phrase of 1 to ${String(PROMPT_SAY_DOES_MAX)} characters with no control, format or line-separator characters and no ${RESERVED_NOTICE_MARK}`,
     });
   }
   const quote = record["quote"];
@@ -551,11 +552,21 @@ function sayEntryErrors(entry: unknown, at: string): { path: string; message: st
     if (quote === null || typeof quote !== "object" || Array.isArray(quote)) {
       errors.push({ path: `${at}/quote`, message: "expected a map from payload key to a label or ~" });
     } else {
-      for (const [key, label] of Object.entries(quote as Record<string, unknown>)) {
+      const entries = Object.entries(quote as Record<string, unknown>);
+      // A quote map that shows nothing is a minimal card that can never be
+      // drawn: refused at load rather than falling back on every request while
+      // its author believes the simple card is on (fix round 2, S6).
+      if (!entries.some(([, label]) => typeof label === "string")) {
+        errors.push({ path: `${at}/quote`, message: "the quote map shows no field: give at least one key a label" });
+      }
+      for (const [key, label] of entries) {
         const keyOk = key.length > 0 && [...key].length <= PROMPT_SAY_KEY_MAX && !INVISIBLE.test(key);
         const labelOk =
           label === null ||
-          (typeof label === "string" && [...label].length <= PROMPT_SAY_LABEL_MAX && !INVISIBLE.test(label));
+          (typeof label === "string" &&
+            [...label].length <= PROMPT_SAY_LABEL_MAX &&
+            !INVISIBLE.test(label) &&
+            !label.includes(RESERVED_NOTICE_MARK));
         if (!keyOk || !labelOk) {
           errors.push({
             path: `${at}/quote/${key}`,
@@ -651,8 +662,10 @@ export const PROMPT_BLOCK_ERROR_KEYWORDS = [
   "prompt-key-unknown",
   /** `style` is not one of {@link PROMPT_STYLES} (APRV-489). */
   "prompt-style-unknown",
-  /** `say` is not a map of class pattern to a well-formed declaration (APRV-489). */
+  /** `say` is not a map of class name to a well-formed declaration (APRV-489). */
   "prompt-say-shape",
+  /** A `say` key is a class pattern (a `*` segment), not one exact class (fix round 2, S6). */
+  "prompt-say-wildcard",
 ] as const;
 
 /** The three row-list keys, each an array of row names. */
@@ -728,11 +741,14 @@ export function promptBlockErrors(policy: Policy): ValidationError[] {
       } else {
         for (const pattern of Object.keys(say as Record<string, unknown>).sort()) {
           const entryAt = `${at}/say/${pattern}`;
-          if (!CLASS_PATTERN.test(pattern)) {
+          if (!EXACT_CLASS.test(pattern)) {
+            const wildcard = CLASS_PATTERN.test(pattern);
             errors.push({
               path: entryAt,
-              keyword: "prompt-say-shape",
-              message: `${JSON.stringify(pattern)} is not a class pattern`,
+              keyword: wildcard ? "prompt-say-wildcard" : "prompt-say-shape",
+              message: wildcard
+                ? `${JSON.stringify(pattern)} is a class pattern; a say entry names exactly one class, so one phrase can never stand for several classes`
+                : `${JSON.stringify(pattern)} is not a class name`,
             });
           }
           for (const problem of sayEntryErrors((say as Record<string, unknown>)[pattern], entryAt)) {
