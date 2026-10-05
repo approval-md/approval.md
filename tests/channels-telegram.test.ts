@@ -7547,6 +7547,150 @@ test("APRV-302: the note prompt keeps its toast, and its reply answers no callba
   assertClean(world.unit);
 });
 
+/**
+ * A review channel whose ForceReply note prompts are refused after the first
+ * `allowed` (APRV-492).
+ *
+ * This is the relay's shape: the control plane licenses exactly one prompt per
+ * grade tap and refuses a second send for the same tap. Every other call
+ * (cards, edits, toasts, polls) passes to the mock, and a refused send never
+ * reaches it, so `notePromptId()` still names the prompt the chat really shows.
+ */
+function notePromptChannel(world: Sampled, allowed: number) {
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  let attempts = 0;
+  const fetch: NonNullable<TelegramConfig["fetch"]> = async (url, init) => {
+    if (url.endsWith("/sendMessage")) {
+      const body = JSON.parse(String((init as { body?: unknown }).body ?? "{}")) as {
+        reply_markup?: { force_reply?: boolean };
+      };
+      if (body.reply_markup?.force_reply === true) {
+        attempts += 1;
+        if (attempts > allowed) {
+          const text = JSON.stringify({
+            ok: false,
+            error_code: 403,
+            description: "Forbidden: one note prompt per grade tap",
+          });
+          return { ok: false, status: 403, text: async () => text };
+        }
+      }
+    }
+    return await passthrough(url, init);
+  };
+  const channel = channelFor({ fetch });
+  const setup = setupFor(world, channel, undefined, "paced");
+  const captured = capture();
+  channel.onReview(reviewHandlerFor(setup, captured.streams));
+  return { channel, setup, promptAttempts: () => attempts, ...captured };
+}
+
+test("APRV-492: a doubled OK asks for the note once, and the reply to that prompt records", async () => {
+  const world = sampledWorld(1);
+  const { channel, promptAttempts } = notePromptChannel(world, 1);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "loved");
+  await tapReview(channel, "ok");
+  const first = notePromptId();
+  // The second OK lands while the note is still awaited. It asks for nothing
+  // new: the prompt on screen is the one the reply will answer.
+  const again = await tapReview(channel, "ok");
+  assert.deepEqual(again.reviews, [], "the doubled OK recorded before the note arrived");
+  assert.equal(promptAttempts(), 1, "a second prompt was asked for while the first was awaited");
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_REVIEW_NOTE_TOAST, "the doubled tap was not told to reply");
+  assert.equal(notePromptId(), first);
+  assert.deepEqual(reviewsIn(world), []);
+
+  await replyWithNote(channel, "the cleanup I wanted");
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1, "the reply to the prompt on screen recorded nothing");
+  const payload = (reviews[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "loved");
+  assert.equal(payload["note"], "the cleanup I wanted");
+  assertClean(world.unit);
+});
+
+test("APRV-492: a doubled second Deny asks for the note once, and the reply records one denial", async () => {
+  const world = sampledWorld(1);
+  const { channel, promptAttempts } = notePromptChannel(world, 1);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "disliked");
+  await tapReview(channel, "deny");
+  assert.equal(promptAttempts(), 0, "arming asked for a note");
+  await tapReview(channel, "deny");
+  assert.equal(promptAttempts(), 1);
+  await tapReview(channel, "deny");
+  assert.equal(promptAttempts(), 1, "the doubled Deny asked for a second prompt");
+  assert.deepEqual(reviewsIn(world), [], "a Deny recorded before the note arrived");
+
+  await replyWithNote(channel, "it pushed to a branch nobody asked for");
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1, "the reply to the prompt on screen recorded nothing");
+  const payload = (reviews[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "disliked");
+  assert.equal(payload["note"], "it pushed to a branch nobody asked for");
+  const obligations = recordsOf(world.unit.logPath).filter((entry) => entry.event === "reconciliation.required");
+  assert.equal(obligations.length, 1, "one denial did not open exactly one obligation");
+  assertClean(world.unit);
+});
+
+test("APRV-492: a replacement prompt that fails to send leaves the old prompt live", async () => {
+  const world = sampledWorld(1);
+  const { channel, promptAttempts } = notePromptChannel(world, 1);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "loved");
+  await tapReview(channel, "ok");
+  const first = notePromptId();
+  // A different grade, then OK: that asks a different question, so a new
+  // prompt is sent, and here the send fails.
+  await tapReview(channel, "disliked");
+  await tapReview(channel, "ok");
+  assert.equal(promptAttempts(), 2, "the different grade did not ask for its own prompt");
+  assert.equal(notePromptId(), first, "a refused send reached the chat");
+  assert.deepEqual(reviewsIn(world), []);
+
+  // The prompt still on screen still resolves, and records what it asked for.
+  await replyWithNote(channel, "exactly what I wanted");
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1, "the prompt on screen stopped resolving when its replacement failed");
+  const payload = (reviews[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "loved", "the reply recorded a grade its prompt did not ask about");
+  assert.equal(payload["note"], "exactly what I wanted");
+  assertClean(world.unit);
+});
+
+test("APRV-492: a replacement prompt that is sent retires the old one", async () => {
+  const world = sampledWorld(1);
+  const { channel } = notePromptChannel(world, 2);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "loved");
+  await tapReview(channel, "ok");
+  const first = notePromptId();
+  await tapReview(channel, "disliked");
+  await tapReview(channel, "ok");
+  const second = notePromptId();
+  assert.notEqual(second, first, "the different grade sent no prompt of its own");
+
+  // A late reply to the old prompt lands nowhere: the human moved on from it.
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "late words", replyToMessageId: first }));
+  await channel.pollOnce();
+  assert.deepEqual(reviewsIn(world), [], "a reply to a replaced prompt recorded");
+
+  await replyWithNote(channel, "it renamed a file the task never named");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "disliked");
+  assert.equal(payload["note"], "it renamed a file the task never named");
+  assertClean(world.unit);
+});
+
 /** Run one CLI verb against a sampled world's log, in process. */
 async function runReviewCli(
   world: Sampled,
