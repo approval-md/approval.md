@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 08:21'
+updated_date: '2026-10-05 10:26'
 labels:
   - agentvillage
 dependencies: []
@@ -66,4 +66,10 @@ Fix round 1 (refutation of PR #614), lane claude-edge/A3-fix1.
 - Follow-up filed: APRV-487 (N3, match reviews to samples by subject_seq exclusively when present).
 FOLLOWER-FACING FIELD LIST CHANGE (for the orchestrator to post to the follower and dbt halves): payload.verdict_source ('explicit', REQUIRED on new reviews). Count a review as an explicit approval only when it carries verdict_source; a review without it predates APRV-482 or came from an old build, and its ok may have been defaulted. audit.sampled gains payload.policy_sha256 (64-hex, REQUIRED on new samples).
 UPDATED PROPOSED SPEC HUNKS (N4, pending sign-off). §8, replacing the APRV-481 hunk: '`audit.reviewed` records written since APRV-481 MUST carry `payload.subject_seq`, `payload.sampled_subject_hash` and `payload.verdict`, and since PR #614 `payload.verdict_source` with the value `explicit`. Verifiers MUST accept earlier records without them, and a reader MUST NOT treat a verdict on a record without `verdict_source` as explicit. `payload.payload_hash` MAY be recorded only when the reviewing surface rendered the bound bytes whole, and it MUST equal the execution's binding.' Also §8: '`audit.sampled` records written since PR #614 MUST carry `payload.policy_sha256`, the hash the latest policy attestation named when the sample was taken; verifiers MUST accept earlier samples without it.' §11.2 row unchanged: rendered-payload-mismatch.
+
+Fix round 2 (impact-scoped recheck of PR #614).
+- NF-3 (fixed under APRV-483, 3449b538) changes what audit.sampled's payload.policy_sha256 means: the latest attestation before the sampled execution.started (the policy the action ran under), no longer the latest attestation when the sample was drawn. Shape, requiredness and the historical widening are unchanged; only the audit_sampled_record $comment prose was updated, so conformance 3.0.0 vectors and the manifest are unchanged (conformance/run.mjs exit 0).
+- NF-4 (regen-conformance-vectors can silently flip a valid fixture to an expected refusal) is filed as APRV-490; nothing added here.
+
+UPDATED PROPOSED SPEC HUNK (NF-3, replacing the §8 audit.sampled sentence above): '`audit.sampled` records written since PR #614 MUST carry `payload.policy_sha256`, the hash named by the latest policy attestation before the sampled `execution.started` (the policy the action ran under); verifiers MUST accept earlier samples without it.' SPEC.md is not edited.
 <!-- SECTION:NOTES:END -->
