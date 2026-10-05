@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agentvillage-d4-C1'
 created_date: '2026-10-05 08:41'
-updated_date: '2026-10-05 09:13'
+updated_date: '2026-10-05 09:20'
 labels:
   - agentvillage
 dependencies: []
@@ -66,4 +66,6 @@ SPEC 11 touch: the approver-facing presentation rule (10.3) is amended; the cano
 Remaining: refuter pass (orchestrator), owner confirmation of R1 before arming, control-plane template PR after the core pin moves.
 
 AC #1 is met in requirement 7's form, not its literal 'only': style and say are accepted under every channel's prompt block (validated everywhere, unknown values fail the load), drawn by Telegram only, ignored by web and cli. AC #11 stays open until the refuter has run.
+
+Security fix round (1417a8ef), from an automated review's two ui-misrepresentation pointers: a cut value or a command not shown as written now adds a computed '⚠ There is more than fits here: open Full details before deciding.' line outside the box; a ~ field adds 'Some of what your agent sent is shown only in Full details.'; cwd, replace_all and content_type are on the card; the class name in '(type: …)' is marked; the settle edit shortens detail lines and never drops the collapsed block. 9 new hostile-payload tests; PR #616 body has a 'Security review pointers' section with file:line.
 <!-- SECTION:NOTES:END -->
