@@ -275,6 +275,8 @@ test("the audit refusal-code union is frozen public API", async () => {
       "actor-not-approver",
       // APRV-483 refutation: the roster is read from attested bytes only.
       "policy-not-attested",
+      // PR #614 refutation F1: attested bytes that do not load name no roster.
+      "policy-invalid",
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
@@ -1594,6 +1596,47 @@ test("APRV-483 refutation: the roster cannot come from a file the reviewer chose
   });
   assert.equal(named.ok, true, named.ok ? "" : named.message);
   assertClean(unit);
+});
+
+test("PR #614 refutation F1: an attested policy that does not load names no roster, so every reviewer is refused", async () => {
+  // Three ways to break the bytes the loader refuses and `policy attest` does
+  // not: a glob in a roster, a roster entry that is not an identifier, and a
+  // YAML typo. Each is attested, so the refusal cannot be policy-not-attested.
+  const breakages: Array<[string, (text: string) => string]> = [
+    ["glob entry", (text) => text.replace("    approvers: [carter]\n", '    approvers: [carter, "*"]\n')],
+    ["non-identifier", (text) => text.replace("    approvers: [carter]\n", '    approvers: [carter, "Carter "]\n')],
+    ["yaml typo", (text) => text.replace("    approvers: [carter]\n", "    approvers: [carter\n")],
+  ];
+  for (const [name, breakIt] of breakages) {
+    const unit = ready();
+    withRoster(unit, true);
+    startSupervised(unit, "task-042:draft", 2);
+    sweep(unit, 5);
+    writeFileSync(unit.policyPath, breakIt(readFileSync(unit.policyPath, "utf8")), "utf8");
+    assert.equal(loadPolicy({ file: unit.policyPath }).ok, false, `${name}: the broken policy loaded`);
+    assert.equal(
+      appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(4)).ok,
+      true,
+      `${name}: attestation of the broken bytes failed, so the probe tests nothing`,
+    );
+    const before = records(unit).length;
+    for (const reviewer of ["human:bob", "human:carter"]) {
+      const result = reviewSample(
+        unit.logPath,
+        { kind: "action-key", actionKey: "task-042:draft" },
+        reviewer,
+        null,
+        { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+      );
+      assert.equal(result.ok, false, `${name}: ${reviewer} recorded a review under a policy that names nobody`);
+      if (!result.ok) assert.equal(result.code, "policy-invalid", `${name}: ${reviewer}: ${result.message}`);
+    }
+    const cli = await runCli(unit, ["audit", "review", "task-042:draft", "--ok", "--as", "human:bob", "--json"]);
+    assert.equal(cli.code, 1, cli.err);
+    assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "policy-invalid");
+    assert.equal(records(unit).length, before, `${name}: a refused review wrote to the log`);
+    assertClean(unit);
+  }
 });
 
 test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {

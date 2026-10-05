@@ -3551,7 +3551,12 @@ class comes from the action's registration (a sample naming no class is refused
 the policy file a grant would read, only when its bytes are the latest
 attestation's: an unattested, edited, unreadable or `--policy`-substituted file
 is refused `policy-not-attested` (exit 1), because a roster read from a file
-nobody attested is one the reviewer could have chosen.
+nobody attested is one the reviewer could have chosen. Attested bytes that do not
+load (a schema-invalid rule, a YAML error) are refused `policy-invalid` (exit 1):
+`policy attest` hashes bytes without parsing them, and the fail-closed reading
+of a broken policy names no roster, which for a review would mean anyone. Nothing
+resolves from a broken file, so an on-roster reviewer is refused too; the repair
+is a corrected policy, attested.
 
 Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
 carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes

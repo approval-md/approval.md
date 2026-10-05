@@ -134,6 +134,18 @@ export const AUDIT_REFUSAL_CODES = [
    * sample is located; nothing is appended.
    */
   "policy-not-attested",
+  /**
+   * The attested policy bytes do not load (schema-invalid, a YAML error, no
+   * policy block), so no roster can be read from them (PR #614 refutation F1).
+   * A gate meeting the same bytes resolves every class `manual`, which
+   * compensates; a review has nothing that compensates, because the action
+   * already ran and this record is its approval. So a policy that names nobody
+   * because it failed to load is refused here rather than read as "no roster".
+   * Distinct from `policy-not-attested`: the bytes ARE the attested ones, and
+   * the repair is a corrected policy and a new attestation, not re-attesting
+   * what is on disk. Evaluated once the sample is located; nothing is appended.
+   */
+  "policy-invalid",
   /** No `audit.sampled` record matches the subject named. */
   "not-sampled",
   /** That sample already has a later `audit.reviewed`. */
@@ -1004,7 +1016,10 @@ export function reviewSample(
  *   an unreadable one, nor a `--policy` pointed elsewhere can supply the roster;
  * - a sample whose class cannot be named (no registration and no class on the
  *   runtime-written sample) is refused rather than resolved as "no rule, no
- *   roster", because that reading would let anyone review it.
+ *   roster", because that reading would let anyone review it;
+ * - attested bytes the loader refuses are refused `policy-invalid` (PR #614
+ *   refutation F1): their fail-closed resolution names no roster, and for a
+ *   review "no roster" would mean "anyone".
  *
  * What still restricts nobody, by design and exactly as for a grant: an
  * attested rule that names no `approvers`.
@@ -1045,6 +1060,14 @@ function reviewerRoster(
     Buffer.from(bytes).toString("utf8"),
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
   );
+  // PR #614 refutation F1. Attested is not the same as valid: `policy attest`
+  // hashes bytes and never parses them, so a policy the loader refuses can be
+  // attested. The fail-closed resolution such bytes produce carries
+  // `approvers: null`, which reads as "no restriction"; for a review that is
+  // the opposite of failing closed. Both checks, because the provenance is the
+  // resolution's own word for the same fact and a second spelling of it should
+  // not be able to slip past the first.
+  if (!load.ok) return policyInvalid(path, `${load.code}: ${load.message}`, subject);
   const resolution = resolve(
     load,
     cls,
@@ -1052,6 +1075,9 @@ function reviewerRoster(
       ? {}
       : { reversible: declared.reversible },
   );
+  if (resolution.provenance === "fail-closed") {
+    return policyInvalid(path, "the policy resolved on its fail-closed path", subject);
+  }
   const approvers = resolution.approvers;
   if (approvers === null || namesApprover(approvers, actor)) return null;
   return refuse(
@@ -1059,6 +1085,15 @@ function reviewerRoster(
     `${actor} is not named in the approvers list for class ${cls}: the rule ${
       resolution.matched === null ? "in force" : `\`${resolution.matched.pattern}\``
     } names ${approvers.length === 0 ? "nobody" : approvers.map((name) => `\`${name}\``).join(", ")}. Under supervised-retro a review is the approval, so it is held to the roster a grant is. Ask a named approver to review it, or amend the policy and re-attest. Nothing was appended.`,
+    { seq: subject.seq },
+  );
+}
+
+/** `policy-invalid`: attested bytes the loader refuses name no roster (F1). */
+function policyInvalid(path: string, cause: string, subject: SampledSubject): AuditRefusal {
+  return refuse(
+    "policy-invalid",
+    `the attested policy ${path} does not load (${cause}), so no approvers roster can be read from it for the sample at seq ${String(subject.seq)}. A gate meeting these bytes would hold every class for a human; a review has nothing that compensates, because the action already ran and the review is its approval. Correct the policy and attest the corrected bytes, then review again. Nothing was appended.`,
     { seq: subject.seq },
   );
 }

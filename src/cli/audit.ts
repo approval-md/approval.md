@@ -297,7 +297,8 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
  * `approvers` roster from the attested bytes only, and refuses
  * `policy-not-attested` otherwise. Under supervised-retro a review is the
  * approval, so a roster from a file nobody attested (or one named here with
- * `--policy`) would be a roster the reviewer chose.
+ * `--policy`) would be a roster the reviewer chose. Attested bytes that do not
+ * load are refused `policy-invalid` (PR #614 refutation F1).
  */
 export function commandAuditReview(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
