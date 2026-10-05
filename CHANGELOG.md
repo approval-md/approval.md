@@ -15,6 +15,33 @@ before a tag.
 
 ## Unreleased
 
+### Policy
+
+- **The `delegation` block is reserved, validated and inert (APRV-500).** A
+  policy may carry one top-level `delegation` block, `{model, classes,
+  max_autonomy, daily_cap, escalate_on, advice, reviewers}`, the shape the judge
+  (a pinned model reviewer, adviser and delegated approver) will take in a later
+  release. This core implements none of it. The block loads only in its off
+  form (`model: null`, every list empty, `max_autonomy: manual`, `daily_cap:
+  0`, `advice: false`, or simply `{}`), which changes no resolution, request
+  or record. Any other value fails the policy closed with the new load code
+  `delegation-not-supported`, so every class resolves `manual` and no setting
+  an author believes is in force is silently ignored. The block's relationships
+  to the rest of the file (exact class keys, no `human-only` or `autonomous`
+  class, the `max_autonomy` pin, the escalation floors, reviewer identities)
+  are checked first and fail as `schema-invalid`. `policy check` notes a
+  declared block; `policy diff` shows its paths. Cores before 0.4.2 refuse the
+  key outright, so a template carries it only once the fleet runs 0.4.2.
+- **The `model:` identity and `verdict_source: model` are reserved.**
+  `model:<name>@<major>.<minor>.<patch>` parses in `delegation.reviewers` and
+  nowhere else: grants, attestations, reviews and channel decisions still
+  require `human:` and refuse it `actor-not-human`. `verdict_source: model` is
+  registered for `audit.reviewed` and never written; the event schema refuses
+  both at the write boundary.
+- **Conformance.** `policy-resolution` 4.1.0 (six new vectors) and
+  `schema-validation` 3.3.0 (twenty-one new fixtures). No existing expectation
+  moves. The SPEC amendment is proposed in the APRV-500 task, pending sign-off.
+
 ### Harnesses
 
 - **The policy decides the tools a harness adapter does not know (APRV-499).**

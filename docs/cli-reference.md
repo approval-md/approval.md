@@ -730,7 +730,8 @@ channel; policy-authorized execution is never represented as a human grant.
  "provenance":"rule"|"default"|"inherited"|"fail-closed"|"floor",
  "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
  "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
-                     "yaml-error"|"schema-invalid"|"protected-route-floor",
+                     "yaml-error"|"schema-invalid"|"protected-route-floor"|
+                     "sender-ambiguous"|"delegation-not-supported",
                      "message":"..."},
  "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
  "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
@@ -773,6 +774,62 @@ resolves more loosely than the `policy.edit` line itself, which would narrow the
 protected surface without removing a path from any list. The policy does not
 load, so every class answers `manual` with `manualBecause: "load-failure"`, and
 the message names the offending entry.
+
+### Delegation block, reserved in 0.4.2; no behaviour (APRV-500)
+
+A policy may carry one top-level `delegation` block. It is where the judge
+will live: a pinned model, `model:<name>@<major>.<minor>.<patch>`, that may
+later review supervised samples, advise on manual cards, and decide manual
+cards in named classes within a daily cap. None of that exists in this core.
+The block is parsed, validated, and loaded only in its off form:
+
+```yaml
+delegation:
+  model: null            # no judge; every other key is inert
+  classes: []            # exact keys of classes, never a wildcard
+  max_autonomy: manual   # manual | supervised-live | supervised-retro
+  daily_cap: 0           # 0 to 1000 judge grants per rolling day
+  escalate_on: []        # deny, low_confidence, irreversible, unknown_class
+  advice: false
+  reviewers: []          # human:<approver id> or model:<name>@<version>
+```
+
+An empty mapping (`delegation: {}`) and any subset of these keys at these
+values is the same off form. It changes no resolution, no request and no
+record, and `policy check` adds one line to the trace saying the block is
+declared and off.
+
+Any other value fails the load with `loadFailure.code`
+`delegation-not-supported`, and the message names every key that is not off.
+The policy then answers `manual` for every class, like any policy that does
+not load. Accepting `daily_cap: 10` and doing nothing would leave the author
+believing a setting is in force that nobody enforces, so this core refuses it.
+
+The block's relationships to the rest of the file are checked first, and a
+fault there is `schema-invalid` with its own keyword in `errors`:
+
+| keyword | rule |
+| --- | --- |
+| `delegation-class-undeclared` | each `classes` entry is an exact key of `classes`; a class reached only through a `<prefix>.*` family is refused |
+| `delegation-class-level` | no delegated class declares `human-only` or `autonomous` |
+| `delegation-max-autonomy-pin` | every delegated class declares an autonomy at least as strict as `max_autonomy`. It is a pin: loosening a delegated row without rewriting this block fails the load |
+| `delegation-escalation-floor` | `daily_cap` above 0 requires `escalate_on` to contain `irreversible` and `unknown_class` |
+| `delegation-reviewer-model` | a `model:` reviewer equals `model` exactly |
+| `delegation-reviewer-unknown` | a `human:` reviewer names a key of `approvers` |
+| `delegation-model-required` | `advice: true`, a cap above 0 or a `model:` reviewer needs `model` |
+
+The `model:` identity is reserved with the block. `delegation.reviewers` is
+the only place it parses. Grant, reject, revoke, attest, `audit review` and
+every channel decision still require `human:` and refuse a `model:` actor
+with `actor-not-human`. The event schema admits no `model:` actor and no
+`verdict_source: model`, which is registered as reserved and never written.
+
+`policy diff` (and the `policy amend` ceremony) shows the block's keys as
+`delegation.<key>` paths and, for an edit that turns one on, the
+`delegation-not-supported` failure of the new side. Older cores (0.4.1 and
+earlier) do not know the key and refuse even the off form as
+`schema-invalid`, so a template carries the block only once every daemon that
+reads it runs 0.4.2 or later.
 
 Human output: the `decisionPath` lines, then a final line `-> <autonomy>`
 carrying "(fail-closed: `<code>`)" or "(floor applied over `<pattern>`:
