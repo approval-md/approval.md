@@ -242,7 +242,14 @@ F2), so the sample fixture gained the field and a sample without it is refused
 `audit_sampled_record_historical` for the samples already in logs. A review
 also requires `payload.verdict_source: "explicit"` (PR #614 refutation F5), so
 the review fixtures gained it and `audit-reviewed-no-verdict-source` is
-refused. If another
+refused. Every `required` error in an expectation now also names the property
+that is missing (`missing`, PR #614 refutation F6), which moves every existing
+expectation that carries one: before it, a review refused for lacking its
+verdict and one refused for lacking its subject hash had the same signature
+(`required` at `/payload`), so an implementation refusing for the wrong reason
+passed. `audit-reviewed-no-verdict`, `audit-reviewed-no-subject-seq` and
+`audit-reviewed-bad-payload-hash` pin the remaining required fields and the
+hash shape, each with its own signature. If another
 branch claims 3.0.0 first, the collision rule below gives this change the next
 major at merge.
 

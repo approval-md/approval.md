@@ -2541,7 +2541,11 @@ const SUITES = [
     // `audit-sampled-no-policy-hash` is refused; historical validation swaps
     // in `audit_sampled_record_historical`. And (F5) `audit.reviewed`
     // REQUIRES `payload.verdict_source: "explicit"`: the review fixtures
-    // gained it and `audit-reviewed-no-verdict-source` is refused.
+    // gained it and `audit-reviewed-no-verdict-source` is refused. And (F6)
+    // every `required` error names its `missing` property, so expectations
+    // carrying one moved; `audit-reviewed-no-verdict`,
+    // `audit-reviewed-no-subject-seq` and `audit-reviewed-bad-payload-hash`
+    // each pin a distinct refusal.
     vectors_version: "3.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
