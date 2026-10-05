@@ -109,6 +109,7 @@ writes — MUST:
 | `gate-verdicts` | Scripted gate scenarios: a policy, a sequence of operations, and the verdict of the last one, covering the refusal codes intake and decision can produce. |
 | `bridge-decisions` | The Codex app-server bridge's reply vocabulary (APRV-367): given what a request advertised and what the client decided, which word goes on the wire and whether it came from the advertisement. The rule it exists for is the negative one: `acceptForSession`, `acceptWithExecpolicyAmendment`, `cancel` and `abort` are never sent, however loudly a server advertises them, and a client matching by prefix would send the first two. |
 | `hook-read-scope` | SPEC.md §5.2/§7 (amended, APRV-347): a harness `PreToolUse` envelope for a read inside the scope, outside it, carrying no path, resolving nowhere, and unparseable — per harness. Targets are SYMBOLIC (`inside`, `outside`, `absent`, …) rather than paths, because a vector naming one machine's directories is a fact about that machine; a runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. |
+| `hook-tool-map` | SPEC.md §5.2 (APRV-499, proposed): the policy's `tools` mapping and `defaults.unmapped_tool`, per harness. A call the adapter's own tables leave unclaimed (an MCP tool, `TodoWrite`, a Hermes `web_search`) is judged under the first matching entry's class, else under `harness.tool.unmapped` when the policy says `record` or `ask`, else not at all. Each vector carries its policy text; the expectation pins the permission, the deny code, whether the call was gated, and what the log gained (the class and `harness_tool` of a start, or the class of a request). Precedence is pinned both ways: a catch-all entry reaches neither Claude Code's `Bash` nor a Hermes rule-table tool. |
 
 `hook-read-scope` pins the permission, the deny CODE and whether the call was
 gated at all, and deliberately does NOT pin the reason text: that is English
@@ -206,6 +207,16 @@ such a class to the default and does not conform. The suite also gained a
 control for the routing floor: a policy whose routing would resolve a built-in
 protected path below what the `policy.edit` line resolves to is refused at load
 with `protected-route-floor`, and every class then resolves to `manual`.
+
+`policy-resolution` reached **4.0.0** at APRV-499, a major for the reason 2.0.0
+was one: no expectation moved, and the no-rule-matched rule is narrowed again,
+for one class. `harness.tool.unmapped` takes its default from
+`defaults.unmapped_tool` when the policy declares it (`record` is
+`autonomous`, `ask` is `manual`), so an implementation that read 3.0.0 and
+resolved it by `defaults.autonomy` does not conform. A `classes` rule matching
+the class still decides it. Two controls pin the load-time refusals of a
+`tools` entry (an undeclared class, and the reserved unmapped class), each
+failing the whole policy closed.
 
 `policy-resolution` reached **3.0.0** at APRV-317. A class rule may now
 explicitly retain autonomous or supervised behavior for a truthful

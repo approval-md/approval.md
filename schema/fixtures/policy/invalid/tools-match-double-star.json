@@ -1,0 +1,9 @@
+{
+  "version": "0.1",
+  "classes": {
+    "marketplace.*": { "autonomy": "manual" }
+  },
+  "tools": [
+    { "match": "mcp__**", "class": "marketplace.app.read" }
+  ]
+}

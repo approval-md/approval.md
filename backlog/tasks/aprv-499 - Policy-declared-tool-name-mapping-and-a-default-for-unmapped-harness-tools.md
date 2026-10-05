@@ -4,6 +4,7 @@ title: Policy-declared tool-name mapping and a default for unmapped harness tool
 status: In Progress
 assignee: []
 created_date: '2026-10-05 22:48'
+updated_date: '2026-10-05 23:00'
 labels:
   - hook
   - policy
@@ -30,3 +31,9 @@ The harness hook classifies a tool call through a per-harness hard-coded rule ta
 - [ ] #6 Tests: exact, glob, precedence vs hard-coded Hermes rules, first match, unknown class rejected, malformed glob rejected, unmapped record/ask/absent; policy schema tests; conformance vectors regenerated and diff read line by line
 - [ ] #7 Docs: docs/claude-code-hook.md and docs/hermes-hook.md tool classification sections; CHANGELOG Unreleased; SPEC amendment proposal text in these notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Resume point: node scripts/run-tests.mjs --only cli-hook (in the worktree), then the conformance regen (npm run build && node scripts/regen-conformance-vectors.mjs)
+<!-- SECTION:NOTES:END -->

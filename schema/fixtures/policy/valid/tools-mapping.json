@@ -1,0 +1,17 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "unmapped_tool": "record"
+  },
+  "classes": {
+    "marketplace.*": { "autonomy": "manual" },
+    "marketplace.app.read": { "autonomy": "autonomous" },
+    "harness.tool.unmapped": { "autonomy": "supervised-retro" }
+  },
+  "tools": [
+    { "match": "mcp__contextsling__publish", "class": "marketplace.contextsling.publish" },
+    { "match": "mcp__contextsling__*", "class": "marketplace.app.read" },
+    { "match": "*", "class": "marketplace.app.read" }
+  ]
+}

@@ -159,6 +159,63 @@ const POLICY_ROUTE_FLOOR_BROKEN = POLICY_ROUTED.replace(
 );
 
 /**
+ * The harness tool mapping and the unmapped-tool default (APRV-499).
+ *
+ * `classes` names the marketplace family the Agent Village reserves, one
+ * member reserved to human hands (so a vector measures ROUTING without a
+ * channel, a daemon or a timeout, the reason `hook-read-scope` uses one), one
+ * autonomous member (so a vector can read the start record back), and the
+ * Hermes rule-table classes at human-only (so precedence is visible as a deny
+ * naming the TABLE's class rather than the entry's).
+ *
+ * `tools` puts the exact publish line FIRST and the server glob after it, so
+ * first-match-wins is visible: publish is refused under its own class and
+ * every other tool of the server is recorded under the read class.
+ */
+function toolMapPolicy({ defaults = [], classes = [], tools = null } = {}) {
+  return [
+    "# Policy",
+    "",
+    "```yaml approval-policy",
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: manual",
+    '  approval_ttl: "1h"',
+    "  on_expiry: reject",
+    ...defaults,
+    "classes:",
+    "  read.*:",
+    "    autonomy: autonomous",
+    "  marketplace.*:",
+    "    autonomy: manual",
+    "  marketplace.app.read:",
+    "    autonomy: autonomous",
+    "  marketplace.contextsling.publish:",
+    "    autonomy: human-only",
+    "  cron.manage:",
+    "    autonomy: human-only",
+    ...classes,
+    ...(tools ?? [
+      "tools:",
+      "  - match: mcp__contextsling__publish",
+      "    class: marketplace.contextsling.publish",
+      '  - match: "mcp__contextsling__*"',
+      "    class: marketplace.app.read",
+      "  - match: mcp_zzz_post",
+      "    class: marketplace.contextsling.publish",
+      "  - match: cronjob_manage",
+      "    class: marketplace.app.read",
+    ]),
+    "```",
+    "",
+  ].join("\n");
+}
+
+const POLICY_TOOLS = toolMapPolicy();
+const POLICY_TOOLS_RECORD = toolMapPolicy({ defaults: ["  unmapped_tool: record"] });
+const POLICY_TOOLS_ASK = toolMapPolicy({ defaults: ["  unmapped_tool: ask"] });
+
+/**
  * SPEC.md §5.2's request-volume limits, one policy per limit (APRV-173).
  *
  * Written separately rather than as one policy carrying both, so each vector
@@ -516,6 +573,61 @@ const policyVectors = [
       "`protected_paths` is additive: it may widen the protected surface and may never narrow it. A routing that would resolve a BUILT-IN protected path below what the `policy.edit` line itself resolves to is refused at load with `protected-route-floor`, and the policy is inoperative — so every class, including unrelated ones, resolves to manual with no matched rule. An implementation that loaded this file and honoured the routing has let a policy edit its way out of the gate",
     control: true,
     input: { policy: POLICY_ROUTE_FLOOR_BROKEN, class: "policy.edit.ci" },
+  },
+  // --- APRV-499: the unmapped-tool default ------------------------------------
+  {
+    id: "unmapped-tool-record-resolves-autonomous",
+    description:
+      "with no rule matching it, `harness.tool.unmapped` takes its autonomy from `defaults.unmapped_tool` rather than `defaults.autonomy`: `record` is autonomous under a manual default. An implementation that resolved it by `defaults.autonomy` would put every unmapped harness tool call on a human's phone under a policy that asked for a record",
+    input: { policy: POLICY_TOOLS_RECORD, class: "harness.tool.unmapped" },
+  },
+  {
+    id: "unmapped-tool-ask-resolves-manual",
+    description: "`ask` resolves `harness.tool.unmapped` manual, with provenance default and no matched rule",
+    input: { policy: POLICY_TOOLS_ASK, class: "harness.tool.unmapped" },
+  },
+  {
+    id: "unmapped-tool-key-names-one-class",
+    description:
+      "the key is the default of ONE class: a sibling under `harness.tool` still takes `defaults.autonomy`",
+    input: { policy: POLICY_TOOLS_RECORD, class: "harness.tool.other" },
+  },
+  {
+    id: "unmapped-tool-rule-decides-over-the-key",
+    description:
+      "a `classes` rule matching `harness.tool.unmapped` decides it, exactly as a rule decides any class over a default: here it reserves unmapped calls to human hands although the key says record",
+    input: {
+      policy: toolMapPolicy({
+        defaults: ["  unmapped_tool: record"],
+        classes: ["  harness.tool.unmapped:", "    autonomy: human-only"],
+      }),
+      class: "harness.tool.unmapped",
+    },
+  },
+  {
+    id: "fail-closed-tools-class-undeclared",
+    description:
+      "a `tools` entry naming a class `classes` does not declare (as an exact key or under a trailing `<prefix>.*` family) fails the policy closed, so every class, unrelated ones included, resolves to manual. An implementation that loaded it would judge the mapped tool by `defaults.autonomy`, a decision nobody made about that tool",
+    control: true,
+    input: {
+      policy: toolMapPolicy({
+        tools: ["tools:", "  - match: mcp__zzz__post", "    class: communicate.zzz.post"],
+      }),
+      class: "read.file",
+    },
+  },
+  {
+    id: "fail-closed-tools-class-reserved",
+    description:
+      "a `tools` entry may not name `harness.tool.unmapped`, which asserts that no entry claimed the call: the policy fails closed",
+    control: true,
+    input: {
+      policy: toolMapPolicy({
+        classes: ["  harness.tool.unmapped:", "    autonomy: autonomous"],
+        tools: ["tools:", "  - match: mcp__zzz__post", "    class: harness.tool.unmapped"],
+      }),
+      class: "read.file",
+    },
   },
 ];
 
@@ -1033,6 +1145,157 @@ const readScopeVectors = [
     description: "unparseable input on the Hermes envelope is a deny in the one supported dialect",
     input: { harness: "hermes", tool: "read_file", target: "inside", malformed: true },
     control: true,
+  },
+];
+
+/**
+ * The policy's tool-name mapping, per harness (APRV-499).
+ *
+ * Every input carries its policy TEXT, as `policy-resolution` does, and a
+ * runner writes it into a scratch gate root, attests it when it loads, and sends
+ * the envelope. The expectation pins the permission, the deny CODE, whether the
+ * call was gated at all, and what the log gained: the class and tool name of an
+ * `execution.started`, or the class of an `approval.requested`.
+ */
+const toolMapVectors = [
+  // --- Claude Code -----------------------------------------------------------
+  {
+    id: "claude-mcp-exact-entry-routes-to-its-class",
+    description:
+      "`mcp__contextsling__publish` matches the exact entry, which comes first, and is judged under its human-only class: refused, nothing appended",
+    input: { harness: "claude-code", policy: POLICY_TOOLS, tool: "mcp__contextsling__publish", tool_input: { text: "hi" } },
+  },
+  {
+    id: "claude-mcp-glob-entry-records-with-the-tool-name",
+    description:
+      "`mcp__contextsling__search` falls past the exact entry to the server glob: autonomous, so it is allowed and its `execution.started` carries the class and `harness_tool`",
+    input: { harness: "claude-code", policy: POLICY_TOOLS, tool: "mcp__contextsling__search", tool_input: { q: "x" } },
+  },
+  {
+    id: "claude-first-match-wins-glob-before-exact",
+    description:
+      "the same two entries in the other order: the glob is first, so publish is recorded under the read class and the exact line after it is never read. Order is the author's statement",
+    input: {
+      harness: "claude-code",
+      policy: toolMapPolicy({
+        tools: [
+          "tools:",
+          '  - match: "mcp__contextsling__*"',
+          "    class: marketplace.app.read",
+          "  - match: mcp__contextsling__publish",
+          "    class: marketplace.contextsling.publish",
+        ],
+      }),
+      tool: "mcp__contextsling__publish",
+      tool_input: {},
+    },
+  },
+  {
+    id: "claude-shell-tool-is-never-remapped",
+    description:
+      "a catch-all `*` entry to a human-only class does not reach `Bash`: the adapter's own tables read the call's arguments and keep precedence over a name-only entry",
+    input: {
+      harness: "claude-code",
+      policy: toolMapPolicy({
+        tools: ["tools:", '  - match: "*"', "    class: marketplace.contextsling.publish"],
+      }),
+      tool: "Bash",
+      tool_input: { command: "ls" },
+    },
+  },
+  {
+    id: "claude-unmapped-absent-is-not-gated",
+    description:
+      "with no `defaults.unmapped_tool`, a tool no entry claims is not a gate question: allowed, nothing appended. Every policy written before APRV-499 behaves exactly so",
+    input: { harness: "claude-code", policy: POLICY_TOOLS, tool: "TodoWrite", tool_input: { todos: [] } },
+  },
+  {
+    id: "claude-unmapped-record-records",
+    description:
+      "`unmapped_tool: record`: the unclaimed call is allowed and recorded under `harness.tool.unmapped` with its tool name",
+    input: { harness: "claude-code", policy: POLICY_TOOLS_RECORD, tool: "TodoWrite", tool_input: { todos: [] } },
+  },
+  {
+    id: "claude-unmapped-ask-asks",
+    description:
+      "`unmapped_tool: ask`: the unclaimed call is requested under `harness.tool.unmapped` and, with nobody answering inside the hook's wait, denied `hook-timeout`",
+    input: {
+      harness: "claude-code",
+      policy: POLICY_TOOLS_ASK,
+      tool: "TodoWrite",
+      tool_input: { todos: [] },
+      timeout: "50ms",
+    },
+  },
+  {
+    id: "claude-unmapped-rule-decides",
+    description:
+      "a `classes` rule reserving `harness.tool.unmapped` to human hands decides over `unmapped_tool: record`",
+    input: {
+      harness: "claude-code",
+      policy: toolMapPolicy({
+        defaults: ["  unmapped_tool: record"],
+        classes: ["  harness.tool.unmapped:", "    autonomy: human-only"],
+      }),
+      tool: "TodoWrite",
+      tool_input: {},
+    },
+  },
+  {
+    id: "claude-undeclared-class-fails-closed",
+    description:
+      "a `tools` entry naming an undeclared class fails the policy closed, and an UNCLAIMED call is then refused rather than allowed: a mapping the runtime cannot read is not evidence that the tool is unmapped",
+    control: true,
+    input: {
+      harness: "claude-code",
+      policy: toolMapPolicy({
+        tools: ["tools:", "  - match: mcp__zzz__post", "    class: communicate.zzz.post"],
+      }),
+      attest: false,
+      tool: "TodoWrite",
+      tool_input: {},
+    },
+  },
+  {
+    id: "claude-malformed-glob-fails-closed",
+    description: "a `match` with two wildcards in a row is a schema violation, and the policy fails closed",
+    control: true,
+    input: {
+      harness: "claude-code",
+      policy: toolMapPolicy({
+        tools: ["tools:", '  - match: "mcp__**"', "    class: marketplace.app.read"],
+      }),
+      attest: false,
+      tool: "mcp__anything",
+      tool_input: {},
+    },
+  },
+  // --- Hermes ----------------------------------------------------------------
+  {
+    id: "hermes-rule-table-keeps-precedence",
+    description:
+      "an entry maps `cronjob_manage` to an autonomous class, and Hermes's own rule table still judges `cronjob_manage create` as `cron.manage` (human-only here): the table reads the action, the entry only the name",
+    input: {
+      harness: "hermes",
+      policy: POLICY_TOOLS,
+      tool: "cronjob_manage",
+      tool_input: { action: "create", script: "job.sh" },
+    },
+  },
+  {
+    id: "hermes-mcp-tool-is-mapped",
+    description: "a Hermes MCP tool the table does not know is answered by its entry",
+    input: { harness: "hermes", policy: POLICY_TOOLS, tool: "mcp_zzz_post", tool_input: { body: "x" } },
+  },
+  {
+    id: "hermes-unmapped-record-records",
+    description: "`unmapped_tool: record` on Hermes: the `{}` allow, and a start naming the tool",
+    input: { harness: "hermes", policy: POLICY_TOOLS_RECORD, tool: "web_search", tool_input: { query: "x" } },
+  },
+  {
+    id: "hermes-unmapped-absent-is-not-gated",
+    description: "with no key, a Hermes tool nothing claims keeps the not-a-gated-tool allow",
+    input: { harness: "hermes", policy: POLICY_TOOLS, tool: "web_search", tool_input: { query: "x" } },
   },
 ];
 
@@ -2382,9 +2645,17 @@ const SUITES = [
     // nonmanual result for reversible:false, and every expectation exposes the
     // governing capability and max-specificity rule group. Both the algorithm
     // and the frozen output shape changed, so this is a major version.
-    vectors_version: "3.0.0",
+    // 4.0.0 (APRV-499): a MAJOR bump for the reason 2.0.0 was one. No existing
+    // expectation moved, but the no-rule-matched rule is narrowed again, for one
+    // class: `harness.tool.unmapped` takes its default from
+    // `defaults.unmapped_tool` when the policy declares it, and an
+    // implementation that read 3.0.0 and resolved it by `defaults.autonomy`
+    // fails `unmapped-tool-record-resolves-autonomous`. Two controls pin the new
+    // load-time refusals of a `tools` entry (an undeclared class, the reserved
+    // unmapped class), each failing the whole policy closed.
+    vectors_version: "4.0.0",
     algorithm:
-      "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, §7 irreversibility floor",
+      "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, §7 irreversibility floor",
     description:
       "Which rule governs an action, what autonomy it resolves to, where a routed policy.edit sub-class inherits from, and where the floor, the protected-path routing floor and the fail-closed rule bind.",
     vectors: policyVectors,
@@ -2560,7 +2831,14 @@ const SUITES = [
     // actor). No existing expectation moves, so
     // an implementation that passed 3.0.0 fails this only by not knowing a type
     // the enum has gained.
-    vectors_version: "3.1.0",
+    // 3.2.0 (APRV-499): a MINOR bump. Six new fixtures: an accepted policy
+    // declaring `tools` and `defaults.unmapped_tool`, three refused policies (a
+    // `match` with `**`, a wildcard `class`, an unknown unmapped-tool value),
+    // and an accepted and a refused `execution.started` carrying the optional
+    // `payload.harness_tool` (the refused one carries a space and a line
+    // break). No existing expectation moves: both policy keys and the payload
+    // field are OPTIONAL and additive.
+    vectors_version: "3.2.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
@@ -2640,6 +2918,17 @@ const SUITES = [
     description:
       "Per-harness PreToolUse envelopes over a scratch gate whose policy reserves `read.file.out_of_scope` to human hands. Targets are SYMBOLIC (`inside`, `inside-relative`, `outside`, `absent`, `unresolvable`) rather than paths, so the suite says nothing about any one machine: a conforming runner builds a gate root, puts a file in it, and picks something outside every read root for `outside`. The expectation pins the permission, the deny CODE, and whether the call was gated at all; the reason text is prose and is deliberately not frozen. The `grok-*` vectors additionally pin the EXIT CODE, because Grok Build reads exit 2 as the deny and exit 0 as the allow whatever stdout said: a runner whose Grok deny exits 0 has emitted a verdict that harness reads as an allow, and it fails these vectors. The `muse-*` vectors cover Meta Muse Code's own tool names (`read_file`, `search` with its ARRAY of paths, `bash` with a per-call `workdir`) and one refusal that is not about the action at all: `muse-contributor-model-denies-an-allowed-read` sends a read INSIDE the scope, which every other vector allows, and expects a deny, because a Contributor-tier session discloses every byte it reads and the guard therefore sits above policy resolution. An implementation that resolved that vector by policy would allow it. The `hermes-*` vectors carry one answer that is the OPPOSITE of every other harness's here, and it is a fact about the harness rather than a choice: a relative path, and a call naming no path, are REFUSED under `hook-unsupported-execution-context`, because Hermes resolves both against a per-session recorded working directory that no field of the event reports, so a verdict over them would bind a different file from the one the harness touches. `hermes-terminal-absolute-workdir-allows` is the control that keeps that refusal about the unbound directory rather than about the tool.",
     vectors: readScopeVectors,
+  },
+  {
+    file: "hook-tool-map.v1.json",
+    suite: "hook-tool-map",
+    // 1.0.0 (APRV-499): a new suite.
+    vectors_version: "1.0.0",
+    algorithm:
+      "SPEC.md §5.2 (APRV-499, proposed): the policy's `tools` mapping (ordered, first match wins, glob over the whole tool name) for harness tool calls the adapter's own tables do not claim, and `defaults.unmapped_tool` for the calls no entry claims",
+    description:
+      "Per-harness PreToolUse envelopes over a scratch gate whose policy text each vector carries. The expectation pins the permission, the deny CODE, whether the call was gated at all, and what the log gained: the class and `harness_tool` of an `execution.started`, or the class of an `approval.requested`. Precedence is pinned from both sides: a catch-all entry does not reach the shell tool, and an entry naming a Hermes rule-table tool does not reach it either. The two controls are policies that must fail closed, and under them an UNCLAIMED call is refused rather than allowed.",
+    vectors: toolMapVectors,
   },
   {
     file: "command-class.v1.json",
