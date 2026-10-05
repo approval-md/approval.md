@@ -520,13 +520,18 @@ running:
 | --- | --- | --- |
 | A writer in another container sharing the volume, or before a host reboot, died holding the lock | another pid namespace or boot id is never judged | `approval log unlock --pid <n>` |
 | macOS: the host rebooted, or the clock was stepped by more than 60 s, since the lock was taken | the boot readings differ, so the pid proves nothing | the same |
-| A writer was killed between creating the lockfile and writing its record | an empty lockfile ages out after ten minutes | wait, or `approval log unlock --pid none` |
+| A writer was killed between creating the lockfile and writing its record | an empty lockfile ages out after ten minutes, and only a writer that watched it unchanged through its wait takes it (the daemon or a CLI verb; never a hook's try-once spend) | wait, or `approval log unlock --pid none` |
+| The dead holder's lockfile belongs to another user (Linux `fs.protected_hardlinks`), e.g. the hook's uid and the daemon's differ | the claim's `link(2)` is refused EPERM; the refusal names the owner's uid | `approval log unlock --pid <n>` as that user or root, or `rm -v .approval/log/events.jsonl.lock` |
+| A directory sits at `events.jsonl.lock.stale.<pid>.<ms>` | no claim can be made there, and unlock does not remove directories | `rm -r` it (the refusal names it), then `approval log unlock --pid <n>` |
+| A reclaim record could not be appended (a daemon id the policy refuses, a torn tail) | a reclaim whose record would be refused is not made | fix the daemon id or repair the tail; a writer that can record it then reclaims |
 | A reclaimer was SIGKILLed between its claim and its take, or a file sits at `events.jsonl.lock.stale.<pid>.<ms>` | that name is the one claim a writer may make, and it is never judged | `approval log unlock --pid <n>` |
 | A FIFO, a link or a malformed file sits at the lock's path | it is not a lockfile, so it is never judged | `rm -v .approval/log/events.jsonl.lock` |
 | A writer refuses `lock-timeout` beside a sync snapshot | a sync may have stopped part way (by design) | `approval log verify`, `approval log sync`, then `approval log unlock --pid <n>` |
 
-`approval log unlock` is human-only (the hook denies it to an agent). It refuses
-a pid that is not the lockfile's and a holder it can see running, takes the
+`approval log unlock` is human-only (the hook denies it to an agent as spelled
+`approval log unlock`; package-runner and script spellings escape that
+classification, APRV-491). It refuses a pid that is not the lockfile's, a holder
+it can see running, and a reclaim in flight whose taker it can see running, takes the
 lock the way a writer's reclaim does, and records `audit.lock_reclaimed` under
 the person's own `human:` actor, with reason `operator-cleared`. A hand `rm` is not recorded in the log.
 

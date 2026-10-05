@@ -7,6 +7,7 @@ status: In Progress
 assignee:
   - '@claude-edge-A2'
   - '@claude-edge-A2-r3'
+  - '@claude-edge-A2-r4'
 created_date: '2026-10-05 05:49'
 updated_date: '2026-10-05 11:09'
 labels:
@@ -74,12 +75,12 @@ Residue (stated):
 - A signal that lands in a failed create attempt's microseconds is dropped when the guard is settled on EEXIST (Node drops a held signal whose last listener is removed before the loop turns). A signal during the wait itself kills at once.
 - A synchronous run of appends holds signals until the loop turns (SN6, unchanged).
 - macOS: a holder pid reused within the same boot is live until that process exits, and unlock refuses it (running).
-- unlock asserts no writer is running; run during an in-flight reclaim of the same lock it could take alongside it.
+- unlock asserts no writer is running. Since round 4 it refuses a reclaim in flight whose taker it sees running (R3-2); a taker it cannot check (another container) is still on the person's word, and take() re-reads its claim and the lock right before its rename (narrows, not atomic).
 - The SPEC.md commit bdd03eb6 (round-2 wording) is reverted by 70558d5a at the orchestrator's instruction: the branch's SPEC.md equals main's, and the hunks below are the proposal pending Carter's sign-off.
 
 ### Proposed SPEC.md hunks, PENDING SIGN-OFF (SPEC.md untouched by this round)
 
-Section 8, event list: add `audit.lock_reclaimed` after `audit.question_preempted`, and the bullet: *`audit.lock_reclaimed`* (audit tier): the append lock was taken over from a holder that is gone; the first record under the lock that was taken. `system:log` when the writer proved the holder gone, `human:` when a person ran `approval log unlock`. Payload: `lockfile` (base name), `reason` (`holder-dead` | `legacy-aged` from the writer; `operator-cleared` from a human, and only from one), `age_ms`, and, when the lockfile carried one, the strictly parsed `holder` {pid, op, created}; nothing else is taken from the file.
+Section 8, event list: add `audit.lock_reclaimed` after `audit.question_preempted`, and the bullet: *`audit.lock_reclaimed`* (audit tier): the append lock was taken over from a holder that is gone; the first record under the lock that was taken. `system:log` when the writer proved the holder gone, `human:` when a person ran `approval log unlock`. Payload: `lockfile` (base name), `reason` (`holder-dead` | `legacy-aged` from the writer; `operator-cleared` from a human, and only from one), `age_ms`, and, when the lockfile carried one, the strictly parsed `holder` {pid, op, created}; nothing else is taken from the file. `holder.created` is recorded only when it lies within [the log's last record's `ts` minus 24 hours, the taker's clock plus 5 minutes]; otherwise it is `null` and `age_ms` is omitted (round 4, R3-7: a value the file chose is never recorded as a time).
 
 Section 11.1 invariant 5, scope note: *Scope note:* the append lock MUST NOT be taken from a holder that may be alive. A writer MAY take a lock whose holder is provably gone in its own process namespace and boot, only after its full lock timeout, and only by an exclusive claim that never moves a file it did not judge; any holder it cannot see into MUST be treated as live, and is cleared only by a human. The reclaim MUST be the first record appended under the lock taken. (Amended APRV-479, pending sign-off.)
 
@@ -91,7 +92,20 @@ See the PR body "Round 3: smaller design" for the test table with exit codes. Mu
 
 Main (#614) merged in at 5801c282 (a merge, not a rebase: the branch was pushed and under review; new commits only); schema-validation regenerated at 3.1.0 on top of 3.0.0.
 
-Remaining: refuter on the round-3 diff, CI, the owner's SPEC sign-off, merge. Not armed.
+Round 4 (claude-edge/A2-r4, 2026-10-05, on c0c34ce6): the round-3 refutation's R3-1 to R3-10, per the orchestrator's dispositions. One commit each.
+- R3-1 (3a73fc54): guard installed before claim() in reclaimStaleLock and takeLockForUnlock, handed to take(), released and settled on every non-taken return. Pin: SIGTERM at `claimed` (process dies of SIGTERM, no lockfile, no stale name, [registered, lock_reclaimed, granted]); fails at c0c34ce6.
+- R3-2 (0933bc62): the taker's own `<lock>.take.<pid>.<nonce>` is written BEFORE the link; unlock judges every `.take.*` beside the lock (same liveness rule) before its claim and again when the claim finds the stale name occupied, and refuses naming a running pid; the writer's `occupied` refusal names a running reclaimer instead of unlock; take() re-reads the stale name and the lock's path (inode, mtime ns, bytes) right before its rename; after a successful unlock, take files of provably gone writers are removed. Pins: S2 shape (claimant SIGSTOPped at `claimed`: writer names it running, unlock refused naming its pid, one reclaim record) and a before-take seam that removes the claim and plants a live lock (nothing moved). Mutations: unlock ignores running takers exit 1; take skips the re-read exit 1.
+- R3-3 (c4ea94cb): before the claim, a reclaim is refused (lock kept, nothing claimed or appended) when daemonStampForAppend() refuses or readTail() is not ok; unlock refuses the same before touching anything. Pin: S3 shape (refused daemon's withAppendLock) and a torn tail. Mutation (pre-check returns null) exit 1.
+- R3-4 + R3-5 (57c545f9): EPERM/EACCES on the claim: both refusals name the lockfile's owner uid and say to run unlock as that user or root, or `rm -v` the lock once no writer runs; a directory at the stale name: both refusals name `rm -r <stale>`. Pins: directory case (all platforms); two-uid Linux case (privileged container, uid 1000's 0644 lockfile, daemon as uid 1001).
+- R3-6: the npx route (4a2e565d, 22 lines) was REVERTED (4a6241dc) at the coordinator's instruction after the security review: probing showed `npm exec approval -- log unlock`, `node node_modules/.bin/approval log unlock`, `npx -c '...'`, `npx file:. log unlock`, `npx approval${IFS}log${IFS}unlock` and any `node x.mjs` importing the CLI still classify as workspace writes, so the route cannot be complete. Filed as APRV-491 (task record on branch backlog/aprv-491-launcher-classify, pushed, PR not opened). unlock's header, cli-reference and the CHANGELOG say in one line that the classification is a speed bump for it, not the boundary. command-class.ts is back to the round-3 diff (only the `unlock` row), so the second flag's "lowered class" hypothesis has no surface left.
+- R3-7 (4bc51521): ruling, the stricter rule: `holder.created` recorded only within [last record ts - 24 h, now + 5 min], else `{pid, op, created: null}` and no `age_ms` (op kept: a closed enum the schema requires). Schema: created string|null; age_ms required except exactly when created is null. Fixtures: valid implausible-created, invalid age-without-created. schema-validation stays 3.1.0 (233 vectors). The §8 hunk above carries the new wording.
+- R3-8 (768ce2c3): legacy-aged requires the empty lockfile's (ino, mtime ns, size), captured at the first EEXIST of the wait, unchanged at the judgement and watched for at least 20 ms; a try-once caller never takes an empty lockfile. Pin: S6 shape (utimes) keeps a live writer's lock. Mutation (watch checks removed) exit 1.
+- R3-9 (b87db195): procIsOwnNamespace also requires `/proc/self/status` `NSpid:` to hold exactly one field equal to the pid (no line: false). Pins: stubbed table; real Linux (privileged) own /proc true, child namespace without remount false even with /proc/self stubbed to agree.
+- R3-10: note only. boot_id is shared by VMs or sandboxes restored from one snapshot onto a shared volume (Firecracker, CRIU), and macOS hostname plus boot within 60 s does not tell cloned VMs apart; both deployment-dependent, neither the village (Railway, one container per volume).
+
+New residue (round 4): a writer stalled between its create and its record for a whole wait (SIGSTOP, a debugger) is indistinguishable from a dead one to a waiting writer (legacy-aged); a dead claimant's take file from another container (not provably gone) stays beside the lock (export-excluded); an empty take file (a claimant killed between its create and its record) likewise.
+
+Remaining: scoped recheck of the round-4 seams, CI, the owner's SPEC sign-off, merge. Not armed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

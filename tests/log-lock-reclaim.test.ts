@@ -284,7 +284,7 @@ test("a holder `created` the log cannot vouch for is recorded as null with no ag
   writeLock(within, recent);
   assert.ok(appendEvent(within, granted(4), { lockTimeoutMs: 0 }).ok);
   const kept = records(within)[1] as EventRecord;
-  assert.deepEqual((kept.payload?.["holder"] as { created: string }).created, recent.created);
+  assert.equal((kept.payload?.["holder"] as { created: string } | undefined)?.created, recent.created);
   assert.equal(typeof kept.payload?.["age_ms"], "number");
 });
 

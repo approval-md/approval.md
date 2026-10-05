@@ -325,7 +325,8 @@ lock timeout (two seconds) and then judges the holder once. It takes the lock
 back by itself only when it can prove the holder gone: the holder ran in this
 writer's own pid namespace and boot, and `kill(pid, 0)` answers ESRCH (on Linux
 also with `/proc/<pid>` absent or a zombie, or the pid now names a process that
-started later), or the lockfile names no holder and is ten minutes old. Any
+started later), or the lockfile names no holder, is ten minutes old, and sat
+unchanged through the writer's whole wait (a try-once caller never takes it). Any
 other holder (another container, another boot, a pid answering EPERM, a `/proc`
 it cannot read) is never taken automatically, because a wrong reclaim forks the
 chain. The writer's `lock-timeout` refusal then names the pid and this command.
@@ -339,15 +340,34 @@ exclusive `link(2)` to `<lock>.stale.<pid>.<created ms>`, then a `rename(2)` of
 its own lockfile over the lock's path) and appends `audit.lock_reclaimed` as the
 first record under it, with your `human:` actor, reason `operator-cleared` (your
 word, which the log never presents as a writer's proof), the strictly parsed
-holder and the lock's age. A stale name a dead reclaimer or anyone else left is cleared
-first. Anything at the lock's path that is not a lockfile (a FIFO, a link, a
-malformed file) is not taken: the refusal says to `rm -v` it.
+holder and the lock's age. A holder `created` the log cannot vouch for (more
+than a day before the log's last record, or more than five minutes ahead of
+this clock) is recorded as `null`, with no age. A stale name a dead reclaimer or
+anyone else left is cleared first, and a dead reclaimer's own
+`<lock>.take.<pid>.*` file with it. Anything at the lock's path that is not a
+lockfile (a FIFO, a link, a malformed file) is not taken: the refusal says to
+`rm -v` it.
+
+It also refuses, touching nothing:
+
+- while a reclaim is in flight: a writer writes its own
+  `<lock>.take.<pid>.<nonce>` before it claims, and a running one is named, so
+  a reclaimer that is stopped (SIGSTOP, a debugger) is never unlocked around;
+- when the record could not be appended: a daemon whose id the attested
+  policy refuses, or a torn tail (repair the tail first);
+- when the claim is refused EPERM or EACCES (Linux `fs.protected_hardlinks`:
+  the lockfile is another user's): the refusal names the owner's uid; run it as
+  that user or root, or `rm -v` the lockfile once no writer runs;
+- when a directory sits at the stale name: the refusal names `rm -r` for it.
 
 **Run it only when no writer is running.** The verb asserts, on your word, that
 the holder is gone. Human-only: the actor comes from `--as` or `APPROVAL_HUMAN`,
 the schema refuses an `agent:` actor on the record, and `core/command-class.ts`
-classifies the invocation `policy.core`, so the harness hook denies an agent
-that tries it. Exit 0 when it unlocked or there was no lock; 4 when it refused.
+classifies `approval log unlock` (and `node <cli> log unlock`) `policy.core`, so the harness hook denies an agent
+that tries it that way. Other spellings (`npx approval log unlock`, `npm exec`,
+a wrapper script) classify as workspace writes, and `--as` is the caller's to
+set, so the classification is a speed bump rather than the boundary (APRV-491).
+Exit 0 when it unlocked or there was no lock; 4 when it refused.
 
 ## log follow
 

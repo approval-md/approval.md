@@ -46,7 +46,8 @@
  *    `/proc` entry that cannot be read.
  * 4. **A lockfile with no holder record** (empty: an older version's, or a
  *    writer killed between the create and the write) is gone only once its
- *    mtime is {@link LEGACY_LOCK_RECLAIM_AGE_MS} old.
+ *    mtime is {@link LEGACY_LOCK_RECLAIM_AGE_MS} old AND this writer watched
+ *    that very file (inode, mtime, size) unchanged through its own wait.
  * 5. **The reclaim ({@link reclaimStaleLock}) is two atomic steps, and nothing
  *    else is written.** The taker's own complete lockfile is written first,
  *    under `<lock>.take.<pid>.<nonce>`, so whoever finds a claim beside the

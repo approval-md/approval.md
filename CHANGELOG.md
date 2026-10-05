@@ -231,10 +231,20 @@ before a tag.
   before it blocks, so a signal during the wait ends it at once (one that landed
   in the append's own milliseconds is lost there: Node shows a caught signal to
   JavaScript only when the event loop turns). The names the reclaim writes
-  beside the lock are excluded from the tenant export. Schema change: the closed
+  beside the lock are excluded from the tenant export. Hardening (round 4): a
+  reclaimer writes its own `events.jsonl.lock.take.<pid>.<nonce>` before it
+  claims and holds the signal guard from the claim on, and `approval log
+  unlock` refuses while one is seen running; a reclaim is not made when its
+  record could not be appended (a refused daemon id, a torn tail); a holder
+  `created` more than a day before the log's last record or more than five
+  minutes ahead is recorded as `null` with no age; an empty lockfile is taken
+  only by a writer that watched it unchanged through its wait; `/proc` counts
+  as this namespace's only when `/proc/self/status` `NSpid:` has one field; a
+  claim refused EPERM names the lockfile's owner uid, and a directory at the
+  stale name names `rm -r`. Schema change: the closed
   event enum gains `audit.lock_reclaimed` (thirty-five types; `schema-validation`
   vectors 3.1.0, a minor bump numbered above #614's 3.0.0 by the collision
-  rule). No append-error code is added. SPEC.md §8 and §11.1 hunks are pending
+  rule; `holder.created` may be `null`, and `age_ms` is absent exactly then). No append-error code is added. SPEC.md §8 and §11.1 hunks are pending
   the owner's sign-off. Behavior change for older writers: an empty lockfile an
   older version left is taken after ten minutes, and an older writer still
   holding one that long would lose it.
