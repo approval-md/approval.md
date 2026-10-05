@@ -697,7 +697,12 @@ export interface GateRefusal {
   limits?: IntakeVerdict[];
   /** Schema errors, when `code` is `envelope-invalid`. */
   errors?: ValidationError[];
-  /** The underlying append error, when `code` is `append-failed`. */
+  /**
+   * The underlying append error, when `code` is `append-failed`; and, on a
+   * `budget-exceeded` from {@link startHarnessExecution}, the error that kept
+   * its `budget.exceeded` record out (APRV-478). Never present beside a
+   * `record`.
+   */
   append?: AppendError;
   /**
    * The two policy hashes actually compared, when `code` is `policy-drift`
@@ -4340,7 +4345,13 @@ function attemptHarnessStart(
       : refuse(
           "budget-exceeded",
           `${message}; the budget.exceeded event could not be appended: ${logged.message}`,
-          { verdicts: failed },
+          // APRV-478: the writer's own error rides along, so a caller that
+          // waits for the log's lock on its event loop (the harness hook's
+          // `spendUnderLock`) can see that the evidence lost a lock race,
+          // re-run the whole attempt and give the record the same chance to
+          // land that a synchronous lock wait gave it. The verdict is the
+          // budget refusal either way.
+          logged.append === undefined ? { verdicts: failed } : { verdicts: failed, append: logged.append },
         );
   }
 

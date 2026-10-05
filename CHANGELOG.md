@@ -68,11 +68,19 @@ before a tag.
   spent, and the grant stays standing for a retry to carry. The same applies to
   the unattended and autonomous charges and to an open window's `gate.bypassed`.
   What remains between the last pause and the record is the spend's own read
-  and its single try at the lock. A lock held past the two-second bound still
-  denies with `append-failed` (`lock-timeout`). `approval serve` and the Codex
-  bridge run the same steps synchronously and still block on a held lock for
-  as long as before; the bound there is now counted per round of the spend
-  rather than per head-moved attempt inside the writer.
+  and its single try at the lock; a try that loses the race goes back to
+  waiting on the event loop until the same two-second bound, and a spend that
+  still has no lock then denies with `append-failed` (`lock-timeout`). A budget
+  refusal's `budget.exceeded` record gets the same retries. A command with
+  several gated classes spends them one at a time, each behind its own pause,
+  so a signal between two of them blocks with the earlier starts already
+  recorded. The trade: the spend's read now sits between seeing the lock free
+  and trying it, so a lock that is only ever free for gaps shorter than that
+  read can run a CLI spend out of its bound (deny, the grant left for a retry)
+  where the old synchronous wait got through. `approval serve`, the Codex
+  bridge and in-process `commandHook` are unchanged: they drive the steps
+  synchronously, have no event loop to wait on, and keep the writer's own
+  synchronous wait exactly as before.
 - **`approval hook hermes`: a SIGTERM mid-wait withdraws the question, and a
   grant after Hermes gave up starts nothing (APRV-473).** The CLI hook run was
   synchronous end to end, so a SIGTERM during the wait (Hermes's own hook

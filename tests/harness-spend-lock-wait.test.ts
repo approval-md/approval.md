@@ -509,7 +509,7 @@ for (const kind of ["claude-code", "codex", "hermes"] as const) {
     assert.equal(verdict.permission, "deny", outcome.stderr);
     assert.match(verdict.message, /^hook-gate-refused:append-failed: /u);
     assert.match(verdict.message, /another writer holds .*events\.jsonl\.lock/u);
-    assert.match(verdict.message, /held it for the whole 2000 ms this spend waits \(APRV-478\)/u);
+    assert.match(verdict.message, /on the event loop for its whole 2000 ms bound, trying every 20 ms, and another writer held it at each of its \d+ attempts? \(APRV-478\)/u);
     assert.equal(count(dir, "execution.started"), 0);
     // Nothing was spent, so the grant is still there for a retry.
     assert.equal(count(dir, "approval.granted"), 1);
@@ -520,61 +520,76 @@ for (const kind of ["claude-code", "codex", "hermes"] as const) {
 // Step by step: the lock wait yields, and the zero pause is last
 // ---------------------------------------------------------------------------
 
+type Steps = Generator<number, number, boolean | undefined>;
+
+function stepsFor(harness: Harness, dir: string, input: string, extra: string[] = []): { steps: Steps; out: string[] } {
+  const out: string[] = [];
+  const streams = { out: (text: string) => out.push(text), err: () => undefined };
+  const steps = commandHookSteps(
+    [harness.kind, "--as", `agent:${harness.kind}`, "--dir", dir, "--timeout", "4m", "--interval", "50ms", ...harness.extra, ...extra],
+    streams,
+    dir,
+    () => input,
+  );
+  return { steps, out };
+}
+
+/** Step as the yielding driver does (`true`) to the first poll pause. */
+function toFirstPoll(steps: Steps, out: string[]): void {
+  let step = steps.next(true);
+  while (step.done !== true && step.value === 0) step = steps.next(true);
+  assert.equal(step.done, false, `the hook answered without waiting: ${out.join("")}`);
+  assert.ok(step.value > 0, "the first pause is the poll interval");
+}
+
 /**
- * The process tests above depend on timing; this one does not. It drives the
- * very steps the CLI's yielding driver runs, in process, and stops at each
- * pause: with the lock held after the grant lands, every step is the retry
- * interval and nothing is spent; once the lock is free, the next step is the
- * zero pause, still with nothing spent; only the step after it appends. With
- * the wait for the lock done synchronously inside the writer (the pre-APRV-478
- * spend), the step after the grant is a zero pause and the spend then blocks
- * for two seconds and refuses, so this fails.
+ * From a step that is about to spend with the lock held: the zero pause, the
+ * retry interval three times with nothing spent, then (lock released) the zero
+ * pause again with nothing spent, and only then the append and the allow.
+ */
+function assertYieldedSpend(harness: Harness, dir: string, steps: Steps, out: string[], startsBefore: number): void {
+  let step = steps.next(true);
+  assert.equal(step.done, false, `the grant was spent with no pause before it: ${out.join("")}`);
+  assert.equal(step.value, 0, `expected the shared zero pause first, got a ${String(step.value)} ms pause`);
+  for (let i = 0; i < 3; i += 1) {
+    step = steps.next(true);
+    assert.equal(step.done, false, `the spend did not wait for the lock: ${out.join("")}`);
+    assert.equal(step.value, DEFAULT_LOCK_RETRY_MS, `expected the lock's retry interval, got a ${String(step.value)} ms pause`);
+    assert.equal(count(dir, "execution.started"), startsBefore, "the spend went through a held lock");
+  }
+  // The other writer finishes. The next step is the zero pause again, the last
+  // point a held signal can reach a listener; nothing is spent yet.
+  release(dir);
+  step = steps.next(true);
+  assert.equal(step.done, false, `the spend ran with no pause after the lock wait: ${out.join("")}`);
+  assert.equal(step.value, 0, `expected the zero pause before the spend, got a ${String(step.value)} ms pause`);
+  assert.equal(count(dir, "execution.started"), startsBefore, "the spend ran before the pause");
+  // Past the pause, the spend and the allow, with no further pause.
+  step = steps.next(true);
+  assert.equal(step.done, true, "the hook paused again after the spend's pause");
+  assert.equal(count(dir, "execution.started"), startsBefore + 1);
+  assert.equal(harness.verdict(out.join("").trim()).permission, "allow", out.join(""));
+}
+
+/**
+ * The process tests above depend on timing; these do not. They drive the very
+ * steps the CLI's yielding driver runs, in process, and stop at each pause.
+ * With the wait for the lock done synchronously inside the writer (the
+ * pre-APRV-478 spend), the step after the zero pause blocks for two seconds and
+ * refuses, so every one of these fails.
  */
 for (const harness of HARNESSES) {
   test(`${harness.kind}: while the log's lock is held the spend yields the retry interval, and the zero pause comes last`, () => {
     const dir = ready(harness.policy);
-    const out: string[] = [];
-    const streams = { out: (text: string) => out.push(text), err: () => undefined };
-    const steps = commandHookSteps(
-      [harness.kind, "--as", `agent:${harness.kind}`, "--dir", dir, "--timeout", "4m", "--interval", "50ms", ...harness.extra],
-      streams,
-      dir,
-      () => harness.call(dir, "tu-stepped"),
-    );
+    const { steps, out } = stepsFor(harness, dir, harness.call(dir, "tu-stepped"));
     try {
-      // Run to the first poll pause: the question is open and nothing is spent.
-      let step = steps.next();
-      while (step.done !== true && step.value === 0) step = steps.next();
-      assert.equal(step.done, false, `the hook answered without waiting: ${out.join("")}`);
-      assert.ok(step.value > 0, "the first pause is the poll interval");
+      toFirstPoll(steps, out);
       const request = records(dir).find((r) => r["event"] === "approval.requested");
       assert.ok(request !== undefined, "the hook opened no question");
-
-      // The grant lands and an outside writer takes the lock behind it.
+      // The grant lands and an outside writer takes the lock behind it; the
+      // next poll reads the grant and the spend meets the held lock.
       assert.equal(grantThenHold(dir, String(request["action_key"])), true);
-
-      // The next poll reads the grant; the spend finds the lock held and
-      // yields the retry interval. Three times over, nothing is spent.
-      for (let i = 0; i < 3; i += 1) {
-        step = steps.next();
-        assert.equal(step.done, false, `the spend did not wait for the lock: ${out.join("")}`);
-        assert.equal(step.value, DEFAULT_LOCK_RETRY_MS, `expected the lock's retry interval, got a ${String(step.value)} ms pause`);
-        assert.equal(count(dir, "execution.started"), 0, "the grant was spent through a held lock");
-      }
-
-      // The other writer finishes. The next step is the zero pause, the last
-      // point a held signal can reach the wait's handler; nothing is spent yet.
-      release(dir);
-      step = steps.next();
-      assert.equal(step.done, false, `the grant was spent with no pause before it: ${out.join("")}`);
-      assert.equal(step.value, 0, `expected the zero pause before the spend, got a ${String(step.value)} ms pause`);
-      assert.equal(count(dir, "execution.started"), 0, "the grant was spent before the pause");
-
-      // Past the pause, the spend and the allow, with no further pause.
-      step = steps.next();
-      assert.equal(step.done, true, "the hook paused again after the spend's pause");
-      assert.equal(count(dir, "execution.started"), 1);
-      assert.equal(harness.verdict(out.join("").trim()).permission, "allow");
+      assertYieldedSpend(harness, dir, steps, out, 0);
     } finally {
       release(dir);
       // Runs the generator's finally blocks, so a failed assertion above does
@@ -583,3 +598,286 @@ for (const harness of HARNESSES) {
     }
   });
 }
+
+for (const kind of ["claude-code", "hermes"] as const) {
+  const harness = byKind(kind);
+
+  test(`${kind}: a carried grant's spend waits for a held lock in yields too`, () => {
+    const dir = ready(harness.policy);
+    // The first call times out with its question open; the human then grants
+    // it, and an identical retry carries the grant.
+    const first = launch(harness, dir, harness.call(dir, "tu-carry-1"), ["--timeout", "1s", "--interval", "100ms"]);
+    return first.done.then((timedOut) => {
+      assert.equal(only(harness, timedOut).permission, "deny", timedOut.stderr);
+      const request = records(dir).find((r) => r["event"] === "approval.requested");
+      assert.ok(request !== undefined);
+      assert.equal(grantThenHold(dir, String(request["action_key"])), true);
+      const { steps, out } = stepsFor(harness, dir, harness.call(dir, "tu-carry-2"));
+      try {
+        // No wait on this path: the steps go straight to the spend, which
+        // meets the held lock.
+        assertYieldedSpend(harness, dir, steps, out, 0);
+        const start = records(dir).find((r) => r["event"] === "execution.started");
+        assert.ok(start !== undefined, "no start recorded");
+        assert.equal((start["payload"] as Record<string, unknown>)["grant_origin"], "carried");
+      } finally {
+        release(dir);
+        steps.return(-1);
+      }
+    });
+  });
+
+  test(`${kind}: an autonomous charge waits for a held lock in yields too`, () => {
+    const dir = ready(policy("autonomous"));
+    const call =
+      kind === "hermes"
+        ? JSON.stringify({
+            hook_event_name: "pre_tool_call",
+            session_id: "hermes-sess-charge",
+            tool_use_id: "tu-charge",
+            cwd: dir,
+            profile: "default",
+            extra: {},
+            tool_name: "terminal",
+            tool_input: { command: "ls", workdir: dir },
+          })
+        : JSON.stringify({
+            session_id: "sess-charge",
+            transcript_path: "/dev/null",
+            cwd: dir,
+            hook_event_name: "PreToolUse",
+            tool_name: "Bash",
+            tool_input: { command: "ls" },
+            tool_use_id: "tu-charge",
+          });
+    hold(dir);
+    const { steps, out } = stepsFor(harness, dir, call);
+    try {
+      assertYieldedSpend(harness, dir, steps, out, 0);
+    } finally {
+      release(dir);
+      steps.return(-1);
+    }
+  });
+}
+
+test("hermes: SIGTERM while an autonomous charge waits for a held lock blocks at exit 2 and records nothing", async () => {
+  const harness = byKind("hermes");
+  const dir = ready(policy("autonomous"));
+  const before = records(dir).length;
+  hold(dir);
+  const hook = launch(
+    harness,
+    dir,
+    JSON.stringify({
+      hook_event_name: "pre_tool_call",
+      session_id: "hermes-sess-charge",
+      tool_use_id: "tu-charge-signal",
+      cwd: dir,
+      profile: "default",
+      extra: {},
+      tool_name: "terminal",
+      tool_input: { command: "ls", workdir: dir },
+    }),
+    [],
+  );
+  let outcome: Outcome;
+  try {
+    // Inside the two seconds the charge waits for the lock, after startup.
+    await delay(1_200);
+    hook.kill("SIGTERM");
+    await delay(100);
+  } finally {
+    release(dir);
+  }
+  outcome = await hook.done;
+  // Hermes's early guard answers: its block, exit 2. Before APRV-478 the
+  // signal was held through the charge's synchronous lock wait and the hook
+  // answered {} with a start recorded after it.
+  assert.equal(outcome.signal, null, outcome.stderr);
+  assert.equal(outcome.code, 2, `${outcome.stdout} ${outcome.stderr}`);
+  assert.equal(only(harness, outcome).permission, "deny", outcome.stdout);
+  assert.equal(records(dir).length, before, "the interrupted charge recorded something");
+});
+
+test("claude-code: a multi-class spend pauses before each class, so a signal between two blocks with only the earlier start recorded", () => {
+  const harness = byKind("claude-code");
+  const dir = ready(policy("autonomous"));
+  const command = "npm install left-pad && curl -X POST https://example.com/hook";
+  const call = JSON.stringify({
+    session_id: "sess-multi",
+    transcript_path: "/dev/null",
+    cwd: dir,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command },
+    tool_use_id: "tu-multi",
+  });
+  const { steps, out } = stepsFor(harness, dir, call);
+  try {
+    toFirstPoll(steps, out);
+    const requests = records(dir).filter((r) => r["event"] === "approval.requested");
+    assert.equal(requests.length, 2, JSON.stringify(requests.map((r) => r["action_key"])));
+    for (const request of requests) {
+      const granted = decide(logOf(dir), String(request["action_key"]), "grant", "human:alice", { policy: { dir } });
+      assert.equal(granted.ok, true, JSON.stringify(granted));
+    }
+    // The poll reads both grants; the first key's pause, nothing spent.
+    let step = steps.next(true);
+    assert.equal(step.done, false);
+    assert.equal(step.value, 0);
+    assert.equal(count(dir, "execution.started"), 0);
+    // The second key's pause, with the first key spent: a signal dispatched
+    // here blocks the call with this one start on the log (documented in
+    // consumeGrants and docs/claude-code-hook.md), and nothing after it.
+    step = steps.next(true);
+    assert.equal(step.done, false, out.join(""));
+    assert.equal(step.value, 0);
+    assert.equal(count(dir, "execution.started"), 1);
+    step = steps.next(true);
+    assert.equal(step.done, true);
+    assert.equal(count(dir, "execution.started"), 2);
+    assert.equal(harness.verdict(out.join("").trim()).permission, "allow");
+  } finally {
+    steps.return(-1);
+  }
+});
+
+test("the synchronous driver keeps the writer's own lock wait: no yields, and a held lock refuses after the writer's bound", () => {
+  // commandHook in process, the serve worker and the Codex bridge step with
+  // `false`/nothing. Their spend is the pre-APRV-478 one: the zero pause (no
+  // pause there) and the writer's own synchronous two-second wait.
+  const harness = byKind("claude-code");
+  const dir = ready(harness.policy);
+  const { steps, out } = stepsFor(harness, dir, harness.call(dir, "tu-sync"));
+  try {
+    let step = steps.next();
+    while (step.done !== true && step.value === 0) step = steps.next();
+    assert.equal(step.done, false);
+    const request = records(dir).find((r) => r["event"] === "approval.requested");
+    assert.ok(request !== undefined);
+    assert.equal(grantThenHold(dir, String(request["action_key"])), true);
+    step = steps.next();
+    assert.equal(step.done, false);
+    assert.equal(step.value, 0, "the shared pause");
+    const startedAt = Date.now();
+    step = steps.next();
+    const blockedMs = Date.now() - startedAt;
+    assert.equal(step.done, true, "the synchronous spend yielded");
+    assert.ok(blockedMs >= 1_900, `the writer waited ${String(blockedMs)} ms, not its own bound`);
+    const verdict = harness.verdict(out.join("").trim());
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.message, /gave up after 2000ms/u);
+    assert.doesNotMatch(verdict.message, /APRV-478/u);
+    assert.equal(count(dir, "execution.started"), 0);
+  } finally {
+    release(dir);
+    steps.return(-1);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A lost race goes back to waiting, for the spend and for its evidence
+// ---------------------------------------------------------------------------
+
+/**
+ * Another writer takes the lock in the gap between the probe that saw it free
+ * and the attempt (here: at the zero pause, which is exactly that gap). The
+ * attempt loses, writes nothing, and the spend goes back to waiting on the
+ * event loop instead of refusing; once the lock is free again it spends.
+ */
+function lsCall(dir: string, id: string): string {
+  return JSON.stringify({
+    session_id: "sess-race",
+    transcript_path: "/dev/null",
+    cwd: dir,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "ls" },
+    tool_use_id: id,
+  });
+}
+
+/** Lock held; step to the zero pause after the wait, re-take the lock there, and lose. */
+function loseOneRace(dir: string, steps: Steps, out: string[]): void {
+  let step = steps.next(true);
+  assert.equal(step.value, 0, "the shared zero pause");
+  step = steps.next(true);
+  assert.equal(step.value, DEFAULT_LOCK_RETRY_MS, "waiting for the held lock");
+  release(dir);
+  step = steps.next(true);
+  assert.equal(step.done, false);
+  assert.equal(step.value, 0, "the zero pause after the wait, before the attempt");
+  // The race: another writer takes the lock after the probe saw it free.
+  hold(dir);
+  step = steps.next(true);
+  assert.equal(step.done, false, `the attempt lost the race and refused instead of waiting: ${out.join("")}`);
+  assert.equal(step.value, DEFAULT_LOCK_RETRY_MS, "back to waiting on the event loop after the lost race");
+  release(dir);
+  step = steps.next(true);
+  assert.equal(step.done, false);
+  assert.equal(step.value, 0, "the zero pause again before the next attempt");
+  step = steps.next(true);
+  assert.equal(step.done, true, out.join(""));
+}
+
+test("claude-code: an attempt that loses the lock race goes back to waiting and then spends", () => {
+  const harness = byKind("claude-code");
+  const dir = ready(policy("autonomous"));
+  hold(dir);
+  const { steps, out } = stepsFor(harness, dir, lsCall(dir, "tu-race-lost"));
+  try {
+    loseOneRace(dir, steps, out);
+    assert.equal(harness.verdict(out.join("").trim()).permission, "allow", out.join(""));
+    assert.equal(count(dir, "execution.started"), 1);
+  } finally {
+    release(dir);
+    steps.return(-1);
+  }
+});
+
+test("claude-code: a budget refusal whose budget.exceeded record loses the lock race is retried, so the record lands", () => {
+  const harness = byKind("claude-code");
+  const dir = ready(
+    [
+      "# Policy",
+      "",
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: manual",
+      '  approval_ttl: "1h"',
+      "  on_expiry: reject",
+      "classes:",
+      "  read.*:",
+      "    autonomy: autonomous",
+      "budgets:",
+      "  global:",
+      "    daily_actions: 1",
+      "```",
+      "",
+    ].join("\n"),
+  );
+  // The first call spends the one action the budget allows.
+  const first = stepsFor(harness, dir, lsCall(dir, "tu-budget-1"));
+  let step = first.steps.next(true);
+  while (step.done !== true) step = first.steps.next(true);
+  assert.equal(harness.verdict(first.out.join("").trim()).permission, "allow", first.out.join(""));
+  assert.equal(count(dir, "budget.exceeded"), 0);
+
+  hold(dir);
+  const { steps, out } = stepsFor(harness, dir, lsCall(dir, "tu-budget-2"));
+  try {
+    loseOneRace(dir, steps, out);
+    const verdict = harness.verdict(out.join("").trim());
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.message, /budget-exceeded/u);
+    // The evidence the refusal promises is on the log (SPEC's start-path code
+    // table: a budget.exceeded record IS appended before the refusal).
+    assert.equal(count(dir, "budget.exceeded"), 1, verdict.message);
+    assert.equal(count(dir, "execution.started"), 1, "only the first call's start");
+  } finally {
+    release(dir);
+    steps.return(-1);
+  }
+});

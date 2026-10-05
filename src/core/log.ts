@@ -543,7 +543,13 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number): LockO
           ok: false,
           error: {
             code: "lock-timeout",
-            message: `another writer holds ${path}; gave up after ${timeoutMs}ms`,
+            // A zero timeout is a single try by request (APRV-478: a caller that
+            // waits for the lock on its own event loop), and "gave up after 0ms"
+            // would read as a writer that never tried.
+            message:
+              timeoutMs <= 0
+                ? `another writer holds ${path}; this append tried the lock once, as its caller asked, and did not wait`
+                : `another writer holds ${path}; gave up after ${timeoutMs}ms`,
           },
         };
       }

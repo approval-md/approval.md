@@ -1259,10 +1259,19 @@ the log.
   while another writer holds the lock (the daemon does, routinely), the hook
   sleeps on a timer and tries again every 20 ms, so a signal during that wait
   is answered with the deny and nothing is spent. If another writer takes the
-  lock in the instant between the last pause and the try, the hook goes back to
-  waiting on the event loop. A lock held for the whole two-second bound every
-  writer has denies the call with `hook-gate-refused:append-failed`
-  (`lock-timeout`) and appends nothing, as it did before.
+  lock between the last pause and the try (the spend's read sits in that gap),
+  the hook goes back to waiting on the event loop, for as long as the
+  two-second bound every writer has; a spend that still cannot get the lock by
+  then denies the call with `hook-gate-refused:append-failed` (`lock-timeout`)
+  and appends nothing, as it did before. One consequence: a lock that is only
+  ever free for gaps shorter than the spend's read (a writer holding it almost
+  continuously) can run the spend out of that bound where the old synchronous
+  wait, which read first and then spun on the lock, got through. That ends in
+  the deny, with the grant left for a retry. A command with several gated classes
+  spends them one at a time, each behind its own pause, so a signal that lands
+  between two of them blocks the call with the earlier classes' starts
+  already recorded and the rest unspent: the same outcome as a spend that fails
+  on a later class, and nothing is recorded after the signal.
 
 What Claude Code does with a hook it killed on its own timeout is its own rule
 (see "When the grant can follow the write" below); `--harness-cap` is what keeps

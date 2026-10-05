@@ -139,7 +139,7 @@ import {
   type HarnessLoopState,
 } from "../core/loop.js";
 import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
-import { HEAD_MOVED_ATTEMPTS, type HeadRetryable } from "../core/head-retry.js";
+import type { HeadRetryable } from "../core/head-retry.js";
 import {
   appendLockHeld,
   DEFAULT_LOCK_RETRY_MS,
@@ -2733,8 +2733,15 @@ function sleepSync(ms: number): void {
  *
  * The pauses are the same durations under either driver, so the deadline
  * arithmetic and the poll cadence do not depend on which one runs them.
+ *
+ * Each `next()` also tells the steps which driver is running them (APRV-478):
+ * `true` from {@link driveYielding}, a pause that turns the event loop, and
+ * `false` or nothing from {@link driveSync}. The one step that reads it is
+ * {@link spendUnderLock}, which waits for the log's lock on the event loop
+ * only when there is an event loop to wait on, and otherwise runs the writer's
+ * own synchronous wait exactly as before.
  */
-type GateSteps<T> = Generator<number, T, undefined>;
+type GateSteps<T> = Generator<number, T, boolean | undefined>;
 
 /** The longest delay `setTimeout` honours (2^31 - 1 ms). */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -2742,7 +2749,7 @@ const MAX_TIMER_MS = 2_147_483_647;
 /** Run `steps` to its verdict, sleeping each pause synchronously. */
 function driveSync<T>(steps: GateSteps<T>): T {
   for (;;) {
-    const next = steps.next();
+    const next = steps.next(false);
     if (next.done === true) return next.value;
     if (next.value > 0) sleepSync(next.value);
   }
@@ -2765,7 +2772,7 @@ function driveSync<T>(steps: GateSteps<T>): T {
  */
 async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
   for (;;) {
-    const next = steps.next();
+    const next = steps.next(true);
     if (next.done === true) return next.value;
     // Clamped to the largest delay a timer holds: past it Node fires the timer
     // at once, and a pause would become a busy poll. The wait re-reads its
@@ -2806,9 +2813,22 @@ async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
  */
 const BEFORE_SPEND = 0;
 
-/** Did this writer's result fail only because another writer held the lock? */
+/**
+ * Did this attempt lose a race for the log's lock, writing nothing?
+ *
+ * Two shapes: the spend's own append refused `append-failed` with the writer's
+ * `lock-timeout`, and a budget refusal whose `budget.exceeded` evidence lost the
+ * race (`startHarnessExecution` carries the writer's error on that refusal for
+ * this, APRV-478). In both nothing was appended, so re-running the whole
+ * attempt is safe and gives the record the chance a synchronous lock wait gave
+ * it.
+ */
 function lockTimedOut(result: HeadRetryable): boolean {
-  return !result.ok && result.code === "append-failed" && result.append?.code === "lock-timeout";
+  return (
+    !result.ok &&
+    (result.code === "append-failed" || result.code === "budget-exceeded") &&
+    result.append?.code === "lock-timeout"
+  );
 }
 
 /**
@@ -2828,17 +2848,22 @@ function lockTimedOut(result: HeadRetryable): boolean {
  *
  * ## What this does instead
  *
- * The wait for the lock becomes yields of the same generator chain. Each round:
+ * The wait for the lock becomes yields of the same generator chain, under ONE
+ * deadline for the whole spend (the writer's own `lockTimeoutMs`, default
+ * {@link DEFAULT_LOCK_TIMEOUT_MS}, taken once when the spend begins):
  *
  * 1. While the lockfile is present ({@link appendLockHeld}, advisory) and the
- *    round's budget (the writer's own `lockTimeoutMs`, default
- *    {@link DEFAULT_LOCK_TIMEOUT_MS}) is not spent, yield the retry interval
- *    (`lockRetryMs`, default {@link DEFAULT_LOCK_RETRY_MS}). Under
- *    {@link driveYielding} each is a timer, so the loop's poll phase runs and a
- *    signal reaches the listener in force: the wait's handler blocks, withdraws
- *    what it can and exits, and nothing below runs.
- * 2. {@link BEFORE_SPEND}: the one zero pause, now immediately before the
- *    attempt, so a signal that landed during the probe itself is dispatched too.
+ *    deadline has not passed, yield the retry interval (`lockRetryMs`, default
+ *    {@link DEFAULT_LOCK_RETRY_MS}).
+ * 2. {@link BEFORE_SPEND}: the zero pause, taken when the spend begins and again
+ *    after any wait, so it always comes immediately before the attempt (with at
+ *    most the probe in between). This
+ *    is the pause the guarantee rests on: two `setImmediate` hops cross a poll
+ *    phase from any phase, so a signal that arrived during the wait or the
+ *    probe is dispatched here at the latest (a retry timer usually dispatches
+ *    it sooner, but a timer scheduled outside a timer callback can fire before
+ *    the next poll). The listener in force then blocks, withdraws what it can
+ *    and exits, and nothing below runs.
  * 3. One attempt with `lockTimeoutMs: 0`: the whole spend (a fresh verified read,
  *    every check, compare-and-append against the head that read saw), whose
  *    append tries the lock exactly ONCE and never sleeps. The lock protocol is
@@ -2846,62 +2871,84 @@ function lockTimedOut(result: HeadRetryable): boolean {
  *    compared under it, so this changes when a writer tries and never what a
  *    try may do.
  *
- * An attempt refused `lock-timeout` after the lock was seen free (another writer
- * took it between the probe and the try) starts a new round, up to
- * {@link HEAD_MOVED_ATTEMPTS} rounds, the same patience the head-moved retry has.
- * One refused after the budget ran out with the lock held the whole time is
- * final, exactly as a writer's own `lock-timeout` is: the caller denies, and
- * nothing was appended (fail closed, §11.1 invariant 8).
+ * An attempt that lost the race (another writer took the lock between the probe
+ * and the try, a window as long as the attempt's own read) yields the retry
+ * interval and goes back to 1, until the deadline: the same number of tries
+ * inside the same bound as `acquireLock`'s synchronous retry, each one a whole
+ * fresh attempt. An attempt that loses at or after the deadline is final,
+ * exactly as a writer's own `lock-timeout` is: the caller denies, and nothing
+ * was appended (fail closed, §11.1 invariant 8). See {@link lockTimedOut} for
+ * the two refusals that count as a lost race.
  *
  * What is left between the last pause and the append is the spend's own read
- * of the log and its single try at the lock: milliseconds, never a wait on
- * another process. A signal there is answered by the verdict the spend reaches.
+ * of the log (milliseconds on a small log, longer on a large one) and its
+ * single try at the lock, never a wait on another process. A signal there is
+ * answered by the verdict the spend reaches.
  *
- * Under {@link driveSync} (`commandHook` in process and in the serve worker,
- * `decideHarnessCall` for the Codex bridge) the yields are `Atomics.wait`
- * sleeps of the same length, so those callers still block on a held lock
- * exactly as long and as often as before. The one difference is accounting:
- * the bound is per round here, where it was per head-moved attempt inside the
- * writer, so a log under sustained contention is refused no later than before
- * and sometimes sooner (the stricter direction).
+ * **The trade, on the yielding path only.** The writer's synchronous wait read
+ * the log first and then spun on the lock itself, so it caught a gap of a
+ * millisecond. Here the spend's read sits between the probe that saw the lock
+ * free and the try, so a lock that is only ever free for gaps shorter than that
+ * read (a writer holding it at a duty cycle near 100%) can run the spend out of
+ * its bound where the synchronous wait got through. That ends in the deny
+ * above, the grant left standing for a retry: fail closed. Holding the lock
+ * across a yield to close it is not an option, because a handler that exits at
+ * that yield would leave a lockfile that is never stolen.
  *
- * `attempt` receives the append options to use, which are the caller's own with
- * `lockTimeoutMs: 0`, and the round number (1-based), for a caller whose first
- * attempt may reuse a read it already holds and whose later ones may not.
+ * **Under {@link driveSync} nothing changes.** `commandHook` in process and in
+ * the serve worker, and `decideHarnessCall` for the Codex bridge, have no event
+ * loop that a signal could be dispatched on, so a yielded wait buys them
+ * nothing. The driver says so at the first pause (see {@link GateSteps}), and
+ * the spend is then exactly what it was: that zero pause (no pause under this
+ * driver) and one call with the caller's own options, whose writer waits for
+ * the lock synchronously, per head-moved attempt, as it always did.
+ *
+ * `attempt` receives the append options to use (the caller's own, with
+ * `lockTimeoutMs: 0` on the yielding path), and the attempt number (1-based),
+ * for a caller whose first attempt may reuse a read it already holds and whose
+ * later ones may not.
  */
 function* spendUnderLock<R extends HeadRetryable>(
   logPath: string,
   append: AppendOptions | undefined,
   attempt: (once: AppendOptions, round: number) => R,
 ): GateSteps<R> {
-  const budgetMs = Math.max(0, append?.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
-  // Never a zero retry: under `driveSync` a zero pause is no pause, and the
-  // probe loop would spin.
-  const retryMs = Math.max(1, append?.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS);
+  // The shared pause, and the driver's answer to whether it turns the loop.
+  const yielding = (yield BEFORE_SPEND) === true;
+  if (!yielding) return attempt(append ?? {}, 1);
+
+  const askedBudget = append?.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const budgetMs = Number.isFinite(askedBudget) ? Math.max(0, askedBudget) : DEFAULT_LOCK_TIMEOUT_MS;
+  // Never a zero (or non-finite) retry: under `driveSync` a zero pause is no
+  // pause, and the probe loop would spin.
+  const askedRetry = append?.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS;
+  const retryMs = Number.isFinite(askedRetry) ? Math.max(1, askedRetry) : DEFAULT_LOCK_RETRY_MS;
   const once: AppendOptions = { ...append, lockTimeoutMs: 0 };
-  for (let round = 1; ; round += 1) {
-    const deadline = Date.now() + budgetMs;
-    let sawFree = false;
+  const deadline = Date.now() + budgetMs;
+  for (let tries = 1; ; tries += 1) {
+    let waited = tries > 1;
     for (;;) {
-      if (!appendLockHeld(logPath)) {
-        sawFree = true;
-        break;
-      }
+      if (!appendLockHeld(logPath)) break;
       const left = deadline - Date.now();
       if (left <= 0) break;
+      waited = true;
       yield Math.min(retryMs, left);
     }
-    yield BEFORE_SPEND;
-    const result = attempt(once, round);
+    // Uncontended first try: the pause above was taken a probe ago, and the
+    // probe is the only thing that ran since. Otherwise the pause again, now
+    // immediately before the attempt.
+    if (waited) yield BEFORE_SPEND;
+    const result = attempt(once, tries);
     if (!lockTimedOut(result)) return result;
-    if (sawFree && round < HEAD_MOVED_ATTEMPTS) continue;
-    const why = sawFree
-      ? `another writer took the lock first in each of ${String(round)} rounds`
-      : `another writer held it for the whole ${String(budgetMs)} ms this spend waits`;
+    const left = deadline - Date.now();
+    if (left > 0) {
+      yield Math.min(retryMs, left);
+      continue;
+    }
     // A copy, as `core/head-retry.ts` makes its own: only the message changes.
     return {
       ...result,
-      message: `${result.message ?? "lock-timeout"}; the spend waited for the log's lock on the event loop, trying it once every ${String(retryMs)} ms, and ${why} (APRV-478). Nothing was appended.`,
+      message: `${result.message ?? "lock-timeout"}; the spend waited for the log's lock on the event loop for its whole ${String(budgetMs)} ms bound, trying every ${String(retryMs)} ms, and another writer held it at each of its ${String(tries)} attempt${tries === 1 ? "" : "s"} (APRV-478). Nothing was appended.`,
     } as R;
   }
 }
@@ -3807,6 +3854,19 @@ function withdrawAbandoned(
  * Steps since APRV-478: each key is spent through {@link spendUnderLock}, so a
  * wait for the log's lock is a yield and the shared pause before the spend
  * ({@link BEFORE_SPEND}) is taken there, immediately before each append.
+ *
+ * **A multi-key spend pauses before every key, deliberately.** A signal that
+ * lands after the first key is spent and before the second is dispatched at the
+ * second key's pause: the call blocks with the first key's `execution.started`
+ * already recorded (before the signal) and the rest unspent. That is the same
+ * outcome as a spend that fails on a later key, above: a recorded start for a
+ * call the harness does not run, a grant that costs one more prompt, and
+ * nothing authorized. The alternative, spending the later keys with no pause,
+ * would make each later key's lock wait synchronous again, and a signal there
+ * would be held through starts recorded AFTER it and answered with an allow.
+ * Recording nothing after the signal and blocking is the stricter of the two.
+ * An atomic spend of every key at once needs a gate operation that does not
+ * exist; this is the residue the SPEC hunk names for a multi-class call.
  */
 function* consumeGrants(
   run: HookRun,
@@ -7488,13 +7548,17 @@ export function commandHookYielding(
  * before a spend ({@link BEFORE_SPEND}) sits between the read that found a
  * grant and the append that spends it, on every harness. No CLI route and no
  * embedding caller uses it; the one entry for those is the two drivers above.
+ *
+ * Pass `true` to each `next()` to step as {@link commandHookYielding} does
+ * (the spend then waits for a held log lock in yields, APRV-478); `false` or
+ * nothing steps as {@link commandHook} does.
  */
 export function commandHookSteps(
   argv: string[],
   streams: Streams,
   cwd: string,
   readStdin: () => string,
-): Generator<number, number, undefined> {
+): Generator<number, number, boolean | undefined> {
   return hookSteps(argv, streams, cwd, readStdin, null);
 }
 

@@ -487,7 +487,10 @@ wait is answered with the block too (APRV-478). What remains is the spend
 itself, from the pause until the record lands: its own read of the log
 (milliseconds, more on a large log), one try at the lock, the append, and the
 verification read after it. A signal that lands there is answered by the
-verdict the hook already reached.
+verdict the hook already reached. A call with several gated classes spends
+them one at a time, each behind its own pause, so a signal between two of them
+blocks the call with the earlier classes' starts already recorded (before the
+signal) and the rest unspent.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was
