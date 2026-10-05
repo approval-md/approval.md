@@ -10,8 +10,8 @@
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "f6c3d42642877efbbfe12e5d2666ccba5d8e694fb271b18bb4f94aea1c447a81",
-    "conformance/vectors/refusal-unions.v1.json": "2f4058c1a910a700cf29713a34992c102c72fe15b745469e26e0fcb7d1408644",
-    "conformance/vectors/schema-validation.v1.json": "efbb7b57a962260815cd9a3498e9d0e953624160ea8d8d5cc4c9a48c4cede2af",
+    "conformance/vectors/refusal-unions.v1.json": "1ac3ae4c8cc489d804cb0dce30292dbb25d5f8a0f0cd96096d0bde879c91a04d",
+    "conformance/vectors/schema-validation.v1.json": "2251f37c88c9703ce057d6a22efc1bc1fb95a65eada7c65187d08fe7ab8f274e",
     "tests/conformance-harness.ts": "4f9d4b1259710e8a6ce8ce5f03e9fc88f8ab62660bacaa6885ae5a7c1869bc68"
   }
 }

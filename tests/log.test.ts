@@ -433,6 +433,10 @@ test("head-moved is pinned in the append-error union", () => {
     // byte-identical like every member before them.
     "daemon-id-invalid",
     "daemon-not-allowed",
+    // APRV-479 round 2 (RB3), pending the owner's sign-off of SPEC §11.2: the
+    // writer holds the lock and cannot establish that every reclaim of it is
+    // recorded, so it appends nothing. Leaves the file byte-identical.
+    "reclaim-pending-unreadable",
   ]);
 });
 

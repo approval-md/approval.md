@@ -99,16 +99,16 @@ import {
 import { systemClock } from "./clock.js";
 import { canonicalize, JcsError } from "./jcs.js";
 import {
-  clearPendingReclaim,
   createLockFile,
   guardTerminationWhileLocked,
   pendingReclaims,
   releaseLockFile,
-  settleTerminationGuards,
+  settlePendingReclaim,
   tryReclaimLock,
   type LockOp,
   type OwnLock,
   type PendingReclaim,
+  type ReclaimNote,
 } from "./log-lock.js";
 import { appendWriteLayer } from "./log-write-layer.js";
 import { validate, type ValidateOptions, type ValidationError } from "./validate.js";
@@ -350,6 +350,14 @@ export const APPEND_ERROR_CODES = [
    * anything in it.
    */
   ...DAEMON_APPEND_REFUSAL_CODES,
+  /**
+   * APRV-479 (round 2, RB3): the writer holds the lock but cannot establish that
+   * every reclaim of it is recorded: the lock's `pending/` directory exists and
+   * cannot be listed, or a recorded pending reclaim cannot be moved out of it.
+   * A reclaim is always recorded before any other record under the next lock,
+   * so the writer appends nothing. Pending the owner's sign-off of SPEC §11.2.
+   */
+  "reclaim-pending-unreadable",
 ] as const;
 
 export type AppendErrorCode = (typeof APPEND_ERROR_CODES)[number];
@@ -568,11 +576,12 @@ type LockOutcome =
  * never lost with this wait. A lock that was kept is named, with the reason, in
  * the `lock-timeout` message.
  *
- * The termination-signal guard ({@link guardTerminationWhileLocked}) spans each
- * create attempt and, after a successful one, the hold: it is taken before the
- * `open`, so no default-disposition signal can kill this process between
- * creating the lockfile and removing it, and settled before every sleep between
- * attempts, so a signal during the wait is never held (APRV-479, S2).
+ * The termination-signal guard ({@link guardTerminationWhileLocked}) spans the
+ * hold only: it is taken right after a successful create, so the wait and any
+ * reclaim run without it (a signal there kills the process at once, and a
+ * reclaim is built to survive that), and a signal in the microseconds between
+ * the create and the guard kills a writer whose lockfile already names it, which
+ * the next writer reclaims (APRV-479, S2 and round 2 RS1).
  */
 function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: LockOp): LockOutcome {
   const path = `${logPath}.lock`;
@@ -580,12 +589,14 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
   let judged = false;
   let kept: string | undefined;
   for (;;) {
-    const releaseGuard = guardTerminationWhileLocked();
     try {
       const own = createLockFile(path, op);
-      return { ok: true, own, releaseGuard };
+      // After the create returned, so a failed attempt never leaves a guard
+      // behind to hold a signal through the wait or the reclaim, and a signal in
+      // the microseconds before this line kills the process with a fully
+      // attributed lockfile, which the next writer reclaims (round 2, RS1).
+      return { ok: true, own, releaseGuard: guardTerminationWhileLocked() };
     } catch (cause) {
-      releaseGuard();
       const code = (cause as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") {
         return {
@@ -595,7 +606,7 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
       }
       if (!judged) {
         judged = true;
-        const outcome = tryReclaimLock(logPath);
+        const outcome = tryReclaimLock(logPath, Date.now(), { recordValid: reclaimRecordValid });
         if (outcome.kind === "kept") kept = outcome.why;
         // Reclaimed, or gone by the time it was read: the create again, now.
         if (outcome.kind !== "kept") continue;
@@ -616,7 +627,6 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
           },
         };
       }
-      settleTerminationGuards();
       sleepSync(retryMs);
     }
   }
@@ -978,12 +988,31 @@ function lockedRun<T>(
     try {
       // Every reclaim whose record is not yet in the log, this writer's own or
       // another's that lost the create to this one (APRV-479, S1), is recorded
-      // first, before the caller reads the tail.
-      for (const pending of pendingReclaims(logPath)) {
-        const recorded = appendReclaimRecord(logPath, pending.note, firstCreatedDir);
+      // first, before the caller reads the tail; and a writer that cannot tell
+      // whether one is waiting appends nothing (round 2, RB3).
+      const scan = pendingReclaims(logPath, Date.now(), { recordValid: reclaimRecordValid });
+      if (!scan.ok) {
+        return {
+          ok: false,
+          error: {
+            code: "reclaim-pending-unreadable",
+            message: `${scan.why}, so this writer cannot tell whether a reclaim of the lock is waiting to be recorded; nothing was appended (a reclaim is recorded before any other record)`,
+          },
+        };
+      }
+      for (const pending of scan.items) {
+        const recorded = recordPendingReclaim(logPath, pending, firstCreatedDir);
         if (recorded.wrote) reclaimWrote = true;
         if (!recorded.result.ok) return { ok: false, error: recorded.result.error };
-        clearPendingReclaim(pending);
+        if (!settlePendingReclaim(logPath, pending)) {
+          return {
+            ok: false,
+            error: {
+              code: "reclaim-pending-unreadable",
+              message: `the reclaim recorded as ${pending.id} could not be moved out of the lock's pending directory, so every later writer would record it again; nothing else was appended`,
+            },
+          };
+        }
       }
       return { ok: true, value: run(firstCreatedDir) };
     } finally {
@@ -995,6 +1024,50 @@ function lockedRun<T>(
   }
 }
 
+/** The `audit.lock_reclaimed` payload for a verified note, or an unverified one (`note` null). */
+function reclaimPayload(lockfile: string, note: ReclaimNote | null, id: string | undefined): Record<string, unknown> {
+  if (note === null) {
+    const payload: Record<string, unknown> = { lockfile, reason: "unverified" };
+    if (id !== undefined) payload["reclaim_id"] = id;
+    return payload;
+  }
+  const payload: Record<string, unknown> = { lockfile: note.lockfile, reason: note.reason, age_ms: note.age_ms };
+  if (note.holder !== undefined) payload["holder"] = { pid: note.holder.pid, op: note.holder.op, created: note.holder.created };
+  if (id !== undefined) payload["reclaim_id"] = id;
+  return payload;
+}
+
+/**
+ * The write boundary's own verdict on the record a reclaim would append,
+ * computed before the reclaim commits (APRV-479 round 2, RB2): a reclaim whose
+ * record would be refused is not made.
+ */
+function reclaimRecordValid(note: ReclaimNote): boolean {
+  try {
+    const record = buildRecord(
+      { ts: systemClock(), event: "audit.lock_reclaimed", actor: "system:log", payload: reclaimPayload(note.lockfile, note, "0000000000000000") },
+      1,
+      GENESIS_PREV,
+      null,
+    );
+    return validate("event", record).ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the log's last record already the record of this pending reclaim? */
+function lastRecordIsReclaim(logPath: string, id: string): boolean {
+  const last = readLastLine(logPath);
+  if (!last.ok || last.last === null || !last.terminated) return false;
+  try {
+    const record = JSON.parse(last.last) as { event?: unknown; payload?: { reclaim_id?: unknown } };
+    return record.event === "audit.lock_reclaimed" && record.payload?.reclaim_id === id;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The record of a reclaimed lock (APRV-479), appended as the first write under
  * the next lock any writer takes after the reclaim: before the caller's own read
@@ -1003,48 +1076,53 @@ function lockedRun<T>(
  * precondition (it decides nothing from the log) and the same daemon stamp. It
  * authorizes nothing and nothing reads it to decide anything.
  *
- * The record is pending beside the lock (the reclaimed lockfile itself, at a
- * pending name) from the reclaim's commit point until it is appended, so it is
+ * The record is pending beside the lock (the reclaimed lockfile itself, under
+ * `pending/`) from the reclaim's commit point until it is appended, so it is
  * never lost with the reclaimer, and every field of it is this writer's own
- * judgement of that file (`pendingReclaims`), never text read from it:
- * when it cannot be appended the caller's operation is refused with the
- * writer's own error, the lock is released, and the record stays pending for
- * the next writer (which meets the same refusal while the log takes no record
- * at all: a corrupt tail, a full disk, a daemon refused its id). It is removed
- * only after it was appended; a writer killed between the two leaves it to be
- * appended again, so the one failure left is a duplicate record, never a
- * missing one.
+ * (`pendingReclaims`): a verified record carries only the strictly parsed
+ * holder, and an unverified one nothing from the file at all.
+ *
+ * - Idempotent: the record carries `reclaim_id`, a digest of the pending name,
+ *   and a pending reclaim whose record is already the log's last line (a writer
+ *   killed between the append and moving the file out) is not appended again.
+ * - Never a wedge: a verified record the write boundary refuses as invalid is
+ *   recorded as `unverified` instead, which carries nothing a file chose. What
+ *   is left is a log that takes no record at all (a corrupt tail, a full disk,
+ *   a daemon refused its id), which refuses the caller's own record too.
  */
-function appendReclaimRecord(
+function recordPendingReclaim(
   logPath: string,
-  note: PendingReclaim["note"],
+  pending: PendingReclaim,
   firstCreatedDir: string | undefined,
-): { result: AppendResult; wrote: boolean } {
+): { result: AppendResult | { ok: true }; wrote: boolean } {
+  if (lastRecordIsReclaim(logPath, pending.id)) return { result: { ok: true }, wrote: false };
   const stamp = daemonStampForAppend();
   if (stamp.kind === "refuse") return { result: fail(stamp.code, stamp.message), wrote: false };
-  const payload: Record<string, unknown> = {
-    lockfile: note.lockfile,
-    reason: note.reason,
-    age_ms: note.age_ms,
-  };
-  if (note.holder !== undefined) payload["holder"] = { ...note.holder };
-  const recorded = appendUnderLock(
-    logPath,
-    { ts: systemClock(), event: "audit.lock_reclaimed", actor: "system:log", payload },
-    {},
-    firstCreatedDir,
-    stamp.kind === "stamp" ? stamp.id : null,
-  );
-  if (recorded.result.ok) return recorded;
+  const daemon = stamp.kind === "stamp" ? stamp.id : null;
+  const append = (note: ReclaimNote | null): { result: AppendResult; wrote: boolean } =>
+    appendUnderLock(
+      logPath,
+      { ts: systemClock(), event: "audit.lock_reclaimed", actor: "system:log", payload: reclaimPayload(pending.lockfile, note, pending.id) },
+      {},
+      firstCreatedDir,
+      daemon,
+    );
+  let recorded = append(pending.note);
+  let wrote = recorded.wrote;
+  if (!recorded.result.ok && recorded.result.error.code === "validation" && pending.note !== null) {
+    recorded = append(null);
+    wrote = wrote || recorded.wrote;
+  }
+  if (recorded.result.ok) return { result: recorded.result, wrote };
   return {
     result: {
       ok: false,
       error: {
         ...recorded.result.error,
-        message: `${recorded.result.error.message} (${note.lockfile} was reclaimed from a holder that is gone${note.why === undefined ? "" : `, ${note.why}`}, and this writer could not record the reclaim, so it appended nothing; the record stays pending for the next writer)`,
+        message: `${recorded.result.error.message} (${pending.lockfile} was reclaimed, and this writer could not record the reclaim, so it appended nothing; the record stays pending for the next writer)`,
       },
     },
-    wrote: recorded.wrote,
+    wrote,
   };
 }
 

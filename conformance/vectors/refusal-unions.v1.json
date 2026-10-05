@@ -166,7 +166,8 @@
           "io",
           "head-moved",
           "daemon-id-invalid",
-          "daemon-not-allowed"
+          "daemon-not-allowed",
+          "reclaim-pending-unreadable"
         ]
       }
     },

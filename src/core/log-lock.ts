@@ -57,14 +57,21 @@
  *    beside it: that rename is the commit point. The winner then takes the lock with the same `wx` create
  *    every writer uses, so a writer that wins that create first is ordinary
  *    contention.
- * 5. **The reclaim is in the log, and cannot be lost.** The commit point renames
- *    the judged lockfile to `<lock>.reclaim-<key>.<nonce>.pending.lock`, and
- *    `core/log.ts` judges every such pending file again (exactly as a lockfile
- *    in place) and appends `audit.lock_reclaimed`, built only from that
- *    judgement, as the first write under whichever lock comes next, the
- *    reclaimer's or another writer's, from a fresh read of the tail: the caller's own
- *    compare-and-append (SPEC.md §11.1 invariant 5) then sees a moved head and
- *    re-reads, as it would after any other writer's record.
+ * 5. **The reclaim is in the log, always first, and cannot be lost.** The
+ *    commit point renames the judged lockfile into `<lock>.d/pending/`, and
+ *    `core/log.ts` records every pending file as `audit.lock_reclaimed` as the
+ *    first write under whichever lock comes next, the reclaimer's or another
+ *    writer's, from a fresh read of the tail. A pending file that re-judges
+ *    cleanly yields a record built from that judgement; one that cannot be
+ *    judged (another namespace, unreadable, malformed, not a regular file) is
+ *    still recorded, as `unverified`, with nothing taken from it, and moved to
+ *    `quarantine/`. A writer that cannot list `pending/` appends nothing. The
+ *    caller's own compare-and-append (SPEC.md §11.1 invariant 5) then sees a
+ *    moved head and re-reads, as it would after any other writer's record.
+ * 5a. **Everything under the log directory is hostile input.** Every file this
+ *    module reads is opened without blocking and without following links, and
+ *    read only when the opened descriptor is a regular file of at most 4 KiB; a
+ *    scan reads at most 64 names from `pending/` and records at most 16.
  * 6. **A termination signal does not leave a lock behind.**
  *    {@link guardTerminationWhileLocked} registers a listener for SIGTERM, SIGINT
  *    and SIGHUP while this process holds a lock, for each signal nobody else
@@ -91,20 +98,24 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
   fstatSync,
   linkSync,
+  lstatSync,
+  mkdirSync,
+  opendirSync,
   openSync,
   readFileSync,
   readSync,
-  readdirSync,
   readlinkSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
+import type { Dir } from "node:fs";
 import { hostname, uptime } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
 /** The holder record's format version. A reader treats any other as unverifiable. */
 export const LOCK_HOLDER_VERSION = 1;
@@ -138,6 +149,17 @@ const MAX_PID = 2 ** 31 - 1;
  * reclaimed (security review of fix round 1).
  */
 const CREATED_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+/**
+ * `created` exactly as `Date#toISOString` writes it AND a real instant: the
+ * string must survive a round trip, which `2026-02-30T00:00:00.000Z` (a shape
+ * match that V8 rolls over to March 2nd) does not (APRV-479 round 2, RB2).
+ */
+export function isCanonicalTimestamp(value: string): boolean {
+  if (!CREATED_SHAPE.test(value)) return false;
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString() === value;
+}
 
 /**
  * A holder's hostname as a message may show it: the hostname charset, at most
@@ -178,11 +200,11 @@ export interface LockHolder extends HolderIdentity {
 }
 
 /**
- * Why a lock was reclaimed. The `audit.lock_reclaimed` payload's `reason`.
- * `holder-boot-ended` stays in the closed set for the schema's sake; since fix
- * round 1 of APRV-479 no judgement produces it (a different boot proves nothing).
+ * Why a lock was reclaimed, as this writer judged it. With `unverified` (a
+ * pending reclaim this writer could not judge, recorded with nothing taken from
+ * it) these are the `audit.lock_reclaimed` payload's closed `reason` set.
  */
-export type LockReclaimReason = "holder-dead" | "holder-replaced" | "holder-boot-ended" | "legacy-aged";
+export type LockReclaimReason = "holder-dead" | "holder-replaced" | "legacy-aged";
 
 /** The judgement on one holder record. */
 export type HolderVerdict =
@@ -441,8 +463,7 @@ export function parseHolder(
   if (
     identity === null ||
     typeof created !== "string" ||
-    !CREATED_SHAPE.test(created) ||
-    !Number.isFinite(Date.parse(created)) ||
+    !isCanonicalTimestamp(created) ||
     (op !== "append" && op !== "hold") ||
     typeof nonce !== "string"
   ) {
@@ -564,35 +585,73 @@ interface SeenLock {
   bytes: Buffer;
 }
 
-/** Read a file through one descriptor, or `null` when there is none. */
-function readLock(path: string): SeenLock | null {
+/** The most bytes any file this module reads may hold: a record is one short line. */
+const MAX_LOCK_FILE_BYTES = 4096;
+
+/**
+ * `O_RDONLY | O_NONBLOCK | O_NOFOLLOW`: every file under the log directory is
+ * written by whoever can write that directory, so an open must never block (a
+ * FIFO with no writer would hang the opener forever) and never follow a link
+ * (APRV-479 round 2, RB1). Platforms without a flag get 0 for it.
+ */
+const SAFE_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+
+/** What a read of one name under the log directory found. */
+type EntryRead =
+  | { kind: "absent" }
+  /** Something is there that this module will not read: a FIFO, socket, device, directory, link, an oversized or unreadable file. */
+  | { kind: "unreadable"; why: string }
+  | { kind: "file"; seen: SeenLock };
+
+/**
+ * Read one file under the log directory as hostile input: opened without
+ * blocking or following links, accepted only when the opened descriptor is a
+ * regular file of at most {@link MAX_LOCK_FILE_BYTES}, read through that one
+ * descriptor. Anything else is `unreadable`, never an error and never a hang.
+ */
+function readEntry(path: string): EntryRead {
   let fd: number;
   try {
-    fd = openSync(path, "r");
-  } catch {
-    return null;
+    fd = openSync(path, SAFE_OPEN_FLAGS);
+  } catch (cause) {
+    const code = errnoOf(cause);
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
+    return { kind: "unreadable", why: code === "ELOOP" || code === "EMLINK" ? "a symbolic link" : (code ?? "an open error") };
   }
   try {
     const stat = fstatSync(fd, { bigint: true });
-    const buffer = Buffer.alloc(4096);
+    if (!stat.isFile()) return { kind: "unreadable", why: "not a regular file" };
+    if (stat.size > BigInt(MAX_LOCK_FILE_BYTES)) return { kind: "unreadable", why: "larger than any record" };
+    const buffer = Buffer.alloc(MAX_LOCK_FILE_BYTES);
     let length = 0;
     for (;;) {
-      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      let read: number;
+      try {
+        read = readSync(fd, buffer, length, buffer.length - length, null);
+      } catch (cause) {
+        // EAGAIN on a regular file cannot happen; any read error is unreadable.
+        return { kind: "unreadable", why: errnoOf(cause) ?? "a read error" };
+      }
       if (read <= 0) break;
       length += read;
       if (length >= buffer.length) break;
     }
     return {
-      ino: stat.ino,
-      mtimeNs: stat.mtimeNs,
-      mtimeMs: Number(stat.mtimeMs),
-      bytes: buffer.subarray(0, length),
+      kind: "file",
+      seen: { ino: stat.ino, mtimeNs: stat.mtimeNs, mtimeMs: Number(stat.mtimeMs), bytes: buffer.subarray(0, length) },
     };
-  } catch {
-    return null;
+  } catch (cause) {
+    return { kind: "unreadable", why: errnoOf(cause) ?? "a stat error" };
   } finally {
     closeSync(fd);
   }
+}
+
+/** A regular file's identity and bytes, or `null` for anything else. */
+function readLock(path: string): SeenLock | null {
+  const entry = readEntry(path);
+  return entry.kind === "file" ? entry.seen : null;
 }
 
 /**
@@ -761,24 +820,64 @@ function snapshotPathFor(logPath: string): string {
 }
 
 /**
- * The name every file of one reclaim of one judged lockfile starts with. Keyed
- * by the lockfile's inode AND a digest of its mtime and bytes, so a later
- * lockfile that happens to reuse the inode is a different reclaim with its own
- * claims. Every name derived from it starts with `<lockfile>.` (the export
- * excludes that prefix) and ends in `.lock` (the daemon's watcher ignores it).
+ * The reclaim's own directory beside the lock (`<log>.lock.d`) and its three
+ * parts (APRV-479 round 2, RB3 and RS3):
+ *
+ * - `claims/`: one name per claim and its temporary; never scanned, read only
+ *   by a reclaimer looking up the one name it is about to take;
+ * - `pending/`: reclaimed lockfiles whose record is not yet in the log; the
+ *   ONLY directory any writer lists, and every name in it leaves it once its
+ *   record is appended;
+ * - `quarantine/`: what a writer recorded as unverified, and what a reclaim
+ *   moved that was not the lockfile it judged; never scanned, kept for a human.
+ *
+ * So the cost of a scan never depends on how many claims or quarantined files
+ * have accumulated. Every path here starts with `<lockfile>.` (the export
+ * excludes that prefix) and every file name ends in `.lock`.
  */
-function reclaimBase(lockPath: string, seen: SeenLock): string {
+export interface ReclaimDirs {
+  root: string;
+  claims: string;
+  pending: string;
+  quarantine: string;
+}
+
+export function reclaimDirs(logPath: string): ReclaimDirs {
+  const root = `${logPath}.lock.d`;
+  return { root, claims: join(root, "claims"), pending: join(root, "pending"), quarantine: join(root, "quarantine") };
+}
+
+/** Make `path` a real directory (never a link to one), or say why it is not. */
+function ensureRealDirectory(path: string): string | null {
+  try {
+    mkdirSync(path);
+  } catch (cause) {
+    if (errnoOf(cause) !== "EEXIST") return errnoOf(cause) ?? "an error";
+  }
+  try {
+    return lstatSync(path).isDirectory() ? null : "not a directory";
+  } catch (cause) {
+    return errnoOf(cause) ?? "an error";
+  }
+}
+
+/**
+ * The key of one judged lockfile: its inode AND a digest of its mtime and
+ * bytes, so a later lockfile that happens to reuse the inode is a different
+ * reclaim with its own claims.
+ */
+function lockKey(seen: SeenLock): string {
   const digest = createHash("sha256")
     .update(seen.mtimeNs.toString())
     .update("\0")
     .update(seen.bytes)
     .digest("hex")
     .slice(0, 12);
-  return `${lockPath}.reclaim-${seen.ino.toString()}-${digest}`;
+  return `${seen.ino.toString()}-${digest}`;
 }
 
-function claimPath(base: string, generation: number): string {
-  return `${base}.claim-${String(generation)}.lock`;
+function claimPath(claims: string, key: string, generation: number): string {
+  return join(claims, `${key}.claim-${String(generation)}.lock`);
 }
 
 /** A claim this process holds. */
@@ -805,24 +904,28 @@ function parseClaim(bytes: Buffer): HolderIdentity | null {
  * hour is a wedge for an hour, never a second reclaimer (APRV-479, B3).
  */
 function takeClaim(
-  base: string,
+  claims: string,
+  key: string,
   nonce: string,
 ): { kind: "held"; claim: HeldClaim } | { kind: "busy"; why: string } | { kind: "vanished" } {
   const record = { v: LOCK_HOLDER_VERSION, kind: "reclaim-claim", ...identityFields(), created: new Date().toISOString(), nonce };
   const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
   for (let generation = 0; generation < MAX_CLAIM_GENERATIONS; generation += 1) {
-    const path = claimPath(base, generation);
-    const linked = linkExclusive(path, `${base}.${nonce}.claim.tmp.lock`, bytes);
+    const path = claimPath(claims, key, generation);
+    const linked = linkExclusive(path, join(claims, `${key}.${nonce}.tmp.lock`), bytes);
     if (linked.kind === "written") {
-      return { kind: "held", claim: { path, next: claimPath(base, generation + 1), bytes } };
+      return { kind: "held", claim: { path, next: claimPath(claims, key, generation + 1), bytes } };
     }
     if (linked.kind === "error") {
       return { kind: "busy", why: `it cannot be reclaimed here: the claim the reclaim needs could not be made (${linked.code})` };
     }
-    const other = readLock(path);
+    const other = readEntry(path);
     // The claimant finished between the link and this read.
-    if (other === null) return { kind: "vanished" };
-    const claimant = parseClaim(other.bytes);
+    if (other.kind === "absent") return { kind: "vanished" };
+    if (other.kind === "unreadable") {
+      return { kind: "busy", why: `a claim on it cannot be read (${other.why}), so it is left to that claimant` };
+    }
+    const claimant = parseClaim(other.seen.bytes);
     if (claimant === null) {
       return { kind: "busy", why: `a reclaim of it is claimed in a form this version does not read, so it is left to that claimant` };
     }
@@ -850,6 +953,24 @@ function stillJudged(lockPath: string, seen: SeenLock): boolean {
 
 /** What a lockfile's bytes and mtime say about taking it now. */
 type LockJudgement = { kind: "gone"; note: ReclaimNote } | { kind: "kept"; why: string };
+
+/**
+ * Is `note` a record the schema accepts, by construction? Every field is
+ * checked against the payload's own constraints, so a reclaim whose record
+ * could not be appended is never committed (APRV-479 round 2, RB2).
+ */
+export function reclaimNoteIsValid(note: ReclaimNote): boolean {
+  if (note.lockfile === "" || /[/\\]/u.test(note.lockfile)) return false;
+  if (note.reason !== "holder-dead" && note.reason !== "holder-replaced" && note.reason !== "legacy-aged") return false;
+  if (!Number.isSafeInteger(note.age_ms) || note.age_ms < 0) return false;
+  if (note.holder !== undefined) {
+    const { pid, op, created } = note.holder;
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > MAX_PID) return false;
+    if (op !== "append" && op !== "hold") return false;
+    if (!isCanonicalTimestamp(created)) return false;
+  }
+  return true;
+}
 
 /**
  * Judge one lockfile's bytes and mtime, as {@link tryReclaimLock} judges the
@@ -899,45 +1020,76 @@ function judgeLockBytes(lockfile: string, seen: SeenLock, now: number): LockJudg
   };
 }
 
+/** Options a writer passes to {@link tryReclaimLock} and {@link pendingReclaims}. */
+export interface ReclaimOptions {
+  /**
+   * The writer's own write-boundary check of the record a reclaim would
+   * append: a reclaim whose record it would refuse is not made, and a pending
+   * record it would refuse is recorded as unverified instead (RB2).
+   */
+  recordValid?: (note: ReclaimNote) => boolean;
+}
+
+function recordable(note: ReclaimNote, options: ReclaimOptions): boolean {
+  return reclaimNoteIsValid(note) && (options.recordValid === undefined || options.recordValid(note));
+}
+
 /**
  * Judge `<logPath>.lock` and, if its holder is provably gone, move it out of
- * the lock's path atomically, so the caller's next `wx` create can take the
- * lock, and into a pending name beside it, which is the record of the reclaim
- * until whichever writer holds the lock next appends it ({@link pendingReclaims}).
+ * the lock's path into `pending/` in one atomic rename, so the caller's next
+ * `wx` create can take the lock and the reclaimed lockfile itself is the
+ * record of the reclaim until whichever writer holds the lock next appends it
+ * ({@link pendingReclaims}).
  *
  * The steps, and why a stall anywhere is harmless:
  *
- * 1. Read and judge the lockfile. Touches nothing.
+ * 1. Read and judge the lockfile (a non-regular file is kept: it cannot be
+ *    judged), and check that the record the reclaim would append is valid
+ *    (if it is not, the lock is kept as if its holder were live). Touches
+ *    nothing.
  * 2. Claim it ({@link takeClaim}). Only claims are written, and only reclaimers
  *    read them; a live claimant's claim is never passed over, so of any number
  *    of writers that judged this lockfile exactly one goes on.
  * 3. Re-check the lockfile, then (after the `before-commit` seam) re-check the
  *    lockfile AND the claim, and rename the lockfile to
- *    `<base>.<nonce>.pending.lock`. THIS RENAME IS THE COMMIT POINT: before it,
- *    every name anybody but a reclaimer reads is untouched, so a reclaimer
- *    stalled or killed anywhere before it leaves the lock exactly as it was (a
- *    wedge, never a fork); the rename frees the lock and makes the record of
- *    the reclaim durable in one atomic step, because the record IS the judged
- *    lockfile at its pending name. Inside the claim the judged lockfile can
- *    leave the path only through this rename, so the re-check immediately
- *    before it can be wrong only if something outside the protocol (a human
- *    `rm`, an older version's unconditional release) replaced the file in the
- *    instant between.
+ *    `pending/<time>-<key>-<nonce>.lock`. THIS RENAME IS THE COMMIT POINT:
+ *    before it, every name anybody but a reclaimer reads is untouched, so a
+ *    reclaimer stalled or killed anywhere before it leaves the lock exactly as
+ *    it was (a wedge, never a fork); the rename frees the lock and makes the
+ *    record of the reclaim durable in one atomic step, because the record IS
+ *    the judged lockfile at its pending name. Inside the claim the judged
+ *    lockfile can leave the path only through this rename, so the re-check
+ *    immediately before it can be wrong only if something outside the protocol
+ *    (a human `rm`, an older version's unconditional release) replaced the file
+ *    in the instant between.
  * 4. Check that what was moved is the judged file. If it is not (that same
  *    out-of-protocol instant), put it back with `link(2)`, which never
  *    overwrites a lock somebody took meanwhile, and move the pending name out of
- *    the pending namespace either way, so nothing records it.
+ *    `pending/` either way, so nothing records it.
  * 5. Remove the claim, a name only this reclaim writes.
  */
-export function tryReclaimLock(logPath: string, now: number = Date.now()): ReclaimOutcome {
+export function tryReclaimLock(logPath: string, now: number = Date.now(), options: ReclaimOptions = {}): ReclaimOutcome {
   const lockPath = `${logPath}.lock`;
-  const seen = readLock(lockPath);
-  if (seen === null) return { kind: "vanished" };
+  const entry = readEntry(lockPath);
+  if (entry.kind === "absent") return { kind: "vanished" };
+  if (entry.kind === "unreadable") {
+    return {
+      kind: "kept",
+      why: `the lock's path holds something this process does not read (${entry.why}), so its holder cannot be judged; a human removes ${basename(lockPath)}`,
+    };
+  }
+  const seen = entry.seen;
 
   const judged = judgeLockBytes(basename(lockPath), seen, now);
   if (judged.kind === "kept") return { kind: "kept", why: judged.why };
   const { note } = judged;
   const why = note.why;
+  if (!recordable(note, options)) {
+    return {
+      kind: "kept",
+      why: `${why}, but the record of its reclaim would not be valid, so the lock is treated as live; a human removes ${basename(lockPath)}`,
+    };
+  }
 
   if (existsSync(snapshotPathFor(logPath))) {
     return {
@@ -952,11 +1104,19 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
     };
   }
 
-  const base = reclaimBase(lockPath, seen);
+  const dirs = reclaimDirs(logPath);
+  for (const dir of [dirs.root, dirs.claims, dirs.pending]) {
+    const bad = ensureRealDirectory(dir);
+    if (bad !== null) {
+      return { kind: "kept", why: `${why}, but it cannot be reclaimed here: ${basename(dirs.root)}/${basename(dir)} is unusable (${bad})` };
+    }
+  }
+
+  const key = lockKey(seen);
   const nonce = randomBytes(8).toString("hex");
 
   // Step 2: the claim.
-  const taken = takeClaim(base, nonce);
+  const taken = takeClaim(dirs.claims, key, nonce);
   if (taken.kind === "vanished") return { kind: "vanished" };
   if (taken.kind === "busy") return { kind: "kept", why: `${why}; ${taken.why}` };
   const claim = taken.claim;
@@ -972,7 +1132,7 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
     if (!stillJudged(lockPath, seen) || !claimStillHeld(claim)) {
       return { kind: "kept", why: `the lock or the claim on it changed during the reclaim; nothing was touched` };
     }
-    const pending = `${base}.${nonce}.pending.lock`;
+    const pending = join(dirs.pending, `${String(now).padStart(15, "0")}-${key}-${nonce}.lock`);
     step("at-commit");
     try {
       renameSync(lockPath, pending); // THE COMMIT POINT.
@@ -1001,20 +1161,13 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
       }
       // Never leave somebody else's lockfile under a pending name: it is not a
       // reclaim this process judged, so nothing may record it.
-      const gone = `${base}.${nonce}.gone.lock`;
       if (restored && moved !== null) unlinkIfBytes(pending, moved.bytes);
-      else {
-        try {
-          renameSync(pending, gone);
-        } catch {
-          // Already gone from the pending name.
-        }
-      }
+      else quarantine(dirs, pending, `moved-${nonce}`);
       return {
         kind: "kept",
         why: restored
           ? `the lock changed hands during the reclaim and was put back`
-          : `the lock changed hands during the reclaim and could not be put back; it is at ${basename(gone)}`,
+          : `the lock changed hands during the reclaim and could not be put back; it is in ${basename(dirs.root)}/quarantine`,
       };
     }
     return { kind: "reclaimed", note };
@@ -1023,65 +1176,145 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
   }
 }
 
+/** Move `path` (any kind of entry) into `quarantine/` under a name this process chose. */
+function quarantine(dirs: ReclaimDirs, path: string, name: string): boolean {
+  if (ensureRealDirectory(dirs.root) !== null || ensureRealDirectory(dirs.quarantine) !== null) return false;
+  try {
+    renameSync(path, join(dirs.quarantine, `${name}-${randomBytes(4).toString("hex")}.lock`));
+    return true;
+  } catch (cause) {
+    return errnoOf(cause) === "ENOENT";
+  }
+}
+
+/**
+ * How many names one scan reads from `pending/`, and how many it records. The
+ * scan reads at most {@link PENDING_SCAN_LIMIT} entries with `opendir` (never
+ * the whole directory) and records at most {@link MAX_PENDING_PER_HOLD} of them,
+ * oldest first among those read: one hold's cost is bounded by these two
+ * numbers, whatever else the reclaim directory holds (RS3).
+ */
+const PENDING_SCAN_LIMIT = 64;
+const MAX_PENDING_PER_HOLD = 16;
+
 /** A reclaim whose record is waiting to be appended. */
 export interface PendingReclaim {
+  /** Its name in `pending/`. */
+  name: string;
   path: string;
-  bytes: Buffer;
-  note: ReclaimNote;
+  /** The record's `reclaim_id`: a digest of the pending name, computed here. */
+  id: string;
+  /** The lockfile name this writer derives from its own log path. */
+  lockfile: string;
+  /**
+   * The verified record, when the pending file re-judges cleanly; `null` when
+   * it cannot be judged, in which case it is recorded as `unverified`, with
+   * nothing taken from it.
+   */
+  note: ReclaimNote | null;
+  /** Why it is unverified (for a person; never recorded). */
+  why?: string;
 }
 
-/**
- * How many pending reclaims one hold of the lock records. Each needs a holder
- * that died holding the lock; the bound keeps a directory flooded with pending
- * names from turning one append into thousands.
- */
-const MAX_PENDING_PER_HOLD = 8;
+/** The outcome of one scan of `pending/`. */
+export type PendingScan =
+  | { ok: true; items: PendingReclaim[] }
+  /** `pending/` exists and cannot be listed: the writer must not append (RB3). */
+  | { ok: false; why: string };
 
 /**
- * The reclaims of `<logPath>.lock` whose records are not yet in the log, in name
- * order. Called by the writer that holds the lock, which appends each and then
- * {@link clearPendingReclaim}s it.
+ * The reclaims of `<logPath>.lock` whose records are not yet in the log, oldest
+ * first. Called by the writer that holds the lock, which records each (and
+ * {@link settlePendingReclaim}s it) before anything else.
  *
- * A pending file is a lockfile that a reclaimer moved out of the lock's path,
- * and anyone who can write this directory can also put a file at a pending
- * name. So nothing in it is taken on trust: it is judged again, exactly as
- * {@link tryReclaimLock} judges a lockfile in place, and its record is built
- * only from that judgement ({@link judgeLockBytes}). A pending file therefore
- * makes this writer append exactly the record it would have appended had it
- * found that same file at the lock's path, and no other: a holder this process
- * cannot prove gone, a record it cannot read, or an unattributed file younger
- * than the reclaim age is skipped and left where it is.
+ * A pending file is evidence that a reclaim happened, whatever its content: a
+ * reclaimer's commit put it there, or someone who can write this directory
+ * did. So every one is recorded. When it re-judges cleanly ({@link
+ * judgeLockBytes}, the same judgement a lockfile in place gets) the record
+ * carries the strictly parsed holder; when it cannot be judged (another pid
+ * namespace or boot, a holder now live, not a regular file, unreadable,
+ * malformed, a record that would not validate) the record is `unverified` and
+ * takes nothing from the file. A planted file therefore costs one truthful
+ * record and can neither silence a real reclaim nor block appends.
+ *
+ * A `pending/` that does not exist (or is not a directory, so no reclaim could
+ * have been committed into it) holds nothing. One that exists and cannot be
+ * listed is a failure: the caller must not append (fail closed).
  */
-export function pendingReclaims(logPath: string, now: number = Date.now()): PendingReclaim[] {
-  const directory = dirname(logPath);
+export function pendingReclaims(logPath: string, now: number = Date.now(), options: ReclaimOptions = {}): PendingScan {
+  const dirs = reclaimDirs(logPath);
   const lockfile = `${basename(logPath)}.lock`;
-  const prefix = `${lockfile}.reclaim-`;
-  let names: string[];
   try {
-    names = readdirSync(directory).filter((name) => name.startsWith(prefix) && name.endsWith(".pending.lock"));
-  } catch {
-    return [];
+    if (!lstatSync(dirs.pending).isDirectory()) return { ok: true, items: [] };
+  } catch (cause) {
+    const code = errnoOf(cause);
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: true, items: [] };
+    return { ok: false, why: `${basename(dirs.root)}/pending cannot be examined (${code ?? "an error"})` };
+  }
+  const names: string[] = [];
+  let dir: Dir;
+  try {
+    dir = opendirSync(dirs.pending);
+  } catch (cause) {
+    return { ok: false, why: `${basename(dirs.root)}/pending cannot be listed (${errnoOf(cause) ?? "an error"})` };
+  }
+  try {
+    for (let read = 0; read < PENDING_SCAN_LIMIT; read += 1) {
+      const entry = dir.readSync();
+      if (entry === null) break;
+      names.push(entry.name);
+    }
+  } catch (cause) {
+    return { ok: false, why: `${basename(dirs.root)}/pending cannot be listed (${errnoOf(cause) ?? "an error"})` };
+  } finally {
+    try {
+      dir.closeSync();
+    } catch {
+      // Closed either way.
+    }
   }
   names.sort();
-  const found: PendingReclaim[] = [];
-  for (const name of names) {
-    if (found.length >= MAX_PENDING_PER_HOLD) break;
-    const path = join(directory, name);
-    const seen = readLock(path);
-    if (seen === null) continue;
-    const judged = judgeLockBytes(lockfile, seen, now);
-    if (judged.kind === "kept") continue;
-    found.push({ path, bytes: Buffer.from(seen.bytes), note: judged.note });
+  const items: PendingReclaim[] = [];
+  for (const name of names.slice(0, MAX_PENDING_PER_HOLD)) {
+    const path = join(dirs.pending, name);
+    const id = createHash("sha256").update("reclaim\0").update(name).digest("hex").slice(0, 16);
+    const entry = readEntry(path);
+    if (entry.kind === "absent") continue;
+    if (entry.kind === "unreadable") {
+      items.push({ name, path, id, lockfile, note: null, why: `it is ${entry.why}` });
+      continue;
+    }
+    const judged = judgeLockBytes(lockfile, entry.seen, now);
+    if (judged.kind === "kept") {
+      items.push({ name, path, id, lockfile, note: null, why: judged.why });
+      continue;
+    }
+    if (!recordable(judged.note, options)) {
+      items.push({ name, path, id, lockfile, note: null, why: `its record would not be valid` });
+      continue;
+    }
+    items.push({ name, path, id, lockfile, note: judged.note });
   }
-  return found;
+  return { ok: true, items };
 }
 
 /**
- * Remove a pending reclaim once its record is in the log. Only the writer that
- * holds the lock calls this, so nobody else is removing or replacing it.
+ * Take a recorded pending reclaim out of `pending/`: a verified one is
+ * removed, an unverified one is moved into `quarantine/` (named by its
+ * `reclaim_id`, so the record names the file a human can look at). `false` when
+ * it could be neither: the caller must not append past it, or every later hold
+ * would record it again.
  */
-export function clearPendingReclaim(pending: PendingReclaim): void {
-  unlinkIfBytes(pending.path, pending.bytes);
+export function settlePendingReclaim(logPath: string, pending: PendingReclaim): boolean {
+  if (pending.note !== null) {
+    try {
+      unlinkSync(pending.path);
+      return true;
+    } catch (cause) {
+      if (errnoOf(cause) === "ENOENT") return true;
+    }
+  }
+  return quarantine(reclaimDirs(logPath), pending.path, pending.id);
 }
 
 /**
@@ -1089,8 +1322,10 @@ export function clearPendingReclaim(pending: PendingReclaim): void {
  * there is none, else whose it is and whether a writer would reclaim it.
  */
 export function describeLogLock(logPath: string, now: number = Date.now()): string | null {
-  const seen = readLock(`${logPath}.lock`);
-  if (seen === null) return null;
+  const entry = readEntry(`${logPath}.lock`);
+  if (entry.kind === "absent") return null;
+  if (entry.kind === "unreadable") return `something this process does not read (${entry.why}); a human removes it`;
+  const seen = entry.seen;
   const parsed = parseHolder(seen.bytes);
   if (parsed.kind === "legacy") {
     const age = Math.round((now - seen.mtimeMs) / 1000);
@@ -1152,25 +1387,29 @@ function scheduleGuardRemoval(): void {
  *
  * Node shows a caught signal to JavaScript only when the event loop turns, and
  * removing the last listener before that turn drops the signal (both measured on
- * Node 26). So the guard ends in one of two ways after the release:
+ * Node 26; there is no synchronous way to learn that a signal is pending, so a
+ * listener cannot even set a flag for synchronous code to read: it runs only on
+ * that turn). So what follows the release decides:
  *
- * - the event loop turns (the verb returned, or it awaits): a signal that arrived
- *   while the lock was held is dispatched to the guard, which re-raises it with
- *   the default disposition, and the process dies of it with the signal's own
- *   status; or
- * - synchronous code is about to block first (a poll loop, a child process):
- *   it calls {@link settleTerminationGuards}, which removes the guard at once,
- *   so the block runs under the default disposition and a signal during it kills
- *   the process immediately, as it did before this guard existed.
+ * - work that must not start after a stop request (`approval run`'s child)
+ *   first awaits {@link yieldToTerminationSignals}: the loop turns, a signal that
+ *   arrived while the lock was held reaches the guard, which re-raises it with
+ *   the default disposition, and the process dies of it, with the signal's own
+ *   status, before the work starts;
+ * - a verb that returns or awaits gets the same at its next turn;
+ * - a synchronous wait (a poll loop that cannot yield) calls
+ *   {@link settleTerminationGuards} first, which removes the guard at once, so
+ *   the wait runs under the default disposition and a signal during it kills
+ *   the process immediately. The price is the one thing Node cannot do: a
+ *   signal that landed in the append's own milliseconds and was not yet
+ *   dispatched is lost, rather than held for the length of the wait (APRV-479,
+ *   S2; the hazard in `cli/hook.ts`'s driver notes is a signal held through a
+ *   synchronous wait).
  *
- * The price of the second way is the one thing Node cannot do: a signal that
- * landed while the lock was being taken or held (milliseconds: the create, a
- * reclaim, the append) and was not yet dispatched is lost, rather than held for
- * the length of the block (APRV-479, S2; the hazard in `cli/hook.ts`'s driver
- * notes is a signal held through a synchronous wait). Node exposes no
- * synchronous way to learn that a signal is pending, so the guard cannot both
- * end with the lock and deliver what it caught; it delivers whenever the event
- * loop turns first, which is every verb that returns or awaits.
+ * The guard is taken only after the lockfile is created (so the lock wait and
+ * any reclaim run with no guard of this lock's: a signal there kills at once,
+ * and the reclaim is built to survive that) and released right after the
+ * lockfile is removed.
  * Windows has no such signals to hold; there this is a no-op.
  */
 export function guardTerminationWhileLocked(): () => void {
@@ -1203,4 +1442,21 @@ export function guardTerminationWhileLocked(): () => void {
 export function settleTerminationGuards(): void {
   if (locksHeld > 0 || guards.size === 0) return;
   removeGuards();
+}
+
+/**
+ * Turn the event loop past a poll phase (two `setImmediate` hops from any
+ * phase), so that a termination signal a released lock's guard caught is
+ * dispatched now: the guard re-raises it and the process dies of it here,
+ * before the caller starts whatever it was about to start. Resolves at once
+ * when no guard is installed. A caller that must not act after a stop request
+ * awaits this between its append and the act (APRV-479 round 2, RS1).
+ */
+export async function yieldToTerminationSignals(): Promise<void> {
+  if (guards.size === 0) return;
+  await new Promise<void>((resolve) => {
+    setImmediate(() => {
+      setImmediate(resolve);
+    });
+  });
 }

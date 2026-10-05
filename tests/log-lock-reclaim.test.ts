@@ -50,6 +50,23 @@
  *   (same inode rewritten, or a new inode) survives the reclaim;
  * - N3: what a killed reclaimer leaves beside the lock is excluded from the
  *   tenant export.
+ *
+ * Fix round 2 (the A2 recheck), each failing on 1b764242:
+ *
+ * - RB1: a FIFO or a symbolic link at the lock path or a pending name never
+ *   hangs a writer and is never followed;
+ * - RB2: a calendar-impossible `created` makes the record unreadable, so the
+ *   lock is kept, and no pending file can make every later append fail;
+ * - RB3: a committed reclaim is always recorded before any other record, as
+ *   `unverified` when the next writer cannot judge it, and a pending directory
+ *   that cannot be listed refuses the append (`reclaim-pending-unreadable`);
+ * - RS1: a stop request during `approval run`'s `execution.started` append, or
+ *   during a reclaim, ends the process before the command (or the append) runs;
+ * - RS3/RS4: one hold reads at most 64 pending names and records at most 16,
+ *   oldest first, and every pending file leaves `pending/`;
+ * - RS5: a claimant that sees a next-generation claim backs off;
+ * - a writer killed between recording a pending reclaim and moving it out does
+ *   not leave a duplicate record.
  */
 
 import assert from "node:assert/strict";
@@ -63,6 +80,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -161,10 +179,15 @@ function deadPid(): number {
   return child.pid;
 }
 
-/** Names in the log's directory that a reclaim may have left behind. */
+/** What a reclaim may have left behind: everything under `<log>.lock.d/`, and any stray name beside the lock. */
 function residue(logPath: string): string[] {
-  const dir = join(logPath, "..");
-  return readdirSync(dir).filter((name) => name.includes(".reclaim-"));
+  const found = readdirSync(join(logPath, "..")).filter((name) => name.startsWith("events.jsonl.lock.") && name !== "events.jsonl.lock.d");
+  const root = `${logPath}.lock.d`;
+  for (const part of ["claims", "pending", "quarantine"]) {
+    const dir = join(root, part);
+    if (existsSync(dir)) for (const name of readdirSync(dir)) found.push(`${part}/${name}`);
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -788,10 +811,9 @@ for (const step of ["claimed", "before-commit"] as const) {
     // The dead claimant's claim stays (nothing ever removes another's claim);
     // it is the lock's bookkeeping and never leaves in a tenant export.
     const left = residue(logPath);
-    assert.ok(left.length >= 1 && left.every((name) => name.endsWith(".claim-0.lock")), left.join(", "));
+    assert.ok(left.length >= 1 && left.every((name) => name.startsWith("claims/") && name.endsWith(".claim-0.lock")), left.join(", "));
     for (const name of left) {
-      assert.ok(name.startsWith("events.jsonl.lock."), name);
-      assert.equal(isExcludedPath(`.approval/log/${name}`, ".approval/log/events.jsonl.lock"), true, name);
+      assert.equal(isExcludedPath(`.approval/log/events.jsonl.lock.d/${name}`, ".approval/log/events.jsonl.lock"), true, name);
     }
   });
 }
@@ -860,10 +882,11 @@ test("the export excludes every file named from the lockfile, and nothing else t
   const lock = ".approval/log/events.jsonl.lock";
   for (const name of [
     "events.jsonl.lock",
-    "events.jsonl.lock.reclaim-12-abcdef012345.claim-0.lock",
-    "events.jsonl.lock.reclaim-12-abcdef012345.0011223344556677.gone.lock",
-    "events.jsonl.lock.reclaim-12-abcdef012345.pending.lock",
-    "events.jsonl.lock.reclaim-12-abcdef012345.0011223344556677.claim.tmp.lock",
+    "events.jsonl.lock.d",
+    "events.jsonl.lock.d/claims/12-abcdef012345.claim-0.lock",
+    "events.jsonl.lock.d/claims/12-abcdef012345.0011223344556677.tmp.lock",
+    "events.jsonl.lock.d/pending/000001791180356-12-abcdef012345-0011223344556677.lock",
+    "events.jsonl.lock.d/quarantine/3f9a0c1d5e7b2468-0a1b2c3d.lock",
   ]) {
     assert.equal(isExcludedPath(`.approval/log/${name}`, lock), true, name);
   }
@@ -1073,47 +1096,84 @@ test("S3: in a pid namespace whose /proc was not remounted, a reader keeps a liv
 // who can write the log's directory, so nothing in them is taken on trust
 // ---------------------------------------------------------------------------
 
-test("a hostile pending file makes a writer append only the record it would have written for that file as the lock, and no more than eight per hold", () => {
-  const logPath = freshLog();
-  const dir = join(logPath, "..");
-  const pending = (tag: string): string => join(dir, `events.jsonl.lock.reclaim-1-aaaaaaaaaaaa.${tag}.pending.lock`);
-  // The old note shape, with chosen fields: no holder record at all, and young.
-  writeFileSync(
-    pending("0000000000000001"),
-    `${JSON.stringify({ v: 1, kind: "reclaim-pending", note: { lockfile: "../../etc/passwd", reason: "holder-dead", age_ms: -5, holder: { pid: 1, op: "append", created: "\u001b[31mforged" } } })}\n`,
-  );
-  // A live holder (this process): never recorded.
-  writeFileSync(pending("0000000000000002"), `${JSON.stringify(holder())}\n`);
-  // A dead pid with a `created` carrying a newline and an escape: unreadable, never recorded.
-  writeFileSync(pending("0000000000000003"), `${JSON.stringify(holder({ pid: deadPid(), created: "2026-10-05T07:00:00.000Z\n\u001b[2J" }))}\n`);
-  // Extra fields and a newer format: unreadable or ignored.
-  writeFileSync(pending("0000000000000004"), `${JSON.stringify({ v: 2, pid: deadPid(), event: "approval.granted", actor: "human:carter" })}\n`);
-  const result = appendEvent(logPath, granted(50));
-  assert.ok(result.ok);
-  assert.deepEqual(
-    records(logPath).map((record) => record.event),
-    ["task.registered", "approval.granted"],
-    "none of those files produced a record",
-  );
+/** Plant `content` under `<log>.lock.d/pending/` (as anyone who can write the log directory can). */
+function plantPending(logPath: string, name: string, content: string | null): string {
+  const dir = join(`${logPath}.lock.d`, "pending");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  if (content === null) mkdirSync(path);
+  else writeFileSync(path, content);
+  return path;
+}
 
-  // A dead holder's record at a pending name is what this writer would have
-  // recorded on finding it as the lock: recorded, from its own judgement only.
-  for (const name of readdirSync(dir).filter((entry) => entry.endsWith(".pending.lock"))) rmSync(join(dir, name));
-  const pid = deadPid();
-  // (A different host would be judged live, another machine, and skipped.)
-  const forged = holder({ pid, nonce: "x".repeat(1000) });
-  for (let n = 0; n < 20; n += 1) writeFileSync(pending(String(n).padStart(16, "0")), `${JSON.stringify({ ...forged, extra: "field" })}\n`);
-  const next = appendEvent(logPath, granted(51));
-  assert.ok(next.ok);
-  const reclaims = records(logPath).filter((record) => record.event === "audit.lock_reclaimed");
-  assert.equal(reclaims.length, 8, "at most eight pending reclaims are recorded per hold");
-  for (const record of reclaims) {
+test("a hostile pending file costs one truthful 'unverified' record with nothing taken from it, and cannot block, silence or forge", () => {
+  const logPath = freshLog();
+  const pending = (n: number): string => `${String(n).padStart(15, "0")}-1-aaaaaaaaaaaa-${String(n).padStart(16, "0")}.lock`;
+  // The round-1 note shape, with chosen fields.
+  plantPending(logPath, pending(1), `${JSON.stringify({ v: 1, kind: "reclaim-pending", note: { lockfile: "../../etc/passwd", reason: "holder-dead", age_ms: -5, holder: { pid: 1, op: "append", created: "\u001b[31mforged" } } })}\n`);
+  // A live holder (this process).
+  plantPending(logPath, pending(2), `${JSON.stringify(holder())}\n`);
+  // A `created` with a newline and an escape, and a calendar-impossible one.
+  plantPending(logPath, pending(3), `${JSON.stringify(holder({ pid: deadPid(), created: "2026-10-05T07:00:00.000Z\n\u001b[2J" }))}\n`);
+  plantPending(logPath, pending(4), `${JSON.stringify(holder({ pid: deadPid(), created: "2026-02-30T00:00:00.000Z" }))}\n`);
+  // A newer format naming an event and an actor; a directory; an empty file.
+  plantPending(logPath, pending(5), `${JSON.stringify({ v: 2, pid: deadPid(), event: "approval.granted", actor: "human:carter" })}\n`);
+  plantPending(logPath, pending(6), null);
+  plantPending(logPath, pending(7), "");
+  const result = appendEvent(logPath, granted(50));
+  assert.ok(result.ok, result.ok ? "" : result.error.message);
+  const log = records(logPath);
+  assert.deepEqual(
+    log.map((record) => record.event),
+    ["task.registered", ...Array.from({ length: 7 }, () => "audit.lock_reclaimed"), "approval.granted"],
+    "every pending file is recorded, before the caller's record",
+  );
+  for (const record of log.filter((entry) => entry.event === "audit.lock_reclaimed")) {
     assert.equal(record.actor, "system:log");
-    assert.deepEqual(Object.keys(record.payload ?? {}).sort(), ["age_ms", "holder", "lockfile", "reason"]);
+    assert.deepEqual(Object.keys(record.payload ?? {}).sort(), ["lockfile", "reason", "reclaim_id"]);
+    assert.equal(record.payload?.["reason"], "unverified");
+    assert.equal(record.payload?.["lockfile"], "events.jsonl.lock");
+    assert.match(String(record.payload?.["reclaim_id"]), /^[0-9a-f]{16}$/u);
+  }
+  // Nothing stays in pending/; each is in quarantine/, named by its record's id.
+  const left = residue(logPath);
+  assert.equal(left.filter((name) => name.startsWith("pending/")).length, 0);
+  const quarantined = left.filter((name) => name.startsWith("quarantine/"));
+  assert.equal(quarantined.length, 7);
+  for (const record of log.filter((entry) => entry.event === "audit.lock_reclaimed")) {
+    assert.ok(quarantined.some((name) => name.startsWith(`quarantine/${String(record.payload?.["reclaim_id"])}-`)));
+  }
+  // The next writer is not blocked and records nothing more.
+  assert.ok(appendEvent(logPath, granted(51)).ok);
+  assert.equal(records(logPath).filter((record) => record.event === "audit.lock_reclaimed").length, 7);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a dead holder's lockfile planted as pending is recorded as what it is, and a flood is bounded per hold, oldest first", () => {
+  const logPath = freshLog();
+  const pid = deadPid();
+  const forged = holder({ pid, nonce: "x".repeat(1000) });
+  for (let n = 0; n < 40; n += 1) {
+    plantPending(logPath, `${String(1000 + n).padStart(15, "0")}-1-bbbbbbbbbbbb-${String(n).padStart(16, "0")}.lock`, `${JSON.stringify({ ...forged, extra: "field" })}\n`);
+  }
+  const first = appendEvent(logPath, granted(52));
+  assert.ok(first.ok);
+  const reclaims = records(logPath).filter((record) => record.event === "audit.lock_reclaimed");
+  assert.equal(reclaims.length, 16, "at most sixteen pending reclaims are recorded per hold");
+  for (const record of reclaims) {
+    assert.deepEqual(Object.keys(record.payload ?? {}).sort(), ["age_ms", "holder", "lockfile", "reason", "reclaim_id"]);
     assert.equal(record.payload?.["lockfile"], "events.jsonl.lock", "the writer's own lockfile name, never the file's");
     assert.deepEqual(record.payload?.["holder"], { pid, op: "append", created: forged.created });
     assert.equal(record.payload?.["reason"], "holder-dead");
   }
+  // Oldest first: the sixteen recorded were the sixteen earliest names.
+  const left = residue(logPath).filter((name) => name.startsWith("pending/"));
+  assert.equal(left.length, 24);
+  assert.ok(left.every((name) => Number(name.slice("pending/".length, "pending/".length + 15)) >= 1016), left.join(", "));
+  assert.ok(appendEvent(logPath, granted(53)).ok);
+  assert.ok(appendEvent(logPath, granted(54)).ok);
+  assert.equal(records(logPath).filter((record) => record.event === "audit.lock_reclaimed").length, 40);
+  assert.equal(residue(logPath).filter((name) => name.startsWith("pending/")).length, 0);
   assert.equal(verify(logPath).status, "clean");
 });
 
@@ -1140,4 +1200,276 @@ test("a hostile lockfile cannot put control characters or its own text into a re
   if (!version.ok) assert.doesNotMatch(version.error.message, /XXXX/u);
   assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered"]);
   rmSync(`${logPath}.lock`);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: RB1, nothing under the log directory can hang a writer
+// ---------------------------------------------------------------------------
+
+/** Run one append in a child process; resolve with how it ended, or "hung" after `ms`. */
+async function appendInChild(logPath: string, n: number, ms: number, lockTimeoutMs = 300): Promise<string> {
+  counter += 1;
+  const script = join(scratch, `child-append-${String(counter)}.mjs`);
+  writeFileSync(
+    script,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `const r = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(n))}, { lockTimeoutMs: ${String(lockTimeoutMs)} });`,
+      `process.stdout.write(r.ok ? "ok" : r.error.code);`,
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    out += chunk.toString("utf8");
+  });
+  const ended = await Promise.race([
+    exitOf(child).then(() => out),
+    new Promise<string>((resolve) => setTimeout(() => resolve("hung"), ms)),
+  ]);
+  if (ended === "hung") child.kill("SIGKILL");
+  return ended;
+}
+
+test("a FIFO at a pending name is recorded as unverified and quarantined; the writer never hangs", { skip: process.platform === "win32" }, async () => {
+  const logPath = freshLog();
+  const fifo = join(`${logPath}.lock.d`, "pending", "000000000000001-1-cccccccccccc-0000000000000001.lock");
+  mkdirSync(dirname(fifo), { recursive: true });
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  assert.equal(await appendInChild(logPath, 60, 8_000), "ok");
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
+  assert.equal(records(logPath)[1]?.payload?.["reason"], "unverified");
+  assert.equal(existsSync(fifo), false);
+  assert.equal(existsSync(`${logPath}.lock`), false);
+});
+
+test("a FIFO or a symbolic link at the lock path is kept as unjudgeable: the writer times out, never hangs, never follows it", { skip: process.platform === "win32" }, async () => {
+  const logPath = freshLog();
+  const lockPath = `${logPath}.lock`;
+  assert.equal(spawnSync("mkfifo", [lockPath]).status, 0);
+  assert.equal(await appendInChild(logPath, 61, 8_000), "lock-timeout");
+  assert.match(describeLogLock(logPath) ?? "", /does not read \(not a regular file\)/u);
+  rmSync(lockPath);
+  // A link to a dead holder's lockfile elsewhere: not followed, not reclaimed.
+  const target = join(scratch, `elsewhere-${String(counter)}.lock`);
+  writeFileSync(target, `${JSON.stringify(holder({ pid: deadPid() }))}\n`);
+  symlinkSync(target, lockPath);
+  assert.equal(await appendInChild(logPath, 62, 8_000), "lock-timeout");
+  assert.ok(existsSync(target), "the link's target is untouched");
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered"]);
+  rmSync(lockPath);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: RB2, a record that could not be appended is never committed
+// ---------------------------------------------------------------------------
+
+test("a lockfile whose `created` is calendar-impossible is kept as unreadable, so no writer is ever refused for good", () => {
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: deadPid(), created: "2026-02-30T00:00:00.000Z" }));
+  for (let n = 0; n < 3; n += 1) {
+    const result = appendEvent(logPath, granted(70 + n), { lockTimeoutMs: 0 });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, "lock-timeout", "kept, never a validation refusal");
+  }
+  assert.equal(existsSync(`${logPath}.lock`), true);
+  assert.deepEqual(residue(logPath), []);
+  rmSync(`${logPath}.lock`);
+  // The control: a real, odd instant still records.
+  writeLock(logPath, holder({ pid: deadPid(), created: "0000-01-01T00:00:00.000Z" }));
+  assert.ok(appendEvent(logPath, granted(73)).ok);
+  assert.equal(records(logPath).filter((record) => record.event === "audit.lock_reclaimed").length, 1);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: RB3, a committed reclaim is always recorded first
+// ---------------------------------------------------------------------------
+
+test("a committed reclaim the next writer cannot judge (it now reads the holder as live) is recorded as unverified before that writer's record", () => {
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: deadPid() }));
+  assert.equal(tryReclaimLock(logPath).kind, "reclaimed");
+  // The next writer sees the holder as another container's would: live.
+  setLockLivenessForTests(() => ({ state: "live", why: "in another pid namespace" }));
+  try {
+    assert.ok(appendEvent(logPath, granted(80)).ok);
+  } finally {
+    setLockLivenessForTests(null);
+  }
+  const log = records(logPath);
+  assert.deepEqual(log.map((record) => record.event), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
+  assert.equal(log[1]?.payload?.["reason"], "unverified");
+  assert.deepEqual(residue(logPath).filter((name) => !name.startsWith("quarantine/")), []);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+
+test("a log directory that cannot be listed (mode 0333) no longer hides a reclaim: it is recorded first", { skip: process.platform === "win32" || ROOT ? "needs a non-root POSIX user (permissions)" : false }, () => {
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: deadPid() }));
+  const dir = dirname(logPath);
+  chmodSync(dir, 0o333);
+  let result;
+  try {
+    result = appendEvent(logPath, granted(81), { lockTimeoutMs: 500 });
+  } finally {
+    chmodSync(dir, 0o755);
+  }
+  assert.ok(result.ok, result.ok ? "" : result.error.message);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a pending directory that cannot be listed refuses the append (reclaim-pending-unreadable); once it can, the reclaim is recorded first", { skip: process.platform === "win32" || ROOT ? "needs a non-root POSIX user (permissions)" : false }, () => {
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: deadPid() }));
+  assert.equal(tryReclaimLock(logPath).kind, "reclaimed");
+  const pendingDir = join(`${logPath}.lock.d`, "pending");
+  chmodSync(pendingDir, 0o333);
+  let refused;
+  try {
+    refused = appendEvent(logPath, granted(82), { lockTimeoutMs: 500 });
+  } finally {
+    chmodSync(pendingDir, 0o755);
+  }
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.error.code, "reclaim-pending-unreadable");
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered"], "nothing was appended");
+  assert.ok(appendEvent(logPath, granted(83)).ok);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
+});
+
+test("a writer killed between recording a pending reclaim and moving it out leaves no duplicate", { skip: process.platform === "win32" }, async () => {
+  const logPath = freshLog();
+  const pid = deadPid();
+  writeLock(logPath, holder({ pid }));
+  counter += 1;
+  const script = join(scratch, `dup-${String(counter)}.mjs`);
+  writeFileSync(
+    script,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { appendWriteLayer, setAppendWriteLayerForTests } from ${JSON.stringify(WRITE_LAYER_MODULE)};`,
+      `const real = appendWriteLayer(); let n = 0;`,
+      `setAppendWriteLayerForTests({ ...real, fsync(fd) { real.fsync(fd); n += 1; if (n === 1) process.kill(process.pid, "SIGKILL"); } });`,
+      `appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(84))});`,
+    ].join("\n"),
+  );
+  const killed = spawnSync(process.execPath, [script]);
+  assert.equal(killed.signal, "SIGKILL");
+  assert.ok(appendEvent(logPath, granted(85), { lockTimeoutMs: 500 }).ok);
+  const reclaims = records(logPath).filter((record) => record.event === "audit.lock_reclaimed");
+  const forDead = reclaims.filter((record) => (record.payload?.["holder"] as { pid?: number } | undefined)?.pid === pid);
+  assert.equal(forDead.length, 1, "the dead holder's reclaim is recorded once");
+  assert.equal(reclaims.length, 2, "and the killed writer's own lock once");
+  assert.deepEqual(residue(logPath).filter((name) => name.startsWith("pending/")), []);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: RS5, a claimant that sees a next-generation claim backs off
+// ---------------------------------------------------------------------------
+
+test("a claimant that finds a next-generation claim beside its own (it was judged gone) backs off and touches nothing", () => {
+  const logPath = freshLog();
+  const lockPath = `${logPath}.lock`;
+  writeLock(logPath, holder({ pid: deadPid() }));
+  const stale = readFileSync(lockPath);
+  const claims = join(`${logPath}.lock.d`, "claims");
+  setReclaimSeamForTests((step) => {
+    if (step !== "claimed") return;
+    const own = readdirSync(claims).find((name) => name.endsWith(".claim-0.lock"));
+    assert.ok(own !== undefined);
+    writeFileSync(join(claims, own.replace(".claim-0.lock", ".claim-1.lock")), "{}\n");
+  });
+  let outcome;
+  try {
+    outcome = tryReclaimLock(logPath);
+  } finally {
+    setReclaimSeamForTests(null);
+  }
+  assert.equal(outcome.kind, "kept");
+  assert.deepEqual(readFileSync(lockPath), stale, "the lock is where it was");
+  assert.deepEqual(residue(logPath).filter((name) => name.startsWith("pending/")), []);
+  rmSync(lockPath);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: RS1, a stop request is never followed by the work starting
+// ---------------------------------------------------------------------------
+
+test("a SIGTERM that lands during a reclaim kills the writer there: nothing is appended after it", { skip: process.platform === "win32" }, async () => {
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: deadPid() }));
+  counter += 1;
+  const marker = join(scratch, `reclaim-signal-${String(counter)}`);
+  writeFileSync(
+    `${marker}.mjs`,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { setReclaimSeamForTests } from ${JSON.stringify(LOCK_MODULE)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `setReclaimSeamForTests((step) => { if (step === "claimed") { writeFileSync(${JSON.stringify(`${marker}.at`)}, "x"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); } });`,
+      `appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(90))}, { lockTimeoutMs: 2000 });`,
+      `setTimeout(() => {}, 2000);`,
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, [`${marker}.mjs`], { stdio: "ignore" });
+  const exited = exitOf(child);
+  await waitFor(() => existsSync(`${marker}.at`), 10_000);
+  child.kill("SIGTERM");
+  assert.equal((await exited).signal, "SIGTERM");
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered"], "nothing was appended after the stop request");
+  // The reclaim it abandoned before its commit is the next writer's.
+  assert.ok(appendEvent(logPath, granted(91), { lockTimeoutMs: 500 }).ok);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("RB3: a reclaim committed in one pid namespace is recorded by a writer in another before its own records (two containers, one volume)", { skip: PRIVILEGED }, () => {
+  const logPath = sharedLog("twons");
+  const a = join(dirname(dirname(logPath)), "a.mjs");
+  writeFileSync(
+    a,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { setReclaimSeamForTests } from ${JSON.stringify(LOCK_MODULE)};`,
+      // A holder record written in THIS namespace (A), then its reclaimer killed right after the commit.
+      `setReclaimSeamForTests((step) => { if (step === "after-commit") process.kill(process.pid, "SIGKILL"); });`,
+      `appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(100))});`,
+    ].join("\n"),
+  );
+  const b = join(dirname(dirname(logPath)), "b.mjs");
+  writeFileSync(
+    b,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `for (const n of [101, 102]) { const r = appendEvent(${JSON.stringify(logPath)}, { ...${JSON.stringify(granted(0))}, action_key: "task-479:writer:" + n }); if (!r.ok) { console.error(r.error.code); process.exit(1); } }`,
+    ].join("\n"),
+  );
+  // The lock in the volume names a holder in A's pid namespace: plant it there.
+  const plantA = join(dirname(dirname(logPath)), "plant.mjs");
+  writeFileSync(
+    plantA,
+    [
+      `import { spawnSync } from "node:child_process";`,
+      `import { writeFileSync } from "node:fs";`,
+      `import { holderRecord } from ${JSON.stringify(LOCK_MODULE)};`,
+      `const dead = spawnSync(process.execPath, ["--version"]).pid;`,
+      `writeFileSync(${JSON.stringify(`${logPath}.lock`)}, JSON.stringify({ ...holderRecord("append", new Date(Date.now() - 60000)), pid: dead }) + "\\n");`,
+      `const r = spawnSync(process.execPath, [${JSON.stringify(a)}]);`,
+      `process.exit(r.signal === "SIGKILL" ? 0 : 1);`,
+    ].join("\n"),
+  );
+  const inA = spawnSync("unshare", ["--pid", "--fork", "--mount-proc", process.execPath, plantA], { encoding: "utf8" });
+  assert.equal(inA.status, 0, `container A: ${inA.stderr}`);
+  assert.equal(existsSync(`${logPath}.lock`), false, "A's reclaimer committed before it died");
+  const inB = spawnSync("unshare", ["--pid", "--fork", "--mount-proc", process.execPath, b], { encoding: "utf8" });
+  assert.equal(inB.status, 0, `container B: ${inB.stderr}`);
+  const log = records(logPath);
+  assert.deepEqual(log.map((record) => record.event), ["task.registered", "audit.lock_reclaimed", "approval.granted", "approval.granted"]);
+  // B cannot see A's namespace: unverified, unless the kernel reused A's namespace inode, where the pid decides.
+  assert.ok(["unverified", "holder-dead"].includes(String(log[1]?.payload?.["reason"])), String(log[1]?.payload?.["reason"]));
+  assert.equal(verify(logPath).status, "clean");
 });
