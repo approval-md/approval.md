@@ -3255,7 +3255,7 @@ export function reviewHandlerFor(
   streams: Streams,
 ): (tap: {
   sampleSeq: number;
-  verdict: "ok" | "denied";
+  verdict?: "ok" | "denied";
   reaction?: "disliked" | "indifferent" | "liked" | "loved";
   note?: string;
   sender?: ChannelSender;
@@ -3295,7 +3295,9 @@ export function reviewHandlerFor(
       tap.note ?? null,
       {
         ...(setup.gateOptions.policy === undefined ? {} : { policy: setup.gateOptions.policy }),
-        verdict: tap.verdict,
+        // APRV-482: passed only when the human gave one. A grade alone arrives
+        // with none and `reviewSample` refuses it `verdict-required`.
+        ...(tap.verdict === undefined ? {} : { verdict: tap.verdict }),
         ...(tap.reaction === undefined ? {} : { reaction: tap.reaction }),
         // APRV-481: the card's own statement that it showed the bytes whole,
         // which `reviewSample` checks against the log before recording it.
@@ -3324,7 +3326,7 @@ export function reviewHandlerFor(
             event: "review",
             ok: false,
             sample_seq: tap.sampleSeq,
-            verdict: tap.verdict,
+            verdict: tap.verdict ?? null,
             reaction: tap.reaction ?? null,
             code: result.code,
           })}\n`,
@@ -3347,7 +3349,7 @@ export function reviewHandlerFor(
           seq: result.record.seq,
           sample_seq: result.subject.seq,
           action_key: result.subject.actionKey,
-          verdict: tap.verdict,
+          verdict: tap.verdict ?? null,
           reaction: tap.reaction ?? null,
           obligation_seq: obligation === null ? null : obligation.seq,
         })}\n`,
@@ -3363,7 +3365,7 @@ export function reviewHandlerFor(
     }
 
     const detail = [
-      `recorded at seq ${String(result.record.seq)} by ${setup.actor} · verdict ${tap.verdict}`,
+      `recorded at seq ${String(result.record.seq)} by ${setup.actor} · verdict ${tap.verdict ?? "-"}`,
       ...(tap.reaction === undefined
         ? []
         : [`reaction: ${tap.reaction} — guidance, not policy; it changes no verdict and no budget`]),
@@ -3498,7 +3500,7 @@ export function commandHandlerFor(
             : `Review of sample ${String(card)} passed over — this listener sends no further card for it.`,
           "Nothing was recorded. The sample is still open: it is listed by `approval audit list` and reviewable with `approval audit review " +
             String(card) +
-            "`, and the card already in this chat keeps its buttons.",
+            " --ok` (or `--deny`), and the card already in this chat keeps its buttons.",
         ]);
         return;
       }

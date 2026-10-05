@@ -1471,6 +1471,7 @@ const VERBS: VerbSpec[] = [
       ),
       flags: {
         "--note": "string",
+        "--ok": "boolean",
         "--deny": "boolean",
         ...AS_FLAG,
         ...LOG_FLAG,

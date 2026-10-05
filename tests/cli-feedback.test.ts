@@ -278,7 +278,7 @@ function fixture(): Case {
       { kind: "action-key", actionKey: "task-042:draft2" },
       "human:carter",
       "read it; nothing to say beyond that",
-      { clock: fixedClock(at(13)) },
+      { verdict: "ok", clock: fixedClock(at(13)) },
     ),
     "review draft2",
   );

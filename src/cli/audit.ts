@@ -286,7 +286,7 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
 // ===========================================================================
 
 /**
- * `approval audit review <seq|action-key> [--note "<text>"]`
+ * `approval audit review <seq|action-key> (--ok | --deny) [--note "<text>"]`
  *
  * HUMAN-ONLY, enforced in `core/audit.ts` and checked here first so a malformed
  * invocation never reaches the log. `--note` is optional: the event's content is
@@ -304,6 +304,7 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
     {
       ...COMMON_FLAGS,
       "--note": "string",
+      "--ok": "boolean",
       "--deny": "boolean",
       "--reaction": "string",
       "--as": "string",
@@ -354,12 +355,27 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
     );
   }
 
+  // APRV-482. Two explicit forms, and saying both is a malformed invocation
+  // (exit 2) rather than a verdict: the reviewer said two opposite things.
+  // Saying neither is NOT a usage error. It reaches the core, which refuses
+  // `verdict-required` (exit 1) in the same words every surface gets.
+  const ok = boolFlag(flags, "--ok");
+  const deny = boolFlag(flags, "--deny");
+  if (ok && deny) {
+    return usageError(
+      streams,
+      json,
+      "--ok and --deny are opposite verdicts; pass exactly one",
+      AUDIT_REVIEW_HELP,
+    );
+  }
+  const verdict: "ok" | "denied" | undefined = deny ? "denied" : ok ? "ok" : undefined;
+
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
   const policyFlag = stringFlag(flags, "--policy");
   const dirFlag = stringFlag(flags, "--dir");
-  const deny = boolFlag(flags, "--deny");
   const result = reviewSample(
     logPath,
     parseSubjectRef(subject),
@@ -370,9 +386,9 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
         policyFlag !== null
           ? { file: absolute(policyFlag, cwd) }
           : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
-      // Explicit rather than defaulted through: the ABSENCE of --deny is "ok",
-      // and it must be this file that says so, once, where a reader can see it.
-      verdict: deny ? "denied" : "ok",
+      // APRV-482: only what the reviewer said. Neither flag passes no verdict,
+      // and the core refuses it; nothing here defaults one.
+      ...(verdict === undefined ? {} : { verdict }),
       // Absent means absent (APRV-239). No default is substituted here or
       // downstream: `indifferent` is a thing a person had to actually say.
       ...(reactionFlag === null ? {} : { reaction: reactionFlag }),
@@ -388,7 +404,7 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
       sample_seq: result.subject.seq,
       action_key: result.subject.actionKey,
       task: result.subject.task,
-      verdict: deny ? "denied" : "ok",
+      verdict,
       // Always present, `null` when the reviewer gave none: a consumer reading
       // this shape must be able to tell "no reaction" from "the key is missing
       // because this build predates the field".

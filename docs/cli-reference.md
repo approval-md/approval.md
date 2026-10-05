@@ -3538,6 +3538,12 @@ carries in the open.
 
 ## audit review
 
+Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
+carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes
+nothing: under supervised-retro the review counts as the approval, and an
+approval is something the reviewer says, never a default. Both flags together
+is a usage error (exit 2).
+
 `--note` is optional — unlike `execution resolve`, this event records only that a
 person looked, and the runtime is not relying on the note for a fact it does not
 otherwise have. Human-only: a runtime that could mark its own samples reviewed
@@ -4373,11 +4379,25 @@ first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disli
 
 | Tap | What is recorded |
 | --- | --- |
-| ✅ | `audit.reviewed` with verdict `ok` and no reaction. |
-| a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
+| ✅ | `audit.reviewed` with verdict `ok`, and the held grade if there is one. |
+| a reaction, nothing armed | **Nothing.** Refused `verdict-required` (APRV-482): a grade is not a verdict. The card holds the grade and says `GRADE … HELD` in its heading. |
+| ✅ after a reaction | verdict `ok` with the held grade (a `loved` or `disliked` asks for words first). |
 | 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
-| 🛑 twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| 🛑 twice | verdict `denied` with the held grade if any, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
+
+**A verdict is an explicit act (APRV-482).** Under supervised-retro a review
+counts as the individual approval nobody gave before the action ran, so nothing
+records `ok` on a reviewer's behalf. The explicit forms per surface:
+
+| Surface | `ok` | `denied` | Refused `verdict-required` |
+| --- | --- | --- | --- |
+| Telegram card | ✅ (alone, or after a grade) | 🛑 twice, or 🛑 then a grade | a grade tapped with nothing armed |
+| `approval audit review` | `--ok` | `--deny` | neither flag, with or without `--reaction`; both flags is a usage error (exit 2) |
+
+The refusal on the card is the runtime's own: the tap reaches `reviewSample`
+with no verdict, and the code and its message come back exactly as a terminal
+sees them.
 
 The card does not print this table under itself. It used to, and the paragraph
 of rules pushed the rows a review is actually about off the first screen for a

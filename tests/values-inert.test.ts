@@ -685,7 +685,7 @@ function buildInertLog(feedback: boolean): InertCase {
       { kind: "action-key", actionKey: "task-042:draft2" },
       "human:carter",
       null,
-      { clock: () => at(8), ...(feedback ? { reaction: "liked" as const } : {}) },
+      { verdict: "ok", clock: () => at(8), ...(feedback ? { reaction: "liked" as const } : {}) },
     ),
     "review draft2",
   );

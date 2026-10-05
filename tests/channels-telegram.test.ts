@@ -6244,6 +6244,7 @@ function reviewStateFor(card: ReviewCard): ReviewCardState {
     card,
     nonce: "n",
     denyArmed: false,
+    heldReaction: null,
     settled: null,
     notice: null,
     awaitingNote: null,
@@ -6458,17 +6459,48 @@ test("APRV-481: a review from a hash-only card records no payload hash", async (
   assertClean(world.unit);
 });
 
-test("APRV-299: a reaction alone records ok and that grade", async () => {
+test("APRV-482: a reaction alone is refused verdict-required, and the OK that follows records it", async () => {
+  const world = sampledWorld(1);
+  const { channel, err } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A grade is not a verdict. The tap reaches the runtime with NO verdict and
+  // the runtime's own refusal is what the card shows.
+  const bare = await tapReview(channel, "liked");
+  assert.equal(bare.reviews.length, 1);
+  assert.equal(bare.reviews[0]?.ok, false);
+  assert.equal(bare.reviews[0]?.tap.verdict, undefined, "the channel supplied a verdict nobody gave");
+  assert.deepEqual(reviewsIn(world), [], "a reaction alone wrote a review");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("verdict-required"), `the code is not on the card: ${last.text}`);
+  assert.ok(last.text.includes(TELEGRAM_NOT_RECORDED));
+  assert.ok(last.text.includes("GRADE LIKED HELD"), `the card does not say it holds the grade: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused tap took the buttons away");
+  assert.ok(err.some((line) => line.includes("verdict-required")), "the operator was not told");
+
+  // The explicit form: OK, which records the verdict with the held grade.
+  await tapReview(channel, "ok");
+  const record = reviewsIn(world)[0] as EventRecord;
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "liked", "the held grade was lost");
+  assertClean(world.unit);
+});
+
+test("APRV-482: a held grade rides with a two-tap denial", async () => {
   const world = sampledWorld(1);
   const { channel } = reviewChannelFor(world);
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  await tapReview(channel, "liked");
-
-  const record = reviewsIn(world)[0] as EventRecord;
-  const payload = record.payload as Record<string, unknown>;
-  assert.equal(payload["verdict"], "ok", "a reaction alone did not imply ok");
-  assert.equal(payload["reaction"], "liked");
+  await tapReview(channel, "indifferent");
+  assert.deepEqual(reviewsIn(world), []);
+  await tapReview(channel, "deny");
+  assert.deepEqual(reviewsIn(world), [], "the first Deny tap recorded");
+  await tapReview(channel, "deny");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "indifferent");
   assertClean(world.unit);
 });
 
@@ -6555,7 +6587,10 @@ test("APRV-299: loved asks for a note first, and a blank one records nothing", a
   const { channel } = reviewChannelFor(world);
   const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  const asked = await tapReview(channel, "loved");
+  // APRV-482: the grade first is held and refused; the OK is what asks why.
+  const held = await tapReview(channel, "loved");
+  assert.equal(held.reviews[0]?.ok, false, "a grade alone was not refused");
+  const asked = await tapReview(channel, "ok");
   assert.deepEqual(asked.reviews, [], "the tap recorded before the note arrived");
   assert.deepEqual(reviewsIn(world), [], "the tap appended before the note arrived");
   const prompt = mock.sentMessages().find((entry) => entry.messageId === notePromptId());
@@ -6571,8 +6606,9 @@ test("APRV-299: loved asks for a note first, and a blank one records nothing", a
     "the refusal code is not on the card",
   );
 
-  // Words land, verbatim, beside the grade.
-  await tapReview(channel, "loved");
+  // Words land, verbatim, beside the grade. The grade is still held, so OK
+  // asks again.
+  await tapReview(channel, "ok");
   await replyWithNote(channel, "exactly the cleanup I wanted and nobody asked me for");
   const record = reviewsIn(world)[0] as EventRecord;
   const payload = record.payload as Record<string, unknown>;
@@ -6722,9 +6758,10 @@ test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", a
   const world = sampledWorld(2);
   const { channel } = reviewChannelFor(world);
 
-  // One reaction given on the card…
+  // One reaction given on the card, with its explicit OK (APRV-482)…
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
   await tapReview(channel, "liked");
+  await tapReview(channel, "ok");
 
   // …and one given at the terminal, through the verb an operator runs.
   const cli = await runReviewCli(world, [
@@ -6733,6 +6770,7 @@ test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", a
     String(world.samples[1]),
     "--reaction",
     "liked",
+    "--ok",
     "--as",
     HUMAN,
   ]);
@@ -6793,9 +6831,13 @@ test("APRV-302: a review tap is acked as a review, not as a decision", async () 
   await channel.offerReview(cards[1] as ReviewCard);
   await tapReview(channel, "indifferent");
   assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+  await tapReview(channel, "ok");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
 
   await channel.offerReview(cards[2] as ReviewCard);
   await tapReview(channel, "liked");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+  await tapReview(channel, "ok");
   assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
 
   // The toast that says something the ack does not is untouched: the first deny
@@ -6946,8 +6988,10 @@ test("APRV-324: a note prompt answers only to the account that armed it", async 
   const { channel } = reviewChannelFor(world);
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  // Dana grades it `loved`, which asks for words before anything is written.
+  // Dana grades it `loved` and taps OK, which asks for words before anything
+  // is written (APRV-482: the grade alone is held, the OK asks).
   await tapReview(channel, "loved", CHAT, DANA_TG);
+  await tapReview(channel, "ok", CHAT, DANA_TG);
   assert.equal(reviewsIn(world).length, 0);
 
   // Carter replies to Dana's prompt. The words are not Dana's, and the grade is
@@ -6973,6 +7017,7 @@ test("APRV-302: the note prompt keeps its toast, and its reply answers no callba
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
   await tapReview(channel, "disliked");
+  await tapReview(channel, "ok");
   assert.equal(
     mock.answerTexts().at(-1),
     TELEGRAM_REVIEW_NOTE_TOAST,

@@ -17,6 +17,16 @@ before a tag.
 
 ### Channels
 
+- **A review verdict needs an explicit affirmative (APRV-482).** `reviewSample`
+  no longer defaults `verdict` to `ok`; a review that names none is refused
+  with the new audit code `verdict-required` before the log is read. `approval
+  audit review` gains `--ok` and requires exactly one of `--ok`/`--deny` (both
+  is exit 2, neither is `verdict-required` exit 1, `--reaction` alone included).
+  On a Telegram card a grade tapped with nothing armed is refused by the
+  runtime and held on the card (`GRADE … HELD`), and the ✅ or second 🛑 that
+  follows records it. Behavior change: scripts running a bare `approval audit
+  review <seq>` must add `--ok`.
+
 - **`audit.reviewed` names its sample, the execution and the verdict
   (APRV-481).** New reviews must carry `payload.subject_seq`,
   `payload.sampled_subject_hash` and `payload.verdict`; the write boundary

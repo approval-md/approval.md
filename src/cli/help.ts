@@ -1248,7 +1248,7 @@ export const AUDIT_HELP = `approval audit — the retrospective review of sample
 
 Usage:
   approval audit list        [--all] [--log <path>] [--json]
-  approval audit review      <seq|action-key> [--deny] [--note "<text>"] […]
+  approval audit review      <seq|action-key> (--ok | --deny) [--note "<text>"] […]
   approval audit obligations [--all] [--log <path>] [--json]
   approval audit reconcile   <obligation-seq> --note "<text>" [--revert <key>] […]
 
@@ -1296,23 +1296,22 @@ ${why("audit-list")}`;
 export const AUDIT_REVIEW_HELP = `approval audit review — record that a human reviewed a sample
 
 Usage:
-  approval audit review <seq|action-key> [--deny] [--note "<text>"]
+  approval audit review <seq|action-key> (--ok | --deny) [--note "<text>"]
                         [--reaction <w>] [--as human:<id>] [--log <path>] [--json]
 
-Arguments:
-  <seq|action-key> a bare integer is the SEQ OF THE audit.sampled RECORD; any
-                   other value is an action key with one open sample
+  <seq|action-key> SEQ of the audit.sampled record, or a key with 1 open sample
 Flags:
+  --ok             this action should have happened. One of --ok/--deny REQUIRED
   --deny           this action should NOT have happened. Opens an obligation
   --note <text>    what you concluded. OPTIONAL, but loved/disliked REQUIRE it
   --reaction <w>   disliked|indifferent|liked|loved. GUIDANCE, never enforcement
   --as human:<id>  the reviewer; else APPROVAL_HUMAN. HUMAN-ONLY
   --log <path> / --json / -h, --help   the log / machine-readable output / help
 
-Appends audit.reviewed. NO ATTESTATION IS REQUIRED. Refuses (exit 1) not-sampled,
-already-reviewed, ambiguous-subject, actor-not-human, note-required and
-reaction-conflicts-verdict (--deny with liked or loved); log untouched. --deny
-ALSO appends reconciliation.required, shaped by the DECLARED reversible, not you.
+Refuses (exit 1), log untouched: actor-not-human, verdict-required (no --ok or
+--deny), note-required, reaction-conflicts-verdict (--deny + liked/loved),
+not-sampled, already-reviewed, ambiguous-subject. No attestation is required.
+--deny ALSO appends reconciliation.required, shaped by the DECLARED reversible.
 JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

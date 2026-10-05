@@ -144,6 +144,15 @@ export const AUDIT_REFUSAL_CODES = [
    */
   "reaction-conflicts-verdict",
   /**
+   * A review that names no verdict (APRV-482). Under supervised-retro a review
+   * counts as the individual approval nobody gave before the action ran, and an
+   * approval is an affirmative act: a reaction tap on a card, or a bare
+   * `approval audit review <seq>`, used to write verdict `ok` on the reviewer's
+   * behalf. Now the verdict is said or nothing is written. Evaluated right after
+   * the actor check, before the log is read; nothing is appended.
+   */
+  "verdict-required",
+  /**
    * A `gated-revert` obligation whose satisfaction names no completed revert
    * (APRV-127). The obligation is to undo the action THROUGH THE GATE, and the
    * evidence of that is an `execution.completed` in this same log.
@@ -690,9 +699,13 @@ export type Obligation = "gated-revert" | "policy-finding";
 
 export interface ReviewOptions extends AuditOptions {
   /**
-   * The verdict. Defaults to `"ok"`: a review whose caller says nothing about
-   * what it concluded records the observation it always did, and the ABSENCE of
-   * a verdict is never read as a denial.
+   * The verdict, REQUIRED in effect since APRV-482: a review whose caller does
+   * not state one is refused `verdict-required` and appends nothing. It used to
+   * default to `"ok"`, which let a reaction tap or a bare terminal review count
+   * as an approval nobody affirmatively gave. Optional in the type only so a
+   * caller that omits it meets the named refusal rather than a compile error in
+   * some other language's binding; the ABSENCE of a verdict is still never read
+   * as a denial, and is no longer read as `ok` either.
    */
   verdict?: ReviewVerdict;
   /**
@@ -787,11 +800,22 @@ export function reviewSample(
   note: string | null,
   options: ReviewOptions = {},
 ): ReviewResult | AuditRefusal {
-  const verdict: ReviewVerdict = options.verdict ?? "ok";
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
       `audit review is human-only: the event's entire content is that a person looked at a sampled action, and a runtime that could mark its own samples reviewed would be a supervision backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+    );
+  }
+
+  // APRV-482. The verdict is an affirmative act or it is nothing. Checked after
+  // the actor (who is asking comes first, as everywhere) and before every rule
+  // that reads the verdict, so a bare review is told what it lacks rather than
+  // judged as an `ok` it never said.
+  const verdict = options.verdict;
+  if (verdict !== "ok" && verdict !== "denied") {
+    return refuse(
+      "verdict-required",
+      `a review must say its verdict: under supervised-retro it counts as the approval nobody gave before the action ran, so a grade alone, or a review that names nothing, records nothing. At a terminal pass --ok or --deny; on a review card tap OK, or Deny twice. Nothing was appended.`,
     );
   }
 

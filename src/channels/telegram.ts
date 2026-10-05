@@ -1950,6 +1950,16 @@ export const TELEGRAM_REVIEW_DENIED = "✗ REVIEWED — DENIED";
 export const TELEGRAM_REVIEW_ARMED = "DENY ARMED — nothing is recorded yet";
 
 /**
+ * The headline a card wears while a grade is held and no verdict has been
+ * given (APRV-482). A grade is not a verdict: tapping one with nothing armed
+ * records nothing, and the card keeps the grade so the OK or the Deny that
+ * follows records it.
+ */
+export function telegramReviewGradeHeld(reaction: Reaction): string {
+  return `GRADE ${reaction.toUpperCase()} HELD — nothing is recorded until you tap OK or Deny`;
+}
+
+/**
  * What a review tap's single answer says (APRV-302).
  *
  * {@link TELEGRAM_ACK_HEARD}'s "deciding" is a request card's word: something is
@@ -2006,7 +2016,14 @@ export function reviewNotePromptLines(
 export interface ReviewTap {
   /** `seq` of the `audit.sampled` record this card was drawn for. */
   sampleSeq: number;
-  verdict: ReviewVerdict;
+  /**
+   * The verdict the taps added up to, or absent when the human gave none
+   * (APRV-482): a grade tapped with nothing armed. The channel still hands that
+   * tap to the runtime, which refuses it `verdict-required`, so the refusal a
+   * reviewer reads is the core's own and no channel decides which gestures are
+   * approvals.
+   */
+  verdict?: ReviewVerdict;
   /** The grade, when the human gave one. Absent means absent. */
   reaction?: Reaction;
   /** The human's words, when a note prompt collected any. */
@@ -2091,6 +2108,12 @@ export interface ReviewCardState {
    * whose next Deny tap arms again.
    */
   denyArmed: boolean;
+  /**
+   * A grade tapped before any verdict (APRV-482), held so the OK or the second
+   * Deny that follows records it. **Process memory**, like the arming: it
+   * appends nothing, the card states it, and losing it to a restart costs a tap.
+   */
+  heldReaction: Reaction | null;
   /**
    * The outcome, once the runtime has recorded one. Written only from the
    * handler's answer, never inferred here.
@@ -2365,7 +2388,11 @@ export function renderReviewCard(state: ReviewCardState): {
   const author = originOf(card.fields.summary);
   const lines: string[] = [
     `<b>${escapeHtml(
-      state.denyArmed ? `${TELEGRAM_REVIEW_HEADING} — ${TELEGRAM_REVIEW_ARMED}` : TELEGRAM_REVIEW_HEADING,
+      [
+        TELEGRAM_REVIEW_HEADING,
+        ...(state.denyArmed ? [TELEGRAM_REVIEW_ARMED] : []),
+        ...(state.heldReaction === null ? [] : [telegramReviewGradeHeld(state.heldReaction)]),
+      ].join(" — "),
     )}</b>`,
     `<code>${escapeHtml(key)}</code>`,
     "",
@@ -2971,6 +2998,7 @@ export class TelegramChannel implements TestableChannel {
       card,
       nonce,
       denyArmed: false,
+      heldReaction: null,
       settled: null,
       notice: null,
       awaitingNote: null,
@@ -4696,19 +4724,33 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    const verdict: ReviewVerdict = state.denyArmed ? "denied" : "ok";
     if (tap.choice === "ok" || tap.choice === "deny") {
       // `ok` with deny armed is a correction, and it disarms: a human who
       // reached for Deny and then chose OK meant OK, and nothing was written in
       // between for the change of mind to contradict.
       const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
       state.denyArmed = chosen === "denied";
+      // APRV-482: a grade held from before the verdict rides with it, and a
+      // grade that wants words asks for them now, exactly as a grade tapped
+      // after an armed Deny always has. The pair core refuses outright is sent
+      // straight through, so no note is collected for a record that will not
+      // exist.
+      const held = state.heldReaction;
+      if (held !== null) {
+        const conflicts = chosen === "denied" && (held === "liked" || held === "loved");
+        if (!conflicts && (held === "loved" || held === "disliked")) {
+          await this.safeAnswer(callbackId, TELEGRAM_REVIEW_NOTE_TOAST);
+          await this.askForNote(state, chosen, held, sender);
+          return;
+        }
+      }
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
       await this.recordReview(
         state,
         {
           sampleSeq: state.card.sampleSeq,
           verdict: chosen,
+          ...(held === null ? {} : { reaction: held }),
           ...(sender === undefined ? {} : { sender }),
         },
         result,
@@ -4717,6 +4759,27 @@ export class TelegramChannel implements TestableChannel {
     }
 
     const reaction = tap.choice;
+    if (!state.denyArmed) {
+      // APRV-482. A grade with no verdict is not an approval. The card holds
+      // the grade (process memory, stated in its heading) and the tap still
+      // goes to the runtime with NO verdict, so the refusal on the card is the
+      // core's own `verdict-required` and its words, and the operator's stderr
+      // says the same. No note is asked for: words for a record that is about
+      // to be refused would be attention spent on nothing.
+      state.heldReaction = reaction;
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
+      await this.recordReview(
+        state,
+        {
+          sampleSeq: state.card.sampleSeq,
+          reaction,
+          ...(sender === undefined ? {} : { sender }),
+        },
+        result,
+      );
+      return;
+    }
+    const verdict: ReviewVerdict = "denied";
     // The two grades that require the human's own words ask for them FIRST, and
     // nothing is appended until the reply arrives. The exception is the pair
     // `core/audit.ts` refuses outright: a denied review that says liked or
@@ -4897,6 +4960,7 @@ export class TelegramChannel implements TestableChannel {
       state.settled = { headline: response.headline, detail: response.detail };
       state.notice = null;
       state.denyArmed = false;
+      state.heldReaction = null;
       this.reviewNonces.delete(state.nonce);
       if (state.awaitingNote !== null) {
         this.reviewNotePrompts.delete(state.awaitingNote.promptId);
