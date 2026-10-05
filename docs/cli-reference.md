@@ -3546,9 +3546,12 @@ refused `actor-not-approver` (exit 1) and nothing is appended. This binds every
 surface, because the check is in `reviewSample` itself: `--as human:<id>` at a
 terminal and a sender-mapped tap on a Telegram card are held to the same list.
 A rule that names no `approvers` restricts nobody, exactly as for grants. The
-class comes from the action's registration, and the roster is read from the
-live policy file without the attestation check a grant makes first (review has
-never required attestation).
+class comes from the action's registration (a sample naming no class is refused
+`actor-not-approver`, never read as "no roster"), and the roster is read from
+the policy file a grant would read, only when its bytes are the latest
+attestation's: an unattested, edited, unreadable or `--policy`-substituted file
+is refused `policy-not-attested` (exit 1), because a roster read from a file
+nobody attested is one the reviewer could have chosen.
 
 Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
 carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes
@@ -3561,10 +3564,12 @@ person looked, and the runtime is not relying on the note for a fact it does not
 otherwise have. Human-only: a runtime that could mark its own samples reviewed
 would be a supervision backlog that empties itself.
 
-No attestation is required, for the reason `execution resolve` states: review
-records an observation, exercises no policy authority, authorizes nothing, and
-spends no budget. A review blocked because a policy file was edited afterwards
-would be a supervision backlog held open by an unrelated fact.
+Since APRV-483 a review needs the attested policy, because its roster check
+reads the class's `approvers` from it (below). Before that no attestation was
+required, for the reason `execution resolve` states: review recorded an
+observation and exercised no policy authority. Under supervised-retro the
+review is the approval, and the trade is stated plainly: a policy edited and not
+yet re-attested now holds the review backlog open until a human re-attests.
 
 What it appends is `audit.reviewed`, naming the sample's action key and task; its
 payload is listed field by field under [the review record](#the-review-record),

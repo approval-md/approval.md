@@ -71,9 +71,12 @@
  * party being audited does not author the clock it is judged by.
  */
 
+import { readFileSync } from "node:fs";
+
 import { tick, type ClockOptions } from "./clock.js";
 import { findDeclaration, indexDeclarations } from "./execute.js";
-import { namesApprover } from "./gate.js";
+import { namesApprover, policyPathOf } from "./gate.js";
+import { attestationRefusal, checkAttestationOfBytes, unreadablePolicyStatus } from "./attest.js";
 import {
   appendEvent,
   type AppendError,
@@ -81,7 +84,12 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { loadPolicy, type LoadPolicyOptions, type PolicyLoadResult } from "./policy-load.js";
+import {
+  loadPolicy,
+  loadPolicyText,
+  type LoadPolicyOptions,
+  type PolicyLoadResult,
+} from "./policy-load.js";
 import { resolve } from "./policy-match.js";
 import { resolveSampler, type Sampler } from "./sampler.js";
 import { payloadOf, readVerifiedRecords } from "./state.js";
@@ -115,6 +123,17 @@ export const AUDIT_REFUSAL_CODES = [
    * sample (and so its class) is located; nothing is appended.
    */
   "actor-not-approver",
+  /**
+   * The policy the reviewer's roster would be read from is not the attested
+   * one: never attested, edited since, or unreadable (APRV-483 refutation).
+   * Same spelling as the gate's, with the attestation module's message. Before
+   * this a review read no policy and needed no attestation; once a review is
+   * held to a roster, a roster read from an unattested file (or from any file a
+   * terminal reviewer names with `--policy`) is a roster the reviewer chose,
+   * and a policy that fails to load would restrict nobody. Evaluated once the
+   * sample is located; nothing is appended.
+   */
+  "policy-not-attested",
   /** No `audit.sampled` record matches the subject named. */
   "not-sampled",
   /** That sample already has a later `audit.reviewed`. */
@@ -796,9 +815,10 @@ export function obligationFor(reversible: boolean | null): Obligation {
  * would be the party under oversight closing its own audit item, and a backlog
  * that can be emptied by the thing it supervises measures nothing.
  *
- * No attestation is required, for the reason `execution resolve` states: review
- * records an observation and exercises no policy authority. It authorizes
- * nothing, spends no budget, and mints no token.
+ * It needs the ATTESTED policy since APRV-483 (it needed none before): under
+ * supervised-retro a review is the approval, so the reviewer is held to the
+ * class's `approvers` roster, and that roster is read only from bytes a human
+ * attested ({@link reviewerRoster}). It spends no budget and mints no token.
  *
  * `--note` is optional and recorded verbatim when present. It is not mandatory
  * the way `execution resolve`'s is, because that verb writes an *outcome* the
@@ -881,10 +901,8 @@ export function reviewSample(
   // and reversibility come from the registration (never from the review or the
   // execution's own payload, global invariant 4), failing that from the
   // runtime-written sample; the rule is the single winner `resolve` picks, as
-  // for a grant; and a rule with no `approvers` restricts nobody. The policy is
-  // read as `sampleSupervised` reads it, without an attestation requirement,
-  // because review never required one; the roster in force is therefore the
-  // live file's, which a grant reaches only after its attestation check.
+  // for a grant; and a rule with no `approvers` restricts nobody. The roster is
+  // read from the ATTESTED policy bytes, as a grant's is.
   const rosterRefusal = reviewerRoster(read.records, subject, actor, options);
   if (rosterRefusal !== null) return rosterRefusal;
 
@@ -974,8 +992,22 @@ export function reviewSample(
 }
 
 /**
- * `actor-not-approver` when the class's roster does not name `actor`, else
- * `null` (APRV-483).
+ * `actor-not-approver` when the class's roster does not name `actor`,
+ * `policy-not-attested` when the roster cannot be read from the attested
+ * policy, else `null` (APRV-483).
+ *
+ * Fail-closed in every input it does not control (APRV-483 refutation):
+ *
+ * - the policy is read ONCE from the file a grant would read
+ *   (`core/gate.ts` `policyPathOf`), its bytes must be the latest attestation's,
+ *   and the roster is parsed from those same bytes, so neither an edited file,
+ *   an unreadable one, nor a `--policy` pointed elsewhere can supply the roster;
+ * - a sample whose class cannot be named (no registration and no class on the
+ *   runtime-written sample) is refused rather than resolved as "no rule, no
+ *   roster", because that reading would let anyone review it.
+ *
+ * What still restricts nobody, by design and exactly as for a grant: an
+ * attested rule that names no `approvers`.
  */
 function reviewerRoster(
   records: readonly EventRecord[],
@@ -983,12 +1015,36 @@ function reviewerRoster(
   actor: string,
   options: AuditOptions,
 ): AuditRefusal | null {
+  const path = policyPathOf(options.policy === undefined ? {} : { policy: options.policy });
+  let bytes: Uint8Array;
+  try {
+    bytes = readFileSync(path);
+  } catch (cause) {
+    return attestationRefused(
+      unreadablePolicyStatus(path, cause instanceof Error ? cause.message : String(cause)),
+      subject,
+    );
+  }
+  const attested = attestationRefused(checkAttestationOfBytes(records as EventRecord[], bytes), subject);
+  if (attested !== null) return attested;
+
   const declared =
     subject.actionKey === null ? null : findDeclaration(records as EventRecord[], subject.actionKey);
   const sampleRecord = records.find((record) => record.seq === subject.seq);
   const sampledClass = sampleRecord === undefined ? null : stringOrNull(payloadOf(sampleRecord)["class"]);
-  const cls = declared?.class ?? sampledClass ?? "";
-  const load = policyFor(options, process.cwd());
+  const cls = stringOrNull(declared?.class) ?? sampledClass;
+  if (cls === null) {
+    return refuse(
+      "actor-not-approver",
+      `the sample at seq ${String(subject.seq)} names no class, so no approvers roster can be checked for it and no reviewer can be shown to be on one. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
+  const load = loadPolicyText(
+    path,
+    Buffer.from(bytes).toString("utf8"),
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
   const resolution = resolve(
     load,
     cls,
@@ -1003,6 +1059,20 @@ function reviewerRoster(
     `${actor} is not named in the approvers list for class ${cls}: the rule ${
       resolution.matched === null ? "in force" : `\`${resolution.matched.pattern}\``
     } names ${approvers.length === 0 ? "nobody" : approvers.map((name) => `\`${name}\``).join(", ")}. Under supervised-retro a review is the approval, so it is held to the roster a grant is. Ask a named approver to review it, or amend the policy and re-attest. Nothing was appended.`,
+    { seq: subject.seq },
+  );
+}
+
+/** `policy-not-attested` for a non-attested status, else `null`. */
+function attestationRefused(
+  status: Parameters<typeof attestationRefusal>[0],
+  subject: SampledSubject,
+): AuditRefusal | null {
+  const refusal = attestationRefusal(status);
+  if (refusal === null) return null;
+  return refuse(
+    "policy-not-attested",
+    `${refusal.message}. A review is held to the class's approvers roster, and a roster read from a policy nobody attested is one the reviewer could have chosen. Nothing was appended.`,
     { seq: subject.seq },
   );
 }
@@ -1206,9 +1276,9 @@ export interface SatisfyInput {
  *   ceremony with its own `policy.updated` record — so the note is the discharge
  *   there, and the note is required.
  *
- * No attestation is required, for the reason `audit review` and `execution
- * resolve` state: this record exercises no policy authority, authorizes nothing,
- * spends no budget, and mints no token.
+ * No attestation is required, for the reason `execution resolve` states: this
+ * record exercises no policy authority, authorizes nothing, spends no budget,
+ * and mints no token.
  */
 export function satisfyObligation(
   logPath: string,

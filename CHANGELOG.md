@@ -23,7 +23,12 @@ before a tag.
   other reviewer with the new audit code `actor-not-approver`, using the
   gate's own `namesApprover` (now exported). It binds the CLI `--as` path and
   sender-mapped Telegram taps alike; a rule with no roster restricts nobody.
-  Behavior change: a review by a person off a named roster no longer records.
+  The roster is read only from the attested policy bytes (the file a grant
+  reads), so an unattested, edited, unreadable or `--policy`-substituted file
+  is refused with the new audit code `policy-not-attested`, and a sample
+  naming no class is refused rather than read as "no roster". Behavior
+  change: a review by a person off a named roster no longer records, and a
+  review now needs the policy attested (it needed none before).
 
 - **A review verdict needs an explicit affirmative (APRV-482).** `reviewSample`
   no longer defaults `verdict` to `ok`; a review that names none is refused

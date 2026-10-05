@@ -50,6 +50,7 @@ import {
 } from "../src/core/audit.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { namesApprover } from "../src/core/gate.js";
 import { verify } from "../src/core/verify.js";
 import { resetAuditSweepNotices, sweepAuditSampling } from "../src/daemon/audit.js";
 import { main } from "../src/cli/main.js";
@@ -272,6 +273,8 @@ test("the audit refusal-code union is frozen public API", async () => {
       // APRV-483. Beside the identity code it refines, and spelled as the
       // gate spells it: a review is held to the roster a grant is.
       "actor-not-approver",
+      // APRV-483 refutation: the roster is read from attested bytes only.
+      "policy-not-attested",
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
@@ -818,7 +821,7 @@ test("QUEUE.md's sampled-audit backlog fills on sample and clears on review", as
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "spot-checked the written file",
-    { verdict: "ok", clock: fixedClock(at(7)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)) },
   );
   assert.equal(reviewed.ok, true, reviewed.ok ? "" : reviewed.message);
 
@@ -835,7 +838,7 @@ test("a review that precedes its sample does not close it", async () => {
   sweep(unit, 5);
   const firstSample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
   assert.equal(
-    reviewSample(unit.logPath, { kind: "seq", seq: firstSample.seq }, "human:carter", null, {
+    reviewSample(unit.logPath, { kind: "seq", seq: firstSample.seq }, "human:carter", null, { ...unit.options,
       verdict: "ok",
       clock: fixedClock(at(6)),
     }).ok,
@@ -863,7 +866,7 @@ test("review is human-only in core", async () => {
   const before = records(unit).length;
 
   for (const actor of ["agent:claude", "system:daemon", "carter"]) {
-    const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, actor, null, { verdict: "ok" });
+    const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, actor, null, { ...unit.options, verdict: "ok" });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.code, "actor-not-human");
   }
@@ -876,7 +879,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
 
-  const missing = reviewSample(unit.logPath, { kind: "seq", seq: 999 }, "human:carter", null, { verdict: "ok" });
+  const missing = reviewSample(unit.logPath, { kind: "seq", seq: 999 }, "human:carter", null, { ...unit.options, verdict: "ok" });
   assert.equal(missing.ok, false);
   if (!missing.ok) assert.equal(missing.code, "not-sampled");
 
@@ -885,7 +888,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:nope" },
     "human:carter",
     null,
-    { verdict: "ok" },
+    { ...unit.options, verdict: "ok" },
   );
   assert.equal(unknownKey.ok, false);
   if (!unknownKey.ok) assert.equal(unknownKey.code, "not-sampled");
@@ -895,7 +898,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     null,
-    { verdict: "ok", clock: fixedClock(at(6)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(6)) },
   );
   assert.equal(first.ok, true);
 
@@ -904,7 +907,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     null,
-    { verdict: "ok", clock: fixedClock(at(7)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)) },
   );
   assert.equal(again.ok, false);
   if (!again.ok) assert.equal(again.code, "already-reviewed");
@@ -922,7 +925,7 @@ test("the reviewed event names the sample and carries the note", async () => {
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "the file matches what was declared",
-    { verdict: "ok", clock: fixedClock(at(9)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(9)) },
   );
   assert.equal(result.ok, true);
   if (!result.ok) return;
@@ -946,7 +949,7 @@ test("APRV-481: a new review names its sample, the execution it judged, and its 
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
   const sampled = sample.payload as Record<string, unknown>;
 
-  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
     clock: fixedClock(at(9)),
     verdict: "ok",
   });
@@ -982,7 +985,7 @@ test("APRV-481: the payload hash is recorded only when the surface showed the bo
     { kind: "seq", seq: (samples[0] as EventRecord).seq },
     "human:carter",
     null,
-    { clock: fixedClock(at(9)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft2") },
+    { ...unit.options, clock: fixedClock(at(9)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft2") },
   );
   assert.equal(wrong.ok, false);
   if (!wrong.ok) assert.equal(wrong.code, "rendered-payload-mismatch");
@@ -994,7 +997,7 @@ test("APRV-481: the payload hash is recorded only when the surface showed the bo
     { kind: "seq", seq: (samples[0] as EventRecord).seq },
     "human:carter",
     null,
-    { clock: fixedClock(at(10)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft") },
+    { ...unit.options, clock: fixedClock(at(10)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft") },
   );
   assert.equal(shown.ok, true, shown.ok ? "" : shown.message);
   if (shown.ok) {
@@ -1007,7 +1010,7 @@ test("APRV-481: the payload hash is recorded only when the surface showed the bo
     { kind: "seq", seq: (samples[1] as EventRecord).seq },
     "human:carter",
     null,
-    { clock: fixedClock(at(11)), verdict: "ok" },
+    { ...unit.options, clock: fixedClock(at(11)), verdict: "ok" },
   );
   assert.equal(unseen.ok, true, unseen.ok ? "" : unseen.message);
   if (unseen.ok) assert.equal("payload_hash" in (unseen.record.payload as Record<string, unknown>), false);
@@ -1057,7 +1060,7 @@ test("the note is optional", async () => {
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
-  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
     verdict: "ok",
     clock: fixedClock(at(9)),
   });
@@ -1081,7 +1084,7 @@ test("a review records the reaction beside the verdict", async () => {
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "exactly the file I wanted, and it said so in the summary",
-    { verdict: "ok", clock: fixedClock(at(9)), reaction: "loved" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(9)), reaction: "loved" },
   );
   assert.equal(result.ok, true, result.ok ? "" : result.message);
   if (!result.ok) return;
@@ -1101,7 +1104,7 @@ test("an omitted reaction leaves no key: absence is never `indifferent`", async 
   sweep(unit, 5);
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
 
-  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
     verdict: "ok",
     clock: fixedClock(at(9)),
   });
@@ -1126,7 +1129,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
     { kind: "seq", seq: (samples[0] as EventRecord).seq },
     "human:carter",
     null,
-    { verdict: "ok", clock: fixedClock(at(6)), reaction: "indifferent" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(6)), reaction: "indifferent" },
   );
   assert.equal(ok.ok, true, ok.ok ? "" : ok.message);
 
@@ -1135,7 +1138,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
     { kind: "seq", seq: (samples[1] as EventRecord).seq },
     "human:carter",
     null,
-    { verdict: "ok", clock: fixedClock(at(7)), reaction: "liked" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)), reaction: "liked" },
   );
   assert.equal(liked.ok, true, liked.ok ? "" : liked.message);
 
@@ -1154,7 +1157,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       note,
-      { verdict: "ok", clock: fixedClock(at(8)), reaction },
+      { ...unit.options, verdict: "ok", clock: fixedClock(at(8)), reaction },
     );
     assert.equal(refused.ok, false, `${reaction} with ${JSON.stringify(note)} was accepted`);
     if (!refused.ok) {
@@ -1178,7 +1181,7 @@ test("--deny with liked or loved refuses reaction-conflicts-verdict", async () =
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       "a note, so this is not note-required",
-      { clock: fixedClock(at(6)), verdict: "denied", reaction },
+      { ...unit.options, clock: fixedClock(at(6)), verdict: "denied", reaction },
     );
     assert.equal(refused.ok, false, `denied + ${reaction} was accepted`);
     if (!refused.ok) assert.equal(refused.code, "reaction-conflicts-verdict");
@@ -1190,7 +1193,7 @@ test("--deny with liked or loved refuses reaction-conflicts-verdict", async () =
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     "should not have gone out",
-    { clock: fixedClock(at(7)), verdict: "denied", reaction: "disliked" },
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "denied", reaction: "disliked" },
   );
   assert.equal(disliked.ok, true, disliked.ok ? "" : disliked.message);
   if (disliked.ok) {
@@ -1216,7 +1219,7 @@ test("both reaction rules are settled after the actor check and before the log i
     { kind: "seq", seq: 999 },
     "agent:claude",
     null,
-    { verdict: "denied", reaction: "loved" },
+    { ...unit.options, verdict: "denied", reaction: "loved" },
   );
   assert.equal(notHuman.ok, false);
   if (!notHuman.ok) assert.equal(notHuman.code, "actor-not-human");
@@ -1230,7 +1233,7 @@ test("both reaction rules are settled after the actor check and before the log i
     { kind: "seq", seq: 999 },
     "human:carter",
     "worded, so this is the conflict rule and not note-required",
-    { verdict: "denied", reaction: "loved" },
+    { ...unit.options, verdict: "denied", reaction: "loved" },
   );
   assert.equal(noSubject.ok, false);
   if (!noSubject.ok) assert.equal(noSubject.code, "reaction-conflicts-verdict");
@@ -1540,6 +1543,114 @@ test("APRV-483: a rule that names no roster restricts no reviewer, as for grants
     { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
   );
   assert.equal(result.ok, true, result.ok ? "" : result.message);
+  assertClean(unit);
+});
+
+test("APRV-483 refutation: the roster cannot come from a file the reviewer chose or nobody attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+  const review = (options: Record<string, unknown>) =>
+    reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:bob", null, {
+      clock: fixedClock(at(6)),
+      verdict: "ok",
+      ...options,
+    });
+
+  // 1. `--policy` pointed at a roster-free file the reviewer wrote.
+  const elsewhere = join(unit.dir, "elsewhere.md");
+  writeFileSync(elsewhere, policyText(SAMPLE_EVERYTHING), "utf8");
+  const chosen = review({ policy: { file: elsewhere } });
+  assert.equal(chosen.ok, false, "a reviewer-chosen policy supplied the roster");
+  if (!chosen.ok) assert.equal(chosen.code, "policy-not-attested");
+  const cli = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", elsewhere, "--as", "human:bob", "--json",
+  ]);
+  assert.equal(cli.code, 1, cli.err);
+  assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "policy-not-attested");
+
+  // 2. The attested file edited to drop the roster, and not re-attested.
+  const attestedText = readFileSync(unit.policyPath, "utf8");
+  writeFileSync(unit.policyPath, attestedText.replace("    approvers: [carter]\n", ""), "utf8");
+  const drifted = review(unit.options);
+  assert.equal(drifted.ok, false, "an unattested edit dropped the roster");
+  if (!drifted.ok) assert.equal(drifted.code, "policy-not-attested");
+
+  // 3. No policy file at all: unreadable is not "no roster".
+  unlinkSync(unit.policyPath);
+  const missing = review(unit.options);
+  assert.equal(missing.ok, false, "a missing policy restricted nobody");
+  if (!missing.ok) assert.equal(missing.code, "policy-not-attested");
+
+  writeFileSync(unit.policyPath, attestedText, "utf8");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  // Restored bytes are the attested ones: the roster binds again, and its member records.
+  const named = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(7)),
+    verdict: "ok",
+  });
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const before = records(unit).length;
+  // Two hand-written samples through the real writer: one naming no subject
+  // hash, one naming a hash but no action key and no class.
+  const noHash = appendEvent(unit.logPath, {
+    ts: at(3),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    payload: { subject_seq: 1 },
+  });
+  assert.equal(noHash.ok, true, JSON.stringify(noHash));
+  const noClass = appendEvent(unit.logPath, {
+    ts: at(4),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    payload: { subject_seq: 1, subject_hash: "f".repeat(64) },
+  });
+  assert.equal(noClass.ok, true, JSON.stringify(noClass));
+  const appended = records(unit).length;
+
+  const hashless = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: noHash.ok ? noHash.record.seq : 0 },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(hashless.ok, false, "a review of a hashless sample was recorded");
+  if (!hashless.ok) assert.equal(hashless.code, "not-sampled");
+
+  const classless = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: noClass.ok ? noClass.record.seq : 0 },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(classless.ok, false, "a classless sample let an unrostered reviewer through");
+  if (!classless.ok) assert.equal(classless.code, "actor-not-approver");
+
+  // A verdict that is neither word is no verdict, not `ok`.
+  const garbled = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, "human:carter", null, { ...unit.options,
+    verdict: "maybe" as unknown as "ok",
+  });
+  assert.equal(garbled.ok, false);
+  if (!garbled.ok) assert.equal(garbled.code, "verdict-required");
+
+  // An empty roster names nobody (the schema's minItems 1 makes it unreachable
+  // from a valid policy; the comparison itself is the backstop).
+  assert.equal(namesApprover([], "human:carter"), false);
+
+  assert.equal(records(unit).length, appended, "a refused review wrote to the log");
+  assert.ok(appended > before);
   assertClean(unit);
 });
 

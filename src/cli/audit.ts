@@ -293,10 +293,11 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
  * that a person looked, and a note is the reviewer's own record of what they
  * concluded.
  *
- * No attestation is required, for the reason `execution resolve` states: review
- * records an observation, exercises no policy authority, authorizes nothing, and
- * spends no budget. A review blocked because a policy file was edited afterwards
- * would be a supervision backlog held open by an unrelated fact.
+ * Since APRV-483 the policy must be attested: the core reads the class's
+ * `approvers` roster from the attested bytes only, and refuses
+ * `policy-not-attested` otherwise. Under supervised-retro a review is the
+ * approval, so a roster from a file nobody attested (or one named here with
+ * `--policy`) would be a roster the reviewer chose.
  */
 export function commandAuditReview(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(

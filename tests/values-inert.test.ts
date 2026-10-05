@@ -671,7 +671,7 @@ function buildInertLog(feedback: boolean): InertCase {
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       feedback ? "this should not have been written at all" : null,
-      {
+      { policy: { file: unit.policyPath },
         clock: () => at(7),
         verdict: "denied",
         ...(feedback ? { reaction: "disliked" as const } : {}),
@@ -685,7 +685,7 @@ function buildInertLog(feedback: boolean): InertCase {
       { kind: "action-key", actionKey: "task-042:draft2" },
       "human:carter",
       null,
-      { verdict: "ok", clock: () => at(8), ...(feedback ? { reaction: "liked" as const } : {}) },
+      { policy: { file: unit.policyPath }, verdict: "ok", clock: () => at(8), ...(feedback ? { reaction: "liked" as const } : {}) },
     ),
     "review draft2",
   );

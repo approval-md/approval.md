@@ -854,7 +854,13 @@ export function readGateRecords(logPath: string, schemaDir?: string): ReadOutcom
  * `checkAttestation` reports `unreadable` and the gate refuses — a missing
  * policy is never a pass.
  */
-function policyPathOf(options: GateOptions): string {
+/**
+ * The policy file a gate operation reads: `policy.file`, or the first policy
+ * filename found in `policy.dir` (default: the working directory). Exported for
+ * `core/audit.ts` (APRV-483), whose roster check must read the same file a
+ * grant would and hold it to the same attestation.
+ */
+export function policyPathOf(options: GateOptions): string {
   const policy = options.policy ?? {};
   if (policy.file !== undefined) return policy.file;
   const dir = policy.dir ?? process.cwd();

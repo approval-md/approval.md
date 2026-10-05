@@ -6748,7 +6748,7 @@ test("APRV-299: a lost card leaves the sample pending and reviewable", async () 
     { kind: "seq", seq: card.sampleSeq },
     HUMAN,
     null,
-    { verdict: "ok" },
+    { ...world.unit.options, verdict: "ok" },
   );
   assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
   assertClean(world.unit);
