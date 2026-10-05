@@ -809,6 +809,57 @@ test("review 4: a client that disconnects mid-wait leaves its question for the r
   }
 });
 
+/**
+ * APRV-473's serve half. On the CLI a Hermes hook killed mid-wait now withdraws
+ * its question; on this route the same moment is a client that goes away, and
+ * there is no held signal to fix: the thread learns of the departure from a
+ * shared flag it reads at every poll tick and once more before any spend, with
+ * no JS listener involved. What must hold is the same property the CLI fix
+ * buys: a grant that lands after the asker left is never recorded as the start
+ * of a call nobody is holding. The question itself stays for the retry
+ * (APRV-427 review 4), as for Claude Code above.
+ */
+test("APRV-473: a Hermes client that disconnects mid-wait never has a later grant spent on its call", async () => {
+  const { dir, logPath } = await ready();
+  const server = await listener(dir, { hookHarnessCap: "300s" });
+  const envelope = {
+    hook_event_name: "pre_tool_call",
+    session_id: SESSION,
+    tool_use_id: "tu-hermes-gone",
+    cwd: dir,
+    profile: "default",
+    extra: {},
+    tool_name: "terminal",
+    tool_input: { command: manual("tu-hermes-gone"), workdir: dir },
+  };
+  try {
+    const client = new AbortController();
+    const first = fetch(url(server, "/hook/hermes"), {
+      method: "POST",
+      headers: { authorization: `Bearer ${AGENT_TOKEN}` },
+      body: JSON.stringify(envelope),
+      signal: client.signal,
+    }).then(
+      () => "answered",
+      () => "aborted",
+    );
+    await until("the Hermes call's request", () => requestedKeys(logPath).length === 1);
+    const key = requestedKeys(logPath)[0] as string;
+    client.abort();
+    assert.equal(await first, "aborted");
+    await until("the abandoned call to leave its thread", () => server.hookThreads().busy === 0);
+
+    await decide(dir, "grant", key);
+    assert.equal(
+      records(logPath).filter((record) => record.event === "execution.started").length,
+      0,
+      "a grant that landed after the Hermes client left was spent on its call",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("review pass 3: a torn read on the deadline tick takes the timeout path and leaves the question open", async () => {
   for (const [label, cleanFirst] of [
     ["after a clean read", true],

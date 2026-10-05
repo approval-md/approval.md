@@ -394,18 +394,19 @@ test("a post event still never blocks, whatever happens in it", () => {
 });
 
 /**
- * SIGTERM mid-wait. The wait is a synchronous poll (`Atomics.wait`), so a JS
- * signal handler cannot run until it ends: the hook keeps waiting and answers
- * when the wait runs out. Observed while writing this test, and the property
- * that matters for Hermes holds either way: the answer is the block directive
- * at exit 2, never an empty stdout. The handler's own directive
- * (`hook-interrupted`) covers a signal that lands while the event loop runs.
+ * SIGTERM mid-wait. Until APRV-473 the wait was a synchronous poll
+ * (`Atomics.wait`), so the signal was held and the hook answered when the wait
+ * ran out. The CLI route now pauses on the event loop, so the wait's own
+ * handler answers: `hook-interrupted` at exit 2, with the question withdrawn.
+ * The wait here is far longer than the test, so nothing but the signal can end
+ * it. `tests/hermes-wait-interrupt.test.ts` carries the rest of the rule (the
+ * later grant refused, the race, the held stdin read).
  */
 test("SIGTERM mid-wait still ends in the block directive at exit 2", async () => {
   const dir = ready();
   const child = spawn(
     process.execPath,
-    [CLI_ENTRY, "hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s", "--timeout", "3s", "--interval", "50ms"],
+    [CLI_ENTRY, "hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s", "--timeout", "4m", "--interval", "50ms"],
     { cwd: dir, env: { ...process.env, APPROVAL_HUMAN: "" } },
   );
   let stdout = "";
@@ -433,7 +434,13 @@ test("SIGTERM mid-wait still ends in the block directive at exit 2", async () =>
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
   assert.deepEqual(Object.keys(parsed).sort(), ["action", "message"]);
   assert.equal(parsed["action"], "block");
-  assert.match(String(parsed["message"]), /^hook-(interrupted|timeout): /u);
+  assert.match(String(parsed["message"]), /^hook-interrupted: the hook received SIGTERM while waiting/u);
+  assert.equal(
+    logRecords(dir).filter((record) => record["event"] === "approval.withdrawn").length,
+    1,
+    "the interrupted wait did not withdraw its question",
+  );
+  assert.equal(logRecords(dir).filter((record) => record["event"] === "execution.started").length, 0);
 });
 
 test("a hook module that fails to load still blocks, from main itself", () => {

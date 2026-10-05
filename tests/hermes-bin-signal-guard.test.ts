@@ -3,10 +3,8 @@
  *
  * Hermes reads a hook that exits non-zero with an EMPTY stdout as an ALLOW, and
  * it sends SIGTERM on its hook timeout and on gateway shutdown. The runtime's
- * guard (`hermesFailClosed`, APRV-445) exists only once dist/ has loaded, and
- * on the CLI it never gets a turn anyway (the hook run is synchronous, and a JS
- * listener runs only when the event loop turns), so the bin installs one first.
- * These tests pin:
+ * guard (`hermesFailClosed`, APRV-445) exists only once dist/ has loaded, so the
+ * bin installs one first. These tests pin:
  *
  * - a signal dispatched while the runtime is still loading answers with the
  *   runtime's own `hook-interrupted` directive, byte for byte, at exit 2, every
@@ -14,8 +12,9 @@
  *   bin's guard each of these dies by signal with an empty stdout);
  * - while a runtime raises HERMES_SIGNAL_OWNER, the bin steps aside and only the
  *   runtime's answer is printed;
- * - a signal held through the synchronous hook run ends with the run's own
- *   single verdict at exit 2;
+ * - a signal mid-wait, through the real bin, is answered once: by the wait's
+ *   own handler, which withdraws the question (APRV-473), and never by the bin
+ *   as well;
  * - every other verb, and every other harness hook, keeps the default
  *   disposition;
  * - a smoke run of signals at arbitrary instants from spawn on never ends in a
@@ -267,14 +266,26 @@ test("smoke: a signal at an arbitrary instant from spawn on never ends in a nume
     return child.done;
   });
   let bootstrap = 0;
+  let teardown = 0;
   for (const outcome of await Promise.all(runs)) {
+    if (outcome.code === null && outcome.stdout !== "") {
+      // Node's own teardown, after the hook answered and the runtime closed
+      // its signal handles: a death by the signal with the answer already
+      // written. Seen under load (APRV-473's twenty-run sweep). What matters to
+      // Hermes is that the answer on stdout is one block directive.
+      teardown += 1;
+      assert.notEqual(outcome.signal, null);
+      const written = outcome.stdout.split("\n").filter((line) => line.length > 0);
+      assert.equal(written.length, 1, `a death by signal after more than one object: ${outcome.stdout}`);
+      assert.equal((JSON.parse(written[0] as string) as Record<string, unknown>)["action"], "block");
+      continue;
+    }
     if (outcome.code === null) {
       // Expected only in Node's own bootstrap, before the bin's first
       // statement. This test cannot tell that apart from a regression of the
       // bin's guard; the held-runtime test above is what pins the guard.
       bootstrap += 1;
       assert.notEqual(outcome.signal, null);
-      assert.equal(outcome.stdout, "", "a death by signal after something was printed");
       continue;
     }
     assert.equal(outcome.code, 2, `exit ${String(outcome.code)}: ${outcome.stdout} ${outcome.stderr}`);
@@ -285,10 +296,11 @@ test("smoke: a signal at an arbitrary instant from spawn on never ends in a nume
     assert.equal(parsed["action"], "block");
   }
   t.diagnostic(`${String(bootstrap)} of 20 signals ended in a death by signal (Node's bootstrap)`);
+  t.diagnostic(`${String(teardown)} of 20 signals ended in a death by signal after the answer (Node's teardown)`);
 });
 
 // ---------------------------------------------------------------------------
-// Held through the synchronous run
+// Mid-wait, through the real bin: one answer, the runtime's
 // ---------------------------------------------------------------------------
 
 const POLICY = [
@@ -317,13 +329,17 @@ function logRecords(dir: string): Record<string, unknown>[] {
 }
 
 /**
- * The hook's wait is a synchronous `Atomics.wait` poll, so a SIGTERM sent once
- * the request is logged is caught and held: no JS listener runs until the run
- * returns. What then answers is the run's own verdict (here the 3 s
- * `hook-timeout`), and the bin's guard, dispatched last, exits with it rather
- * than printing a second object.
+ * Until APRV-473 the hook's wait was a synchronous `Atomics.wait` poll, so a
+ * SIGTERM sent once the request was logged was held until the run returned and
+ * the run's own timeout answered. The CLI route now pauses on the event loop,
+ * so the signal reaches the listeners mid-wait: the wait's own handler, which
+ * is prepended, withdraws the question and prints its directive, and the bin's
+ * guard (registered first, so it is called next) steps aside because the
+ * runtime holds HERMES_SIGNAL_OWNER. The wording tells the two apart: the
+ * wait's says "while waiting for a decision", the bin's "before it reached a
+ * verdict".
  */
-test("through the bin, a SIGTERM held through the wait ends with the run's own single verdict at exit 2", async () => {
+test("through the bin, a SIGTERM mid-wait is answered once, by the wait's own handler, at exit 2", async () => {
   const dir = caseDir();
   writeFileSync(join(dir, "APPROVAL.md"), POLICY, "utf8");
   const attest = launch(["policy", "attest", "--as", "human:alice"], dir, { input: "" });
@@ -331,7 +347,7 @@ test("through the bin, a SIGTERM held through the wait ends with the run's own s
   assert.equal(attested.code, 0, attested.stderr);
 
   const child = launch(
-    ["hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s", "--timeout", "3s", "--interval", "50ms"],
+    ["hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s", "--timeout", "4m", "--interval", "50ms"],
     dir,
     {
       input: JSON.stringify({
@@ -359,7 +375,12 @@ test("through the bin, a SIGTERM held through the wait ends with the run's own s
   const parsed = JSON.parse(lines[0] as string) as Record<string, unknown>;
   assert.deepEqual(Object.keys(parsed).sort(), ["action", "message"]);
   assert.equal(parsed["action"], "block");
-  assert.match(String(parsed["message"]), /^hook-(interrupted|timeout): /u);
+  assert.equal(
+    parsed["message"],
+    "hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call",
+  );
+  assert.equal(logRecords(dir).filter((record) => record["event"] === "approval.withdrawn").length, 1);
+  assert.equal(logRecords(dir).filter((record) => record["event"] === "execution.started").length, 0);
 });
 
 // ---------------------------------------------------------------------------

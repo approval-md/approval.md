@@ -1354,10 +1354,15 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       // ALLOW. So for that one harness the import and the call are caught here,
       // and the block directive is spelled inline because the module that
       // normally spells it is the one that may not have loaded.
+      //
+      // APRV-473. The Hermes hook runs with its pauses on the event loop, so a
+      // SIGTERM mid-wait reaches the wait's handler (which withdraws the
+      // question and blocks) instead of being held until the wait returns.
+      // Awaited inside the `try`, so a rejection is caught like a throw.
       if (rest[0] === "hermes") {
         try {
-          const { commandHook } = await import("./hook.js");
-          return commandHook(rest, streams, cwd);
+          const { commandHookYielding } = await import("./hook.js");
+          return await commandHookYielding(rest, streams, cwd);
         } catch (cause) {
           const message = `hook-io: the hook could not run: ${
             cause instanceof Error ? cause.message : String(cause)
