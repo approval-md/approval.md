@@ -4449,7 +4449,8 @@ naming `approval audit review <seq> --ok` (or `--deny`), leaves that sample for
 a terminal review, and offers the next one. Every other failure (a 429, a
 timeout, a 5xx, a network error) prints `approval: telegram review-offer-retry:`
 and pauses review cards for Telegram's `retry_after` or the backoff, whichever
-is longer (one minute, doubling per attempt), then offers the same sample again.
+is longer (one minute, doubling per attempt; never more than an hour, whatever
+`retry_after` says), then offers the same sample again.
 After five failed attempts the sample is left for a terminal review with the
 `review-offer-failed` line. Either way the sample stays open in
 `approval audit list` and QUEUE.md, the queue behind it no longer waits, and a

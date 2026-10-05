@@ -149,6 +149,7 @@ import {
   reviewHandlerFor,
   summaryLines,
   REVIEW_OFFER_ATTEMPTS,
+  REVIEW_OFFER_MAX_WAIT_MS,
   supersededPending,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
@@ -6663,6 +6664,27 @@ test("PR #614 recheck NF-2: one 429 does not hide the sample, its retry_after is
   assert.equal(last.reviewCard?.sample_seq, third);
   await tapReview(channel, "ok");
   assert.equal(reviewsIn(world).length, 3);
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-5: a retry_after of 1e13 seconds does not throw, and the pause is capped at an hour", async () => {
+  const world = sampledWorld(1);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 429, description: "Too Many Requests: retry after 10000000000000", retryAfter: 1e13 },
+  ]);
+  const state = newDispatchState();
+  assert.equal(REVIEW_OFFER_MAX_WAIT_MS, 3_600_000);
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.ok(err.some((line) => line.includes("review-offer-retry")), err.join(""));
+  assert.equal(state.review.offersPausedUntilMs, Date.parse(at(90)) + REVIEW_OFFER_MAX_WAIT_MS);
+
+  const inside = await dispatchPending(setup, streams, state, at(149));
+  assert.equal(inside.reviewCard, undefined);
+  assert.equal(cardSends(), 1, "a send went out inside the capped pause");
+  const after = await dispatchPending(setup, streams, state, at(150));
+  assert.equal(after.reviewCard?.sample_seq, world.samples[0], "the capped pause never ended");
   assertClean(world.unit);
 });
 

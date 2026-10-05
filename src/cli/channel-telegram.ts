@@ -2423,7 +2423,13 @@ async function dispatchReviews(
     // walkthrough pauses: for Telegram's `retry_after` when it named one, and
     // never less than the backoff for this sample's attempt count.
     review.offerFailures.set(nextSeq, attempts);
-    const waitMs = Math.max(reviewOfferBackoffMs(attempts), retryAfterMsOf(cause) ?? 0);
+    // NF-5: capped, because `retry_after` is the network's number. A huge one
+    // would otherwise park reviews for years, or overflow the Date below and
+    // throw out of a dispatch cycle that is documented never to throw.
+    const waitMs = Math.min(
+      Math.max(reviewOfferBackoffMs(attempts), retryAfterMsOf(cause) ?? 0),
+      REVIEW_OFFER_MAX_WAIT_MS,
+    );
     const base = Number.isFinite(nowMs) ? nowMs : Date.now();
     review.offersPausedUntilMs = base + waitMs;
     streams.err(
@@ -2440,6 +2446,12 @@ async function dispatchReviews(
  * it.
  */
 export const REVIEW_OFFER_ATTEMPTS = 5;
+
+/**
+ * The longest review cards ever pause after one failed offer, whatever
+ * `retry_after` said (PR #614 recheck NF-5): one hour.
+ */
+export const REVIEW_OFFER_MAX_WAIT_MS = 3_600_000;
 
 /** The first pause after a transient offer failure; it doubles per attempt. */
 export const REVIEW_OFFER_BACKOFF_MS = 60_000;
