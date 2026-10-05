@@ -90,6 +90,7 @@ import {
   existsSync,
   fstatSync,
   linkSync,
+  lstatSync,
   openSync,
   readFileSync,
   readSync,
@@ -509,6 +510,8 @@ interface SeenLock {
   ino: bigint;
   mtimeNs: bigint;
   mtimeMs: number;
+  /** The owner's uid: what a refusal names when the claim is refused EPERM. */
+  uid: number;
   bytes: Buffer;
 }
 
@@ -543,7 +546,10 @@ function readEntry(path: string): EntryRead {
       length += read;
       if (length >= buffer.length) break;
     }
-    return { kind: "file", seen: { ino: stat.ino, mtimeNs: stat.mtimeNs, mtimeMs: Number(stat.mtimeMs), bytes: buffer.subarray(0, length) } };
+    return {
+      kind: "file",
+      seen: { ino: stat.ino, mtimeNs: stat.mtimeNs, mtimeMs: Number(stat.mtimeMs), uid: Number(stat.uid), bytes: buffer.subarray(0, length) },
+    };
   } catch (cause) {
     return { kind: "unreadable", why: errnoOf(cause) ?? "a read error" };
   } finally {
@@ -714,13 +720,40 @@ function judgeLock(lockPath: string, seen: SeenLock, now: number): LockJudgement
   return { kind: "gone", note: noteFor(lockPath, parsed.holder, seen, now, "holder-dead", verdict.why) };
 }
 
+function isDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why a claim failed, for a person: a link refused EPERM or EACCES (Linux
+ * `fs.protected_hardlinks`: a file the claimant neither owns nor can read and
+ * write) can be made only by the lockfile's owner or root.
+ */
+function claimFailure(lockPath: string, seen: SeenLock, code: string, unlock: string): string {
+  if (code !== "EPERM" && code !== "EACCES") return `the claim on ${basename(lockPath)} failed (link: ${code}); a human runs \`${unlock}\``;
+  return `the claim on ${basename(lockPath)} failed (link: ${code}): it is owned by uid ${String(seen.uid)}, and only that user or root may link it; run \`${unlock}\` as that user or root, or \`rm -v ${lockPath}\` once no writer runs`;
+}
+
+/** A directory at the stale name, which neither a writer nor `approval log unlock` removes. */
+function staleDirectory(stale: string): string {
+  return `${basename(stale)} is a directory, so no claim can be made there; once no writer is running, a human removes it (\`rm -r ${stale}\`) and runs \`approval log unlock\` again`;
+}
+
 /** What a claim found. */
 type Claim =
   | { kind: "claimed" }
   /** The lock's path no longer holds the judged file. */
   | { kind: "moved" }
-  /** The stale name is taken while the lock's path still holds the judged file. `judged`: by that same file (another reclaimer's claim). */
-  | { kind: "occupied"; judged: boolean }
+  /**
+   * The stale name is taken while the lock's path still holds the judged file.
+   * `judged`: by that same file (another reclaimer's claim). `directory`: by a
+   * directory, which no unlink removes.
+   */
+  | { kind: "occupied"; judged: boolean; directory: boolean }
   | { kind: "failed"; code: string };
 
 /**
@@ -738,7 +771,7 @@ function claim(lockPath: string, seen: SeenLock, stale: string): Claim {
     const now = readEntry(lockPath);
     if (now.kind !== "file" || !sameLock(now.seen, seen)) return { kind: "moved" };
     const there = readEntry(stale);
-    return { kind: "occupied", judged: there.kind === "file" && sameLock(there.seen, seen) };
+    return { kind: "occupied", judged: there.kind === "file" && sameLock(there.seen, seen), directory: isDirectory(stale) };
   }
   const there = readEntry(stale);
   if (there.kind !== "file" || !sameLock(there.seen, seen)) {
@@ -945,6 +978,7 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
     case "moved":
       return { kind: "retry", why: `${lockfile} changed hands while it was being judged` };
     case "occupied": {
+      if (claimed.directory) return { kind: "kept", why: `${note.why}, but ${staleDirectory(note.stale)}` };
       if (!claimed.judged) {
         return { kind: "kept", why: `${note.why}, but ${basename(note.stale)} already exists and is not that lockfile, so no writer can claim the reclaim; once no writer is running, \`${unlock}\` clears both` };
       }
@@ -957,7 +991,7 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
         : { kind: "retry", why: `${note.why}, and another writer has claimed its reclaim (${basename(note.stale)}); if no writer is running, \`${unlock}\` finishes it` };
     }
     case "failed":
-      return { kind: "kept", why: `${note.why}, but the claim on it failed (link: ${claimed.code}); a human runs \`${unlock}\`` };
+      return { kind: "kept", why: `${note.why}, but ${claimFailure(lockPath, entry.seen, claimed.code, unlock)}` };
     case "claimed":
       break;
   }
@@ -1054,13 +1088,15 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
     if (!again.ok) return refuse(`${again.why}, so a reclaim in flight cannot be ruled out; nothing was touched`);
     const busyNow = again.takers.find((taker) => taker.verdict === "running");
     if (busyNow !== undefined) return refuse(inFlight(lockfile, busyNow));
+    if (claimed.directory) return refuse(staleDirectory(note.stale));
     // A dead reclaimer's claim, or a planted file: the human says no writer is
     // running, so it goes, and the claim is made again, exclusively.
     unlinkQuietly(note.stale);
     claimed = claim(lockPath, entry.seen, note.stale);
   }
   if (claimed.kind === "moved") return refuse(`${lockfile} changed hands while it was being read: a writer is running; nothing was touched`);
-  if (claimed.kind !== "claimed") return refuse(`the claim on ${lockfile} failed (${claimed.kind === "failed" ? claimed.code : "its stale name is taken"})`);
+  if (claimed.kind === "failed") return refuse(claimFailure(lockPath, entry.seen, claimed.code, unlockCommand(pid)));
+  if (claimed.kind !== "claimed") return refuse(claimed.directory ? staleDirectory(note.stale) : `the claim on ${lockfile} failed (its stale name is taken again)`);
   const taken = take(lockPath, prepared.prepared, note.stale, entry.seen, releaseGuard);
   if (!taken.ok) return { kind: "refused", why: `the lock could not be taken (${taken.why})` };
   // Dead reclaimers' own lockfiles: their writers are provably gone, so

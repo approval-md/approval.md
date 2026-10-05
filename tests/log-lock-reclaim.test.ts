@@ -32,6 +32,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
+  chownSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -504,6 +505,33 @@ test("a planted file at the stale name is neither trusted nor removed: the lock 
   assert.deepEqual(residue(logPath), []);
   assert.ok(appendEvent(logPath, granted(25), { lockTimeoutMs: 40 }).ok);
   assert.deepEqual(events(logPath), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a directory at the stale name: the writer and `approval log unlock` both name `rm -r` for it, and touch nothing (R3-5)", () => {
+  const logPath = freshLog();
+  const left = holder({ pid: deadPid() });
+  writeLock(logPath, left);
+  const planted = staleOf(logPath, left);
+  mkdirSync(planted);
+  writeFileSync(join(planted, "x"), "y");
+  const lockBytes = readFileSync(`${logPath}.lock`);
+
+  const message = refused(logPath, 29);
+  assert.match(message, /is a directory/u);
+  assert.ok(message.includes(`(\`rm -r ${planted}\`)`), message);
+  assert.doesNotMatch(message, /clears both/u, "unlock does not remove a directory, so the writer does not say it does");
+  const unlocked = unlockAppendLock(logPath, left.pid, "human:carter");
+  assert.equal(unlocked.kind, "refused");
+  if (unlocked.kind === "refused") assert.match(unlocked.message, /is a directory.*`rm -r .*`/u);
+  assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
+  assert.equal(readFileSync(join(planted, "x"), "utf8"), "y", "the directory is untouched");
+  assert.deepEqual(residue(logPath).sort(), [`events.jsonl.lock.stale.${String(left.pid)}.${String(Date.parse(left.created))}`]);
+  assert.deepEqual(events(logPath), ["task.registered"]);
+
+  rmSync(planted, { recursive: true });
+  assert.equal(unlockAppendLock(logPath, left.pid, "human:carter").kind, "unlocked", "and once it is removed, unlock clears the lock");
+  assert.deepEqual(residue(logPath), []);
   assert.equal(verify(logPath).status, "clean");
 });
 
@@ -1343,4 +1371,42 @@ test("two pid namespaces on one volume: a dead holder's lock from container A is
   }
   assert.equal(events(logPath)[1], "audit.lock_reclaimed");
   assert.equal(verify(logPath).status, "clean");
+});
+
+test("two uids: a lockfile only its owner or root may link (fs.protected_hardlinks) is kept, and both refusals name the owner and `rm -v` (R3-4)", { skip: PRIVILEGED }, (t) => {
+  if (readFileSync("/proc/sys/fs/protected_hardlinks", "utf8").trim() !== "1") {
+    t.skip("needs fs.protected_hardlinks=1");
+    return;
+  }
+  const logPath = sharedLog("xuid");
+  const base = dirname(dirname(logPath));
+  // The hook (uid 1000, umask 022) was SIGKILLed holding the lock: 0644, its own.
+  writeLock(logPath, holder({ pid: deadPid() }));
+  chownSync(`${logPath}.lock`, 1000, 1000);
+  chmodSync(`${logPath}.lock`, 0o644);
+  const lockBytes = readFileSync(`${logPath}.lock`);
+  const daemon = join(base, "daemon.mjs");
+  writeFileSync(
+    daemon,
+    [
+      `import { appendEvent, unlockAppendLock } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { readFileSync, writeFileSync } from "node:fs";`,
+      `const pid = JSON.parse(readFileSync(${JSON.stringify(`${logPath}.lock`)}, "utf8")).pid;`,
+      `const r = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(63))}, { lockTimeoutMs: 0 });`,
+      `const u = unlockAppendLock(${JSON.stringify(logPath)}, pid, "human:carter");`,
+      `writeFileSync(${JSON.stringify(join(base, "daemon-result"))}, JSON.stringify({ writer: r.ok ? "ok" : r.error.message, unlock: u.kind === "refused" ? u.message : u.kind }));`,
+    ].join("\n"),
+  );
+  chmodSync(daemon, 0o644);
+  // The daemon runs as uid 1001.
+  const run = spawnSync(process.execPath, [daemon], { uid: 1001, gid: 1001, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(readFileSync(join(base, "daemon-result"), "utf8")) as { writer: string; unlock: string };
+  for (const message of [result.writer, result.unlock]) {
+    assert.match(message, /link: EPERM\): it is owned by uid 1000/u);
+    assert.match(message, /as that user or root, or `rm -v .*events\.jsonl\.lock` once no writer runs/u);
+  }
+  assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
+  assert.deepEqual(residue(logPath), [], "the daemon's own lockfile went with its failed claim");
+  assert.deepEqual(events(logPath), ["task.registered"]);
 });
