@@ -449,6 +449,7 @@ Usage:
   approval log sync    [--remote <name>] [--branch <name>] [--json]
   approval log advance [--branch <name>] [--pr] [--dry-run] [--json]
   approval log checkpoint --as human:<id> [--key-file <path>] [--json]
+  approval log unlock --pid <n|none> --as human:<id> [--json]
 
 Subcommands:
   verify   walk the hash chain end to end; clean | torn-tail | corrupt
@@ -456,11 +457,10 @@ Subcommands:
   follow   verified records after an exclusive cursor, then verified appends
   sync     fast-forward pull, with a snapshot and a chain reconcile
   advance  commit the log's new records onto a records branch
-  checkpoint  sign the current head with your own key (human-only)
+  checkpoint / unlock  sign the head / take over a dead writer's lock (human-only)
 
-verify, tail, export and follow only read. sync and advance move the FILE and append no record;
-checkpoint appends one. Default log: .approval/log/events.jsonl
-JSON shapes: docs/cli-reference.md; ${EXIT_CODES_POINTER}
+verify, tail, export, follow only read; sync, advance move the FILE; checkpoint, unlock append.
+Default log: .approval/log/events.jsonl. JSON shapes: docs/cli-reference.md; ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("log")}`;
 
@@ -588,6 +588,28 @@ hashes they replaced, which is what \`log verify --checkpoints\` then catches.
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("log-checkpoint")}`;
+
+export const LOG_UNLOCK_HELP = `approval log unlock — take over a lock a dead writer left, by hand
+
+Usage:
+  approval log unlock --pid <n|none> --as human:<id> [--log <path>] [--json]
+
+Flags:
+  --pid <n|none>    the pid the lockfile names (a lock-timeout refusal prints
+                    it), or none for a lockfile that names no holder
+  --as human:<id>   who is unlocking; or set APPROVAL_HUMAN
+  --log <path>      log whose lock to take (default .approval/log/events.jsonl)
+  --json / -h, --help   machine-readable output / this text
+
+A writer takes a dead holder's lock back by itself only when it can prove the
+holder gone in its own pid namespace and boot. Run this for any other lock,
+once you know no writer is running: it takes the lock as a writer would and
+appends audit.lock_reclaimed under your name. It refuses a --pid that is not
+the lockfile's and a holder it sees running. HUMAN-ONLY.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("log-unlock")}`;
 
 export const TAIL_HELP = `approval log tail — print the last records of the log
 

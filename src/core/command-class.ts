@@ -2791,6 +2791,11 @@ function refineApprovalVerb(
     // class (SPEC.md §11.1 invariant 9): `policy.core` already exists and is
     // already in this row's `emits`.
     if (sub === "checkpoint") return { class: "policy.core", rule: "approval-log-checkpoint" };
+    // APRV-479. Taking over the log's lock from a holder no writer can prove
+    // gone is a person's assertion, recorded under their name: an agent that
+    // could run it could break a live writer's lock and fork the chain. The
+    // same lock as `checkpoint`, for the same reason, and no new class.
+    if (sub === "unlock") return { class: "policy.core", rule: "approval-log-unlock" };
     return null;
   }
   // APRV-455. `channel relay` records gestures attributed to an EdgeOS account

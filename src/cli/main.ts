@@ -916,6 +916,14 @@ async function commandLog(
       const { commandLogCheckpoint } = await import("./log-checkpoint.js");
       return commandLogCheckpoint(rest, streams, cwd);
     }
+    // APRV-479. Taking over a lock a dead writer left, which no writer could
+    // judge itself (another container or boot): a person's assertion that the
+    // holder is gone, recorded under their own name. Human-only, and the hook
+    // denies it (`policy.core`, `core/command-class.ts`).
+    case "unlock": {
+      const { commandLogUnlock } = await import("./log-unlock.js");
+      return commandLogUnlock(rest, streams, cwd);
+    }
     default:
       return usageError(
         streams,

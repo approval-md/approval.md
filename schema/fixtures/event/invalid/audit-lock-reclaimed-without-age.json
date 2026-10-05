@@ -5,8 +5,7 @@
   "actor": "system:log",
   "payload": {
     "lockfile": "events.jsonl.lock",
-    "reason": "unverified",
-    "reclaim_id": "3f9a0c1d5e7b2468"
+    "reason": "holder-dead"
   },
   "alg": "sha256/jcs",
   "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",

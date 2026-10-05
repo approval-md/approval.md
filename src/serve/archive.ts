@@ -220,12 +220,13 @@ export function readTarEntries(archive: Buffer): TarEntry[] {
  * so the file exists for exactly the span of the copy and means nothing but
  * "somebody was reading when this was made".
  *
- * The same holds for the files the lock's reclaim derives from that exact path
- * (APRV-479), every one named `<lockfile>.<something>`: a claim, a moved-aside
- * lockfile, a pending reclaim record, and what a reclaimer killed part way
- * leaves of them. They are the lock's bookkeeping, they carry the writing
- * machine's hostname and boot id (which the log itself deliberately does not),
- * and nothing in them is the tenant's.
+ * The same holds for the names the lock's reclaim derives from that exact path
+ * (APRV-479), every one `<lockfile>.<something>`: the claim on a dead holder's
+ * lockfile (`.stale.<pid>.<ms>`) and a taker's own lockfile before its rename
+ * (`.take.<pid>.<nonce>`), which a writer killed part way leaves behind. They
+ * are the lock's bookkeeping, they carry the writing machine's hostname and
+ * boot id (which the log itself deliberately does not), and nothing in them is
+ * the tenant's.
  */
 export function isExcludedPath(path: string, excludedLock: string | null = null): boolean {
   const base = path.split("/").at(-1) ?? path;

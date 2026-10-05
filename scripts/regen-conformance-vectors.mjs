@@ -2527,15 +2527,21 @@ const SUITES = [
     // moves: the field is OPTIONAL and additive, so every record written before
     // it validates exactly as it did, and an implementation that passed 2.8.0
     // fails this only by not knowing a field that has been added.
-    // 2.10.0 (APRV-479): a MINOR bump, the same shape 2.1.0, 2.3.0 and 2.4.0
-    // were. `audit.lock_reclaimed` is a new event type with five new fixtures
-    // (two accepted — a reclaim from a dead holder carrying its record, and one
-    // from an unattributed lockfile carrying none — and three refused: an agent
-    // actor, a reason outside the closed set, and a lockfile named by a path
-    // rather than a base name). No existing expectation moves, so an
-    // implementation that passed 2.9.0 fails this only by not knowing a type the
-    // enum has gained.
-    vectors_version: "2.10.0",
+    // 3.1.0 (APRV-479): a MINOR bump, the same shape 2.1.0, 2.3.0 and 2.4.0
+    // were, numbered by the collision rule (conformance/README.md: a version is
+    // claimed at merge, one minor above the highest either side saw). PR #614
+    // takes this suite to 3.0.0 and lands first, so this change is 3.1.0 even
+    // though the branch it was written on still reads 2.9.0; whichever lands
+    // second rebases and reruns this script, and the number stands.
+    // `audit.lock_reclaimed` is a new event type with seven new fixtures: three
+    // accepted (a writer's reclaim from a dead holder carrying its strictly
+    // parsed record, one from an empty lockfile carrying none, and a person's
+    // `approval log unlock` under a `human:` actor) and four refused (an
+    // `agent:` actor, a reason outside the closed set, a lockfile named by a
+    // path rather than a base name, and a record with no `age_ms`).
+    // No existing expectation moves, so an implementation that passed 3.0.0
+    // fails this only by not knowing a type the enum has gained.
+    vectors_version: "3.1.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

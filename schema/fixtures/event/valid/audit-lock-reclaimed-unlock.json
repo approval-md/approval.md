@@ -1,16 +1,16 @@
 {
-  "seq": 215,
-  "ts": "2026-10-05T07:41:12.408Z",
+  "seq": 216,
+  "ts": "2026-10-05T11:02:40.115Z",
   "event": "audit.lock_reclaimed",
-  "actor": "system:log",
+  "actor": "human:carter",
   "payload": {
     "lockfile": "events.jsonl.lock",
-    "reason": "unverified",
-    "reclaim_id": "3f9a0c1d5e7b2468",
+    "reason": "holder-dead",
+    "age_ms": 4021877,
     "holder": {
-      "pid": 48213,
+      "pid": 31,
       "op": "append",
-      "created": "2026-10-05T07:28:58.197Z"
+      "created": "2026-10-05T09:55:38.238Z"
     }
   },
   "alg": "sha256/jcs",
