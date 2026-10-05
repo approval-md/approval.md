@@ -427,19 +427,42 @@ export function inForcePolicyText(
     return { ok: false, reason: "no policy is in force: the log carries no attestation" };
   }
 
-  // Two kinds of record can name the attested bytes, and both are read
-  // (APRV-356). A `policy.proposed` binds the whole text so an approver can
-  // read the file on a phone; since APRV-356 an ATTESTATION binds it too, so a
-  // chain only ever attested at a terminal is recoverable as well. Newest
-  // first, and the two are not ranked against each other: both are verified
-  // against the same digest from the same verified log, so whichever is found
-  // first carries bytes that hash to it or it is skipped.
+  const text = storedPolicyText(records, storeDir, attested);
+  if (text !== null) return { ok: true, text, sha256: attested };
+
+  return {
+    ok: false,
+    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: no record naming those bytes — neither a policy.proposed nor the attestation itself — binds a payload this log can read beside it. Since APRV-356 every attestation stores the attested text, so this is the ordinary state of a chain last attested BEFORE that landed, where a terminal attestation recorded only the digest.`,
+  };
+}
+
+/**
+ * The policy text hashing to `sha256`, read from the payload store beside the
+ * log and verified, or `null` when no record binds a stored copy of it
+ * (APRV-356; factored out of {@link inForcePolicyText} for PR #614 fix round 3,
+ * where a review reads the policy its sample pinned).
+ *
+ * Two kinds of record can name the bytes, and both are read. A
+ * `policy.proposed` binds the whole text so an approver can read the file on a
+ * phone; since APRV-356 an ATTESTATION binds it too, so a chain only ever
+ * attested at a terminal is recoverable as well. Newest first, and the two are
+ * not ranked against each other: whichever is found first carries bytes that
+ * hash to `sha256` or it is skipped. This answers "what are these bytes", never
+ * "were they attested": the store is content-addressed and every copy is
+ * verified against the digest, so a caller that needs authority checks the
+ * attestation in the verified log itself.
+ */
+export function storedPolicyText(
+  records: readonly EventRecord[],
+  storeDir: string,
+  sha256: string,
+): string | null {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index] as EventRecord;
     if (record.event !== PROPOSAL_EVENT && record.event !== ATTESTATION_EVENT) continue;
     const payload = record.payload;
     if (payload === undefined) continue;
-    if (payload["sha256"] !== attested) continue;
+    if (payload["sha256"] !== sha256) continue;
     const bound = payload["payload_hash"];
     if (typeof bound !== "string") continue;
     const stored = loadPayload(storeDir, bound);
@@ -450,14 +473,10 @@ export function inForcePolicyText(
     if (typeof text !== "string") continue;
     // The verification, and the only reason reading a file beside the log is
     // allowed to answer a question about authority at all.
-    if (policyBytesHash(Buffer.from(text, "utf8")) !== attested) continue;
-    return { ok: true, text, sha256: attested };
+    if (policyBytesHash(Buffer.from(text, "utf8")) !== sha256) continue;
+    return text;
   }
-
-  return {
-    ok: false,
-    reason: `the policy in force hashes ${attested} and its BYTES are not recoverable: no record naming those bytes — neither a policy.proposed nor the attestation itself — binds a payload this log can read beside it. Since APRV-356 every attestation stores the attested text, so this is the ordinary state of a chain last attested BEFORE that landed, where a terminal attestation recorded only the digest.`,
-  };
+  return null;
 }
 
 /**

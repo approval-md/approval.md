@@ -104,7 +104,8 @@ const CHAIN: EventInput[] = [
     actor: "system:auditor",
     task: "task-099",
     action_key: OTHER_KEY,
-    payload: { reason: "spot check" },
+    // PR #614 F2: a new sample pins the attested policy it was taken under.
+    payload: { reason: "spot check", policy_sha256: "b".repeat(64) },
   },
 ];
 

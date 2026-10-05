@@ -44,6 +44,74 @@ before a tag.
   new keys and fails the whole policy closed to all-`manual`, so a policy may
   carry them only once every daemon reading it runs this release.
 
+- **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
+  An attested policy that does not load is refused with the new audit code
+  `policy-invalid` instead of reading as "no roster". `audit.sampled` now
+  pins the attested policy its execution ran under (`payload.policy_sha256`,
+  the latest attestation before the `execution.started`; required on new
+  records, widened for old ones), and a review reads its roster only from bytes
+  hashing to that pin; a class matching no rule there is refused
+  `actor-not-approver`. New reviews carry `payload.verdict_source:
+  "explicit"` (required), the follower's discriminator between an explicit and
+  a pre-APRV-482 defaulted `ok`. On a Telegram card a held grade and an armed
+  Deny belong to the account that tapped them, and another account's tap that
+  would finish them is refused on the card; a lone grade is held only after the
+  runtime answers `verdict-required`. The whole card is bounded to one
+  message (summary cut at 400 characters, rows at 300, notice at 600, payload
+  budget from the remaining headroom), and a card that cannot be offered is
+  left for a terminal review with a coded `review-offer-failed` line instead
+  of blocking the queue. A key declared by two tasks is refused. Conformance
+  `schema-validation` 3.0.0 now names the missing property on every
+  `required` error and pins each required review field separately.
+
+- **A review is held to the class's approvers roster (APRV-483).**
+  `reviewSample` resolves the sampled action's class (from its registration)
+  under the policy and, where the winning rule names `approvers`, refuses any
+  other reviewer with the new audit code `actor-not-approver`, using the
+  gate's own `namesApprover` (now exported). It binds the CLI `--as` path and
+  sender-mapped Telegram taps alike; a rule with no roster restricts nobody.
+  The roster is read only from the attested policy bytes (the file a grant
+  reads), so an unattested, edited, unreadable or `--policy`-substituted file
+  is refused with the new audit code `policy-not-attested`, and a sample
+  naming no class is refused rather than read as "no roster". Behavior
+  change: a review by a person off a named roster no longer records, and a
+  review now needs the policy attested (it needed none before).
+
+- **A review verdict needs an explicit affirmative (APRV-482).** `reviewSample`
+  no longer defaults `verdict` to `ok`; a review that names none is refused
+  with the new audit code `verdict-required`, judged after the roster check so an
+  off-roster reviewer hears `actor-not-approver` first. `approval
+  audit review` gains `--ok` and requires exactly one of `--ok`/`--deny` (both
+  is exit 2, neither is `verdict-required` exit 1, `--reaction` alone included).
+  On a Telegram card a grade tapped with nothing armed is refused by the
+  runtime and held on the card (`GRADE … HELD`), and the ✅ or second 🛑 that
+  follows records it. Behavior change: scripts running a bare `approval audit
+  review <seq>` must add `--ok`.
+
+- **`audit.reviewed` names its sample, the execution and the verdict
+  (APRV-481).** New reviews must carry `payload.subject_seq`,
+  `payload.sampled_subject_hash` and `payload.verdict`; the write boundary
+  refuses one without them, and `validate(..., { mode: "historical" })` reads
+  older reviews unchanged (`audit_reviewed_record` joins `WIDENED_DEFS`).
+  `payload.payload_hash` is written only when the surface showed the bytes
+  whole, and `reviewSample` refuses a shown hash that is not the execution's
+  binding with the new audit code `rendered-payload-mismatch`. The follower's
+  field list lives in one place, `docs/cli-reference.md#the-review-record`.
+  Conformance: `schema-validation` is 3.0.0 (existing expectations moved).
+  Behavior change for anything that appends reviews by hand.
+
+- **A Telegram review card shows the payload that ran (APRV-480).** Under
+  supervised-retro the review is the individual approval, and the card showed a
+  key and the agent's own summary of what it did. `ReviewCardFields` now
+  carries `fullPayload` (hash-checked against the execution's binding, as a
+  prompt's is) and `payload_hash`, and the card renders one of three payload
+  regions whose heading says which: the bytes whole (`PAYLOAD — the bytes that
+  ran, shown whole`), the hash only with the reason (nobody holds the bytes,
+  they do not hash to the binding, or they exceed one card's 2000 escaped
+  characters), or `none recorded`. Bytes are never shown in part. Behavior
+  change: SPEC.md §10.3's "the card carries no payload region" is amended by
+  this task, pending sign-off.
+
 - **A relayed Telegram channel refuses a button it did not send (APRV-456).**
   With `--api-base` naming anything but the Bot API, or with the new
   `--no-stale-copy` flag (on `approval channel telegram listen`, `channel

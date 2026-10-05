@@ -4,7 +4,7 @@
   "event": "audit.reviewed",
   "task": "task-049",
   "action_key": "task-049:archive:2026-08-04",
-  "actor": "agent:chaser",
+  "actor": "human:carter",
   "channel": "cli",
   "payload": {
     "subject_seq": 15,
@@ -12,7 +12,8 @@
     "reviewed": true,
     "sampled_subject_hash": "6c1d3f0b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817060504",
     "verdict": "ok",
-    "verdict_source": "explicit"
+    "verdict_source": "explicit",
+    "payload_hash": "6C1D3F0B"
   },
   "alg": "sha256/jcs",
   "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",

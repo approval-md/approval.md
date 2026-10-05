@@ -2527,7 +2527,26 @@ const SUITES = [
     // moves: the field is OPTIONAL and additive, so every record written before
     // it validates exactly as it did, and an implementation that passed 2.8.0
     // fails this only by not knowing a field that has been added.
-    vectors_version: "2.9.0",
+    // 3.0.0 (APRV-481): a MAJOR bump, because existing expectations move.
+    // `audit.reviewed` now REQUIRES `payload.subject_seq`,
+    // `payload.sampled_subject_hash` and `payload.verdict` at the write
+    // boundary, so the five audit.reviewed fixtures gained those fields and a
+    // review without them (the new `audit-reviewed-no-subject-hash` fixture) is
+    // refused. An implementation that passed 2.9.0 accepts that record and so
+    // fails here. The read boundary is unchanged: `mode: "historical"` swaps in
+    // `audit_reviewed_record_historical`, so a pre-APRV-481 review still
+    // verifies; the vectors pin the write boundary only, as they always have.
+    // Same unreleased major (PR #614 refutation F2): `audit.sampled` now
+    // REQUIRES `payload.policy_sha256`, so the sample fixture gained it and
+    // `audit-sampled-no-policy-hash` is refused; historical validation swaps
+    // in `audit_sampled_record_historical`. And (F5) `audit.reviewed`
+    // REQUIRES `payload.verdict_source: "explicit"`: the review fixtures
+    // gained it and `audit-reviewed-no-verdict-source` is refused. And (F6)
+    // every `required` error names its `missing` property, so expectations
+    // carrying one moved; `audit-reviewed-no-verdict`,
+    // `audit-reviewed-no-subject-seq` and `audit-reviewed-bad-payload-hash`
+    // each pin a distinct refusal.
+    vectors_version: "3.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

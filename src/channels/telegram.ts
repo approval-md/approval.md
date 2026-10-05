@@ -959,14 +959,25 @@ function formatTelegramTtl(ms: number | null): string {
  * attached one. Naming the subset as a type is what lets {@link reviewRow} and
  * {@link telegramRow} share one implementation of those five without either
  * side casting: a card supplies exactly these fields, and the compiler refuses
- * a card that reaches for `budgets`, `fullPayload`, or anything else that only
- * a pending question has.
+ * a card that reaches for `budgets`, `ttl_remaining_ms`, or anything else that
+ * only a pending question has.
+ *
+ * Since APRV-480 a card also carries `fullPayload`, the bytes the sampled
+ * execution bound to, and `payload_hash`, the binding the log recorded for them.
+ * Under supervised-retro a review counts as the individual approval nobody gave
+ * before the action ran, so the reviewer has to be able to read what was
+ * published; a uuid beside the agent's own summary of what it did is the agent
+ * describing its own homework. `fullPayload` is computed the way a prompt's is
+ * (hash-checked against the binding before anything renders it) and is `null`
+ * when nobody holds the bytes; `payload_hash` is absent only when the execution
+ * recorded no binding at all. Which of the two a card SHOWS is
+ * {@link reviewPayloadView}'s decision, and the card says which.
  */
 export type ReviewCardFields = Pick<
   ChannelRequest,
-  "action_key" | "class" | "task" | "summary"
+  "action_key" | "class" | "task" | "summary" | "fullPayload"
 > &
-  Partial<Pick<ChannelRequest, "command_breakdown" | "gloss">>;
+  Partial<Pick<ChannelRequest, "command_breakdown" | "gloss" | "payload_hash">>;
 
 /** The rows a review card renders, in the order it renders them (APRV-299). */
 export const REVIEW_CARD_ROWS = [
@@ -2052,6 +2063,16 @@ export const TELEGRAM_REVIEW_DENIED = "✗ REVIEWED — DENIED";
 export const TELEGRAM_REVIEW_ARMED = "DENY ARMED — nothing is recorded yet";
 
 /**
+ * The headline a card wears while a grade is held and no verdict has been
+ * given (APRV-482). A grade is not a verdict: tapping one with nothing armed
+ * records nothing, and the card keeps the grade so the OK or the Deny that
+ * follows records it.
+ */
+export function telegramReviewGradeHeld(reaction: Reaction): string {
+  return `GRADE ${reaction.toUpperCase()} HELD — nothing is recorded until you tap OK or Deny`;
+}
+
+/**
  * What a review tap's single answer says (APRV-302).
  *
  * {@link TELEGRAM_ACK_HEARD}'s "deciding" is a request card's word: something is
@@ -2069,6 +2090,17 @@ export const TELEGRAM_REVIEW_ACK =
 /** The toast a first Deny tap gets: it says plainly that nothing was written. */
 export const TELEGRAM_REVIEW_ARM_TOAST =
   "Deny armed — nothing recorded. Tap Deny again to record it, or a reaction to record it with a grade.";
+
+/**
+ * The card line and toast for a tap that would finish another account's
+ * half-finished review (PR #614 refutation F3): an armed Deny or a held grade
+ * belongs to the account that tapped it, and nothing is recorded. A held grade
+ * is replaced by the tapper's own grade (a grade finishes nothing), which the
+ * line says (PR #614 recheck NF-1, minor). Under 200 characters, the Bot API's
+ * limit for a callback answer.
+ */
+export const TELEGRAM_REVIEW_OTHER_SENDER =
+  "Another account's unfinished review (armed Deny or held grade) is on this card. Nothing was recorded. Tap your own grade to replace a held one; an armed Deny is theirs to finish.";
 
 /** The toast a reaction that needs the human's own words gets. */
 export const TELEGRAM_REVIEW_NOTE_TOAST =
@@ -2108,7 +2140,14 @@ export function reviewNotePromptLines(
 export interface ReviewTap {
   /** `seq` of the `audit.sampled` record this card was drawn for. */
   sampleSeq: number;
-  verdict: ReviewVerdict;
+  /**
+   * The verdict the taps added up to, or absent when the human gave none
+   * (APRV-482): a grade tapped with nothing armed. The channel still hands that
+   * tap to the runtime, which refuses it `verdict-required`, so the refusal a
+   * reviewer reads is the core's own and no channel decides which gestures are
+   * approvals.
+   */
+  verdict?: ReviewVerdict;
   /** The grade, when the human gave one. Absent means absent. */
   reaction?: Reaction;
   /** The human's words, when a note prompt collected any. */
@@ -2125,6 +2164,14 @@ export interface ReviewTap {
    * policy, refuses an account it does not name, and records the one it does.
    */
   sender?: ChannelSender;
+  /**
+   * The payload binding this card showed WHOLE (APRV-481), present only when
+   * {@link reviewPayloadView} put the bytes on the screen. Set by the channel
+   * from the card it is holding, never from anything the network sent; the
+   * runtime checks it against the log before recording it as the review's
+   * `payload_hash`.
+   */
+  payloadHash?: string;
 }
 
 /** What the runtime did with a review tap, as it reports it back. */
@@ -2137,6 +2184,15 @@ export interface ReviewTapResponse {
   detail: string[];
   /** The toast, which Telegram caps at a short sentence. */
   toast: string;
+  /**
+   * The refusal code, when the runtime refused (PR #614 refutation N6/F3).
+   * The card holds a lone grade only when this is `verdict-required`: the
+   * runtime judges the verdict after the sender and the roster, so that code
+   * says the tapper may review and lacks only the verdict. A grade refused for
+   * anything else (an unmapped sender, a reviewer off the roster) is not held,
+   * so it cannot block the next account's tap.
+   */
+  code?: string;
 }
 
 export type ReviewTapHandler = (tap: ReviewTap) => ReviewTapResponse | Promise<ReviewTapResponse>;
@@ -2185,6 +2241,22 @@ export interface ReviewCardState {
    * whose next Deny tap arms again.
    */
   denyArmed: boolean;
+  /**
+   * A grade tapped before any verdict (APRV-482), held so the OK or the second
+   * Deny that follows records it. **Process memory**, like the arming: it
+   * appends nothing, the card states it, and losing it to a restart costs a tap.
+   */
+  heldReaction: Reaction | null;
+  /**
+   * Who armed Deny and who holds the grade, as the transport attributed the tap
+   * (PR #614 refutation F3): the sender's id, or `null` for a tap that carried
+   * none. A held grade or an armed Deny is one person's half-finished review,
+   * so it rides only on that person's next verdict tap; another account's tap
+   * is refused on the card rather than recording someone else's grade or
+   * denial under its own name. Process memory, cleared with the state it owns.
+   */
+  armedBy: string | null;
+  heldBy: string | null;
   /**
    * The outcome, once the runtime has recorded one. Written only from the
    * handler's answer, never inferred here.
@@ -2300,44 +2372,222 @@ function trimNotice(text: string): string {
 }
 
 /**
- * The card's message: the rows, whatever notice the last tap produced, and the
- * keyboard.
+ * How much payload, in ESCAPED characters, a review card carries whole
+ * (APRV-480).
  *
- * No paragraph explaining the buttons (APRV-302). The heading
- * ({@link TELEGRAM_REVIEW_HEADING}) is what says a review is not a request, and
- * the deny latch says itself: the first tap is answered by
- * {@link TELEGRAM_REVIEW_ARM_TOAST} and the card's own heading becomes
- * {@link TELEGRAM_REVIEW_ARMED} until it is spent. Four sentences of rules under
- * every card said the same thing to a reader who had already read them once, and
- * pushed the rows a review is actually about off the first screen.
- *
- * Pure. Two things it deliberately does NOT carry, and both are the same rule
- * read twice: no payload region, and no approve button. SPEC.md §10.3 requires
- * the canonical rendering in front of an approver before a DECISION is
- * collected, and this collects none — the action ran, the review says only what
- * a person thought of it, and a card that offered an approve would be
- * presenting a settled fact as a live authorization. A sample is never
- * delivered as an approval request and never accepts a token.
+ * A card is one message edited in place, so it cannot spill the payload over
+ * several messages the way a prompt does: the edit that settles it replaces one
+ * message, and a second message holding the rest of the bytes would outlive the
+ * card it belonged to. So the bytes are shown whole or not at all. Never cut:
+ * a review that recorded a payload hash over bytes the reviewer saw half of
+ * would claim more than they read. This is the CEILING; the budget a given
+ * card gets is {@link reviewPayloadBudget}, which is this or the headroom the
+ * card's own rows leave under {@link TELEGRAM_MAX_MESSAGE_CHARS}, whichever is
+ * smaller (PR #614 refutation F4).
  */
-export function renderReviewCard(state: ReviewCardState): {
-  text: string;
-  keyboard: { inline_keyboard: InlineButton[][] } | null;
-} {
-  const card = state.card;
-  const key = card.fields.action_key.value;
+export const REVIEW_PAYLOAD_BUDGET = 2000;
 
-  if (state.settled !== null) {
-    return {
-      text: [
-        `<b>${escapeHtml(state.settled.headline)}</b>`,
-        `<code>${escapeHtml(key)}</code>`,
-        "",
-        ...state.settled.detail.map((entry) => escapeHtml(trimNotice(entry))),
-      ].join("\n"),
-      keyboard: null,
-    };
+/**
+ * The longest agent-written summary a review card shows, in characters (PR
+ * #614 refutation F4). The summary is the requesting party's own claim and its
+ * schema sets no length, so before this cap an agent could write a summary
+ * that pushed the card past Telegram's limit, which failed the send and held
+ * the review queue. Longer text is cut with a marker saying how much is not
+ * shown; the registration record keeps it whole.
+ */
+export const REVIEW_SUMMARY_MAX = 400;
+
+/**
+ * How much of each row a review card shows, in characters (PR #614 refutation
+ * F4), tried in order until the card fits one message with the longest
+ * heading, the hash-only payload region and the largest notice a tap can add.
+ * `row` caps the key, class, task, command breakdown, gloss, run time and
+ * outcome; `summary` caps the agent's summary (never above
+ * {@link REVIEW_SUMMARY_MAX}); `origin` caps an author or source label. An
+ * ordinary card fits at the first level and shows its rows as they are; only a
+ * card whose rows are pathologically long is cut further, and the last level
+ * fits whatever the rows hold (pinned by the worst-case test in
+ * `tests/channels-telegram.test.ts`).
+ */
+const REVIEW_CAP_LEVELS: readonly { row: number; summary: number; origin: number }[] = [
+  { row: 300, summary: REVIEW_SUMMARY_MAX, origin: 60 },
+  { row: 160, summary: 240, origin: 40 },
+  { row: 80, summary: 120, origin: 30 },
+  { row: 40, summary: 60, origin: 20 },
+];
+
+/** The longest notice headline a review card shows (F4). Headlines are constants. */
+const REVIEW_NOTICE_HEADLINE_MAX = 100;
+
+/**
+ * The most characters a review card's notice region (a refusal, or the arming
+ * line) shows, all its lines together (PR #614 refutation F4). Each line was
+ * already cut at {@link REVIEW_NOTICE_MAX}; the region had no total, so a
+ * refusal with several long lines could take the card over the limit and make
+ * the redraw that carries it fail. The whole refusal is on the listener's
+ * stderr.
+ */
+export const REVIEW_NOTICE_REGION_MAX = 600;
+
+/** The most characters a settled card's detail lines show together (F4). */
+const REVIEW_SETTLED_REGION_MAX = 3000;
+
+/**
+ * The visible length of HTML this channel wrote: tags removed and each entity
+ * {@link escapeHtml} produces counted as the one character it stands for.
+ * Telegram measures its limit after entity parsing, so this is the number the
+ * limit applies to.
+ */
+export function telegramVisibleLength(html: string): number {
+  return html.replace(/<[^>]*>/gu, "").replace(/&(?:amp|lt|gt);/gu, "x").length;
+}
+
+/** `text` cut at `max` characters with a marker saying how much is not shown. */
+function capReviewText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return `${cut}${reviewCutMarker(text.length - cut.length)}`;
+}
+
+/** The marker a cut row ends with. */
+function reviewCutMarker(hidden: number): string {
+  return `… [+${String(hidden)} chars not shown]`;
+}
+
+/** The longest {@link reviewCutMarker}: a JavaScript string is under 2^53 long. */
+const REVIEW_CUT_MARKER_MAX = reviewCutMarker(Number.MAX_SAFE_INTEGER).length;
+
+/** The line a region ends with when lines were left out. */
+const REVIEW_REGION_OVERFLOW = "… [more on the listener's stderr]";
+
+/**
+ * Lines cut so that together, counting the newline before each, they show at
+ * most `max` characters plus one cut marker and the overflow line.
+ */
+function capReviewRegion(lines: readonly string[], max: number): string[] {
+  const out: string[] = [];
+  let used = 0;
+  for (const entry of lines) {
+    const room = max - used - 1;
+    if (room <= 0) {
+      out.push(REVIEW_REGION_OVERFLOW);
+      break;
+    }
+    const shown = capReviewText(entry, room);
+    out.push(shown);
+    used += shown.length + 1;
   }
+  return out;
+}
 
+/**
+ * The longest payload text, in characters, a review card will even try to
+ * render (APRV-480 refutation: review-delivery resource cap).
+ *
+ * Supervised payloads carry no size cap of their own (`PROPOSE_PAYLOAD_MAX_BYTES`
+ * binds proposals only), and the party under review writes them. Without this
+ * bound every render of a card, every redraw after a tap, and every tap's
+ * {@link reviewPayloadView} would run the canonical renderer and HTML escaping
+ * over the whole payload only to conclude "too long", so an agent could make
+ * each review gesture cost work proportional to bytes it chose. Text past this
+ * length is `too-long` without being rendered at all; the card builder
+ * (`cli/audit-card.ts`) keeps no more than this much text in the card it holds.
+ * Eight times the card budget, because a canonical rendering is never that much
+ * shorter than the JSON it renders, and erring here only ever shows the hash.
+ */
+export const REVIEW_RENDER_INPUT_MAX = REVIEW_PAYLOAD_BUDGET * 8;
+
+/** The heading over a payload the card shows whole (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_BYTES =
+  "PAYLOAD — the bytes that ran, shown whole; this review covers them";
+
+/** The heading over a payload the card names by hash only (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY =
+  "PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes";
+
+/** The heading on a card whose execution recorded no payload binding (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_NONE =
+  "PAYLOAD — none recorded; the execution bound to no payload hash";
+
+/**
+ * What a review card shows of the payload, decided once from the card alone
+ * (APRV-480).
+ *
+ * - `bytes`: the canonical rendering, whole. Only this case lets a review
+ *   record a payload hash (APRV-481), because only here did the reviewer read
+ *   the bytes the hash names.
+ * - `hash`: the binding, and the reason the bytes are not on the card: nobody
+ *   holds them (`unavailable`), or they are longer than one card carries
+ *   (`too-long`). The card says so in its heading.
+ * - `none`: the execution recorded no binding, so there is nothing to show and
+ *   nothing to name.
+ *
+ * Pure and deterministic over the card, so the rendering and the tap that
+ * follows it can never disagree about which case was on the screen.
+ */
+export type ReviewPayloadView =
+  | { kind: "bytes"; hash: string; text: string }
+  | { kind: "hash"; hash: string; reason: "unavailable" | "too-long" }
+  | { kind: "none" };
+
+export function reviewPayloadView(card: ReviewCard): ReviewPayloadView {
+  const rendering = card.fields.fullPayload.value;
+  const bound = card.fields.payload_hash?.value ?? rendering?.hash ?? null;
+  if (rendering !== null && (bound === null || bound === rendering.hash)) {
+    // Bounded before any rendering work: see REVIEW_RENDER_INPUT_MAX.
+    if (rendering.truncated || rendering.text.length > REVIEW_RENDER_INPUT_MAX) {
+      return { kind: "hash", hash: rendering.hash, reason: "too-long" };
+    }
+    const text = payloadRegionText(rendering, card.fields.class.value);
+    if (escapeHtml(text).length <= reviewPayloadBudget(card)) {
+      return { kind: "bytes", hash: rendering.hash, text };
+    }
+    return { kind: "hash", hash: rendering.hash, reason: "too-long" };
+  }
+  if (bound === null) return { kind: "none" };
+  return { kind: "hash", hash: bound, reason: "unavailable" };
+}
+
+/** The payload region of a review card, as HTML lines (APRV-480). */
+function reviewPayloadLines(view: ReviewPayloadView): string[] {
+  switch (view.kind) {
+    case "bytes":
+      return [`<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_BYTES)}</b>`, `<pre>${escapeHtml(view.text)}</pre>`];
+    case "hash":
+      return [
+        `<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY)}</b>`,
+        escapeHtml(
+          view.reason === "too-long"
+            ? `The bytes are longer than one card carries, so none of them are shown. sha256 ${view.hash}`
+            : `This runtime does not hold the bytes the execution bound to. sha256 ${view.hash}`,
+        ),
+      ];
+    default:
+      return [`<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_NONE)}</b>`];
+  }
+}
+
+/**
+ * A review card's HTML lines around the payload region, every row cut to its
+ * cap (PR #614 refutation F4): `top` is the key and the computed rows, `bottom`
+ * the claimed ones. Pure over the card, so the payload budget computed from it
+ * and the card drawn from it cannot disagree.
+ */
+function reviewCardFrame(card: ReviewCard): { top: string[]; bottom: string[] } {
+  let frame = reviewCardFrameAt(card, REVIEW_CAP_LEVELS[0] as (typeof REVIEW_CAP_LEVELS)[number]);
+  for (const level of REVIEW_CAP_LEVELS) {
+    frame = reviewCardFrameAt(card, level);
+    if (reviewFixedLength(frame) + REVIEW_HASH_REGION_MAX <= TELEGRAM_MAX_MESSAGE_CHARS) break;
+  }
+  return frame;
+}
+
+function reviewCardFrameAt(
+  card: ReviewCard,
+  caps: (typeof REVIEW_CAP_LEVELS)[number],
+): { top: string[]; bottom: string[] } {
   const computedLines: Line[] = [];
   const claimedLines: Line[] = [];
   for (const row of REVIEW_CARD_ROWS) {
@@ -2350,27 +2600,155 @@ export function renderReviewCard(state: ReviewCardState): {
   computedLines.push(line("verdict", card.verdict, "verdict", card.verdict.value));
 
   const render = (entry: Line): string =>
-    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
+    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(
+      capReviewText(entry.text, entry.field === "summary" ? caps.summary : caps.row),
+    )} <i>(${escapeHtml(capReviewText(entry.origin, caps.origin))})</i>`;
 
-  const author = originOf(card.fields.summary);
+  const author = capReviewText(originOf(card.fields.summary), caps.origin);
+  return {
+    top: [
+      `<code>${escapeHtml(capReviewText(card.fields.action_key.value, caps.row))}</code>`,
+      "",
+      "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
+      ...computedLines.map(render),
+      "",
+    ],
+    bottom: [
+      "",
+      `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
+      ...claimedLines.map(render),
+    ],
+  };
+}
+
+/** The longest heading a live card can wear: Deny armed and a grade held. */
+const REVIEW_HEADING_MAX = Math.max(
+  ...REACTIONS.map(
+    (reaction) =>
+      [TELEGRAM_REVIEW_HEADING, TELEGRAM_REVIEW_ARMED, telegramReviewGradeHeld(reaction)].join(" — ")
+        .length,
+  ),
+);
+
+/**
+ * What a notice can add to a card at most: the blank line and the headline,
+ * each after a newline, then the region (newlines counted), one cut marker and
+ * the overflow line after its newline.
+ */
+const REVIEW_NOTICE_RESERVE =
+  2 +
+  REVIEW_NOTICE_HEADLINE_MAX +
+  REVIEW_CUT_MARKER_MAX +
+  REVIEW_NOTICE_REGION_MAX +
+  REVIEW_CUT_MARKER_MAX +
+  1 +
+  REVIEW_REGION_OVERFLOW.length;
+
+/** The longest hash-only or none payload region, with the newlines around it. */
+const REVIEW_HASH_REGION_MAX = Math.max(
+  ...(
+    [
+      { kind: "hash", hash: "0".repeat(64), reason: "too-long" },
+      { kind: "hash", hash: "0".repeat(64), reason: "unavailable" },
+      { kind: "none" },
+    ] as const
+  ).map((view) => telegramVisibleLength(reviewPayloadLines(view).join("\n")) + 2),
+);
+
+/**
+ * Everything a live card can hold except the payload region: the longest
+ * heading, the frame, the largest notice, and the newlines joining them.
+ */
+function reviewFixedLength(frame: { top: string[]; bottom: string[] }): number {
+  return (
+    REVIEW_HEADING_MAX +
+    1 +
+    telegramVisibleLength([...frame.top, ...frame.bottom].join("\n")) +
+    REVIEW_NOTICE_RESERVE
+  );
+}
+
+/**
+ * How many escaped characters of payload this card can show whole (PR #614
+ * refutation F4): {@link REVIEW_PAYLOAD_BUDGET}, or the room the card's own
+ * rows leave under {@link TELEGRAM_MAX_MESSAGE_CHARS} after the longest heading,
+ * the payload heading and the largest notice a tap can add, whichever is
+ * smaller. Pure over the card, so the view a card is drawn with and the view a
+ * tap records are the same view.
+ */
+export function reviewPayloadBudget(card: ReviewCard): number {
+  const fixed =
+    reviewFixedLength(reviewCardFrame(card)) +
+    // The bytes heading and the newlines around the heading and the payload.
+    TELEGRAM_REVIEW_PAYLOAD_BYTES.length +
+    3;
+  return Math.max(0, Math.min(REVIEW_PAYLOAD_BUDGET, TELEGRAM_MAX_MESSAGE_CHARS - fixed));
+}
+
+/**
+ * The card's message: the rows, whatever notice the last tap produced, and the
+ * keyboard.
+ *
+ * No paragraph explaining the buttons (APRV-302). The heading
+ * ({@link TELEGRAM_REVIEW_HEADING}) is what says a review is not a request, and
+ * the deny latch says itself: the first tap is answered by
+ * {@link TELEGRAM_REVIEW_ARM_TOAST} and the card's own heading becomes
+ * {@link TELEGRAM_REVIEW_ARMED} until it is spent. Four sentences of rules under
+ * every card said the same thing to a reader who had already read them once, and
+ * pushed the rows a review is actually about off the first screen.
+ *
+ * Pure. It carries no approve button: the action ran, and a card that offered
+ * an approve would be presenting a settled fact as a live authorization. A
+ * sample is never delivered as an approval request and never accepts a token.
+ *
+ * It DOES carry a payload region since APRV-480, between the computed rows and
+ * the claimed ones, exactly where a prompt puts its own. Under supervised-retro
+ * the review is the individual approval, so the reviewer reads the bytes that
+ * ran, or is told plainly that the card shows only their hash and why
+ * ({@link reviewPayloadView}). The heading says which, every time.
+ */
+export function renderReviewCard(state: ReviewCardState): {
+  text: string;
+  keyboard: { inline_keyboard: InlineButton[][] } | null;
+} {
+  const card = state.card;
+  const key = card.fields.action_key.value;
+
+  if (state.settled !== null) {
+    return {
+      text: [
+        `<b>${escapeHtml(capReviewText(state.settled.headline, REVIEW_NOTICE_HEADLINE_MAX))}</b>`,
+        `<code>${escapeHtml(capReviewText(key, (REVIEW_CAP_LEVELS[0] as { row: number }).row))}</code>`,
+        "",
+        ...capReviewRegion(state.settled.detail.map(trimNotice), REVIEW_SETTLED_REGION_MAX).map(
+          (entry) => escapeHtml(entry),
+        ),
+      ].join("\n"),
+      keyboard: null,
+    };
+  }
+
+  const frame = reviewCardFrame(card);
   const lines: string[] = [
     `<b>${escapeHtml(
-      state.denyArmed ? `${TELEGRAM_REVIEW_HEADING} — ${TELEGRAM_REVIEW_ARMED}` : TELEGRAM_REVIEW_HEADING,
+      [
+        TELEGRAM_REVIEW_HEADING,
+        ...(state.denyArmed ? [TELEGRAM_REVIEW_ARMED] : []),
+        ...(state.heldReaction === null ? [] : [telegramReviewGradeHeld(state.heldReaction)]),
+      ].join(" — "),
     )}</b>`,
-    `<code>${escapeHtml(key)}</code>`,
-    "",
-    "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
-    ...computedLines.map(render),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
-    ...claimedLines.map(render),
+    ...frame.top,
+    ...reviewPayloadLines(reviewPayloadView(card)),
+    ...frame.bottom,
   ];
 
   if (state.notice !== null) {
     lines.push(
       "",
-      `<b>${escapeHtml(state.notice.headline)}</b>`,
-      ...state.notice.lines.map((entry) => escapeHtml(trimNotice(entry))),
+      `<b>${escapeHtml(capReviewText(state.notice.headline, REVIEW_NOTICE_HEADLINE_MAX))}</b>`,
+      ...capReviewRegion(state.notice.lines.map(trimNotice), REVIEW_NOTICE_REGION_MAX).map((entry) =>
+        escapeHtml(entry),
+      ),
     );
   }
 
@@ -2411,10 +2789,82 @@ export class TelegramApiError extends Error {
      * JSON, or carried no description.
      */
     readonly description: string | null = null,
+    /**
+     * The Bot API's `parameters.retry_after`, in seconds, when the failure
+     * carried one (PR #614 recheck NF-2). Telegram sends it with 429 "Too Many
+     * Requests" and means it: a send before it elapses is refused again.
+     * `null` when the body named none.
+     */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "TelegramApiError";
   }
+}
+
+/**
+ * The Bot API refusals that are a fact about the message itself (PR #614
+ * recheck NF-2). Each is a 400 whose `description` says the text, its markup
+ * or its keyboard is unacceptable, so resending the same card meets the same
+ * refusal however long the sender waits:
+ *
+ * - `message is too long`: the text is over 4096 characters after entities;
+ * - `can't parse entities`: the HTML the card was drawn with does not parse;
+ * - `message text is empty` / `text must be non-empty`: nothing to send;
+ * - `reply markup is too long`: the inline keyboard is over its byte limit;
+ * - `BUTTON_DATA_INVALID`: a button's callback data is over 64 bytes or empty;
+ * - `ENTITIES_TOO_LONG` / `entities too long`: too many formatting entities.
+ *
+ * Deliberately absent, because the card cannot cause them and a retry can
+ * clear them: `chat not found`, `bot was blocked`, `not enough rights` (the
+ * chat's state, which a human repairs), every 429, every 5xx, every timeout and
+ * network failure.
+ */
+const TELEGRAM_DETERMINISTIC_SEND_REFUSALS: readonly RegExp[] = [
+  /message is too long/iu,
+  /can't parse entities/iu,
+  /message text is empty|text must be non-empty/iu,
+  /reply markup is too long/iu,
+  /BUTTON_DATA_INVALID/u,
+  /ENTITIES_TOO_LONG|entities too long/iu,
+];
+
+/**
+ * Whether a failed send is the Bot API refusing the message itself, so that
+ * sending the same message again can only fail again (PR #614 recheck NF-2).
+ *
+ * Only an HTTP 400 whose description matches
+ * {@link TELEGRAM_DETERMINISTIC_SEND_REFUSALS} qualifies. Anything else, an
+ * error that is not a {@link TelegramApiError} included, is treated as
+ * transient, which is the direction that keeps a card in front of the
+ * approver: a transient failure misread as deterministic hides a sample from
+ * the phone, and the converse costs a bounded number of retries.
+ */
+export function isDeterministicSendRefusal(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.status === 400 &&
+    cause.description !== null &&
+    TELEGRAM_DETERMINISTIC_SEND_REFUSALS.some((pattern) => pattern.test(cause.description as string))
+  );
+}
+
+/**
+ * The wait, in milliseconds, a failed call's `retry_after` asks for, or `null`
+ * when it named none (PR #614 recheck NF-2).
+ */
+export function retryAfterMsOf(cause: unknown): number | null {
+  if (!(cause instanceof TelegramApiError) || cause.retryAfterSeconds === null) return null;
+  return cause.retryAfterSeconds * 1000;
+}
+
+/** `parameters.retry_after` from a parsed Bot API body, when it is a positive integer. */
+function retryAfterFrom(parsed: unknown): number | null {
+  if (parsed === null || typeof parsed !== "object") return null;
+  const parameters = (parsed as Record<string, unknown>)["parameters"];
+  if (parameters === null || typeof parameters !== "object") return null;
+  const value = (parameters as Record<string, unknown>)["retry_after"];
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 /**
@@ -2959,8 +3409,9 @@ export class TelegramChannel implements TestableChannel {
    * A unit like a checkpoint prompt: one thing to read, never grouped into a
    * digest, and never delivered through {@link notify} — a digest is a set of
    * similar pending REQUESTS decided together, and a sample is neither pending
-   * nor a request. It sends ONE message: no payload region, and a keyboard
-   * whose six buttons collect a verdict and a grade and mint nothing.
+   * nor a request. It sends ONE message: the rows, the payload whole or by hash
+   * (APRV-480, never split across messages), and a keyboard whose six buttons
+   * collect a verdict and a grade and mint nothing.
    *
    * Refuses when no handler is registered, rather than sending a dead button.
    */
@@ -2977,6 +3428,9 @@ export class TelegramChannel implements TestableChannel {
       card,
       nonce,
       denyArmed: false,
+      heldReaction: null,
+      armedBy: null,
+      heldBy: null,
       settled: null,
       notice: null,
       awaitingNote: null,
@@ -4865,29 +5319,78 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    // The first Deny tap arms and writes nothing. Stated on the card, so the
-    // approver reads the state rather than inferring it from a toast.
-    if (tap.choice === "deny" && !state.denyArmed) {
-      state.denyArmed = true;
-      state.notice = null;
-      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ARM_TOAST);
+    // PR #614 refutation F3. An armed Deny and a held grade are one account's
+    // unfinished review. A tap that would finish either (any verdict, or a
+    // grade landing on an armed Deny) from a different account is refused on
+    // the card, so a record never carries a grade or a denial its reviewer did
+    // not tap. A grade tapped with nothing armed only replaces the held grade
+    // and is not refused: it finishes nothing, and its new holder is the tapper.
+    const tapper = sender === undefined ? null : sender.id;
+    const finishes = tap.choice === "ok" || tap.choice === "deny" || state.denyArmed;
+    const othersArm = state.denyArmed && state.armedBy !== tapper;
+    const othersGrade = state.heldReaction !== null && state.heldBy !== tapper;
+    if (finishes && (othersArm || (othersGrade && (tap.choice === "ok" || tap.choice === "deny")))) {
+      state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [TELEGRAM_REVIEW_OTHER_SENDER] };
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_OTHER_SENDER);
       await this.redrawReview(state);
       return;
     }
 
-    const verdict: ReviewVerdict = state.denyArmed ? "denied" : "ok";
+    // The first Deny tap arms and writes nothing. Stated on the card, so the
+    // approver reads the state rather than inferring it from a toast.
+    //
+    // PR #614 recheck NF-1: arming is earned the way a held grade is. The tap
+    // goes to the runtime with NO verdict, and the card arms only when the
+    // answer is `verdict-required`, which the runtime gives only after the
+    // sender and the class's roster have passed. An unmapped or off-roster
+    // account's Deny is refused on the card with its own code and arms
+    // nothing, so it cannot leave a half-finished denial that blocks the
+    // approvers' taps.
+    if (tap.choice === "deny" && !state.denyArmed) {
+      const answered = await this.recordReview(
+        state,
+        {
+          sampleSeq: state.card.sampleSeq,
+          ...(sender === undefined ? {} : { sender }),
+        },
+        result,
+        { kind: "deny", by: tapper },
+      );
+      await this.safeAnswer(
+        callbackId,
+        state.denyArmed ? TELEGRAM_REVIEW_ARM_TOAST : answered?.toast ?? TELEGRAM_NOT_RECORDED,
+      );
+      return;
+    }
+
     if (tap.choice === "ok" || tap.choice === "deny") {
       // `ok` with deny armed is a correction, and it disarms: a human who
       // reached for Deny and then chose OK meant OK, and nothing was written in
       // between for the change of mind to contradict.
       const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
       state.denyArmed = chosen === "denied";
+      if (!state.denyArmed) state.armedBy = null;
+      // APRV-482: a grade held from before the verdict rides with it, and a
+      // grade that wants words asks for them now, exactly as a grade tapped
+      // after an armed Deny always has. The pair core refuses outright is sent
+      // straight through, so no note is collected for a record that will not
+      // exist.
+      const held = state.heldReaction;
+      if (held !== null) {
+        const conflicts = chosen === "denied" && (held === "liked" || held === "loved");
+        if (!conflicts && (held === "loved" || held === "disliked")) {
+          await this.safeAnswer(callbackId, TELEGRAM_REVIEW_NOTE_TOAST);
+          await this.askForNote(state, chosen, held, sender);
+          return;
+        }
+      }
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
       await this.recordReview(
         state,
         {
           sampleSeq: state.card.sampleSeq,
           verdict: chosen,
+          ...(held === null ? {} : { reaction: held }),
           ...(sender === undefined ? {} : { sender }),
         },
         result,
@@ -4896,6 +5399,27 @@ export class TelegramChannel implements TestableChannel {
     }
 
     const reaction = tap.choice;
+    if (!state.denyArmed) {
+      // APRV-482. A grade with no verdict is not an approval. The card holds
+      // the grade (process memory, stated in its heading) and the tap still
+      // goes to the runtime with NO verdict, so the refusal on the card is the
+      // core's own `verdict-required` and its words, and the operator's stderr
+      // says the same. No note is asked for: words for a record that is about
+      // to be refused would be attention spent on nothing.
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
+      await this.recordReview(
+        state,
+        {
+          sampleSeq: state.card.sampleSeq,
+          reaction,
+          ...(sender === undefined ? {} : { sender }),
+        },
+        result,
+        { kind: "grade", reaction, by: tapper },
+      );
+      return;
+    }
+    const verdict: ReviewVerdict = "denied";
     // The two grades that require the human's own words ask for them FIRST, and
     // nothing is appended until the reply arrives. The exception is the pair
     // `core/audit.ts` refuses outright: a denied review that says liked or
@@ -5050,13 +5574,28 @@ export class TelegramChannel implements TestableChannel {
     state: ReviewCardState,
     tap: ReviewTap,
     result: TelegramPollResult,
-  ): Promise<void> {
+    /**
+     * A lone grade to hold, or a Deny to arm, if the runtime answers
+     * `verdict-required` (PR #614 refutation N6/F3, recheck NF-1): only then
+     * has the tapper passed the sender and roster checks, so only then is the
+     * half-finished review theirs to finish.
+     */
+    hold?:
+      | { kind: "grade"; reaction: Reaction; by: string | null }
+      | { kind: "deny"; by: string | null },
+  ): Promise<ReviewTapResponse | null> {
     const handler = this.reviewHandler;
-    if (handler === null) return;
+    if (handler === null) return null;
+
+    // APRV-481: whether the bytes were on this card is the card's own fact,
+    // decided by the same pure view that drew it, so the record's payload hash
+    // can never name more than the reviewer was shown.
+    const view = reviewPayloadView(state.card);
+    const sent: ReviewTap = view.kind === "bytes" ? { ...tap, payloadHash: view.hash } : tap;
 
     let response: ReviewTapResponse;
     try {
-      response = await handler(tap);
+      response = await handler(sent);
     } catch (cause) {
       state.notice = { headline: TELEGRAM_NOT_RECORDED, lines: [TELEGRAM_HANDLER_FAILED] };
       await this.redrawReview(state);
@@ -5064,12 +5603,15 @@ export class TelegramChannel implements TestableChannel {
     }
 
     this.counters.reviews += 1;
-    result.reviews.push({ tap, ok: response.ok });
+    result.reviews.push({ tap: sent, ok: response.ok });
 
     if (response.ok) {
       state.settled = { headline: response.headline, detail: response.detail };
       state.notice = null;
       state.denyArmed = false;
+      state.heldReaction = null;
+      state.armedBy = null;
+      state.heldBy = null;
       this.reviewNonces.delete(state.nonce);
       if (state.awaitingNote !== null) {
         this.reviewNotePrompts.delete(state.awaitingNote.promptId);
@@ -5077,8 +5619,22 @@ export class TelegramChannel implements TestableChannel {
       }
     } else {
       state.notice = { headline: response.headline, lines: response.detail };
+      if (hold !== undefined && response.code === "verdict-required") {
+        if (hold.kind === "grade") {
+          state.heldReaction = hold.reaction;
+          state.heldBy = hold.by;
+        } else {
+          // The armed state is the card's message; the refusal that earned it
+          // is the runtime's word for "a verdict is still needed", which the
+          // armed heading already says.
+          state.denyArmed = true;
+          state.armedBy = hold.by;
+          state.notice = null;
+        }
+      }
     }
     await this.redrawReview(state);
+    return response;
   }
 
   /** One `editMessageText` that replaces a review card's text and its keyboard. */
@@ -5302,23 +5858,31 @@ export class TelegramChannel implements TestableChannel {
    * reporting a failure and a second one thrown from the diagnostic would
    * replace the real reason with a worse one.
    */
-  private async describeFailure(response: { text(): Promise<string> }): Promise<string | null> {
+  private async describeFailure(
+    response: { text(): Promise<string> },
+  ): Promise<{ description: string | null; retryAfterSeconds: number | null }> {
+    const nothing = { description: null, retryAfterSeconds: null };
     let body: string;
     try {
       body = await response.text();
     } catch {
-      return null;
+      return nothing;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(body);
     } catch {
-      return null;
+      return nothing;
     }
-    if (parsed === null || typeof parsed !== "object") return null;
+    if (parsed === null || typeof parsed !== "object") return nothing;
     const description = (parsed as Record<string, unknown>)["description"];
-    if (typeof description !== "string" || description.length === 0) return null;
-    return this.redact(description);
+    return {
+      description:
+        typeof description !== "string" || description.length === 0 ? null : this.redact(description),
+      // PR #614 recheck NF-2: a 429 says how long to wait, and the review
+      // walkthrough honours it rather than spending its retry budget early.
+      retryAfterSeconds: retryAfterFrom(parsed),
+    };
   }
 
   /**
@@ -5353,7 +5917,7 @@ export class TelegramChannel implements TestableChannel {
         // was thrown out of were the same "HTTP 400" on the operator's
         // terminal. Read best effort — a status is still worth reporting when
         // the body is missing, truncated, or not JSON at all.
-        const description = await this.describeFailure(response);
+        const { description, retryAfterSeconds } = await this.describeFailure(response);
         throw new TelegramApiError(
           description === null
             ? `${method}: HTTP ${response.status}`
@@ -5361,6 +5925,7 @@ export class TelegramChannel implements TestableChannel {
           method,
           response.status,
           description,
+          retryAfterSeconds,
         );
       }
       raw = await response.text();
@@ -5396,6 +5961,7 @@ export class TelegramChannel implements TestableChannel {
         // failure took (APRV-277).
         null,
         description,
+        retryAfterFrom(envelope),
       );
     }
     return envelope["result"] as T;
