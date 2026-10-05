@@ -66,7 +66,7 @@
  *    nothing else from the file, and only then unlinks the stale name.
  * 7. **A termination signal does not leave a lock behind.**
  *    {@link guardTerminationWhileLocked} is installed before a lockfile is
- *    created and held until it is removed: for SIGTERM, SIGINT and SIGHUP with
+ *    created, and before a reclaim's claim, and held until the lock is removed: for SIGTERM, SIGINT and SIGHUP with
  *    no listener, a listener that re-raises the signal with its default
  *    disposition once the lock is released, so the process still dies of it.
  *    SIGKILL cannot be caught, which is what 1 to 6 are for.
@@ -748,12 +748,17 @@ function claim(lockPath: string, seen: SeenLock, stale: string): Claim {
 /**
  * The take: write this process's complete lockfile under a name only it uses,
  * then `rename(2)` it over the lock's path, which holds the claimed file. The
- * signal guard is installed before the file is created and handed to the
- * caller with the lock. On failure the claim is released, so the next writer
- * may claim again.
+ * signal guard was installed by the caller before its claim (the claim is the
+ * reclaim's first durable state) and is handed back with the lock. On failure
+ * the claim is released, so the next writer may claim again, and the guard
+ * with it.
  */
-function take(lockPath: string, op: LockOp, stale: string): { ok: true; own: OwnLock; releaseGuard: () => void } | { ok: false; why: string } {
-  const releaseGuard = guardTerminationWhileLocked();
+function take(
+  lockPath: string,
+  op: LockOp,
+  stale: string,
+  releaseGuard: () => void,
+): { ok: true; own: OwnLock; releaseGuard: () => void } | { ok: false; why: string } {
   const temporary = `${lockPath}.take.${String(process.pid)}.${randomBytes(8).toString("hex")}`;
   try {
     const own = createLockFile(temporary, op);
@@ -819,7 +824,15 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
     return { kind: "kept", why: `${note.why}, but the log itself is absent, so there is nothing a reclaim record could follow; a human runs \`${unlock}\`` };
   }
   step("judged");
+  // The claim is the reclaim's first durable state: a termination signal from
+  // here on is held until the lock this reclaim takes is released, or settled
+  // at once on every path that takes nothing.
+  const releaseGuard = guardTerminationWhileLocked();
   const claimed = claim(lockPath, entry.seen, note.stale);
+  if (claimed.kind !== "claimed") {
+    releaseGuard();
+    settleTerminationGuards();
+  }
   switch (claimed.kind) {
     case "moved":
       return { kind: "retry", why: `${lockfile} changed hands while it was being judged` };
@@ -833,7 +846,7 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
       break;
   }
   step("claimed");
-  const taken = take(lockPath, op, note.stale);
+  const taken = take(lockPath, op, note.stale, releaseGuard);
   if (!taken.ok) return { kind: "kept", why: `${note.why}, but this writer could not take the lock (${taken.why})` };
   return { kind: "taken", own: taken.own, releaseGuard: taken.releaseGuard, note };
 }
@@ -892,6 +905,13 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
     why = verdict.why;
   }
   const note = noteFor(lockPath, holder, entry.seen, now, "operator-cleared", why);
+  // As in a writer's reclaim: guarded from the claim on.
+  const releaseGuard = guardTerminationWhileLocked();
+  const refuse = (text: string): UnlockOutcome => {
+    releaseGuard();
+    settleTerminationGuards();
+    return { kind: "refused", why: text };
+  };
   let claimed = claim(lockPath, entry.seen, note.stale);
   if (claimed.kind === "occupied") {
     // A dead reclaimer's claim, or a planted file: the human says no writer is
@@ -899,9 +919,9 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
     unlinkQuietly(note.stale);
     claimed = claim(lockPath, entry.seen, note.stale);
   }
-  if (claimed.kind === "moved") return { kind: "refused", why: `${lockfile} changed hands while it was being read: a writer is running; nothing was touched` };
-  if (claimed.kind !== "claimed") return { kind: "refused", why: `the claim on ${lockfile} failed (${claimed.kind === "failed" ? claimed.code : "its stale name is taken"})` };
-  const taken = take(lockPath, "hold", note.stale);
+  if (claimed.kind === "moved") return refuse(`${lockfile} changed hands while it was being read: a writer is running; nothing was touched`);
+  if (claimed.kind !== "claimed") return refuse(`the claim on ${lockfile} failed (${claimed.kind === "failed" ? claimed.code : "its stale name is taken"})`);
+  const taken = take(lockPath, "hold", note.stale, releaseGuard);
   if (!taken.ok) return { kind: "refused", why: `the lock could not be taken (${taken.why})` };
   return { kind: "taken", own: taken.own, releaseGuard: taken.releaseGuard, note };
 }

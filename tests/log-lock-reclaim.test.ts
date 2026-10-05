@@ -790,8 +790,10 @@ test("a SIGTERM while a process holds the lock mid-append: the append finishes, 
 for (const [step, label, stale] of [
   ["after-open", "between the create and the holder record", false],
   ["before-take", "between a reclaim's own lockfile and its take", true],
+  // R3-1: the claim is the reclaim's first durable state, so the guard covers it.
+  ["claimed", "between a reclaim's claim and its take", true],
 ] as const) {
-  test(`a SIGTERM ${label} (the create's own window) leaves no lockfile, and the process dies of it once the lock is released`, { skip: !POSIX }, () => {
+  test(`a SIGTERM ${label} leaves no lockfile and no stale name, and the process dies of it once the lock is released`, { skip: !POSIX }, () => {
     const logPath = freshLog();
     if (stale) writeLock(logPath, holder({ pid: deadPid() }));
     counter += 1;
@@ -815,7 +817,7 @@ for (const [step, label, stale] of [
     assert.equal(existsSync(`${logPath}.lock`), false, "no lockfile is left behind");
     assert.equal(readFileSync(result, "utf8"), "true", "the append under the lock finished first");
     assert.deepEqual(events(logPath), stale ? ["task.registered", "audit.lock_reclaimed", "approval.granted"] : ["task.registered", "approval.granted"]);
-    assert.deepEqual(residue(logPath), []);
+    assert.deepEqual(residue(logPath), [], "no stale name or take file is left behind");
     assert.equal(verify(logPath).status, "clean");
   });
 }
