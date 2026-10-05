@@ -6983,6 +6983,36 @@ test("APRV-324: a mapping edited and not attested records no review", async () =
   assertClean(world.unit);
 });
 
+/** The mapped policy with a class roster naming only `carter` (APRV-483). */
+const REVIEW_POLICY_ROSTER = REVIEW_POLICY_MAPPED.replace(
+  "  files.write.*:\n    autonomy: supervised\n",
+  "  files.write.*:\n    autonomy: supervised\n    approvers: [carter]\n",
+);
+
+test("APRV-483: a mapped reviewer off the class roster is refused actor-not-approver on the card", async () => {
+  assert.notEqual(REVIEW_POLICY_ROSTER, REVIEW_POLICY_MAPPED, "the roster fixture did not apply");
+  const world = sampledWorld(1, REVIEW_POLICY_ROSTER);
+  const { channel, err } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // Dana is a mapped approver of the policy, and not on this class's roster.
+  const refused = await tapReview(channel, "ok", CHAT, DANA_TG);
+  assert.equal(refused.reviews[0]?.ok, false);
+  assert.deepEqual(reviewsIn(world), [], "a review off the roster was recorded");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("actor-not-approver"), `the code is not on the card: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused reviewer took the buttons away");
+  assert.ok(err.some((line) => line.includes("actor-not-approver")), "the operator was not told");
+
+  // Carter is on it, and the same card records.
+  await tapReview(channel, "ok", CHAT, CARTER_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:carter");
+  assertClean(world.unit);
+});
+
 test("APRV-324: a note prompt answers only to the account that armed it", async () => {
   const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
   const { channel } = reviewChannelFor(world);

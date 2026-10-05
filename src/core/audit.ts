@@ -73,6 +73,7 @@
 
 import { tick, type ClockOptions } from "./clock.js";
 import { findDeclaration, indexDeclarations } from "./execute.js";
+import { namesApprover } from "./gate.js";
 import {
   appendEvent,
   type AppendError,
@@ -104,6 +105,16 @@ const HUMAN_ACTOR = /^human:.+/u;
 export const AUDIT_REFUSAL_CODES = [
   /** Review was attempted by an actor that is not `human:<id>`. */
   "actor-not-human",
+  /**
+   * The reviewer is a person the class's `approvers` roster does not name
+   * (APRV-483). Same comparison and same code as a grant's (`core/gate.ts`
+   * `namesApprover`), because under supervised-retro a review IS the approval,
+   * and a roster that bound the grant and not the review would be a roster the
+   * retrospective path walks around, including through `--as`. A rule that
+   * names no roster restricts nobody, exactly as for grants. Evaluated once the
+   * sample (and so its class) is located; nothing is appended.
+   */
+  "actor-not-approver",
   /** No `audit.sampled` record matches the subject named. */
   "not-sampled",
   /** That sample already has a later `audit.reviewed`. */
@@ -866,6 +877,17 @@ export function reviewSample(
     );
   }
 
+  // APRV-483. The roster check a grant makes, made of the reviewer. The class
+  // and reversibility come from the registration (never from the review or the
+  // execution's own payload, global invariant 4), failing that from the
+  // runtime-written sample; the rule is the single winner `resolve` picks, as
+  // for a grant; and a rule with no `approvers` restricts nobody. The policy is
+  // read as `sampleSupervised` reads it, without an attestation requirement,
+  // because review never required one; the roster in force is therefore the
+  // live file's, which a grant reaches only after its attestation check.
+  const rosterRefusal = reviewerRoster(read.records, subject, actor, options);
+  if (rosterRefusal !== null) return rosterRefusal;
+
   // APRV-481. The surface's word that it showed the bytes is checked against
   // the binding the log holds, never copied on trust (SPEC.md §11.1 invariant 4
   // in spirit: a field that claims more scrutiny than happened is the same
@@ -949,6 +971,40 @@ export function reviewSample(
   const obliged = appendObligation(logPath, read.records, subject, result.record, options);
   if (!obliged.ok) return obliged;
   return { ok: true, record: result.record, subject, obligation: obliged.record };
+}
+
+/**
+ * `actor-not-approver` when the class's roster does not name `actor`, else
+ * `null` (APRV-483).
+ */
+function reviewerRoster(
+  records: readonly EventRecord[],
+  subject: SampledSubject,
+  actor: string,
+  options: AuditOptions,
+): AuditRefusal | null {
+  const declared =
+    subject.actionKey === null ? null : findDeclaration(records as EventRecord[], subject.actionKey);
+  const sampleRecord = records.find((record) => record.seq === subject.seq);
+  const sampledClass = sampleRecord === undefined ? null : stringOrNull(payloadOf(sampleRecord)["class"]);
+  const cls = declared?.class ?? sampledClass ?? "";
+  const load = policyFor(options, process.cwd());
+  const resolution = resolve(
+    load,
+    cls,
+    declared?.reversible === null || declared?.reversible === undefined
+      ? {}
+      : { reversible: declared.reversible },
+  );
+  const approvers = resolution.approvers;
+  if (approvers === null || namesApprover(approvers, actor)) return null;
+  return refuse(
+    "actor-not-approver",
+    `${actor} is not named in the approvers list for class ${cls}: the rule ${
+      resolution.matched === null ? "in force" : `\`${resolution.matched.pattern}\``
+    } names ${approvers.length === 0 ? "nobody" : approvers.map((name) => `\`${name}\``).join(", ")}. Under supervised-retro a review is the approval, so it is held to the roster a grant is. Ask a named approver to review it, or amend the policy and re-attest. Nothing was appended.`,
+    { seq: subject.seq },
+  );
 }
 
 /**

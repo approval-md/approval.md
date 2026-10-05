@@ -269,6 +269,9 @@ test("the audit refusal-code union is frozen public API", async () => {
     [...AUDIT_REFUSAL_CODES],
     [
       "actor-not-human",
+      // APRV-483. Beside the identity code it refines, and spelled as the
+      // gate spells it: a review is held to the roster a grant is.
+      "actor-not-approver",
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
@@ -1450,6 +1453,94 @@ test("approval audit review on an unsampled action refuses with exit 1", async (
   const body = JSON.parse(run.err) as { ok: boolean; error: { code: string } };
   assert.equal(body.ok, false);
   assert.equal(body.error.code, "not-sampled");
+});
+
+// ===========================================================================
+// The roster (APRV-483)
+// ===========================================================================
+
+/** `unit`'s policy with a roster: `carter` on `files.write.*`, `bob` declared but not on it. */
+function withRoster(unit: Case, roster: boolean): void {
+  const text = readFileSync(unit.policyPath, "utf8")
+    .replace(
+      "classes:\n",
+      ["approvers:", "  carter:", "    channels: [cli]", "  bob:", "    channels: [cli]", "classes:", ""].join("\n"),
+    )
+    .replace(
+      "  files.write.*:\n    autonomy: supervised\n",
+      `  files.write.*:\n    autonomy: supervised\n${roster ? "    approvers: [carter]\n" : ""}`,
+    );
+  writeFileSync(unit.policyPath, text, "utf8");
+  const loaded = loadPolicy({ file: unit.policyPath });
+  assert.equal(loaded.ok, true, JSON.stringify(loaded));
+  // Re-attested, so the supervised start below runs under the edited bytes.
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(1)).ok, true);
+}
+
+test("APRV-483: a reviewer the class's roster does not name is refused actor-not-approver", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const stranger = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(stranger.ok, false, "a non-roster reviewer was recorded");
+  if (!stranger.ok) assert.equal(stranger.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused reviewer wrote to the log");
+
+  const named = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+test("APRV-483: --as cannot name a reviewer off the roster; it can name one on it", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const asBob = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", unit.policyPath, "--as", "human:bob", "--json",
+  ]);
+  assert.equal(asBob.code, 1, asBob.err);
+  assert.equal((JSON.parse(asBob.err) as { error: { code: string } }).error.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "--as off the roster wrote to the log");
+
+  const asCarter = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", unit.policyPath, "--as", "human:carter", "--json",
+  ]);
+  assert.equal(asCarter.code, 0, asCarter.err);
+  assertClean(unit);
+});
+
+test("APRV-483: a rule that names no roster restricts no reviewer, as for grants", async () => {
+  const unit = ready();
+  withRoster(unit, false);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const result = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  assertClean(unit);
 });
 
 // ===========================================================================

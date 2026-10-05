@@ -17,6 +17,14 @@ before a tag.
 
 ### Channels
 
+- **A review is held to the class's approvers roster (APRV-483).**
+  `reviewSample` resolves the sampled action's class (from its registration)
+  under the policy and, where the winning rule names `approvers`, refuses any
+  other reviewer with the new audit code `actor-not-approver`, using the
+  gate's own `namesApprover` (now exported). It binds the CLI `--as` path and
+  sender-mapped Telegram taps alike; a rule with no roster restricts nobody.
+  Behavior change: a review by a person off a named roster no longer records.
+
 - **A review verdict needs an explicit affirmative (APRV-482).** `reviewSample`
   no longer defaults `verdict` to `ok`; a review that names none is refused
   with the new audit code `verdict-required` before the log is read. `approval

@@ -1310,7 +1310,8 @@ Flags:
 
 Refuses (exit 1), log untouched: actor-not-human, verdict-required (no --ok or
 --deny), note-required, reaction-conflicts-verdict (--deny + liked/loved),
-not-sampled, already-reviewed, ambiguous-subject. No attestation is required.
+not-sampled, already-reviewed, ambiguous-subject, actor-not-approver (the
+reviewer, --as included, is off the class's approvers roster). No attestation.
 --deny ALSO appends reconciliation.required, shaped by the DECLARED reversible.
 JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}

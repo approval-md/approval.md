@@ -3538,6 +3538,18 @@ carries in the open.
 
 ## audit review
 
+**The reviewer must be on the class's roster (APRV-483).** Where the policy rule
+that resolves the sampled action's class names `approvers`, the reviewer must be
+one of them, compared exactly as a grant's approver is (`namesApprover` in
+`core/gate.ts`): a bare id on the roster matches `human:<id>`. Anyone else is
+refused `actor-not-approver` (exit 1) and nothing is appended. This binds every
+surface, because the check is in `reviewSample` itself: `--as human:<id>` at a
+terminal and a sender-mapped tap on a Telegram card are held to the same list.
+A rule that names no `approvers` restricts nobody, exactly as for grants. The
+class comes from the action's registration, and the roster is read from the
+live policy file without the attestation check a grant makes first (review has
+never required attestation).
+
 Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
 carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes
 nothing: under supervised-retro the review counts as the approval, and an
@@ -4431,7 +4443,10 @@ reviewer has to be able to say which half they meant.
 
 Every append goes through the same `reviewSample` that `approval audit review`
 calls, recorded against the human identity this listener was configured with
-(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. So `approval
+(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. That identity,
+or the person a sender mapping resolves a tap to, must be on the class's
+`approvers` roster where the rule names one, or the card shows
+`actor-not-approver` and keeps its buttons (APRV-483). So `approval
 feedback` shows a reaction given on a card exactly as one given at a terminal:
 same record, same `human:<id>`, same everything.
 
