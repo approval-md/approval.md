@@ -3577,7 +3577,10 @@ Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
 carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes
 nothing: under supervised-retro the review counts as the approval, and an
 approval is something the reviewer says, never a default. Both flags together
-is a usage error (exit 2).
+is a usage error (exit 2). The verdict is judged after the roster (PR #614
+refutation N6): a reviewer off the roster is told `actor-not-approver` whether
+or not they gave a verdict, and a grade with no verdict is not judged for its
+note until the verdict comes.
 
 `--note` is optional — unlike `execution resolve`, this event records only that a
 person looked, and the runtime is not relying on the note for a fact it does not

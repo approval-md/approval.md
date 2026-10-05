@@ -3304,6 +3304,7 @@ export function reviewHandlerFor(
         headline: TELEGRAM_NOT_RECORDED,
         detail: [refusedDecisionLine(resolved.code)],
         toast: "Not recorded.",
+        code: resolved.code,
       };
     }
 
@@ -3356,6 +3357,7 @@ export function reviewHandlerFor(
         headline: TELEGRAM_NOT_RECORDED,
         detail: [result.code, result.message],
         toast: "Not recorded — the card says why.",
+        code: result.code,
       };
     }
 

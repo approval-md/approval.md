@@ -7193,6 +7193,16 @@ test("APRV-483: a mapped reviewer off the class roster is refused actor-not-appr
   const { channel, err } = reviewChannelFor(world);
   const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
+  // PR #614 N6: Dana's lone grade is answered with the roster, not with
+  // verdict-required, and the card does not hold it, so it cannot block anyone.
+  const graded = await tapReview(channel, "liked", CHAT, DANA_TG);
+  assert.equal(graded.reviews[0]?.ok, false);
+  const afterGrade = editsFor(deliveryId);
+  const gradeText = (afterGrade[afterGrade.length - 1] as { text: string }).text;
+  assert.ok(gradeText.includes("actor-not-approver"), `a lone grade was not told the roster: ${gradeText}`);
+  assert.ok(!gradeText.includes("verdict-required"), "the off-roster grade was told verdict-required first");
+  assert.ok(!gradeText.includes("GRADE LIKED HELD"), "the card held a grade the runtime refused");
+
   // Dana is a mapped approver of the policy, and not on this class's roster.
   const refused = await tapReview(channel, "ok", CHAT, DANA_TG);
   assert.equal(refused.reviews[0]?.ok, false);

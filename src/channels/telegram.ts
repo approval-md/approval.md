@@ -2068,6 +2068,15 @@ export interface ReviewTapResponse {
   detail: string[];
   /** The toast, which Telegram caps at a short sentence. */
   toast: string;
+  /**
+   * The refusal code, when the runtime refused (PR #614 refutation N6/F3).
+   * The card holds a lone grade only when this is `verdict-required`: the
+   * runtime judges the verdict after the sender and the roster, so that code
+   * says the tapper may review and lacks only the verdict. A grade refused for
+   * anything else (an unmapped sender, a reviewer off the roster) is not held,
+   * so it cannot block the next account's tap.
+   */
+  code?: string;
 }
 
 export type ReviewTapHandler = (tap: ReviewTap) => ReviewTapResponse | Promise<ReviewTapResponse>;
@@ -5001,8 +5010,6 @@ export class TelegramChannel implements TestableChannel {
       // core's own `verdict-required` and its words, and the operator's stderr
       // says the same. No note is asked for: words for a record that is about
       // to be refused would be attention spent on nothing.
-      state.heldReaction = reaction;
-      state.heldBy = tapper;
       await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
       await this.recordReview(
         state,
@@ -5012,6 +5019,7 @@ export class TelegramChannel implements TestableChannel {
           ...(sender === undefined ? {} : { sender }),
         },
         result,
+        { reaction, by: tapper },
       );
       return;
     }
@@ -5170,6 +5178,12 @@ export class TelegramChannel implements TestableChannel {
     state: ReviewCardState,
     tap: ReviewTap,
     result: TelegramPollResult,
+    /**
+     * A lone grade to hold if the runtime answers `verdict-required` (PR #614
+     * refutation N6/F3): only then has the tapper passed the sender and roster
+     * checks, so only then is the grade theirs to finish.
+     */
+    hold?: { reaction: Reaction; by: string | null },
   ): Promise<void> {
     const handler = this.reviewHandler;
     if (handler === null) return;
@@ -5206,6 +5220,10 @@ export class TelegramChannel implements TestableChannel {
       }
     } else {
       state.notice = { headline: response.headline, lines: response.detail };
+      if (hold !== undefined && response.code === "verdict-required") {
+        state.heldReaction = hold.reaction;
+        state.heldBy = hold.by;
+      }
     }
     await this.redrawReview(state);
   }

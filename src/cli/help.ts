@@ -1299,6 +1299,7 @@ Usage:
   approval audit review <seq|action-key> (--ok | --deny) [--note "<text>"]
                         [--reaction <w>] [--as human:<id>] [--log <path>] [--json]
 
+Arguments:
   <seq|action-key> SEQ of the audit.sampled record, or a key with 1 open sample
 Flags:
   --ok             this action should have happened. One of --ok/--deny REQUIRED
@@ -1308,11 +1309,10 @@ Flags:
   --as human:<id>  the reviewer; else APPROVAL_HUMAN. HUMAN-ONLY
   --log <path> / --json / -h, --help   the log / machine-readable output / help
 
-Refuses (exit 1), log untouched: actor-not-human, verdict-required (no --ok or
---deny), note-required, reaction-conflicts-verdict (--deny + liked/loved),
-not-sampled, already-reviewed, ambiguous-subject, actor-not-approver (the
-reviewer, --as included, is off the class's roster), policy-not-attested.
---deny ALSO appends reconciliation.required, shaped by the DECLARED reversible.
+Refuses (exit 1), log untouched: actor-not-human, note-required, not-sampled,
+reaction-conflicts-verdict (--deny + liked/loved), already-reviewed,
+ambiguous-subject, actor-not-approver (reviewer or --as off the class's roster),
+policy-not-attested, policy-invalid, then verdict-required (no --ok or --deny).
 JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

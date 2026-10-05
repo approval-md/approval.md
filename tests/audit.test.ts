@@ -1775,6 +1775,35 @@ test("PR #614 refutation F5: every review the runtime writes says its verdict wa
   assertClean(unit);
 });
 
+test("PR #614 refutation N7: a key two tasks declare is refused, never reviewed under a guessed roster", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  // Only a tampered log reaches this: registration refuses the collision, so
+  // the second declaration goes through the writer directly, as tampering would.
+  const registered = records(unit).find((record) => record.event === "task.registered") as EventRecord;
+  const collided = appendEvent(unit.logPath, {
+    ts: at(5),
+    event: "task.registered",
+    actor: registered.actor,
+    task: "task-043",
+    ...(registered.payload === undefined ? {} : { payload: registered.payload }),
+  });
+  assert.equal(collided.ok, true, JSON.stringify(collided));
+  const before = records(unit).length;
+  const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(6)),
+    verdict: "ok",
+  });
+  assert.equal(result.ok, false, "a review was recorded under a collided declaration");
+  if (!result.ok) {
+    assert.equal(result.code, "actor-not-approver");
+    assert.match(result.message, /more than one task/u);
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+});
+
 test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {
   const unit = ready();
   withRoster(unit, true);
@@ -1819,13 +1848,6 @@ test("APRV-481/483 refutation: a sample that names no subject hash or no class i
   assert.equal(classless.ok, false, "a classless sample let an unrostered reviewer through");
   if (!classless.ok) assert.equal(classless.code, "actor-not-approver");
 
-  // A verdict that is neither word is no verdict, not `ok`.
-  const garbled = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, "human:carter", null, { ...unit.options,
-    verdict: "maybe" as unknown as "ok",
-  });
-  assert.equal(garbled.ok, false);
-  if (!garbled.ok) assert.equal(garbled.code, "verdict-required");
-
   // An empty roster names nobody (the schema's minItems 1 makes it unreachable
   // from a valid policy; the comparison itself is the backstop).
   assert.equal(namesApprover([], "human:carter"), false);
@@ -1839,28 +1861,46 @@ test("APRV-481/483 refutation: a sample that names no subject hash or no class i
 // An explicit affirmative (APRV-482)
 // ===========================================================================
 
-test("APRV-482: a review with no verdict is refused verdict-required before the log is read", async () => {
+test("APRV-482: a review with no verdict is refused verdict-required, after the roster check (PR #614 N6)", async () => {
   const unit = ready();
+  withRoster(unit, true);
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
   const before = records(unit).length;
 
-  // No verdict, with and without a grade: neither is an approval.
-  for (const options of [{}, { reaction: "liked" as const }, { reaction: "indifferent" as const }]) {
+  // No verdict, with and without a grade, or a verdict that is neither word:
+  // none is an approval. A lone `loved` is told it lacks a verdict, not a note
+  // (the note rule judges a grade beside a verdict).
+  for (const options of [
+    {},
+    { reaction: "liked" as const },
+    { reaction: "indifferent" as const },
+    { reaction: "loved" as const },
+    { verdict: "maybe" as unknown as "ok" },
+  ]) {
     const refused = reviewSample(
       unit.logPath,
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       null,
-      { clock: fixedClock(at(6)), ...options },
+      { ...unit.options, clock: fixedClock(at(6)), ...options },
     );
     assert.equal(refused.ok, false, `a review with no verdict was recorded (${JSON.stringify(options)})`);
     if (!refused.ok) assert.equal(refused.code, "verdict-required");
   }
-  // Before the read: a log that does not exist would be log-unreadable.
-  const unread = reviewSample(join(unit.dir, "no-such.jsonl"), { kind: "seq", seq: 1 }, "human:carter", null);
-  assert.equal(unread.ok, false);
-  if (!unread.ok) assert.equal(unread.code, "verdict-required");
+  // N6: who may review is said before what the review lacks. A reviewer off
+  // the roster tapping a grade is told actor-not-approver at once.
+  for (const options of [{}, { reaction: "liked" as const }]) {
+    const off = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:bob",
+      null,
+      { ...unit.options, clock: fixedClock(at(6)), ...options },
+    );
+    assert.equal(off.ok, false);
+    if (!off.ok) assert.equal(off.code, "actor-not-approver");
+  }
   // After the actor: a non-human is told it is not human first.
   const agent = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, "agent:claude", null);
   assert.equal(agent.ok, false);

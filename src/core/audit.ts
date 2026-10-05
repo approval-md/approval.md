@@ -74,7 +74,7 @@
 import { readFileSync } from "node:fs";
 
 import { tick, type ClockOptions } from "./clock.js";
-import { findDeclaration, indexDeclarations } from "./execute.js";
+import { declaringTasks, findDeclaration, indexDeclarations } from "./execute.js";
 import { namesApprover, policyPathOf } from "./gate.js";
 import {
   attestationRefusal,
@@ -198,8 +198,10 @@ export const AUDIT_REFUSAL_CODES = [
    * counts as the individual approval nobody gave before the action ran, and an
    * approval is an affirmative act: a reaction tap on a card, or a bare
    * `approval audit review <seq>`, used to write verdict `ok` on the reviewer's
-   * behalf. Now the verdict is said or nothing is written. Evaluated right after
-   * the actor check, before the log is read; nothing is appended.
+   * behalf. Now the verdict is said or nothing is written. Evaluated once the
+   * sample is located and the reviewer has passed the roster check (PR #614
+   * refutation N6: who may review is said before what the review lacks);
+   * nothing is appended.
    */
   "verdict-required",
   /**
@@ -447,6 +449,10 @@ export function boundPayloadHash(
   const started = start === undefined ? null : stringOrNull(payloadOf(start)["payload_hash"]);
   if (started !== null) return started;
   if (subject.actionKey === null) return null;
+  // PR #614 refutation N7: findDeclaration's contract. A key two tasks declare
+  // is a collision registration refuses, so a log holding one cannot say which
+  // binding governs, and no binding is the fail-closed answer.
+  if (declaringTasks(records as EventRecord[], subject.actionKey).length > 1) return null;
   return findDeclaration(records as EventRecord[], subject.actionKey)?.payload_hash ?? null;
 }
 
@@ -900,26 +906,25 @@ export function reviewSample(
     );
   }
 
-  // APRV-482. The verdict is an affirmative act or it is nothing. Checked after
-  // the actor (who is asking comes first, as everywhere) and before every rule
-  // that reads the verdict, so a bare review is told what it lacks rather than
-  // judged as an `ok` it never said.
+  // APRV-482. The verdict is an affirmative act or it is nothing. Read here and
+  // REFUSED after the roster check (PR #614 refutation N6): who may review comes
+  // before what the review lacks, so a reviewer off the roster who taps a grade
+  // is told `actor-not-approver` at once rather than `verdict-required` first
+  // and the roster only on their next tap.
   const verdict = options.verdict;
-  if (verdict !== "ok" && verdict !== "denied") {
-    return refuse(
-      "verdict-required",
-      `a review must say its verdict: under supervised-retro it counts as the approval nobody gave before the action ran, so a grade alone, or a review that names nothing, records nothing. At a terminal pass --ok or --deny; on a review card tap OK, or Deny twice. Nothing was appended.`,
-    );
-  }
+  const hasVerdict = verdict === "ok" || verdict === "denied";
 
   // APRV-239, and deliberately here: after the actor check and BEFORE the log is
   // read. Both rules are properties of the two arguments in front of this
   // function, so neither needs a log to decide, and a refusal that had already
   // read (and verified) a log would report a log failure for an invocation that
   // was malformed before it ever touched one. Nothing is appended on either
-  // path; the reviewer fixes the invocation and reviews again.
+  // path; the reviewer fixes the invocation and reviews again. Both judge a
+  // grade beside a verdict, so a review with no verdict skips them and meets
+  // `verdict-required` below: a card's lone `loved` is told it lacks a verdict,
+  // not a note it will be asked for once the verdict comes.
   const reaction = options.reaction;
-  if (reaction !== undefined) {
+  if (hasVerdict && reaction !== undefined) {
     if (verdict === "denied" && (reaction === "liked" || reaction === "loved")) {
       return refuse(
         "reaction-conflicts-verdict",
@@ -967,6 +972,14 @@ export function reviewSample(
   // read from the ATTESTED policy bytes, as a grant's is.
   const rosterRefusal = reviewerRoster(read.records, subject, actor, options);
   if (rosterRefusal !== null) return rosterRefusal;
+
+  if (!hasVerdict) {
+    return refuse(
+      "verdict-required",
+      `a review must say its verdict: under supervised-retro it counts as the approval nobody gave before the action ran, so a grade alone, or a review that names nothing, records nothing. At a terminal pass --ok or --deny; on a review card tap OK, or Deny twice. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
 
   // APRV-481. The surface's word that it showed the bytes is checked against
   // the binding the log holds, never copied on trust (SPEC.md §11.1 invariant 4
@@ -1111,6 +1124,19 @@ function reviewerRoster(
       : pinnedPolicyRefused(records, subject, subject.policySha256, path, bytes);
   if (attested !== null) return attested;
 
+  // PR #614 refutation N7: findDeclaration's contract on an enforcement path.
+  // A key two tasks declare is a collision registration refuses (APRV-138), so
+  // a log holding one cannot say which class, and so which roster, governs.
+  if (
+    subject.actionKey !== null &&
+    declaringTasks(records as EventRecord[], subject.actionKey).length > 1
+  ) {
+    return refuse(
+      "actor-not-approver",
+      `action ${subject.actionKey} is declared by more than one task, a collision registration refuses, so the log cannot say which class (and so which approvers roster) governs the sample at seq ${String(subject.seq)}. Nothing was appended.`,
+      { seq: subject.seq },
+    );
+  }
   const declared =
     subject.actionKey === null ? null : findDeclaration(records as EventRecord[], subject.actionKey);
   const sampleRecord = records.find((record) => record.seq === subject.seq);
