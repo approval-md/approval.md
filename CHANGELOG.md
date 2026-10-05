@@ -237,6 +237,20 @@ before a tag.
   older version left is taken after ten minutes, and an older writer still
   holding one that long would lose it.
 
+### Classifier
+
+- **`npx approval <verb>` and `npx approval-md <verb>` classify as `approval
+  <verb>` does (APRV-479 round 4, R3-6; a classifier change beyond the lock
+  fix).** The package-runner spelling of the gate's own CLI fell to the
+  `workspace-tool` row (`files.write.workspace`), so `npx approval log unlock`,
+  `npx approval log checkpoint` and `npx approval gate open` bypassed the
+  `policy.core` classification that holds them human-only. Every verb the
+  `approval` row refines (the `policy.core` ceremonies, `log sync`,
+  `log advance`) now answers the same under `npx`, versioned specs and
+  `npx -p approval-md approval …` included; every other verb keeps the
+  workspace-tool answer. `bunx` and `pnpm dlx` are not recognized by the
+  classifier for any tool and are unchanged.
+
 ## 0.4.0 — 2026-10-04
 
 Written on 2026-10-04 against `main` at `70979abe`, 239 non-merge commits after
