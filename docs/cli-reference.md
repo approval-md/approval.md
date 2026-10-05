@@ -3959,7 +3959,8 @@ services, open "Full details" every time.
 <b>Your agent wants to <phrase></b>
 <blockquote><b>Label:</b> quoted value        one payload value per line, verbatim
 …</blockquote>
-⚠ There is more than fits here: open Full details before deciding.   when a value was cut or a command is not shown as written
+⚠ This runs 3 commands. Only the beginning is shown above: …   a command: the classifier's count, when cut or more than one
+⚠ There is more than fits here: open Full details before deciding.   when any other value was cut
 Not shown here: <key>, <key>. Open Full details before deciding.        when the say entry leaves a field off (~)
 <i>AI summary (not checked):</i> …            only when a model sentence is attached
 <i>Your agent says (not checked):</i> …       only when the class's say entry has note: summary
@@ -3989,22 +3990,29 @@ drawn; the line is not refreshed afterwards. A request with no time left says
   the buttons.
 - *Quoted from the bound payload:* the box, and only payload values. Each line
   is one payload value, verbatim (marked as below, and visibly cut when long),
-  under a label: the operator's attested label, or the runtime's fixed label
-  for a field of a shape it knows. Nothing computed, abbreviated or paraphrased
-  is ever inside the box. The bytes were hash-checked against the request's
+  under a label (the operator's attested label, or the runtime's fixed label
+  for a field of a shape it knows), or alone when it is the only quotation.
+  Nothing computed, abbreviated, joined or paraphrased is ever inside the box;
+  a list of addresses is one line per address. Each value sits inside the
+  runtime's own Unicode isolate (U+2068 … U+2069), so right-to-left letters in
+  it cannot reorder its label, the cut mark or the lines around it. The bytes were hash-checked against the request's
   `payload_hash` before the channel saw them, so they are what will be acted
   on; their content was written by the agent. A command is shown up to 160
-  characters on one line, with `In folder:` and its `cwd`; a longer or
-  multi-line command is shown from its start, cut, and announced (the
-  classifier's outline of it is in "Full details" only, because it leaves out
-  flags and their values, which is where a deletion target or an uploaded file
-  lives). A file change shows the file, the change and every other field under
+  characters (under `Command:` when its `cwd` is quoted as `In folder:`); a
+  longer one is shown from its start and cut. A computed line under the box
+  gives the classifier's count of the commands in it ("⚠ This runs 3
+  commands. Only the beginning is shown above", or "This runs 2 commands, all
+  shown above.", or "more than one command may be here" when it cannot count),
+  and never names or paraphrases a command the box does not show; the
+  classifier's outline is in "Full details" only, because it leaves out flags
+  and their values, which is where a deletion target or an uploaded file
+  lives. A file change shows the file, the change and every other field under
   its own key name (`tool:`, `replace_all: true`). An email shows From, To, Cc,
   Bcc, Subject, Format and Message. An opaque payload shows the fields its
   `say.<class>.quote` map labels.
-- *Never a clean-looking partial:* when a value is cut or a command is not
-  shown as written, "⚠ There is more than fits here: open Full details before
-  deciding." follows the box; when the declaration leaves fields off (`~`),
+- *Never a clean-looking partial:* when a command is cut, its computed count
+  line says so; when any other value is cut, "⚠ There is more than fits here:
+  open Full details before deciding." follows the box; when the declaration leaves fields off (`~`),
   "Not shown here: <their key names>. Open Full details before deciding." does.
   Both are outside the box, so quoted text can neither produce nor suppress
   them.
@@ -4017,10 +4025,14 @@ is drawn ` ⏎ `). Control, format, bidirectional and every default-ignorable
 character (variation selectors, joiners, tag characters, U+034F, the Khmer and
 Mongolian invisibles), the Hangul fillers and the braille blank, and combining
 marks beyond two on one character are drawn as `«U+202E»`; so are `«` and `⏎`
-in the value, which makes the marking injective. Two exceptions keep ordinary
-emoji readable: one U+FE0F straight after a pictograph (❤️) and one U+200D
-between two pictographs (👨‍👩‍👧) are drawn as themselves; each changes the
-emoji's look and carries at most one bit. A value longer than 280 characters is
+in the value, which makes the marking injective. One exception keeps emoji
+readable: a grapheme cluster that is WHOLLY a recognised emoji sequence
+(Unicode's RGI set, `\p{RGI_Emoji}` with the regular-expression `v` flag: ❤️,
+👨‍👩‍👧, 1️⃣, 👍🏽) is drawn as itself. Every other presentation selector or joiner
+is marked, so a U+FE0F after a face that is already an emoji, or a U+200D
+between two pictographs that form no emoji, cannot carry hidden bits. On a
+runtime without that property nothing is exempt. Node 20, this package's
+floor, ships V8 11.3, which has it. A value longer than 280 characters is
 cut between grapheme clusters with `…(cut; see full details)`, and everything is
 HTML-escaped. A value cannot start a line of its own, close the box, open or
 close the collapsed block, or be bold.
@@ -4063,12 +4075,17 @@ prompts are the same under both styles in this release.
 
 **`say`.** Keyed by EXACT class name: a pattern such as `files.*` is refused at
 load (`prompt-say-wildcard`), because one friendly phrase must never stand for
-several classes. `does` is a one-line phrase of at most 120 characters; `quote`
-maps every top-level key an opaque payload may carry to the label it is quoted
-under (`""` for none, at most 40 characters) or to `~` for a key deliberately
-left off, and must show at least one key; `note` is `summary` (the default) or
-`none`. Neither `does` nor a label may contain `⚠`, which the card reserves for
-its own notices. A `say` entry is read only under `style: minimal`. A class
+several classes. For a class core phrases itself (the list above) core's phrase
+always wins: a `say` entry may set `quote` and `note` for it but not `does`
+(`prompt-say-builtin`). For any other class `does` is required and is a verb
+phrase of at most 120 characters that completes "Your agent wants to …": it
+starts with a letter and has no line break, `.` `!` `?` `…` `:` `;`, markup or
+`⚠` (`prompt-say-does`), so operator text cannot read as a second sentence or
+as one of the runtime's notices. `quote` maps every top-level key an opaque
+payload may carry to the label it is quoted under (letters, digits and spaces,
+at most 24; `""` only when it is the only key shown) or to `~` for a key
+deliberately left off, and must show at least one key (`prompt-say-label`,
+`prompt-say-shape`); `note` is `summary` (the default) or `none`. A `say` entry is read only under `style: minimal`. A class
 core phrases itself still needs a `say` entry with a `quote` map when its
 payload is opaque (a Hermes tool payload, `{tool, input}`, is). A `say` entry
 for a class no rule names loads: it applies if that class is ever requested.
