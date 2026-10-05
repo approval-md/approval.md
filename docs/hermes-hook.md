@@ -500,13 +500,28 @@ SIGKILL, a sandbox stopped under it), which left `events.jsonl.lock` behind and
 every later writer, the daemon included, refusing `lock-timeout` until a human
 removed the file. The lockfile now names its holder, and the next writer that
 finds it held takes it back when that holder is provably gone (on Linux: the same
-boot and pid namespace, and `/proc/<pid>` absent, a zombie, or a later process
-under the same pid), appending `audit.lock_reclaimed` before its own record. A
-live holder's lock is never taken, nor one in another container's pid namespace
-or on another machine; a lockfile with no holder record (an older version's) is
-taken only once it is ten minutes old. The first spend that meets such a lock
-waits out its two-second bound on the event loop and then reclaims it on its
-single try, so the self-heal costs that one call two seconds.
+boot id and pid namespace, and `/proc/<pid>` absent with `kill(pid, 0)` answering
+ESRCH, a zombie, or a later process under the same pid), and the record of the
+reclaim, `audit.lock_reclaimed`, is appended by whichever writer takes the lock
+next, before its own record. A live holder's lock is never taken, nor one this
+process cannot check: a `/proc` entry hidden or unreadable to it (hidepid, the
+daemon and the hook under different uids), a `/proc` that is not its own pid
+namespace's, a holder in another container's pid namespace, or one under another
+boot id (an earlier boot of the host, or another sandbox kernel sharing the
+volume). A lockfile with no holder record (an older version's) is taken only
+once it is ten minutes old. The first spend that meets such a lock waits out its
+two-second bound on the event loop and then reclaims it on its single try, so
+the self-heal costs that one call two seconds.
+
+What still wedges is a lock this process cannot judge, and in the village that
+is the common kill: a sandbox recreated while a hook was mid-append leaves a lock
+whose holder lived in the old container's pid namespace (and, on a microVM
+runtime, under the old kernel's boot id). No writer takes that lock; every
+writer refuses `lock-timeout` naming it, and a human who has checked that the
+old sandbox is gone removes it from the store root:
+`rm -v .approval/log/events.jsonl.lock`, which prints
+`removed '.approval/log/events.jsonl.lock'`. A lock removed by hand is not
+recorded in the log.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was

@@ -1277,17 +1277,21 @@ Neither stretch can leave the log's lock behind any more (APRV-479). A process
 that holds `events.jsonl.lock` (the requests' appends before the wait, the
 spend) and has no listener for SIGTERM, SIGINT or SIGHUP gets one for as long as
 it holds the lock: a signal there waits until the append is done and the
-lockfile removed, and the process then dies of it as it would have, one append
-later. SIGKILL cannot be caught, and a hook killed by it mid-append still leaves
-the lockfile, so the lockfile now names its holder (pid, host, boot, and on Linux
-the pid namespace and start time) and the next writer that finds it takes it
-back when that holder is provably gone: on Linux by its start time, elsewhere by
-`kill(pid, 0)` on the same host. The reclaim is recorded as
-`audit.lock_reclaimed` before that writer's own record, and a live holder's
-lock, or one this process cannot check (another host, another container), is
-never taken; that writer still times out and its refusal names the holder. Until
-then every writer refused `lock-timeout` and the gate stayed wedged until a
-human removed the file.
+lockfile removed, and the process then dies of it when its event loop next
+turns, which for these routes is the next pause. SIGKILL cannot be caught, and a
+hook killed by it mid-append still leaves the lockfile, so the lockfile now
+names its holder (pid, host, boot, and on Linux the pid and time namespaces and
+the start time) and the next writer that finds it takes it back when that
+holder is provably gone. On Linux that needs the same boot id and pid namespace,
+and then `/proc/<pid>` absent with `kill(pid, 0)` answering ESRCH, a zombie, or
+a later process under the same pid; elsewhere it needs the same host and
+`kill(pid, 0)` answering ESRCH. The reclaim is recorded as
+`audit.lock_reclaimed` by whichever writer takes the lock next, before its own
+record, and a live holder's lock, or one this process cannot check (another
+host, another kernel, another container, a `/proc` it cannot read), is never
+taken; that writer still times out and its refusal names the holder. Until then
+every writer refused `lock-timeout` and the gate stayed wedged until a human
+removed the file.
 
 What Claude Code does with a hook it killed on its own timeout is its own rule
 (see "When the grant can follow the write" below); `--harness-cap` is what keeps

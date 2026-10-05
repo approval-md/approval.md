@@ -120,29 +120,45 @@ before a tag.
   any verb under SIGKILL, a Hermes gateway restart) wedged every later writer on
   `append-failed` / `lock-timeout`, the daemon included, until a human removed
   the file. The lockfile now carries its holder's record (pid, host, boot, on
-  Linux the pid namespace and process start time, when, which kind of holder, a
-  nonce). A writer that finds it held judges the holder once per wait: on Linux
-  by `/proc/<pid>/stat` (absent, a zombie, or a different start time) in the
-  same boot and pid namespace; on macOS and elsewhere by `kill(pid, 0)` on the
-  same host, a running pid being taken as the holder. A lock whose holder is
-  gone is removed atomically (an exclusive `link(2)` claim keyed by its inode,
-  identity re-checked, renamed aside, re-checked) and the writer then takes the
-  lock with the usual `wx` create and appends a new audit-tier record,
-  `audit.lock_reclaimed` (`system:log`; lockfile, reason, age, holder pid and
-  kind), before its own record, whose compare-and-append then sees the moved
-  head. A live holder's lock is never taken, however old, and neither is one this
-  process cannot check (another host, another container, a newer record
-  format); a lockfile with no holder record is taken only once it is ten minutes
-  old; a lock beside a `log sync` snapshot or an absent log is kept. The
+  Linux the pid and time namespaces and the process start time, when, which kind
+  of holder, a nonce). A writer that finds it held judges the holder once per
+  wait, and a holder is live unless it is proved gone. On Linux the proof needs
+  `/proc` to be this process's own pid namespace's, the same boot id and pid
+  namespace as the holder, and then `/proc/<pid>` absent with `kill(pid, 0)`
+  answering ESRCH, a zombie, or a different start time read in the same time
+  namespace; a `/proc` entry that cannot be read (hidepid, another uid) or that
+  is hidden while `kill(pid, 0)` still finds the pid is live, and so is a holder
+  under another boot id (an earlier boot and another kernel sharing the volume
+  cannot be told apart). On macOS and elsewhere the proof is the same host and
+  `kill(pid, 0)` answering ESRCH; a running pid is the holder, and a boot reading
+  that moved (every wall-clock step moves it) proves nothing. A lock whose holder
+  is gone is claimed with an exclusive `link(2)` of a file naming the claimant;
+  a claim is passed over only when its claimant is provably gone, never because
+  of its age. The claimant re-checks the lockfile and its claim, writes the
+  record of the reclaim beside the lock, re-checks both, and renames the
+  lockfile aside (the commit point); the record is then appended, as the new
+  audit-tier `audit.lock_reclaimed` (`system:log`; lockfile, reason, age, holder
+  pid and kind), by whichever writer takes the lock next, before its own record,
+  so a reclaimer that never gets the lock cannot lose it. A live holder's lock is
+  never taken, however old, and neither is one this process cannot check
+  (another host, another kernel, another container, a newer record format); a
+  lockfile with no holder record is taken only once it is ten minutes old; a
+  lock beside a `log sync` snapshot or an absent log is kept. The
   `lock-timeout` message now names the holder and why its lock was kept. A
   process that holds the lock with no listener for SIGTERM, SIGINT or SIGHUP
-  gets a listener for that span, so such a signal waits for the release and
-  then kills the process as before. Schema change: the closed event enum gains
-  `audit.lock_reclaimed` (thirty-five types; `schema-validation` vectors
-  2.10.0). SPEC.md §8 and §11.1 wording is proposed in the task notes, pending
-  sign-off. Behavior change for older writers: a lockfile an older version left
-  (empty) is reclaimed after ten minutes, and an older writer still holding one
-  that long would lose it.
+  gets a listener for that span: a signal then waits for the release and kills
+  the process when the event loop next turns, and a verb that waits
+  synchronously after its append (`approval policy amend`'s prompt, `approval
+  wait`, the child of `approval run`) drops the listener before it blocks, so a
+  signal during the wait ends it at once. The files a reclaim keeps beside the
+  lock (`events.jsonl.lock.reclaim-*`) are excluded from the tenant export.
+  Schema change: the closed event enum gains `audit.lock_reclaimed`
+  (thirty-five types; `schema-validation` vectors 2.10.0). SPEC.md §8 and §11.1
+  wording is proposed in the task notes, pending sign-off. Behavior change for
+  older writers: a lockfile an older version left (empty) is reclaimed after ten
+  minutes, and an older writer still holding one that long would lose it. Still
+  a human's: a lock left by a holder in another pid namespace or under another
+  boot id (a recreated sandbox, a rebooted host) stays until a human removes it.
 
 ## 0.4.0 — 2026-10-04
 
