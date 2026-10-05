@@ -348,6 +348,33 @@ export function openSamples(records: readonly EventRecord[]): SampledSubject[] {
   return sampledSubjects(records).filter((subject) => subject.reviewedSeq === null);
 }
 
+/**
+ * The payload hash the sampled execution bound to, or `null` when the log
+ * records none (APRV-480).
+ *
+ * Read off the `execution.started` the sample names, whose `payload_hash` is the
+ * executor's recomputation of the bytes it ran; failing that, off the
+ * registration's declared binding. Both are records the log already holds, so
+ * nothing here takes a payload hash from the party under review, and the review
+ * card (`cli/audit-card.ts`) and the review record (APRV-481) derive the same
+ * answer from the same records.
+ */
+export function boundPayloadHash(
+  records: readonly EventRecord[],
+  subject: SampledSubject,
+): string | null {
+  const start =
+    subject.subjectSeq === null
+      ? undefined
+      : records.find(
+          (record) => record.seq === subject.subjectSeq && record.event === "execution.started",
+        );
+  const started = start === undefined ? null : stringOrNull(payloadOf(start)["payload_hash"]);
+  if (started !== null) return started;
+  if (subject.actionKey === null) return null;
+  return findDeclaration(records as EventRecord[], subject.actionKey)?.payload_hash ?? null;
+}
+
 /** The candidates a sweep would sample now: eligible, selected, not yet sampled. */
 export function pendingSamples(
   records: readonly EventRecord[],

@@ -17,6 +17,18 @@ before a tag.
 
 ### Channels
 
+- **A Telegram review card shows the payload that ran (APRV-480).** Under
+  supervised-retro the review is the individual approval, and the card showed a
+  key and the agent's own summary of what it did. `ReviewCardFields` now
+  carries `fullPayload` (hash-checked against the execution's binding, as a
+  prompt's is) and `payload_hash`, and the card renders one of three payload
+  regions whose heading says which: the bytes whole (`PAYLOAD — the bytes that
+  ran, shown whole`), the hash only with the reason (nobody holds the bytes,
+  they do not hash to the binding, or they exceed one card's 2000 escaped
+  characters), or `none recorded`. Bytes are never shown in part. Behavior
+  change: SPEC.md §10.3's "the card carries no payload region" is amended by
+  this task, pending sign-off.
+
 - **A relayed Telegram channel refuses a button it did not send (APRV-456).**
   With `--api-base` naming anything but the Bot API, or with the new
   `--no-stale-copy` flag (on `approval channel telegram listen`, `channel

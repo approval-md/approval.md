@@ -932,14 +932,25 @@ function formatTelegramTtl(ms: number | null): string {
  * attached one. Naming the subset as a type is what lets {@link reviewRow} and
  * {@link telegramRow} share one implementation of those five without either
  * side casting: a card supplies exactly these fields, and the compiler refuses
- * a card that reaches for `budgets`, `fullPayload`, or anything else that only
- * a pending question has.
+ * a card that reaches for `budgets`, `ttl_remaining_ms`, or anything else that
+ * only a pending question has.
+ *
+ * Since APRV-480 a card also carries `fullPayload`, the bytes the sampled
+ * execution bound to, and `payload_hash`, the binding the log recorded for them.
+ * Under supervised-retro a review counts as the individual approval nobody gave
+ * before the action ran, so the reviewer has to be able to read what was
+ * published; a uuid beside the agent's own summary of what it did is the agent
+ * describing its own homework. `fullPayload` is computed the way a prompt's is
+ * (hash-checked against the binding before anything renders it) and is `null`
+ * when nobody holds the bytes; `payload_hash` is absent only when the execution
+ * recorded no binding at all. Which of the two a card SHOWS is
+ * {@link reviewPayloadView}'s decision, and the card says which.
  */
 export type ReviewCardFields = Pick<
   ChannelRequest,
-  "action_key" | "class" | "task" | "summary"
+  "action_key" | "class" | "task" | "summary" | "fullPayload"
 > &
-  Partial<Pick<ChannelRequest, "command_breakdown" | "gloss">>;
+  Partial<Pick<ChannelRequest, "command_breakdown" | "gloss" | "payload_hash">>;
 
 /** The rows a review card renders, in the order it renders them (APRV-299). */
 export const REVIEW_CARD_ROWS = [
@@ -2187,6 +2198,87 @@ function trimNotice(text: string): string {
 }
 
 /**
+ * How much payload, in ESCAPED characters, a review card carries whole
+ * (APRV-480).
+ *
+ * A card is one message edited in place, so it cannot spill the payload over
+ * several messages the way a prompt does: the edit that settles it replaces one
+ * message, and a second message holding the rest of the bytes would outlive the
+ * card it belonged to. So the bytes are shown whole or not at all. Never cut:
+ * a review that recorded a payload hash over bytes the reviewer saw half of
+ * would claim more than they read. The budget leaves room under
+ * {@link TELEGRAM_MAX_MESSAGE_CHARS} for the rows, a refusal notice
+ * ({@link REVIEW_NOTICE_MAX} per line) and the headings.
+ */
+export const REVIEW_PAYLOAD_BUDGET = 2000;
+
+/** The heading over a payload the card shows whole (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_BYTES =
+  "PAYLOAD — the bytes that ran, shown whole; this review covers them";
+
+/** The heading over a payload the card names by hash only (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY =
+  "PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes";
+
+/** The heading on a card whose execution recorded no payload binding (APRV-480). */
+export const TELEGRAM_REVIEW_PAYLOAD_NONE =
+  "PAYLOAD — none recorded; the execution bound to no payload hash";
+
+/**
+ * What a review card shows of the payload, decided once from the card alone
+ * (APRV-480).
+ *
+ * - `bytes`: the canonical rendering, whole. Only this case lets a review
+ *   record a payload hash (APRV-481), because only here did the reviewer read
+ *   the bytes the hash names.
+ * - `hash`: the binding, and the reason the bytes are not on the card: nobody
+ *   holds them (`unavailable`), or they are longer than one card carries
+ *   (`too-long`). The card says so in its heading.
+ * - `none`: the execution recorded no binding, so there is nothing to show and
+ *   nothing to name.
+ *
+ * Pure and deterministic over the card, so the rendering and the tap that
+ * follows it can never disagree about which case was on the screen.
+ */
+export type ReviewPayloadView =
+  | { kind: "bytes"; hash: string; text: string }
+  | { kind: "hash"; hash: string; reason: "unavailable" | "too-long" }
+  | { kind: "none" };
+
+export function reviewPayloadView(card: ReviewCard): ReviewPayloadView {
+  const rendering = card.fields.fullPayload.value;
+  const bound = card.fields.payload_hash?.value ?? rendering?.hash ?? null;
+  if (rendering !== null && !rendering.truncated && (bound === null || bound === rendering.hash)) {
+    const text = payloadRegionText(rendering, card.fields.class.value);
+    if (escapeHtml(text).length <= REVIEW_PAYLOAD_BUDGET) {
+      return { kind: "bytes", hash: rendering.hash, text };
+    }
+    return { kind: "hash", hash: rendering.hash, reason: "too-long" };
+  }
+  if (bound === null) return { kind: "none" };
+  return { kind: "hash", hash: bound, reason: "unavailable" };
+}
+
+/** The payload region of a review card, as HTML lines (APRV-480). */
+function reviewPayloadLines(view: ReviewPayloadView): string[] {
+  switch (view.kind) {
+    case "bytes":
+      return [`<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_BYTES)}</b>`, `<pre>${escapeHtml(view.text)}</pre>`];
+    case "hash":
+      return [
+        `<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY)}</b>`,
+        escapeHtml(
+          view.reason === "too-long"
+            ? `The bytes are longer than one card carries, so none of them are shown. sha256 ${view.hash}`
+            : `This runtime does not hold the bytes the execution bound to. sha256 ${view.hash}`,
+        ),
+      ];
+    default:
+      return [`<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_NONE)}</b>`];
+  }
+}
+
+/**
  * The card's message: the rows, whatever notice the last tap produced, and the
  * keyboard.
  *
@@ -2198,13 +2290,15 @@ function trimNotice(text: string): string {
  * every card said the same thing to a reader who had already read them once, and
  * pushed the rows a review is actually about off the first screen.
  *
- * Pure. Two things it deliberately does NOT carry, and both are the same rule
- * read twice: no payload region, and no approve button. SPEC.md §10.3 requires
- * the canonical rendering in front of an approver before a DECISION is
- * collected, and this collects none — the action ran, the review says only what
- * a person thought of it, and a card that offered an approve would be
- * presenting a settled fact as a live authorization. A sample is never
- * delivered as an approval request and never accepts a token.
+ * Pure. It carries no approve button: the action ran, and a card that offered
+ * an approve would be presenting a settled fact as a live authorization. A
+ * sample is never delivered as an approval request and never accepts a token.
+ *
+ * It DOES carry a payload region since APRV-480, between the computed rows and
+ * the claimed ones, exactly where a prompt puts its own. Under supervised-retro
+ * the review is the individual approval, so the reviewer reads the bytes that
+ * ran, or is told plainly that the card shows only their hash and why
+ * ({@link reviewPayloadView}). The heading says which, every time.
  */
 export function renderReviewCard(state: ReviewCardState): {
   text: string;
@@ -2248,6 +2342,8 @@ export function renderReviewCard(state: ReviewCardState): {
     "",
     "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
     ...computedLines.map(render),
+    "",
+    ...reviewPayloadLines(reviewPayloadView(card)),
     "",
     `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
     ...claimedLines.map(render),
@@ -2827,8 +2923,9 @@ export class TelegramChannel implements TestableChannel {
    * A unit like a checkpoint prompt: one thing to read, never grouped into a
    * digest, and never delivered through {@link notify} — a digest is a set of
    * similar pending REQUESTS decided together, and a sample is neither pending
-   * nor a request. It sends ONE message: no payload region, and a keyboard
-   * whose six buttons collect a verdict and a grade and mint nothing.
+   * nor a request. It sends ONE message: the rows, the payload whole or by hash
+   * (APRV-480, never split across messages), and a keyboard whose six buttons
+   * collect a verdict and a grade and mint nothing.
    *
    * Refuses when no handler is registered, rather than sending a dead button.
    */

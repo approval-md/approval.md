@@ -4307,16 +4307,35 @@ Each `audit.sampled` with no later `audit.reviewed` now arrives as a **review
 card**.
 
 A card is not a prompt and says so. Its headline is `REVIEW — THIS ALREADY RAN`,
-it carries no payload region and no approve button, and it accepts no token: the
-action has happened, and a card offering an approve would present a settled fact
-as a live authorization. What it carries is the same rows a prompt would show
-for the same action — class, the command breakdown, task, the agent's claimed
-summary, the model gloss where one is attached — plus two the card adds: `ran
-at` (the `execution.started` the sample named) and `verdict` (that the runtime
-allowed this without asking, which autonomy said so, the rate it was drawn at,
-and how the log says it ended). Everything computed is derived from the verified
-log, the payload store and the classifier; the claimed rows sit under the same
-"NOT verified by the runtime" heading a prompt gives them.
+it carries no approve button, and it accepts no token: the action has happened,
+and a card offering an approve would present a settled fact as a live
+authorization. What it carries is the same rows a prompt would show for the same
+action — class, the command breakdown, task, the agent's claimed summary, the
+model gloss where one is attached — plus two the card adds: `ran at` (the
+`execution.started` the sample named) and `verdict` (that the runtime allowed
+this without asking, which autonomy said so, the rate it was drawn at, and how
+the log says it ended). Everything computed is derived from the verified log,
+the payload store and the classifier; the claimed rows sit under the same "NOT
+verified by the runtime" heading a prompt gives them.
+
+**The card shows the payload that ran (APRV-480).** Under supervised-retro the
+review is the individual approval nobody gave before the action executed, so the
+reviewer reads the published bytes rather than a key and the agent's own summary
+of what it did. Between the computed and the claimed rows the card carries one
+of three payload regions, and its heading says which:
+
+| Heading | What the reviewer sees | When |
+| --- | --- | --- |
+| `PAYLOAD — the bytes that ran, shown whole; this review covers them` | the canonical rendering of the bytes, whole, in a `<pre>` block | the runtime holds bytes that hash to the execution's binding and they fit one card |
+| `PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes` | the binding's `sha256`, and why the bytes are absent | nobody holds the bytes, the bytes held do not hash to the binding, or they are longer than one card carries (2000 escaped characters) |
+| `PAYLOAD — none recorded; the execution bound to no payload hash` | nothing to show and nothing to name | the execution and its registration recorded no `payload_hash` |
+
+The bytes are shown whole or not at all: a card is one message edited in place,
+so it cannot spill a payload over several messages the way a request prompt
+does, and a review over half the bytes would claim more than the reviewer read.
+Only the first case lets the review record carry a `payload_hash` (see
+[audit review](#audit-review)). A terminal review (`approval audit review`)
+shows no payload and so never records one.
 
 Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
 first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,

@@ -29,11 +29,12 @@
  *   through the human-only `reviewSample`.
  */
 
-import { claimed, computed } from "../channels/contract.js";
+import { claimed, computed, type PayloadRendering } from "../channels/contract.js";
 import type { ReviewCard, ReviewCardFields } from "../channels/telegram.js";
 import { openSamples, type SampledSubject } from "../core/audit.js";
 import { indexDeclarations } from "../core/execute.js";
 import type { EventRecord } from "../core/log.js";
+import { payloadHash } from "../core/payload.js";
 import { loadPayload, payloadStoreDirFor } from "../core/payload-store.js";
 import { payloadOf, readVerifiedRecords } from "../core/state.js";
 import { commandBreakdown, commandPayloadView } from "../core/wysiwys.js";
@@ -125,6 +126,28 @@ function materialFor(
 }
 
 /**
+ * The payload rendering a review card carries, or `null` (APRV-480).
+ *
+ * The hash is recomputed and compared against the binding the log recorded,
+ * as `channels/tagging.ts` does for a prompt: material from a caller's override
+ * is not trusted any more than material from the store, and bytes that do not
+ * hash to the binding are never shown as the bytes that ran. The text is never
+ * truncated here: whether the bytes fit is the channel's question, and a channel
+ * that cannot show them whole shows the hash instead (`reviewPayloadView`).
+ */
+function renderingFor(material: unknown, boundHash: string): PayloadRendering | null {
+  if (material === null || material === undefined) return null;
+  try {
+    const hash = payloadHash(material);
+    if (hash !== boundHash) return null;
+    const text = JSON.stringify(material, null, 2) ?? String(material);
+    return { value: material, text, hash, truncated: false };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * What the runtime did at the time, in one computed line.
  *
  * The three facts a reviewer needs before they can say whether it should have
@@ -188,14 +211,11 @@ function cardFor(
   const startPayload = start === undefined ? {} : payloadOf(start);
   const ranAt = start?.ts ?? stringOrNull(sample["subject_ts"]) ?? subject.ts;
 
-  const material = materialFor(
-    options,
-    logPath,
-    actionKey,
-    stringOrNull(startPayload["payload_hash"]) ?? declared.payload_hash,
-  );
+  const boundHash = stringOrNull(startPayload["payload_hash"]) ?? declared.payload_hash;
+  const material = materialFor(options, logPath, actionKey, boundHash);
   const command = material === null ? null : commandPayloadView(material);
   const breakdown = command === null ? null : commandBreakdown(command.command);
+  const rendering = boundHash === null ? null : renderingFor(material, boundHash);
 
   const author = authors.get(actionKey) ?? "the requesting party";
   const fields: ReviewCardFields = {
@@ -203,6 +223,11 @@ function cardFor(
     class: computed(declared.class, "log"),
     task: computed<string | null>(subject.task ?? declared.task, "log"),
     summary: claimed<string | null>(declared.summary, author),
+    // APRV-480: the bytes that ran, hash-checked here exactly as a prompt's are
+    // in `channels/tagging.ts`, so a card cannot show bytes the binding does not
+    // name. `null` when nobody holds them; the channel then shows the hash.
+    fullPayload: computed<PayloadRendering | null>(rendering, "payload-binding"),
+    ...(boundHash === null ? {} : { payload_hash: computed(boundHash, "log") }),
     ...(breakdown === null ? {} : { command_breakdown: computed(breakdown, "classifier") }),
   };
 

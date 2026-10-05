@@ -103,7 +103,14 @@ import {
   TELEGRAM_REVIEW_NOTE_TOAST,
   TELEGRAM_REVIEW_HEADING,
   TELEGRAM_REVIEW_RECORDED,
+  TELEGRAM_REVIEW_PAYLOAD_BYTES,
+  TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY,
+  TELEGRAM_REVIEW_PAYLOAD_NONE,
+  REVIEW_PAYLOAD_BUDGET,
+  renderReviewCard,
+  reviewPayloadView,
   type ReviewCard,
+  type ReviewCardState,
   type ReviewChoice,
   type TelegramConfig,
   type TelegramPollResult,
@@ -6134,8 +6141,8 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   const deliveryId = await channel.offerReview(card);
   const sent = mock.sentMessages().slice(before);
 
-  // One message. No payload region: a review collects no decision, so §10.4's
-  // "show the bytes first" has nothing to be first of.
+  // One message, payload and all (APRV-480): a card is edited in place, so the
+  // bytes ride inside it rather than in messages that would outlive it.
   assert.equal(sent.length, 1, `a review card sent ${sent.length} messages`);
   const message = sent[0] as { text: string; replyMarkup: unknown };
   assert.equal(String(deliveryId), String((sent[0] as { messageId: number }).messageId));
@@ -6145,7 +6152,16 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
     false,
     "a review card called itself an approval request",
   );
-  assert.equal(message.text.includes("PAYLOAD"), false, "a review card carried a payload region");
+  // APRV-480: the bytes that ran are on the card, whole, under a heading that
+  // says so, and the reviewer is no longer left with a key and the agent's own
+  // summary of what it did.
+  assert.ok(
+    message.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES),
+    `the card does not say it shows the bytes: ${message.text}`,
+  );
+  assert.ok(message.text.includes("<pre>"), "the payload is not in its own region");
+  assert.ok(message.text.includes("wip 0"), "the payload's own text is not on the card");
+  assert.equal(message.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), false);
 
   // The rows the request prompt's own renderer draws, plus the two the card
   // adds. Same bullets, same computed/claimed split, same origins.
@@ -6213,6 +6229,122 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   }
 
   assert.deepEqual(reviewsIn(world), [], "rendering a card appended something");
+  assertClean(world.unit);
+});
+
+/** A review card's state as `offerReview` would first hold it, for the pure renderer. */
+function reviewStateFor(card: ReviewCard): ReviewCardState {
+  return {
+    deliveryId: "1",
+    card,
+    nonce: "n",
+    denyArmed: false,
+    settled: null,
+    notice: null,
+    awaitingNote: null,
+    deliveredAtMs: 0,
+  };
+}
+
+/** `card` carrying `material` as the bytes it ran, bound and hash-checked. */
+function cardCarrying(card: ReviewCard, material: unknown): ReviewCard {
+  const hash = payloadHash(material);
+  return {
+    ...card,
+    fields: {
+      ...card.fields,
+      payload_hash: computed(hash, "log"),
+      fullPayload: computed(
+        { value: material, text: JSON.stringify(material, null, 2), hash, truncated: false },
+        "payload-binding",
+      ),
+    },
+  };
+}
+
+test("APRV-480: a card whose bytes nobody holds shows the hash, and says it is only the hash", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const built = openReviewCards(world.unit.logPath, { payloadStoreDir: null });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  const bound = payloadHash(world.payloads.get(world.keys[0] as string));
+
+  assert.equal(card.fields.fullPayload.value, null, "the card claimed bytes nobody holds");
+  assert.equal(card.fields.payload_hash?.value, bound, "the card lost the binding");
+  assert.deepEqual(reviewPayloadView(card), { kind: "hash", hash: bound, reason: "unavailable" });
+
+  const before = mock.sentMessages().length;
+  await channel.offerReview(card);
+  const text = (mock.sentMessages()[before] as { text: string }).text;
+  assert.ok(text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), `no hash-only heading: ${text}`);
+  assert.ok(text.includes(`sha256 ${bound}`), "the hash the card names is not the binding");
+  assert.ok(text.includes("does not hold the bytes"), "the card does not say why it shows only the hash");
+  assert.equal(text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), false, "a hash-only card claimed the bytes");
+  assert.equal(text.includes("<pre>"), false, "a hash-only card carried a payload region");
+  assertClean(world.unit);
+});
+
+test("APRV-480: bytes that do not hash to the binding are never shown as the bytes that ran", () => {
+  const world = sampledWorld(1);
+  const built = openReviewCards(world.unit.logPath, {
+    payloadStoreDir: null,
+    payload: () => ({ command: "rm -rf /", cwd: "/repo" }),
+  });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  assert.equal(card.fields.fullPayload.value, null, "substituted bytes reached the card");
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "hash");
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.equal(drawn.text.includes("rm -rf"), false, "substituted bytes were rendered");
+  assertClean(world.unit);
+});
+
+test("APRV-480: bytes longer than one card carries are named by hash, whole or not at all", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const long = { command: `echo ${"y".repeat(REVIEW_PAYLOAD_BUDGET)}`, cwd: "/repo" };
+  const card = cardCarrying(base, long);
+
+  const view = reviewPayloadView(card);
+  assert.deepEqual(view, { kind: "hash", hash: payloadHash(long), reason: "too-long" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), drawn.text);
+  assert.ok(drawn.text.includes("longer than one card carries"), "the card does not say why");
+  assert.ok(drawn.text.includes(`sha256 ${payloadHash(long)}`));
+  assert.equal(drawn.text.includes("y".repeat(50)), false, "a too-long payload was shown in part");
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assertClean(world.unit);
+});
+
+test("APRV-480: bytes that fit are shown whole, and the card stays one message", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const fits = { command: `echo ${"z".repeat(1200)}`, cwd: "/repo" };
+  const card = cardCarrying(base, fits);
+
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "bytes");
+  assert.equal(view.kind === "bytes" ? view.hash : null, payloadHash(fits));
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), drawn.text);
+  assert.ok(drawn.text.includes("z".repeat(1200)), "the bytes were not shown whole");
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assertClean(world.unit);
+});
+
+test("APRV-480: an execution that bound no payload says so rather than showing nothing", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const { payload_hash: _dropped, ...rest } = base.fields;
+  const card: ReviewCard = { ...base, fields: { ...rest, fullPayload: computed(null, "payload-binding") } };
+
+  assert.deepEqual(reviewPayloadView(card), { kind: "none" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_NONE), drawn.text);
+  assert.equal(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), false);
+  assert.equal(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), false);
   assertClean(world.unit);
 });
 
