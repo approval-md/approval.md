@@ -65,10 +65,10 @@
  * 7. **A lock whose holder is provably gone is taken back, and the log says so
  *    (APRV-479).** The lockfile carries its holder's record, a writer that finds
  *    it held judges the holder once per wait, and a lock left by a dead holder
- *    is reclaimed atomically, with the record of the reclaim written beside the
- *    lock before the lock is freed; whichever writer takes the lock next appends
- *    it as `audit.lock_reclaimed` before anything else, from a fresh read of the
- *    tail. A live holder's lock, and any holder this process cannot check, is
+ *    is reclaimed atomically by renaming it to a pending name beside the lock;
+ *    whichever writer takes the lock next judges that file again and appends
+ *    the record of the reclaim as `audit.lock_reclaimed` before anything else,
+ *    from a fresh read of the tail. A live holder's lock, and any holder this process cannot check, is
  *    never taken. `core/log-lock.ts` holds the rules.
  *
  * Determinism: `ts` is supplied by the caller. This module never reads the
@@ -1003,8 +1003,10 @@ function lockedRun<T>(
  * precondition (it decides nothing from the log) and the same daemon stamp. It
  * authorizes nothing and nothing reads it to decide anything.
  *
- * The record is pending in a file beside the lock from before the reclaim's
- * commit point until it is appended, so it is never lost with the reclaimer:
+ * The record is pending beside the lock (the reclaimed lockfile itself, at a
+ * pending name) from the reclaim's commit point until it is appended, so it is
+ * never lost with the reclaimer, and every field of it is this writer's own
+ * judgement of that file (`pendingReclaims`), never text read from it:
  * when it cannot be appended the caller's operation is refused with the
  * writer's own error, the lock is released, and the record stays pending for
  * the next writer (which meets the same refusal while the log takes no record

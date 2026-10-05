@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-edge-A2'
 created_date: '2026-10-05 05:49'
-updated_date: '2026-10-05 08:51'
+updated_date: '2026-10-05 08:58'
 labels:
   - security
 dependencies: []
@@ -140,6 +140,17 @@ Section 11.1 invariant 5, appended scope note: *Scope note:* the append lock tha
 - 01abbddd with the new test file (scratch tree, imports shimmed, never committed): 15 fail on macOS (behavioural: decision table at its first B1 row, B2/S4 boot test, S1 direct, N3 export, S2 amend 11.6 s; by absence of the new seam or exports: S1 seam, B3 x4, N2 x2, S3 unit, probe tests); on Linux the B1, S3 and boot tests fail behaviourally (B1 and S3: the reader reclaimed a live holder's lock).
 
 Resume point: none; fix round 1 pushed, refuter recheck and CI are the orchestrator's.
+
+## Fix round 1, security pointer ("audit-log-injection in src/core/log-lock.ts")
+
+Confirmed, in the S1 marker as first written (d9fbb718): `pendingReclaims` took `lockfile`, `age_ms` and `holder.{pid,op,created}` from the pending file's JSON and the next writer appended them as a chain-valid `system:log` record. Anyone who can write the log directory could plant a marker and have every later writer append a record it would never have written (and a marker whose `lockfile` broke the schema refused every later append). Changed:
+- The commit point now renames the judged lockfile itself to `<lock>.reclaim-<key>.<nonce>.pending.lock`: freeing the lock and keeping the record are one atomic step, and no separate marker exists.
+- `pendingReclaims` judges each pending file again with the same `judgeLockBytes` that `tryReclaimLock` uses for the lock in place, and builds the note only from that judgement: `lockfile` is the writer's own lockfile name, `reason` from its own verdict, `age_ms` from its own clock (clamped non-negative safe integer), and from the file only a holder record that parsed to the strict v1 shape (pid, op, created). A live or unverifiable holder, an unreadable record, or an unattributed file younger than ten minutes is skipped. So a planted pending file yields exactly the record a lockfile with the same bytes would have yielded when reclaimed in place (no new capability), and nothing else; event, actor, seq and hash inputs are never from a file. At most 8 pending files are recorded per hold.
+- `parseHolder`: `created` must match `Date#toISOString`'s shape and parse; pid at most 2^31-1; otherwise the record is unreadable (never reclaimed). Hostnames shown in messages pass through `displayHost` (hostname charset, 64 chars); an unknown version is never echoed.
+- A moved file that is not the judged one is moved out of the pending namespace (`.gone.lock`) when it cannot be put back, so it can never be recorded.
+- Values that remain from files and why each is safe: `holder.pid` (safe integer, 1..2^31-1, schema integer >= 1), `holder.op` (enum), `holder.created` (strict ISO shape, schema date-time); `host`, `boot`, `pidns`, `start`, `timens`, `nonce` reach no record (equality and display only, display sanitized); claim files contribute only an identity that is judged, never written anywhere.
+- Tests (tests/log-lock-reclaim.test.ts): "a hostile pending file makes a writer append only the record it would have written..." (old note shape with `../../etc/passwd` and negative age, a live holder, a `created` with a newline and escape, a v2 record naming an event and actor: none recorded; 20 dead-holder files with extra fields: exactly 8 records, payload keys exactly lockfile/reason/age_ms/holder, lockfile the writer's own); "a hostile lockfile cannot put control characters or its own text into a refusal". Both fail at 9013943d (the planted note made the append fail; the escape and newline reached the refusal) and pass at the new tip.
+- Re-run after the change: log-lock-reclaim exit 0 (33: 31 pass, 2 skipped) on macOS; Linux container exit 0 (32/32 incl. B1, S3 and both hostile tests); mutations judge-always-gone exit 1 (9 fail), guard-noop exit 1 (1), no-post-rename-check exit 1 (1), samelock-inode-only exit 1 (1), each restored.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

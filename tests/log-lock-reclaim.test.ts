@@ -824,7 +824,7 @@ test("a lockfile rewritten in place (same inode, a new holder) after the claim i
   assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
 });
 
-test("a lockfile replaced (a new inode) between the last check and the rename is put back, and the pending record withdrawn", () => {
+test("a lockfile replaced (a new inode) between the last check and the rename is put back, and nothing is left at a pending name", () => {
   const logPath = freshLog();
   const lockPath = `${logPath}.lock`;
   writeLock(logPath, holder({ pid: deadPid() }));
@@ -1066,4 +1066,78 @@ test("S3: in a pid namespace whose /proc was not remounted, a reader keeps a liv
   assert.match(result.message ?? "", /\/proc belongs to another pid namespace/u);
   assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
   assert.equal(verify(logPath).status, "clean");
+});
+
+// ---------------------------------------------------------------------------
+// Security review of fix round 1: files beside the lock are written by anyone
+// who can write the log's directory, so nothing in them is taken on trust
+// ---------------------------------------------------------------------------
+
+test("a hostile pending file makes a writer append only the record it would have written for that file as the lock, and no more than eight per hold", () => {
+  const logPath = freshLog();
+  const dir = join(logPath, "..");
+  const pending = (tag: string): string => join(dir, `events.jsonl.lock.reclaim-1-aaaaaaaaaaaa.${tag}.pending.lock`);
+  // The old note shape, with chosen fields: no holder record at all, and young.
+  writeFileSync(
+    pending("0000000000000001"),
+    `${JSON.stringify({ v: 1, kind: "reclaim-pending", note: { lockfile: "../../etc/passwd", reason: "holder-dead", age_ms: -5, holder: { pid: 1, op: "append", created: "\u001b[31mforged" } } })}\n`,
+  );
+  // A live holder (this process): never recorded.
+  writeFileSync(pending("0000000000000002"), `${JSON.stringify(holder())}\n`);
+  // A dead pid with a `created` carrying a newline and an escape: unreadable, never recorded.
+  writeFileSync(pending("0000000000000003"), `${JSON.stringify(holder({ pid: deadPid(), created: "2026-10-05T07:00:00.000Z\n\u001b[2J" }))}\n`);
+  // Extra fields and a newer format: unreadable or ignored.
+  writeFileSync(pending("0000000000000004"), `${JSON.stringify({ v: 2, pid: deadPid(), event: "approval.granted", actor: "human:carter" })}\n`);
+  const result = appendEvent(logPath, granted(50));
+  assert.ok(result.ok);
+  assert.deepEqual(
+    records(logPath).map((record) => record.event),
+    ["task.registered", "approval.granted"],
+    "none of those files produced a record",
+  );
+
+  // A dead holder's record at a pending name is what this writer would have
+  // recorded on finding it as the lock: recorded, from its own judgement only.
+  for (const name of readdirSync(dir).filter((entry) => entry.endsWith(".pending.lock"))) rmSync(join(dir, name));
+  const pid = deadPid();
+  // (A different host would be judged live, another machine, and skipped.)
+  const forged = holder({ pid, nonce: "x".repeat(1000) });
+  for (let n = 0; n < 20; n += 1) writeFileSync(pending(String(n).padStart(16, "0")), `${JSON.stringify({ ...forged, extra: "field" })}\n`);
+  const next = appendEvent(logPath, granted(51));
+  assert.ok(next.ok);
+  const reclaims = records(logPath).filter((record) => record.event === "audit.lock_reclaimed");
+  assert.equal(reclaims.length, 8, "at most eight pending reclaims are recorded per hold");
+  for (const record of reclaims) {
+    assert.equal(record.actor, "system:log");
+    assert.deepEqual(Object.keys(record.payload ?? {}).sort(), ["age_ms", "holder", "lockfile", "reason"]);
+    assert.equal(record.payload?.["lockfile"], "events.jsonl.lock", "the writer's own lockfile name, never the file's");
+    assert.deepEqual(record.payload?.["holder"], { pid, op: "append", created: forged.created });
+    assert.equal(record.payload?.["reason"], "holder-dead");
+  }
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a hostile lockfile cannot put control characters or its own text into a refusal", () => {
+  const logPath = freshLog();
+  // A live holder (this process) whose host carries escapes and a newline.
+  writeLock(logPath, holder({ host: "\u001b]0;pwned\u0007\nFORGED LINE" }));
+  const live = appendEvent(logPath, granted(52), { lockTimeoutMs: 0 });
+  assert.equal(live.ok, false);
+  if (!live.ok) {
+    assert.equal(live.error.code, "lock-timeout");
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(live.error.message, /[\u0000-\u001f\u007f]/u);
+  }
+  // A `created` that is not a timestamp, or a version that is a wall of text:
+  // the record is unreadable, so the lock is kept, and none of it is echoed.
+  writeLock(logPath, holder({ pid: deadPid(), created: "2026-10-05T07:00:00.000Z\nFORGED" }));
+  const created = appendEvent(logPath, granted(53), { lockTimeoutMs: 0 });
+  assert.equal(created.ok, false);
+  if (!created.ok) assert.doesNotMatch(created.error.message, /FORGED/u);
+  writeLock(logPath, `${JSON.stringify({ v: "X".repeat(5000) })}\n`);
+  const version = appendEvent(logPath, granted(54), { lockTimeoutMs: 0 });
+  assert.equal(version.ok, false);
+  if (!version.ok) assert.doesNotMatch(version.error.message, /XXXX/u);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered"]);
+  rmSync(`${logPath}.lock`);
 });

@@ -53,16 +53,16 @@
  *    `link(2)` of a file carrying the claimant's own holder record; a claim is
  *    passed over only when its claimant is provably gone (by the same
  *    judgement), never because of its age. Re-check the lockfile (inode, mtime,
- *    bytes) and the claim, write the record of the reclaim beside the lock,
- *    re-check both again, and rename the lockfile aside: that rename is the
- *    commit point. The winner then takes the lock with the same `wx` create
+ *    bytes) and the claim, twice, and rename the lockfile to a pending name
+ *    beside it: that rename is the commit point. The winner then takes the lock with the same `wx` create
  *    every writer uses, so a writer that wins that create first is ordinary
  *    contention.
- * 5. **The reclaim is in the log, and cannot be lost.** The record of the reclaim
- *    is written to `<lock>.reclaim-<key>.pending.lock` BEFORE the commit point,
- *    and `core/log.ts` appends every such pending record as `audit.lock_reclaimed`
- *    as the first write under whichever lock comes next, the reclaimer's or
- *    another writer's, from a fresh read of the tail: the caller's own
+ * 5. **The reclaim is in the log, and cannot be lost.** The commit point renames
+ *    the judged lockfile to `<lock>.reclaim-<key>.<nonce>.pending.lock`, and
+ *    `core/log.ts` judges every such pending file again (exactly as a lockfile
+ *    in place) and appends `audit.lock_reclaimed`, built only from that
+ *    judgement, as the first write under whichever lock comes next, the
+ *    reclaimer's or another writer's, from a fresh read of the tail: the caller's own
  *    compare-and-append (SPEC.md §11.1 invariant 5) then sees a moved head and
  *    re-reads, as it would after any other writer's record.
  * 6. **A termination signal does not leave a lock behind.**
@@ -122,6 +122,33 @@ export const LEGACY_LOCK_RECLAIM_AGE_MS = 10 * 60_000;
  * first needs a reclaimer to have died between its claim and its release.
  */
 const MAX_CLAIM_GENERATIONS = 16;
+
+/**
+ * The largest pid a record may name (Linux's PID_MAX_LIMIT is 2^22; anything
+ * past a signed 32-bit pid is no process at all).
+ */
+const MAX_PID = 2 ** 31 - 1;
+
+/**
+ * The one shape a holder record's `created` may take: what `Date#toISOString`
+ * writes. Lockfiles sit in a directory other processes can write, and
+ * `created` is the one free-text field of a record that reaches the log
+ * (`audit.lock_reclaimed`'s `holder.created`) and a refusal message, so
+ * anything else makes the record unreadable, and an unreadable record is never
+ * reclaimed (security review of fix round 1).
+ */
+const CREATED_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+/**
+ * A holder's hostname as a message may show it: the hostname charset, at most
+ * 64 characters. It comes from a file another process wrote, never reaches the
+ * log, and must not carry control characters or escapes into a terminal.
+ */
+function displayHost(host: string): string {
+  if (host === "") return "an unnamed host";
+  const shown = host.replace(/[^A-Za-z0-9._-]/gu, "?");
+  return shown.length > 64 ? `${shown.slice(0, 64)}...` : shown;
+}
 
 /** `append`: one record. `hold`: a whole operation under `withAppendLock`. */
 export type LockOp = "append" | "hold";
@@ -368,6 +395,7 @@ function parseIdentity(record: Record<string, unknown>): HolderIdentity | null {
     typeof pid !== "number" ||
     !Number.isSafeInteger(pid) ||
     pid <= 0 ||
+    pid > MAX_PID ||
     typeof host !== "string" ||
     typeof boot !== "string" ||
     (pidns !== undefined && typeof pidns !== "string") ||
@@ -413,6 +441,8 @@ export function parseHolder(
   if (
     identity === null ||
     typeof created !== "string" ||
+    !CREATED_SHAPE.test(created) ||
+    !Number.isFinite(Date.parse(created)) ||
     (op !== "append" && op !== "hold") ||
     typeof nonce !== "string"
   ) {
@@ -439,7 +469,7 @@ export function judgeHolder(
   self: SelfIdentity,
   probe: LivenessProbe,
 ): HolderVerdict {
-  const who = `pid ${String(holder.pid)} on ${holder.host === "" ? "an unnamed host" : holder.host}`;
+  const who = `pid ${String(holder.pid)} on ${displayHost(holder.host)}`;
   if (self.linux) {
     if (self.procIsOwn === false) {
       return {
@@ -818,11 +848,62 @@ function stillJudged(lockPath: string, seen: SeenLock): boolean {
   return now !== null && sameLock(now, seen);
 }
 
+/** What a lockfile's bytes and mtime say about taking it now. */
+type LockJudgement = { kind: "gone"; note: ReclaimNote } | { kind: "kept"; why: string };
+
 /**
- * Judge `<logPath>.lock` and, if its holder is provably gone, remove it
- * atomically so the caller's next `wx` create can take the lock, leaving the
- * record of the reclaim pending beside it for whichever writer holds the lock
- * next ({@link pendingReclaims}).
+ * Judge one lockfile's bytes and mtime, as {@link tryReclaimLock} judges the
+ * lock in place and {@link pendingReclaims} judges a reclaimed lockfile again
+ * before its record is appended. Every field of the note is this process's own
+ * conclusion: the reason from its own judgement, the age from its own clock,
+ * the lockfile name from its own path; from the file it takes only a holder
+ * record that parsed to the strict v1 shape (pid, op, `created`).
+ */
+function judgeLockBytes(lockfile: string, seen: SeenLock, now: number): LockJudgement {
+  const parsed = parseHolder(seen.bytes);
+  if (parsed.kind === "legacy") {
+    const ageMs = Math.max(0, Math.round(now - seen.mtimeMs));
+    if (ageMs < LEGACY_LOCK_RECLAIM_AGE_MS) {
+      return {
+        kind: "kept",
+        why: `the lockfile names no holder (an older writer, or one killed between creating it and writing its record) and is ${String(Math.round(ageMs / 1000))} s old; such a lock is reclaimed only once it is ${String(LEGACY_LOCK_RECLAIM_AGE_MS / 60_000)} minutes old`,
+      };
+    }
+    return {
+      kind: "gone",
+      note: { lockfile, reason: "legacy-aged", age_ms: ageMs, why: `the lockfile names no holder and is ${String(Math.round(ageMs / 1000))} s old` },
+    };
+  }
+  if (parsed.kind === "unknown") {
+    const version = typeof parsed.version === "number" && Number.isSafeInteger(parsed.version) ? `v ${String(parsed.version)}` : "an unrecognised version";
+    return {
+      kind: "kept",
+      why: `the lockfile's holder record is in a format this version does not read (${version}), so its holder cannot be checked`,
+    };
+  }
+  const verdict = judge(parsed.holder);
+  if (verdict.state === "live") {
+    return { kind: "kept", why: `held by ${verdict.why} (${parsed.holder.op}, since ${parsed.holder.created})` };
+  }
+  const created = Date.parse(parsed.holder.created);
+  const ageMs = Math.max(0, Math.round(now - (Number.isFinite(created) ? created : seen.mtimeMs)));
+  return {
+    kind: "gone",
+    note: {
+      lockfile,
+      reason: verdict.reason,
+      age_ms: Number.isSafeInteger(ageMs) ? ageMs : 0,
+      why: verdict.why,
+      holder: { pid: parsed.holder.pid, op: parsed.holder.op, created: parsed.holder.created },
+    },
+  };
+}
+
+/**
+ * Judge `<logPath>.lock` and, if its holder is provably gone, move it out of
+ * the lock's path atomically, so the caller's next `wx` create can take the
+ * lock, and into a pending name beside it, which is the record of the reclaim
+ * until whichever writer holds the lock next appends it ({@link pendingReclaims}).
  *
  * The steps, and why a stall anywhere is harmless:
  *
@@ -830,59 +911,33 @@ function stillJudged(lockPath: string, seen: SeenLock): boolean {
  * 2. Claim it ({@link takeClaim}). Only claims are written, and only reclaimers
  *    read them; a live claimant's claim is never passed over, so of any number
  *    of writers that judged this lockfile exactly one goes on.
- * 3. Re-check that the lockfile is still the one judged, then write the pending
- *    record of the reclaim (`<base>.pending.lock`). Nobody can hold the lock
- *    while the judged lockfile is in place, so nobody reads the record yet.
- * 4. Re-check the lockfile AND the claim, then rename the lockfile aside. THIS
- *    RENAME IS THE COMMIT POINT: before it, every name anybody but a reclaimer
- *    reads is untouched, so a reclaimer stalled or killed anywhere before it
- *    leaves the lock exactly as it was (a wedge, never a fork); after it, the
- *    lock is free for the ordinary `wx` create and the record of the reclaim is
- *    already durable. Inside the claim the judged lockfile can leave the path
- *    only through this rename, so the re-check immediately before it can be
- *    wrong only if something outside the protocol (a human `rm`, an older
- *    version's unconditional release) replaced the file in the instant between.
- * 5. Check that what was moved is the judged file. If it is not (that same
+ * 3. Re-check the lockfile, then (after the `before-commit` seam) re-check the
+ *    lockfile AND the claim, and rename the lockfile to
+ *    `<base>.<nonce>.pending.lock`. THIS RENAME IS THE COMMIT POINT: before it,
+ *    every name anybody but a reclaimer reads is untouched, so a reclaimer
+ *    stalled or killed anywhere before it leaves the lock exactly as it was (a
+ *    wedge, never a fork); the rename frees the lock and makes the record of
+ *    the reclaim durable in one atomic step, because the record IS the judged
+ *    lockfile at its pending name. Inside the claim the judged lockfile can
+ *    leave the path only through this rename, so the re-check immediately
+ *    before it can be wrong only if something outside the protocol (a human
+ *    `rm`, an older version's unconditional release) replaced the file in the
+ *    instant between.
+ * 4. Check that what was moved is the judged file. If it is not (that same
  *    out-of-protocol instant), put it back with `link(2)`, which never
- *    overwrites a lock somebody took meanwhile, and withdraw the record.
- * 6. Remove the moved file, then the claim. Both names are this reclaim's own.
+ *    overwrites a lock somebody took meanwhile, and move the pending name out of
+ *    the pending namespace either way, so nothing records it.
+ * 5. Remove the claim, a name only this reclaim writes.
  */
 export function tryReclaimLock(logPath: string, now: number = Date.now()): ReclaimOutcome {
   const lockPath = `${logPath}.lock`;
   const seen = readLock(lockPath);
   if (seen === null) return { kind: "vanished" };
 
-  const parsed = parseHolder(seen.bytes);
-  let reason: LockReclaimReason;
-  let why: string;
-  let holder: ReclaimNote["holder"];
-  let ageMs: number;
-  if (parsed.kind === "legacy") {
-    ageMs = Math.max(0, Math.round(now - seen.mtimeMs));
-    if (ageMs < LEGACY_LOCK_RECLAIM_AGE_MS) {
-      return {
-        kind: "kept",
-        why: `the lockfile names no holder (an older writer, or one killed between creating it and writing its record) and is ${String(Math.round(ageMs / 1000))} s old; such a lock is reclaimed only once it is ${String(LEGACY_LOCK_RECLAIM_AGE_MS / 60_000)} minutes old`,
-      };
-    }
-    reason = "legacy-aged";
-    why = `the lockfile names no holder and is ${String(Math.round(ageMs / 1000))} s old`;
-  } else if (parsed.kind === "unknown") {
-    return {
-      kind: "kept",
-      why: `the lockfile's holder record is in a format this version does not read (v ${JSON.stringify(parsed.version)}), so its holder cannot be checked`,
-    };
-  } else {
-    const verdict = judge(parsed.holder);
-    const created = Date.parse(parsed.holder.created);
-    ageMs = Number.isFinite(created) ? Math.max(0, Math.round(now - created)) : Math.max(0, Math.round(now - seen.mtimeMs));
-    if (verdict.state === "live") {
-      return { kind: "kept", why: `held by ${verdict.why} (${parsed.holder.op}, since ${parsed.holder.created})` };
-    }
-    reason = verdict.reason;
-    why = verdict.why;
-    holder = { pid: parsed.holder.pid, op: parsed.holder.op, created: parsed.holder.created };
-  }
+  const judged = judgeLockBytes(basename(lockPath), seen, now);
+  if (judged.kind === "kept") return { kind: "kept", why: judged.why };
+  const { note } = judged;
+  const why = note.why;
 
   if (existsSync(snapshotPathFor(logPath))) {
     return {
@@ -906,79 +961,64 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
   if (taken.kind === "busy") return { kind: "kept", why: `${why}; ${taken.why}` };
   const claim = taken.claim;
 
-  const note: ReclaimNote = { lockfile: basename(lockPath), reason, age_ms: ageMs, why };
-  if (holder !== undefined) note.holder = holder;
-  // The pending record this reclaim wrote, while it is still this reclaim's to
-  // withdraw (until the commit point).
-  let pendingOwn: { path: string; bytes: Buffer } | null = null;
   try {
     step("claimed");
-    // Step 3: still the judged lockfile? Then the record goes down first (S1).
+    // Step 3: still the judged lockfile?
     if (!stillJudged(lockPath, seen)) {
       return { kind: "kept", why: `the lock changed hands while it was being judged; nothing was touched` };
     }
-    const pendingPath = `${base}.pending.lock`;
-    const pendingBytes = Buffer.from(`${JSON.stringify({ v: LOCK_HOLDER_VERSION, kind: "reclaim-pending", note })}\n`, "utf8");
-    const pending = linkExclusive(pendingPath, `${base}.${nonce}.pending.tmp.lock`, pendingBytes);
-    if (pending.kind === "error") {
-      return {
-        kind: "kept",
-        why: `${why}, but the record of the reclaim could not be written beside the lock (${pending.code}), so the lock stays`,
-      };
-    }
-    // "exists": a claimant before this one, provably gone, wrote the record for
-    // this same lockfile; it stands for this reclaim.
-    if (pending.kind === "written") pendingOwn = { path: pendingPath, bytes: pendingBytes };
-
     step("before-commit");
-    // Step 4: re-check both, immediately before the one step that frees the lock.
+    // Re-check both, immediately before the one step that frees the lock.
     if (!stillJudged(lockPath, seen) || !claimStillHeld(claim)) {
       return { kind: "kept", why: `the lock or the claim on it changed during the reclaim; nothing was touched` };
     }
-    const aside = `${base}.${nonce}.gone.lock`;
+    const pending = `${base}.${nonce}.pending.lock`;
     step("at-commit");
     try {
-      renameSync(lockPath, aside); // THE COMMIT POINT.
+      renameSync(lockPath, pending); // THE COMMIT POINT.
     } catch (cause) {
       if (errnoOf(cause) === "ENOENT") return { kind: "vanished" };
       return { kind: "kept", why: `${why}, but it could not be moved aside: ${(cause as Error).message}` };
     }
     step("after-commit");
 
-    // Step 5: was it the judged file?
-    const moved = readLock(aside);
+    // Step 4: was it the judged file?
+    const moved = readLock(pending);
     if (moved === null || !sameLock(moved, seen)) {
-      // Reachable only from outside the protocol (see step 4). Put the file
+      // Reachable only from outside the protocol (see step 3). Put the file
       // back if it is still exactly what was moved and this process still
       // holds the claim; link(2) never replaces a lock somebody took meanwhile.
       step("before-put-back");
       let restored = false;
-      const still = moved === null ? null : readLock(aside);
+      const still = moved === null ? null : readLock(pending);
       if (moved !== null && still !== null && sameLock(still, moved) && claimStillHeld(claim)) {
         try {
-          linkSync(aside, lockPath);
+          linkSync(pending, lockPath);
           restored = true;
         } catch {
           restored = false;
         }
       }
-      if (restored && moved !== null) unlinkIfBytes(aside, moved.bytes);
+      // Never leave somebody else's lockfile under a pending name: it is not a
+      // reclaim this process judged, so nothing may record it.
+      const gone = `${base}.${nonce}.gone.lock`;
+      if (restored && moved !== null) unlinkIfBytes(pending, moved.bytes);
+      else {
+        try {
+          renameSync(pending, gone);
+        } catch {
+          // Already gone from the pending name.
+        }
+      }
       return {
         kind: "kept",
         why: restored
           ? `the lock changed hands during the reclaim and was put back`
-          : `the lock changed hands during the reclaim and could not be put back; it is at ${basename(aside)}`,
+          : `the lock changed hands during the reclaim and could not be put back; it is at ${basename(gone)}`,
       };
     }
-
-    // Committed: the pending record now belongs to whichever writer holds the
-    // lock next, this one or another.
-    pendingOwn = null;
-    // Step 6.
-    unlinkIfBytes(aside, seen.bytes);
     return { kind: "reclaimed", note };
   } finally {
-    if (pendingOwn !== null) unlinkIfBytes(pendingOwn.path, pendingOwn.bytes);
     unlinkIfBytes(claim.path, claim.bytes);
   }
 }
@@ -987,18 +1027,35 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
 export interface PendingReclaim {
   path: string;
   bytes: Buffer;
-  note: Omit<ReclaimNote, "why"> & { why?: string };
+  note: ReclaimNote;
 }
+
+/**
+ * How many pending reclaims one hold of the lock records. Each needs a holder
+ * that died holding the lock; the bound keeps a directory flooded with pending
+ * names from turning one append into thousands.
+ */
+const MAX_PENDING_PER_HOLD = 8;
 
 /**
  * The reclaims of `<logPath>.lock` whose records are not yet in the log, in name
  * order. Called by the writer that holds the lock, which appends each and then
- * {@link clearPendingReclaim}s it. A pending file this version cannot read is
- * left where it is and skipped.
+ * {@link clearPendingReclaim}s it.
+ *
+ * A pending file is a lockfile that a reclaimer moved out of the lock's path,
+ * and anyone who can write this directory can also put a file at a pending
+ * name. So nothing in it is taken on trust: it is judged again, exactly as
+ * {@link tryReclaimLock} judges a lockfile in place, and its record is built
+ * only from that judgement ({@link judgeLockBytes}). A pending file therefore
+ * makes this writer append exactly the record it would have appended had it
+ * found that same file at the lock's path, and no other: a holder this process
+ * cannot prove gone, a record it cannot read, or an unattributed file younger
+ * than the reclaim age is skipped and left where it is.
  */
-export function pendingReclaims(logPath: string): PendingReclaim[] {
+export function pendingReclaims(logPath: string, now: number = Date.now()): PendingReclaim[] {
   const directory = dirname(logPath);
-  const prefix = `${basename(logPath)}.lock.reclaim-`;
+  const lockfile = `${basename(logPath)}.lock`;
+  const prefix = `${lockfile}.reclaim-`;
   let names: string[];
   try {
     names = readdirSync(directory).filter((name) => name.startsWith(prefix) && name.endsWith(".pending.lock"));
@@ -1008,30 +1065,13 @@ export function pendingReclaims(logPath: string): PendingReclaim[] {
   names.sort();
   const found: PendingReclaim[] = [];
   for (const name of names) {
+    if (found.length >= MAX_PENDING_PER_HOLD) break;
     const path = join(directory, name);
     const seen = readLock(path);
     if (seen === null) continue;
-    const record = parseJsonObject(seen.bytes);
-    if (record === "empty" || record === null || record["v"] !== LOCK_HOLDER_VERSION || record["kind"] !== "reclaim-pending") continue;
-    const note = record["note"] as Record<string, unknown> | undefined;
-    if (note === undefined || typeof note !== "object" || note === null) continue;
-    const { lockfile, reason, age_ms: ageMs, holder, why } = note;
-    if (
-      typeof lockfile !== "string" ||
-      (reason !== "holder-dead" && reason !== "holder-replaced" && reason !== "holder-boot-ended" && reason !== "legacy-aged") ||
-      typeof ageMs !== "number"
-    ) {
-      continue;
-    }
-    const parsedNote: PendingReclaim["note"] = { lockfile, reason, age_ms: ageMs };
-    if (typeof why === "string") parsedNote.why = why;
-    if (holder !== undefined) {
-      if (typeof holder !== "object" || holder === null) continue;
-      const { pid, op, created } = holder as Record<string, unknown>;
-      if (typeof pid !== "number" || (op !== "append" && op !== "hold") || typeof created !== "string") continue;
-      parsedNote.holder = { pid, op, created };
-    }
-    found.push({ path, bytes: Buffer.from(seen.bytes), note: parsedNote });
+    const judged = judgeLockBytes(lockfile, seen, now);
+    if (judged.kind === "kept") continue;
+    found.push({ path, bytes: Buffer.from(seen.bytes), note: judged.note });
   }
   return found;
 }

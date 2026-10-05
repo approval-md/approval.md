@@ -134,12 +134,15 @@ before a tag.
   that moved (every wall-clock step moves it) proves nothing. A lock whose holder
   is gone is claimed with an exclusive `link(2)` of a file naming the claimant;
   a claim is passed over only when its claimant is provably gone, never because
-  of its age. The claimant re-checks the lockfile and its claim, writes the
-  record of the reclaim beside the lock, re-checks both, and renames the
-  lockfile aside (the commit point); the record is then appended, as the new
+  of its age. The claimant re-checks the lockfile and its claim and renames the
+  lockfile to a pending name beside it (the commit point, which frees the lock
+  and keeps the record of the reclaim in one step). Whichever writer takes the
+  lock next judges each pending file again exactly as it would judge the lock,
+  builds the record only from its own judgement, and appends it, as the new
   audit-tier `audit.lock_reclaimed` (`system:log`; lockfile, reason, age, holder
-  pid and kind), by whichever writer takes the lock next, before its own record,
-  so a reclaimer that never gets the lock cannot lose it. A live holder's lock is
+  pid and kind), before its own record, so a reclaimer that never gets the lock
+  cannot lose it and a file planted at a pending name yields only the record a
+  lockfile with the same bytes would have. A live holder's lock is
   never taken, however old, and neither is one this process cannot check
   (another host, another kernel, another container, a newer record format); a
   lockfile with no holder record is taken only once it is ten minutes old; a
