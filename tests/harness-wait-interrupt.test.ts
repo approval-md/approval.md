@@ -38,7 +38,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { interruptedWaitDirective } from "../src/cli/hook.js";
+import { commandHookSteps, interruptedWaitDirective } from "../src/cli/hook.js";
 
 const BIN = fileURLToPath(new URL("../../cli.js", import.meta.url));
 const ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -504,8 +504,12 @@ for (const harness of HARNESSES) {
       }
       const verdict = only(harness, outcome);
       if (verdict.permission === "allow") {
-        // The one legitimate allow: the hook read the grant and spent it
-        // BEFORE the signal reached it.
+        // The legitimate allow: the hook read the grant and passed its pause
+        // before the spend with no signal dispatched. The signal then landed
+        // after the spend, or inside the spend's own synchronous stretch (its
+        // read, its lock wait, its append), which is the documented residue
+        // (APRV-478 tracks the lock wait). The pause itself is pinned
+        // deterministically by the stepped test below, not by this race.
         allowed += 1;
         assert.equal(outcome.code, 0, outcome.stderr);
         assert.equal(count(dir, "execution.started"), 1);
@@ -571,5 +575,94 @@ for (const harness of HARNESSES) {
     const late = cli(["grant", String(request?.["action_key"]), "--as", "human:alice"], dir);
     assert.equal(late.code, 0, late.stderr);
     assert.equal(count(dir, "execution.started"), 0);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The shared pause before the spend, pinned step by step (APRV-475 refuter)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every harness, Hermes included, for the stepped test: the shared pause is
+ * one yield in one chain, so it must show up identically on all six.
+ */
+const STEPPED: readonly { kind: string; policy: string; call: (dir: string) => string; extra: string[] }[] = [
+  ...HARNESSES.map((harness) => ({
+    kind: harness.kind,
+    policy: harness.manualPolicy,
+    call: (dir: string) => harness.manualCall(dir, "tu-stepped"),
+    extra: [] as string[],
+  })),
+  {
+    kind: "hermes",
+    policy: policy("autonomous"),
+    call: (dir: string) =>
+      JSON.stringify({
+        hook_event_name: "pre_tool_call",
+        session_id: "hermes-sess-stepped",
+        tool_use_id: "tu-stepped",
+        cwd: dir,
+        profile: "default",
+        extra: {},
+        tool_name: "terminal",
+        tool_input: { command: NPM_INSTALL, workdir: dir },
+      }),
+    extra: ["--harness-cap", "300s"],
+  },
+];
+
+/**
+ * The race tests above cannot see this pause: a 60 s interval dispatches the
+ * signal in the timer pause, and the twenty-run race is probabilistic (the
+ * refuter deleted the pause and all thirty still passed). So this drives the
+ * very steps the CLI's yielding driver runs, in process, and stops at each
+ * pause to look at the log: after a grant lands, the next step must be a ZERO
+ * pause with the grant read and nothing spent yet, and only the step after it
+ * may append `execution.started`. With the pause removed, the step after the
+ * grant spends at once and this fails.
+ */
+for (const stepped of STEPPED) {
+  test(`${stepped.kind}: after the wait reads a grant, the shared zero pause comes before anything is spent`, () => {
+    const dir = ready(stepped.policy);
+    const out: string[] = [];
+    const streams = { out: (text: string) => out.push(text), err: () => undefined };
+    const steps = commandHookSteps(
+      [stepped.kind, "--as", `agent:${stepped.kind}`, "--dir", dir, "--timeout", "4m", "--interval", "50ms", ...stepped.extra],
+      streams,
+      dir,
+      () => stepped.call(dir),
+    );
+    try {
+      // Run to the first poll pause: the question is open and nothing is spent.
+      let step = steps.next();
+      while (step.done !== true && step.value === 0) step = steps.next();
+      assert.equal(step.done, false, `the hook answered without waiting: ${out.join("")}`);
+      assert.ok(step.value > 0, "the first pause is the poll interval");
+      const request = records(dir).find((r) => r["event"] === "approval.requested");
+      assert.ok(request !== undefined, "the hook opened no question");
+      assert.equal(count(dir, "execution.started"), 0);
+
+      // The human grants while the hook sleeps between polls.
+      const grant = cli(["grant", String(request["action_key"]), "--as", "human:alice"], dir);
+      assert.equal(grant.code, 0, grant.stderr);
+
+      // The next poll reads the grant, and the step it ends on is the zero
+      // pause: the point where the yielding driver lets a held signal reach
+      // the wait's handler. Nothing is spent yet.
+      step = steps.next();
+      assert.equal(step.done, false, `the grant was spent with no pause before it: ${out.join("")}`);
+      assert.equal(step.value, 0, `expected the zero pause before the spend, got a ${String(step.value)} ms pause`);
+      assert.equal(count(dir, "execution.started"), 0, "the grant was spent before the pause");
+
+      // Past the pause, the spend and the allow.
+      step = steps.next();
+      assert.equal(step.done, true, "the hook paused again after the spend's pause");
+      assert.equal(step.value, 0, out.join(""));
+      assert.equal(count(dir, "execution.started"), 1);
+    } finally {
+      // Runs the generator's finally blocks, so a failed assertion above does
+      // not leave the wait's signal listeners registered in this process.
+      steps.return(-1);
+    }
   });
 }

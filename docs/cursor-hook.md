@@ -590,15 +590,17 @@ answer started authorizing a retry.
 ### When a signal ends the wait (APRV-475)
 
 A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
-Cursor has stopped waiting for this tool call. The hook ends the wait at once:
-it withdraws the question this invocation opened (`approval.withdrawn`, reason
-`cancelled`, the note naming the signal), prints Cursor's ordinary deny,
+Cursor has stopped waiting for this tool call. The hook ends the wait at once.
+It first prints Cursor's ordinary deny,
 
 ```json
 {"permission":"deny","user_message":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call","agent_message":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}
 ```
 
-and exits 0, the code at which Cursor reads that verdict. If stdout cannot take
+then withdraws the question this invocation opened (`approval.withdrawn`,
+reason `cancelled`, the note naming the signal), and exits 0, the code at which
+Cursor reads that verdict. The deny goes out before the withdrawal because the
+withdrawal can wait on the log's lock. If stdout cannot take
 the whole line it exits 2 instead, which the required `failClosed: true` turns
 into a block. A grant that arrives afterwards is refused `request-withdrawn`,
 and nothing records `execution.started` for the call. A grant that landed first,

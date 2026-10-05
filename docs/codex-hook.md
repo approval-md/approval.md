@@ -136,11 +136,11 @@ the app-server approval protocol can bind what the hook cannot; see
 A direct `apply_patch` under a manual class waits on a human (Bash never gets
 that far). A `SIGTERM` or `SIGINT` that reaches the hook during that wait means
 Codex has stopped waiting for the call, and the hook ends the wait at once: it
-withdraws the question this invocation opened (`approval.withdrawn`, reason
-`cancelled`, the note naming the signal), prints the ordinary Codex deny,
+first prints the ordinary Codex deny,
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`
-with no `updatedInput`, and exits 0, the code at which the observed Codex
-release reads that verdict. If stdout cannot take the whole line it exits 2; the
+with no `updatedInput`, then withdraws the question this invocation opened
+(`approval.withdrawn`, reason `cancelled`, the note naming the signal), and
+exits 0, the code at which the observed Codex release reads that verdict. If stdout cannot take the whole line it exits 2; the
 observed-version evidence does not record how Codex reads exit 2 with an empty
 stdout, so treat that fallback as unverified, like the crash and timeout rows
 above.

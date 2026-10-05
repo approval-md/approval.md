@@ -197,11 +197,11 @@ than assumed either way.
 
 A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
 Muse has stopped waiting for the call. The hook ends the wait at once: it
-withdraws the question this invocation opened (`approval.withdrawn`, reason
-`cancelled`, the note naming the signal), prints the one dialect this adapter
-speaks,
+first prints the one dialect this adapter speaks,
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`,
-and exits 0, the form the probe measured to block. If stdout cannot take the
+then withdraws the question this invocation opened (`approval.withdrawn`,
+reason `cancelled`, the note naming the signal), and exits 0, the form the probe
+measured to block. If stdout cannot take the
 whole line it exits 2 instead; an empty stdout at exit 2 is the third form the
 probe measured to block, and a torn line at exit 2 is unparseable output, which
 Muse ignores like any failed hook. A grant that arrives afterwards is refused

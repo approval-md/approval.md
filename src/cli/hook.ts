@@ -1347,23 +1347,24 @@ export function interruptedWaitDirective(
 const INTERRUPTED_BARE_EXIT = 2;
 
 /**
- * Answer an interrupted wait and leave (APRV-475).
+ * Answer an interrupted wait (APRV-475), and return the code to exit with.
  *
- * Writes {@link interruptedWaitDirective} synchronously to fd 1, because
- * `process.exit` does not wait for a stream to drain, and exits with the
+ * Writes {@link interruptedWaitDirective} synchronously to fd 1, because the
+ * `process.exit` that follows does not wait for a stream to drain. Returns the
  * directive's own exit code, or {@link INTERRUPTED_BARE_EXIT} when the write
- * threw or came up short. Called by the wait's signal handler only, after its
- * withdrawal.
+ * threw or came up short. Called by the wait's signal handler only, BEFORE its
+ * withdrawal, so the block is on stdout however long the withdrawal waits for
+ * the log's lock.
  */
-function exitInterruptedWait(signal: NodeJS.Signals, harness: HarnessKind): never {
+function writeInterruptedWait(signal: NodeJS.Signals, harness: HarnessKind): number {
   const directive = interruptedWaitDirective(signal, harness);
   let whole = false;
   try {
     whole = writeSync(1, directive.stdout) === Buffer.byteLength(directive.stdout);
   } catch {
-    // stdout is gone; the exit code below is the whole verdict.
+    // stdout is gone; the exit code is the whole verdict.
   }
-  return process.exit(whole ? directive.exitCode : INTERRUPTED_BARE_EXIT);
+  return whole ? directive.exitCode : INTERRUPTED_BARE_EXIT;
 }
 
 /** The machine-readable code a Hermes `execute_code` call is refused with. */
@@ -4496,6 +4497,18 @@ function* gateHarnessSteps(
   // a JSON-RPC channel). A serve thread's caller departing is `callerGone`.
   const onSignal = (signal: NodeJS.Signals): void => {
     leaveWait();
+    // APRV-445, APRV-475. A harness tearing down may still read the verdict,
+    // and on several harnesses an exit with nothing on stdout is not a block
+    // (Hermes reads it as an ALLOW unless the exit is 2; Claude Code, Codex
+    // and Muse read most such exits as a failed hook and run the call). So the
+    // harness's own block directive goes out FIRST, in its own dialect,
+    // written synchronously, before the withdrawal: the withdrawal is a
+    // compare-and-append that can wait up to the lock timeout behind another
+    // writer, and a harness that escalates SIGTERM to SIGKILL inside that wait
+    // must already be holding the block (APRV-475 refuter). The directive does
+    // not depend on the withdrawal's outcome, and a withdrawal that never lands
+    // leaves the question open as a timed-out one is.
+    const exitCode = writeInterruptedWait(signal, run.harness);
     try {
       withdrawPending(
         run,
@@ -4505,20 +4518,13 @@ function* gateHarnessSteps(
       );
     } catch (cause) {
       // The withdrawal failed outright (an I/O fault inside the append). The
-      // verdict below still goes out: a block with the question left standing
+      // block is already on stdout: a block with the question left standing
       // is the stricter of the two outcomes this handler can still reach.
       streams.err(
         `approval: the hook could not withdraw its request after ${signal}: ${cause instanceof Error ? cause.message : String(cause)}\n`,
       );
     }
-    // APRV-445, APRV-475. A harness tearing down may still read the verdict,
-    // and on several harnesses an exit with nothing on stdout is not a block
-    // (Hermes reads it as an ALLOW unless the exit is 2; Claude Code, Codex
-    // and Muse read most such exits as a failed hook and run the call). So the
-    // harness's own block directive goes out first, in its own dialect and at
-    // its own exit code, written synchronously because `process.exit` below
-    // does not wait for a stream to drain.
-    exitInterruptedWait(signal, run.harness);
+    process.exit(exitCode);
   };
   const onTerm = (): void => onSignal("SIGTERM");
   const onInt = (): void => onSignal("SIGINT");
@@ -7342,6 +7348,25 @@ export function commandHookYielding(
   // so its failure is swallowed (APRV-473 refuter).
   process.stderr.on("error", () => undefined);
   return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
+}
+
+/**
+ * The steps {@link commandHook} and {@link commandHookYielding} drive, for a
+ * test that drives them itself (APRV-475 refuter).
+ *
+ * A test seam and nothing more: it exists so a test can stop at each pause and
+ * look at the log, which is the only deterministic way to pin that the pause
+ * before a spend ({@link BEFORE_SPEND}) sits between the read that found a
+ * grant and the append that spends it, on every harness. No CLI route and no
+ * embedding caller uses it; the one entry for those is the two drivers above.
+ */
+export function commandHookSteps(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string,
+): Generator<number, number, undefined> {
+  return hookSteps(argv, streams, cwd, readStdin, null);
 }
 
 function* hookSteps(

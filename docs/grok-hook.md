@@ -185,10 +185,11 @@ this adapter exists to bring back inside the gate. See
 
 A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
 Grok has stopped waiting for the call. The hook ends the wait at once: it
-withdraws the question this invocation opened (`approval.withdrawn`, reason
-`cancelled`, the note naming the signal), prints Grok's deny,
+first prints Grok's deny,
 `{"decision":"deny","reason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}`,
-and exits **2**, the code Grok reads as the deny. If stdout cannot take the
+then withdraws the question this invocation opened (`approval.withdrawn`,
+reason `cancelled`, the note naming the signal), and exits **2**, the code Grok
+reads as the deny. If stdout cannot take the
 whole line it still exits 2, so on this harness the verdict survives a closed
 pipe. A grant that arrives afterwards is refused `request-withdrawn`, and
 nothing records `execution.started` for the call. A grant that landed first,
