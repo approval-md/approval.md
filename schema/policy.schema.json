@@ -386,6 +386,59 @@
           "$ref": "#/$defs/promptRows",
           "description": "Visibility DOWN: the row never renders on this channel. Refused for the rows required for a decision — `action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load` — and refused at policy load with the machine-readable keyword `prompt-row-required`, which fails the whole policy closed. `payload_hash` is NOT among them because the bound hash is stated inside the canonical block on every channel, so hiding the row removes a duplicate rather than the binding. Naming one row in both `always` and `hide` is refused rather than resolved by precedence: an author who wrote both believes one of them, and picking for them would be a guess.",
           "examples": [["provenance", "chain", "requested_ts"]]
+        },
+        "style": {
+          "type": "string",
+          "enum": ["technical", "minimal"],
+          "default": "technical",
+          "description": "SPEC.md §5.2/§10.3 (APRV-489): how this channel lays out a prompt. `technical`, the default and what an absent key means, is the card every earlier build sent, byte for byte. `minimal` is a short card in plain words: a headline the runtime computes from the class, the payload's own words quoted from the bound bytes, a deadline in plain words, and the whole technical card, canonical rendering included, collapsed inside the same message as the Approve and Deny buttons (SPEC.md §10.3, amended APRV-489). Only Telegram draws it in this release; on `web` and `cli` the key is validated and IGNORED, which shows more than was asked for and never less. A request the minimal card cannot draw honestly (an opaque payload without a `say` declaration naming every key, an attestation, a policy edit, a digest, a truncated payload, an abnormal health row, a card over the message limit) is sent as the technical card. Review cards never change. The enum is closed: an unknown style fails validation, which fails the policy closed to all-`manual`.",
+          "examples": ["minimal"]
+        },
+        "say": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/classPattern" },
+          "additionalProperties": { "$ref": "#/$defs/promptSay" },
+          "description": "SPEC.md §5.2 (APRV-489): what the minimal card says about a class, keyed by class pattern and resolved like a class rule (most specific first). Operator text the approver attests, never agent text. Read only under `style: minimal`.",
+          "examples": [
+            {
+              "digest.share": {
+                "does": "share a note about you",
+                "quote": { "scope": "Shared with", "expires_at": "Until", "text": "Note", "digest_id": null },
+                "note": "none"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "promptSay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["does"],
+      "description": "SPEC.md §5.2 (APRV-489): one class's minimal-card declaration.",
+      "properties": {
+        "does": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "The plain-words verb phrase the headline completes: `Your agent wants to <does>`. One line, with no control, format or line-separator characters (checked at load). The runtime chooses the entry by the class the log records."
+        },
+        "quote": {
+          "type": "object",
+          "propertyNames": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "maxLength": 40 },
+              { "type": "null" }
+            ]
+          },
+          "description": "The closed field set for an OPAQUE payload: every top-level key the payload may carry, mapped to the label its value is quoted under (`\"\"` for no label), or `~` for a key known and deliberately left off the simple card. A payload carrying any key this map does not name is sent as the technical card. Ignored for command, file-change and email payloads, whose excerpt is built in."
+        },
+        "note": {
+          "type": "string",
+          "enum": ["summary", "none"],
+          "default": "summary",
+          "description": "Whether the agent's own summary is shown, labelled as the agent's and as not checked: `summary` (the default) or `none`."
         }
       }
     },

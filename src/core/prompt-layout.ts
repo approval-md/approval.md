@@ -60,6 +60,7 @@
  */
 
 import type { Policy, PolicyLoadResult } from "./policy-load.js";
+import { matchesPattern, specificityOf } from "./policy-match.js";
 import type { ValidationError } from "./validate.js";
 
 /**
@@ -312,6 +313,243 @@ export interface PromptBlock {
   rows?: PromptRow[];
   always?: PromptRow[];
   hide?: PromptRow[];
+  /** {@link PromptStyle} (APRV-489). Read by {@link promptStyleFor}, never by the row layout. */
+  style?: PromptStyle;
+  /** {@link PromptSay} (APRV-489). Read by {@link promptSayFor}, never by the row layout. */
+  say?: PromptSay;
+}
+
+// ---------------------------------------------------------------------------
+// The prompt style (APRV-489)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a channel lays out a prompt, as the attested policy chooses it (APRV-489).
+ *
+ * - `technical` is every prompt this runtime has ever sent: the computed block,
+ *   the canonical rendering, the claimed block. It is the default, and what an
+ *   absent key means, so every policy written before the key renders byte for
+ *   byte what it rendered before.
+ * - `minimal` is a short card in plain words for a reader who is not an
+ *   engineer: a headline the RUNTIME computes from the class, the payload's own
+ *   words quoted from the bound bytes, a deadline in plain words, and the whole
+ *   technical card, canonical rendering included, collapsed inside the same
+ *   message as the buttons (SPEC.md §10.3, amended APRV-489).
+ *
+ * A style chooses what is in front of the reader first. It cannot change what
+ * the approver SIGNS: the canonical rendering is in the button-bearing message
+ * either way, the `display_hash` names the same text, and the callback data and
+ * the log are the same.
+ *
+ * Closed for `delivery`'s reason: a style this runtime cannot draw is a screen
+ * the author believes is in force that nothing renders.
+ */
+export const PROMPT_STYLES = ["technical", "minimal"] as const;
+
+/** One of {@link PROMPT_STYLES}. */
+export type PromptStyle = (typeof PROMPT_STYLES)[number];
+
+/** What an absent `style`, a policy that did not load, and every channel but Telegram mean. */
+export const DEFAULT_PROMPT_STYLE: PromptStyle = "technical";
+
+/**
+ * The channels that draw a `minimal` card. Telegram only, in this release.
+ *
+ * Every other channel IGNORES the key (APRV-489, documented in
+ * `docs/cli-reference.md`): `style: minimal` under `channels.web.prompt` or
+ * `channels.cli.prompt` loads and changes nothing. Ignoring is the safe
+ * direction, because the channel then shows MORE than was asked for, never
+ * less, and it is never an error at prompt time. The value is still validated
+ * wherever it appears, so a misspelling fails the load on every channel alike.
+ */
+export const PROMPT_STYLE_CHANNELS: readonly PromptChannel[] = ["telegram"];
+
+/** The two words `say.<class>.note` may say. */
+export const PROMPT_SAY_NOTES = ["summary", "none"] as const;
+
+/** One of {@link PROMPT_SAY_NOTES}. */
+export type PromptSayNote = (typeof PROMPT_SAY_NOTES)[number];
+
+/**
+ * What the operator declares about one class for the minimal card (APRV-489).
+ *
+ * - `does` is the plain-words verb phrase the headline completes: "Your agent
+ *   wants to <does>". Operator text the resident attested; it is the headline
+ *   only for a class this entry matches, chosen by the runtime from the class
+ *   the log records. Nothing the agent writes reaches it.
+ * - `quote` is the closed field set for an OPAQUE payload: every top-level key
+ *   the payload may carry, each with the label its value is quoted under, or
+ *   `null` (YAML `~`) for "known, deliberately not on the simple card". A
+ *   payload carrying a key this map does not name is drawn as the technical
+ *   card instead (SPEC.md §9's closed-field-set rule, applied to the summary
+ *   view). Ignored for the structured kinds (command, file change, email),
+ *   whose computed excerpt is built in.
+ * - `note` says whether the agent's own summary is shown, labelled as the
+ *   agent's: `summary` (the default) or `none`.
+ */
+export interface PromptSayEntry {
+  does: string;
+  quote?: Readonly<Record<string, string | null>>;
+  note?: PromptSayNote;
+}
+
+/** `channels.telegram.prompt.say`: class pattern -> declaration. */
+export type PromptSay = Readonly<Record<string, PromptSayEntry>>;
+
+/** The longest `does` phrase, in characters. A headline is one line on a phone. */
+export const PROMPT_SAY_DOES_MAX = 120;
+
+/** The longest `quote` label, in characters. */
+export const PROMPT_SAY_LABEL_MAX = 40;
+
+/** The longest payload key a `quote` map may name. */
+export const PROMPT_SAY_KEY_MAX = 64;
+
+/**
+ * Whether `value` is one of {@link PROMPT_STYLES}.
+ */
+export function isPromptStyle(value: unknown): value is PromptStyle {
+  return typeof value === "string" && (PROMPT_STYLES as readonly string[]).includes(value);
+}
+
+/**
+ * The style in force for `channel` (APRV-489).
+ *
+ * Fail-soft to {@link DEFAULT_PROMPT_STYLE}, in the direction
+ * {@link promptLayoutFor} fails: a policy that did not load, an absent key, a
+ * channel that does not draw a minimal card, and a value from a later version
+ * all mean `technical`, which shows more rather than less. A LOADED policy
+ * cannot carry an unknown value, because {@link promptBlockErrors} and the
+ * schema refuse it at load.
+ */
+export function promptStyleFor(load: PolicyLoadResult, channel: string): PromptStyle {
+  if (!load.ok) return DEFAULT_PROMPT_STYLE;
+  if (!(PROMPT_STYLE_CHANNELS as readonly string[]).includes(channel)) return DEFAULT_PROMPT_STYLE;
+  const raw = promptObjectOf(load.policy.channels?.[channel]);
+  if (raw === null) return DEFAULT_PROMPT_STYLE;
+  const style = raw["style"];
+  return isPromptStyle(style) ? style : DEFAULT_PROMPT_STYLE;
+}
+
+/**
+ * The `say` declarations in force for `channel`, or an empty map (APRV-489).
+ *
+ * Same fail-soft rule as {@link promptStyleFor}. An entry that is not
+ * well-formed is dropped rather than half-read; from a loaded policy none is,
+ * since {@link promptBlockErrors} refuses it at load. An empty map is safe:
+ * every opaque payload then falls back to the technical card.
+ */
+export function promptSayFor(load: PolicyLoadResult, channel: string): PromptSay {
+  if (!load.ok) return {};
+  if (!(PROMPT_STYLE_CHANNELS as readonly string[]).includes(channel)) return {};
+  const raw = promptObjectOf(load.policy.channels?.[channel]);
+  if (raw === null) return {};
+  const say = raw["say"];
+  if (say === null || typeof say !== "object" || Array.isArray(say)) return {};
+  const out: Record<string, PromptSayEntry> = {};
+  for (const [pattern, entry] of Object.entries(say as Record<string, unknown>)) {
+    if (sayEntryErrors(entry, "").length > 0 || !CLASS_PATTERN.test(pattern)) continue;
+    const record = entry as Record<string, unknown>;
+    const quote = record["quote"] as Record<string, string | null> | undefined;
+    const note = record["note"] as PromptSayNote | undefined;
+    out[pattern] = {
+      does: record["does"] as string,
+      ...(quote === undefined ? {} : { quote: { ...quote } }),
+      ...(note === undefined ? {} : { note }),
+    };
+  }
+  return out;
+}
+
+/**
+ * The declaration that applies to `actionClass`, or `null` (APRV-489).
+ *
+ * Resolved the way a class rule is (SPEC.md §5.2): every matching pattern, the
+ * most specific first, and among a full specificity tie the lexicographically
+ * smallest pattern, so the answer never depends on YAML key order. The class
+ * is the one the LOG records; nothing a payload or an agent says chooses it.
+ */
+export function sayEntryFor(
+  say: PromptSay,
+  actionClass: string,
+): { pattern: string; entry: PromptSayEntry } | null {
+  let best: { pattern: string; entry: PromptSayEntry } | null = null;
+  for (const pattern of Object.keys(say).sort()) {
+    const entry = say[pattern];
+    if (entry === undefined || !matchesPattern(pattern, actionClass)) continue;
+    if (best === null) {
+      best = { pattern, entry };
+      continue;
+    }
+    const [a0, a1] = specificityOf(pattern);
+    const [b0, b1] = specificityOf(best.pattern);
+    if (a0 > b0 || (a0 === b0 && a1 < b1)) best = { pattern, entry };
+  }
+  return best;
+}
+
+/** `$defs.classPattern` in `schema/policy.schema.json`, mirrored for the unknown-channel net. */
+const CLASS_PATTERN = /^(?:[a-z0-9][a-z0-9_-]*|\*)(?:\.(?:[a-z0-9][a-z0-9_-]*|\*))*$/u;
+
+/** Characters an operator's phrase or label may not carry: controls, format (bidi, zero-width) and line separators. */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+/** The `prompt` object under one channel entry, or `null`. */
+function promptObjectOf(entry: unknown): Record<string, unknown> | null {
+  if (entry === null || typeof entry !== "object") return null;
+  const raw = (entry as Record<string, unknown>)["prompt"];
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as Record<string, unknown>;
+}
+
+/** The shape errors of one `say` entry, each a message suffix; empty means well-formed. */
+function sayEntryErrors(entry: unknown, at: string): { path: string; message: string }[] {
+  const errors: { path: string; message: string }[] = [];
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    return [{ path: at, message: "expected an object with `does`, and optionally `quote` and `note`" }];
+  }
+  const record = entry as Record<string, unknown>;
+  for (const key of Object.keys(record).sort()) {
+    if (key !== "does" && key !== "quote" && key !== "note") {
+      errors.push({ path: `${at}/${key}`, message: "unknown key; a say entry defines does, quote, note" });
+    }
+  }
+  const does = record["does"];
+  if (
+    typeof does !== "string" ||
+    does.trim().length === 0 ||
+    [...does].length > PROMPT_SAY_DOES_MAX ||
+    INVISIBLE.test(does)
+  ) {
+    errors.push({
+      path: `${at}/does`,
+      message: `expected a one-line phrase of 1 to ${String(PROMPT_SAY_DOES_MAX)} characters with no control, format or line-separator characters`,
+    });
+  }
+  const quote = record["quote"];
+  if (quote !== undefined) {
+    if (quote === null || typeof quote !== "object" || Array.isArray(quote)) {
+      errors.push({ path: `${at}/quote`, message: "expected a map from payload key to a label or ~" });
+    } else {
+      for (const [key, label] of Object.entries(quote as Record<string, unknown>)) {
+        const keyOk = key.length > 0 && [...key].length <= PROMPT_SAY_KEY_MAX && !INVISIBLE.test(key);
+        const labelOk =
+          label === null ||
+          (typeof label === "string" && [...label].length <= PROMPT_SAY_LABEL_MAX && !INVISIBLE.test(label));
+        if (!keyOk || !labelOk) {
+          errors.push({
+            path: `${at}/quote/${key}`,
+            message: `expected a payload key of 1 to ${String(PROMPT_SAY_KEY_MAX)} characters mapped to a one-line label of at most ${String(PROMPT_SAY_LABEL_MAX)} characters, or ~`,
+          });
+        }
+      }
+    }
+  }
+  const note = record["note"];
+  if (note !== undefined && !(PROMPT_SAY_NOTES as readonly unknown[]).includes(note)) {
+    errors.push({ path: `${at}/note`, message: `expected one of ${PROMPT_SAY_NOTES.join(", ")}` });
+  }
+  return errors;
 }
 
 /**
@@ -391,9 +629,17 @@ export const PROMPT_BLOCK_ERROR_KEYWORDS = [
   "prompt-row-conflict",
   /** A key the `prompt` block does not define. */
   "prompt-key-unknown",
+  /** `style` is not one of {@link PROMPT_STYLES} (APRV-489). */
+  "prompt-style-unknown",
+  /** `say` is not a map of class pattern to a well-formed declaration (APRV-489). */
+  "prompt-say-shape",
 ] as const;
 
-const PROMPT_BLOCK_KEYS = ["rows", "always", "hide"] as const;
+/** The three row-list keys, each an array of row names. */
+const PROMPT_ROW_KEYS = ["rows", "always", "hide"] as const;
+
+/** Every key a `prompt` block defines (APRV-489 adds `style` and `say`). */
+const PROMPT_BLOCK_KEYS = [...PROMPT_ROW_KEYS, "style", "say"] as const;
 
 /**
  * Validate every `channels.<name>.prompt` in a policy. Empty means clean.
@@ -424,7 +670,7 @@ export function promptBlockErrors(policy: Policy): ValidationError[] {
       errors.push({
         path: at,
         keyword: "prompt-block-shape",
-        message: "expected an object with any of `rows`, `always`, `hide`",
+        message: "expected an object with any of `rows`, `always`, `hide`, `style`, `say`",
       });
       continue;
     }
@@ -440,8 +686,44 @@ export function promptBlockErrors(policy: Policy): ValidationError[] {
       }
     }
 
+    // APRV-489. Checked wherever it appears, on every channel name, although
+    // only Telegram draws it: a misspelt style is a statement the runtime cannot
+    // honour on any channel, and the policy fails closed on all of them alike.
+    const style = block["style"];
+    if (style !== undefined && !isPromptStyle(style)) {
+      errors.push({
+        path: `${at}/style`,
+        keyword: "prompt-style-unknown",
+        message: `unknown prompt style ${JSON.stringify(style)}; known styles are ${PROMPT_STYLES.join(", ")}`,
+      });
+    }
+    const say = block["say"];
+    if (say !== undefined) {
+      if (say === null || typeof say !== "object" || Array.isArray(say)) {
+        errors.push({
+          path: `${at}/say`,
+          keyword: "prompt-say-shape",
+          message: "expected a map from class pattern to { does, quote, note }",
+        });
+      } else {
+        for (const pattern of Object.keys(say as Record<string, unknown>).sort()) {
+          const entryAt = `${at}/say/${pattern}`;
+          if (!CLASS_PATTERN.test(pattern)) {
+            errors.push({
+              path: entryAt,
+              keyword: "prompt-say-shape",
+              message: `${JSON.stringify(pattern)} is not a class pattern`,
+            });
+          }
+          for (const problem of sayEntryErrors((say as Record<string, unknown>)[pattern], entryAt)) {
+            errors.push({ path: problem.path, keyword: "prompt-say-shape", message: problem.message });
+          }
+        }
+      }
+    }
+
     const seen: Record<string, Set<string>> = {};
-    for (const key of PROMPT_BLOCK_KEYS) {
+    for (const key of PROMPT_ROW_KEYS) {
       const value = block[key];
       if (value === undefined) continue;
       if (!Array.isArray(value)) {

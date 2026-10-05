@@ -42,10 +42,16 @@ import { loadPolicyText, type PolicyLoadResult } from "../src/core/policy-load.j
 import {
   applyPromptBlock,
   CLI_PROMPT_LAYOUT,
+  DEFAULT_PROMPT_STYLE,
   isPromptRow,
   promptBlockErrors,
   promptLayoutFor,
+  promptSayFor,
+  promptStyleFor,
+  sayEntryFor,
   PROMPT_ROWS,
+  PROMPT_SAY_NOTES,
+  PROMPT_STYLES,
   REQUIRED_PROMPT_ROWS,
   TELEGRAM_PROMPT_LAYOUT,
   WEB_PROMPT_LAYOUT,
@@ -505,4 +511,114 @@ test("the web page honours a layout, computed and claimed stay apart", async () 
   assert.ok(page.includes(world.key), "the page did not render the request");
   assert.equal(page.includes(">chain<"), false, "a hidden row reached the served page");
   assert.ok(page.includes(PAYLOAD_BEGIN), "the canonical block was suppressed on the page");
+});
+
+// ---------------------------------------------------------------------------
+// The prompt style and the say declarations (APRV-489)
+// ---------------------------------------------------------------------------
+
+const VILLAGE_SAY = [
+  "      say:",
+  "        intent.publish.inferred.index:",
+  '          does: "post a wish to Index, the village matching service, in your name"',
+  '          quote: { text: "" }',
+  "          note: none",
+  "        digest.share:",
+  '          does: "share a note about you"',
+  '          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: ~ }',
+  "          note: none",
+  "        intent.publish.*:",
+  '          does: "post something to Index in your name"',
+  '          quote: { text: "" }',
+];
+
+test("an absent style is technical, on every channel, and a failed load is technical too (AC #1)", () => {
+  const clean = load();
+  assert.equal(clean.ok, true);
+  for (const channel of ["telegram", "web", "cli", "matrix"]) {
+    assert.equal(promptStyleFor(clean, channel), "technical", channel);
+    assert.deepEqual(promptSayFor(clean, channel), {}, channel);
+  }
+  const broken = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", "      rows: [clas]"]);
+  assert.equal(broken.ok, false);
+  assert.equal(promptStyleFor(broken, "telegram"), "technical", "a policy that did not load drew a minimal card");
+  assert.equal(DEFAULT_PROMPT_STYLE, "technical");
+});
+
+test("style minimal and a say map load under channels.telegram.prompt and resolve", () => {
+  const result = load(["channels:", "  telegram:", "    prompt:", "      always: [ttl_remaining_ms]", "      style: minimal", ...VILLAGE_SAY]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(promptStyleFor(result, "telegram"), "minimal");
+  const say = promptSayFor(result, "telegram");
+  assert.deepEqual(say["digest.share"], {
+    does: "share a note about you",
+    quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: null },
+    note: "none",
+  });
+  // The layout is untouched by the new keys: the ttl row is still forced on.
+  assert.equal(promptLayoutFor(result, "telegram").visibility.ttl_remaining_ms, "always");
+});
+
+test("a say entry is chosen like a class rule: the most specific pattern wins", () => {
+  const result = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", ...VILLAGE_SAY]);
+  const say = promptSayFor(result, "telegram");
+  assert.equal(sayEntryFor(say, "intent.publish.inferred.index")?.pattern, "intent.publish.inferred.index");
+  assert.equal(sayEntryFor(say, "intent.publish.stated.index")?.pattern, "intent.publish.*");
+  assert.equal(sayEntryFor(say, "village.vote"), null);
+});
+
+test("style is IGNORED on web and cli: it loads and they stay technical (documented rule)", () => {
+  const result = load(["channels:", "  web:", "    prompt:", "      style: minimal", "  cli:", "    prompt:", "      style: minimal"]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(promptStyleFor(result, "web"), "technical");
+  assert.equal(promptStyleFor(result, "cli"), "technical");
+  // ...and the row layout those channels draw is the one they ship.
+  assert.deepEqual(promptLayoutFor(result, "web"), WEB_PROMPT_LAYOUT);
+  assert.deepEqual(promptLayoutFor(result, "cli"), CLI_PROMPT_LAYOUT);
+});
+
+test("an unknown style fails the load: by the schema on telegram, by keyword elsewhere", () => {
+  const typed = load(["channels:", "  telegram:", "    prompt:", "      style: compact"]);
+  assert.equal(typed.ok, false, "an unknown style loaded");
+  assert.equal(typed.ok === false && typed.code, "schema-invalid");
+  assert.ok(keywordsOf(typed).includes("enum"), keywordsOf(typed).join(","));
+  const untyped = load(["channels:", "  matrix:", "    prompt:", "      style: compact"]);
+  assert.equal(untyped.ok, false);
+  assert.deepEqual(keywordsOf(untyped), ["prompt-style-unknown"]);
+});
+
+test("a malformed say fails the load, with prompt-say-shape on an untyped channel", () => {
+  const cases: [string, string[]][] = [
+    ["say is a list", ["      say: [a]"]],
+    ["bad class pattern", ["      say:", "        Digest.Share: { does: share }"]],
+    ["missing does", ["      say:", "        digest.share: { quote: { text: Note } }"]],
+    ["empty does", ["      say:", '        digest.share: { does: "" }']],
+    ["does too long", ["      say:", `        digest.share: { does: "${"x".repeat(121)}" }`]],
+    ["does with a bidi override", ["      say:", '        digest.share: { does: "share \\u202Etxt" }']],
+    ["does on two lines", ["      say:", '        digest.share: { does: "share\\nall" }']],
+    ["label too long", ["      say:", `        digest.share: { does: share, quote: { text: "${"y".repeat(41)}" } }`]],
+    ["label is a number", ["      say:", "        digest.share: { does: share, quote: { text: 3 } }"]],
+    ["unknown note", ["      say:", "        digest.share: { does: share, note: always }"]],
+    ["unknown entry key", ["      say:", "        digest.share: { does: share, show: all }"]],
+  ];
+  for (const [label, lines] of cases) {
+    const typed = load(["channels:", "  telegram:", "    prompt:", ...lines]);
+    assert.equal(typed.ok, false, `${label}: loaded on telegram`);
+    const untyped = load(["channels:", "  matrix:", "    prompt:", ...lines]);
+    assert.equal(untyped.ok, false, `${label}: loaded on an untyped channel`);
+    assert.ok(
+      keywordsOf(untyped).length > 0 && keywordsOf(untyped).every((keyword) => keyword === "prompt-say-shape"),
+      `${label}: ${keywordsOf(untyped).join(",")}`,
+    );
+  }
+});
+
+test("the schema's style enum is PROMPT_STYLES, and the new keys sit in the shared prompt block", () => {
+  const schema = JSON.parse(
+    readFileSync(join(fileURLToPath(new URL("../../", import.meta.url)), "schema/policy.schema.json"), "utf8"),
+  ) as { $defs: Record<string, { properties?: Record<string, { enum?: string[] }> }> };
+  assert.deepEqual(schema.$defs["promptLayout"]?.properties?.["style"]?.enum, [...PROMPT_STYLES]);
+  assert.ok(schema.$defs["promptLayout"]?.properties?.["say"] !== undefined);
+  assert.deepEqual(Object.keys(schema.$defs["promptSay"]?.properties ?? {}).sort(), ["does", "note", "quote"]);
+  assert.deepEqual([...PROMPT_SAY_NOTES], ["summary", "none"]);
 });
