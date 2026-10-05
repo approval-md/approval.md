@@ -4452,7 +4452,7 @@ first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disli
 | ✅ | `audit.reviewed` with verdict `ok`, and the held grade if there is one. |
 | a reaction, nothing armed | **Nothing.** Refused `verdict-required` (APRV-482): a grade is not a verdict. The card holds the grade and says `GRADE … HELD` in its heading. |
 | ✅ after a reaction | verdict `ok` with the held grade (a `loved` or `disliked` asks for words first). |
-| 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
+| 🛑 once | **Nothing.** The tap reaches the runtime with no verdict, and the card arms (it says `DENY ARMED` on itself) only when the answer is `verdict-required`, which the runtime gives only to a mapped sender on the class's roster. Any other refusal is shown on the card and arms nothing. |
 | 🛑 twice | verdict `denied` with the held grade if any, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
 
@@ -4463,7 +4463,11 @@ refused on the card with one line: any ✅ or 🛑 while another account holds t
 grade or armed Deny, and any reaction while another account armed Deny. A
 reaction tapped with nothing armed only replaces the held grade, and its tapper
 then holds it. A record therefore never carries a grade or a denial its reviewer
-did not tap.
+did not tap. Only an account that may review can leave either behind (PR #614
+recheck NF-1): a grade is held, and a Deny arms, only after the runtime has
+passed the sender and the roster and answered `verdict-required`, so an
+unmapped or off-roster account in the approver chat cannot block the
+approvers' taps.
 
 **A verdict is an explicit act (APRV-482).** Under supervised-retro a review
 counts as the individual approval nobody gave before the action ran, so nothing

@@ -1981,10 +1981,13 @@ export const TELEGRAM_REVIEW_ARM_TOAST =
 /**
  * The card line and toast for a tap that would finish another account's
  * half-finished review (PR #614 refutation F3): an armed Deny or a held grade
- * belongs to the account that tapped it, and nothing is recorded.
+ * belongs to the account that tapped it, and nothing is recorded. A held grade
+ * is replaced by the tapper's own grade (a grade finishes nothing), which the
+ * line says (PR #614 recheck NF-1, minor). Under 200 characters, the Bot API's
+ * limit for a callback answer.
  */
 export const TELEGRAM_REVIEW_OTHER_SENDER =
-  "Another account armed Deny or holds a grade on this card; only that account's tap can finish it. Nothing was recorded.";
+  "Another account's unfinished review (armed Deny or held grade) is on this card. Nothing was recorded. Tap your own grade to replace a held one; an armed Deny is theirs to finish.";
 
 /** The toast a reaction that needs the human's own words gets. */
 export const TELEGRAM_REVIEW_NOTE_TOAST =
@@ -5030,12 +5033,28 @@ export class TelegramChannel implements TestableChannel {
 
     // The first Deny tap arms and writes nothing. Stated on the card, so the
     // approver reads the state rather than inferring it from a toast.
+    //
+    // PR #614 recheck NF-1: arming is earned the way a held grade is. The tap
+    // goes to the runtime with NO verdict, and the card arms only when the
+    // answer is `verdict-required`, which the runtime gives only after the
+    // sender and the class's roster have passed. An unmapped or off-roster
+    // account's Deny is refused on the card with its own code and arms
+    // nothing, so it cannot leave a half-finished denial that blocks the
+    // approvers' taps.
     if (tap.choice === "deny" && !state.denyArmed) {
-      state.denyArmed = true;
-      state.armedBy = tapper;
-      state.notice = null;
-      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ARM_TOAST);
-      await this.redrawReview(state);
+      const answered = await this.recordReview(
+        state,
+        {
+          sampleSeq: state.card.sampleSeq,
+          ...(sender === undefined ? {} : { sender }),
+        },
+        result,
+        { kind: "deny", by: tapper },
+      );
+      await this.safeAnswer(
+        callbackId,
+        state.denyArmed ? TELEGRAM_REVIEW_ARM_TOAST : answered?.toast ?? TELEGRAM_NOT_RECORDED,
+      );
       return;
     }
 
@@ -5091,7 +5110,7 @@ export class TelegramChannel implements TestableChannel {
           ...(sender === undefined ? {} : { sender }),
         },
         result,
-        { reaction, by: tapper },
+        { kind: "grade", reaction, by: tapper },
       );
       return;
     }
@@ -5251,14 +5270,17 @@ export class TelegramChannel implements TestableChannel {
     tap: ReviewTap,
     result: TelegramPollResult,
     /**
-     * A lone grade to hold if the runtime answers `verdict-required` (PR #614
-     * refutation N6/F3): only then has the tapper passed the sender and roster
-     * checks, so only then is the grade theirs to finish.
+     * A lone grade to hold, or a Deny to arm, if the runtime answers
+     * `verdict-required` (PR #614 refutation N6/F3, recheck NF-1): only then
+     * has the tapper passed the sender and roster checks, so only then is the
+     * half-finished review theirs to finish.
      */
-    hold?: { reaction: Reaction; by: string | null },
-  ): Promise<void> {
+    hold?:
+      | { kind: "grade"; reaction: Reaction; by: string | null }
+      | { kind: "deny"; by: string | null },
+  ): Promise<ReviewTapResponse | null> {
     const handler = this.reviewHandler;
-    if (handler === null) return;
+    if (handler === null) return null;
 
     // APRV-481: whether the bytes were on this card is the card's own fact,
     // decided by the same pure view that drew it, so the record's payload hash
@@ -5293,11 +5315,21 @@ export class TelegramChannel implements TestableChannel {
     } else {
       state.notice = { headline: response.headline, lines: response.detail };
       if (hold !== undefined && response.code === "verdict-required") {
-        state.heldReaction = hold.reaction;
-        state.heldBy = hold.by;
+        if (hold.kind === "grade") {
+          state.heldReaction = hold.reaction;
+          state.heldBy = hold.by;
+        } else {
+          // The armed state is the card's message; the refusal that earned it
+          // is the runtime's word for "a verdict is still needed", which the
+          // armed heading already says.
+          state.denyArmed = true;
+          state.armedBy = hold.by;
+          state.notice = null;
+        }
       }
     }
     await this.redrawReview(state);
+    return response;
   }
 
   /** One `editMessageText` that replaces a review card's text and its keyboard. */

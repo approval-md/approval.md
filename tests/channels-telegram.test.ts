@@ -7428,6 +7428,53 @@ test("APRV-483: a mapped reviewer off the class roster is refused actor-not-appr
   assertClean(world.unit);
 });
 
+test("PR #614 recheck NF-1: an unmapped or off-roster account's Deny arms nothing, so the approver is never blocked", async () => {
+  // The recheck's probe F3, on a sender-mapped policy whose class roster names
+  // carter only: 999 is unmapped, dana (77) is mapped and off the roster.
+  const world = sampledWorld(1, REVIEW_POLICY_ROSTER);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+  const lastText = () => (editsFor(deliveryId).at(-1) as { text: string }).text;
+  const toasts = mock.answerTexts().length;
+
+  // The unmapped account's Deny reaches the runtime with no verdict and is
+  // refused with its own code; the card does not arm.
+  const stranger = await tapReview(channel, "deny", CHAT, STRANGER_TG);
+  assert.equal(stranger.reviews.length, 1, "the first Deny did not reach the runtime");
+  assert.equal(stranger.reviews[0]?.ok, false);
+  assert.equal(stranger.reviews[0]?.tap.verdict, undefined, "the arming tap carried a verdict");
+  assert.ok(lastText().includes(TELEGRAM_NOT_RECORDED), `the refusal is not on the card: ${lastText()}`);
+  assert.match(lastText(), /not one the attested policy names/u, "the card does not say the sender is unmapped");
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_ARMED), "an unmapped account armed Deny");
+  assert.notEqual(mock.answerTexts().at(-1), TELEGRAM_REVIEW_ARM_TOAST, "the toast said Deny was armed");
+
+  // The off-roster account's Deny is refused by the roster; nothing arms.
+  await tapReview(channel, "deny", CHAT, DANA_TG);
+  assert.ok(lastText().includes("actor-not-approver"), `the roster refusal is not on the card: ${lastText()}`);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_ARMED), "an off-roster account armed Deny");
+  assert.deepEqual(reviewsIn(world), []);
+
+  // The approver is not blocked: a grade, then a two-tap Deny, each from
+  // carter, and none of them is refused as another account's review.
+  await tapReview(channel, "indifferent", CHAT, CARTER_TG);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_OTHER_SENDER), `carter's grade was blocked: ${lastText()}`);
+  const arming = await tapReview(channel, "deny", CHAT, CARTER_TG);
+  assert.equal(arming.reviews[0]?.ok, false, "the arming tap recorded");
+  assert.ok(lastText().includes(TELEGRAM_REVIEW_ARMED), `carter's Deny did not arm: ${lastText()}`);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_OTHER_SENDER), `carter's Deny was blocked: ${lastText()}`);
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_REVIEW_ARM_TOAST);
+  assert.deepEqual(reviewsIn(world), [], "the first Deny tap recorded");
+  await tapReview(channel, "deny", CHAT, CARTER_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:carter");
+  const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "indifferent");
+  assert.ok(mock.answerTexts().length > toasts);
+  assertClean(world.unit);
+});
+
 test("APRV-324: a note prompt answers only to the account that armed it", async () => {
   const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
   const { channel } = reviewChannelFor(world);
