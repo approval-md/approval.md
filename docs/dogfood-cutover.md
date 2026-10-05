@@ -520,7 +520,7 @@ always available:
 
 ```sh
 approval audit list                                     # what is awaiting review
-approval audit review <sample-seq> --reaction liked     # or --deny, --note "…"
+approval audit review <sample-seq> --ok --reaction liked  # or --deny; --note "…"
 approval audit obligations                              # what a denial opened
 ```
 

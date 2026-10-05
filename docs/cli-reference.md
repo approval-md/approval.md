@@ -3575,20 +3575,113 @@ carries in the open.
 
 ## audit review
 
+**The reviewer must be on the class's roster (APRV-483).** Where the policy rule
+that resolves the sampled action's class names `approvers`, the reviewer must be
+one of them, compared exactly as a grant's approver is (`namesApprover` in
+`core/gate.ts`): a bare id on the roster matches `human:<id>`. Anyone else is
+refused `actor-not-approver` (exit 1) and nothing is appended. This binds every
+surface, because the check is in `reviewSample` itself: `--as human:<id>` at a
+terminal and a sender-mapped tap on a Telegram card are held to the same list.
+A rule that names no `approvers` restricts nobody, exactly as for grants. The
+class comes from the action's registration (a sample naming no class is refused
+`actor-not-approver`, never read as "no roster"), and the roster is read from
+the policy file a grant would read, only when its bytes are the latest
+attestation's: an unattested, edited, unreadable or `--policy`-substituted file
+is refused `policy-not-attested` (exit 1), because a roster read from a file
+nobody attested is one the reviewer could have chosen. Attested bytes that do not
+load (a schema-invalid rule, a YAML error) are refused `policy-invalid` (exit 1):
+`policy attest` hashes bytes without parsing them, and the fail-closed reading
+of a broken policy names no roster, which for a review would mean anyone. Nothing
+resolves from a broken file, so an on-roster reviewer is refused too; the repair
+is a corrected policy, attested.
+
+**The roster is the one in force when the action ran (PR #614 refutation F2,
+recheck NF-3).** Every `audit.sampled` the runtime writes pins the attested
+policy the sampled execution ran under, as `payload.policy_sha256`: the
+`sha256` named by the latest `policy.updated` attestation before the
+`execution.started` record, which is the policy the gate checked when it
+recorded the start (a harness start carries the same hash as its own
+`policy_sha256`). A policy attested between the run and the sweep therefore
+changes neither who may review the sample nor whether anyone can. Only an
+execution older than every attestation in the log pins the latest attestation
+at sampling instead. A review of that sample reads the
+roster only from policy bytes that hash to the pin, and only when an
+attestation before the sample names that hash. The bytes come from the payload
+store beside the log, where every attestation since APRV-356 keeps the text it
+attested (PR #614 fix round 3), so editing and re-attesting the policy, a
+settings save from the app included, leaves older open samples reviewable. The
+policy file on disk is the fallback, used only when its bytes hash to the pin
+(a chain last attested before APRV-356 stored none). Bytes in neither place are
+refused `policy-not-attested`, and the message names the hash it needs. A later
+re-attestation that renames or drops the class's rule therefore cannot leave
+the sample with no roster, and one that names a different roster cannot open
+it to a reviewer the action's policy did not name. A class that matches no rule in the pinned policy
+(it reached supervised through `defaults.autonomy`) is refused
+`actor-not-approver` with that reason, because the defaults carry no roster
+and for a review "no roster" would mean anyone. A sample written before samples
+pinned a policy has no `policy_sha256` and keeps the latest-attestation reading
+above.
+
+Exactly one of `--ok` and `--deny` is required (APRV-482). A bare review, or one
+carrying only `--reaction`, is refused `verdict-required` (exit 1) and writes
+nothing: under supervised-retro the review counts as the approval, and an
+approval is something the reviewer says, never a default. Both flags together
+is a usage error (exit 2). The verdict is judged after the roster (PR #614
+refutation N6): a reviewer off the roster is told `actor-not-approver` whether
+or not they gave a verdict, and a grade with no verdict is not judged for its
+note until the verdict comes.
+
 `--note` is optional — unlike `execution resolve`, this event records only that a
 person looked, and the runtime is not relying on the note for a fact it does not
 otherwise have. Human-only: a runtime that could mark its own samples reviewed
 would be a supervision backlog that empties itself.
 
-No attestation is required, for the reason `execution resolve` states: review
-records an observation, exercises no policy authority, authorizes nothing, and
-spends no budget. A review blocked because a policy file was edited afterwards
-would be a supervision backlog held open by an unrelated fact.
+Since APRV-483 a review needs the attested policy, because its roster check
+reads the class's `approvers` from it (below). Before that no attestation was
+required, for the reason `execution resolve` states: review recorded an
+observation and exercised no policy authority. Under supervised-retro the
+review is the approval, and the trade is stated plainly: a policy edited and not
+yet re-attested now holds the review backlog open until a human re-attests.
 
-What it appends is `audit.reviewed`, naming the sample's action key and task, with
-payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"...",
-"reaction"?:"disliked"|"indifferent"|"liked"|"loved"}`.
-An action key with several open samples refuses `ambiguous-subject`.
+What it appends is `audit.reviewed`, naming the sample's action key and task; its
+payload is listed field by field under [the review record](#the-review-record),
+which is the one place those names are defined. An action key with several open
+samples refuses `ambiguous-subject`.
+
+### The review record
+
+The field names a follower reads (the data pipeline's follower and the dbt
+models built on it read reviews as approvals under supervised-retro). This
+table is the single definition; other docs link here rather than restating it.
+Every `audit.reviewed` written since APRV-481 carries the three required fields,
+and since PR #614's F5 fix a fourth, `verdict_source`; the write boundary refuses
+one that does not. The verdict alone cannot say whether the reviewer gave it:
+before APRV-482 the runtime wrote `ok` for a grade-only tap or a bare
+`audit review`, and such a record may carry all three APRV-481 fields, so
+`verdict_source` is the field that separates the two. A review written before then
+may lack them and still verifies (the read boundary is the schema's
+`audit_reviewed_record_historical`), so a follower treats their absence on an
+old record as "not recorded", never as a default.
+
+| Field | Where | Required | Meaning |
+| --- | --- | --- | --- |
+| `event` | record | yes | `audit.reviewed`. |
+| `seq`, `ts`, `hash` | record | yes | The review's own chain position and runtime-assigned time. |
+| `actor` | record | yes | `human:<id>`, the reviewer. Since APRV-483 a person on the class's `approvers` roster wherever the rule names one. |
+| `action_key`, `task` | record | when the sample named them | The reviewed action and its task. |
+| `channel` | record | no | The surface, when the writer recorded one. |
+| `payload.subject_seq` | payload | yes (APRV-481) | The `seq` of the `audit.sampled` record this review answers. Not the execution's seq. |
+| `payload.sampled_subject_hash` | payload | yes (APRV-481) | The `hash` of the `execution.started` record the sample named: the join key from a review to the execution it judged. |
+| `payload.verdict` | payload | yes (APRV-481) | `ok` or `denied`. The enforcement field. Explicit only on records that carry `verdict_source`. |
+| `payload.verdict_source` | payload | yes (PR #614 F5) | Always `explicit`: the reviewer said the verdict (`--ok`/`--deny`, a card's OK or second Deny). The discriminator for a follower: a review WITHOUT it predates APRV-482 or was written by an older build, and its `ok` may have been defaulted for a grade-only tap or a bare terminal review. Count only reviews carrying it as explicit approvals. |
+| `payload.payload_hash` | payload | no | The SHA-256/JCS binding of the bytes the execution ran, present ONLY when the surface showed those bytes whole before the verdict (a Telegram card's `bytes` view). Absent when the reviewer saw a hash, nothing, or a terminal. Checked against the execution's binding before it is written. |
+| `payload.reaction` | payload | no | `disliked`, `indifferent`, `liked` or `loved`. Guidance, never enforcement; absent is absent. |
+| `payload.note` | payload | with `loved`/`disliked` | The reviewer's words, verbatim. |
+| `payload.sender`, `payload.sender_source` | payload | no | The authenticated account the review arrived from, when a transport authenticated one. |
+| `payload.subject_event`, `payload.reviewed` | payload | no | Constants (`audit.sampled`, `true`) kept for older readers. |
+
+A denial is followed by a runtime-authored `reconciliation.required` whose
+`payload.review_seq` is the review's `seq`.
 
 **`--json`** (one object on stdout):
 
@@ -4344,16 +4437,61 @@ Each `audit.sampled` with no later `audit.reviewed` now arrives as a **review
 card**.
 
 A card is not a prompt and says so. Its headline is `REVIEW — THIS ALREADY RAN`,
-it carries no payload region and no approve button, and it accepts no token: the
-action has happened, and a card offering an approve would present a settled fact
-as a live authorization. What it carries is the same rows a prompt would show
-for the same action — class, the command breakdown, task, the agent's claimed
-summary, the model gloss where one is attached — plus two the card adds: `ran
-at` (the `execution.started` the sample named) and `verdict` (that the runtime
-allowed this without asking, which autonomy said so, the rate it was drawn at,
-and how the log says it ended). Everything computed is derived from the verified
-log, the payload store and the classifier; the claimed rows sit under the same
-"NOT verified by the runtime" heading a prompt gives them.
+it carries no approve button, and it accepts no token: the action has happened,
+and a card offering an approve would present a settled fact as a live
+authorization. What it carries is the same rows a prompt would show for the same
+action — class, the command breakdown, task, the agent's claimed summary, the
+model gloss where one is attached — plus two the card adds: `ran at` (the
+`execution.started` the sample named) and `verdict` (that the runtime allowed
+this without asking, which autonomy said so, the rate it was drawn at, and how
+the log says it ended). Everything computed is derived from the verified log,
+the payload store and the classifier; the claimed rows sit under the same "NOT
+verified by the runtime" heading a prompt gives them.
+
+**The card shows the payload that ran (APRV-480).** Under supervised-retro the
+review is the individual approval nobody gave before the action executed, so the
+reviewer reads the published bytes rather than a key and the agent's own summary
+of what it did. Between the computed and the claimed rows the card carries one
+of three payload regions, and its heading says which:
+
+| Heading | What the reviewer sees | When |
+| --- | --- | --- |
+| `PAYLOAD — the bytes that ran, shown whole; this review covers them` | the canonical rendering of the bytes, whole, in a `<pre>` block | the runtime holds bytes that hash to the execution's binding and they fit one card |
+| `PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes` | the binding's `sha256`, and why the bytes are absent | nobody holds the bytes, the bytes held do not hash to the binding, or they are longer than this card's payload budget (at most 2000 escaped characters, less when the card's rows leave less room) |
+| `PAYLOAD — none recorded; the execution bound to no payload hash` | nothing to show and nothing to name | the execution and its registration recorded no `payload_hash` |
+
+The bytes are shown whole or not at all: a card is one message edited in place,
+so it cannot spill a payload over several messages the way a request prompt
+does, and a review over half the bytes would claim more than the reviewer read.
+Only the first case lets the review record carry a `payload_hash` (see
+[the review record](#the-review-record)). A terminal review (`approval audit
+review`) shows no payload and so never records one.
+
+**The whole card fits one message (PR #614 refutation F4).** The agent's summary
+is cut at 400 characters and every other row at 300, each with a marker saying
+how many characters are not shown (the registration record keeps the text
+whole); a card whose rows are pathologically long cuts them further, in steps,
+until it fits. A notice shows at most 600 characters, the rest on the
+listener's stderr. The payload budget is what the card's own rows leave under
+Telegram's 4096-character limit after the longest heading and the largest
+notice a tap can add, capped at 2000, and it is computed from the card alone,
+so the card a reviewer saw and the view a tap records cannot disagree.
+
+**A card that fails to send (PR #614 recheck NF-2).** When Telegram refuses the
+card itself (HTTP 400 `message is too long`, `can't parse entities`,
+`message text is empty` or `text must be non-empty`, `reply markup is too long`,
+`BUTTON_DATA_INVALID`, `ENTITIES_TOO_LONG`), resending it can only fail again:
+the listener prints a coded `approval: telegram review-offer-failed:` line
+naming `approval audit review <seq> --ok` (or `--deny`), leaves that sample for
+a terminal review, and offers the next one. Every other failure (a 429, a
+timeout, a 5xx, a network error) prints `approval: telegram review-offer-retry:`
+and pauses review cards for Telegram's `retry_after` or the backoff, whichever
+is longer (one minute, doubling per attempt; never more than an hour, whatever
+`retry_after` says), then offers the same sample again.
+After five failed attempts the sample is left for a terminal review with the
+`review-offer-failed` line. Either way the sample stays open in
+`approval audit list` and QUEUE.md, the queue behind it no longer waits, and a
+restarted listener offers it afresh.
 
 Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
 first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,
@@ -4361,11 +4499,38 @@ first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disli
 
 | Tap | What is recorded |
 | --- | --- |
-| ✅ | `audit.reviewed` with verdict `ok` and no reaction. |
-| a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
-| 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
-| 🛑 twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| ✅ | `audit.reviewed` with verdict `ok`, and the held grade if there is one. |
+| a reaction, nothing armed | **Nothing.** Refused `verdict-required` (APRV-482): a grade is not a verdict. The card holds the grade and says `GRADE … HELD` in its heading. |
+| ✅ after a reaction | verdict `ok` with the held grade (a `loved` or `disliked` asks for words first). |
+| 🛑 once | **Nothing.** The tap reaches the runtime with no verdict, and the card arms (it says `DENY ARMED` on itself) only when the answer is `verdict-required`, which the runtime gives only to a mapped sender on the class's roster. Any other refusal is shown on the card and arms nothing. |
+| 🛑 twice | verdict `denied` with the held grade if any, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
+
+**A held grade and an armed Deny belong to the account that tapped them (PR #614
+refutation F3).** The card remembers the transport's sender id with each. A tap
+that would finish another account's half-finished review records nothing and is
+refused on the card with one line: any ✅ or 🛑 while another account holds the
+grade or armed Deny, and any reaction while another account armed Deny. A
+reaction tapped with nothing armed only replaces the held grade, and its tapper
+then holds it. A record therefore never carries a grade or a denial its reviewer
+did not tap. Only an account that may review can leave either behind (PR #614
+recheck NF-1): a grade is held, and a Deny arms, only after the runtime has
+passed the sender and the roster and answered `verdict-required`, so an
+unmapped or off-roster account in the approver chat cannot block the
+approvers' taps.
+
+**A verdict is an explicit act (APRV-482).** Under supervised-retro a review
+counts as the individual approval nobody gave before the action ran, so nothing
+records `ok` on a reviewer's behalf. The explicit forms per surface:
+
+| Surface | `ok` | `denied` | Refused `verdict-required` |
+| --- | --- | --- | --- |
+| Telegram card | ✅ (alone, or after a grade) | 🛑 twice, or 🛑 then a grade | a grade tapped with nothing armed |
+| `approval audit review` | `--ok` | `--deny` | neither flag, with or without `--reaction`; both flags is a usage error (exit 2) |
+
+The refusal on the card is the runtime's own: the tap reaches `reviewSample`
+with no verdict, and the code and its message come back exactly as a terminal
+sees them.
 
 The card does not print this table under itself. It used to, and the paragraph
 of rules pushed the rows a review is actually about off the first screen for a
@@ -4399,7 +4564,10 @@ reviewer has to be able to say which half they meant.
 
 Every append goes through the same `reviewSample` that `approval audit review`
 calls, recorded against the human identity this listener was configured with
-(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. So `approval
+(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. That identity,
+or the person a sender mapping resolves a tap to, must be on the class's
+`approvers` roster where the rule names one, or the card shows
+`actor-not-approver` and keeps its buttons (APRV-483). So `approval
 feedback` shows a reaction given on a card exactly as one given at a terminal:
 same record, same `human:<id>`, same everything.
 

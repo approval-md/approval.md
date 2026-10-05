@@ -7,7 +7,12 @@
   "actor": "human:carter",
   "channel": "cli",
   "payload": {
+    "subject_seq": 15,
+    "subject_event": "audit.sampled",
+    "reviewed": true,
+    "sampled_subject_hash": "6c1d3f0b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817060504",
     "verdict": "ok",
+    "verdict_source": "explicit",
     "reaction": "loved",
     "note": "exactly the archive I would have written by hand"
   },

@@ -255,8 +255,12 @@ const HUMAN_ACTOR = /^human:.+/u;
  * language. An empty list names nobody and therefore matches nobody;
  * `approvers` carries `minItems: 1`, so a valid policy cannot produce one, and
  * that branch stays a fail-closed backstop rather than a reachable path.
+ *
+ * Exported for `core/audit.ts` (APRV-483), whose review check is this one
+ * comparison applied to a reviewer, so a grant and a review can never disagree
+ * about who is on a roster.
  */
-function namesApprover(approvers: readonly string[], actor: string): boolean {
+export function namesApprover(approvers: readonly string[], actor: string): boolean {
   const bare = actor.startsWith("human:") ? actor.slice("human:".length) : actor;
   return approvers.some((name) => name === actor || name === bare);
 }
@@ -850,7 +854,13 @@ export function readGateRecords(logPath: string, schemaDir?: string): ReadOutcom
  * `checkAttestation` reports `unreadable` and the gate refuses — a missing
  * policy is never a pass.
  */
-function policyPathOf(options: GateOptions): string {
+/**
+ * The policy file a gate operation reads: `policy.file`, or the first policy
+ * filename found in `policy.dir` (default: the working directory). Exported for
+ * `core/audit.ts` (APRV-483), whose roster check must read the same file a
+ * grant would and hold it to the same attestation.
+ */
+export function policyPathOf(options: GateOptions): string {
   const policy = options.policy ?? {};
   if (policy.file !== undefined) return policy.file;
   const dir = policy.dir ?? process.cwd();

@@ -48,8 +48,10 @@ import {
   sampledSubjects,
   supervisedExecutions,
 } from "../src/core/audit.js";
-import type { EventRecord } from "../src/core/log.js";
+import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { payloadPath, payloadStoreDirFor } from "../src/core/payload-store.js";
+import { namesApprover } from "../src/core/gate.js";
 import { verify } from "../src/core/verify.js";
 import { resetAuditSweepNotices, sweepAuditSampling } from "../src/daemon/audit.js";
 import { main } from "../src/cli/main.js";
@@ -269,9 +271,20 @@ test("the audit refusal-code union is frozen public API", async () => {
     [...AUDIT_REFUSAL_CODES],
     [
       "actor-not-human",
+      // APRV-483. Beside the identity code it refines, and spelled as the
+      // gate spells it: a review is held to the roster a grant is.
+      "actor-not-approver",
+      // APRV-483 refutation: the roster is read from attested bytes only.
+      "policy-not-attested",
+      // PR #614 refutation F1: attested bytes that do not load name no roster.
+      "policy-invalid",
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
+      // APRV-481. Beside the subject codes because, like them, it is a fact
+      // about the sample the log holds: the surface named bytes the sampled
+      // execution did not bind to.
+      "rendered-payload-mismatch",
       // APRV-127's reconciliation codes. Additive: every code above kept its
       // name and its meaning, so a supervisor branching on the pre-split union
       // is unaffected, and the new ones only ever come from the new verbs.
@@ -282,6 +295,9 @@ test("the audit refusal-code union is frozen public API", async () => {
       // because both rules are properties of a review's own arguments and both
       // are settled before the log is read. Additive again: nothing above moved.
       "reaction-conflicts-verdict",
+      // APRV-482. Beside the two rules it is judged with: all three are
+      // properties of the review's own arguments, settled before the log is read.
+      "verdict-required",
       "revert-required",
       "obligation-not-appended",
       "log-unreadable",
@@ -808,7 +824,7 @@ test("QUEUE.md's sampled-audit backlog fills on sample and clears on review", as
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "spot-checked the written file",
-    { clock: fixedClock(at(7)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)) },
   );
   assert.equal(reviewed.ok, true, reviewed.ok ? "" : reviewed.message);
 
@@ -825,7 +841,8 @@ test("a review that precedes its sample does not close it", async () => {
   sweep(unit, 5);
   const firstSample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
   assert.equal(
-    reviewSample(unit.logPath, { kind: "seq", seq: firstSample.seq }, "human:carter", null, {
+    reviewSample(unit.logPath, { kind: "seq", seq: firstSample.seq }, "human:carter", null, { ...unit.options,
+      verdict: "ok",
       clock: fixedClock(at(6)),
     }).ok,
     true,
@@ -852,7 +869,7 @@ test("review is human-only in core", async () => {
   const before = records(unit).length;
 
   for (const actor of ["agent:claude", "system:daemon", "carter"]) {
-    const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, actor, null);
+    const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, actor, null, { ...unit.options, verdict: "ok" });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.code, "actor-not-human");
   }
@@ -865,7 +882,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
 
-  const missing = reviewSample(unit.logPath, { kind: "seq", seq: 999 }, "human:carter", null);
+  const missing = reviewSample(unit.logPath, { kind: "seq", seq: 999 }, "human:carter", null, { ...unit.options, verdict: "ok" });
   assert.equal(missing.ok, false);
   if (!missing.ok) assert.equal(missing.code, "not-sampled");
 
@@ -874,6 +891,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:nope" },
     "human:carter",
     null,
+    { ...unit.options, verdict: "ok" },
   );
   assert.equal(unknownKey.ok, false);
   if (!unknownKey.ok) assert.equal(unknownKey.code, "not-sampled");
@@ -883,7 +901,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     null,
-    { clock: fixedClock(at(6)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(6)) },
   );
   assert.equal(first.ok, true);
 
@@ -892,7 +910,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", async
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     null,
-    { clock: fixedClock(at(7)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)) },
   );
   assert.equal(again.ok, false);
   if (!again.ok) assert.equal(again.code, "already-reviewed");
@@ -910,7 +928,7 @@ test("the reviewed event names the sample and carries the note", async () => {
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "the file matches what was declared",
-    { clock: fixedClock(at(9)) },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(9)) },
   );
   assert.equal(result.ok, true);
   if (!result.ok) return;
@@ -927,12 +945,126 @@ test("the reviewed event names the sample and carries the note", async () => {
   assertClean(unit);
 });
 
+test("APRV-481: a new review names its sample, the execution it judged, and its verdict", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  const sampled = sample.payload as Record<string, unknown>;
+
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
+    clock: fixedClock(at(9)),
+    verdict: "ok",
+  });
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) return;
+  const payload = result.record.payload as Record<string, unknown>;
+  assert.equal(payload["subject_seq"], sample.seq, "subject_seq is not the sample's seq");
+  assert.equal(
+    payload["sampled_subject_hash"],
+    sampled["subject_hash"],
+    "sampled_subject_hash is not the hash the sample recorded",
+  );
+  const started = records(unit).find((record) => record.seq === sampled["subject_seq"]) as EventRecord;
+  assert.equal(started.event, "execution.started");
+  assert.equal(payload["sampled_subject_hash"], started.hash, "the hash does not join to the execution");
+  assert.equal(payload["verdict"], "ok");
+  // No surface said it showed the bytes, so the record claims no reading of them.
+  assert.equal("payload_hash" in payload, false, "a review nobody showed bytes recorded a payload hash");
+  assertClean(unit);
+});
+
+test("APRV-481: the payload hash is recorded only when the surface showed the bound bytes", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+  const samples = records(unit).filter((record) => record.event === "audit.sampled");
+  const before = records(unit).length;
+
+  // Bytes that are not the binding: refused, and nothing written.
+  const wrong = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[0] as EventRecord).seq },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(9)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft2") },
+  );
+  assert.equal(wrong.ok, false);
+  if (!wrong.ok) assert.equal(wrong.code, "rendered-payload-mismatch");
+  assert.equal(records(unit).length, before, "a mismatched payload hash wrote to the log");
+
+  // The binding itself: recorded.
+  const shown = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[0] as EventRecord).seq },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(10)), verdict: "ok", renderedPayloadHash: bindingFor("task-042:draft") },
+  );
+  assert.equal(shown.ok, true, shown.ok ? "" : shown.message);
+  if (shown.ok) {
+    assert.equal((shown.record.payload as Record<string, unknown>)["payload_hash"], bindingFor("task-042:draft"));
+  }
+
+  // Shown nothing: absent.
+  const unseen = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[1] as EventRecord).seq },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(11)), verdict: "ok" },
+  );
+  assert.equal(unseen.ok, true, unseen.ok ? "" : unseen.message);
+  if (unseen.ok) assert.equal("payload_hash" in (unseen.record.payload as Record<string, unknown>), false);
+  assertClean(unit);
+});
+
+test("APRV-481: a review written before the fields were required still verifies", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  // An old review, written under the pre-APRV-481 schema: no verdict and no
+  // subject hash. Appended through the real writer with that schema, so the
+  // chain is a real chain and the only thing under test is the read boundary.
+  const oldSchemaDir = join(unit.dir, "schema-pre-481");
+  mkdirSync(oldSchemaDir, { recursive: true });
+  const schemaRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "schema");
+  for (const name of readdirSync(schemaRoot)) {
+    if (!name.endsWith(".schema.json")) continue;
+    let text = readFileSync(join(schemaRoot, name), "utf8");
+    if (name === "event.schema.json") {
+      const parsed = JSON.parse(text) as { $defs: Record<string, unknown> };
+      parsed.$defs["audit_reviewed_record"] = parsed.$defs["audit_reviewed_record_historical"];
+      text = JSON.stringify(parsed);
+    }
+    writeFileSync(join(oldSchemaDir, name), text, "utf8");
+  }
+  const appended = appendEvent(
+    unit.logPath,
+    {
+      ts: at(6),
+      event: "audit.reviewed",
+      actor: "human:carter",
+      task: "task-042",
+      action_key: "task-042:draft",
+      payload: { subject_seq: sample.seq, subject_event: "audit.sampled", reviewed: true },
+    },
+    { schemaDir: oldSchemaDir },
+  );
+  assert.equal(appended.ok, true, JSON.stringify(appended));
+  assertClean(unit);
+  assert.deepEqual(openSamples(records(unit)), [], "the old review no longer closes its sample");
+});
+
 test("the note is optional", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
-  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
+    verdict: "ok",
     clock: fixedClock(at(9)),
   });
   assert.equal(result.ok, true);
@@ -955,7 +1087,7 @@ test("a review records the reaction beside the verdict", async () => {
     { kind: "seq", seq: sample.seq },
     "human:carter",
     "exactly the file I wanted, and it said so in the summary",
-    { clock: fixedClock(at(9)), reaction: "loved" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(9)), reaction: "loved" },
   );
   assert.equal(result.ok, true, result.ok ? "" : result.message);
   if (!result.ok) return;
@@ -975,7 +1107,8 @@ test("an omitted reaction leaves no key: absence is never `indifferent`", async 
   sweep(unit, 5);
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
 
-  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, { ...unit.options,
+    verdict: "ok",
     clock: fixedClock(at(9)),
   });
   assert.equal(result.ok, true);
@@ -999,7 +1132,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
     { kind: "seq", seq: (samples[0] as EventRecord).seq },
     "human:carter",
     null,
-    { clock: fixedClock(at(6)), reaction: "indifferent" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(6)), reaction: "indifferent" },
   );
   assert.equal(ok.ok, true, ok.ok ? "" : ok.message);
 
@@ -1008,7 +1141,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
     { kind: "seq", seq: (samples[1] as EventRecord).seq },
     "human:carter",
     null,
-    { clock: fixedClock(at(7)), reaction: "liked" },
+    { ...unit.options, verdict: "ok", clock: fixedClock(at(7)), reaction: "liked" },
   );
   assert.equal(liked.ok, true, liked.ok ? "" : liked.message);
 
@@ -1027,7 +1160,7 @@ test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       note,
-      { clock: fixedClock(at(8)), reaction },
+      { ...unit.options, verdict: "ok", clock: fixedClock(at(8)), reaction },
     );
     assert.equal(refused.ok, false, `${reaction} with ${JSON.stringify(note)} was accepted`);
     if (!refused.ok) {
@@ -1051,7 +1184,7 @@ test("--deny with liked or loved refuses reaction-conflicts-verdict", async () =
       { kind: "action-key", actionKey: "task-042:draft" },
       "human:carter",
       "a note, so this is not note-required",
-      { clock: fixedClock(at(6)), verdict: "denied", reaction },
+      { ...unit.options, clock: fixedClock(at(6)), verdict: "denied", reaction },
     );
     assert.equal(refused.ok, false, `denied + ${reaction} was accepted`);
     if (!refused.ok) assert.equal(refused.code, "reaction-conflicts-verdict");
@@ -1063,7 +1196,7 @@ test("--deny with liked or loved refuses reaction-conflicts-verdict", async () =
     { kind: "action-key", actionKey: "task-042:draft" },
     "human:carter",
     "should not have gone out",
-    { clock: fixedClock(at(7)), verdict: "denied", reaction: "disliked" },
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "denied", reaction: "disliked" },
   );
   assert.equal(disliked.ok, true, disliked.ok ? "" : disliked.message);
   if (disliked.ok) {
@@ -1089,7 +1222,7 @@ test("both reaction rules are settled after the actor check and before the log i
     { kind: "seq", seq: 999 },
     "agent:claude",
     null,
-    { verdict: "denied", reaction: "loved" },
+    { ...unit.options, verdict: "denied", reaction: "loved" },
   );
   assert.equal(notHuman.ok, false);
   if (!notHuman.ok) assert.equal(notHuman.code, "actor-not-human");
@@ -1103,7 +1236,7 @@ test("both reaction rules are settled after the actor check and before the log i
     { kind: "seq", seq: 999 },
     "human:carter",
     "worded, so this is the conflict rule and not note-required",
-    { verdict: "denied", reaction: "loved" },
+    { ...unit.options, verdict: "denied", reaction: "loved" },
   );
   assert.equal(noSubject.ok, false);
   if (!noSubject.ok) assert.equal(noSubject.code, "reaction-conflicts-verdict");
@@ -1113,7 +1246,7 @@ test("both reaction rules are settled after the actor check and before the log i
     { kind: "seq", seq: 1 },
     "human:carter",
     null,
-    { reaction: "disliked" },
+    { verdict: "ok", reaction: "disliked" },
   );
   assert.equal(noLog.ok, false);
   if (!noLog.ok) assert.equal(noLog.code, "note-required");
@@ -1159,6 +1292,7 @@ test("approval audit review appends through the CLI and clears the backlog", asy
   const run = await runCli(unit, [
     "audit",
     "review",
+    "--ok",
     String(sample.seq),
     "--note",
     "looked at the diff",
@@ -1184,6 +1318,7 @@ test("approval audit review --reaction reports the grade on both output forms", 
   const json = await runCli(unit, [
     "audit",
     "review",
+    "--ok",
     "task-042:draft",
     "--reaction",
     "loved",
@@ -1203,6 +1338,7 @@ test("approval audit review --reaction reports the grade on both output forms", 
   const human = await runCli(unit, [
     "audit",
     "review",
+    "--ok",
     "task-042:draft2",
     "--reaction",
     "indifferent",
@@ -1221,6 +1357,7 @@ test("approval audit review --reaction reports the grade on both output forms", 
   const silent = await runCli(unit2, [
     "audit",
     "review",
+    "--ok",
     "task-042:draft",
     "--as",
     "human:carter",
@@ -1242,6 +1379,7 @@ test("approval audit review refuses a misspelled --reaction at exit 2", async ()
   const run = await runCli(unit, [
     "audit",
     "review",
+    "--ok",
     "task-042:draft",
     "--reaction",
     "love",
@@ -1282,6 +1420,7 @@ test("approval audit review surfaces both reaction refusals with exit 1", async 
   const wordless = await runCli(unit, [
     "audit",
     "review",
+    "--ok",
     "task-042:draft",
     "--reaction",
     "disliked",
@@ -1315,11 +1454,678 @@ test("approval audit review on an unsampled action refuses with exit 1", async (
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
 
-  const run = await runCli(unit, ["audit", "review", "task-042:draft", "--as", "human:carter", "--json"]);
+  const run = await runCli(unit, ["audit", "review", "task-042:draft", "--ok", "--as", "human:carter", "--json"]);
   assert.equal(run.code, 1);
   const body = JSON.parse(run.err) as { ok: boolean; error: { code: string } };
   assert.equal(body.ok, false);
   assert.equal(body.error.code, "not-sampled");
+});
+
+// ===========================================================================
+// The roster (APRV-483)
+// ===========================================================================
+
+/** `unit`'s policy with a roster: `carter` on `files.write.*`, `bob` declared but not on it. */
+function withRoster(unit: Case, roster: boolean): void {
+  const text = readFileSync(unit.policyPath, "utf8")
+    .replace(
+      "classes:\n",
+      ["approvers:", "  carter:", "    channels: [cli]", "  bob:", "    channels: [cli]", "classes:", ""].join("\n"),
+    )
+    .replace(
+      "  files.write.*:\n    autonomy: supervised\n",
+      `  files.write.*:\n    autonomy: supervised\n${roster ? "    approvers: [carter]\n" : ""}`,
+    );
+  writeFileSync(unit.policyPath, text, "utf8");
+  const loaded = loadPolicy({ file: unit.policyPath });
+  assert.equal(loaded.ok, true, JSON.stringify(loaded));
+  // Re-attested, so the supervised start below runs under the edited bytes.
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(1)).ok, true);
+}
+
+test("APRV-483: a reviewer the class's roster does not name is refused actor-not-approver", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const stranger = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(stranger.ok, false, "a non-roster reviewer was recorded");
+  if (!stranger.ok) assert.equal(stranger.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused reviewer wrote to the log");
+
+  const named = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+test("APRV-483: --as cannot name a reviewer off the roster; it can name one on it", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const asBob = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", unit.policyPath, "--as", "human:bob", "--json",
+  ]);
+  assert.equal(asBob.code, 1, asBob.err);
+  assert.equal((JSON.parse(asBob.err) as { error: { code: string } }).error.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "--as off the roster wrote to the log");
+
+  const asCarter = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", unit.policyPath, "--as", "human:carter", "--json",
+  ]);
+  assert.equal(asCarter.code, 0, asCarter.err);
+  assertClean(unit);
+});
+
+test("APRV-483: a rule that names no roster restricts no reviewer, as for grants", async () => {
+  const unit = ready();
+  withRoster(unit, false);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const result = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  assertClean(unit);
+});
+
+test("APRV-483 refutation: the roster cannot come from a file the reviewer chose or nobody attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+  const review = (options: Record<string, unknown>) =>
+    reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:bob", null, {
+      clock: fixedClock(at(6)),
+      verdict: "ok",
+      ...options,
+    });
+
+  // The sample pins the attested policy, whose bytes the payload store holds
+  // (fix round 3), so no file the reviewer can reach supplies the roster: in
+  // each case below bob is held to carter-only and refused actor-not-approver.
+  // 1. `--policy` pointed at a roster-free file the reviewer wrote.
+  const elsewhere = join(unit.dir, "elsewhere.md");
+  writeFileSync(elsewhere, policyText(SAMPLE_EVERYTHING), "utf8");
+  const chosen = review({ policy: { file: elsewhere } });
+  assert.equal(chosen.ok, false, "a reviewer-chosen policy supplied the roster");
+  if (!chosen.ok) assert.equal(chosen.code, "actor-not-approver");
+  const cli = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--ok", "--policy", elsewhere, "--as", "human:bob", "--json",
+  ]);
+  assert.equal(cli.code, 1, cli.err);
+  assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "actor-not-approver");
+
+  // 2. The attested file edited to drop the roster, and not re-attested.
+  const attestedText = readFileSync(unit.policyPath, "utf8");
+  writeFileSync(unit.policyPath, attestedText.replace("    approvers: [carter]\n", ""), "utf8");
+  const drifted = review(unit.options);
+  assert.equal(drifted.ok, false, "an unattested edit dropped the roster");
+  if (!drifted.ok) assert.equal(drifted.code, "actor-not-approver");
+
+  // 3. No policy file at all: unreadable is not "no roster".
+  unlinkSync(unit.policyPath);
+  const missing = review(unit.options);
+  assert.equal(missing.ok, false, "a missing policy restricted nobody");
+  if (!missing.ok) assert.equal(missing.code, "actor-not-approver");
+
+  writeFileSync(unit.policyPath, attestedText, "utf8");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  // Restored bytes are the attested ones: the roster binds again, and its member records.
+  const named = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(7)),
+    verdict: "ok",
+  });
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+function sha256Of(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/**
+ * An `audit.sampled` for `key`'s execution pinning `pin`, appended through the
+ * real writer and its schema, as a tampered log or another build would write
+ * it. The sampler never writes these pins (PR #614 recheck NF-3), so this is
+ * how a review is put in front of a pin the sampler would not choose.
+ */
+function handSample(unit: Case, key: string, pin: string, minutes: number): EventRecord {
+  const started = records(unit).find(
+    (record) => record.event === "execution.started" && record.action_key === key,
+  ) as EventRecord;
+  const appended = appendEvent(unit.logPath, {
+    ts: at(minutes),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    ...(started.task === undefined ? {} : { task: started.task }),
+    action_key: key,
+    payload: {
+      subject_seq: started.seq,
+      subject_hash: started.hash,
+      subject_event: "execution.started",
+      subject_ts: started.ts,
+      class: (started.payload as Record<string, unknown>)["class"],
+      reason: "supervised-sample",
+      selection: "hmac-sha256/event-hash",
+      rate: 1,
+      autonomy: "supervised",
+      policy_sha256: pin,
+    },
+  });
+  assert.equal(appended.ok, true, JSON.stringify(appended));
+  return (appended as { ok: true; record: EventRecord }).record;
+}
+
+/** `unit`'s policy file replaced by `text`, attested at `minutes`; returns its sha256. */
+function attestText(unit: Case, text: string, minutes: number): string {
+  writeFileSync(unit.policyPath, text, "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true, "the probe policy does not load");
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(minutes)).ok, true);
+  return sha256Of(unit.policyPath);
+}
+
+/** Review `key` as `reviewer` with an explicit OK. */
+function reviewOk(unit: Case, key: string, reviewer: string, minutes: number) {
+  return reviewSample(unit.logPath, { kind: "action-key", actionKey: key }, reviewer, null, {
+    ...unit.options,
+    clock: fixedClock(at(minutes)),
+    verdict: "ok",
+  });
+}
+
+test("PR #614 refutation F1: an attested policy that does not load names no roster, so every reviewer is refused", async () => {
+  // Three ways to break the bytes the loader refuses and `policy attest` does
+  // not: a glob in a roster, a roster entry that is not an identifier, and a
+  // YAML typo. Each is attested, so the refusal cannot be policy-not-attested.
+  const breakages: Array<[string, (text: string) => string]> = [
+    ["glob entry", (text) => text.replace("    approvers: [carter]\n", '    approvers: [carter, "*"]\n')],
+    ["non-identifier", (text) => text.replace("    approvers: [carter]\n", '    approvers: [carter, "Carter "]\n')],
+    ["yaml typo", (text) => text.replace("    approvers: [carter]\n", "    approvers: [carter\n")],
+  ];
+  for (const [name, breakIt] of breakages) {
+    const unit = ready();
+    withRoster(unit, true);
+    startSupervised(unit, "task-042:draft", 2);
+    const validText = readFileSync(unit.policyPath, "utf8");
+    const brokenText = breakIt(validText);
+    writeFileSync(unit.policyPath, brokenText, "utf8");
+    assert.equal(loadPolicy({ file: unit.policyPath }).ok, false, `${name}: the broken policy loaded`);
+    assert.equal(
+      appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(4)).ok,
+      true,
+      `${name}: attestation of the broken bytes failed, so the probe tests nothing`,
+    );
+    const brokenSha = sha256Of(unit.policyPath);
+    // The sampler pins the policy the execution ran under (PR #614 recheck
+    // NF-3), and no execution runs under bytes that do not load, so a broken
+    // pin arrives only from another build or a loader that has since grown
+    // stricter. The sample is written by hand, through the real writer, with
+    // the broken bytes on disk: the review reaches the pinned policy and the
+    // only thing left to refuse it is that the policy does not load.
+    handSample(unit, "task-042:draft", brokenSha, 5);
+    assert.equal(sampledSubjects(records(unit))[0]?.policySha256, brokenSha, `${name}: the sample pinned another policy`);
+    const before = records(unit).length;
+    for (const reviewer of ["human:bob", "human:carter"]) {
+      const result = reviewSample(
+        unit.logPath,
+        { kind: "action-key", actionKey: "task-042:draft" },
+        reviewer,
+        null,
+        { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+      );
+      assert.equal(result.ok, false, `${name}: ${reviewer} recorded a review under a policy that names nobody`);
+      if (!result.ok) assert.equal(result.code, "policy-invalid", `${name}: ${reviewer}: ${result.message}`);
+    }
+    const cli = await runCli(unit, ["audit", "review", "task-042:draft", "--ok", "--as", "human:bob", "--json"]);
+    assert.equal(cli.code, 1, cli.err);
+    assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "policy-invalid");
+    assert.equal(records(unit).length, before, `${name}: a refused review wrote to the log`);
+    assertClean(unit);
+  }
+});
+
+test("PR #614 refutation F2: a sample pins the attested policy, and a re-attestation that renames the rule cannot open the review", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const pinned = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  assert.equal((sample.payload as Record<string, unknown>)["policy_sha256"], pinned);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, pinned);
+
+  // The probe: the class's rule renamed away and the result attested.
+  const attestedText = readFileSync(unit.policyPath, "utf8");
+  writeFileSync(unit.policyPath, attestedText.replace("  files.write.*:\n", "  files.remote.*:\n"), "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true);
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(5)).ok, true);
+  const before = records(unit).length;
+
+  // The renamed policy stays on disk. The roster is still the pinned
+  // policy's, read from the payload store (fix round 3): its member reviews,
+  // anyone else is refused, and the rename neither strands the sample nor
+  // opens it.
+  const stranger = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(stranger.ok, false);
+  if (!stranger.ok) assert.equal(stranger.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  const named = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(8)), verdict: "ok" },
+  );
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+test("PR #614 refutation F2: a class that matches no rule in the pinned policy is refused actor-not-approver", async () => {
+  const unit = ready();
+  // `files.write.*` gone and the defaults supervised: the class resolves
+  // supervised with no rule, so the policy names no roster for it.
+  const text = readFileSync(unit.policyPath, "utf8")
+    .replace("defaults:\n  autonomy: manual\n", "defaults:\n  autonomy: supervised\n")
+    .replace("  files.write.*:\n    autonomy: supervised\n", "");
+  writeFileSync(unit.policyPath, text, "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true);
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(1)).ok, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+  const result = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(result.ok, false, "a class no rule names was approvable by anyone");
+  if (!result.ok) {
+    assert.equal(result.code, "actor-not-approver");
+    assert.match(result.message, /matches no rule/u);
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  assertClean(unit);
+});
+
+test("PR #614 refutation F2: a sample written before samples pinned a policy reads as not pinned", () => {
+  const subjects = sampledSubjects([
+    {
+      seq: 1,
+      ts: T0,
+      event: "audit.sampled",
+      actor: AUDIT_ACTOR,
+      action_key: "task-042:draft",
+      payload: { subject_seq: 1, subject_hash: "f".repeat(64) },
+      alg: "sha256/jcs",
+      prev: null,
+      hash: "e".repeat(64),
+    } as unknown as EventRecord,
+  ]);
+  assert.equal(subjects[0]?.policySha256, null);
+});
+
+test("PR #614 recheck NF-3 (probe F2c): a policy attested between the run and the sweep does not re-roster the review", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+
+  // P2 names bob, not carter, and is attested after the run and before the sweep.
+  const p2 = attestText(unit, p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n"), 3);
+  assert.notEqual(p2, p1);
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1, "the sample did not pin the policy the action ran under");
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  assert.equal((sample.payload as Record<string, unknown>)["policy_sha256"], p1);
+  const before = records(unit).length;
+
+  // P2 stays on disk. The roster is P1's, read from the payload store the
+  // attestation filled (fix round 3): bob is refused, carter records.
+  assert.equal(sha256Of(unit.policyPath), p2);
+  const bob = reviewOk(unit, "task-042:draft", "human:bob", 7);
+  assert.equal(bob.ok, false, "bob reviewed an action that ran under a roster that did not name him");
+  if (!bob.ok) assert.equal(bob.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 8);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 recheck NF-3 (reverse): a policy that drops the rule before the sweep leaves the sample reviewable by the approver it ran under", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  // P2 drops the class's rule and keeps it supervised through the defaults, so
+  // the sweep still draws it; P2 names no roster for it, and before NF-3 the
+  // sample pinned P2 and was refused actor-not-approver for every reviewer.
+  attestText(
+    unit,
+    p1Text
+      .replace("defaults:\n  autonomy: manual\n", "defaults:\n  autonomy: supervised\n")
+      .replace("  files.write.*:\n    autonomy: supervised\n    approvers: [carter]\n", ""),
+    3,
+  );
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1);
+
+  writeFileSync(unit.policyPath, p1Text, "utf8");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 6);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 fix round 3 (probe R2-N3d): a prose-only re-attestation does not strand an open sample", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1);
+  // A settings save: prose changes, the roster does not, and it is attested.
+  const p2 = attestText(unit, p1Text.replace("# Policy\n", "# Policy\n\nEdited from the app.\n"), 6);
+  assert.notEqual(p2, p1);
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 7);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 fix round 3: a pin whose bytes are neither stored nor on disk is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  attestText(unit, p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n"), 6);
+  // An attestation made before APRV-356 stored no bytes: removed here from the
+  // store, every copy of P1 the log binds.
+  for (const record of records(unit)) {
+    const payload = (record.payload ?? {}) as Record<string, unknown>;
+    if (record.event === "policy.updated" && payload["sha256"] === p1 && typeof payload["payload_hash"] === "string") {
+      unlinkSync(payloadPath(payloadStoreDirFor(unit.logPath), payload["payload_hash"]));
+    }
+  }
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 7);
+    assert.equal(result.ok, false, `${reviewer} reviewed with the pinned bytes nowhere`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, new RegExp(p1, "u"));
+      assert.match(result.message, /not in the payload store/u);
+    }
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  // The disk fallback: P1's bytes restored to the file, and carter records.
+  writeFileSync(unit.policyPath, p1Text, "utf8");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 8);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 recheck (probe F2a): a pin attested only after the sample is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  startSupervised(unit, "task-042:draft", 2);
+  // P2's hash is written into a sample before anyone attests P2.
+  const p2Text = p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n");
+  writeFileSync(unit.policyPath, p2Text, "utf8");
+  const p2 = sha256Of(unit.policyPath);
+  handSample(unit, "task-042:draft", p2, 3);
+  attestText(unit, p2Text, 4);
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 5);
+    assert.equal(result.ok, false, `${reviewer} reviewed under a pin attested after the sample`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, /no attestation before it names that hash/u);
+    }
+  }
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+});
+
+test("PR #614 recheck (probe F2b): a pin no attestation names is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  // Bytes nobody attested, on disk, and a sample pinning exactly them.
+  const unattestedText = readFileSync(unit.policyPath, "utf8").replace("    approvers: [carter]\n", "    approvers: [bob]\n");
+  writeFileSync(unit.policyPath, unattestedText, "utf8");
+  const pin = sha256Of(unit.policyPath);
+  handSample(unit, "task-042:draft", pin, 3);
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 4);
+    assert.equal(result.ok, false, `${reviewer} reviewed under a pin nobody attested`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, /no attestation before it names that hash/u);
+    }
+  }
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+});
+
+test("PR #614 refutation F5: every review the runtime writes says its verdict was explicit", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+  const ok = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(6)),
+    verdict: "ok",
+  });
+  assert.equal(ok.ok, true, ok.ok ? "" : ok.message);
+  const cli = await runCli(unit, ["audit", "review", "task-042:draft2", "--deny", "--as", "human:carter"]);
+  assert.equal(cli.code, 0, cli.err);
+  const reviews = records(unit).filter((record) => record.event === "audit.reviewed");
+  assert.equal(reviews.length, 2);
+  for (const review of reviews) {
+    assert.equal((review.payload as Record<string, unknown>)["verdict_source"], "explicit");
+  }
+  assertClean(unit);
+});
+
+test("PR #614 refutation N7: a key two tasks declare is refused, never reviewed under a guessed roster", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  // Only a tampered log reaches this: registration refuses the collision, so
+  // the second declaration goes through the writer directly, as tampering would.
+  const registered = records(unit).find((record) => record.event === "task.registered") as EventRecord;
+  const collided = appendEvent(unit.logPath, {
+    ts: at(5),
+    event: "task.registered",
+    actor: registered.actor,
+    task: "task-043",
+    ...(registered.payload === undefined ? {} : { payload: registered.payload }),
+  });
+  assert.equal(collided.ok, true, JSON.stringify(collided));
+  const before = records(unit).length;
+  const result = reviewSample(unit.logPath, { kind: "action-key", actionKey: "task-042:draft" }, "human:carter", null, {
+    ...unit.options,
+    clock: fixedClock(at(6)),
+    verdict: "ok",
+  });
+  assert.equal(result.ok, false, "a review was recorded under a collided declaration");
+  if (!result.ok) {
+    assert.equal(result.code, "actor-not-approver");
+    assert.match(result.message, /more than one task/u);
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+});
+
+test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const before = records(unit).length;
+  // Two hand-written samples through the real writer: one naming no subject
+  // hash, one naming a hash but no action key and no class. Both pin the
+  // attested policy (PR #614 F2), so the refusals below are about the sample.
+  const pinned = createHash("sha256").update(readFileSync(unit.policyPath)).digest("hex");
+  const noHash = appendEvent(unit.logPath, {
+    ts: at(3),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    payload: { subject_seq: 1, policy_sha256: pinned },
+  });
+  assert.equal(noHash.ok, true, JSON.stringify(noHash));
+  const noClass = appendEvent(unit.logPath, {
+    ts: at(4),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    payload: { subject_seq: 1, subject_hash: "f".repeat(64), policy_sha256: pinned },
+  });
+  assert.equal(noClass.ok, true, JSON.stringify(noClass));
+  const appended = records(unit).length;
+
+  const hashless = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: noHash.ok ? noHash.record.seq : 0 },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(hashless.ok, false, "a review of a hashless sample was recorded");
+  if (!hashless.ok) assert.equal(hashless.code, "not-sampled");
+
+  const classless = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: noClass.ok ? noClass.record.seq : 0 },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(classless.ok, false, "a classless sample let an unrostered reviewer through");
+  if (!classless.ok) assert.equal(classless.code, "actor-not-approver");
+
+  // An empty roster names nobody (the schema's minItems 1 makes it unreachable
+  // from a valid policy; the comparison itself is the backstop).
+  assert.equal(namesApprover([], "human:carter"), false);
+
+  assert.equal(records(unit).length, appended, "a refused review wrote to the log");
+  assert.ok(appended > before);
+  assertClean(unit);
+});
+
+// ===========================================================================
+// An explicit affirmative (APRV-482)
+// ===========================================================================
+
+test("APRV-482: a review with no verdict is refused verdict-required, after the roster check (PR #614 N6)", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  // No verdict, with and without a grade, or a verdict that is neither word:
+  // none is an approval. A lone `loved` is told it lacks a verdict, not a note
+  // (the note rule judges a grade beside a verdict).
+  for (const options of [
+    {},
+    { reaction: "liked" as const },
+    { reaction: "indifferent" as const },
+    { reaction: "loved" as const },
+    { verdict: "maybe" as unknown as "ok" },
+  ]) {
+    const refused = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:carter",
+      null,
+      { ...unit.options, clock: fixedClock(at(6)), ...options },
+    );
+    assert.equal(refused.ok, false, `a review with no verdict was recorded (${JSON.stringify(options)})`);
+    if (!refused.ok) assert.equal(refused.code, "verdict-required");
+  }
+  // N6: who may review is said before what the review lacks. A reviewer off
+  // the roster tapping a grade is told actor-not-approver at once.
+  for (const options of [{}, { reaction: "liked" as const }]) {
+    const off = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:bob",
+      null,
+      { ...unit.options, clock: fixedClock(at(6)), ...options },
+    );
+    assert.equal(off.ok, false);
+    if (!off.ok) assert.equal(off.code, "actor-not-approver");
+  }
+  // After the actor: a non-human is told it is not human first.
+  const agent = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, "agent:claude", null);
+  assert.equal(agent.ok, false);
+  if (!agent.ok) assert.equal(agent.code, "actor-not-human");
+
+  assert.equal(records(unit).length, before, "a verdict-less review wrote to the log");
+  assertClean(unit);
+});
+
+test("APRV-482: a bare CLI review is refused; --ok and --deny are the explicit forms", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const bare = await runCli(unit, ["audit", "review", "task-042:draft", "--as", "human:carter", "--json"]);
+  assert.equal(bare.code, 1, bare.err);
+  assert.equal((JSON.parse(bare.err) as { error: { code: string } }).error.code, "verdict-required");
+
+  const graded = await runCli(unit, [
+    "audit", "review", "task-042:draft", "--reaction", "liked", "--as", "human:carter", "--json",
+  ]);
+  assert.equal(graded.code, 1, graded.err);
+  assert.equal((JSON.parse(graded.err) as { error: { code: string } }).error.code, "verdict-required");
+
+  const both = await runCli(unit, ["audit", "review", "task-042:draft", "--ok", "--deny", "--as", "human:carter"]);
+  assert.equal(both.code, 2, "two opposite verdicts were not a usage error");
+  assert.equal(records(unit).length, before, "a refused CLI review wrote to the log");
+
+  const ok = await runCli(unit, ["audit", "review", "task-042:draft", "--ok", "--as", "human:carter", "--json"]);
+  assert.equal(ok.code, 0, ok.err);
+  assert.equal((JSON.parse(ok.out) as { verdict: string }).verdict, "ok");
+  const review = records(unit).find((record) => record.event === "audit.reviewed") as EventRecord;
+  assert.equal((review.payload as Record<string, unknown>)["verdict"], "ok");
+  assertClean(unit);
 });
 
 test("approval audit rejects an unknown subcommand and offers no way to sample", async () => {

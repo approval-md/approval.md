@@ -72,6 +72,7 @@ import {
   digestCallbackData,
   digestKeyOf,
   groupForDigest,
+  isDeterministicSendRefusal,
   isMessageNotModified,
   parseCallbackData,
   payloadShapeKey,
@@ -98,12 +99,24 @@ import {
   TELEGRAM_COMMANDS,
   TELEGRAM_REVIEW_ACK,
   TELEGRAM_REVIEW_ARMED,
+  TELEGRAM_REVIEW_OTHER_SENDER,
   TELEGRAM_REVIEW_ARM_TOAST,
   TELEGRAM_REVIEW_DENIED,
   TELEGRAM_REVIEW_NOTE_TOAST,
   TELEGRAM_REVIEW_HEADING,
   TELEGRAM_REVIEW_RECORDED,
+  TELEGRAM_REVIEW_PAYLOAD_BYTES,
+  TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY,
+  TELEGRAM_REVIEW_PAYLOAD_NONE,
+  REVIEW_PAYLOAD_BUDGET,
+  REVIEW_SUMMARY_MAX,
+  reviewPayloadBudget,
+  telegramVisibleLength,
+  REVIEW_RENDER_INPUT_MAX,
+  renderReviewCard,
+  reviewPayloadView,
   type ReviewCard,
+  type ReviewCardState,
   type ReviewChoice,
   type TelegramConfig,
   type TelegramPollResult,
@@ -135,6 +148,8 @@ import {
   queueLines,
   reviewHandlerFor,
   summaryLines,
+  REVIEW_OFFER_ATTEMPTS,
+  REVIEW_OFFER_MAX_WAIT_MS,
   supersededPending,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
@@ -5948,7 +5963,11 @@ interface Sampled extends Live {
  * have refused, and the cards are built from the same verified log the CLI
  * reads.
  */
-function sampledWorld(count: number, policyText: string = REVIEW_POLICY): Sampled {
+function sampledWorld(
+  count: number,
+  policyText: string = REVIEW_POLICY,
+  payloadFor?: (index: number) => unknown,
+): Sampled {
   fixtureCounter += 1;
   const prefix = `sampled${fixtureCounter}`;
   const unit = newScenario(scratch.root, policyText);
@@ -5959,7 +5978,7 @@ function sampledWorld(count: number, policyText: string = REVIEW_POLICY): Sample
   const actions = [];
   for (let index = 0; index < count; index += 1) {
     const key = actionKeyFor(prefix, index);
-    const payload = {
+    const payload = payloadFor?.(index) ?? {
       command: `git add -A && git commit -m "wip ${index}"`,
       cwd: "/repo",
     };
@@ -6134,8 +6153,8 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   const deliveryId = await channel.offerReview(card);
   const sent = mock.sentMessages().slice(before);
 
-  // One message. No payload region: a review collects no decision, so §10.4's
-  // "show the bytes first" has nothing to be first of.
+  // One message, payload and all (APRV-480): a card is edited in place, so the
+  // bytes ride inside it rather than in messages that would outlive it.
   assert.equal(sent.length, 1, `a review card sent ${sent.length} messages`);
   const message = sent[0] as { text: string; replyMarkup: unknown };
   assert.equal(String(deliveryId), String((sent[0] as { messageId: number }).messageId));
@@ -6145,7 +6164,16 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
     false,
     "a review card called itself an approval request",
   );
-  assert.equal(message.text.includes("PAYLOAD"), false, "a review card carried a payload region");
+  // APRV-480: the bytes that ran are on the card, whole, under a heading that
+  // says so, and the reviewer is no longer left with a key and the agent's own
+  // summary of what it did.
+  assert.ok(
+    message.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES),
+    `the card does not say it shows the bytes: ${message.text}`,
+  );
+  assert.ok(message.text.includes("<pre>"), "the payload is not in its own region");
+  assert.ok(message.text.includes("wip 0"), "the payload's own text is not on the card");
+  assert.equal(message.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), false);
 
   // The rows the request prompt's own renderer draws, plus the two the card
   // adds. Same bullets, same computed/claimed split, same origins.
@@ -6216,6 +6244,539 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   assertClean(world.unit);
 });
 
+/** A review card's state as `offerReview` would first hold it, for the pure renderer. */
+function reviewStateFor(card: ReviewCard): ReviewCardState {
+  return {
+    deliveryId: "1",
+    card,
+    nonce: "n",
+    denyArmed: false,
+    heldReaction: null,
+    armedBy: null,
+    heldBy: null,
+    settled: null,
+    notice: null,
+    awaitingNote: null,
+    deliveredAtMs: 0,
+  };
+}
+
+/** `card` carrying `material` as the bytes it ran, bound and hash-checked. */
+function cardCarrying(card: ReviewCard, material: unknown): ReviewCard {
+  const hash = payloadHash(material);
+  return {
+    ...card,
+    fields: {
+      ...card.fields,
+      payload_hash: computed(hash, "log"),
+      fullPayload: computed(
+        { value: material, text: JSON.stringify(material, null, 2), hash, truncated: false },
+        "payload-binding",
+      ),
+    },
+  };
+}
+
+test("APRV-480: a card whose bytes nobody holds shows the hash, and says it is only the hash", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const built = openReviewCards(world.unit.logPath, { payloadStoreDir: null });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  const bound = payloadHash(world.payloads.get(world.keys[0] as string));
+
+  assert.equal(card.fields.fullPayload.value, null, "the card claimed bytes nobody holds");
+  assert.equal(card.fields.payload_hash?.value, bound, "the card lost the binding");
+  assert.deepEqual(reviewPayloadView(card), { kind: "hash", hash: bound, reason: "unavailable" });
+
+  const before = mock.sentMessages().length;
+  await channel.offerReview(card);
+  const text = (mock.sentMessages()[before] as { text: string }).text;
+  assert.ok(text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), `no hash-only heading: ${text}`);
+  assert.ok(text.includes(`sha256 ${bound}`), "the hash the card names is not the binding");
+  assert.ok(text.includes("does not hold the bytes"), "the card does not say why it shows only the hash");
+  assert.equal(text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), false, "a hash-only card claimed the bytes");
+  assert.equal(text.includes("<pre>"), false, "a hash-only card carried a payload region");
+  assertClean(world.unit);
+});
+
+test("APRV-480: bytes that do not hash to the binding are never shown as the bytes that ran", () => {
+  const world = sampledWorld(1);
+  const built = openReviewCards(world.unit.logPath, {
+    payloadStoreDir: null,
+    payload: () => ({ command: "rm -rf /", cwd: "/repo" }),
+  });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  assert.equal(card.fields.fullPayload.value, null, "substituted bytes reached the card");
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "hash");
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.equal(drawn.text.includes("rm -rf"), false, "substituted bytes were rendered");
+  assertClean(world.unit);
+});
+
+test("APRV-480: bytes longer than one card carries are named by hash, whole or not at all", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const long = { command: `echo ${"y".repeat(REVIEW_PAYLOAD_BUDGET)}`, cwd: "/repo" };
+  const card = cardCarrying(base, long);
+
+  const view = reviewPayloadView(card);
+  assert.deepEqual(view, { kind: "hash", hash: payloadHash(long), reason: "too-long" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), drawn.text);
+  assert.ok(drawn.text.includes("longer than one card carries"), "the card does not say why");
+  assert.ok(drawn.text.includes(`sha256 ${payloadHash(long)}`));
+  assert.equal(drawn.text.includes("y".repeat(50)), false, "a too-long payload was shown in part");
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assertClean(world.unit);
+});
+
+test("APRV-480: an agent-sized payload costs a review card bounded work (refutation: resource cap)", () => {
+  // The party under review chooses the payload's size, and supervised payloads
+  // have no cap of their own. A rendering past REVIEW_RENDER_INPUT_MAX must be
+  // judged too long WITHOUT the renderer touching its value: this one throws on
+  // any access, so a view that rendered it first fails here.
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const hash = "c".repeat(64);
+  const poisoned = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("the review card rendered a payload past its input bound");
+      },
+      ownKeys() {
+        throw new Error("the review card rendered a payload past its input bound");
+      },
+    },
+  );
+  const card: ReviewCard = {
+    ...base,
+    fields: {
+      ...base.fields,
+      payload_hash: computed(hash, "log"),
+      fullPayload: computed(
+        { value: poisoned, text: "q".repeat(REVIEW_RENDER_INPUT_MAX + 1), hash, truncated: false },
+        "payload-binding",
+      ),
+    },
+  };
+  assert.deepEqual(reviewPayloadView(card), { kind: "hash", hash, reason: "too-long" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY));
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS);
+
+  // And the card builder holds no more than the bound of a large payload's
+  // text, marked truncated, so a held card is not a copy of an agent's bytes.
+  const big = sampledWorld(1, REVIEW_POLICY, () => ({ command: `echo ${"w".repeat(REVIEW_RENDER_INPUT_MAX * 4)}`, cwd: "/repo" }));
+  const held = cardsFor(big)[0] as ReviewCard;
+  const rendering = held.fields.fullPayload.value;
+  assert.ok(rendering !== null, "the builder dropped bytes it holds");
+  assert.equal(rendering?.truncated, true, "a payload past the bound was held whole");
+  assert.equal(rendering?.text.length, REVIEW_RENDER_INPUT_MAX);
+  assert.equal(reviewPayloadView(held).kind, "hash");
+  assertClean(world.unit);
+  assertClean(big.unit);
+});
+
+test("APRV-480: bytes that fit are shown whole, and the card stays one message", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const fits = { command: `echo ${"z".repeat(1200)}`, cwd: "/repo" };
+  const card = cardCarrying(base, fits);
+
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "bytes");
+  assert.equal(view.kind === "bytes" ? view.hash : null, payloadHash(fits));
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), drawn.text);
+  assert.ok(drawn.text.includes("z".repeat(1200)), "the bytes were not shown whole");
+  assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assertClean(world.unit);
+});
+
+/** `card` with its agent-written summary replaced by `text`. */
+function withSummary(card: ReviewCard, text: string): ReviewCard {
+  return { ...card, fields: { ...card.fields, summary: claimed<string | null>(text, "agent:claude") } };
+}
+
+test("PR #614 refutation F4: an 800-character command and a 1500-character summary make one card that shows the bytes", () => {
+  const world = sampledWorld(1);
+  const material = { command: `echo ${"y".repeat(795)}`, cwd: "/repo" };
+  const card = withSummary(cardCarrying(cardsFor(world)[0] as ReviewCard, material), "s".repeat(1500));
+
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "bytes", "the card fell back to the hash with room to spare");
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assert.ok(drawn.text.includes("y".repeat(795)), "the bytes were not shown whole");
+  assert.ok(drawn.text.includes("s".repeat(REVIEW_SUMMARY_MAX)), "the summary lost more than its cap");
+  assert.ok(!drawn.text.includes("s".repeat(REVIEW_SUMMARY_MAX + 1)), "the summary was not capped");
+  assert.match(drawn.text, /\+1100 chars not shown/u);
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: a payload at its budget and a 2500-character summary stay one message, and the tap agrees with the card", () => {
+  const world = sampledWorld(1);
+  const plain = withSummary(cardsFor(world)[0] as ReviewCard, "s".repeat(2500));
+  // The same card with its free-text rows as long as an ordinary card shows
+  // them uncut: the budget must come from what the rows leave, not a constant.
+  // (The class stays real: the canonical rendering repeats it, and a class as
+  // long as these rows leaves no room for any payload, which is the hash view.)
+  const long: ReviewCard = {
+    ...plain,
+    fields: {
+      ...plain.fields,
+      task: computed<string | null>("t".repeat(300), "log"),
+      command_breakdown: computed("b".repeat(300), "classifier"),
+      gloss: claimed("g".repeat(300), "agent:claude"),
+    },
+    verdict: computed("v".repeat(300), "log"),
+  };
+  for (const base of [plain, long]) {
+    const budget = reviewPayloadBudget(base);
+    assert.ok(budget > 0 && budget <= REVIEW_PAYLOAD_BUDGET, `budget ${String(budget)}`);
+    const carrying = (size: number): ReviewCard => cardCarrying(base, { command: "x".repeat(size), cwd: "/repo" });
+    // The longest command this card shows whole, by bisection.
+    let low = 1;
+    let high = REVIEW_PAYLOAD_BUDGET;
+    assert.equal(reviewPayloadView(carrying(low)).kind, "bytes", `no payload fit the card (budget ${String(budget)})`);
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (reviewPayloadView(carrying(mid)).kind === "bytes") low = mid;
+      else high = mid - 1;
+    }
+    const card = carrying(low);
+    for (const state of [
+      reviewStateFor(card),
+      // The longest heading and the longest notice a tap can add.
+      {
+        ...reviewStateFor(card),
+        denyArmed: true,
+        heldReaction: "indifferent" as const,
+        notice: { headline: TELEGRAM_NOT_RECORDED, lines: ["n".repeat(900), "m".repeat(900), "o".repeat(900)] },
+      },
+    ]) {
+      const drawn = renderReviewCard(state);
+      assert.ok(
+        telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS,
+        `the card overran one message: ${String(telegramVisibleLength(drawn.text))}`,
+      );
+      assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), "the drawn card and the view disagree");
+    }
+    // One character more is the hash, on the card and in the view alike.
+    const over = carrying(low + 1);
+    assert.equal(reviewPayloadView(over).kind, "hash");
+    assert.ok(renderReviewCard(reviewStateFor(over)).text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY));
+  }
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: every row at its worst, armed, graded and refused, is still one message", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const huge = (seed: string): string => `${seed}&<>`.repeat(2000);
+  const card: ReviewCard = {
+    ...base,
+    fields: {
+      ...base.fields,
+      action_key: computed(huge("k"), "log"),
+      class: computed(huge("c"), "log"),
+      task: computed<string | null>(huge("t"), "log"),
+      summary: claimed<string | null>(huge("s"), huge("a")),
+      command_breakdown: computed(huge("b"), huge("o")),
+      gloss: claimed(huge("g"), huge("a")),
+      payload_hash: computed("f".repeat(64), "log"),
+    },
+    ranAt: computed(huge("r"), "log"),
+    verdict: computed(huge("v"), "log"),
+  };
+  assert.equal(reviewPayloadView(card).kind, "hash");
+  const drawn = renderReviewCard({
+    ...reviewStateFor(card),
+    denyArmed: true,
+    heldReaction: "indifferent",
+    notice: { headline: huge("h"), lines: Array.from({ length: 10 }, () => huge("n")) },
+  });
+  assert.ok(
+    telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS,
+    `the worst card overran one message: ${String(telegramVisibleLength(drawn.text))}`,
+  );
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: a card that cannot be offered leaves its sample for a terminal review and the queue advances", async () => {
+  const world = sampledWorld(2);
+  const { channel, setup } = reviewChannelFor(world);
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const offer = channel.offerReview.bind(channel);
+  let failures = 0;
+  channel.offerReview = async (card: ReviewCard) => {
+    if (card.sampleSeq === world.samples[0]) {
+      failures += 1;
+      // PR #614 recheck NF-2: only the Bot API's refusal of the card itself
+      // makes a sample terminal-only at once; this is that refusal.
+      throw new TelegramApiError(
+        "sendMessage: HTTP 400 (Bad Request: message is too long)",
+        "sendMessage",
+        400,
+        "Bad Request: message is too long",
+      );
+    }
+    return offer(card);
+  };
+
+  const first = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(first.reviewCard, undefined);
+  assert.equal(failures, 1);
+  assert.ok(
+    err.some((entry) => entry.includes("review-offer-failed") && entry.includes(`approval audit review ${String(world.samples[0])}`)),
+    `no coded line names the terminal repair: ${err.join("")}`,
+  );
+  const second = await dispatchPending(setup, streams, state, at(91));
+  assert.equal(second.reviewCard?.sample_seq, world.samples[1], "the failed sample blocked the queue");
+  assert.equal(failures, 1, "the failed offer was retried");
+  assert.deepEqual(reviewsIn(world), [], "a failed offer recorded something");
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// PR #614 recheck NF-2: a failed offer hides a sample from the phone only when
+// Telegram refused the card itself. A 429, a timeout, a 5xx or a network error
+// is retried, with Telegram's retry_after honoured and a per-sample budget.
+// ---------------------------------------------------------------------------
+
+type ScriptedFailure =
+  | { status: number; description: string; retryAfter?: number }
+  | { network: string };
+
+/**
+ * A fetch that fails the next review-card sends with `failures`, in order, and
+ * passes everything else (later cards, edits, polls) to the mock. A review
+ * card is recognised by its heading, so request messages and summaries are
+ * never consumed.
+ */
+function reviewSendsFail(failures: ScriptedFailure[]): {
+  fetch: NonNullable<TelegramConfig["fetch"]>;
+  cardSends: () => number;
+} {
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  let sends = 0;
+  const fetch: NonNullable<TelegramConfig["fetch"]> = async (url, init) => {
+    if (url.endsWith("/sendMessage")) {
+      const body = JSON.parse(String((init as { body?: unknown }).body ?? "{}")) as { text?: string };
+      if (typeof body.text === "string" && body.text.includes(TELEGRAM_REVIEW_HEADING)) {
+        sends += 1;
+        const failure = failures.shift();
+        if (failure !== undefined) {
+          if ("network" in failure) throw new TypeError(failure.network);
+          const text = JSON.stringify({
+            ok: false,
+            error_code: failure.status,
+            description: failure.description,
+            ...(failure.retryAfter === undefined ? {} : { parameters: { retry_after: failure.retryAfter } }),
+          });
+          return { ok: false, status: failure.status, text: async () => text };
+        }
+      }
+    }
+    return await passthrough(url, init);
+  };
+  return { fetch, cardSends: () => sends };
+}
+
+/** A review channel whose card sends fail as scripted, wired as the listener wires it. */
+function failingReviewChannel(world: Sampled, failures: ScriptedFailure[]) {
+  const scripted = reviewSendsFail(failures);
+  const channel = channelFor({ fetch: scripted.fetch });
+  const setup = setupFor(world, channel, undefined, "paced");
+  const captured = capture();
+  channel.onReview(reviewHandlerFor(setup, captured.streams));
+  return { channel, setup, cardSends: scripted.cardSends, ...captured };
+}
+
+/** `minutes` after T0 plus `seconds`. */
+function atSeconds(minutes: number, seconds: number): string {
+  return new Date(Date.parse(at(minutes)) + seconds * 1000).toISOString();
+}
+
+test("PR #614 recheck NF-2: only the Bot API refusing the card itself is deterministic", () => {
+  const refusal = (status: number | null, description: string | null) =>
+    new TelegramApiError("sendMessage: refused", "sendMessage", status, description);
+  for (const description of [
+    "Bad Request: message is too long",
+    "Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 3",
+    "Bad Request: message text is empty",
+    "Bad Request: text must be non-empty",
+    "Bad Request: reply markup is too long",
+    "Bad Request: BUTTON_DATA_INVALID",
+    "Bad Request: ENTITIES_TOO_LONG",
+  ]) {
+    assert.equal(isDeterministicSendRefusal(refusal(400, description)), true, description);
+  }
+  for (const [status, description] of [
+    [429, "Too Many Requests: retry after 35"],
+    [500, "Internal Server Error"],
+    [502, "Bad Gateway"],
+    [400, "Bad Request: chat not found"],
+    [403, "Forbidden: bot was blocked by the user"],
+    [null, "Bad Request: message is too long"],
+    [400, null],
+  ] as const) {
+    assert.equal(isDeterministicSendRefusal(refusal(status, description)), false, `${String(status)} ${String(description)}`);
+  }
+  assert.equal(isDeterministicSendRefusal(new Error("Bad Request: message is too long")), false, "a bare Error is not the Bot API");
+});
+
+test("PR #614 recheck NF-2: one 429 does not hide the sample, its retry_after is honoured, and later samples still flow", async () => {
+  const world = sampledWorld(3);
+  const { channel, setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 429, description: "Too Many Requests: retry after 150", retryAfter: 150 },
+  ]);
+  const state = newDispatchState();
+  const [first, second, third] = world.samples as [number, number, number];
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.equal(cardSends(), 1);
+  assert.ok(err.some((line) => line.includes("review-offer-retry") && line.includes(`sample seq ${String(first)}`)), err.join(""));
+  assert.equal(err.some((line) => line.includes("review-offer-failed")), false, "a 429 made the sample terminal-only");
+  assert.equal(state.review.terminalOnly.has(first), false, "a 429 hid the sample from the phone");
+
+  // Past the 60-second backoff but inside Telegram's 150 seconds: nothing is
+  // sent, neither the same card nor the next one.
+  const waiting = await dispatchPending(setup, streams, state, atSeconds(92, 0));
+  assert.equal(waiting.reviewCard, undefined, "a card went out inside retry_after");
+  assert.equal(cardSends(), 1, "a send was attempted inside retry_after");
+
+  // After retry_after: the same sample, not the next one.
+  const retried = await dispatchPending(setup, streams, state, atSeconds(92, 31));
+  assert.equal(retried.reviewCard?.sample_seq, first, "the 429'd sample lost its place");
+  await tapReview(channel, "ok");
+  const next = await dispatchPending(setup, streams, state, at(93));
+  assert.equal(next.reviewCard?.sample_seq, second, "the sample after it did not flow");
+  await tapReview(channel, "ok");
+  const last = await dispatchPending(setup, streams, state, at(94));
+  assert.equal(last.reviewCard?.sample_seq, third);
+  await tapReview(channel, "ok");
+  assert.equal(reviewsIn(world).length, 3);
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-5: a retry_after of 1e13 seconds does not throw, and the pause is capped at an hour", async () => {
+  const world = sampledWorld(1);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 429, description: "Too Many Requests: retry after 10000000000000", retryAfter: 1e13 },
+  ]);
+  const state = newDispatchState();
+  assert.equal(REVIEW_OFFER_MAX_WAIT_MS, 3_600_000);
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.ok(err.some((line) => line.includes("review-offer-retry")), err.join(""));
+  assert.equal(state.review.offersPausedUntilMs, Date.parse(at(90)) + REVIEW_OFFER_MAX_WAIT_MS);
+
+  const inside = await dispatchPending(setup, streams, state, at(149));
+  assert.equal(inside.reviewCard, undefined);
+  assert.equal(cardSends(), 1, "a send went out inside the capped pause");
+  const after = await dispatchPending(setup, streams, state, at(150));
+  assert.equal(after.reviewCard?.sample_seq, world.samples[0], "the capped pause never ended");
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-2: a deterministic 400 marks the sample terminal-only with the coded line", async () => {
+  const world = sampledWorld(2);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 400, description: "Bad Request: can't parse entities: unexpected end tag" },
+  ]);
+  const state = newDispatchState();
+  const [first, second] = world.samples as [number, number];
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.ok(
+    err.some(
+      (line) =>
+        line.includes("review-offer-failed") &&
+        line.includes("refused the card itself") &&
+        line.includes(`approval audit review ${String(first)}`),
+    ),
+    err.join(""),
+  );
+  assert.equal(state.review.terminalOnly.has(first), true);
+  // No pause and no retry: the next cycle offers the next sample.
+  const next = await dispatchPending(setup, streams, state, atSeconds(90, 1));
+  assert.equal(next.reviewCard?.sample_seq, second);
+  assert.equal(cardSends(), 2, "the refused card was sent again");
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-2: transient failures spend a per-sample budget with backoff, then the sample is terminal-only", async () => {
+  const world = sampledWorld(2);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 500, description: "Internal Server Error" },
+    { network: "fetch failed" },
+    { status: 502, description: "Bad Gateway" },
+    { status: 429, description: "Too Many Requests: retry after 1", retryAfter: 1 },
+    { status: 500, description: "Internal Server Error" },
+  ]);
+  const state = newDispatchState();
+  const [first, second] = world.samples as [number, number];
+  assert.equal(REVIEW_OFFER_ATTEMPTS, 5);
+
+  // Backoff after attempt n is 60 s * 2^(n-1). Each attempt goes out once its
+  // pause has passed, and a cycle inside the pause sends nothing.
+  const attemptsAt = [atSeconds(90, 0), atSeconds(91, 1), atSeconds(93, 2), atSeconds(97, 3), atSeconds(105, 4)];
+  const insidePause = [atSeconds(90, 59), atSeconds(93, 0), atSeconds(97, 0), atSeconds(105, 0)];
+  for (const [index, when] of attemptsAt.entries()) {
+    const cycle = await dispatchPending(setup, streams, state, when);
+    assert.equal(cycle.reviewCard, undefined, `attempt ${String(index + 1)} delivered`);
+    assert.equal(cardSends(), index + 1, `attempt ${String(index + 1)} was not made`);
+    const pause = insidePause[index];
+    if (pause !== undefined) {
+      assert.equal(state.review.terminalOnly.has(first), false, `attempt ${String(index + 1)} hid the sample`);
+      const quiet = await dispatchPending(setup, streams, state, pause);
+      assert.equal(quiet.reviewCard, undefined);
+      assert.equal(cardSends(), index + 1, `a send went out inside the pause after attempt ${String(index + 1)}`);
+    }
+  }
+  assert.equal(err.filter((line) => line.includes("review-offer-retry")).length, 4, err.join(""));
+  assert.ok(
+    err.some(
+      (line) =>
+        line.includes("review-offer-failed") &&
+        line.includes("5 attempts failed") &&
+        line.includes(`approval audit review ${String(first)}`),
+    ),
+    err.join(""),
+  );
+  assert.equal(state.review.terminalOnly.has(first), true, "the spent budget did not hand the sample to the terminal");
+
+  // The queue moves on at once.
+  const next = await dispatchPending(setup, streams, state, atSeconds(105, 5));
+  assert.equal(next.reviewCard?.sample_seq, second);
+  assert.deepEqual(reviewsIn(world), []);
+  assertClean(world.unit);
+});
+
+test("APRV-480: an execution that bound no payload says so rather than showing nothing", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const { payload_hash: _dropped, ...rest } = base.fields;
+  const card: ReviewCard = { ...base, fields: { ...rest, fullPayload: computed(null, "payload-binding") } };
+
+  assert.deepEqual(reviewPayloadView(card), { kind: "none" });
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_NONE), drawn.text);
+  assert.equal(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), false);
+  assert.equal(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY), false);
+  assertClean(world.unit);
+});
+
 test("APRV-299: OK records a review through the real path, and settles the card", async () => {
   const world = sampledWorld(1);
   const { channel } = reviewChannelFor(world);
@@ -6234,6 +6795,14 @@ test("APRV-299: OK records a review through the real path, and settles the card"
   assert.equal(payload["verdict"], "ok");
   assert.equal(payload["subject_seq"], card.sampleSeq);
   assert.equal("reaction" in payload, false, "an omitted reaction wrote a key");
+  // APRV-481: the card showed the bytes whole, so the review says which bytes
+  // the reviewer read, and names the execution it judged.
+  assert.equal(
+    payload["payload_hash"],
+    payloadHash(world.payloads.get(world.keys[0] as string)),
+    "a card that showed the bytes did not record their hash",
+  );
+  assert.equal(typeof payload["sampled_subject_hash"], "string");
 
   // The card says so, and its buttons are gone in the same call.
   const edits = editsFor(deliveryId);
@@ -6246,17 +6815,119 @@ test("APRV-299: OK records a review through the real path, and settles the card"
   assertClean(world.unit);
 });
 
-test("APRV-299: a reaction alone records ok and that grade", async () => {
+test("APRV-481: a review from a hash-only card records no payload hash", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const built = openReviewCards(world.unit.logPath, { payloadStoreDir: null });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  const card = (built.ok ? built.cards[0] : undefined) as ReviewCard;
+  assert.equal(reviewPayloadView(card).kind, "hash");
+  await channel.offerReview(card);
+
+  const polled = await tapReview(channel, "ok");
+  assert.equal(polled.reviews[0]?.ok, true);
+  assert.equal(polled.reviews[0]?.tap.payloadHash, undefined, "a hash-only card claimed it showed the bytes");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal("payload_hash" in payload, false, "the record claims a reading the card never offered");
+  assert.equal(payload["subject_seq"], card.sampleSeq);
+  assert.equal(typeof payload["sampled_subject_hash"], "string");
+  assertClean(world.unit);
+});
+
+test("APRV-482: a reaction alone is refused verdict-required, and the OK that follows records it", async () => {
+  const world = sampledWorld(1);
+  const { channel, err } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A grade is not a verdict. The tap reaches the runtime with NO verdict and
+  // the runtime's own refusal is what the card shows.
+  const bare = await tapReview(channel, "liked");
+  assert.equal(bare.reviews.length, 1);
+  assert.equal(bare.reviews[0]?.ok, false);
+  assert.equal(bare.reviews[0]?.tap.verdict, undefined, "the channel supplied a verdict nobody gave");
+  assert.deepEqual(reviewsIn(world), [], "a reaction alone wrote a review");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("verdict-required"), `the code is not on the card: ${last.text}`);
+  assert.ok(last.text.includes(TELEGRAM_NOT_RECORDED));
+  assert.ok(last.text.includes("GRADE LIKED HELD"), `the card does not say it holds the grade: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused tap took the buttons away");
+  assert.ok(err.some((line) => line.includes("verdict-required")), "the operator was not told");
+
+  // The explicit form: OK, which records the verdict with the held grade.
+  await tapReview(channel, "ok");
+  const record = reviewsIn(world)[0] as EventRecord;
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "liked", "the held grade was lost");
+  assertClean(world.unit);
+});
+
+test("APRV-482: a held grade rides with a two-tap denial", async () => {
   const world = sampledWorld(1);
   const { channel } = reviewChannelFor(world);
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  await tapReview(channel, "liked");
+  await tapReview(channel, "indifferent");
+  assert.deepEqual(reviewsIn(world), []);
+  await tapReview(channel, "deny");
+  assert.deepEqual(reviewsIn(world), [], "the first Deny tap recorded");
+  await tapReview(channel, "deny");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "indifferent");
+  assertClean(world.unit);
+});
 
-  const record = reviewsIn(world)[0] as EventRecord;
-  const payload = record.payload as Record<string, unknown>;
-  assert.equal(payload["verdict"], "ok", "a reaction alone did not imply ok");
-  assert.equal(payload["reaction"], "liked");
+test("PR #614 refutation F3: a grade one account holds never rides on another account's OK", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A taps a grade; B taps OK. B's OK is refused on the card: recording it
+  // would put A's grade in B's record.
+  await tapReview(channel, "liked", CHAT, "1001");
+  const other = await tapReview(channel, "ok", CHAT, "42");
+  assert.equal(other.reviews.length, 0, "a refused tap reached the runtime");
+  assert.deepEqual(reviewsIn(world), [], "B's OK recorded A's grade");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_OTHER_SENDER), `the card does not say why: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused tap took the buttons away");
+
+  // B's own grade replaces A's (a grade finishes nothing), and B's OK then
+  // records B's grade and nobody else's.
+  await tapReview(channel, "indifferent", CHAT, "42");
+  await tapReview(channel, "ok", CHAT, "42");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reaction"], "indifferent", "the record carries a grade its reviewer did not tap");
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F3: a Deny one account armed is never finished by another account's tap", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // A arms Deny; B's grade, B's OK and B's Deny are each refused, because
+  // each would finish A's denial (or undo it) under B's name.
+  await tapReview(channel, "deny", CHAT, "1001");
+  for (const choice of ["indifferent", "ok", "deny"] as const) {
+    const tapped = await tapReview(channel, choice, CHAT, "42");
+    assert.equal(tapped.reviews.length, 0, `B's ${choice} reached the runtime`);
+  }
+  assert.deepEqual(reviewsIn(world), [], "B's tap recorded A's armed denial");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string };
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_OTHER_SENDER), `the card does not say why: ${last.text}`);
+  assert.ok(last.text.includes(TELEGRAM_REVIEW_ARMED), "a refused tap disarmed the card");
+
+  // The account that armed it finishes it.
+  await tapReview(channel, "deny", CHAT, "1001");
+  const payload = (reviewsIn(world)[0] as EventRecord).payload as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal("reaction" in payload, false, "a grade nobody on this denial tapped rode with it");
   assertClean(world.unit);
 });
 
@@ -6343,7 +7014,10 @@ test("APRV-299: loved asks for a note first, and a blank one records nothing", a
   const { channel } = reviewChannelFor(world);
   const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  const asked = await tapReview(channel, "loved");
+  // APRV-482: the grade first is held and refused; the OK is what asks why.
+  const held = await tapReview(channel, "loved");
+  assert.equal(held.reviews[0]?.ok, false, "a grade alone was not refused");
+  const asked = await tapReview(channel, "ok");
   assert.deepEqual(asked.reviews, [], "the tap recorded before the note arrived");
   assert.deepEqual(reviewsIn(world), [], "the tap appended before the note arrived");
   const prompt = mock.sentMessages().find((entry) => entry.messageId === notePromptId());
@@ -6359,8 +7033,9 @@ test("APRV-299: loved asks for a note first, and a blank one records nothing", a
     "the refusal code is not on the card",
   );
 
-  // Words land, verbatim, beside the grade.
-  await tapReview(channel, "loved");
+  // Words land, verbatim, beside the grade. The grade is still held, so OK
+  // asks again.
+  await tapReview(channel, "ok");
   await replyWithNote(channel, "exactly the cleanup I wanted and nobody asked me for");
   const record = reviewsIn(world)[0] as EventRecord;
   const payload = record.payload as Record<string, unknown>;
@@ -6500,7 +7175,7 @@ test("APRV-299: a lost card leaves the sample pending and reviewable", async () 
     { kind: "seq", seq: card.sampleSeq },
     HUMAN,
     null,
-    { verdict: "ok" },
+    { ...world.unit.options, verdict: "ok" },
   );
   assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
   assertClean(world.unit);
@@ -6510,9 +7185,10 @@ test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", a
   const world = sampledWorld(2);
   const { channel } = reviewChannelFor(world);
 
-  // One reaction given on the card…
+  // One reaction given on the card, with its explicit OK (APRV-482)…
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
   await tapReview(channel, "liked");
+  await tapReview(channel, "ok");
 
   // …and one given at the terminal, through the verb an operator runs.
   const cli = await runReviewCli(world, [
@@ -6521,6 +7197,7 @@ test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", a
     String(world.samples[1]),
     "--reaction",
     "liked",
+    "--ok",
     "--as",
     HUMAN,
   ]);
@@ -6581,9 +7258,13 @@ test("APRV-302: a review tap is acked as a review, not as a decision", async () 
   await channel.offerReview(cards[1] as ReviewCard);
   await tapReview(channel, "indifferent");
   assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+  await tapReview(channel, "ok");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
 
   await channel.offerReview(cards[2] as ReviewCard);
   await tapReview(channel, "liked");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+  await tapReview(channel, "ok");
   assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
 
   // The toast that says something the ack does not is untouched: the first deny
@@ -6729,13 +7410,102 @@ test("APRV-324: a mapping edited and not attested records no review", async () =
   assertClean(world.unit);
 });
 
+/** The mapped policy with a class roster naming only `carter` (APRV-483). */
+const REVIEW_POLICY_ROSTER = REVIEW_POLICY_MAPPED.replace(
+  "  files.write.*:\n    autonomy: supervised\n",
+  "  files.write.*:\n    autonomy: supervised\n    approvers: [carter]\n",
+);
+
+test("APRV-483: a mapped reviewer off the class roster is refused actor-not-approver on the card", async () => {
+  assert.notEqual(REVIEW_POLICY_ROSTER, REVIEW_POLICY_MAPPED, "the roster fixture did not apply");
+  const world = sampledWorld(1, REVIEW_POLICY_ROSTER);
+  const { channel, err } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  // PR #614 N6: Dana's lone grade is answered with the roster, not with
+  // verdict-required, and the card does not hold it, so it cannot block anyone.
+  const graded = await tapReview(channel, "liked", CHAT, DANA_TG);
+  assert.equal(graded.reviews[0]?.ok, false);
+  const afterGrade = editsFor(deliveryId);
+  const gradeText = (afterGrade[afterGrade.length - 1] as { text: string }).text;
+  assert.ok(gradeText.includes("actor-not-approver"), `a lone grade was not told the roster: ${gradeText}`);
+  assert.ok(!gradeText.includes("verdict-required"), "the off-roster grade was told verdict-required first");
+  assert.ok(!gradeText.includes("GRADE LIKED HELD"), "the card held a grade the runtime refused");
+
+  // Dana is a mapped approver of the policy, and not on this class's roster.
+  const refused = await tapReview(channel, "ok", CHAT, DANA_TG);
+  assert.equal(refused.reviews[0]?.ok, false);
+  assert.deepEqual(reviewsIn(world), [], "a review off the roster was recorded");
+  const edits = editsFor(deliveryId);
+  const last = edits[edits.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("actor-not-approver"), `the code is not on the card: ${last.text}`);
+  assert.notEqual(last.replyMarkup, undefined, "a refused reviewer took the buttons away");
+  assert.ok(err.some((line) => line.includes("actor-not-approver")), "the operator was not told");
+
+  // Carter is on it, and the same card records.
+  await tapReview(channel, "ok", CHAT, CARTER_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:carter");
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-1: an unmapped or off-roster account's Deny arms nothing, so the approver is never blocked", async () => {
+  // The recheck's probe F3, on a sender-mapped policy whose class roster names
+  // carter only: 999 is unmapped, dana (77) is mapped and off the roster.
+  const world = sampledWorld(1, REVIEW_POLICY_ROSTER);
+  const { channel } = reviewChannelFor(world);
+  const deliveryId = await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+  const lastText = () => (editsFor(deliveryId).at(-1) as { text: string }).text;
+  const toasts = mock.answerTexts().length;
+
+  // The unmapped account's Deny reaches the runtime with no verdict and is
+  // refused with its own code; the card does not arm.
+  const stranger = await tapReview(channel, "deny", CHAT, STRANGER_TG);
+  assert.equal(stranger.reviews.length, 1, "the first Deny did not reach the runtime");
+  assert.equal(stranger.reviews[0]?.ok, false);
+  assert.equal(stranger.reviews[0]?.tap.verdict, undefined, "the arming tap carried a verdict");
+  assert.ok(lastText().includes(TELEGRAM_NOT_RECORDED), `the refusal is not on the card: ${lastText()}`);
+  assert.match(lastText(), /not one the attested policy names/u, "the card does not say the sender is unmapped");
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_ARMED), "an unmapped account armed Deny");
+  assert.notEqual(mock.answerTexts().at(-1), TELEGRAM_REVIEW_ARM_TOAST, "the toast said Deny was armed");
+
+  // The off-roster account's Deny is refused by the roster; nothing arms.
+  await tapReview(channel, "deny", CHAT, DANA_TG);
+  assert.ok(lastText().includes("actor-not-approver"), `the roster refusal is not on the card: ${lastText()}`);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_ARMED), "an off-roster account armed Deny");
+  assert.deepEqual(reviewsIn(world), []);
+
+  // The approver is not blocked: a grade, then a two-tap Deny, each from
+  // carter, and none of them is refused as another account's review.
+  await tapReview(channel, "indifferent", CHAT, CARTER_TG);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_OTHER_SENDER), `carter's grade was blocked: ${lastText()}`);
+  const arming = await tapReview(channel, "deny", CHAT, CARTER_TG);
+  assert.equal(arming.reviews[0]?.ok, false, "the arming tap recorded");
+  assert.ok(lastText().includes(TELEGRAM_REVIEW_ARMED), `carter's Deny did not arm: ${lastText()}`);
+  assert.ok(!lastText().includes(TELEGRAM_REVIEW_OTHER_SENDER), `carter's Deny was blocked: ${lastText()}`);
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_REVIEW_ARM_TOAST);
+  assert.deepEqual(reviewsIn(world), [], "the first Deny tap recorded");
+  await tapReview(channel, "deny", CHAT, CARTER_TG);
+  const reviews = reviewsIn(world);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.actor, "human:carter");
+  const payload = (reviews[0]?.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["verdict"], "denied");
+  assert.equal(payload["reaction"], "indifferent");
+  assert.ok(mock.answerTexts().length > toasts);
+  assertClean(world.unit);
+});
+
 test("APRV-324: a note prompt answers only to the account that armed it", async () => {
   const world = sampledWorld(1, REVIEW_POLICY_MAPPED);
   const { channel } = reviewChannelFor(world);
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
-  // Dana grades it `loved`, which asks for words before anything is written.
+  // Dana grades it `loved` and taps OK, which asks for words before anything
+  // is written (APRV-482: the grade alone is held, the OK asks).
   await tapReview(channel, "loved", CHAT, DANA_TG);
+  await tapReview(channel, "ok", CHAT, DANA_TG);
   assert.equal(reviewsIn(world).length, 0);
 
   // Carter replies to Dana's prompt. The words are not Dana's, and the grade is
@@ -6761,6 +7531,7 @@ test("APRV-302: the note prompt keeps its toast, and its reply answers no callba
   await channel.offerReview(cardsFor(world)[0] as ReviewCard);
 
   await tapReview(channel, "disliked");
+  await tapReview(channel, "ok");
   assert.equal(
     mock.answerTexts().at(-1),
     TELEGRAM_REVIEW_NOTE_TOAST,

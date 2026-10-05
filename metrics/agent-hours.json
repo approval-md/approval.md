@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-28T10:30:06.470Z",
+  "generated_at": "2026-10-05T10:30:09.580Z",
   "repo": "approval-md/approval.md",
   "method": {
     "active_time": "sum of gaps between consecutive transcript events, each capped at gap_seconds, attributed to the most recent assistant model",
@@ -17,35 +17,35 @@
   },
   "agents": {
     "claude-fable": {
-      "hours": 234,
-      "sessions": 76,
-      "turns": 24696,
-      "output_tokens": 22038983,
-      "input_tokens": 7043283086
+      "hours": 263.5,
+      "sessions": 80,
+      "turns": 27314,
+      "output_tokens": 26546487,
+      "input_tokens": 8225272580
     },
     "claude-haiku": {
       "hours": 0.9,
-      "sessions": 331,
-      "turns": 710,
-      "output_tokens": 426741,
-      "input_tokens": 19517686
+      "sessions": 338,
+      "turns": 724,
+      "output_tokens": 434797,
+      "input_tokens": 19925848
     },
     "claude-opus": {
-      "hours": 264,
-      "sessions": 714,
-      "turns": 77561,
-      "output_tokens": 28821855,
-      "input_tokens": 15329722884
+      "hours": 318.5,
+      "sessions": 953,
+      "turns": 95361,
+      "output_tokens": 31196448,
+      "input_tokens": 19264071681
     },
     "claude-sonnet": {
-      "hours": 7.4,
-      "sessions": 64,
-      "turns": 3330,
-      "output_tokens": 757192,
-      "input_tokens": 291412967
+      "hours": 9.7,
+      "sessions": 82,
+      "turns": 4435,
+      "output_tokens": 980212,
+      "input_tokens": 471193068
     },
     "codex-astra": {
-      "hours": 30.9,
+      "hours": 31,
       "sessions": 14,
       "turns": 148,
       "output_tokens": 1156314,
@@ -74,7 +74,7 @@
       "approx": true
     }
   },
-  "total_hours": 587.2,
+  "total_hours": 673.6,
   "weeks": {
     "2026-W32": {
       "claude-fable": 15.8,
@@ -124,9 +124,19 @@
       "claude-fable": 20.1,
       "claude-opus": 28.8,
       "claude-sonnet": 0.2,
-      "codex-astra": 4.4,
+      "codex-astra": 4.5,
       "codex-review": 4.2,
       "codex-sol": 3
+    },
+    "2026-W40": {
+      "claude-fable": 25.8,
+      "claude-haiku": 0,
+      "claude-opus": 48.5,
+      "claude-sonnet": 2.3
+    },
+    "2026-W41": {
+      "claude-fable": 3.7,
+      "claude-opus": 6
     }
   }
 }
