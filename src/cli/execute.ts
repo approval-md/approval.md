@@ -99,6 +99,7 @@ import {
   type ExecuteRefusal,
   type ResolveOutcome,
 } from "../core/execute.js";
+import { settleTerminationGuards } from "../core/log-lock.js";
 import { harnessLoopEscalation, harnessOutcomeCoverage, loopClearance } from "../core/loop.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
@@ -661,6 +662,10 @@ export function commandRun(
           readJailFor(flags, cwd),
         )
       : null;
+  // `execution.started` was just appended: settle the log lock's signal guard,
+  // so a signal during the child's run reaches this process as it did before
+  // the guard existed, instead of waiting for the child to exit (APRV-479, S2).
+  settleTerminationGuards();
   const child = spawnSync(
     wrapped?.command ?? command,
     wrapped?.args ?? childArgv.slice(1),
@@ -720,8 +725,13 @@ export function commandRun(
 /** `wait --timeout 0` (and `0s`, `0ms`, …): read once, never sleep (APRV-445). */
 const ZERO_DURATION = /^0(?:ms|s|m|h|d|w)?$/u;
 
-/** Synchronous sleep with no dependency and no busy-spin. */
+/**
+ * Synchronous sleep with no dependency and no busy-spin. The log lock's signal
+ * guard is settled first, so a wait that follows an append is never run with
+ * termination signals held (APRV-479, S2).
+ */
 function sleepSync(ms: number): void {
+  settleTerminationGuards();
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

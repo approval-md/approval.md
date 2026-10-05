@@ -873,6 +873,71 @@ test("the export excludes every file named from the lockfile, and nothing else t
 });
 
 // ---------------------------------------------------------------------------
+// Fix round 1: S2, a verb that waits after its append answers Ctrl-C at once
+// ---------------------------------------------------------------------------
+
+function policyText(body: string[]): string {
+  return ["# Policy", "", "```yaml approval-policy", ...body, "```", ""].join("\n");
+}
+
+const WITH_CHANNEL = (resolution: "autonomous" | "supervised"): string =>
+  policyText([
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: supervised",
+    "  approval_ttl: 24h",
+    "approvers:",
+    "  carter:",
+    "    channels: [telegram]",
+    "channels:",
+    "  telegram:",
+    "    token_env: TELEGRAM_TOKEN",
+    "    chat_id_env: TELEGRAM_CHAT",
+    "classes:",
+    "  read.*:",
+    `    autonomy: ${resolution}`,
+  ]);
+
+test("`approval policy amend` waiting on its prompt dies of SIGINT at once, not when its wait ends", { skip: process.platform === "win32" }, async () => {
+  counter += 1;
+  const dir = join(scratch, `amend-${String(counter)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), WITH_CHANNEL("autonomous"));
+  const env = { ...process.env };
+  delete env["APPROVAL_HUMAN"];
+  for (const args of [
+    ["init", "-q", "."],
+    ["config", "user.email", "test@example.invalid"],
+    ["config", "user.name", "Test"],
+    ["add", "-A"],
+    ["commit", "-qm", "policy"],
+  ]) {
+    assert.equal(spawnSync("git", args, { cwd: dir }).status, 0, `git ${args.join(" ")}`);
+  }
+  const attest = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:carter"], { cwd: dir, env, encoding: "utf8" });
+  assert.equal(attest.status, 0, attest.stderr);
+  writeFileSync(join(dir, "APPROVAL.md"), WITH_CHANNEL("supervised"));
+
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const child = spawn(
+    process.execPath,
+    [CLI_ENTRY, "policy", "amend", "--as", "agent:planner", "--wait", "12s", "--interval", "200ms", "--json"],
+    { cwd: dir, env, stdio: "ignore" },
+  );
+  const exited = exitOf(child);
+  // The proposal is appended, so the verb is in its synchronous poll.
+  await waitFor(() => existsSync(logPath) && readFileSync(logPath, "utf8").includes('"policy.proposed"'), 15_000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const sentAt = Date.now();
+  child.kill("SIGINT");
+  const { signal } = await exited;
+  const elapsed = Date.now() - sentAt;
+  assert.equal(signal, "SIGINT", "the process died of the signal");
+  assert.ok(elapsed < 4_000, `it died ${String(elapsed)} ms after the signal; before fix round 1 it was held until the 12 s wait ended`);
+  assert.equal(existsSync(`${logPath}.lock`), false, "and left no lockfile");
+});
+
+// ---------------------------------------------------------------------------
 // Fix round 1: B1 and S3 on real Linux, in a disposable privileged container
 // ---------------------------------------------------------------------------
 
