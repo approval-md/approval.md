@@ -190,9 +190,21 @@ function recordOnlyKeys(records: EventRecord[], classes: Map<string, string>): S
     if (record.event !== "approval.granted") continue;
     if (typeof record.action_key === "string") granted.add(record.action_key);
   }
+  // The class alone is not enough (a task envelope may declare it): the start
+  // must be a harness start naming its tool, which only the policy-authorized
+  // harness start writes, after checking the name against the attested
+  // mapping (`core/gate.ts`, `toolMapStartRefusal`). An outcome whose key has
+  // no such start, a refused start that wrote nothing among them, keeps
+  // counting exactly as before.
   const keys = new Set<string>();
-  for (const [key, cls] of classes) {
-    if (cls === UNMAPPED_TOOL_CLASS && !granted.has(key)) keys.add(key);
+  for (const record of records) {
+    if (record.event !== "execution.started") continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    if (classes.get(key) !== UNMAPPED_TOOL_CLASS || granted.has(key)) continue;
+    const payload = payloadOf(record);
+    if (payload["execution"] !== "harness" || typeof payload["harness_tool"] !== "string") continue;
+    keys.add(key);
   }
   return keys;
 }

@@ -143,8 +143,10 @@ export interface BudgetAction {
    * no `tools` entry claimed. Such a start is a RECORD of unclassified tool
    * use, not an approved action, so a global `daily_actions` budget neither
    * counts it nor refuses it. Set only by the write boundary that records
-   * policy-authorized harness starts (`core/gate.ts`); a human's grant of the
-   * same class is an approved action and is counted like any other.
+   * policy-authorized harness starts (`core/gate.ts`), and only for a start
+   * carrying `harness_tool` that the attested mapping leaves unclaimed; a
+   * human's grant of the same class is an approved action and is counted like
+   * any other.
    */
   recordOnly?: boolean;
 }
@@ -383,9 +385,21 @@ function tally(events: EventRecord[]): Consumption {
  * USD is unaffected (these starts declare no cost), and class-scoped limits
  * are unaffected: a `limits` block on a rule matching
  * `harness.tool.unmapped` is a ceiling written for exactly these records.
+ *
+ * WHO can produce one. The class alone is not enough, because a task envelope
+ * may DECLARE `harness.tool.unmapped` for any action and the proposal path
+ * would record its start under that class. The start must also be a harness
+ * start (`execution: "harness"`) carrying `harness_tool`, which only
+ * `core/gate.ts`'s policy-authorized harness start writes, and only after
+ * re-deriving, from the ATTESTED policy it holds, that no `tools` entry claims
+ * that name (`toolMapStartRefusal`). Nothing in the tool call's arguments is
+ * read: the class comes from the attested mapping and the name from the
+ * harness's own event.
  */
 function isRecordOnlyUnmappedStart(record: EventRecord): boolean {
-  return record.event === "execution.started" && classOf(record) === UNMAPPED_TOOL_CLASS;
+  if (record.event !== "execution.started" || classOf(record) !== UNMAPPED_TOOL_CLASS) return false;
+  const payload = payloadOf(record);
+  return payload["execution"] === "harness" && typeof payload["harness_tool"] === "string";
 }
 
 /**

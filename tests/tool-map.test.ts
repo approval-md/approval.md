@@ -436,14 +436,25 @@ function h1Log(...inputs: EventInput[]): EventRecord[] {
 
 const H1_TS = "2026-10-05T12:00:00.000Z";
 
-function h1Start(cls: string, task: string, key: string): EventInput {
+/**
+ * A harness start. `tool` is the `harness_tool` the policy-authorized hook
+ * start writes; a start of `harness.tool.unmapped` written without one is what
+ * a task envelope DECLARING that class would produce.
+ */
+function h1Start(cls: string, task: string, key: string, tool?: string): EventInput {
   return {
     ts: H1_TS,
     event: "execution.started",
     actor: "agent:cc",
     task,
     action_key: key,
-    payload: { class: cls, est_cost_usd: "0", execution: "harness", payload_hash: "a".repeat(64) },
+    payload: {
+      class: cls,
+      est_cost_usd: "0",
+      execution: "harness",
+      payload_hash: "a".repeat(64),
+      ...(tool === undefined ? {} : { harness_tool: tool }),
+    },
   };
 }
 
@@ -466,8 +477,8 @@ const H1_SCOPE = { classLimits: null, classPattern: null, globalBudgets: { globa
 
 test("H1: a record-only harness.tool.unmapped start is not counted by a global daily_actions budget", () => {
   const records = h1Log(
-    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:1", "hook:s:1:harness.tool.unmapped"),
-    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:2", "hook:s:2:harness.tool.unmapped"),
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:1", "hook:s:1:harness.tool.unmapped", "TodoWrite"),
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:2", "hook:s:2:harness.tool.unmapped", "TodoWrite"),
   );
   assert.equal(evaluateBudgets(records, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, true);
   // Real work still counts.
@@ -496,8 +507,12 @@ test("H1: failed record-only unmapped calls do not accrue to the loop floor; fai
   for (const index of [1, 2, 3]) {
     const task = `hook:s:${String(index)}`;
     const key = `${task}:${UNMAPPED_TOOL_CLASS}`;
-    recordOnly.push(h1Start(UNMAPPED_TOOL_CLASS, task, key), h1Failed(task, key));
-    granted.push(h1Grant(UNMAPPED_TOOL_CLASS, task, key), h1Start(UNMAPPED_TOOL_CLASS, task, key), h1Failed(task, key));
+    recordOnly.push(h1Start(UNMAPPED_TOOL_CLASS, task, key, "TodoWrite"), h1Failed(task, key));
+    granted.push(
+      h1Grant(UNMAPPED_TOOL_CLASS, task, key),
+      h1Start(UNMAPPED_TOOL_CLASS, task, key, "TodoWrite"),
+      h1Failed(task, key),
+    );
   }
   assert.equal(harnessLoopFloor(h1Log(...recordOnly), "hook:s:4", "agent:cc"), null);
   assert.notEqual(harnessLoopFloor(h1Log(...granted), "hook:s:4", "agent:cc"), null);
@@ -509,10 +524,61 @@ test("H1: failed record-only unmapped calls do not accrue to the loop floor; fai
     streak.push(h1Start("exec.local", task, key), h1Failed(task, key));
   }
   streak.push(
-    h1Start(UNMAPPED_TOOL_CLASS, "hook:w:3", "hook:w:3:harness.tool.unmapped"),
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:w:3", "hook:w:3:harness.tool.unmapped", "TodoWrite"),
     { ts: H1_TS, event: "execution.completed", actor: "agent:cc", task: "hook:w:3", action_key: "hook:w:3:harness.tool.unmapped" },
     h1Start("exec.local", "hook:w:4", "hook:w:4:exec.local"),
     h1Failed("hook:w:4", "hook:w:4:exec.local"),
   );
   assert.notEqual(harnessLoopFloor(h1Log(...streak), "hook:w:5", "agent:cc"), null);
+});
+
+// Named attacks from the scan of the H1 commit (fix round 1).
+
+test("H1 attack 1: a start that only DECLARES harness.tool.unmapped (no harness_tool) is counted by daily_actions", () => {
+  // What a task envelope declaring the class would produce on the proposal
+  // path: the class is the agent's word, so it buys no exemption.
+  const declared = h1Log(h1Start(UNMAPPED_TOOL_CLASS, "task-1", "task-1:a"));
+  assert.equal(evaluateBudgets(declared, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, false);
+  // And its admission is charged unless the write boundary marked it record-only.
+  const empty = h1Log(h1Start("exec.local", "task-2", "task-2:a"));
+  assert.equal(evaluateBudgets(empty, H1_SCOPE, { class: UNMAPPED_TOOL_CLASS }, H1_TS).pass, false);
+  // A non-harness start naming a tool is not one either.
+  const notHarness = h1Log({
+    ts: H1_TS,
+    event: "execution.started",
+    actor: "agent:cc",
+    task: "task-3",
+    action_key: "task-3:a",
+    payload: { class: UNMAPPED_TOOL_CLASS, est_cost_usd: "0", payload_hash: "a".repeat(64), harness_tool: "TodoWrite" },
+  });
+  assert.equal(evaluateBudgets(notHarness, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, false);
+});
+
+test("H1 attack 2: refused, unknown and declared-only starts still accrue to the loop floor exactly as before", () => {
+  // Failures whose keys name no start at all (a start that was refused writes
+  // nothing): side-effecting by construction, as before.
+  const orphans: EventInput[] = [];
+  for (const index of [1, 2, 3]) orphans.push(h1Failed(`hook:o:${String(index)}`, `hook:o:${String(index)}:x`));
+  assert.notEqual(harnessLoopFloor(h1Log(...orphans), "hook:o:4", "agent:cc"), null);
+  // Failed starts of harness.tool.unmapped written WITHOUT harness_tool (a
+  // declared class, not the hook's record): counted.
+  const declared: EventInput[] = [];
+  for (const index of [1, 2, 3]) {
+    const task = `hook:d:${String(index)}`;
+    const key = `${task}:${UNMAPPED_TOOL_CLASS}`;
+    declared.push(h1Start(UNMAPPED_TOOL_CLASS, task, key), h1Failed(task, key));
+  }
+  assert.notEqual(harnessLoopFloor(h1Log(...declared), "hook:d:4", "agent:cc"), null);
+  // A failure keyed to an ordinary class is counted even when record-only
+  // starts sit between the failures.
+  const mixed: EventInput[] = [];
+  for (const index of [1, 2, 3]) {
+    const task = `hook:m:${String(index)}`;
+    mixed.push(
+      h1Start(UNMAPPED_TOOL_CLASS, `${task}u`, `${task}u:${UNMAPPED_TOOL_CLASS}`, "TodoWrite"),
+      h1Start("exec.local", task, `${task}:exec.local`),
+      h1Failed(task, `${task}:exec.local`),
+    );
+  }
+  assert.notEqual(harnessLoopFloor(h1Log(...mixed), "hook:m:4", "agent:cc"), null);
 });

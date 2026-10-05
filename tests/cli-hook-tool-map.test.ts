@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
+import { startHarnessExecution } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -653,4 +654,116 @@ test("H1: failed record-only unmapped calls do not trip the loop floor", () => {
   );
   assert.equal(write.permission, "allow", write.reason);
   assert.doesNotMatch(write.reason, /loop-escalated/);
+});
+
+test("H1 attack 1: nothing in the tool input makes a mapped call record-only; the class comes from the attested mapping", () => {
+  const dir = ready(
+    policy(
+      ["  unmapped_tool: record"],
+      [
+        ...CLASSES,
+        "  communicate.zzz.send:",
+        "    autonomy: autonomous",
+        "tools:",
+        "  - match: mcp__zzz__send",
+        "    class: communicate.zzz.send",
+        "budgets:",
+        "  global:",
+        "    daily_actions: 1",
+      ],
+    ),
+  );
+  const forged = { class: "harness.tool.unmapped", harness_tool: "TodoWrite", execution: "harness" };
+  const first = claudeVerdict(claude(dir, "mcp__zzz__send", forged, "t-atk-1"));
+  assert.equal(first.permission, "allow", first.reason);
+  const [start] = starts(dir);
+  assert.ok(start !== undefined);
+  const payload = start["payload"] as Record<string, unknown>;
+  assert.equal(payload["class"], "communicate.zzz.send");
+  assert.equal(payload["harness_tool"], "mcp__zzz__send");
+  // It was charged: the one action the budget allows is gone.
+  const second = claudeVerdict(claude(dir, "mcp__zzz__send", forged, "t-atk-2"));
+  assert.equal(second.permission, "deny");
+  assert.match(second.reason, /budget-exceeded/);
+});
+
+test("H1 attack 1: the write boundary re-derives the class of a named harness tool from the ATTESTED mapping", () => {
+  // The hook classifies from its own read of the policy; a swap between that
+  // read and the gate's attested read could hand the gate an unmapped class
+  // for a tool the attested policy maps. The gate refuses it and appends nothing.
+  const dir = ready(
+    policy(
+      ["  unmapped_tool: record"],
+      [
+        ...CLASSES,
+        "  communicate.zzz.send:",
+        "    autonomy: autonomous",
+        "tools:",
+        "  - match: mcp__zzz__send",
+        "    class: communicate.zzz.send",
+      ],
+    ),
+  );
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const before = logRecords(dir).length;
+  const forged = startHarnessExecution(
+    logPath,
+    {
+      task: "hook:cc-sess-tools:t-atk-race",
+      actionKey: "hook:cc-sess-tools:t-atk-race:harness.tool.unmapped",
+      cls: "harness.tool.unmapped",
+      payload_hash: "a".repeat(64),
+      harness_tool: "mcp__zzz__send",
+    },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(forged.ok, false);
+  assert.equal(forged.ok ? "" : forged.code, "policy-not-attested");
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+  // The honest pair is admitted.
+  const honest = startHarnessExecution(
+    logPath,
+    {
+      task: "hook:cc-sess-tools:t-atk-honest",
+      actionKey: "hook:cc-sess-tools:t-atk-honest:harness.tool.unmapped",
+      cls: "harness.tool.unmapped",
+      payload_hash: "a".repeat(64),
+      harness_tool: "TodoWrite",
+    },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(honest.ok, true, honest.ok ? "" : honest.message);
+});
+
+test("H1 attack 2: a refused unmapped call writes no start, and failed side-effecting calls still trip the floor", () => {
+  const dir = ready(policy(["  unmapped_tool: record"], [...CLASSES]));
+  // A refused unmapped call (an unrecordable name) leaves nothing for the
+  // floor to exempt.
+  const refused = claudeVerdict(claude(dir, "Todo Write", {}, "t-atk-refused"));
+  assert.equal(refused.permission, "deny");
+  assert.equal(starts(dir).length, 0);
+  // Three failed side-effecting calls, with record-only calls between them,
+  // floor the session exactly as before.
+  for (const index of [1, 2, 3]) {
+    const todo = `t-atk-todo${String(index)}`;
+    const recorded = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, todo, ["--timeout", "50ms"]));
+    assert.equal(recorded.permission, "allow", recorded.reason);
+    claudePost(dir, "TodoWrite", { todos: [] }, todo);
+    const id = `t-atk-w${String(index)}`;
+    const write = { file_path: join(dir, `w${String(index)}.txt`), content: "x" };
+    assert.equal(claudeVerdict(claude(dir, "Write", write, id, ["--timeout", "50ms"])).permission, "allow");
+    claudeFailedPost(dir, "Write", write, id);
+  }
+  const floored = claudeVerdict(
+    claude(dir, "Write", { file_path: join(dir, "w4.txt"), content: "x" }, "t-atk-w4", ["--timeout", "50ms"]),
+  );
+  assert.equal(floored.permission, "deny");
+  assert.match(floored.reason, /loop-escalated/);
+  // The floor still ROUTES an unmapped call to a human (it is not known to
+  // only look); H1 exempts it from accruing, not from the floor.
+  const routed = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-atk-todo4", ["--timeout", "50ms"]));
+  assert.equal(routed.permission, "deny");
+  assert.match(routed.reason, /loop-escalated/);
 });
