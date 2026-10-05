@@ -78,6 +78,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -107,6 +108,7 @@ import {
   type ProcStatRead,
   type SelfIdentity,
 } from "../src/core/log-lock.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import { verify } from "../src/core/verify.js";
 import { isExcludedPath } from "../src/serve/archive.js";
 
@@ -1425,6 +1427,92 @@ test("a SIGTERM that lands during a reclaim kills the writer there: nothing is a
   // The reclaim it abandoned before its commit is the next writer's.
   assert.ok(appendEvent(logPath, granted(91), { lockTimeoutMs: 500 }).ok);
   assert.equal(verify(logPath).status, "clean");
+});
+
+const RUN_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "classes:",
+  "  files.write.*:",
+  "    autonomy: supervised",
+  "```",
+  "",
+].join("\n");
+
+function runTaskFile(binding: string): string {
+  return [
+    "---",
+    "id: task-479",
+    "title: Write a file",
+    "status: In Progress",
+    "approval:",
+    "  origin:",
+    "    app: example-capture",
+    '    created_by: "human:carter"',
+    "  state: proposed",
+    "  actions:",
+    "    - class: files.write.local",
+    '      summary: "Write the marker"',
+    "      reversible: true",
+    '      est_cost_usd: "0.01"',
+    '      idempotency_key: "task-479:write"',
+    `      payload_hash: "${binding}"`,
+    "---",
+    "",
+    "Body.",
+    "",
+  ].join("\n");
+}
+
+test("`approval run`: a SIGTERM during the execution.started append ends the process before the command starts", { skip: process.platform === "win32" }, async () => {
+  counter += 1;
+  mkdirSync(join(scratch, `run-${String(counter)}`), { recursive: true });
+  // The real path: `run` binds the payload to the cwd it will spawn in.
+  const dir = realpathSync(join(scratch, `run-${String(counter)}`));
+  const ran = join(dir, "the-command-ran");
+  const command = [process.execPath, "-e", `require("fs").writeFileSync(${JSON.stringify(ran)}, "x")`];
+  writeFileSync(join(dir, "APPROVAL.md"), RUN_POLICY);
+  writeFileSync(join(dir, "task-479.md"), runTaskFile(runPayloadHash(command, dir)));
+  const env = { ...process.env };
+  delete env["APPROVAL_HUMAN"];
+  const cli = (args: string[]): number | null => spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd: dir, env }).status;
+  assert.equal(cli(["policy", "attest", "--as", "human:carter"]), 0);
+  assert.equal(cli(["register", "task-479.md", "--as", "agent:claude"]), 0);
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const marker = join(dir, "writing");
+  const wrapper = join(scratch, `run-wrapper-${String(counter)}.mjs`);
+  writeFileSync(
+    wrapper,
+    [
+      `import { appendWriteLayer, setAppendWriteLayerForTests } from ${JSON.stringify(WRITE_LAYER_MODULE)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `const real = appendWriteLayer();`,
+      `setAppendWriteLayerForTests({ ...real, write(fd, data) {`,
+      `  if (Buffer.from(data).toString("utf8").includes('"execution.started"')) {`,
+      `    writeFileSync(${JSON.stringify(marker)}, "x");`,
+      `    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);`,
+      `  }`,
+      `  return real.write(fd, data);`,
+      `} });`,
+      `const { main } = await import(${JSON.stringify(pathToFileURL(CLI_ENTRY).href)});`,
+      `process.exitCode = await main(${JSON.stringify(["run", "task-479:write", "--as", "agent:claude", "--no-sandbox", "--", ...command])});`,
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, [wrapper], { cwd: dir, env, stdio: "ignore" });
+  const exited = exitOf(child);
+  await waitFor(() => existsSync(marker), 15_000);
+  child.kill("SIGTERM");
+  const { signal } = await exited;
+  assert.equal(signal, "SIGTERM", "the process died of the signal");
+  assert.equal(existsSync(ran), false, "the command never started");
+  const events = records(logPath).map((record) => record.event);
+  assert.equal(events.at(-1), "execution.started", "the append it was in finished, and nothing ran after it");
+  assert.equal(existsSync(`${logPath}.lock`), false);
 });
 
 test("RB3: a reclaim committed in one pid namespace is recorded by a writer in another before its own records (two containers, one volume)", { skip: PRIVILEGED }, () => {

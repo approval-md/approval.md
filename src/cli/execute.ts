@@ -99,7 +99,7 @@ import {
   type ExecuteRefusal,
   type ResolveOutcome,
 } from "../core/execute.js";
-import { settleTerminationGuards } from "../core/log-lock.js";
+import { settleTerminationGuards, yieldToTerminationSignals } from "../core/log-lock.js";
 import { harnessLoopEscalation, harnessOutcomeCoverage, loopClearance } from "../core/loop.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
@@ -459,12 +459,55 @@ export interface RunChildIo {
 
 const INHERIT_CHILD_IO: RunChildIo = { stdio: "inherit" };
 
+/**
+ * `approval run`, for a caller that can await (the CLI): between appending
+ * `execution.started` and spawning the child it turns the event loop, so a
+ * SIGTERM, SIGINT or SIGHUP that landed during that append kills this process,
+ * with the signal's own status, before the command exists (APRV-479 round 2,
+ * RS1). Node shows a held signal to JavaScript only on that turn.
+ */
+export async function commandRunYielding(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  childIo: RunChildIo = INHERIT_CHILD_IO,
+): Promise<number> {
+  const steps = runSteps(argv, streams, cwd, childIo);
+  for (let next = steps.next(); ; next = steps.next()) {
+    if (next.done === true) return next.value;
+    await yieldToTerminationSignals();
+    settleTerminationGuards();
+  }
+}
+
+/**
+ * `approval run`, synchronously, for in-process callers (the MCP server, which
+ * owns its own signal listeners, so no lock guard is ever installed there).
+ */
 export function commandRun(
   argv: string[],
   streams: Streams,
   cwd: string,
   childIo: RunChildIo = INHERIT_CHILD_IO,
 ): number {
+  const steps = runSteps(argv, streams, cwd, childIo);
+  for (let next = steps.next(); ; next = steps.next()) {
+    if (next.done === true) return next.value;
+    settleTerminationGuards();
+  }
+}
+
+/**
+ * The body of `approval run`. It yields once, after `execution.started` is
+ * appended and before the child is spawned, so its driver can let a termination
+ * signal that arrived during the append end the process first.
+ */
+function* runSteps(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  childIo: RunChildIo,
+): Generator<"before-spawn", number, void> {
   // `--` separates our flags from the child's argv, and the child's argv may
   // legitimately contain anything at all — including flags this CLI knows. So
   // the split happens on the RAW argv, before any parsing, and everything to the
@@ -662,10 +705,12 @@ export function commandRun(
           readJailFor(flags, cwd),
         )
       : null;
-  // `execution.started` was just appended: settle the log lock's signal guard,
-  // so a signal during the child's run reaches this process as it did before
-  // the guard existed, instead of waiting for the child to exit (APRV-479, S2).
-  settleTerminationGuards();
+  // `execution.started` was just appended. The driver turns the event loop here
+  // (the CLI) so a stop request that landed during the append ends the process
+  // before the child exists, then settles the guard, so a signal during the
+  // child's run reaches this process as it did before the guard existed
+  // (APRV-479, S2 and round 2 RS1).
+  yield "before-spawn";
   const child = spawnSync(
     wrapped?.command ?? command,
     wrapped?.args ?? childArgv.slice(1),

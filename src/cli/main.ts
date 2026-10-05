@@ -1160,8 +1160,8 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // health — deliberately two verbs, because they answer to two different
     // people (the human who decides, the operator who repairs).
     case "run": {
-      const { commandRun } = await import("./execute.js");
-      return commandRun(rest, streams, cwd);
+      const { commandRunYielding } = await import("./execute.js");
+      return commandRunYielding(rest, streams, cwd);
     }
     // The starving verb (APRV-193). It authorizes nothing and appends nothing:
     // it runs a command with outbound network denied, which is what the hook
