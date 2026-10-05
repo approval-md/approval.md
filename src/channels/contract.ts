@@ -85,6 +85,7 @@ import { payloadStoreDirFor } from "../core/payload-store.js";
 import { loadPolicyText } from "../core/policy-load.js";
 import type { Autonomy } from "../core/policy-load.js";
 import type { Provenance } from "../core/policy-match.js";
+import type { PromptRendering } from "../core/prompt-layout.js";
 import { readVerifiedRecords, type RequestState } from "../core/state.js";
 import { tick } from "../core/clock.js";
 
@@ -439,7 +440,28 @@ export interface ChannelRequest {
   chain: TaggedField<ChainPosition>;
   /** The derived approval state; always `requested` for a live pending item. */
   state: TaggedField<RequestState>;
+  /**
+   * Present, and `true`, when the request is a tool call the requesting agent
+   * is blocked in right now (APRV-489): the request record declared
+   * `execution: "harness"` and a `harness_cap_ms`, so the gate's window is the
+   * harness wait and the call is withdrawn when it ends.
+   *
+   * **Computed**, by the tagger from the verified request record. Keyed by a
+   * symbol on purpose: the CLI and web channels, `--json` and `approval queue`
+   * enumerate a request's string keys, and this fact only chooses the wording
+   * of the minimal card's deadline line ("Your agent is waiting" versus "Open
+   * for"), so it must not add a row or a JSON key anywhere else. The time
+   * itself is `ttl_remaining_ms`, already the gate's own window.
+   */
+  readonly [LIVE_TOOL_CALL]?: TaggedField<true>;
 }
+
+/**
+ * The key of {@link ChannelRequest}'s live-tool-call fact (APRV-489). A symbol,
+ * so `Object.keys`, `Object.entries` and `JSON.stringify` never see it, and
+ * object spread (as `attachGloss` copies a request) carries it.
+ */
+export const LIVE_TOOL_CALL: unique symbol = Symbol("approval.md/live-tool-call");
 
 /** Refusals {@link createChannelRequest} can return. Frozen, per §11.1(6). */
 export const CHANNEL_REQUEST_REFUSAL_CODES = [
@@ -643,6 +665,13 @@ export interface ChannelDecision {
   deliveryId: DeliveryId;
   /** Set when the delivery was a batch (SPEC.md §10.3). */
   batchDeliveryId?: DeliveryId;
+  /**
+   * Which layout the approver answered on (APRV-489), recorded as
+   * `payload.rendering`. Set only by a channel that was asked for a
+   * non-default style; absent, the record is unchanged. A statement about the
+   * channel's own screen, never an input to a decision.
+   */
+  rendering?: PromptRendering;
 }
 
 /**
@@ -935,6 +964,9 @@ export function recordChannelDecision(
   if (decision.batchDeliveryId !== undefined) {
     options.batchDeliveryId = decision.batchDeliveryId;
   }
+  // APRV-489. Which layout the approver answered on, when a channel drew a
+  // non-default one. A record of the screen; nothing below reads it.
+  if (decision.rendering !== undefined) options.rendering = decision.rendering;
   // APRV-324. Every surface names itself on the record it writes, so a reader
   // of a grant can tell a tap on a phone from a line typed into a terminal. The
   // fallback matches `noteRefusedDecision`'s below.

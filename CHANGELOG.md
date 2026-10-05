@@ -17,8 +17,6 @@ before a tag.
 
 ### Channels
 
-- **TODO, lands when #616 merges (APRV-489): delete this line, keep the entry below.**
-
 - **A minimal Telegram card, chosen by the attested policy (APRV-489).**
   `channels.telegram.prompt.style: minimal` sends each approval as one short
   message in plain words: a bold headline the runtime computes from the class
@@ -42,11 +40,10 @@ before a tag.
   read for each card, so a re-attested setting needs no restart. `technical` stays the default and its bytes are
   unchanged; review cards, their note prompt and checkpoint prompts are the
   same under both styles; `web` and `cli` ignore the key. SPEC §10.3 and §5.2
-  are amended (pending sign-off). **Rollout order:** an older core refuses the
-  new keys and fails the whole policy closed to all-`manual`, so a policy may
-  carry them only once every daemon reading it runs this release.
-
-- **TODO, lands when #619 merges (APRV-492): delete this line, keep the entry below.**
+  are amended, signed off at log seq 84046 (`SPEC.md` sha256 `3b1de87a`).
+  **Rollout order:** an older core refuses the new keys and fails the whole
+  policy closed to all-`manual`, so a policy may carry them only once every
+  daemon reading it runs this release.
 
 - **A doubled review tap no longer loses the note prompt (APRV-492).** On a
   Telegram review card, a second OK (or a doubled second Deny) tapped while a
