@@ -1012,7 +1012,19 @@ tools:
   then `manual`. Under a policy that does not load, a tool the adapter does not
   know is refused `hook-policy-unavailable` like every gated call, instead of the
   old allow: a mapping the runtime cannot read is not evidence that a tool is
-  unmapped.
+  unmapped. The refusal lists the first entries at fault and the repair (fix
+  them, then `approval policy attest`).
+- **"Not a gated tool" is believed only of the attested policy.** A tool the
+  adapter does not know is allowed unrecorded only when the policy loads, maps
+  nothing for it, declares no `unmapped_tool`, and is byte-for-byte the policy
+  a human last attested. An edited or never-attested file is refused
+  `hook-gate-refused:policy-not-attested` for these calls exactly as it is for
+  `Bash`, so deleting a `tools` line or the `unmapped_tool` key on disk
+  loosens nothing until a human attests the edit. This costs one verified read
+  of the log per such call (resumed behind the daemon's snapshot where there is
+  one). Under an open window, a policy that does not load or is not attested
+  cannot vouch for a tool either: the call is recorded as `gate.bypassed` under
+  `harness.tool.unmapped`.
 - **`defaults.unmapped_tool` covers what no entry claims.** `record` classifies
   the call `harness.tool.unmapped`, which resolves `autonomous` when no `classes`
   rule matches it: the call proceeds and leaves an `execution.started` carrying
@@ -1024,11 +1036,24 @@ tools:
   Absent, which is every policy written before the key existed, nothing changes:
   allowed, not recorded.
 - **A mapped call is an ordinary gated call.** Its payload is `{tool, input}`, its
-  start or request is under the entry's class, and an autonomous start records
-  `harness_tool` too, since several tools may share one class. A recorded start
-  is charged like any autonomous start, so `daily_actions` budgets count every
-  recorded tool call, and a run of failures in a recorded tool counts toward the
-  loop floor like any side-effecting call.
+  start or request is under the entry's class, and every start it writes
+  (autonomous, supervised, or the spend of a human's grant) records
+  `harness_tool` too, since several tools may share one class. A mapped start
+  is charged like any autonomous start: `daily_actions` counts it, and a run of
+  its failures counts toward the loop floor.
+- **A record-only unmapped start is a record, not an action** (ruling H1). A
+  `harness.tool.unmapped` start no human granted is not counted by a global
+  `daily_actions` budget and is not refused by a spent one, and its failures
+  and completions are invisible to the loop floor. A granted one (`ask`) counts
+  like any approved action, and a `limits` block on a rule matching the class
+  still meters it. The floor still ROUTES an unmapped call to a human once other
+  calls have tripped it. The exemption needs a harness start carrying
+  `harness_tool`, which the gate writes only after checking the name against
+  the attested mapping; a task that merely declares the class gets none.
+- **A tool name the record cannot carry is refused by name.** Under a mapping or
+  an unmapped default, a name outside 1 to 256 of letters, digits, `_`, `.`,
+  `:` and `-` is refused `hook-io` with `tool-name-invalid` before anything is
+  appended.
 - **A tool name is only as trustworthy as the configuration that named it.** An
   entry trusts that `mcp__contextsling__*` is the server the operator
   installed. An agent able to write the MCP configuration could register a

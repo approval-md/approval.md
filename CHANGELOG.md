@@ -35,11 +35,30 @@ before a tag.
   closed. `docs/claude-code-hook.md` and `docs/hermes-hook.md` carry the
   details, including the Claude Code matcher an MCP tool needs to reach the hook
   at all. The SPEC amendment is proposed in the APRV-499 task, pending sign-off.
+  Upgrade order: every runtime (hook and daemon) must be on 0.4.2 before any
+  policy template carries `tools` or `defaults.unmapped_tool`, because 0.4.1's
+  closed policy schema refuses both keys and fails the whole policy to manual.
 - **Behaviour change under a policy that does not load.** A tool the adapter does
   not know is now refused `hook-policy-unavailable` like every gated call, where
   it was allowed: the runtime cannot read the mapping, so it cannot know the tool
-  is unmapped. Under a policy that loads and declares neither key, the answer is
-  unchanged, at the cost of one policy load per such call.
+  is unmapped. The refusal now lists the first entries at fault and the repair.
+- **Behaviour change under an unattested policy.** "Not a gated tool" is believed
+  only of the attested policy: an edited or never-attested policy refuses an
+  unknown tool `hook-gate-refused:policy-not-attested`, as it refuses `Bash`,
+  so deleting a `tools` line or `unmapped_tool` on disk loosens nothing until a
+  human attests the edit. Under an attested policy that declares neither key the
+  answer is unchanged, at the cost of one policy read and one verified log read
+  per such call. Under an open window, an unknown tool whose policy does not
+  load or is not attested is recorded as `gate.bypassed` rather than run
+  unrecorded.
+- **Record-only starts are records, not actions.** A `harness.tool.unmapped`
+  start written under `unmapped_tool: record` with no human grant is not
+  charged to a global `daily_actions` budget and does not accrue to the loop
+  floor; a granted one counts as before. The gate re-checks the named tool's
+  class against the attested mapping before it writes such a start, and every
+  start a mapped or unmapped call writes (including a grant's spend) carries
+  `harness_tool`. A tool name the record cannot carry is refused `hook-io`
+  (`tool-name-invalid`) before anything is appended.
 - **Conformance.** `policy-resolution` 4.0.0 (the `harness.tool.unmapped`
   default narrows the no-rule-matched rule for one class), `schema-validation`
   3.2.0 (six new fixtures), and a new `hook-tool-map` 1.0.0 suite.

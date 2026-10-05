@@ -664,16 +664,25 @@ tools:
 - **Every `class` must be declared** in `classes`, exactly or under a trailing
   `<prefix>.*` family. A malformed or undeclared entry fails the policy closed,
   and then an unknown tool is blocked `hook-policy-unavailable` with the rest,
-  rather than allowed.
+  rather than allowed; the block names the entries at fault and the repair.
+- **"Not a gated tool" needs the attested policy.** `todo`, `memory` or an MCP
+  tool is allowed unrecorded only when the policy maps nothing for it, declares
+  no `unmapped_tool`, and is the file a human last attested. An unattested edit
+  is blocked `hook-gate-refused:policy-not-attested`, as `terminal` is, so
+  removing a line on disk loosens nothing until the resident attests it.
 - **`unmapped_tool: record`** judges an unclaimed call under
   `harness.tool.unmapped`, which resolves `autonomous` unless a `classes` rule
   says otherwise: the `{}` allow, plus an `execution.started` naming the tool in
   `harness_tool` and binding `{tool, input}` by hash only. **`ask`** resolves it
   `manual`, which on this harness also needs the `--harness-cap` statement of the
   section on timeouts before a human can be asked at all. Absent, nothing changes.
-- The post half closes a recorded start exactly as it closes a rule-table one,
-  so a failing app counts toward the loop floor like any side-effecting tool,
-  and every recorded start is charged against `daily_actions` budgets.
+- The post half closes a recorded start exactly as it closes a rule-table one.
+  A MAPPED app's start is charged against `daily_actions` and its failures count
+  toward the loop floor like any side-effecting tool. A record-only
+  `harness.tool.unmapped` start (no human grant) is neither (ruling H1): it is a
+  record of unclassified tool use, so `todo` and `web_search` do not spend the
+  resident's action budget or floor the session. A tripped floor still routes
+  an unmapped call to a human.
 - An entry trusts the tool NAME, which on Hermes comes from the MCP servers in
   `$HERMES_HOME/config.yaml`. That file is a gate organ here already; keep it
   so, or an agent that could rename a server could move its tools under a looser
