@@ -15,6 +15,35 @@ before a tag.
 
 ## Unreleased
 
+### Harnesses
+
+- **The policy decides the tools a harness adapter does not know (APRV-499).**
+  A tool call the adapter's own tables leave unclaimed (every MCP tool, Claude
+  Code's `WebFetch` or `TodoWrite`, a Hermes `web_search`) used to be allowed as
+  "not a gated tool" with no record. Two policy keys now decide it, so a new app
+  is a policy line rather than a release. `tools` is an ordered list of
+  `{match, class}`: `match` is a glob over the whole tool name with `*` as the
+  only wildcard, `class` must be declared by `classes` (exactly or under a
+  trailing `<prefix>.*` family), and the first match wins. The adapter's shell,
+  file, read and pass-through tools and Hermes's hard-coded rule table keep
+  precedence over every entry. `defaults.unmapped_tool` covers what no entry
+  claims: `record` judges the call under `harness.tool.unmapped`, which resolves
+  `autonomous` unless a `classes` rule says otherwise (allowed, with an
+  `execution.started` carrying the new optional `payload.harness_tool` and the
+  hash of `{tool, input}`), and `ask` resolves it `manual`. Absent, nothing
+  changes. A malformed entry or an undeclared class fails the whole policy
+  closed. `docs/claude-code-hook.md` and `docs/hermes-hook.md` carry the
+  details, including the Claude Code matcher an MCP tool needs to reach the hook
+  at all. The SPEC amendment is proposed in the APRV-499 task, pending sign-off.
+- **Behaviour change under a policy that does not load.** A tool the adapter does
+  not know is now refused `hook-policy-unavailable` like every gated call, where
+  it was allowed: the runtime cannot read the mapping, so it cannot know the tool
+  is unmapped. Under a policy that loads and declares neither key, the answer is
+  unchanged, at the cost of one policy load per such call.
+- **Conformance.** `policy-resolution` 4.0.0 (the `harness.tool.unmapped`
+  default narrows the no-rule-matched rule for one class), `schema-validation`
+  3.2.0 (six new fixtures), and a new `hook-tool-map` 1.0.0 suite.
+
 ## 0.4.1 — 2026-10-05
 
 ### Channels

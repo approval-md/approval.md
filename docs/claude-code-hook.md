@@ -967,6 +967,77 @@ is a gate on what is ASKED for. For custody over what a process CAN open, the
 Seatbelt read jail in [docs/sandboxed-exec.md](./sandboxed-exec.md) denies file
 reads by default and opens the same roots.
 
+### Tools the adapter does not know (APRV-499)
+
+The adapter knows `Bash`, the four file tools and the three read tools. Every
+other tool a session calls, `WebFetch`, `Task`, `TodoWrite` and every MCP tool
+(`mcp__<server>__<tool>`) among them, used to be answered `allow` with "is not a
+gated tool" and no record. Two policy keys now say what happens to those calls,
+and adding an app to a session needs a policy line rather than a release of this
+runtime:
+
+```yaml
+# an excerpt of the approval-policy block
+defaults:
+  autonomy: manual
+  unmapped_tool: record          # or ask; absent = not gated, no record
+
+classes:
+  marketplace.*:                 { autonomy: manual }
+  marketplace.app.read:          { autonomy: autonomous }
+  marketplace.contextsling.publish: { autonomy: manual }
+
+tools:
+  - match: mcp__contextsling__publish
+    class: marketplace.contextsling.publish
+  - match: "mcp__contextsling__*"
+    class: marketplace.app.read
+```
+
+- **`tools` is an ordered list, and the first match wins.** `match` is compared
+  against the whole tool name, case-sensitively; `*` is the only wildcard and
+  matches any run of characters, including none. Put the narrow line first:
+  above, `publish` takes its own class and every other tool of that server is a
+  recorded read. Swap the two lines and the glob claims `publish` too.
+- **The adapter's own tables come first, always.** A `tools` entry is consulted
+  only for a call that `Bash`, the file tools and the read tools do not claim, so
+  a catch-all `- match: "*"` reaches `WebFetch` and never reaches `Bash`. Those
+  tables read the call's arguments, and an entry reads only its name.
+- **Every `class` must be declared.** It has to be an exact key of `classes` or
+  sit under a trailing family key (`marketplace.*` covers
+  `marketplace.contextsling.publish`). An undeclared class, a `match` with `**`
+  or a character outside letters, digits, `_`, `.`, `:` and `-`, a wildcard in a
+  `class`, two entries with the same `match`, or an entry naming
+  `harness.tool.unmapped` makes the whole policy fail to load, and every class is
+  then `manual`. Under a policy that does not load, a tool the adapter does not
+  know is refused `hook-policy-unavailable` like every gated call, instead of the
+  old allow: a mapping the runtime cannot read is not evidence that a tool is
+  unmapped.
+- **`defaults.unmapped_tool` covers what no entry claims.** `record` classifies
+  the call `harness.tool.unmapped`, which resolves `autonomous` when no `classes`
+  rule matches it: the call proceeds and leaves an `execution.started` carrying
+  `harness_tool` (the tool name) and the hash of `{tool, input}`, so the
+  arguments never reach the log. `ask` resolves the same class `manual`, so the
+  call waits for a human, and the request carries the whole call as its
+  payload. A `classes` line for `harness.tool.unmapped` decides it instead
+  (`supervised-retro` to sample the recorded calls, `human-only` to refuse them).
+  Absent, which is every policy written before the key existed, nothing changes:
+  allowed, not recorded.
+- **A mapped call is an ordinary gated call.** Its payload is `{tool, input}`, its
+  start or request is under the entry's class, and an autonomous start records
+  `harness_tool` too, since several tools may share one class.
+- **The matcher decides what reaches the hook at all.** Claude Code runs this
+  hook only for the tools the `PreToolUse` entry's `matcher` names, and the
+  installed matcher names the five gated tools. To gate MCP tools, widen it: add
+  `|mcp__.*` for every MCP tool, or match every tool, and register the same
+  matcher on `PostToolUse` so recorded starts are closed. Every matched call is a
+  process start and, for a tool the adapter does not know, one policy load.
+
+The Agent Village's resident template sets `unmapped_tool: record`, so every
+tool call a resident's agent makes is on the record from the first day, and an
+installed app adds its own `tools` lines and classes as a settings change the
+resident attests.
+
 ### What the approver reads (APRV-124)
 
 The prompt binds to the payload, and the payload is the thing being done, whole.

@@ -333,7 +333,8 @@ test("unmapped_tool: record on Hermes allows with {} and records the tool name",
   const verdict = hermesVerdict(hermes(dir, "web_search", { query: "x" }, "h-record"));
   assert.equal(verdict.permission, "allow");
   const [start] = starts(dir);
-  assert.equal((start?.["payload"] as Record<string, unknown>)["harness_tool"], "web_search");
+  assert.ok(start !== undefined, "no execution.started was appended");
+  assert.equal((start["payload"] as Record<string, unknown>)["harness_tool"], "web_search");
 });
 
 test("unmapped_tool: ask gates an unmapped tool as manual under harness.tool.unmapped", () => {
@@ -344,8 +345,10 @@ test("unmapped_tool: ask gates an unmapped tool as manual under harness.tool.unm
   assert.match(verdict.reason, /^hook-timeout: /);
   const requested = logRecords(dir).filter((record) => record["event"] === "approval.requested");
   assert.equal(requested.length, 1);
-  assert.equal(requested[0]?.["action_key"], "hook:cc-sess-tools:t-ask:harness.tool.unmapped");
-  assert.equal((requested[0]?.["payload"] as Record<string, unknown>)["class"], "harness.tool.unmapped");
+  const [request] = requested;
+  assert.ok(request !== undefined);
+  assert.equal(request["action_key"], "hook:cc-sess-tools:t-ask:harness.tool.unmapped");
+  assert.equal((request["payload"] as Record<string, unknown>)["class"], "harness.tool.unmapped");
   assert.equal(starts(dir).length, 0);
 });
 
