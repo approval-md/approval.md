@@ -17,6 +17,26 @@ before a tag.
 
 ### Channels
 
+- **A minimal Telegram card, chosen by the attested policy (APRV-489).**
+  `channels.telegram.prompt.style: minimal` sends each approval as one short
+  message in plain words: a bold headline the runtime computes from the class
+  ("Your agent wants to …"), the payload's own words quoted from the bound
+  bytes, any model or agent description labelled "not checked" below them, a
+  deadline line ("Open for about 3 days. If you don't answer, your agent will
+  not do this."), Approve and Deny, and the whole technical card, canonical
+  rendering included, collapsed in the same message under "Full details".
+  `channels.telegram.prompt.say` holds the operator's phrase per class and the
+  closed field set of an opaque payload. Anything the card cannot draw
+  honestly gets the technical card (attestations, policy edits, truncated
+  payloads, abnormal rows, undeclared or unlisted payload keys, digests, cards
+  over 3800 characters), and the decision record states what was shown in
+  `payload.rendering`. `technical` stays the default and its bytes are
+  unchanged; review cards, their note prompt and checkpoint prompts are the
+  same under both styles; `web` and `cli` ignore the key. SPEC §10.3 and §5.2
+  are amended (pending sign-off). **Rollout order:** an older core refuses the
+  new keys and fails the whole policy closed to all-`manual`, so a policy may
+  carry them only once every daemon reading it runs this release.
+
 - **A relayed Telegram channel refuses a button it did not send (APRV-456).**
   With `--api-base` naming anything but the Bot API, or with the new
   `--no-stale-copy` flag (on `approval channel telegram listen`, `channel
