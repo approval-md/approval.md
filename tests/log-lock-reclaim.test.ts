@@ -985,7 +985,7 @@ test("unlock takes a lock no writer would (another pid namespace or boot), and r
   const reclaim = records(logPath)[1] as EventRecord;
   assert.equal(reclaim.event, "audit.lock_reclaimed");
   assert.equal(reclaim.actor, "human:carter");
-  assert.equal(reclaim.payload?.["reason"], "holder-dead");
+  assert.equal(reclaim.payload?.["reason"], "operator-cleared", "a person's word, never recorded as a writer's proof");
   assert.deepEqual(reclaim.payload?.["holder"], { pid: 31, op: "append", created: left.created });
   assert.equal(existsSync(`${logPath}.lock`), false);
   assert.deepEqual(residue(logPath), []);
@@ -1023,7 +1023,7 @@ test("unlock --pid none takes an empty lockfile at once and records no holder", 
   writeLock(logPath, "");
   assert.equal(unlockAppendLock(logPath, null, "human:carter").kind, "unlocked");
   const reclaim = records(logPath)[1] as EventRecord;
-  assert.equal(reclaim.payload?.["reason"], "holder-dead");
+  assert.equal(reclaim.payload?.["reason"], "operator-cleared");
   assert.equal(reclaim.payload?.["holder"], undefined);
   assert.equal(verify(logPath).status, "clean");
 });

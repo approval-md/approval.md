@@ -1087,7 +1087,8 @@ export type UnlockResult =
  * `approval log unlock --pid <n|none>` (APRV-479): a human takes over a lock no
  * writer reclaims (another container, another boot, a holder that cannot be
  * checked), with the same claim and take a writer's reclaim uses, and records
- * it as `audit.lock_reclaimed` under their own `human:` actor as the first
+ * it as `audit.lock_reclaimed` (reason `operator-cleared`) under their own
+ * `human:` actor as the first
  * record under the lock taken. `pid` must be the pid the lockfile names, or
  * `null` for one that names no holder. Human-only: the CLI resolves the actor,
  * the schema refuses an `agent:` one, and the harness hook classifies the verb

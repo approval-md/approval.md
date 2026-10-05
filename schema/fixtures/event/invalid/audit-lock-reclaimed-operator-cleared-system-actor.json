@@ -2,16 +2,11 @@
   "seq": 216,
   "ts": "2026-10-05T11:02:40.115Z",
   "event": "audit.lock_reclaimed",
-  "actor": "human:carter",
+  "actor": "system:log",
   "payload": {
     "lockfile": "events.jsonl.lock",
     "reason": "operator-cleared",
-    "age_ms": 4021877,
-    "holder": {
-      "pid": 31,
-      "op": "append",
-      "created": "2026-10-05T09:55:38.238Z"
-    }
+    "age_ms": 4021877
   },
   "alg": "sha256/jcs",
   "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",

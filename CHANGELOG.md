@@ -213,7 +213,9 @@ before a tag.
   message names the pid and the new human-only verb `approval log unlock --pid
   <n|none>`, which refuses a pid that is not the lockfile's or a holder it sees
   running, takes the lock the same way, and records `audit.lock_reclaimed`
-  under the person's `human:` actor (classified `policy.core`, so the hook
+  with reason `operator-cleared` (a person's word, never recorded as proof;
+  the schema binds that reason to a `human:` actor and no other) under the
+  person's `human:` actor (classified `policy.core`, so the hook
   denies it to an agent). For the village: a Railway recreate gives the service
   a fresh filesystem, so the case this covers is the same-container restart, a
   hook SIGKILLed while its container stays up. A process with no listener for

@@ -172,8 +172,13 @@ export interface LockHolder extends HolderIdentity {
   nonce: string;
 }
 
-/** Why a lock was reclaimed: the `audit.lock_reclaimed` payload's closed `reason` set. */
-export type LockReclaimReason = "holder-dead" | "legacy-aged";
+/**
+ * Why a lock was taken over: the `audit.lock_reclaimed` payload's closed
+ * `reason` set. `holder-dead` and `legacy-aged` are a writer's proof;
+ * `operator-cleared` is a person's assertion (`approval log unlock`), never a
+ * proof, and only a `human:` actor carries it.
+ */
+export type LockReclaimReason = "holder-dead" | "legacy-aged" | "operator-cleared";
 
 /**
  * The judgement on one holder record. `running` (on a live verdict): this
@@ -852,7 +857,8 @@ export type UnlockOutcome =
  * that is not the record's, a holder it sees running, a lock beside a sync
  * snapshot, and anything at the lock's path that is not a lockfile (which `rm`
  * removes). It takes the lock with the same claim and take as a writer's
- * reclaim, so the record of it is the first under the lock it takes.
+ * reclaim, so the record of it (reason `operator-cleared`) is the first under
+ * the lock it takes.
  */
 export function takeLockForUnlock(logPath: string, expected: number | null, now: number = Date.now()): UnlockOutcome {
   const lockPath = `${logPath}.lock`;
@@ -885,7 +891,7 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
     }
     why = verdict.why;
   }
-  const note = noteFor(lockPath, holder, entry.seen, now, "holder-dead", why);
+  const note = noteFor(lockPath, holder, entry.seen, now, "operator-cleared", why);
   let claimed = claim(lockPath, entry.seen, note.stale);
   if (claimed.kind === "occupied") {
     // A dead reclaimer's claim, or a planted file: the human says no writer is

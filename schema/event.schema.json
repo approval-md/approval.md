@@ -2200,11 +2200,53 @@
           "actor",
           "payload"
         ],
+        "allOf": [
+          {
+            "$comment": "A person's assertion is never recorded as the writer's proof, nor the reverse: `operator-cleared` if and only if the actor is `human:`.",
+            "if": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "const": "operator-cleared"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                }
+              },
+              "required": [
+                "payload"
+              ]
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "type": "string",
+                  "pattern": "^human:"
+                }
+              }
+            },
+            "else": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "type": "string",
+                  "pattern": "^system:"
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "actor": {
             "type": "string",
             "pattern": "^(system|human):",
-            "description": "`system:log`: the runtime's log writer, which proved the holder gone. `human:<id>`: the person who ran `approval log unlock`. An `agent:` actor is refused: no agent takes over the log's lock."
+            "description": "`system:log`: the runtime's log writer, which proved the holder gone. `human:<id>`: the person who ran `approval log unlock`, and only with reason `operator-cleared`. An `agent:` actor is refused: no agent takes over the log's lock."
           },
           "payload": {
             "type": "object",
@@ -2224,9 +2266,10 @@
               "reason": {
                 "enum": [
                   "holder-dead",
-                  "legacy-aged"
+                  "legacy-aged",
+                  "operator-cleared"
                 ],
-                "description": "Why the holder counts as gone. CLOSED, additive-only. `holder-dead`: no process has the holder's pid in the writer's pid namespace and boot, or the pid names a later process (`system:log`); or a person asserted it (`human:`). `legacy-aged`: the lockfile named no holder and was older than the reclaim age."
+                "description": "Why the holder counts as gone. CLOSED, additive-only. `holder-dead`: the writer proved it: no process has the holder's pid in the writer's pid namespace and boot, or the pid names a later process. `legacy-aged`: the writer found the lockfile naming no holder and older than the reclaim age. `operator-cleared`: a person ran `approval log unlock` and asserted the holder gone, which is not a proof; it is the only reason a `human:` actor may carry, and a `system:` actor may never carry it."
               },
               "age_ms": {
                 "type": "integer",

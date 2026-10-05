@@ -337,8 +337,9 @@ elsewhere: the pid on this host in this boot), and refuses beside a `log sync`
 snapshot. It then takes the lock exactly as a writer's reclaim does (an
 exclusive `link(2)` to `<lock>.stale.<pid>.<created ms>`, then a `rename(2)` of
 its own lockfile over the lock's path) and appends `audit.lock_reclaimed` as the
-first record under it, with your `human:` actor, the strictly parsed holder and
-the lock's age. A stale name a dead reclaimer or anyone else left is cleared
+first record under it, with your `human:` actor, reason `operator-cleared` (your
+word, which the log never presents as a writer's proof), the strictly parsed
+holder and the lock's age. A stale name a dead reclaimer or anyone else left is cleared
 first. Anything at the lock's path that is not a lockfile (a FIFO, a link, a
 malformed file) is not taken: the refusal says to `rm -v` it.
 

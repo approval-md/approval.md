@@ -528,7 +528,7 @@ running:
 `approval log unlock` is human-only (the hook denies it to an agent). It refuses
 a pid that is not the lockfile's and a holder it can see running, takes the
 lock the way a writer's reclaim does, and records `audit.lock_reclaimed` under
-the person's own `human:` actor. A hand `rm` is not recorded in the log.
+the person's own `human:` actor, with reason `operator-cleared`. A hand `rm` is not recorded in the log.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was
