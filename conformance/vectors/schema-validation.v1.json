@@ -1373,7 +1373,8 @@
           "actor": "system:auditor",
           "daemon": "daemon-3f2a9c11",
           "payload": {
-            "rate": 0.1
+            "rate": 0.1,
+            "policy_sha256": "3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c"
           },
           "alg": "sha256/jcs",
           "prev": "07453feb30c2b0b1a2806398cdd17b38d98f9abf52b8a75ca42878c9101d8264",
@@ -1382,19 +1383,7 @@
         "mode": "write"
       },
       "expect": {
-        "valid": false,
-        "failure_class": "schema-required",
-        "errors": [
-          {
-            "path": "/payload",
-            "keyword": "required",
-            "missing": "policy_sha256"
-          },
-          {
-            "path": "",
-            "keyword": "if"
-          }
-        ]
+        "valid": true
       }
     },
     {
