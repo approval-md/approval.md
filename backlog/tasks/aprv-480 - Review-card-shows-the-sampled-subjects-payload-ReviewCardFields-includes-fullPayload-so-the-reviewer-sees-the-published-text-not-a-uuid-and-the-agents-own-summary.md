@@ -7,7 +7,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 07:46'
+updated_date: '2026-10-05 08:21'
 labels:
   - agentvillage
 dependencies: []
@@ -54,4 +54,11 @@ PROPOSED SPEC HUNK (pending sign-off; no SPEC.md edit made). §10.3 "Review deli
 - with: "the card offers no approval and accepts no token. It carries a payload region showing either the bytes the sampled execution bound to, whole, or that binding's hash with the reason the bytes are absent, and its heading says which; a channel MUST NOT show part of the bytes as the payload (Amended APRV-480)."
 
 Resume point (fix round 1, refutation of PR #614): no fix landed yet; next is F1 in src/core/audit.ts reviewerRoster (refuse when the policy load is not ok or the resolution is fail-closed). Next command: node scripts/run-tests.mjs --only audit
+
+Fix round 1 (refutation of PR #614), lane claude-edge/A3-fix1. The resume point above is spent; nothing is in flight.
+- F4 (should-fix) FIXED in 327baedb. Summary capped at 400 chars, other rows at 300, both with a '+N chars not shown' marker; pathologically long rows are cut further in fixed steps (REVIEW_CAP_LEVELS) until the frame + longest heading + largest notice + hash region fit 4096 visible chars. Notice region capped at 600, settled detail at 3000. reviewPayloadBudget(card) replaces the constant 2000 (min of 2000 and the headroom), pure over the card so the drawn view and the tap's view agree. dispatchReviews marks a sample whose offer threw as terminal-only (coded 'approval: telegram review-offer-failed:' line naming approval audit review <seq> --ok|--deny) and offers the next one. Tests: the four 'PR #614 refutation F4' tests in tests/channels-telegram.test.ts; each of the four predicates mutated off fails its test.
+- F3 (card state per sender, APRV-482 surface) FIXED in e0fd9498, see APRV-482.
+- Follow-ups filed: APRV-485 (N1 rebuild cost), APRV-486 (N2 bidi/invisible chars in the bytes view).
+- SPEC hunk §10.3 (APRV-480) gains: 'The whole card MUST fit one message: claimed and computed rows are cut with a marker, and the payload region's budget is what the rows leave.'
+Evidence: tsc --noEmit exit 0; oxlint src tests exit 0; run-tests --only audit event-schema money channels-telegram render-queue conformance-regen conformance autonomy-split values-inert cli-feedback cli-help cli-long-help cli-instructions docs-guard gate gate-window reindex retro-rate daemon telegram-webhook exit 0, 690 pass, 0 fail.
 <!-- SECTION:NOTES:END -->

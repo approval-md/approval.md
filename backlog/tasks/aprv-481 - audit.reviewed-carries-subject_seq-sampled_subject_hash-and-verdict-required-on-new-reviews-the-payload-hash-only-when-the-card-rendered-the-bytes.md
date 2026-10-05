@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 07:25'
+updated_date: '2026-10-05 08:21'
 labels:
   - agentvillage
 dependencies: []
@@ -58,4 +58,12 @@ PROPOSED SPEC HUNK (pending sign-off). §8 event log, after the event-types list
 "`audit.reviewed` records written since APRV-481 MUST carry `payload.subject_seq` (the seq of the `audit.sampled` it answers), `payload.sampled_subject_hash` (the hash of the `execution.started` that sample named) and `payload.verdict`. Verifiers MUST accept earlier records without them. `payload.payload_hash` MAY be recorded only when the reviewing surface rendered the bound bytes whole, and it MUST equal the execution's binding (Amended APRV-481)."
 §11.2 audit_refusal_codes, new row after `ambiguous-subject`:
 "| `rendered-payload-mismatch` | The reviewing surface said it showed bytes whose hash is not the sampled execution's binding. Nothing is appended. |"
+
+Fix round 1 (refutation of PR #614), lane claude-edge/A3-fix1.
+- F5 (should-fix) FIXED in 62913219. New audit.reviewed records REQUIRE payload.verdict_source = "explicit" (const); reviewSample writes it on every surface. The historical form allows it without requiring it, so old reviews verify through the existing audit_reviewed_record widening. Tests: event-schema 'PR #614 F5: a new review says its verdict was explicit; an old one without the field still reads', audit 'PR #614 refutation F5: every review the runtime writes says its verdict was explicit'. Fixture audit-reviewed-no-verdict-source added; review fixtures gained the field.
+- F6 (should-fix) FIXED in 2bd7af75. The schema-validation harness names the missing property on every required error (missing), thrown as a harness failure if the validator message has another shape. New fixtures audit-reviewed-no-verdict, audit-reviewed-no-subject-seq, audit-reviewed-bad-payload-hash; each review/sample required field now has its own signature. Still the unreleased 3.0.0 major. conformance/run.mjs exit 0, 490/490, manifest ok.
+- F2's schema half (audit.sampled pins policy_sha256) is in 52ba4de0, see APRV-483.
+- Follow-up filed: APRV-487 (N3, match reviews to samples by subject_seq exclusively when present).
+FOLLOWER-FACING FIELD LIST CHANGE (for the orchestrator to post to the follower and dbt halves): payload.verdict_source ('explicit', REQUIRED on new reviews). Count a review as an explicit approval only when it carries verdict_source; a review without it predates APRV-482 or came from an old build, and its ok may have been defaulted. audit.sampled gains payload.policy_sha256 (64-hex, REQUIRED on new samples).
+UPDATED PROPOSED SPEC HUNKS (N4, pending sign-off). §8, replacing the APRV-481 hunk: '`audit.reviewed` records written since APRV-481 MUST carry `payload.subject_seq`, `payload.sampled_subject_hash` and `payload.verdict`, and since PR #614 `payload.verdict_source` with the value `explicit`. Verifiers MUST accept earlier records without them, and a reader MUST NOT treat a verdict on a record without `verdict_source` as explicit. `payload.payload_hash` MAY be recorded only when the reviewing surface rendered the bound bytes whole, and it MUST equal the execution's binding.' Also §8: '`audit.sampled` records written since PR #614 MUST carry `payload.policy_sha256`, the hash the latest policy attestation named when the sample was taken; verifiers MUST accept earlier samples without it.' §11.2 row unchanged: rendered-payload-mismatch.
 <!-- SECTION:NOTES:END -->

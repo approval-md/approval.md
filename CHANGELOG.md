@@ -17,6 +17,25 @@ before a tag.
 
 ### Channels
 
+- **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
+  An attested policy that does not load is refused with the new audit code
+  `policy-invalid` instead of reading as "no roster". `audit.sampled` now
+  pins the attested policy in force (`payload.policy_sha256`, required on new
+  records, widened for old ones), and a review reads its roster only from bytes
+  hashing to that pin; a class matching no rule there is refused
+  `actor-not-approver`. New reviews carry `payload.verdict_source:
+  "explicit"` (required), the follower's discriminator between an explicit and
+  a pre-APRV-482 defaulted `ok`. On a Telegram card a held grade and an armed
+  Deny belong to the account that tapped them, and another account's tap that
+  would finish them is refused on the card; a lone grade is held only after the
+  runtime answers `verdict-required`. The whole card is bounded to one
+  message (summary cut at 400 characters, rows at 300, notice at 600, payload
+  budget from the remaining headroom), and a card that cannot be offered is
+  left for a terminal review with a coded `review-offer-failed` line instead
+  of blocking the queue. A key declared by two tasks is refused. Conformance
+  `schema-validation` 3.0.0 now names the missing property on every
+  `required` error and pins each required review field separately.
+
 - **A review is held to the class's approvers roster (APRV-483).**
   `reviewSample` resolves the sampled action's class (from its registration)
   under the policy and, where the winning rule names `approvers`, refuses any
@@ -32,7 +51,8 @@ before a tag.
 
 - **A review verdict needs an explicit affirmative (APRV-482).** `reviewSample`
   no longer defaults `verdict` to `ok`; a review that names none is refused
-  with the new audit code `verdict-required` before the log is read. `approval
+  with the new audit code `verdict-required`, judged after the roster check so an
+  off-roster reviewer hears `actor-not-approver` first. `approval
   audit review` gains `--ok` and requires exactly one of `--ok`/`--deny` (both
   is exit 2, neither is `verdict-required` exit 1, `--reaction` alone included).
   On a Telegram card a grade tapped with nothing armed is refused by the
