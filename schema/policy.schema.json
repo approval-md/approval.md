@@ -414,13 +414,13 @@
     "promptSay": {
       "type": "object",
       "additionalProperties": false,
-      "description": "SPEC.md §5.2 (APRV-489): one class's minimal-card declaration. `does` is required for a class core does not phrase itself and refused for one it does (checked at load).",
+      "description": "SPEC.md §5.2 (APRV-489): one class's minimal-card declaration. `does` is required for a class core does not phrase itself and refused for one it does, or for a class the command classifier emits (checked at load). It is drawn only over an opaque payload: over a command, a file change or an email the runtime draws its own kind phrase.",
       "properties": {
         "does": {
           "type": "string",
           "minLength": 1,
           "maxLength": 120,
-          "description": "The plain-words verb phrase the headline completes: `Your agent wants to <does>`. Starts with a letter; no line break, sentence punctuation (. ! ? … : ;), markup or ⚠ (checked at load). Not allowed for a class core phrases itself. The runtime chooses the entry by the exact class the log records."
+          "description": "The plain-words verb phrase the headline completes: `Your agent wants to <does>`. Starts with a letter; no line break, sentence punctuation (. ! ? … : ;), markup or ⚠ (checked at load). Not allowed for a class core phrases itself or a class the command classifier emits (`prompt-say-kind`). Drawn only over an opaque payload: over a command, a file change or an email the runtime's kind phrase is drawn instead and the decision record notes `say_does_ignored`. The runtime chooses the entry by the exact class the log records."
         },
         "quote": {
           "type": "object",

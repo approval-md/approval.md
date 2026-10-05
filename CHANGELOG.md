@@ -27,8 +27,11 @@ before a tag.
   rendering included, collapsed in the same message under "Full details".
   `channels.telegram.prompt.say` holds the operator's phrase per exact class
   name and the closed field set of an opaque payload. The box holds payload
-  values only, verbatim; a cut value, a command not shown as written and a
-  field left off are announced under it. Anything the card cannot draw
+  values only, verbatim; a cut value, a command cut short (with the
+  classifier's count as a lower bound, "at least N commands") and a field
+  left off are announced under it, and a command shown whole carries no count
+  line. The operator's phrase is drawn only over an opaque payload: over a
+  command, a file change or an email the runtime's own phrase wins. Anything the card cannot draw
   honestly gets the technical card (attestations, policy edits, truncated
   payloads, abnormal health facts, undeclared or unlisted payload keys,
   batches and digests, cards over 3800 characters, a card the Bot API

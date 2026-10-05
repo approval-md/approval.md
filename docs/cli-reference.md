@@ -3959,7 +3959,7 @@ services, open "Full details" every time.
 <b>Your agent wants to <phrase></b>
 <blockquote><b>Label:</b> quoted value        one payload value per line, verbatim
 …</blockquote>
-⚠ This runs 3 commands. Only the beginning is shown above: …   a command: the classifier's count, when cut or more than one
+⚠ This runs at least 3 commands. Only the beginning is shown above: …   a command, only when cut
 ⚠ There is more than fits here: open Full details before deciding.   when any other value was cut
 Not shown here: <key>, <key>. Open Full details before deciding.        when the say entry leaves a field off (~)
 <i>AI summary (not checked):</i> …            only when a model sentence is attached
@@ -3981,13 +3981,14 @@ drawn; the line is not refreshed afterwards. A request with no time left says
 **What is computed, what is quoted, what is described.**
 
 - *Computed by the runtime:* the first line, chosen by the exact class the LOG
-  records, from the attested `say.<class>.does`, from core's own phrase for a
-  class core emits (`network.call`, `read.web`, `browser.exec`, `cron.manage`,
-  `process.write`, `skill.manage`, `agent.delegate`, `message.send`,
-  `files.delete.scratch`), or from the payload's structural kind ("run a
-  command", "change a file", "send an email", followed by `(type: <class>)`);
-  the notices under the box; the deadline line; everything in "Full details";
-  the buttons.
+  records: core's own phrase for a class core emits (`network.call`,
+  `read.web`, `browser.exec`, `cron.manage`, `process.write`, `skill.manage`,
+  `agent.delegate`, `message.send`, `files.delete.scratch`); else, for a
+  payload the runtime reads itself, its structural kind ("run a command",
+  "change a file", "send an email", followed by `(type: <class>)`), whatever
+  the class's `say` entry says; else, for an opaque payload only, the attested
+  `say.<class>.does`. The notices under the box; the deadline line; everything
+  in "Full details"; the buttons.
 - *Quoted from the bound payload:* the box, and only payload values. Each line
   is one payload value, verbatim (marked as below, and visibly cut when long),
   under a label (the operator's attested label, or the runtime's fixed label
@@ -3995,15 +3996,24 @@ drawn; the line is not refreshed afterwards. A request with no time left says
   Nothing computed, abbreviated, joined or paraphrased is ever inside the box;
   a list of addresses is one line per address. Each value sits inside the
   runtime's own Unicode isolate (U+2068 … U+2069), so right-to-left letters in
-  it cannot reorder its label, the cut mark or the lines around it. The bytes were hash-checked against the request's
+  it cannot reorder its label or the lines around it. The cut mark is drawn
+  inside the value's isolate, so a cut right-to-left value shows it at its left
+  edge, still visible; the notice under the box says the same thing outside
+  any isolate. The operator's `does` phrase in the headline is not isolated.
+  The bytes were hash-checked against the request's
   `payload_hash` before the channel saw them, so they are what will be acted
   on; their content was written by the agent. A command is shown up to 160
   characters (under `Command:` when its `cwd` is quoted as `In folder:`); a
-  longer one is shown from its start and cut. A computed line under the box
-  gives the classifier's count of the commands in it ("⚠ This runs 3
-  commands. Only the beginning is shown above", or "This runs 2 commands, all
-  shown above.", or "more than one command may be here" when it cannot count),
-  and never names or paraphrases a command the box does not show; the
+  longer one is shown from its start and cut, and only then does a computed
+  line under the box say so ("⚠ This runs at least 3 commands. Only the
+  beginning is shown above", the classifier's count as a lower bound, since it
+  does not see commands started inside other commands such as a
+  here-document piped into `sh`, `$( … )`, `bash -c` or `eval`; "⚠ Only the
+  beginning of this command is shown above" when it counts one; "⚠ More than
+  one command may be here, and only the beginning is shown above" when it
+  cannot count). A command shown whole gets no line: the
+  card makes no claim about how many commands it is. The line never names or
+  paraphrases a command the box does not show; the
   classifier's outline is in "Full details" only, because it leaves out flags
   and their values, which is where a deletion target or an uploaded file
   lives. A file change shows the file, the change and every other field under
@@ -4077,7 +4087,13 @@ prompts are the same under both styles in this release.
 load (`prompt-say-wildcard`), because one friendly phrase must never stand for
 several classes. For a class core phrases itself (the list above) core's phrase
 always wins: a `say` entry may set `quote` and `note` for it but not `does`
-(`prompt-say-builtin`). For any other class `does` is required and is a verb
+(`prompt-say-builtin`). The same holds for a class the command classifier
+emits (`files.delete.out_of_scope`, `vcs.push.main`, `harness.launch.*`, …),
+whose payload is a command or a file change the runtime phrases itself
+(`prompt-say-kind`). For any other class `does` is a phrase for OPAQUE
+payloads only: when a request of that class carries a command, a file change
+or an email, the runtime's kind phrase is drawn instead and the record notes
+`say_does_ignored` (below). For those classes `does` is required and is a verb
 phrase of at most 120 characters that completes "Your agent wants to …": it
 starts with a letter and has no line break, `.` `!` `?` `…` `:` `;`, markup or
 `⚠` (`prompt-say-does`), so operator text cannot read as a second sentence or
@@ -4100,7 +4116,10 @@ their full prompt, which shows more than was asked for rather than less.
 **What the record says.** A decision taken on a card drawn under a minimal
 policy carries `payload.rendering` on its `approval.granted` or
 `approval.rejected`: `{"style": "minimal"}`, or `{"style": "technical",
-"fallback": "<reason>"}` when the technical card was sent instead. Under a
+"fallback": "<reason>"}` when the technical card was sent instead. A minimal
+card whose class's `say` entry set a `does` phrase the runtime did not use
+(the payload was a command, a file change or an email, so the runtime drew its
+own phrase) records `{"style": "minimal", "say_does_ignored": true}`. Under a
 technical policy the key is absent and the record is unchanged. Nothing reads
 it back; it is a statement about the screen the approver answered on. It is an
 OPEN field: `schema/event.schema.json` does not constrain it in this release,
