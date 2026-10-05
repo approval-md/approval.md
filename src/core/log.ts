@@ -104,10 +104,12 @@ import {
   createLockFile,
   finishReclaim,
   guardTerminationWhileLocked,
+  observeLock,
   reclaimStaleLock,
   releaseLockFile,
   settleTerminationGuards,
   takeLockForUnlock,
+  type LockObservation,
   type LockOp,
   type OwnLock,
   type ReclaimNote,
@@ -587,6 +589,9 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
   let deadline = Date.now() + timeoutMs;
   let rounds = 0;
   let kept: string | undefined;
+  // The lockfile as first refused in this wait (APRV-479 R3-8): an empty one
+  // is taken only if it is still that file when the wait ends.
+  let watched: LockObservation | null | undefined;
   for (;;) {
     const releaseGuard = guardTerminationWhileLocked();
     try {
@@ -601,6 +606,7 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
           error: { code: "io", message: `lockfile ${path} could not be created: ${errorMessage(cause)}` },
         };
       }
+      if (watched === undefined) watched = observeLock(logPath);
     }
     if (Date.now() < deadline) {
       sleepSync(retryMs);
@@ -611,6 +617,7 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
       const outcome = reclaimStaleLock(logPath, op, {
         recordValid: reclaimRecordValid,
         recordContext: () => reclaimRecordContext(logPath),
+        watched: watched ?? null,
       });
       if (outcome.kind === "taken") {
         return { ok: true, own: outcome.own, releaseGuard: outcome.releaseGuard, reclaimed: outcome.note };
@@ -618,6 +625,7 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
       kept = outcome.why;
       if (outcome.kind === "retry") {
         deadline = Date.now() + timeoutMs;
+        watched = undefined;
         continue;
       }
     }

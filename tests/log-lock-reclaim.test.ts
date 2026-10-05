@@ -58,6 +58,7 @@ import {
   judgeHolder,
   LEGACY_LOCK_RECLAIM_AGE_MS,
   NODE_LIVENESS_PROBE,
+  observeLock,
   parseProcStat,
   procIsOwnNamespace,
   reclaimStaleLock,
@@ -378,6 +379,69 @@ test("an empty lockfile is kept while younger than ten minutes, and taken once o
   assert.ok((reclaim.payload?.["age_ms"] as number) >= LEGACY_LOCK_RECLAIM_AGE_MS);
   assert.deepEqual(residue(logPath), []);
   assert.equal(verify(logPath).status, "clean");
+});
+
+test("an empty lockfile is taken as legacy-aged only if it sat unchanged through this writer's own wait: an old mtime alone never takes a live writer's lock (R3-8)", { skip: !POSIX }, async () => {
+  // The S6 shape: a live writer between its create and its record, its
+  // lockfile's mtime reading old (a clock step, a lagging file server; utimes
+  // stands in for the skew), and a try-once writer judging it.
+  const logPath = freshLog();
+  counter += 1;
+  const marker = join(scratch, `skewed-writer-${String(counter)}`);
+  writeFileSync(
+    `${marker}.mjs`,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { setLockSeamForTests } from ${JSON.stringify(LOCK_MODULE)};`,
+      `import { existsSync, writeFileSync } from "node:fs";`,
+      `let once = false;`,
+      `setLockSeamForTests((step) => { if (step === "after-open" && !once) { once = true; writeFileSync(${JSON.stringify(`${marker}.open`)}, "1"); while (!existsSync(${JSON.stringify(`${marker}.go`)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); } });`,
+      `const r = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(90))}, { lockTimeoutMs: 0 });`,
+      `writeFileSync(${JSON.stringify(`${marker}.result`)}, JSON.stringify(r.ok));`,
+    ].join("\n"),
+  );
+  const writer = spawn(process.execPath, [`${marker}.mjs`], { stdio: "ignore" });
+  const exited = exitOf(writer);
+  try {
+    await waitFor(() => existsSync(`${marker}.open`), 10_000);
+    const old = (Date.now() - LEGACY_LOCK_RECLAIM_AGE_MS - 60_000) / 1000;
+    utimesSync(`${logPath}.lock`, old, old);
+    const tryOnce = appendEvent(logPath, granted(92), { lockTimeoutMs: 0 });
+    assert.equal(tryOnce.ok, false, "a try-once writer never takes an empty lockfile");
+    if (!tryOnce.ok) {
+      assert.equal(tryOnce.error.code, "lock-timeout");
+      assert.match(tryOnce.error.message, /did not wait to see it stay unchanged/u);
+    }
+    assert.equal(readFileSync(`${logPath}.lock`, "utf8"), "", "the live writer's lockfile is untouched");
+    // (A writer stalled between its create and its record for a whole wait,
+    // SIGSTOP or a debugger, is indistinguishable from a dead one here: stated
+    // residue, not pinned.)
+  } finally {
+    writeFileSync(`${marker}.go`, "1");
+  }
+  assert.equal((await exited).code, 0);
+  assert.equal(readFileSync(`${marker}.result`, "utf8"), "true", "the live writer appended");
+  assert.deepEqual(events(logPath), ["task.registered", "approval.granted"], "no reclaim: one writer at a time");
+  assert.deepEqual(residue(logPath), []);
+  assert.equal(verify(logPath).status, "clean");
+
+  // An aged empty lockfile that is not the one the wait began with is not taken.
+  const other = freshLog();
+  writeLock(other, "");
+  const first = (Date.now() - LEGACY_LOCK_RECLAIM_AGE_MS - 120_000) / 1000;
+  utimesSync(`${other}.lock`, first, first);
+  const seen = observeLock(other, Date.now() - 1_000);
+  assert.ok(seen !== null);
+  rmSync(`${other}.lock`);
+  writeLock(other, "");
+  const second = (Date.now() - LEGACY_LOCK_RECLAIM_AGE_MS - 60_000) / 1000;
+  utimesSync(`${other}.lock`, second, second);
+  const outcome = reclaimStaleLock(other, "append", { watched: seen });
+  assert.equal(outcome.kind, "retry", "the empty lockfile changed during the wait");
+  assert.equal(existsSync(`${other}.lock`), true);
+  assert.deepEqual(residue(other), []);
+  assert.equal(reclaimStaleLock(other, "append", { watched: null }).kind, "retry", "nothing watched, nothing taken");
+  rmSync(`${other}.lock`);
 });
 
 test("a lockfile that does not parse strictly is not this writer's to judge, however old: another version, malformed JSON, text, an impossible date", () => {

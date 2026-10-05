@@ -114,6 +114,16 @@ export const LOCK_HOLDER_VERSION = 1;
 export const LEGACY_LOCK_RECLAIM_AGE_MS = 10 * 60_000;
 
 /**
+ * How long a writer must have watched an empty lockfile unchanged (the same
+ * inode, mtime and size since the first refusal of its wait) before it may take
+ * it as `legacy-aged`. A writer of this version fills its record within
+ * microseconds of its create, so an empty file that stays empty across a retry
+ * interval is not one; an mtime alone can read old through a stepped clock or
+ * a file server's lagging one (APRV-479 R3-8).
+ */
+export const LEGACY_LOCK_WATCH_MS = 20;
+
+/**
  * Off Linux, how far apart two boot readings (`now - uptime`, in seconds) may
  * be and still count as one boot. A wall-clock step moves the reading, so a
  * larger gap is "another boot, or a stepped clock": live, never gone.
@@ -701,9 +711,30 @@ export function unlockCommand(pid: number | null): string {
   return `approval log unlock --pid ${pid === null ? "none" : String(pid)}`;
 }
 
+/** A lockfile as a writer saw it at the first refusal of its wait (R3-8). */
+export interface LockObservation {
+  ino: bigint;
+  mtimeNs: bigint;
+  size: bigint;
+  /** When it was seen, by this process's clock. */
+  at: number;
+}
+
+/** What is at `<logPath>.lock` now, without opening it: a regular file's identity, or `null`. */
+export function observeLock(logPath: string, now: number = Date.now()): LockObservation | null {
+  try {
+    const stat = lstatSync(`${logPath}.lock`, { bigint: true });
+    return stat.isFile() ? { ino: stat.ino, mtimeNs: stat.mtimeNs, size: stat.size, at: now } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The judgement of a lockfile's bytes. */
 type LockJudgement =
   | { kind: "gone"; note: ReclaimNote }
+  /** An empty lockfile that is not the one this writer watched: wait again. */
+  | { kind: "changed"; why: string }
   | { kind: "kept"; why: string; pid: number | null; running: boolean }
   | { kind: "unjudgeable"; why: string };
 
@@ -727,7 +758,7 @@ function noteFor(lockPath: string, holder: LockHolder | null, seen: SeenLock, no
   return note;
 }
 
-function judgeLock(lockPath: string, seen: SeenLock, now: number): LockJudgement {
+function judgeLock(lockPath: string, seen: SeenLock, now: number, watched: LockObservation | null): LockJudgement {
   const lockfile = basename(lockPath);
   const parsed = parseHolder(seen.bytes);
   if (parsed.kind === "unknown") {
@@ -739,6 +770,19 @@ function judgeLock(lockPath: string, seen: SeenLock, now: number): LockJudgement
       return {
         kind: "kept",
         why: `${lockfile} names no holder (an older version's, or a writer killed between creating it and writing its record) and is ${String(ageS)} s old; it is reclaimed at ${String(LEGACY_LOCK_RECLAIM_AGE_MS / 60_000)} minutes`,
+        pid: null,
+        running: false,
+      };
+    }
+    // R3-8: an old mtime is not enough. The very file (inode, mtime, size)
+    // must have sat unchanged across this writer's own wait.
+    if (watched === null || watched.ino !== seen.ino || watched.mtimeNs !== seen.mtimeNs || watched.size !== BigInt(seen.bytes.length)) {
+      return { kind: "changed", why: `${lockfile} names no holder, and is not the file this writer saw when its wait began` };
+    }
+    if (now - watched.at < LEGACY_LOCK_WATCH_MS) {
+      return {
+        kind: "kept",
+        why: `${lockfile} names no holder and is ${String(ageS)} s old by its mtime, but this writer did not wait to see it stay unchanged (a try-once caller never takes an empty lockfile; a writer that waits does)`,
         pid: null,
         running: false,
       };
@@ -937,6 +981,12 @@ export interface ReclaimOptions {
   /** The writer's own write-boundary check of the record it would append: a reclaim it would refuse is not made. */
   recordValid?: (note: ReclaimNote) => boolean;
   /**
+   * The lockfile as this writer saw it at the first refusal of this wait
+   * ({@link observeLock}). An empty lockfile is taken only when it is that
+   * same file, watched for at least {@link LEGACY_LOCK_WATCH_MS}.
+   */
+  watched?: LockObservation | null;
+  /**
    * Can this writer append at all right now (its daemon stamp, the log's
    * tail), and when was the log's last record? Asked before the claim, so a
    * reclaim whose record would be refused is never made; the last record's
@@ -964,7 +1014,8 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
     };
   }
   const now = options.now ?? Date.now();
-  const judged = judgeLock(lockPath, entry.seen, now);
+  const judged = judgeLock(lockPath, entry.seen, now, options.watched ?? null);
+  if (judged.kind === "changed") return { kind: "retry", why: judged.why };
   if (judged.kind === "unjudgeable") {
     return { kind: "kept", why: `${judged.why}, so it is not this writer's to judge; once no writer is running, a human removes it (\`rm -v ${lockPath}\`)` };
   }
