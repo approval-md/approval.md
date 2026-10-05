@@ -5155,6 +5155,15 @@ export class TelegramChannel implements TestableChannel {
    * A second prompt replaces the first: only one grade can be outstanding on
    * one card, and the older prompt stops resolving so a late reply to it lands
    * nowhere rather than recording a grade the human moved on from.
+   *
+   * APRV-492, two rules about that replacement. A tap that would ask the SAME
+   * question again (same verdict, same grade, same account: a doubled OK or a
+   * doubled second Deny) sends nothing: the prompt on screen already collects
+   * those words, and the relay licenses one prompt per grade tap, so a second
+   * send is refused and must not cost the first its meaning. And a prompt that
+   * does replace another retires the old one only once the new send has
+   * succeeded: a send that fails throws with the old prompt still live, so the
+   * words the human was told to give still have somewhere to land.
    */
   private async askForNote(
     state: ReviewCardState,
@@ -5162,7 +5171,16 @@ export class TelegramChannel implements TestableChannel {
     reaction: Reaction,
     sender?: ChannelSender,
   ): Promise<void> {
-    if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
+    const waiting = state.awaitingNote;
+    if (
+      waiting !== null &&
+      waiting.verdict === verdict &&
+      waiting.reaction === reaction &&
+      waiting.sender?.id === sender?.id &&
+      this.reviewNotePrompts.get(waiting.promptId) === state.deliveryId
+    ) {
+      return;
+    }
     const lines = reviewNotePromptLines(reaction, verdict, state.card.fields.action_key.value);
     const sent = await this.call<{ message_id: number }>("sendMessage", {
       chat_id: this.chatId,
@@ -5174,6 +5192,7 @@ export class TelegramChannel implements TestableChannel {
       reply_markup: { force_reply: true },
     });
     const promptId = String(sent.message_id);
+    if (state.awaitingNote !== null) this.reviewNotePrompts.delete(state.awaitingNote.promptId);
     state.awaitingNote = { promptId, verdict, reaction, ...(sender === undefined ? {} : { sender }) };
     this.reviewNotePrompts.set(promptId, state.deliveryId);
   }

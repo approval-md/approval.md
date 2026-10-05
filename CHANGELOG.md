@@ -17,6 +17,16 @@ before a tag.
 
 ### Channels
 
+- **A doubled review tap no longer loses the note prompt (APRV-492).** On a
+  Telegram review card, a second OK (or a doubled second Deny) tapped while a
+  `loved`/`disliked` note was still awaited asked for a second prompt and
+  forgot the first before sending it; the relay licenses one prompt per grade
+  tap and refused the second, so the reply to the prompt on screen recorded
+  nothing. A tap that asks the same question (same verdict, grade and account)
+  now sends nothing and leaves the prompt on screen live, and a prompt that
+  replaces another retires the old one only after the new send succeeds. What
+  a review records is unchanged.
+
 - **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
   An attested policy that does not load is refused with the new audit code
   `policy-invalid` instead of reading as "no roster". `audit.sampled` now
