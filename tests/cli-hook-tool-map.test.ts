@@ -22,6 +22,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { commandGate } from "../src/cli/gate-window.js";
+import type { Streams } from "../src/cli/main.js";
+import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import { payloadHash } from "../src/core/payload.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -391,4 +394,263 @@ test("a malformed glob fails the policy closed", () => {
   const verdict = claudeVerdict(claude(dir, "mcp__anything", {}, "t-glob-bad"));
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-policy-unavailable: schema-invalid: /);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (APRV-499 refutation A10)
+// ---------------------------------------------------------------------------
+
+function rewrite(dir: string, text: string): void {
+  writeFileSync(join(dir, "APPROVAL.md"), text, "utf8");
+}
+
+function attest(dir: string): void {
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+}
+
+function claudeFailedPost(dir: string, tool: string, input: Record<string, unknown>, id: string): Run {
+  const event = JSON.stringify({
+    hook_event_name: "PostToolUse",
+    session_id: "cc-sess-tools",
+    tool_use_id: id,
+    cwd: dir,
+    tool_name: tool,
+    tool_input: input,
+    tool_response: { type: "error", error: "it did not work" },
+  });
+  return runCli(["hook", "claude-code", "--as", "agent:cc", "--dir", dir], dir, event);
+}
+
+/** Open the gate window in this process with a scripted terminal, as `cli-gate-window.test.ts` does. */
+function openWindow(dir: string): void {
+  let err = "";
+  const streams: Streams = {
+    out: () => undefined,
+    err: (text) => {
+      err += text;
+    },
+  };
+  const prompter: Prompter = {
+    readLine: () => "understood",
+    readSecret: (): SecretRead => {
+      throw new Error("gate open must never ask for a secret");
+    },
+    confirm: () => {
+      throw new Error("gate open must never use a y/N confirmation");
+    },
+  };
+  const code = commandGate(
+    ["open", "--for", "5m", "--reason", "repair the policy", "--as", "human:alice"],
+    streams,
+    dir,
+    { prompter },
+  );
+  assert.equal(code, 0, err);
+}
+
+test("B1: an unattested edit removing a tools entry does not loosen the gate; the call is refused policy-not-attested, as Bash is", () => {
+  const dir = ready(policy([], [...CLASSES, ...TOOLS]));
+  const attested = claudeVerdict(claude(dir, "mcp__contextsling__publish", { text: "x" }, "t-b1-before"));
+  assert.equal(attested.permission, "deny");
+  assert.match(attested.reason, /^hook-class-human-only: /);
+
+  // The entry that made the call human-only is removed on disk, and nobody attests.
+  rewrite(dir, policy([], [...CLASSES]));
+  const before = logRecords(dir).length;
+
+  const mcp = claudeVerdict(claude(dir, "mcp__contextsling__publish", { text: "x" }, "t-b1-mcp"));
+  assert.equal(mcp.permission, "deny");
+  assert.match(mcp.reason, /^hook-gate-refused:policy-not-attested: /);
+  // Bash under the same edited file gets the same answer.
+  const bash = claudeVerdict(claude(dir, "Bash", { command: "ls" }, "t-b1-bash"));
+  assert.equal(bash.permission, "deny");
+  assert.match(bash.reason, /^hook-gate-refused:policy-not-attested: /);
+  // Hermes, the same.
+  const hermesRun = hermesVerdict(hermes(dir, "mcp_zzz_post", { body: "x" }, "h-b1"));
+  assert.equal(hermesRun.permission, "deny");
+  assert.match(hermesRun.message, /policy-not-attested/);
+  // The post half does not call it ungated either: it goes on to the close,
+  // which finds no start.
+  const post = claudePost(dir, "mcp__contextsling__publish", { text: "x" }, "t-b1-mcp");
+  assert.doesNotMatch(post.stderr, /post-tool-not-gated/);
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+});
+
+test("B1: an unattested edit removing unmapped_tool: ask refuses TodoWrite and Hermes todo until a human re-attests", () => {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  rewrite(dir, policy([], [...CLASSES]));
+  const before = logRecords(dir).length;
+
+  const todo = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-b1-ask"));
+  assert.equal(todo.permission, "deny");
+  assert.match(todo.reason, /^hook-gate-refused:policy-not-attested: /);
+  assert.match(todo.reason, /an edited policy is inoperative until a human re-attests it/);
+  const hermesRun = hermesVerdict(hermes(dir, "todo", { items: [] }, "h-b1-ask"));
+  assert.equal(hermesRun.permission, "deny");
+  assert.match(hermesRun.message, /policy-not-attested/);
+  const post = claudePost(dir, "TodoWrite", { todos: [] }, "t-b1-ask");
+  assert.doesNotMatch(post.stderr, /post-tool-not-gated/);
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+
+  // Re-attesting the edit is what puts it in force.
+  attest(dir);
+  const after = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-b1-ask-after"));
+  assert.equal(after.permission, "allow");
+  assert.equal(after.reason, "TodoWrite is not a gated tool");
+  const afterHermes = hermesVerdict(hermes(dir, "todo", { items: [] }, "h-b1-ask-after"));
+  assert.equal(afterHermes.permission, "allow");
+});
+
+test("B1: a policy that was never attested leaves no unclaimed call ungated", () => {
+  const dir = ready(policy([], [...CLASSES]), false);
+  const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-b1-never"));
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-gate-refused:policy-not-attested: /);
+  assert.equal(logRecords(dir).length, 0);
+});
+
+test("S1: under an open window a policy that does not load still records an unclaimed call as gate.bypassed", () => {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  openWindow(dir);
+  rewrite(dir, policy([], [...CLASSES, "tools:", "  - match: mcp__zzz__post", "    class: communicate.zzz.post"]));
+  const before = logRecords(dir).length;
+
+  const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-s1"));
+  assert.equal(verdict.permission, "allow");
+  assert.match(verdict.reason, /^gate-open: harness\.tool\.unmapped bypassed /);
+  const bypassed = logRecords(dir).slice(before);
+  assert.equal(bypassed.length, 1);
+  assert.equal(bypassed[0]?.["event"], "gate.bypassed");
+  const payload = bypassed[0]?.["payload"] as Record<string, unknown>;
+  assert.equal(payload["tool"], "TodoWrite");
+  assert.deepEqual(payload["classes"], ["harness.tool.unmapped"]);
+
+  // Hermes, the same.
+  const hermesRun = hermesVerdict(hermes(dir, "todo", { items: [] }, "h-s1"));
+  assert.equal(hermesRun.permission, "allow");
+  assert.equal(logRecords(dir).slice(before).filter((record) => record["event"] === "gate.bypassed").length, 2);
+});
+
+test("S1: under an open window an unattested policy that maps nothing still records an unclaimed call", () => {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  openWindow(dir);
+  rewrite(dir, policy([], [...CLASSES]));
+  const before = logRecords(dir).length;
+  const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-s1-drift"));
+  assert.equal(verdict.permission, "allow");
+  assert.match(verdict.reason, /^gate-open: harness\.tool\.unmapped bypassed /);
+  const bypassed = logRecords(dir).slice(before);
+  assert.deepEqual(bypassed.map((record) => record["event"]), ["gate.bypassed"]);
+});
+
+test("S2: a tools mapping that will not load is refused with its per-entry errors and the repair", () => {
+  const dir = ready(
+    policy([], [...CLASSES, "tools:", "  - match: mcp__zzz__post", "    class: nope.nope"]),
+    false,
+  );
+  const claudeRun = claudeVerdict(claude(dir, "mcp__zzz__post", {}, "t-s2"));
+  assert.equal(claudeRun.permission, "deny");
+  assert.match(claudeRun.reason, /^hook-policy-unavailable: schema-invalid: /);
+  assert.match(claudeRun.reason, /\/tools\/0\/class: class "nope\.nope" is not declared/);
+  assert.match(claudeRun.reason, /approval policy attest/);
+  const hermesRun = hermesVerdict(hermes(dir, "todo", {}, "h-s2"));
+  assert.equal(hermesRun.permission, "deny");
+  assert.match(hermesRun.message, /\/tools\/0\/class: class "nope\.nope" is not declared/);
+  assert.match(hermesRun.message, /approval policy attest/);
+});
+
+test("S3: a supervised-retro mapped start carries harness_tool", () => {
+  const dir = ready(
+    policy(
+      [],
+      [
+        ...CLASSES,
+        "  marketplace.retro.post:",
+        "    autonomy: supervised-retro",
+        "tools:",
+        '  - match: "mcp__r__*"',
+        "    class: marketplace.retro.post",
+      ],
+    ),
+  );
+  const verdict = claudeVerdict(claude(dir, "mcp__r__post", { body: "x" }, "t-s3-retro"));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  const [start] = starts(dir);
+  assert.ok(start !== undefined, "no execution.started was appended");
+  const payload = start["payload"] as Record<string, unknown>;
+  assert.equal(payload["class"], "marketplace.retro.post");
+  assert.equal(payload["harness_tool"], "mcp__r__post");
+});
+
+test("S3: a start that spends a human's grant carries harness_tool", () => {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  const input = { todos: [] };
+  const asked = claudeVerdict(claude(dir, "TodoWrite", input, "t-s3-ask", ["--timeout", "50ms"]));
+  assert.equal(asked.permission, "deny");
+  const granted = runCli(
+    ["grant", "hook:cc-sess-tools:t-s3-ask:harness.tool.unmapped", "--as", "human:alice"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+  const spent = claudeVerdict(claude(dir, "TodoWrite", input, "t-s3-spend", ["--timeout", "1s"]));
+  assert.equal(spent.permission, "allow", spent.reason);
+  const [start] = starts(dir);
+  assert.ok(start !== undefined, "no execution.started was appended");
+  const payload = start["payload"] as Record<string, unknown>;
+  assert.equal(payload["class"], "harness.tool.unmapped");
+  assert.equal(payload["harness_tool"], "TodoWrite");
+});
+
+test("S4: a tool name a tools entry could not name is refused by name before anything is appended", () => {
+  const dir = ready(policy(["  unmapped_tool: record"], [...CLASSES]));
+  const before = logRecords(dir).length;
+  for (const [name, id] of [
+    ["Todo Write", "t-s4-space"],
+    ["café", "t-s4-accent"],
+    ["x".repeat(300), "t-s4-long"],
+  ] as const) {
+    const verdict = claudeVerdict(claude(dir, name, {}, id));
+    assert.equal(verdict.permission, "deny", name);
+    assert.match(verdict.reason, /^hook-io: tool-name-invalid: /, name);
+    assert.doesNotMatch(verdict.reason, /append-failed/, name);
+  }
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+});
+
+test("H1: record-only unmapped starts are not charged to daily_actions, and a spent budget does not refuse them", () => {
+  const dir = ready(
+    policy(["  unmapped_tool: record"], [...CLASSES, "budgets:", "  global:", "    daily_actions: 1"]),
+  );
+  for (const id of ["t-h1-a", "t-h1-b", "t-h1-c"]) {
+    const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, id));
+    assert.equal(verdict.permission, "allow", verdict.reason);
+  }
+  assert.equal(starts(dir).length, 3, "each record-only call still writes its start");
+  // The one action the budget allows is still there for real work.
+  const first = claudeVerdict(claude(dir, "Bash", { command: "ls" }, "t-h1-bash-1"));
+  assert.equal(first.permission, "allow", first.reason);
+  // The budget is live: a second action is refused.
+  const second = claudeVerdict(claude(dir, "Bash", { command: "ls" }, "t-h1-bash-2"));
+  assert.equal(second.permission, "deny");
+  assert.match(second.reason, /budget-exceeded/);
+  // And a record-only call is not refused by the spent budget.
+  const after = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-h1-d"));
+  assert.equal(after.permission, "allow", after.reason);
+});
+
+test("H1: failed record-only unmapped calls do not trip the loop floor", () => {
+  const dir = ready(policy(["  unmapped_tool: record"], [...CLASSES]));
+  for (const id of ["t-h1-f1", "t-h1-f2", "t-h1-f3", "t-h1-f4"]) {
+    assert.equal(claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, id)).permission, "allow");
+    claudeFailedPost(dir, "TodoWrite", { todos: [] }, id);
+  }
+  assert.equal(logRecords(dir).filter((record) => record["event"] === "execution.failed").length, 4);
+  // A side-effecting call after four failed record-only calls is answered by
+  // the policy, not floored to a human.
+  const write = claudeVerdict(
+    claude(dir, "Write", { file_path: join(dir, "after.txt"), content: "x" }, "t-h1-write", ["--timeout", "50ms"]),
+  );
+  assert.equal(write.permission, "allow", write.reason);
+  assert.doesNotMatch(write.reason, /loop-escalated/);
 });

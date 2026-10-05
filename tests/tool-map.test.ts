@@ -4,13 +4,21 @@
  * fail a policy closed, the schema, and the one class whose default
  * `defaults.unmapped_tool` supplies.
  *
- * Pure: every policy here is text handed to `loadPolicyText`, so nothing
- * touches a log. The hook's own half is `tests/cli-hook-tool-map.test.ts`.
+ * Every policy here is text handed to `loadPolicyText`. The one section that
+ * touches a log (ruling H1, budgets and the loop floor) appends through the
+ * real write boundary into a scratch directory. The hook's own half is
+ * `tests/cli-hook-tool-map.test.ts`.
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 
+import { evaluateBudgets } from "../src/core/budgets.js";
+import { appendEvent, type EventInput, type EventRecord } from "../src/core/log.js";
+import { harnessLoopFloor } from "../src/core/loop.js";
 import { diffPolicies } from "../src/core/policy-diff.js";
 import { explain } from "../src/core/policy-explain.js";
 import { loadPolicyText, type PolicyLoadResult } from "../src/core/policy-load.js";
@@ -400,4 +408,111 @@ test("the policy differ probes the classes the tool mapping reaches", () => {
   assert.ok(change !== undefined, "the unmapped class's resolution change was not reported");
   assert.equal(change.before.autonomy, "manual");
   assert.equal(change.after.autonomy, "autonomous");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, ruling H1: record-only unmapped starts are records, not actions
+// ---------------------------------------------------------------------------
+
+const h1Scratch = mkdtempSync(join(tmpdir(), "approval-md-tool-map-h1-"));
+let h1Counter = 0;
+
+after(() => {
+  rmSync(h1Scratch, { recursive: true, force: true });
+});
+
+/** Append through the real write boundary and return the records, in order. */
+function h1Log(...inputs: EventInput[]): EventRecord[] {
+  h1Counter += 1;
+  const path = join(h1Scratch, `log-${String(h1Counter)}`, "events.jsonl");
+  const records: EventRecord[] = [];
+  for (const input of inputs) {
+    const result = appendEvent(path, input);
+    assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+    if (result.ok) records.push(result.record);
+  }
+  return records;
+}
+
+const H1_TS = "2026-10-05T12:00:00.000Z";
+
+function h1Start(cls: string, task: string, key: string): EventInput {
+  return {
+    ts: H1_TS,
+    event: "execution.started",
+    actor: "agent:cc",
+    task,
+    action_key: key,
+    payload: { class: cls, est_cost_usd: "0", execution: "harness", payload_hash: "a".repeat(64) },
+  };
+}
+
+function h1Grant(cls: string, task: string, key: string): EventInput {
+  return {
+    ts: H1_TS,
+    event: "approval.granted",
+    actor: "human:alice",
+    task,
+    action_key: key,
+    payload: { class: cls },
+  };
+}
+
+function h1Failed(task: string, key: string): EventInput {
+  return { ts: H1_TS, event: "execution.failed", actor: "agent:cc", task, action_key: key };
+}
+
+const H1_SCOPE = { classLimits: null, classPattern: null, globalBudgets: { global: { daily_actions: 1 } } };
+
+test("H1: a record-only harness.tool.unmapped start is not counted by a global daily_actions budget", () => {
+  const records = h1Log(
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:1", "hook:s:1:harness.tool.unmapped"),
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:2", "hook:s:2:harness.tool.unmapped"),
+  );
+  assert.equal(evaluateBudgets(records, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, true);
+  // Real work still counts.
+  const spent = [...records, ...h1Log(h1Start("exec.local", "hook:s:3", "hook:s:3:exec.local"))];
+  assert.equal(evaluateBudgets(spent, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, false);
+  // And a record-only admission is not refused by a spent budget.
+  assert.equal(
+    evaluateBudgets(spent, H1_SCOPE, { class: UNMAPPED_TOOL_CLASS, recordOnly: true }, H1_TS).pass,
+    true,
+  );
+  // Without the record-only mark the same class is an action like any other.
+  assert.equal(evaluateBudgets(spent, H1_SCOPE, { class: UNMAPPED_TOOL_CLASS }, H1_TS).pass, false);
+});
+
+test("H1: a human's grant of harness.tool.unmapped is an approved action and is counted", () => {
+  const records = h1Log(
+    h1Grant(UNMAPPED_TOOL_CLASS, "hook:s:1", "hook:s:1:harness.tool.unmapped"),
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:s:1", "hook:s:1:harness.tool.unmapped"),
+  );
+  assert.equal(evaluateBudgets(records, H1_SCOPE, { class: "exec.local" }, H1_TS).pass, false);
+});
+
+test("H1: failed record-only unmapped calls do not accrue to the loop floor; failed granted ones do", () => {
+  const recordOnly: EventInput[] = [];
+  const granted: EventInput[] = [];
+  for (const index of [1, 2, 3]) {
+    const task = `hook:s:${String(index)}`;
+    const key = `${task}:${UNMAPPED_TOOL_CLASS}`;
+    recordOnly.push(h1Start(UNMAPPED_TOOL_CLASS, task, key), h1Failed(task, key));
+    granted.push(h1Grant(UNMAPPED_TOOL_CLASS, task, key), h1Start(UNMAPPED_TOOL_CLASS, task, key), h1Failed(task, key));
+  }
+  assert.equal(harnessLoopFloor(h1Log(...recordOnly), "hook:s:4", "agent:cc"), null);
+  assert.notEqual(harnessLoopFloor(h1Log(...granted), "hook:s:4", "agent:cc"), null);
+  // A record-only call that completes clears nothing either: it is transparent.
+  const streak: EventInput[] = [];
+  for (const index of [1, 2]) {
+    const task = `hook:w:${String(index)}`;
+    const key = `${task}:exec.local`;
+    streak.push(h1Start("exec.local", task, key), h1Failed(task, key));
+  }
+  streak.push(
+    h1Start(UNMAPPED_TOOL_CLASS, "hook:w:3", "hook:w:3:harness.tool.unmapped"),
+    { ts: H1_TS, event: "execution.completed", actor: "agent:cc", task: "hook:w:3", action_key: "hook:w:3:harness.tool.unmapped" },
+    h1Start("exec.local", "hook:w:4", "hook:w:4:exec.local"),
+    h1Failed("hook:w:4", "hook:w:4:exec.local"),
+  );
+  assert.notEqual(harnessLoopFloor(h1Log(...streak), "hook:w:5", "agent:cc"), null);
 });
