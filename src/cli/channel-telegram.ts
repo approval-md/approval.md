@@ -200,7 +200,7 @@ import {
   type RefusedGestureKind,
 } from "../core/gesture-refusal.js";
 import { attestationRefusal, checkAttestation } from "../core/attest.js";
-import { promptLayoutFor } from "../core/prompt-layout.js";
+import { promptLayoutFor, promptSayFor, promptStyleFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
   isAttestationActionKey,
@@ -969,6 +969,11 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // default, because a layout is not a permission and an unrelated typo in a
     // class rule must not silently redecorate a phone screen.
     layout: promptLayoutFor(policyLoad, "telegram"),
+    // APRV-489. The card style and the operator's plain-words declarations, off
+    // the same load and with the same fail direction: a policy that did not load
+    // declares nothing, and the technical card is what nothing means.
+    promptStyle: promptStyleFor(policyLoad, "telegram"),
+    say: promptSayFor(policyLoad, "telegram"),
     // APRV-456. From the launch flags alone: a relayed channel (an --api-base
     // that is not the Bot API) or --no-stale-copy turns APRV-196's fallback
     // off. The policy loaded above is deliberately not consulted, so nothing

@@ -243,11 +243,20 @@ import type { ChannelSender } from "../core/sender-identity.js";
 // §11.1 invariant 10's guard scans the modules that decide, which this is not.
 import { REACTIONS, type Reaction, type ReviewVerdict } from "../core/audit.js";
 import {
+  DEFAULT_PROMPT_STYLE,
   TELEGRAM_PROMPT_LAYOUT,
   type PromptLayout,
+  type PromptRendering,
   type PromptRow,
+  type PromptSay,
+  type PromptStyle,
 } from "../core/prompt-layout.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
+import {
+  MINIMAL_DENY_LABEL,
+  MINIMAL_MESSAGE_BUDGET,
+  renderTelegramMinimal,
+} from "./telegram-minimal.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -592,6 +601,19 @@ export interface TelegramConfig {
    * nothing else: no policy key and nothing in an update can set it.
    */
   staleCopy?: boolean;
+  /**
+   * Which layout a prompt is drawn in (APRV-489), from
+   * `channels.telegram.prompt.style`. Passed in by the verb, which has already
+   * loaded the policy, for {@link TelegramConfig.layout}'s reason. Defaults to
+   * `technical`, so a channel constructed without one sends exactly what it
+   * sent before the key existed.
+   */
+  promptStyle?: PromptStyle;
+  /**
+   * The operator's plain-words declarations per class (APRV-489), from
+   * `channels.telegram.prompt.say`. Read only under `promptStyle: minimal`.
+   */
+  say?: PromptSay;
 }
 
 /**
@@ -2496,6 +2518,16 @@ interface Delivery {
    * and why it is never shorter than the gate's own window.
    */
   windowMs: number | null;
+  /**
+   * Which layout this card was drawn in, when the policy asked for a
+   * non-default one (APRV-489). Carried onto the decision a tap on it makes.
+   */
+  rendering?: PromptRendering;
+  /**
+   * A minimal card's headline and collapsed details, both HTML (APRV-489), so
+   * the settle edit can keep them. Absent on every technical card.
+   */
+  card?: { headline: string; details: string };
 }
 
 /**
@@ -2533,6 +2565,10 @@ export class TelegramChannel implements TestableChannel {
   private readonly describeAction: ((actionRef: string) => string | null) | null;
   /** The policy's row layout for this channel (APRV-218). Read-only, and pure input to the renderer. */
   private readonly layout: PromptLayout;
+  /** The policy's prompt style for this channel (APRV-489). */
+  private readonly promptStyle: PromptStyle;
+  /** The policy's `say` declarations (APRV-489). Pure input to the minimal renderer. */
+  private readonly say: PromptSay;
   /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
   private lastSweepMs = Number.NEGATIVE_INFINITY;
 
@@ -2707,6 +2743,8 @@ export class TelegramChannel implements TestableChannel {
     this.now = config.now ?? (() => Date.now());
     this.describeAction = config.describeAction ?? null;
     this.layout = config.layout ?? TELEGRAM_PROMPT_LAYOUT;
+    this.promptStyle = config.promptStyle ?? DEFAULT_PROMPT_STYLE;
+    this.say = config.say ?? {};
     // APRV-456. Only an explicit `true` or an absent key leaves the fallback on;
     // anything else a caller passes turns it off, the stricter direction.
     this.staleCopy = config.staleCopy === undefined || config.staleCopy === true;
@@ -3083,6 +3121,7 @@ export class TelegramChannel implements TestableChannel {
 
     // Armed only now, and all at once: until the message with the buttons on it
     // exists there is nothing a callback could legitimately answer.
+    const rendering = this.digestRendering(stale !== null);
     for (const [index, member] of state.members.entries()) {
       this.deliveries.set(member.nonce, {
         actionKey: member.actionKey,
@@ -3091,6 +3130,7 @@ export class TelegramChannel implements TestableChannel {
         batchDeliveryId,
         deliveredAtMs,
         windowMs: windows[index] ?? null,
+        ...(rendering === undefined ? {} : { rendering }),
       });
     }
     this.digests.set(deliveryId, state);
@@ -3192,7 +3232,27 @@ export class TelegramChannel implements TestableChannel {
       ],
     };
 
-    const sent = await this.sendPrompt(request, TELEGRAM_PROMPT_HEADING, keyboard);
+    // APRV-489. The minimal card is tried only when the policy asked for it,
+    // and anything it will not draw honestly is sent as the technical card,
+    // exactly as a technical policy sends it, with the reason kept for the
+    // decision record and said on stderr.
+    let sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
+    let rendering: PromptRendering | undefined;
+    let card: { headline: string; details: string } | undefined;
+    const minimal = this.promptStyle === "minimal" ? await this.sendMinimal(request, nonce) : null;
+    if (minimal !== null && minimal.ok) {
+      sent = minimal.sent;
+      rendering = { style: "minimal" };
+      card = minimal.card;
+    } else {
+      if (minimal !== null) {
+        rendering = { style: "technical", fallback: minimal.reason };
+        this.complain(
+          `approval: telegram sent the technical card for ${actionKey}, not the minimal one: ${minimal.reason}`,
+        );
+      }
+      sent = await this.sendPrompt(request, TELEGRAM_PROMPT_HEADING, keyboard);
+    }
 
     this.counters.notified += 1;
     this.deliveries.set(nonce, {
@@ -3202,6 +3262,8 @@ export class TelegramChannel implements TestableChannel {
       deliveredAtMs: this.now(),
       windowMs: this.retentionWindowMs(request),
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
+      ...(rendering === undefined ? {} : { rendering }),
+      ...(card === undefined ? {} : { card }),
     });
 
     return {
@@ -3211,6 +3273,76 @@ export class TelegramChannel implements TestableChannel {
         ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
       },
     };
+  }
+
+  /**
+   * Send `request` as ONE minimal card (APRV-489), or report why it was not.
+   *
+   * The card is drawn from the same `renderTelegram` output the technical card
+   * would send, under the same layout, so the collapsed block IS the technical
+   * card. The buttons carry the same callback data as the technical card's; only
+   * the reject label reads "Deny" (R7). Nothing is sent when the card is refused,
+   * so the caller's technical send is the only send.
+   */
+  private async sendMinimal(
+    request: ChannelRequest,
+    nonce: string,
+  ): Promise<
+    | { ok: true; sent: { deliveryId: DeliveryId; rendered: RenderedRequest }; card: { headline: string; details: string } }
+    | { ok: false; reason: string }
+  > {
+    const actionKey = request.action_key.value;
+    const rendering = renderTelegram(request, TELEGRAM_PROMPT_HEADING, this.layout);
+    const drawn = renderTelegramMinimal(
+      request,
+      {
+        header: rendering.header,
+        payloadText: rendering.payloadText,
+        claimedText: rendering.claimedText,
+        anomalous: rendering.lines.some((entry) => entry.label.startsWith(TELEGRAM_ANOMALY_MARK)),
+        payloadLabel: `<b>${PAYLOAD_CHUNK_LABEL}</b>`,
+      },
+      this.say,
+    );
+    if (!drawn.ok) return { ok: false, reason: drawn.reason };
+
+    const result = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: drawn.text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
+            { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
+          ],
+        ],
+      },
+    });
+    const fields: RenderedField[] = rendering.lines.map((entry) => ({
+      field: entry.field,
+      kind: entry.kind,
+      text: entry.text,
+    }));
+    return {
+      ok: true,
+      sent: {
+        deliveryId: String(result.message_id),
+        rendered: { action_key: actionKey, fields, fullPayloadText: rendering.payloadText },
+      },
+      card: { headline: drawn.headline, details: drawn.details },
+    };
+  }
+
+  /**
+   * What a decision on a digest records about its layout (APRV-489): nothing
+   * under a technical policy, and the technical card with its reason under a
+   * minimal one, since a digest is always drawn technical.
+   */
+  private digestRendering(stale: boolean): PromptRendering | undefined {
+    if (this.promptStyle === "technical") return undefined;
+    return { style: "technical", fallback: stale ? "stale-summary" : "digest" };
   }
 
   /**
@@ -3225,14 +3357,19 @@ export class TelegramChannel implements TestableChannel {
    * the ladder rescues a tap on an old copy of a request still open here, and
    * a decided one is not that.
    */
-  private disarm(deliveryId: DeliveryId): string {
+  private disarm(deliveryId: DeliveryId): {
+    actionKey: string;
+    card: { headline: string; details: string } | undefined;
+  } {
     let actionKey = "";
+    let card: { headline: string; details: string } | undefined;
     // Deleting the current entry mid-iteration is defined behaviour for a Map,
     // and every nonce for this message id goes — a re-notify of the same
     // message would otherwise leave an older nonce still resolving.
     for (const [nonce, delivery] of this.deliveries) {
       if (delivery.deliveryId !== deliveryId) continue;
       actionKey = delivery.actionKey;
+      card = delivery.card ?? card;
       this.deliveries.delete(nonce);
     }
     const digest = this.digests.get(deliveryId);
@@ -3240,7 +3377,7 @@ export class TelegramChannel implements TestableChannel {
       this.allNonces.delete(digest.allNonce);
       this.digests.delete(deliveryId);
     }
-    return actionKey;
+    return { actionKey, card };
   }
 
   /**
@@ -3461,13 +3598,28 @@ export class TelegramChannel implements TestableChannel {
       await this.settleMember(digest, actionKey, outcome, detail);
       return;
     }
-    const settledKey = this.disarm(deliveryId);
-    const text = [
+    const settled = this.disarm(deliveryId);
+    const technicalText = [
       `<b>${escapeHtml(outcome)}</b>`,
-      `<code>${escapeHtml(actionKey ?? settledKey)}</code>`,
+      `<code>${escapeHtml(actionKey ?? settled.actionKey)}</code>`,
       "",
       ...detail.map((entry) => escapeHtml(entry)),
     ].join("\n");
+    // APRV-489. A minimal card keeps its headline and its collapsed details
+    // under the outcome, so the settled message still holds the canonical
+    // rendering the approver answered on. Should that not fit, the technical
+    // annotation is the fallback: the outcome is what the edit must carry.
+    const minimalText =
+      settled.card === undefined
+        ? null
+        : [
+            `<b>${escapeHtml(outcome)}</b>`,
+            settled.card.headline,
+            ...detail.map((entry) => escapeHtml(entry)),
+            settled.card.details,
+          ].join("\n");
+    const text =
+      minimalText !== null && minimalText.length <= MINIMAL_MESSAGE_BUDGET ? minimalText : technicalText;
     await this.call("editMessageText", {
       chat_id: this.chatId,
       message_id: Number(deliveryId),
@@ -4162,6 +4314,9 @@ export class TelegramChannel implements TestableChannel {
       ...(delivery.batchDeliveryId === undefined
         ? {}
         : { batchDeliveryId: delivery.batchDeliveryId }),
+      // APRV-489. The layout THIS card was drawn in, from this process's own
+      // record of what it sent; nothing in the tap chooses it.
+      ...(delivery.rendering === undefined ? {} : { rendering: delivery.rendering }),
       ...(parsed.decision === "reject"
         ? { note: `${TELEGRAM_REJECT_NOTE} (callback ${callbackId})` }
         : {}),
@@ -4330,12 +4485,14 @@ export class TelegramChannel implements TestableChannel {
     const refusals: string[] = [];
 
     for (const member of open) {
+      const allRendering = this.digestRendering(digest.stale !== null);
       const one: ChannelDecision = {
         action_key: member.actionKey,
         decision,
         deliveryId: digest.deliveryId,
         batchDeliveryId: digest.batchDeliveryId,
         ...(sender === undefined ? {} : { sender }),
+        ...(allRendering === undefined ? {} : { rendering: allRendering }),
         ...(decision === "reject"
           ? { note: `${TELEGRAM_REJECT_NOTE} (callback ${callbackId}, all)` }
           : {}),

@@ -158,6 +158,7 @@ import {
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { loadPayload, payloadPath, payloadStoreDirFor, storePayload } from "./payload-store.js";
+import type { PromptRendering } from "./prompt-layout.js";
 import {
   loadPolicyText,
   policyUnreadable,
@@ -2705,6 +2706,17 @@ export interface DecideOptions extends GateOptions {
    * silently mixed in with policy-attested ones.
    */
   senderSource?: "policy";
+  /**
+   * Which prompt layout the approver decided on (APRV-489), recorded as
+   * `payload.rendering` on `approval.granted` / `approval.rejected` only.
+   *
+   * Set by a decision surface that drew a non-default layout, or that was asked
+   * for one and drew the technical card instead (then `fallback` names why).
+   * Absent under a technical policy, so those records are byte-identical to
+   * every earlier build's. A record of the screen and never an input: no check
+   * here or anywhere reads it back.
+   */
+  rendering?: PromptRendering;
 }
 
 /**
@@ -3065,6 +3077,15 @@ function attemptDecide(
       ...(options.sender.hashed === true ? { hashed: true } : {}),
     };
     if (options.senderSource !== undefined) payload["sender_source"] = options.senderSource;
+  }
+  // APRV-489. Grant and reject only, the two answers a prompt collects, and only
+  // when the surface drew (or was asked for) a non-default layout. Copied in a
+  // fixed shape so nothing else a caller hangs on the object reaches the log.
+  if (decision !== "revoke" && options.rendering !== undefined) {
+    payload["rendering"] = {
+      style: options.rendering.style,
+      ...(options.rendering.fallback === undefined ? {} : { fallback: options.rendering.fallback }),
+    };
   }
 
   if (decision === "grant") {

@@ -87,6 +87,7 @@ import {
   claimed,
   computed,
   createChannelRequest,
+  LIVE_TOOL_CALL,
   type ChannelRequest,
   type PayloadRendering,
 } from "./contract.js";
@@ -757,6 +758,12 @@ function tagDerivation(
       : {}),
     ...(typeof route["confidence"] === "number"
       ? { confidence: claimed(route["confidence"], registrationActor) }
+      : {}),
+    // APRV-489. A tool call the agent is blocked in: the record declared the
+    // harness executes it and how long the harness waits. Symbol-keyed, so no
+    // channel's row list and no JSON output gains a key (see `LIVE_TOOL_CALL`).
+    ...(derivation.declared.execution === "harness" && derivation.declared.harness_cap_ms !== null
+      ? { [LIVE_TOOL_CALL]: computed(true as const, "log") }
       : {}),
   };
 

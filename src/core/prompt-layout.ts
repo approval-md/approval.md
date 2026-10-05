@@ -364,6 +364,26 @@ export const DEFAULT_PROMPT_STYLE: PromptStyle = "technical";
  */
 export const PROMPT_STYLE_CHANNELS: readonly PromptChannel[] = ["telegram"];
 
+/**
+ * Which layout an approver decided on, as a decision record states it
+ * (APRV-489): `payload.rendering` on `approval.granted` / `approval.rejected`.
+ *
+ * Written only when the policy asked for a style other than `technical`, so a
+ * record under a technical policy is byte-identical to every earlier one.
+ * `style` is what was SHOWN; `fallback` is present when the policy asked for
+ * `minimal` and the channel sent the technical card instead, naming why (the
+ * codes are `MINIMAL_FALLBACKS` in `channels/telegram-minimal.ts`).
+ *
+ * A statement by the channel about its own screen, read by nothing that
+ * decides: no verdict, budget, token or sampling path reads it (SPEC.md §11.1
+ * invariant 4 holds by there being no reader). The style a policy requested is
+ * recoverable from the policy hash the record already carries.
+ */
+export interface PromptRendering {
+  style: PromptStyle;
+  fallback?: string;
+}
+
 /** The two words `say.<class>.note` may say. */
 export const PROMPT_SAY_NOTES = ["summary", "none"] as const;
 
