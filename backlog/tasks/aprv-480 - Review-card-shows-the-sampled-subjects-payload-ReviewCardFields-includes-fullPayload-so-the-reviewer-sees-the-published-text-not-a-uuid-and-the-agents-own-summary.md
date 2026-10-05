@@ -7,7 +7,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 07:25'
+updated_date: '2026-10-05 07:46'
 labels:
   - agentvillage
 dependencies: []
@@ -52,4 +52,6 @@ Resume point: none (lane complete; PR open).
 PROPOSED SPEC HUNK (pending sign-off; no SPEC.md edit made). §10.3 "Review delivered through a channel":
 - replace: "the card carries no payload region, offers no approval, accepts no token"
 - with: "the card offers no approval and accepts no token. It carries a payload region showing either the bytes the sampled execution bound to, whole, or that binding's hash with the reason the bytes are absent, and its heading says which; a channel MUST NOT show part of the bytes as the payload (Amended APRV-480)."
+
+Resume point (fix round 1, refutation of PR #614): no fix landed yet; next is F1 in src/core/audit.ts reviewerRoster (refuse when the policy load is not ok or the resolution is fail-closed). Next command: node scripts/run-tests.mjs --only audit
 <!-- SECTION:NOTES:END -->
