@@ -432,7 +432,7 @@
               { "type": "null" }
             ]
           },
-          "description": "The closed field set for an OPAQUE payload: every top-level key the payload may carry, mapped to the label its value is quoted under (`\"\"` for no label), or `~` for a key known and deliberately left off the simple card. A payload carrying any key this map does not name is sent as the technical card. Ignored for command, file-change and email payloads, whose excerpt is built in."
+          "description": "The closed field set for an OPAQUE payload: every top-level key the payload may carry, mapped to the label its value is quoted under (`\"\"` for no label), or `~` for a key known and deliberately left off the simple card (the card then names it under the quotations). At least one key must be shown (checked at load). A payload carrying any key this map does not name is sent as the technical card. Ignored for command, file-change and email payloads, whose excerpt is built in."
         },
         "note": {
           "type": "string",

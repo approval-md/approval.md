@@ -51,9 +51,11 @@ What it says, in one line each:
   do, the exact words it will post, share or vote, how long the resident has,
   and Approve and Deny, with the full technical card (the canonical rendering
   included) collapsed under "Full details". The `say` entries are the
-  operator's words for the three resident-facing classes, and their `quote`
-  maps name every key each payload carries, so a payload with any other key is
-  sent as the technical card. `always: [ttl_remaining_ms]` keeps the one
+  operator's words for the three resident-facing classes, keyed by exact class
+  name, and their `quote` maps name and SHOW every key each payload carries
+  (the ids under plain labels, so the "Not shown here" notice appears only when
+  something is really left off), so a payload with any other key is sent as
+  the technical card. `always: [ttl_remaining_ms]` keeps the one
   `ttl` row the relay's quiet-hours hold reads, inside "Full details".
   **Rollout order:** `style` and `say` need a core with APRV-489. An older
   core refuses the keys at the schema, the whole policy fails to load, and
@@ -95,11 +97,11 @@ channels:
           note: none
         digest.share:
           does: "share a note about you with other people"
-          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: ~ }
+          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: "Reference" }
           note: none
         village.vote:
           does: "vote for you in this week's village question"
-          quote: { answer: "Answer", question_id: ~ }
+          quote: { answer: "Answer", question_id: "Question" }
           note: summary
 
 classes:

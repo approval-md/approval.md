@@ -25,12 +25,16 @@ before a tag.
   deadline line ("Open for about 3 days. If you don't answer, your agent will
   not do this."), Approve and Deny, and the whole technical card, canonical
   rendering included, collapsed in the same message under "Full details".
-  `channels.telegram.prompt.say` holds the operator's phrase per class and the
-  closed field set of an opaque payload. Anything the card cannot draw
+  `channels.telegram.prompt.say` holds the operator's phrase per exact class
+  name and the closed field set of an opaque payload. The box holds payload
+  values only, verbatim; a cut value, a command not shown as written and a
+  field left off are announced under it. Anything the card cannot draw
   honestly gets the technical card (attestations, policy edits, truncated
-  payloads, abnormal rows, undeclared or unlisted payload keys, digests, cards
-  over 3800 characters), and the decision record states what was shown in
-  `payload.rendering`. `technical` stays the default and its bytes are
+  payloads, abnormal health facts, undeclared or unlisted payload keys,
+  batches and digests, cards over 3800 characters, a card the Bot API
+  refuses), and the decision record states what was shown in
+  `payload.rendering` (an open field in this release). Style and `say` are
+  read for each card, so a re-attested setting needs no restart. `technical` stays the default and its bytes are
   unchanged; review cards, their note prompt and checkpoint prompts are the
   same under both styles; `web` and `cli` ignore the key. SPEC §10.3 and §5.2
   are amended (pending sign-off). **Rollout order:** an older core refuses the

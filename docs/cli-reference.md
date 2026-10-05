@@ -3903,6 +3903,23 @@ with `always` carries it only when the value is in fact the reason to look, so
 `always: [budgets]` gets a quiet budget line on an ordinary request and a
 shouted one when a ceiling is in play.
 
+Fail soft on absence, closed on invalidity, the split every other policy key
+keeps. No `prompt` block — and a policy that failed to load at all — means the
+rows the channel ships, because a layout is not a permission and an unrelated
+typo in a class rule must not silently redecorate a phone screen. An unknown
+row name, a required row in `hide`, a row named by both `always` and `hide`, or
+a key the block does not define fails the WHOLE policy at load with a
+machine-readable keyword (`prompt-row-unknown`, `prompt-row-required`,
+`prompt-row-conflict`, `prompt-key-unknown`, `prompt-block-shape`), and every
+class resolves to `manual` until the file is repaired. The check runs for every
+channel name, including the unknown ones the schema admits as free-form
+objects, so a layout is validated wherever it is written.
+
+Nothing here teaches a channel anything about the log. Every row a layout can
+turn on was already on the `ChannelRequest`, and `--json`, `approval queue` and
+the web page carried it all along; rendering stays a pure function of
+(request, layout).
+
 ### The minimal card: `channels.telegram.prompt.style` (APRV-489)
 
 The technical card is three messages written for an engineer. A resident
@@ -3920,27 +3937,30 @@ channels:
       say:
         digest.share:
           does: "share a note about you with other people"
-          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: ~ }
+          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: "Reference" }
           note: none
 ```
 
 **For the approver, in plain words.** The bold first line says what your agent
-wants to do. The box under it holds the agent's own words, exactly as they
-will be posted, shared or run; nothing in the box was written by approval.md.
-A line marked "not checked" is a description (by an AI model or by your agent)
+wants to do. The box under it holds the agent's own words, copied exactly from
+what will be posted, shared or run; approval.md writes nothing inside the box
+except the labels. If a line under the box starts with ⚠ or says "Not shown
+here", the box is not the whole story: open "Full details" before deciding. A
+line marked "not checked" is a description (by an AI model or by your agent)
 that nobody verified. The next line says how long you have; if you do nothing,
 nothing happens. Tap "Full details" to see everything the runtime checked,
 including the exact text this approval is bound to. Approve says yes; Deny says
-no.
+no. For anything that deletes, sends files or money, or talks to outside
+services, open "Full details" every time.
 
 **The exact layout** (HTML; `[ ]` are the inline buttons):
 
 ```
 <b>Your agent wants to <phrase></b>
-<blockquote><b>Label:</b> quoted value        one line per field, from the bound payload
+<blockquote><b>Label:</b> quoted value        one payload value per line, verbatim
 …</blockquote>
-⚠ There is more than fits here: open Full details before deciding.   only when a quoted value was cut or a command is not shown whole
-Some of what your agent sent is shown only in Full details.            only when a say entry leaves a field the payload carries off (~)
+⚠ There is more than fits here: open Full details before deciding.   when a value was cut or a command is not shown as written
+Not shown here: <key>, <key>. Open Full details before deciding.        when the say entry leaves a field off (~)
 <i>AI summary (not checked):</i> …            only when a model sentence is attached
 <i>Your agent says (not checked):</i> …       only when the class's say entry has note: summary
 <i>Your agent estimates the cost (not checked):</i> $0.00   only when the estimate is above zero
@@ -3953,107 +3973,134 @@ Open for about 3 days. If you don't answer, your agent will not do this.
 A tool call the agent is blocked in says "Your agent is waiting: about 4
 minutes left. If you don't answer, it will not do this." instead. The time is
 the gate's own window for the request (the policy's TTL, narrowed by a
-harness hook's cap), from the verified log.
+harness hook's cap), from the verified log, as it stood when the card was
+drawn; the line is not refreshed afterwards. A request with no time left says
+"Time is up: this request has closed, and an answer now will not count."
 
 **What is computed, what is quoted, what is described.**
 
-- *Computed by the runtime:* the first line, chosen by the class the LOG
+- *Computed by the runtime:* the first line, chosen by the exact class the LOG
   records, from the attested `say.<class>.does`, from core's own phrase for a
   class core emits (`network.call`, `read.web`, `browser.exec`, `cron.manage`,
   `process.write`, `skill.manage`, `agent.delegate`, `message.send`,
   `files.delete.scratch`), or from the payload's structural kind ("run a
   command", "change a file", "send an email", followed by `(type: <class>)`);
-  the deadline line; everything in "Full details"; the buttons.
-- *Quoted from the bound payload:* the box. The bytes were hash-checked against
-  the request's `payload_hash` before the channel saw them, so they are what
-  will be acted on; their content was written by the agent. A command is shown
-  whole up to 160 characters on one line, with the folder it runs in; a longer
-  or multi-line command is cut and followed by its classifier steps; a file
-  change shows the file, the change and whether it replaces every match; an
-  email shows From, To, Cc, Bcc, Subject, the format and the message; an opaque
-  payload shows the fields its `say.<class>.quote` map labels.
-- *Never a clean-looking partial:* when the box does not show everything (a
-  value cut, a command not shown as written), the computed line "⚠ There is
-  more than fits here: open Full details before deciding." follows the box;
-  when the declaration leaves a field off (`~`), "Some of what your agent sent
-  is shown only in Full details." does. Both are outside the box, so quoted
-  text can neither produce nor suppress them.
+  the notices under the box; the deadline line; everything in "Full details";
+  the buttons.
+- *Quoted from the bound payload:* the box, and only payload values. Each line
+  is one payload value, verbatim (marked as below, and visibly cut when long),
+  under a label: the operator's attested label, or the runtime's fixed label
+  for a field of a shape it knows. Nothing computed, abbreviated or paraphrased
+  is ever inside the box. The bytes were hash-checked against the request's
+  `payload_hash` before the channel saw them, so they are what will be acted
+  on; their content was written by the agent. A command is shown up to 160
+  characters on one line, with `In folder:` and its `cwd`; a longer or
+  multi-line command is shown from its start, cut, and announced (the
+  classifier's outline of it is in "Full details" only, because it leaves out
+  flags and their values, which is where a deletion target or an uploaded file
+  lives). A file change shows the file, the change and every other field under
+  its own key name (`tool:`, `replace_all: true`). An email shows From, To, Cc,
+  Bcc, Subject, Format and Message. An opaque payload shows the fields its
+  `say.<class>.quote` map labels.
+- *Never a clean-looking partial:* when a value is cut or a command is not
+  shown as written, "⚠ There is more than fits here: open Full details before
+  deciding." follows the box; when the declaration leaves fields off (`~`),
+  "Not shown here: <their key names>. Open Full details before deciding." does.
+  Both are outside the box, so quoted text can neither produce nor suppress
+  them.
 - *Described, and labelled "not checked":* the AI summary and the agent's own
   summary and estimate. They never stand alone and never come first: they sit
   below the box.
 
 **Quoted text is hostile input.** Every quoted value is one line (a line break
-is drawn ` ⏎ `), control, format and bidirectional characters are drawn as
-`«U+202E»` (and `«` and `⏎` in the value are drawn the same way, so two
-different values never look the same), a value longer than 280 characters is
-cut with `…(cut; see full details)`, and everything is HTML-escaped. A value
-cannot start a line of its own, close the box, open or close the collapsed
-block, or be bold.
+is drawn ` ⏎ `). Control, format, bidirectional and every default-ignorable
+character (variation selectors, joiners, tag characters, U+034F, the Khmer and
+Mongolian invisibles), the Hangul fillers and the braille blank, and combining
+marks beyond two on one character are drawn as `«U+202E»`; so are `«` and `⏎`
+in the value, which makes the marking injective. Two exceptions keep ordinary
+emoji readable: one U+FE0F straight after a pictograph (❤️) and one U+200D
+between two pictographs (👨‍👩‍👧) are drawn as themselves; each changes the
+emoji's look and carries at most one bit. A value longer than 280 characters is
+cut between grapheme clusters with `…(cut; see full details)`, and everything is
+HTML-escaped. A value cannot start a line of its own, close the box, open or
+close the collapsed block, or be bold.
+
+Injective is not "never looks the same". Look-alike letters from other scripts
+(a Cyrillic а for a Latin a), a lone emoji with and without its presentation
+selector, and runs of ordinary spaces are drawn as themselves, so two different
+values can still look alike. Telegram clients also turn URLs, `@names`,
+`#tags` and `/commands` in the box and in "Full details" into links; a link's
+text is always its own target (markup in a value is escaped, so a value cannot
+make link text say something else), but a look-alike domain stays look-alike.
 
 **When the technical card is sent instead.** The minimal card is never guessed
 at or drawn partially. These requests get today's technical card, the decision
-record says why (below), and the listener says so on stderr:
+record says why (`payload.rendering.fallback`, below), and the listener says
+so on stderr:
 
 - an attestation prompt, a `policy.*` or `log.*` class, or a protected path;
 - a truncated payload, or none;
-- an abnormal health row (a budget over its ceiling, a policy not attested, an
-  autonomy that is not `manual`);
+- any abnormal health fact (a budget over its ceiling, a policy not attested,
+  an autonomy that is not `manual`), even when the row layout hides its row;
 - an opaque payload whose class has no `say` entry, carrying a key the entry's
-  `quote` map does not name, that is not an object, or whose entry quotes
-  nothing (every key `~`);
-- a digest, and the collapsed stale-request summary;
+  `quote` map does not name, or that is not an object;
+- a request delivered as part of a batch: a digest, its members, the collapsed
+  stale-request summary, and a batch whose digest did not fit or has one member;
 - a card over 3800 characters (Telegram's limit is 4096, and a relay's
-  `Agent: <name>` line needs room): the canonical rendering is never cut to fit.
+  `Agent: <name>` line needs room): the canonical rendering is never cut to fit;
+- a policy file that does not match its attestation (`policy-unattested`);
+- a minimal card the Bot API or a relay refuses (any 4xx but 429): the
+  technical card is sent once instead (`send-refused`); a 429, a 5xx or a
+  network failure is retried by the next cycle as before.
+
+When the edit that settles a minimal card is refused (it replaces the only
+message holding the request), a short settle text with the outcome, the
+request's key and who decided when is sent instead, so a decided card never
+looks undecided.
 
 Review cards ("REVIEW — THIS ALREADY RAN"), their note prompt and checkpoint
 prompts are the same under both styles in this release.
 
-**`say`.** Keyed by class pattern and resolved like a class rule, most specific
-first. `does` is a one-line phrase of at most 120 characters; `quote` maps
-every top-level key an opaque payload may carry to the label it is quoted under
-(`""` for none, at most 40 characters) or to `~` for a key deliberately left
-off; `note` is `summary` (the default) or `none`. A `say` entry is read only
-under `style: minimal`. A class core phrases itself still needs a `say` entry
-with a `quote` map when its payload is opaque (a Hermes tool payload,
-`{tool, input}`, is).
+**`say`.** Keyed by EXACT class name: a pattern such as `files.*` is refused at
+load (`prompt-say-wildcard`), because one friendly phrase must never stand for
+several classes. `does` is a one-line phrase of at most 120 characters; `quote`
+maps every top-level key an opaque payload may carry to the label it is quoted
+under (`""` for none, at most 40 characters) or to `~` for a key deliberately
+left off, and must show at least one key; `note` is `summary` (the default) or
+`none`. Neither `does` nor a label may contain `⚠`, which the card reserves for
+its own notices. A `say` entry is read only under `style: minimal`. A class
+core phrases itself still needs a `say` entry with a `quote` map when its
+payload is opaque (a Hermes tool payload, `{tool, input}`, is). A `say` entry
+for a class no rule names loads: it applies if that class is ever requested.
 
 **Other channels.** `style` and `say` are validated wherever they appear and an
 unknown value fails the policy closed (`prompt-style-unknown`,
-`prompt-say-shape` on an untyped channel; the schema's own `enum` and shape
-errors on `telegram`, `web` and `cli`). Only Telegram draws a minimal card; the
-CLI and web channels IGNORE the keys and keep their full prompt, which shows
-more than was asked for rather than less.
+`prompt-say-shape`, `prompt-say-wildcard` on an untyped channel; the schema's
+own `enum`, `pattern` and shape errors on `telegram`, `web` and `cli`). Only
+Telegram draws a minimal card; the CLI and web channels IGNORE the keys and keep
+their full prompt, which shows more than was asked for rather than less.
 
 **What the record says.** A decision taken on a card drawn under a minimal
 policy carries `payload.rendering` on its `approval.granted` or
 `approval.rejected`: `{"style": "minimal"}`, or `{"style": "technical",
 "fallback": "<reason>"}` when the technical card was sent instead. Under a
 technical policy the key is absent and the record is unchanged. Nothing reads
-it back; it is a statement about the screen the approver answered on.
+it back; it is a statement about the screen the approver answered on. It is an
+OPEN field: `schema/event.schema.json` does not constrain it in this release,
+so a reader with a closed schema for `approval.granted` must admit it.
 
 **Changing it.** It is a policy key, so changing it is an attestation, and a
 decision on a request routed under the old policy is refused `policy-drift`, as
-for any policy change. A listener reads it when it starts, as it reads the row
-layout. An older core
-refuses the keys at the schema, and the whole policy then fails closed to
-all-`manual`: roll the core out before the policy that uses them.
-
-Fail soft on absence, closed on invalidity, the split every other policy key
-keeps. No `prompt` block — and a policy that failed to load at all — means the
-rows the channel ships, because a layout is not a permission and an unrelated
-typo in a class rule must not silently redecorate a phone screen. An unknown
-row name, a required row in `hide`, a row named by both `always` and `hide`, or
-a key the block does not define fails the WHOLE policy at load with a
-machine-readable keyword (`prompt-row-unknown`, `prompt-row-required`,
-`prompt-row-conflict`, `prompt-key-unknown`, `prompt-block-shape`), and every
-class resolves to `manual` until the file is repaired. The check runs for every
-channel name, including the unknown ones the schema admits as free-form
-objects, so a layout is validated wherever it is written.
-
-Nothing here teaches a channel anything about the log. Every row a layout can
-turn on was already on the `ChannelRequest`, and `--json`, `approval queue` and
-the web page carried it all along; rendering stays a pure function of
-(request, layout).
+for any policy change. The Telegram listener resolves `style` and `say` for EACH
+card it draws, and only from attested bytes: it reads the policy file once,
+requires those bytes to hash to the latest attestation in the verified log
+(the digest the gate decides under), and takes the settings from the same
+bytes. A re-attested setting therefore reaches the next card without a
+restart, and an edit to the file that nobody attested changes nothing: the card
+is technical, and when the attested policy asks for minimal the record says
+`fallback: "policy-unattested"`. An older core refuses the keys at the schema, and the
+whole policy then fails closed to all-`manual`: roll the core out before the
+policy that uses them.
 
 ## channel cli
 
