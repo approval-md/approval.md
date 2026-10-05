@@ -98,6 +98,19 @@ export const MINIMAL_GLOSS_LABEL = "AI summary (not checked):";
 export const MINIMAL_SUMMARY_LABEL = "Your agent says (not checked):";
 export const MINIMAL_COST_LABEL = "Your agent estimates the cost (not checked):";
 
+/**
+ * The computed line under the quote box when the box does not show every byte
+ * of the payload in full (a value was cut). Plain words, and outside the box,
+ * so no quoted text can produce or suppress it.
+ */
+export const MINIMAL_MORE_LINE = "⚠ There is more than fits here: open Full details before deciding.";
+
+/**
+ * The computed line under the quote box when the operator's declaration leaves
+ * a field the payload carries off the simple card (a `~` key in `quote`).
+ */
+export const MINIMAL_HIDDEN_LINE = "Some of what your agent sent is shown only in Full details.";
+
 /** The first line of the collapsed block: what a reader sees before tapping. */
 export const MINIMAL_DETAILS_HEADING = "Full details (tap to open)";
 
@@ -207,17 +220,22 @@ function markOne(character: string): string {
  * between tokens, so a mark is never split.
  */
 export function quoteLine(value: string, max: number = MINIMAL_QUOTE_MAX): string {
-  if (value.length === 0) return MINIMAL_EMPTY_MARK;
+  return drawQuote(value, max).text;
+}
+
+/** {@link quoteLine}, and whether the value was cut. */
+function drawQuote(value: string, max: number): { text: string; cut: boolean } {
+  if (value.length === 0) return { text: MINIMAL_EMPTY_MARK, cut: false };
   let out = "";
   let used = 0;
   for (const character of value) {
     const token = markOne(character);
     const cost = [...token].length;
-    if (used + cost > max) return `${out}${MINIMAL_CUT_MARK}`;
+    if (used + cost > max) return { text: `${out}${MINIMAL_CUT_MARK}`, cut: true };
     out += token;
     used += cost;
   }
-  return out;
+  return { text: out, cut: false };
 }
 
 /** A value of any JSON type as text: strings as themselves, everything else as JSON. */
@@ -226,10 +244,16 @@ function valueText(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
-/** One quote-box line, HTML: `<b>label:</b> value`, or the value alone for an empty label. */
-function quoted(label: string, value: string, max: number = MINIMAL_QUOTE_MAX): string {
-  const shown = escapeHtml(quoteLine(value, max));
-  return label.length === 0 ? shown : `<b>${escapeHtml(label)}:</b> ${shown}`;
+/** One quote-box line, HTML: `<b>label:</b> value`, or the value alone for an empty label; and whether it was cut. */
+function quoted(label: string, value: string, max: number = MINIMAL_QUOTE_MAX): { html: string; cut: boolean } {
+  const line = drawQuote(value, max);
+  const shown = escapeHtml(line.text);
+  return { html: label.length === 0 ? shown : `<b>${escapeHtml(label)}:</b> ${shown}`, cut: line.cut };
+}
+
+/** A class name as the headline may show it: marked like a quoted value, one line, bounded. */
+function className(actionClass: string): string {
+  return quoteLine(actionClass, 80);
 }
 
 /** "about 4 minutes", "about 3 days": a duration a non-engineer reads at a glance. */
@@ -272,13 +296,18 @@ function excerptOf(
   value: unknown,
   entry: PromptSayEntry | null,
   breakdown: string | null,
-): { kind: keyof typeof KIND_PHRASES | "opaque"; lines: string[] } | MinimalRefusal {
+): Excerpt | MinimalRefusal {
   const command = commandPayloadView(value);
   if (command !== null) {
     const whole = !command.command.includes("\n") && [...command.command].length <= MINIMAL_COMMAND_MAX;
     const lines = [quoted("", command.command, MINIMAL_COMMAND_MAX)];
+    // Where it runs is part of what it does (`rm -rf *` in a scratch folder
+    // and in a home folder are different requests), so it is always shown.
+    if (command.cwd !== null) lines.push(quoted("In folder", command.cwd));
     if (!whole && breakdown !== null) lines.push(quoted("Steps", breakdown));
-    return { kind: "command", lines };
+    // A command shown only in part is ALWAYS flagged, even when the steps line
+    // happens to fit: the steps are the classifier's abbreviation, not the bytes.
+    return excerpt("command", lines, !whole);
   }
 
   const change = changePayloadView(value);
@@ -290,7 +319,12 @@ function excerptOf(
     } else {
       lines.push(quoted("Replaces", change.before), quoted("With", change.after));
     }
-    return { kind: "file-change", lines };
+    // `replace_all: true` changes every match, not one: the same before/after
+    // text means a different edit, so it is on the card whenever it is set.
+    if (change.labels.some((field) => field.label === "replace_all" && field.text === "true")) {
+      lines.push(quoted("Every match", "yes"));
+    }
+    return excerpt("file-change", lines, false);
   }
 
   const email = emailPayloadFields(value);
@@ -302,13 +336,14 @@ function excerptOf(
       bcc: "Bcc",
       subject: "Subject",
       body: "Message",
+      content_type: "Format",
     };
-    const lines: string[] = [];
+    const lines: { html: string; cut: boolean }[] = [];
     for (const field of email) {
       const label = labels[field.label];
       if (label !== undefined) lines.push(quoted(label, field.text));
     }
-    return { kind: "email", lines };
+    return excerpt("email", lines, false);
   }
 
   // Opaque: the closed field set is the operator's declaration, or nothing.
@@ -322,13 +357,42 @@ function excerptOf(
       return { ok: false, reason: "unlisted-key" };
     }
   }
-  const lines: string[] = [];
+  const lines: { html: string; cut: boolean }[] = [];
+  let hidden = false;
   for (const [key, label] of Object.entries(entry.quote)) {
-    if (label === null || !Object.prototype.hasOwnProperty.call(record, key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    if (label === null) {
+      hidden = true;
+      continue;
+    }
     lines.push(quoted(label, valueText(record[key])));
   }
   if (lines.length === 0) return { ok: false, reason: "nothing-quoted" };
-  return { kind: "opaque", lines };
+  return { ...excerpt("opaque", lines, false), hidden };
+}
+
+/** What the quote box holds, and what it does not show. */
+interface Excerpt {
+  kind: keyof typeof KIND_PHRASES | "opaque";
+  /** HTML lines inside the box. */
+  lines: string[];
+  /** Some value was cut, or (a command) not shown whole: the card must say so. */
+  partial: boolean;
+  /** The declaration left a field the payload carries off the card. */
+  hidden: boolean;
+}
+
+function excerpt(
+  kind: Excerpt["kind"],
+  lines: { html: string; cut: boolean }[],
+  partial: boolean,
+): Excerpt {
+  return {
+    kind,
+    lines: lines.map((line) => line.html),
+    partial: partial || lines.some((line) => line.cut),
+    hidden: false,
+  };
 }
 
 /**
@@ -404,12 +468,16 @@ export function renderTelegramMinimal(
   let phrase: string;
   if (entry !== null) phrase = entry.does;
   else if (builtin !== undefined) phrase = builtin;
-  else if (excerpt.kind !== "opaque") phrase = `${KIND_PHRASES[excerpt.kind]} (type: ${actionClass})`;
+  else if (excerpt.kind !== "opaque") phrase = `${KIND_PHRASES[excerpt.kind]} (type: ${className(actionClass)})`;
   else return { ok: false, reason: "undeclared" };
 
   const headline = `<b>${escapeHtml(`${MINIMAL_HEADLINE_PREFIX}${phrase}`)}</b>`;
 
   const lines = [headline, `<blockquote>${excerpt.lines.join("\n")}</blockquote>`];
+  // Computed, outside the box, before any claimed line: what the box does NOT
+  // show. A partial excerpt is never presented as if it were the whole.
+  if (excerpt.partial) lines.push(escapeHtml(MINIMAL_MORE_LINE));
+  if (excerpt.hidden) lines.push(escapeHtml(MINIMAL_HIDDEN_LINE));
   // Claimed lines: only below the quote, always labelled, always one line.
   if (request.gloss !== undefined && request.gloss.value.trim().length > 0) {
     lines.push(`<i>${escapeHtml(MINIMAL_GLOSS_LABEL)}</i> ${escapeHtml(quoteLine(request.gloss.value))}`);

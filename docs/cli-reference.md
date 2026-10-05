@@ -3939,6 +3939,8 @@ no.
 <b>Your agent wants to <phrase></b>
 <blockquote><b>Label:</b> quoted value        one line per field, from the bound payload
 …</blockquote>
+⚠ There is more than fits here: open Full details before deciding.   only when a quoted value was cut or a command is not shown whole
+Some of what your agent sent is shown only in Full details.            only when a say entry leaves a field the payload carries off (~)
 <i>AI summary (not checked):</i> …            only when a model sentence is attached
 <i>Your agent says (not checked):</i> …       only when the class's say entry has note: summary
 <i>Your agent estimates the cost (not checked):</i> $0.00   only when the estimate is above zero
@@ -3965,10 +3967,17 @@ harness hook's cap), from the verified log.
 - *Quoted from the bound payload:* the box. The bytes were hash-checked against
   the request's `payload_hash` before the channel saw them, so they are what
   will be acted on; their content was written by the agent. A command is shown
-  whole up to 160 characters, otherwise cut and followed by its classifier
-  steps; a file change shows the file and the change; an email shows From, To,
-  Cc, Bcc, Subject and the message; an opaque payload shows the fields its
-  `say.<class>.quote` map labels.
+  whole up to 160 characters on one line, with the folder it runs in; a longer
+  or multi-line command is cut and followed by its classifier steps; a file
+  change shows the file, the change and whether it replaces every match; an
+  email shows From, To, Cc, Bcc, Subject, the format and the message; an opaque
+  payload shows the fields its `say.<class>.quote` map labels.
+- *Never a clean-looking partial:* when the box does not show everything (a
+  value cut, a command not shown as written), the computed line "⚠ There is
+  more than fits here: open Full details before deciding." follows the box;
+  when the declaration leaves a field off (`~`), "Some of what your agent sent
+  is shown only in Full details." does. Both are outside the box, so quoted
+  text can neither produce nor suppress them.
 - *Described, and labelled "not checked":* the AI summary and the agent's own
   summary and estimate. They never stand alone and never come first: they sit
   below the box.

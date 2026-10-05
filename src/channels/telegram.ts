@@ -252,11 +252,7 @@ import {
   type PromptStyle,
 } from "../core/prompt-layout.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
-import {
-  MINIMAL_DENY_LABEL,
-  MINIMAL_MESSAGE_BUDGET,
-  renderTelegramMinimal,
-} from "./telegram-minimal.js";
+import { MINIMAL_DENY_LABEL, renderTelegramMinimal } from "./telegram-minimal.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1247,6 +1243,44 @@ export function renderTelegram(
         : `${payload.truncated ? `--- payload TRUNCATED at render (sha256 ${payload.hash}) — no canonical rendering exists; do not grant on this ---\n` : ""}${payloadRegionText(payload, request.class.value)}`,
   };
 }
+
+/**
+ * The settle edit of a minimal card (APRV-489): the outcome, the card's
+ * headline, the detail lines, and the collapsed block WHOLE.
+ *
+ * The edit replaces the only message that holds the canonical rendering, so
+ * the rendering is never what gives way to fit: the runtime's own detail lines
+ * are shortened instead, with a marker, and the outcome headline always stays.
+ * The card was at most 3800 characters with its quote box and
+ * deadline line, which the edit drops, so headline plus collapsed block always
+ * fit under {@link TELEGRAM_SETTLE_BUDGET} (the card budget is `MINIMAL_MESSAGE_BUDGET` in `telegram-minimal.ts`).
+ */
+export function minimalSettleText(
+  outcome: string,
+  detail: string[],
+  card: { headline: string; details: string },
+): string {
+  const head = [`<b>${escapeHtml(outcome)}</b>`, card.headline];
+  const fixed = [...head, card.details].join("\n").length + 1;
+  const room = Math.max(0, TELEGRAM_SETTLE_BUDGET - fixed);
+  let lines = detail.map((entry) => escapeHtml(entry)).join("\n");
+  if (lines.length > room) {
+    const marker = "… (shortened; the log holds the full record)";
+    const keep = Math.max(0, room - marker.length);
+    // Cut on a character boundary that does not split an HTML entity.
+    let cut = [...lines].slice(0, keep).join("");
+    const amp = cut.lastIndexOf("&");
+    if (amp >= 0 && !cut.slice(amp).includes(";")) cut = cut.slice(0, amp);
+    lines = `${cut}${marker}`;
+  }
+  return [...head, ...(lines.length === 0 ? [] : [lines]), card.details].join("\n");
+}
+
+/**
+ * The longest settle edit of a minimal card, in characters of HTML: under
+ * Telegram's 4096 with room for a relay's `Agent: <name>` line.
+ */
+export const TELEGRAM_SETTLE_BUDGET = 3990;
 
 /**
  * Split `text` so every chunk survives HTML escaping inside the message limit.
@@ -3609,17 +3643,7 @@ export class TelegramChannel implements TestableChannel {
     // under the outcome, so the settled message still holds the canonical
     // rendering the approver answered on. Should that not fit, the technical
     // annotation is the fallback: the outcome is what the edit must carry.
-    const minimalText =
-      settled.card === undefined
-        ? null
-        : [
-            `<b>${escapeHtml(outcome)}</b>`,
-            settled.card.headline,
-            ...detail.map((entry) => escapeHtml(entry)),
-            settled.card.details,
-          ].join("\n");
-    const text =
-      minimalText !== null && minimalText.length <= MINIMAL_MESSAGE_BUDGET ? minimalText : technicalText;
+    const text = settled.card === undefined ? technicalText : minimalSettleText(outcome, detail, settled.card);
     await this.call("editMessageText", {
       chat_id: this.chatId,
       message_id: Number(deliveryId),
