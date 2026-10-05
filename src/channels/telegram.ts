@@ -610,6 +610,15 @@ export interface TelegramConfig {
    * `channels.telegram.prompt.say`. Read only under `promptStyle: minimal`.
    */
   say?: PromptSay;
+  /**
+   * Where the style and the `say` map come from FOR EACH DELIVERY (fix round
+   * 2, S4). The verb passes a function that reads the policy file the tagger
+   * reads, so a re-attested style or `say` takes effect on the next card
+   * without a restart, exactly as a re-attested class rule does. When absent,
+   * {@link TelegramConfig.promptStyle} and {@link TelegramConfig.say} are used.
+   * A resolver that throws means `technical`.
+   */
+  promptFor?: () => { style: PromptStyle; say: PromptSay };
 }
 
 /**
@@ -1261,19 +1270,67 @@ export function minimalSettleText(
   card: { headline: string; details: string },
 ): string {
   const head = [`<b>${escapeHtml(outcome)}</b>`, card.headline];
+  // One unit throughout (fix round 2, S3): UTF-16 code units of the HTML,
+  // which is what `.length` counts and never less than the parsed text
+  // Telegram limits. The cut is taken between grapheme clusters of the
+  // UNESCAPED text, so it never splits a surrogate pair, a cluster or an entity.
   const fixed = [...head, card.details].join("\n").length + 1;
   const room = Math.max(0, TELEGRAM_SETTLE_BUDGET - fixed);
-  let lines = detail.map((entry) => escapeHtml(entry)).join("\n");
-  if (lines.length > room) {
-    const marker = "… (shortened; the log holds the full record)";
-    const keep = Math.max(0, room - marker.length);
-    // Cut on a character boundary that does not split an HTML entity.
-    let cut = [...lines].slice(0, keep).join("");
-    const amp = cut.lastIndexOf("&");
-    if (amp >= 0 && !cut.slice(amp).includes(";")) cut = cut.slice(0, amp);
-    lines = `${cut}${marker}`;
-  }
+  const raw = detail.join("\n");
+  let lines = escapeHtml(raw);
+  if (lines.length > room) lines = shortenHtml(raw, room, SETTLE_SHORTENED_MARK);
   return [...head, ...(lines.length === 0 ? [] : [lines]), card.details].join("\n");
+}
+
+/** What a shortened run of detail lines ends with. */
+const SETTLE_SHORTENED_MARK = "… (shortened; the log holds the full record)";
+
+/** Grapheme clusters, for cuts that never split one. */
+const SETTLE_GRAPHEMES = new Intl.Segmenter("en", { granularity: "grapheme" });
+
+/** `raw` escaped and cut between clusters so the result, marker included, is at most `budget` UTF-16 units. */
+function shortenHtml(raw: string, budget: number, marker: string): string {
+  const limit = Math.max(0, budget - marker.length);
+  let kept = "";
+  for (const { segment } of SETTLE_GRAPHEMES.segment(raw)) {
+    const escaped = escapeHtml(segment);
+    if (kept.length + escaped.length > limit) break;
+    kept += escaped;
+  }
+  return `${kept}${marker}`;
+}
+
+/**
+ * The settle edit of last resort (fix round 2, S3): sent when Telegram refused
+ * the full settle edit of a minimal card, so a decided card never keeps looking
+ * undecided. The outcome, the request's key, the first detail line (who, when,
+ * which record) cut to fit, and where the rest is. Always under 1000 units.
+ */
+export function shortSettleText(outcome: string, actionKey: string, detail: string[]): string {
+  const first = detail[0] ?? "";
+  return [
+    `<b>${escapeHtml(outcome)}</b>`,
+    `<code>${shortenHtml(actionKey, 200, "")}</code>`,
+    "",
+    ...(first.length === 0 ? [] : [escapeHtml(first).length <= 400 ? escapeHtml(first) : shortenHtml(first, 400, "…")]),
+    "The full record is in the approval log (approval log, approval queue).",
+  ].join("\n");
+}
+
+/**
+ * Whether a Bot API failure is a refusal of THIS message rather than a passing
+ * failure (fix round 2, S2): any 4xx but 429. A 429, a 5xx and a transport
+ * failure are retried by the dispatch cycle as before; a refusal never will
+ * succeed with the same text, so the minimal card gives way to the technical one.
+ */
+export function isMessageRefusal(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.status !== null &&
+    cause.status >= 400 &&
+    cause.status < 500 &&
+    cause.status !== 429
+  );
 }
 
 /**
@@ -2603,6 +2660,8 @@ export class TelegramChannel implements TestableChannel {
   private readonly promptStyle: PromptStyle;
   /** The policy's `say` declarations (APRV-489). Pure input to the minimal renderer. */
   private readonly say: PromptSay;
+  /** The per-delivery resolver (fix round 2, S4), or null for the fixed values above. */
+  private readonly promptFor: (() => { style: PromptStyle; say: PromptSay }) | null;
   /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
   private lastSweepMs = Number.NEGATIVE_INFINITY;
 
@@ -2779,6 +2838,7 @@ export class TelegramChannel implements TestableChannel {
     this.layout = config.layout ?? TELEGRAM_PROMPT_LAYOUT;
     this.promptStyle = config.promptStyle ?? DEFAULT_PROMPT_STYLE;
     this.say = config.say ?? {};
+    this.promptFor = config.promptFor ?? null;
     // APRV-456. Only an explicit `true` or an absent key leaves the fallback on;
     // anything else a caller passes turns it off, the stricter direction.
     this.staleCopy = config.staleCopy === undefined || config.staleCopy === true;
@@ -3273,7 +3333,15 @@ export class TelegramChannel implements TestableChannel {
     let sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
     let rendering: PromptRendering | undefined;
     let card: { headline: string; details: string } | undefined;
-    const minimal = this.promptStyle === "minimal" ? await this.sendMinimal(request, nonce) : null;
+    const prompt = this.currentPrompt();
+    // Fix round 2, B2: a request delivered as part of a batch is always the
+    // technical card, as SPEC §10.3 (amended) says of a grouped delivery.
+    const minimal =
+      prompt.style !== "minimal"
+        ? null
+        : batchDeliveryId !== undefined
+          ? ({ ok: false, reason: "batch" } as const)
+          : await this.sendMinimal(request, nonce, prompt.say);
     if (minimal !== null && minimal.ok) {
       sent = minimal.sent;
       rendering = { style: "minimal" };
@@ -3321,6 +3389,7 @@ export class TelegramChannel implements TestableChannel {
   private async sendMinimal(
     request: ChannelRequest,
     nonce: string,
+    say: PromptSay,
   ): Promise<
     | { ok: true; sent: { deliveryId: DeliveryId; rendered: RenderedRequest }; card: { headline: string; details: string } }
     | { ok: false; reason: string }
@@ -3336,24 +3405,35 @@ export class TelegramChannel implements TestableChannel {
         anomalous: rendering.lines.some((entry) => entry.label.startsWith(TELEGRAM_ANOMALY_MARK)),
         payloadLabel: `<b>${PAYLOAD_CHUNK_LABEL}</b>`,
       },
-      this.say,
+      say,
     );
     if (!drawn.ok) return { ok: false, reason: drawn.reason };
 
-    const result = await this.call<{ message_id: number }>("sendMessage", {
-      chat_id: this.chatId,
-      text: drawn.text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
-            { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
+    let result: { message_id: number };
+    try {
+      result = await this.call<{ message_id: number }>("sendMessage", {
+        chat_id: this.chatId,
+        text: drawn.text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
+              { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
+            ],
           ],
-        ],
-      },
-    });
+        },
+      });
+    } catch (cause) {
+      // Fix round 2, S2: a refusal of the card itself (a Bot API that cannot
+      // parse the expandable block, an entity limit, a relay rule) would refuse
+      // the same card on every cycle and leave the approver with nothing. The
+      // technical card goes instead, once, and the record says why. A passing
+      // failure (429, 5xx, network) is thrown and retried as before.
+      if (isMessageRefusal(cause)) return { ok: false, reason: "send-refused" };
+      throw cause;
+    }
     const fields: RenderedField[] = rendering.lines.map((entry) => ({
       field: entry.field,
       kind: entry.kind,
@@ -3370,12 +3450,27 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * The style and `say` map in force for the delivery about to be drawn (fix
+   * round 2, S4): the resolver's answer when the verb gave one, else the fixed
+   * configuration. A resolver that throws is `technical`, the side that shows more.
+   */
+  private currentPrompt(): { style: PromptStyle; say: PromptSay } {
+    if (this.promptFor === null) return { style: this.promptStyle, say: this.say };
+    try {
+      return this.promptFor();
+    } catch (cause) {
+      this.complain(`approval: telegram could not read the prompt style; drawing technical: ${this.describe(cause)}`);
+      return { style: DEFAULT_PROMPT_STYLE, say: {} };
+    }
+  }
+
+  /**
    * What a decision on a digest records about its layout (APRV-489): nothing
    * under a technical policy, and the technical card with its reason under a
    * minimal one, since a digest is always drawn technical.
    */
   private digestRendering(stale: boolean): PromptRendering | undefined {
-    if (this.promptStyle === "technical") return undefined;
+    if (this.currentPrompt().style === "technical") return undefined;
     return { style: "technical", fallback: stale ? "stale-summary" : "digest" };
   }
 
@@ -3644,13 +3739,28 @@ export class TelegramChannel implements TestableChannel {
     // rendering the approver answered on. Should that not fit, the technical
     // annotation is the fallback: the outcome is what the edit must carry.
     const text = settled.card === undefined ? technicalText : minimalSettleText(outcome, detail, settled.card);
-    await this.call("editMessageText", {
-      chat_id: this.chatId,
-      message_id: Number(deliveryId),
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    });
+    const edit = (body: string) =>
+      this.call("editMessageText", {
+        chat_id: this.chatId,
+        message_id: Number(deliveryId),
+        text: body,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+    if (settled.card === undefined) {
+      await edit(text);
+      return;
+    }
+    // Fix round 2, S3: a minimal card is the only message holding its request,
+    // so a refused settle edit would leave a live-looking card on a decided
+    // request. The short settle text always fits and always says the outcome.
+    try {
+      await edit(text);
+    } catch (cause) {
+      if (!isMessageRefusal(cause) || isMessageNotModified(cause)) throw cause;
+      this.complain(`approval: telegram refused the settle edit of ${settled.actionKey}; sending the short form`);
+      await edit(shortSettleText(outcome, actionKey ?? settled.actionKey, detail));
+    }
   }
 
   /**

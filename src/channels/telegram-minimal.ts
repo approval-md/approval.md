@@ -29,13 +29,25 @@
  * ## Quoted text is hostile input
  *
  * Every quoted value was written by the party asking for approval. So each one
- * is one line (a line break is drawn as ` ⏎ `), invisible, format and
- * bidirectional characters are drawn as `«U+202E»`, `«` and `⏎` themselves are
- * drawn the same way so the marking is injective, the length is bounded with an
- * explicit `…(cut; see full details)`, and the result is HTML-escaped. A value
- * therefore cannot start a line of its own, cannot close the quote box, cannot
- * open or close the collapsed block, and cannot be bold: the headline and the
- * deadline line are bold or outside the box, and nothing quoted can be either.
+ * is one line (a line break is drawn as ` ⏎ `); control, format, bidirectional,
+ * default-ignorable and blank-looking characters, and combining marks beyond two
+ * on one character, are drawn as `«U+202E»`; `«` and `⏎` themselves are drawn
+ * the same way so the marking is injective; the length is bounded with an
+ * explicit `…(cut; see full details)` taken between grapheme clusters; and the
+ * result is HTML-escaped. A value therefore cannot start a line of its own,
+ * cannot close the quote box, cannot open or close the collapsed block, and
+ * cannot be bold: the headline and the deadline line are bold or outside the
+ * box, and nothing quoted can be either.
+ *
+ * ## The box holds payload bytes and nothing else (fix round 2, B1)
+ *
+ * Every line inside the quote box is ONE payload value, verbatim (marked and,
+ * where cut, visibly cut), under a label: the operator's attested label, or the
+ * runtime's fixed label for a field of a shape the runtime knows (`From`,
+ * `In folder`, `replace_all`, …). Nothing computed or paraphrased goes inside
+ * the box: no outline of a command, no "yes" for `true`. What the box does not
+ * show is said OUTSIDE it, by computed notices: a cut, and the names of fields
+ * not quoted.
  *
  * ## When the card is NOT drawn
  *
@@ -75,10 +87,13 @@ import { sayEntryFor, type PromptSay, type PromptSayEntry } from "../core/prompt
  */
 export const MINIMAL_MESSAGE_BUDGET = 3800;
 
+/** The longest key name a hidden-fields notice names, in code points. */
+export const MINIMAL_KEY_MAX = 64;
+
 /** The longest quoted value, in code points, before the cut marker. */
 export const MINIMAL_QUOTE_MAX = 280;
 
-/** The longest command shown whole on the card; a longer one is cut and its steps shown. */
+/** The longest command shown whole on the card; a longer one is cut, visibly, and announced. */
 export const MINIMAL_COMMAND_MAX = 160;
 
 /** What a cut value ends with. Plain words, because the reader is not an engineer. */
@@ -106,10 +121,17 @@ export const MINIMAL_COST_LABEL = "Your agent estimates the cost (not checked):"
 export const MINIMAL_MORE_LINE = "⚠ There is more than fits here: open Full details before deciding.";
 
 /**
- * The computed line under the quote box when the operator's declaration leaves
- * a field the payload carries off the simple card (a `~` key in `quote`).
+ * The computed line under the quote box when the box leaves a field the payload
+ * carries unquoted (a `~` key in the operator's `quote` map), naming the
+ * fields by the payload's own key names, marked like quoted text (S5).
  */
-export const MINIMAL_HIDDEN_LINE = "Some of what your agent sent is shown only in Full details.";
+export function hiddenFieldsLine(keys: readonly string[]): string {
+  const names = keys.map((key) => quoteLine(key, MINIMAL_KEY_MAX)).join(", ");
+  return `Not shown here: ${names}. Open Full details before deciding.`;
+}
+
+/** The fixed opening of {@link hiddenFieldsLine}, for tests and for readers. */
+export const MINIMAL_HIDDEN_PREFIX = "Not shown here: ";
 
 /** The first line of the collapsed block: what a reader sees before tapping. */
 export const MINIMAL_DETAILS_HEADING = "Full details (tap to open)";
@@ -133,6 +155,8 @@ export const MINIMAL_FALLBACKS = [
   "too-long",
   "digest",
   "stale-summary",
+  "batch",
+  "send-refused",
 ] as const;
 
 export type MinimalFallback = (typeof MINIMAL_FALLBACKS)[number];
@@ -198,18 +222,95 @@ function escapeHtml(text: string): string {
   return text.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
 }
 
-/** Characters drawn as `«U+XXXX»`: controls, format (bidi, zero-width), separators, private use, lone surrogates. */
-const MARKED = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}]$/u;
+/**
+ * Characters drawn as `«U+XXXX»`: controls, format (bidi, zero-width), line and
+ * paragraph separators, private use, lone surrogates, every default-ignorable
+ * code point (variation selectors, U+034F, the Khmer and Mongolian invisibles,
+ * tag characters, …), and the blank-looking letters and symbols that are not
+ * default-ignorable: the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 and the
+ * braille blank U+2800 (S1).
+ */
+const MARKED =
+  /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\u115F\u1160\u3164\uFFA0\u2800]$/u;
 
-/** One code point as the card draws it. */
-function markOne(character: string): string {
-  if (character === "\n") return MINIMAL_NEWLINE_MARK;
-  if (character === "«" || character === "⏎" || MARKED.test(character)) {
-    const code = character.codePointAt(0) ?? 0;
-    return `«U+${code.toString(16).toUpperCase().padStart(4, "0")}»`;
-  }
-  return character;
+/** A pictographic character, for the two emoji exceptions below. */
+const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
+
+/** A combining mark. */
+const COMBINING = /^\p{M}$/u;
+
+/** Combining marks drawn as themselves on one character; the rest are marked. */
+export const MINIMAL_COMBINING_MAX = 2;
+
+const VS16 = "\uFE0F";
+const ZWJ = "\u200D";
+
+/** `«U+XXXX»` for one code point. */
+function codeMark(character: string): string {
+  const code = character.codePointAt(0) ?? 0;
+  return `«U+${code.toString(16).toUpperCase().padStart(4, "0")}»`;
 }
+
+/**
+ * One grapheme cluster as the card draws it.
+ *
+ * Two default-ignorable characters are left as themselves, and only inside an
+ * emoji: ONE U+FE0F straight after a pictograph (emoji presentation, as in ❤️),
+ * and ONE U+200D between two pictographs (a joined emoji, as in 👨‍👩‍👧). Each
+ * changes how the emoji is drawn, so neither is invisible, and each carries at
+ * most one bit; marking them would make every heart and family unreadable. Any
+ * other variation selector, any second one, and any joiner elsewhere is marked,
+ * so the "emoji smuggling" payload (an emoji followed by variation selectors
+ * spelling a secret) is drawn as the emoji and then a row of marks.
+ */
+function drawCluster(cluster: string): string {
+  const points = [...cluster];
+  let out = "";
+  let marks = 0;
+  for (const [index, character] of points.entries()) {
+    const previous = index > 0 ? points[index - 1] : undefined;
+    const next = points[index + 1];
+    if (character === "\n") {
+      out += MINIMAL_NEWLINE_MARK;
+      marks = 0;
+      continue;
+    }
+    if (character === "«" || character === "⏎") {
+      out += codeMark(character);
+      marks = 0;
+      continue;
+    }
+    if (character === VS16 && previous !== undefined && PICTOGRAPH.test(previous)) {
+      out += character;
+      continue;
+    }
+    if (
+      character === ZWJ &&
+      previous !== undefined &&
+      next !== undefined &&
+      (PICTOGRAPH.test(previous) || (previous === VS16 && index > 1 && PICTOGRAPH.test(points[index - 2] ?? ""))) &&
+      PICTOGRAPH.test(next)
+    ) {
+      out += character;
+      continue;
+    }
+    if (MARKED.test(character)) {
+      out += codeMark(character);
+      continue;
+    }
+    if (COMBINING.test(character)) {
+      marks += 1;
+      out += marks > MINIMAL_COMBINING_MAX ? codeMark(character) : character;
+      continue;
+    }
+    marks = 0;
+    out += character;
+  }
+  return out;
+}
+
+/** Grapheme clusters, so a cut never splits a flag, an emoji sequence or a letter with its accents. */
+const GRAPHEMES = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 /**
  * A quoted value as one marked, bounded, UNESCAPED line.
@@ -217,7 +318,13 @@ function markOne(character: string): string {
  * Injective up to the cut: every output token comes from exactly one input
  * code point, and the tokens `«U+…»` and ` ⏎ ` arise only from marking,
  * because `«` and `⏎` in the input are themselves marked. The cut is taken
- * between tokens, so a mark is never split.
+ * between grapheme clusters, so neither a mark nor a cluster is ever split.
+ *
+ * Injective is not the same as "never looks the same". Two different values can
+ * still look alike to a reader: look-alike letters from other scripts
+ * (Cyrillic а and Latin a), a lone emoji with and without its presentation
+ * selector, and runs of ordinary spaces are drawn as themselves. The marking
+ * removes the invisible differences, not the visible but subtle ones.
  */
 export function quoteLine(value: string, max: number = MINIMAL_QUOTE_MAX): string {
   return drawQuote(value, max).text;
@@ -228,8 +335,8 @@ function drawQuote(value: string, max: number): { text: string; cut: boolean } {
   if (value.length === 0) return { text: MINIMAL_EMPTY_MARK, cut: false };
   let out = "";
   let used = 0;
-  for (const character of value) {
-    const token = markOne(character);
+  for (const { segment } of GRAPHEMES.segment(value)) {
+    const token = drawCluster(segment);
     const cost = [...token].length;
     if (used + cost > max) return { text: `${out}${MINIMAL_CUT_MARK}`, cut: true };
     out += token;
@@ -285,6 +392,7 @@ export function deadlineLine(request: ChannelRequest): string {
       ? "Your agent is waiting. There is no time limit on this question."
       : "There is no time limit. Nothing happens until you answer.";
   }
+  if (ms <= 0) return "Time is up: this request has closed, and an answer now will not count.";
   const left = plainDuration(ms);
   return toolCall
     ? `Your agent is waiting: ${left} left. If you don't answer, it will not do this.`
@@ -292,11 +400,7 @@ export function deadlineLine(request: ChannelRequest): string {
 }
 
 /** The quote-box lines for a payload, or why there are none. */
-function excerptOf(
-  value: unknown,
-  entry: PromptSayEntry | null,
-  breakdown: string | null,
-): Excerpt | MinimalRefusal {
+function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | MinimalRefusal {
   const command = commandPayloadView(value);
   if (command !== null) {
     const whole = !command.command.includes("\n") && [...command.command].length <= MINIMAL_COMMAND_MAX;
@@ -304,9 +408,11 @@ function excerptOf(
     // Where it runs is part of what it does (`rm -rf *` in a scratch folder
     // and in a home folder are different requests), so it is always shown.
     if (command.cwd !== null) lines.push(quoted("In folder", command.cwd));
-    if (!whole && breakdown !== null) lines.push(quoted("Steps", breakdown));
-    // A command shown only in part is ALWAYS flagged, even when the steps line
-    // happens to fit: the steps are the classifier's abbreviation, not the bytes.
+    // B1: no outline of the command inside the box, and none outside it. The
+    // classifier's breakdown drops flags and their values, which is exactly
+    // where a deletion target or an uploaded file lives; the collapsed block
+    // carries it, under the runtime's own label. A command not shown as written
+    // is announced by the computed notice instead.
     return excerpt("command", lines, !whole);
   }
 
@@ -321,8 +427,10 @@ function excerptOf(
     }
     // `replace_all: true` changes every match, not one: the same before/after
     // text means a different edit, so it is on the card whenever it is set.
-    if (change.labels.some((field) => field.label === "replace_all" && field.text === "true")) {
-      lines.push(quoted("Every match", "yes"));
+    // Every other field of the shape, under its own key name and verbatim
+    // value (B1: `replace_all: true`, never a paraphrase of it).
+    for (const field of change.labels) {
+      if (field.label !== "file") lines.push(quoted(field.label, field.text));
     }
     return excerpt("file-change", lines, false);
   }
@@ -358,11 +466,11 @@ function excerptOf(
     }
   }
   const lines: { html: string; cut: boolean }[] = [];
-  let hidden = false;
+  const hidden: string[] = [];
   for (const [key, label] of Object.entries(entry.quote)) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
     if (label === null) {
-      hidden = true;
+      hidden.push(key);
       continue;
     }
     lines.push(quoted(label, valueText(record[key])));
@@ -378,8 +486,8 @@ interface Excerpt {
   lines: string[];
   /** Some value was cut, or (a command) not shown whole: the card must say so. */
   partial: boolean;
-  /** The declaration left a field the payload carries off the card. */
-  hidden: boolean;
+  /** Payload keys the declaration leaves off the card, in declaration order. */
+  hidden: string[];
 }
 
 function excerpt(
@@ -391,7 +499,7 @@ function excerpt(
     kind,
     lines: lines.map((line) => line.html),
     partial: partial || lines.some((line) => line.cut),
-    hidden: false,
+    hidden: [],
   };
 }
 
@@ -451,15 +559,22 @@ export function renderTelegramMinimal(
   const payload = request.fullPayload.value;
   if (payload === null || technical.payloadText === null) return { ok: false, reason: "no-payload" };
   if (payload.truncated) return { ok: false, reason: "truncated" };
-  if (technical.anomalous) return { ok: false, reason: "anomaly" };
+  // Any abnormal health fact draws the technical card, whether or not the
+  // operator's row layout would have shown its row (fix round 2, S7): a hidden
+  // row must not let an unattested policy, a budget over its ceiling or an
+  // autonomy that is not manual reach the approver as a simple card.
+  if (
+    technical.anomalous ||
+    request.autonomy.value !== "manual" ||
+    !request.budgets.value.every((verdict) => verdict.pass) ||
+    request.attestation.value.status !== "attested"
+  ) {
+    return { ok: false, reason: "anomaly" };
+  }
 
   const declared = sayEntryFor(say, actionClass);
   const entry = declared?.entry ?? null;
-  const excerpt = excerptOf(
-    payload.value,
-    entry,
-    request.command_breakdown === undefined ? null : request.command_breakdown.value,
-  );
+  const excerpt = excerptOf(payload.value, entry);
   if ("ok" in excerpt) return excerpt;
 
   const builtin = Object.prototype.hasOwnProperty.call(BUILTIN_CLASS_PHRASES, actionClass)
@@ -477,7 +592,7 @@ export function renderTelegramMinimal(
   // Computed, outside the box, before any claimed line: what the box does NOT
   // show. A partial excerpt is never presented as if it were the whole.
   if (excerpt.partial) lines.push(escapeHtml(MINIMAL_MORE_LINE));
-  if (excerpt.hidden) lines.push(escapeHtml(MINIMAL_HIDDEN_LINE));
+  if (excerpt.hidden.length > 0) lines.push(escapeHtml(hiddenFieldsLine(excerpt.hidden)));
   // Claimed lines: only below the quote, always labelled, always one line.
   if (request.gloss !== undefined && request.gloss.value.trim().length > 0) {
     lines.push(`<i>${escapeHtml(MINIMAL_GLOSS_LABEL)}</i> ${escapeHtml(quoteLine(request.gloss.value))}`);
