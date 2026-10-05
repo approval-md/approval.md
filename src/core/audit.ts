@@ -99,6 +99,8 @@ import {
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
+import { payloadStoreDirFor } from "./payload-store.js";
+import { storedPolicyText } from "./policy-proposal.js";
 import { resolveSampler, type Sampler } from "./sampler.js";
 import { payloadOf, readVerifiedRecords } from "./state.js";
 import type { ValidateOptions } from "./validate.js";
@@ -1005,7 +1007,7 @@ export function reviewSample(
   // runtime-written sample; the rule is the single winner `resolve` picks, as
   // for a grant; and a rule with no `approvers` restricts nobody. The roster is
   // read from the ATTESTED policy bytes, as a grant's is.
-  const rosterRefusal = reviewerRoster(read.records, subject, actor, options);
+  const rosterRefusal = reviewerRoster(logPath, read.records, subject, actor, options);
   if (rosterRefusal !== null) return rosterRefusal;
 
   if (!hasVerdict) {
@@ -1134,32 +1136,38 @@ export function reviewSample(
  * attested rule that names no `approvers`.
  */
 function reviewerRoster(
+  logPath: string,
   records: readonly EventRecord[],
   subject: SampledSubject,
   actor: string,
   options: AuditOptions,
 ): AuditRefusal | null {
   const path = policyPathOf(options.policy === undefined ? {} : { policy: options.policy });
-  let bytes: Uint8Array;
-  try {
-    bytes = readFileSync(path);
-  } catch (cause) {
-    return attestationRefused(
-      unreadablePolicyStatus(path, cause instanceof Error ? cause.message : String(cause)),
-      subject,
-    );
-  }
   // PR #614 refutation F2 (ruling), recheck NF-3: the roster is the one in
   // force when the action RAN, which the sample pins. A sample that pinned its
   // policy is reviewed only against bytes hashing to that pin, so a later
   // re-attestation that renames, re-rosters or drops the class's rule neither
   // opens the review to a new reviewer nor leaves it with no roster; a sample
   // written before samples pinned one keeps the latest-attestation reading.
-  const attested =
-    subject.policySha256 === null
-      ? attestationRefused(checkAttestationOfBytes(records as EventRecord[], bytes), subject)
-      : pinnedPolicyRefused(records, subject, subject.policySha256, path, bytes);
-  if (attested !== null) return attested;
+  // Fix round 3: the pinned bytes come from the payload store first, so a
+  // re-attestation does not strand the older open samples.
+  let bytes: Uint8Array;
+  if (subject.policySha256 === null) {
+    try {
+      bytes = readFileSync(path);
+    } catch (cause) {
+      return attestationRefused(
+        unreadablePolicyStatus(path, cause instanceof Error ? cause.message : String(cause)),
+        subject,
+      );
+    }
+    const attested = attestationRefused(checkAttestationOfBytes(records as EventRecord[], bytes), subject);
+    if (attested !== null) return attested;
+  } else {
+    const pinned = pinnedPolicyBytes(logPath, records, subject, subject.policySha256, path);
+    if (!pinned.ok) return pinned;
+    bytes = pinned.bytes;
+  }
 
   // PR #614 refutation N7: findDeclaration's contract on an enforcement path.
   // A key two tasks declare is a collision registration refuses (APRV-138), so
@@ -1233,32 +1241,36 @@ function reviewerRoster(
 }
 
 /**
- * `policy-not-attested` unless `bytes` are the policy the sample pinned and a
- * human attested that policy before the sample was taken, else `null` (PR
- * #614 refutation F2).
+ * The bytes of the policy the sample pinned, or `policy-not-attested` (PR #614
+ * refutation F2, recheck NF-3, fix round 3).
  *
- * The pin is compared with the bytes on disk, never with the latest
- * attestation: the question is which roster governed the action when it ran
- * (recheck NF-3), and that is the pinned policy whether or not a later one has
- * been attested since. The attestation check keeps the pin honest: the sampler
- * copies the hash from the log, so a pin no earlier attestation names is a
- * record nobody attested, and its bytes are refused like unattested bytes.
+ * Authority first: a human must have attested the pinned hash before the
+ * sample was taken. The sampler copies the hash from the log, so a pin no
+ * earlier attestation names is a record nobody attested, refused like
+ * unattested bytes.
+ *
+ * Then the bytes, from two places, each verified against the pin and neither
+ * trusted otherwise:
+ *
+ * 1. the APRV-356 payload store beside the log, where every attestation since
+ *    APRV-356 (and every phone proposal) leaves the attested text, read by
+ *    `storedPolicyText`, which hashes what it reads. This is what keeps a
+ *    re-attestation, a settings save included, from stranding the samples
+ *    pinned to the earlier policy;
+ * 2. the policy file on disk, only when its bytes hash to the pin (a chain last
+ *    attested before APRV-356 stored nothing).
+ *
+ * Bytes in neither place are refused, naming the hash needed. The pin is never
+ * compared with the latest attestation: the question is which roster governed
+ * the action when it ran, whether or not a later policy has been attested.
  */
-function pinnedPolicyRefused(
+function pinnedPolicyBytes(
+  logPath: string,
   records: readonly EventRecord[],
   subject: SampledSubject,
   pinned: string,
   path: string,
-  bytes: Uint8Array,
-): AuditRefusal | null {
-  const live = policyBytesHash(bytes);
-  if (live !== pinned) {
-    return refuse(
-      "policy-not-attested",
-      `the action sampled at seq ${String(subject.seq)} ran under the policy attested as sha256 ${pinned}, and ${path} now hashes to ${live}. A review is held to the approvers roster in force when the action ran, so it needs the policy bytes hashing to ${pinned} on disk. Nothing was appended.`,
-      { seq: subject.seq },
-    );
-  }
+): { ok: true; bytes: Uint8Array } | AuditRefusal {
   const attestedBefore = records.some(
     (record) => record.seq < subject.seq && attestationSha256(record) === pinned,
   );
@@ -1269,7 +1281,23 @@ function pinnedPolicyRefused(
       { seq: subject.seq },
     );
   }
-  return null;
+  const stored = storedPolicyText(records, payloadStoreDirFor(logPath), pinned);
+  if (stored !== null) return { ok: true, bytes: Buffer.from(stored, "utf8") };
+
+  let onDisk: string;
+  try {
+    const bytes = readFileSync(path);
+    const live = policyBytesHash(bytes);
+    if (live === pinned) return { ok: true, bytes };
+    onDisk = `bytes hashing to ${live}`;
+  } catch (cause) {
+    onDisk = `nothing readable (${cause instanceof Error ? cause.message : String(cause)})`;
+  }
+  return refuse(
+    "policy-not-attested",
+    `the action sampled at seq ${String(subject.seq)} ran under the policy attested as sha256 ${pinned}. Its bytes are not in the payload store beside the log (an attestation made before APRV-356 stored none), and ${path} holds ${onDisk}. A review is held to the approvers roster in force when the action ran, so it needs the policy bytes hashing to ${pinned}: restore them to ${path}. Nothing was appended.`,
+    { seq: subject.seq },
+  );
 }
 
 /** `policy-invalid`: attested bytes the loader refuses name no roster (F1). */

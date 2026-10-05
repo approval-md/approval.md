@@ -50,6 +50,7 @@ import {
 } from "../src/core/audit.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { payloadPath, payloadStoreDirFor } from "../src/core/payload-store.js";
 import { namesApprover } from "../src/core/gate.js";
 import { verify } from "../src/core/verify.js";
 import { resetAuditSweepNotices, sweepAuditSampling } from "../src/daemon/audit.js";
@@ -1561,30 +1562,33 @@ test("APRV-483 refutation: the roster cannot come from a file the reviewer chose
       ...options,
     });
 
+  // The sample pins the attested policy, whose bytes the payload store holds
+  // (fix round 3), so no file the reviewer can reach supplies the roster: in
+  // each case below bob is held to carter-only and refused actor-not-approver.
   // 1. `--policy` pointed at a roster-free file the reviewer wrote.
   const elsewhere = join(unit.dir, "elsewhere.md");
   writeFileSync(elsewhere, policyText(SAMPLE_EVERYTHING), "utf8");
   const chosen = review({ policy: { file: elsewhere } });
   assert.equal(chosen.ok, false, "a reviewer-chosen policy supplied the roster");
-  if (!chosen.ok) assert.equal(chosen.code, "policy-not-attested");
+  if (!chosen.ok) assert.equal(chosen.code, "actor-not-approver");
   const cli = await runCli(unit, [
     "audit", "review", "task-042:draft", "--ok", "--policy", elsewhere, "--as", "human:bob", "--json",
   ]);
   assert.equal(cli.code, 1, cli.err);
-  assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "policy-not-attested");
+  assert.equal((JSON.parse(cli.err) as { error: { code: string } }).error.code, "actor-not-approver");
 
   // 2. The attested file edited to drop the roster, and not re-attested.
   const attestedText = readFileSync(unit.policyPath, "utf8");
   writeFileSync(unit.policyPath, attestedText.replace("    approvers: [carter]\n", ""), "utf8");
   const drifted = review(unit.options);
   assert.equal(drifted.ok, false, "an unattested edit dropped the roster");
-  if (!drifted.ok) assert.equal(drifted.code, "policy-not-attested");
+  if (!drifted.ok) assert.equal(drifted.code, "actor-not-approver");
 
   // 3. No policy file at all: unreadable is not "no roster".
   unlinkSync(unit.policyPath);
   const missing = review(unit.options);
   assert.equal(missing.ok, false, "a missing policy restricted nobody");
-  if (!missing.ok) assert.equal(missing.code, "policy-not-attested");
+  if (!missing.ok) assert.equal(missing.code, "actor-not-approver");
 
   writeFileSync(unit.policyPath, attestedText, "utf8");
   assert.equal(records(unit).length, before, "a refused review wrote to the log");
@@ -1719,25 +1723,11 @@ test("PR #614 refutation F2: a sample pins the attested policy, and a re-attesta
   assert.equal(loadPolicy({ file: unit.policyPath }).ok, true);
   assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(5)).ok, true);
   const before = records(unit).length;
-  for (const reviewer of ["human:bob", "human:carter"]) {
-    const result = reviewSample(
-      unit.logPath,
-      { kind: "action-key", actionKey: "task-042:draft" },
-      reviewer,
-      null,
-      { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
-    );
-    assert.equal(result.ok, false, `${reviewer} reviewed under a policy that no longer names the class`);
-    if (!result.ok) {
-      assert.equal(result.code, "policy-not-attested");
-      assert.match(result.message, new RegExp(pinned, "u"), "the refusal does not name the hash the review needs");
-    }
-  }
-  assert.equal(records(unit).length, before, "a refused review wrote to the log");
 
-  // The pinned path: the bytes the sample was taken under are back on disk, so
-  // the roster is that policy's. Its member reviews; anyone else is refused.
-  writeFileSync(unit.policyPath, attestedText, "utf8");
+  // The renamed policy stays on disk. The roster is still the pinned
+  // policy's, read from the payload store (fix round 3): its member reviews,
+  // anyone else is refused, and the rename neither strands the sample nor
+  // opens it.
   const stranger = reviewSample(
     unit.logPath,
     { kind: "action-key", actionKey: "task-042:draft" },
@@ -1747,6 +1737,7 @@ test("PR #614 refutation F2: a sample pins the attested policy, and a re-attesta
   );
   assert.equal(stranger.ok, false);
   if (!stranger.ok) assert.equal(stranger.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
   const named = reviewSample(
     unit.logPath,
     { kind: "action-key", actionKey: "task-042:draft" },
@@ -1820,22 +1811,13 @@ test("PR #614 recheck NF-3 (probe F2c): a policy attested between the run and th
   assert.equal((sample.payload as Record<string, unknown>)["policy_sha256"], p1);
   const before = records(unit).length;
 
-  // With P2 on disk nobody reviews it, bob included, and the refusal names P1.
-  for (const reviewer of ["human:bob", "human:carter"]) {
-    const result = reviewOk(unit, "task-042:draft", reviewer, 6);
-    assert.equal(result.ok, false, `${reviewer} reviewed under a policy attested after the run`);
-    if (!result.ok) {
-      assert.equal(result.code, "policy-not-attested");
-      assert.match(result.message, new RegExp(p1, "u"));
-    }
-  }
-  assert.equal(records(unit).length, before, "a refused review wrote to the log");
-
-  // With P1 back on disk the roster is P1's: bob is refused, carter records.
-  writeFileSync(unit.policyPath, p1Text, "utf8");
+  // P2 stays on disk. The roster is P1's, read from the payload store the
+  // attestation filled (fix round 3): bob is refused, carter records.
+  assert.equal(sha256Of(unit.policyPath), p2);
   const bob = reviewOk(unit, "task-042:draft", "human:bob", 7);
   assert.equal(bob.ok, false, "bob reviewed an action that ran under a roster that did not name him");
   if (!bob.ok) assert.equal(bob.code, "actor-not-approver");
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
   const carter = reviewOk(unit, "task-042:draft", "human:carter", 8);
   assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
   assertClean(unit);
@@ -1862,6 +1844,56 @@ test("PR #614 recheck NF-3 (reverse): a policy that drops the rule before the sw
 
   writeFileSync(unit.policyPath, p1Text, "utf8");
   const carter = reviewOk(unit, "task-042:draft", "human:carter", 6);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 fix round 3 (probe R2-N3d): a prose-only re-attestation does not strand an open sample", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1);
+  // A settings save: prose changes, the roster does not, and it is attested.
+  const p2 = attestText(unit, p1Text.replace("# Policy\n", "# Policy\n\nEdited from the app.\n"), 6);
+  assert.notEqual(p2, p1);
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 7);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 fix round 3: a pin whose bytes are neither stored nor on disk is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  attestText(unit, p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n"), 6);
+  // An attestation made before APRV-356 stored no bytes: removed here from the
+  // store, every copy of P1 the log binds.
+  for (const record of records(unit)) {
+    const payload = (record.payload ?? {}) as Record<string, unknown>;
+    if (record.event === "policy.updated" && payload["sha256"] === p1 && typeof payload["payload_hash"] === "string") {
+      unlinkSync(payloadPath(payloadStoreDirFor(unit.logPath), payload["payload_hash"]));
+    }
+  }
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 7);
+    assert.equal(result.ok, false, `${reviewer} reviewed with the pinned bytes nowhere`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, new RegExp(p1, "u"));
+      assert.match(result.message, /not in the payload store/u);
+    }
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  // The disk fallback: P1's bytes restored to the file, and carter records.
+  writeFileSync(unit.policyPath, p1Text, "utf8");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 8);
   assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
   assertClean(unit);
 });

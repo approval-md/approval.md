@@ -3568,9 +3568,14 @@ recorded the start (a harness start carries the same hash as its own
 changes neither who may review the sample nor whether anyone can. Only an
 execution older than every attestation in the log pins the latest attestation
 at sampling instead. A review of that sample reads the
-roster only from policy bytes that hash to the pin: if the file on disk hashes
-to anything else, including a later attestation, the review is refused
-`policy-not-attested` and the message names the hash it needs. A later
+roster only from policy bytes that hash to the pin, and only when an
+attestation before the sample names that hash. The bytes come from the payload
+store beside the log, where every attestation since APRV-356 keeps the text it
+attested (PR #614 fix round 3), so editing and re-attesting the policy, a
+settings save from the app included, leaves older open samples reviewable. The
+policy file on disk is the fallback, used only when its bytes hash to the pin
+(a chain last attested before APRV-356 stored none). Bytes in neither place are
+refused `policy-not-attested`, and the message names the hash it needs. A later
 re-attestation that renames or drops the class's rule therefore cannot leave
 the sample with no roster, and one that names a different roster cannot open
 it to a reviewer the action's policy did not name. A class that matches no rule in the pinned policy
