@@ -414,21 +414,20 @@
     "promptSay": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["does"],
-      "description": "SPEC.md §5.2 (APRV-489): one class's minimal-card declaration.",
+      "description": "SPEC.md §5.2 (APRV-489): one class's minimal-card declaration. `does` is required for a class core does not phrase itself and refused for one it does (checked at load).",
       "properties": {
         "does": {
           "type": "string",
           "minLength": 1,
           "maxLength": 120,
-          "description": "The plain-words verb phrase the headline completes: `Your agent wants to <does>`. One line, with no control, format or line-separator characters (checked at load). The runtime chooses the entry by the class the log records."
+          "description": "The plain-words verb phrase the headline completes: `Your agent wants to <does>`. Starts with a letter; no line break, sentence punctuation (. ! ? … : ;), markup or ⚠ (checked at load). Not allowed for a class core phrases itself. The runtime chooses the entry by the exact class the log records."
         },
         "quote": {
           "type": "object",
           "propertyNames": { "type": "string", "minLength": 1, "maxLength": 64 },
           "additionalProperties": {
             "oneOf": [
-              { "type": "string", "maxLength": 40 },
+              { "type": "string", "maxLength": 24 },
               { "type": "null" }
             ]
           },

@@ -70,12 +70,18 @@
  */
 
 import { LIVE_TOOL_CALL, type ChannelRequest } from "./contract.js";
+import { commandSegmentWords } from "../core/command-class.js";
 import {
   changePayloadView,
   commandPayloadView,
   emailPayloadFields,
 } from "../core/wysiwys.js";
-import { sayEntryFor, type PromptSay, type PromptSayEntry } from "../core/prompt-layout.js";
+import {
+  BUILTIN_CLASS_PHRASES,
+  sayEntryFor,
+  type PromptSay,
+  type PromptSayEntry,
+} from "../core/prompt-layout.js";
 
 /**
  * The longest a minimal card may be, in characters of HTML.
@@ -126,7 +132,7 @@ export const MINIMAL_MORE_LINE = "⚠ There is more than fits here: open Full de
  * fields by the payload's own key names, marked like quoted text (S5).
  */
 export function hiddenFieldsLine(keys: readonly string[]): string {
-  const names = keys.map((key) => quoteLine(key, MINIMAL_KEY_MAX)).join(", ");
+  const names = keys.map((key) => isolate(quoteLine(key, MINIMAL_KEY_MAX - 2))).join(", ");
   return `Not shown here: ${names}. Open Full details before deciding.`;
 }
 
@@ -162,23 +168,8 @@ export const MINIMAL_FALLBACKS = [
 
 export type MinimalFallback = (typeof MINIMAL_FALLBACKS)[number];
 
-/**
- * The phrases for the classes core itself emits (R3: core supplies phrases only
- * for its own built-in classes and payload kinds; an operator's class is
- * phrased by its attested `say` entry). `policy.edit` is absent on purpose: a
- * policy edit is always the technical card.
- */
-export const BUILTIN_CLASS_PHRASES: Readonly<Record<string, string>> = {
-  "network.call": "contact a website or online service",
-  "read.web": "read a web page",
-  "browser.exec": "use a web browser",
-  "cron.manage": "change its scheduled jobs",
-  "process.write": "control a program it is running",
-  "skill.manage": "add or change one of its skills",
-  "agent.delegate": "hand a task to another agent",
-  "message.send": "send a message",
-  "files.delete.scratch": "delete files in its scratch space",
-};
+/** The phrases for the classes core itself emits; the table lives in `core/prompt-layout.ts` (R2-S2). */
+export { BUILTIN_CLASS_PHRASES };
 
 /** The phrase for a structured payload kind, when the class has none. */
 const KIND_PHRASES = {
@@ -234,17 +225,12 @@ function escapeHtml(text: string): string {
 const MARKED =
   /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\u115F\u1160\u3164\uFFA0\u2800]$/u;
 
-/** A pictographic character, for the two emoji exceptions below. */
-const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
-
 /** A combining mark. */
 const COMBINING = /^\p{M}$/u;
 
 /** Combining marks drawn as themselves on one character; the rest are marked. */
 export const MINIMAL_COMBINING_MAX = 2;
 
-const VS16 = "\uFE0F";
-const ZWJ = "\u200D";
 
 /** `«U+XXXX»` for one code point. */
 function codeMark(character: string): string {
@@ -253,24 +239,43 @@ function codeMark(character: string): string {
 }
 
 /**
- * One grapheme cluster as the card draws it.
+ * A recognised emoji sequence (Unicode's RGI set: `\p{RGI_Emoji}`, a property
+ * of strings that needs the regular expression `v` flag), or `null` on a
+ * runtime without it (fix round 3, R2-B1).
  *
- * Two default-ignorable characters are left as themselves, and only inside an
- * emoji: ONE U+FE0F straight after a pictograph (emoji presentation, as in ❤️),
- * and ONE U+200D between two pictographs (a joined emoji, as in 👨‍👩‍👧). Each
- * changes how the emoji is drawn, so neither is invisible, and each carries at
- * most one bit; marking them would make every heart and family unreadable. Any
- * other variation selector, any second one, and any joiner elsewhere is marked,
- * so the "emoji smuggling" payload (an emoji followed by variation selectors
- * spelling a secret) is drawn as the emoji and then a row of marks.
+ * A grapheme cluster is drawn untouched ONLY when the whole cluster is one such
+ * sequence (❤️, 👨‍👩‍👧, 1️⃣, 🏴 with its tag characters): then every
+ * presentation selector, joiner and tag in it is part of the emoji's look. In
+ * every other cluster each of them is marked, so U+FE0F after a face that is
+ * already an emoji, or U+200D between two pictographs that form no emoji, cannot
+ * carry hidden bits. On a runtime without the property the answer is `null`
+ * and NOTHING is exempt: every selector and joiner is marked. Node 20, this
+ * package's floor, ships V8 11.3, which supports the `v` flag (V8 11.2).
+ */
+const RGI_EMOJI: RegExp | null = (() => {
+  try {
+    return new RegExp("^\\p{RGI_Emoji}$", "v");
+  } catch {
+    return null;
+  }
+})();
+
+/** Whether `cluster` is drawn as itself: a recognised emoji sequence, on a runtime that can tell. */
+export function isRecognisedEmoji(cluster: string): boolean {
+  return RGI_EMOJI !== null && RGI_EMOJI.test(cluster);
+}
+
+/**
+ * One grapheme cluster as the card draws it. A recognised emoji sequence is
+ * itself; in any other cluster every marked character, including every
+ * presentation selector and joiner, is drawn `«U+XXXX»`.
  */
 function drawCluster(cluster: string): string {
+  if (isRecognisedEmoji(cluster)) return cluster;
   const points = [...cluster];
   let out = "";
   let marks = 0;
-  for (const [index, character] of points.entries()) {
-    const previous = index > 0 ? points[index - 1] : undefined;
-    const next = points[index + 1];
+  for (const character of points) {
     if (character === "\n") {
       out += MINIMAL_NEWLINE_MARK;
       marks = 0;
@@ -279,20 +284,6 @@ function drawCluster(cluster: string): string {
     if (character === "«" || character === "⏎") {
       out += codeMark(character);
       marks = 0;
-      continue;
-    }
-    if (character === VS16 && previous !== undefined && PICTOGRAPH.test(previous)) {
-      out += character;
-      continue;
-    }
-    if (
-      character === ZWJ &&
-      previous !== undefined &&
-      next !== undefined &&
-      (PICTOGRAPH.test(previous) || (previous === VS16 && index > 1 && PICTOGRAPH.test(points[index - 2] ?? ""))) &&
-      PICTOGRAPH.test(next)
-    ) {
-      out += character;
       continue;
     }
     if (MARKED.test(character)) {
@@ -352,16 +343,45 @@ function valueText(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
-/** One quote-box line, HTML: `<b>label:</b> value`, or the value alone for an empty label; and whether it was cut. */
-function quoted(label: string, value: string, max: number = MINIMAL_QUOTE_MAX): { html: string; cut: boolean } {
-  const line = drawQuote(value, max);
-  const shown = escapeHtml(line.text);
-  return { html: label.length === 0 ? shown : `<b>${escapeHtml(label)}:</b> ${shown}`, cut: line.cut };
+/**
+ * The runtime's own first-strong isolate around every quoted value (fix round
+ * 3, R2-S1). Letters of a right-to-left script reorder the digits and words
+ * near them with no control character present (`pay 100 א 5`); inside an
+ * isolate a value can reorder only itself, never its label, the cut mark, a
+ * neighbouring line or the card's own text. Added AFTER marking, so payload
+ * U+2068/U+2069 are still marked and these two never are; counted in every
+ * length bound; never inside the collapsed block, which stays the technical
+ * card byte for byte.
+ */
+export const ISOLATE_OPEN = "\u2068";
+export const ISOLATE_CLOSE = "\u2069";
+
+function isolate(text: string): string {
+  return `${ISOLATE_OPEN}${text}${ISOLATE_CLOSE}`;
 }
 
-/** A class name as the headline may show it: marked like a quoted value, one line, bounded. */
+/** A value drawn, bounded (the two isolate characters counted), escaped and isolated. */
+function drawIsolated(value: string, max: number): { html: string; cut: boolean } {
+  const line = drawQuote(value, Math.max(1, max - 2));
+  return { html: isolate(escapeHtml(line.text)), cut: line.cut };
+}
+
+/** One quote-box line, HTML: `<b>label:</b> value`, or the value alone for an empty label; and whether it was cut. */
+function quoted(label: string, value: string, max: number = MINIMAL_QUOTE_MAX): QuoteLine {
+  const line = drawIsolated(value, max);
+  return { html: label.length === 0 ? line.html : `<b>${escapeHtml(label)}:</b> ${line.html}`, cut: line.cut, label };
+}
+
+/** One quote-box line and what the box rule needs to know about it. */
+interface QuoteLine {
+  html: string;
+  cut: boolean;
+  label: string;
+}
+
+/** A class name as the headline may show it: marked like a quoted value, bounded, isolated. */
 function className(actionClass: string): string {
-  return quoteLine(actionClass, 80);
+  return isolate(quoteLine(actionClass, 78));
 }
 
 /** "about 4 minutes", "about 3 days": a duration a non-engineer reads at a glance. */
@@ -400,21 +420,52 @@ export function deadlineLine(request: ChannelRequest): string {
     : `Open for ${left}. If you don't answer, your agent will not do this.`;
 }
 
+/**
+ * The computed line under a command's quote box (fix round 3, should-fix 1),
+ * or `null` when the box shows one whole command. `count` is the classifier's
+ * own segment count (the technical card's `commands:` row comes from the same
+ * tokenizer), or `null` when it cannot read the command. It never names or
+ * paraphrases a command the box does not show.
+ */
+export function commandNotice(count: number | null, cut: boolean): string | null {
+  if (count === null) {
+    return cut
+      ? "⚠ More than one command may be here, and only the beginning is shown above: open Full details before deciding."
+      : "More than one command may be here: open Full details if you are unsure.";
+  }
+  if (cut) {
+    return count > 1
+      ? `⚠ This runs ${String(count)} commands. Only the beginning is shown above: open Full details before deciding.`
+      : "⚠ Only the beginning of this command is shown above: open Full details before deciding.";
+  }
+  return count > 1 ? `This runs ${String(count)} commands, all shown above.` : null;
+}
+
 /** The quote-box lines for a payload, or why there are none. */
 function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | MinimalRefusal {
   const command = commandPayloadView(value);
   if (command !== null) {
-    const whole = !command.command.includes("\n") && [...command.command].length <= MINIMAL_COMMAND_MAX;
-    const lines = [quoted("", command.command, MINIMAL_COMMAND_MAX)];
+    // R2-B2: a value stands alone only when it is the only quotation, so the
+    // command takes a label whenever its folder is quoted too.
+    const commandLine = quoted(command.cwd === null ? "" : "Command", command.command, MINIMAL_COMMAND_MAX);
+    const lines = [commandLine];
     // Where it runs is part of what it does (`rm -rf *` in a scratch folder
     // and in a home folder are different requests), so it is always shown.
-    if (command.cwd !== null) lines.push(quoted("In folder", command.cwd));
+    const folder = command.cwd === null ? null : quoted("In folder", command.cwd);
+    if (folder !== null) lines.push(folder);
     // B1: no outline of the command inside the box, and none outside it. The
     // classifier's breakdown drops flags and their values, which is exactly
-    // where a deletion target or an uploaded file lives; the collapsed block
-    // carries it, under the runtime's own label. A command not shown as written
-    // is announced by the computed notice instead.
-    return excerpt("command", lines, !whole);
+    // where a deletion target or an uploaded file lives. What the card says
+    // instead is COMPUTED and outside the box: how many commands this is, by
+    // the classifier's own count, and whether only the beginning is shown.
+    const segments = commandSegmentWords(command.command);
+    return {
+      ...excerpt("command", lines, false),
+      // The command line's own cut is said by the command notice below; the
+      // generic warning is left for the folder line alone.
+      partial: folder?.cut === true,
+      commandNotice: commandNotice(segments === null ? null : segments.length, commandLine.cut),
+    };
   }
 
   const change = changePayloadView(value);
@@ -447,10 +498,20 @@ function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | Mini
       body: "Message",
       content_type: "Format",
     };
-    const lines: { html: string; cut: boolean }[] = [];
+    const lines: QuoteLine[] = [];
+    const record = value as Record<string, unknown>;
     for (const field of email) {
       const label = labels[field.label];
-      if (label !== undefined) lines.push(quoted(label, field.text));
+      if (label === undefined) continue;
+      // R2-B2: a list of addresses is one quoted line PER ADDRESS under the
+      // same label, never the addresses joined with ", " (which would draw
+      // ["a, b"] and ["a", "b"] the same).
+      const raw = record[field.label];
+      if (Array.isArray(raw)) {
+        for (const address of raw as string[]) lines.push(quoted(label, address));
+      } else {
+        lines.push(quoted(label, field.text));
+      }
     }
     return excerpt("email", lines, false);
   }
@@ -466,7 +527,7 @@ function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | Mini
       return { ok: false, reason: "unlisted-key" };
     }
   }
-  const lines: { html: string; cut: boolean }[] = [];
+  const lines: QuoteLine[] = [];
   const hidden: string[] = [];
   for (const [key, label] of Object.entries(entry.quote)) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
@@ -477,6 +538,11 @@ function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | Mini
     lines.push(quoted(label, valueText(record[key])));
   }
   if (lines.length === 0) return { ok: false, reason: "nothing-quoted" };
+  // R2-B2: an unlabelled value only as the ONLY quotation. A loaded policy
+  // cannot declare otherwise (refused at load); a hand-built map falls back.
+  if (lines.length > 1 && lines.some((line) => line.label.length === 0)) {
+    return { ok: false, reason: "undeclared" };
+  }
   return { ...excerpt("opaque", lines, false), hidden };
 }
 
@@ -489,13 +555,11 @@ interface Excerpt {
   partial: boolean;
   /** Payload keys the declaration leaves off the card, in declaration order. */
   hidden: string[];
+  /** A command's computed notice, replacing the generic warning for its command line. */
+  commandNotice?: string | null;
 }
 
-function excerpt(
-  kind: Excerpt["kind"],
-  lines: { html: string; cut: boolean }[],
-  partial: boolean,
-): Excerpt {
+function excerpt(kind: Excerpt["kind"], lines: QuoteLine[], partial: boolean): Excerpt {
   return {
     kind,
     lines: lines.map((line) => line.html),
@@ -581,9 +645,12 @@ export function renderTelegramMinimal(
   const builtin = Object.prototype.hasOwnProperty.call(BUILTIN_CLASS_PHRASES, actionClass)
     ? BUILTIN_CLASS_PHRASES[actionClass]
     : undefined;
+  // R2-S2: core's own phrase always wins for core's own classes (a say entry
+  // may not set `does` for them; refused at load). An operator class takes its
+  // attested phrase.
   let phrase: string;
-  if (entry !== null) phrase = entry.does;
-  else if (builtin !== undefined) phrase = builtin;
+  if (builtin !== undefined) phrase = builtin;
+  else if (entry?.does !== undefined) phrase = entry.does;
   else if (excerpt.kind !== "opaque") phrase = `${KIND_PHRASES[excerpt.kind]} (type: ${className(actionClass)})`;
   else return { ok: false, reason: "undeclared" };
 
@@ -592,16 +659,19 @@ export function renderTelegramMinimal(
   const lines = [headline, `<blockquote>${excerpt.lines.join("\n")}</blockquote>`];
   // Computed, outside the box, before any claimed line: what the box does NOT
   // show. A partial excerpt is never presented as if it were the whole.
+  if (excerpt.commandNotice !== undefined && excerpt.commandNotice !== null) {
+    lines.push(escapeHtml(excerpt.commandNotice));
+  }
   if (excerpt.partial) lines.push(escapeHtml(MINIMAL_MORE_LINE));
   if (excerpt.hidden.length > 0) lines.push(escapeHtml(hiddenFieldsLine(excerpt.hidden)));
   // Claimed lines: only below the quote, always labelled, always one line.
   if (request.gloss !== undefined && request.gloss.value.trim().length > 0) {
-    lines.push(`<i>${escapeHtml(MINIMAL_GLOSS_LABEL)}</i> ${escapeHtml(quoteLine(request.gloss.value))}`);
+    lines.push(`<i>${escapeHtml(MINIMAL_GLOSS_LABEL)}</i> ${drawIsolated(request.gloss.value, MINIMAL_QUOTE_MAX).html}`);
   }
   const showSummary = entry !== null && (entry.note ?? "summary") === "summary";
   const summary = request.summary.value;
   if (showSummary && summary !== null && summary.trim().length > 0) {
-    lines.push(`<i>${escapeHtml(MINIMAL_SUMMARY_LABEL)}</i> ${escapeHtml(quoteLine(summary))}`);
+    lines.push(`<i>${escapeHtml(MINIMAL_SUMMARY_LABEL)}</i> ${drawIsolated(summary, MINIMAL_QUOTE_MAX).html}`);
   }
   if (request.est_cost_usd.value > 0) {
     lines.push(

@@ -44,13 +44,17 @@ import {
   type TelegramConfig,
 } from "../src/channels/telegram.js";
 import {
+  commandNotice,
   deadlineLine,
+  isRecognisedEmoji,
   plainDuration,
   quoteLine,
   renderTelegramMinimal,
   MINIMAL_CUT_MARK,
   MINIMAL_DENY_LABEL,
   MINIMAL_GLOSS_LABEL,
+  ISOLATE_CLOSE,
+  ISOLATE_OPEN,
   MINIMAL_HEADLINE_PREFIX,
   MINIMAL_HIDDEN_PREFIX,
   hiddenFieldsLine,
@@ -515,7 +519,7 @@ test("a card is complete without the gloss: no AI line, no empty line, the comma
   const visibleLines = textOf(card).split("<blockquote expandable>")[0]?.split("\n") ?? [];
   assert.ok(!textOf(card).includes(MINIMAL_GLOSS_LABEL));
   assert.ok(visibleLines.slice(0, -1).every((line) => line.trim().length > 0), "an empty line on the card");
-  assert.ok(textOf(card).includes(`<blockquote>git clone`), "the command is not quoted");
+  assert.ok(textOf(card).includes(`<blockquote><b>Command:</b> ${ISOLATE_OPEN}git clone`), "the command is not quoted");
 });
 
 test("the deadline line is computed from the gate's window: a blocked tool call versus a queued proposal (R4)", () => {
@@ -617,7 +621,8 @@ test("a quoted line break cannot start a line of its own: a forged headline or d
 test("invisible and bidirectional characters are marked, and the marking is injective", async () => {
   const [card] = await minimalSends(intentRequest("pay‮txt.exe​⁦x⁩\r\t«U+202E»⏎"));
   const text = textOf(card);
-  const quoteLineText = text.split("\n")[1] ?? "";
+  // The runtime's own isolate around the value is not a payload character (R2-S1).
+  const quoteLineText = (text.split("\n")[1] ?? "").replace(`<blockquote>${ISOLATE_OPEN}`, "").replace(`${ISOLATE_CLOSE}</blockquote>`, "");
   for (const mark of ["«U+202E»", "«U+200B»", "«U+2066»", "«U+2069»", "«U+000D»", "«U+0009»", "«U+00AB»", "«U+23CE»"]) {
     assert.ok(quoteLineText.includes(mark), `${mark} missing from ${quoteLineText}`);
   }
@@ -893,21 +898,26 @@ test("a long command whose harmful tail falls after the cut says so, in plain wo
   assert.ok(seen.includes(MINIMAL_CUT_MARK), "no cut marker on the command");
   const lines = seen.split("\n");
   const boxEnd = lines.findIndex((line) => line.endsWith("</blockquote>"));
-  assert.equal(lines[boxEnd + 1], MINIMAL_MORE_LINE, "the warning is not the first line under the box");
+  // Fix round 3: for a command the computed notice counts the commands (the classifier's count).
+  assert.equal(
+    lines[boxEnd + 1],
+    "⚠ This runs 4 commands. Only the beginning is shown above: open Full details before deciding.",
+    "the computed notice is not the first line under the box",
+  );
   assert.ok(visible(text).includes("rm -rf ~"), "Full details lost the tail");
 });
 
-test("a multi-line command is flagged even when it is short: the second command is never a clean-looking partial", async () => {
+test("a multi-line command is announced with the classifier's count even when it is short", async () => {
   const request = requestOf("network.call", "hook:s:t10:network.call", { command: "ls\nrm -rf ~", cwd: "/" });
   const [card] = await minimalSends(request);
   const seen = outsideDetails(textOf(card));
   assert.ok(seen.includes("ls ⏎ rm -rf ~"), seen);
-  assert.ok(seen.includes(MINIMAL_MORE_LINE), "a command not shown as written carried no warning");
+  assert.ok(seen.split("\n").includes("This runs 2 commands, all shown above."), seen);
 });
 
 test("where a command runs and a replace-every-match edit are on the card", async () => {
   const [command] = await minimalSends(requestOf("network.call", "hook:s:t11:network.call", { command: "rm -rf *", cwd: "/home/hermes" }));
-  assert.ok(outsideDetails(textOf(command)).includes("<b>In folder:</b> /home/hermes"));
+  assert.ok(outsideDetails(textOf(command)).includes(`<b>In folder:</b> ${ISOLATE_OPEN}/home/hermes${ISOLATE_CLOSE}`));
   const [edit] = await minimalSends(
     requestOf("files.write.workspace", "hook:s:t12:files.write.workspace", {
       tool: "Edit",
@@ -918,9 +928,9 @@ test("where a command runs and a replace-every-match edit are on the card", asyn
     }),
   );
   const seen = outsideDetails(textOf(edit));
-  assert.ok(seen.includes("<b>replace_all:</b> true"), seen);
-  assert.ok(seen.includes("<b>tool:</b> Edit"), seen);
-  assert.ok(seen.startsWith(`<b>${MINIMAL_HEADLINE_PREFIX}change a file (type: files.write.workspace)</b>`));
+  assert.ok(seen.includes(`<b>replace_all:</b> ${ISOLATE_OPEN}true${ISOLATE_CLOSE}`), seen);
+  assert.ok(seen.includes(`<b>tool:</b> ${ISOLATE_OPEN}Edit${ISOLATE_CLOSE}`), seen);
+  assert.ok(seen.startsWith(`<b>${MINIMAL_HEADLINE_PREFIX}change a file (type: ${ISOLATE_OPEN}files.write.workspace${ISOLATE_CLOSE})</b>`));
 });
 
 test("a field the declaration leaves off is NAMED on the card; a fully quoted payload carries no notice (S5)", async () => {
@@ -933,9 +943,15 @@ test("a field the declaration leaves off is NAMED on the card; a fully quoted pa
   );
   const seen = outsideDetails(textOf(pay));
   assert.ok(seen.includes(`\n${hiddenFieldsLine(["to"])}\n`), seen);
-  assert.equal(hiddenFieldsLine(["to", "digest_id"]), "Not shown here: to, digest_id. Open Full details before deciding.");
+  assert.equal(
+    hiddenFieldsLine(["to", "digest_id"]),
+    `Not shown here: ${ISOLATE_OPEN}to${ISOLATE_CLOSE}, ${ISOLATE_OPEN}digest_id${ISOLATE_CLOSE}. Open Full details before deciding.`,
+  );
   // Key names are marked like quoted text.
-  assert.equal(hiddenFieldsLine(["t\u202Eo"]), "Not shown here: t«U+202E»o. Open Full details before deciding.");
+  assert.equal(
+    hiddenFieldsLine(["t\u202Eo"]),
+    `Not shown here: ${ISOLATE_OPEN}t«U+202E»o${ISOLATE_CLOSE}. Open Full details before deciding.`,
+  );
   // The village cards quote their ids under plain labels, so no notice is routine.
   for (const request of [
     requestOf("village.vote", "vote:h", { question_id: "q-12", answer: "beach" }),
@@ -963,7 +979,7 @@ test("a class name is marked like quoted text where the headline shows it", () =
   const request = requestOf("deploy.‮prod", "k:bidi", { command: "ls" });
   const drawn = renderTelegramMinimal(request, technicalOf(request), {});
   assert.ok(drawn.ok);
-  assert.ok(drawn.ok && drawn.headline.includes("(type: deploy.«U+202E»prod)"), drawn.ok ? drawn.headline : "");
+  assert.ok(drawn.ok && drawn.headline.includes(`(type: ${ISOLATE_OPEN}deploy.«U+202E»prod${ISOLATE_CLOSE})`), drawn.ok ? drawn.headline : "");
 });
 
 test("payload text cannot add a second Full details marker, headline, deadline or keyboard row", async () => {
@@ -1034,7 +1050,9 @@ function assertBoxIsVerbatim(text: string, value: unknown): void {
   const candidates = payloadStrings(value).map((entry) => quoteLine(entry, 1_000_000));
   for (const line of text.slice(open + "<blockquote>".length, close).split("\n")) {
     const unlabelled = line.replace(/^<b>[^<]*:<\/b> /u, "");
-    let shown = visible(unlabelled);
+    // Every value sits inside the runtime's own isolate, and only the value does.
+    assert.ok(unlabelled.startsWith(ISOLATE_OPEN) && unlabelled.endsWith(ISOLATE_CLOSE), `value not isolated: ${JSON.stringify(line)}`);
+    let shown = visible(unlabelled.slice(1, -1));
     const cut = shown.endsWith(MINIMAL_CUT_MARK);
     if (cut) shown = shown.slice(0, -MINIMAL_CUT_MARK.length);
     assert.ok(
@@ -1058,7 +1076,10 @@ test("B1: the quote box holds payload bytes only; the destructive command shows 
   assert.ok(!seen.includes("Steps"), "an outline reached the visible card");
   assert.ok(!seen.includes("git log · rm"), "the classifier's lossy outline reached the visible card");
   assert.ok(seen.includes(MINIMAL_CUT_MARK));
-  assert.ok(seen.split("\n").includes(MINIMAL_MORE_LINE));
+  assert.ok(
+    seen.split("\n").includes("⚠ This runs 3 commands. Only the beginning is shown above: open Full details before deciding."),
+    seen,
+  );
   assert.ok(visible(text).includes("curl -T ~/.ssh/id_ed25519"), "Full details lost the bytes");
 });
 
@@ -1122,7 +1143,7 @@ test("S1: default-ignorable, blank-looking and stacked characters are marked; or
   assert.equal(quoteLine("❤️"), "❤️");
   assert.equal(quoteLine("👨‍👩‍👧"), "👨‍👩‍👧");
   assert.equal(quoteLine("❤️‍🔥"), "❤️‍🔥");
-  assert.equal(quoteLine("❤️️"), "❤️«U+FE0F»", "a second selector went unmarked");
+  assert.equal(quoteLine("\u2764\uFE0F\uFE0F"), "\u2764«U+FE0F»«U+FE0F»", "a cluster that is no emoji kept a selector");
   // The cut never splits a grapheme cluster (a flag is two code points).
   const flagged = quoteLine(`${"a".repeat(279)}🇮🇳`, 280);
   assert.equal(flagged, `${"a".repeat(279)}${MINIMAL_CUT_MARK}`);
@@ -1269,4 +1290,86 @@ test("S4 security: an unattested edit to the policy file never changes the card;
     style: "technical",
     say: {},
   });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Fix round 3 (recheck of fix round 2)
+// ---------------------------------------------------------------------------
+
+test("R2-B1: only a whole recognised emoji sequence keeps its selectors and joiners; every other FE0F and ZWJ is marked", () => {
+  assert.equal(isRecognisedEmoji("❤️"), true, "this runtime lacks \\p{RGI_Emoji}: every selector would be marked");
+  // Sixteen faces with U+FE0F on ten of them: ten hidden bits, now ten marks.
+  const faces = "😀️😀😀️😀️😀😀😀️😀️😀️😀😀😀😀️😀️😀️😀️";
+  assert.equal((quoteLine(faces, 100_000).match(/«U\+FE0F»/gu) ?? []).length, 10);
+  // Two shuttlecocks joined by U+200D form no emoji: the joiner is marked.
+  assert.equal(quoteLine("🏸‍🏸"), "🏸«U+200D»🏸");
+  // Real emoji sequences stay as they are.
+  for (const emoji of ["❤️", "👨‍👩‍👧", "❤️‍🔥", "1️⃣", "©️", "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "👍🏽"]) {
+    assert.equal(quoteLine(emoji), emoji, emoji);
+  }
+});
+
+test("R2-B2: a list of addresses is one quoted line per address, so ['a, b'] and ['a', 'b'] never look the same", async () => {
+  const one = requestOf("communicate.email.external", "k:e1", { to: ["alice@x.example, mallory@evil.example"], subject: "hi", body: "b" });
+  const two = requestOf("communicate.email.external", "k:e2", { to: ["alice@x.example", "mallory@evil.example"], subject: "hi", body: "b" });
+  const [cardOne] = await minimalSends(one);
+  const [cardTwo] = await minimalSends(two);
+  const box = (text: string) => text.slice(text.indexOf("<blockquote>"), text.indexOf("</blockquote>"));
+  assert.notEqual(box(textOf(cardOne)), box(textOf(cardTwo)));
+  assert.equal((box(textOf(cardTwo)).match(/<b>To:<\/b>/gu) ?? []).length, 2);
+  assert.equal((box(textOf(cardOne)).match(/<b>To:<\/b>/gu) ?? []).length, 1);
+});
+
+test("R2-B2: a value stands alone only when it is the only quotation", async () => {
+  const [bare] = await minimalSends(requestOf("network.call", "k:c1", { command: "ls" }));
+  assert.ok(textOf(bare).includes(`<blockquote>${ISOLATE_OPEN}ls${ISOLATE_CLOSE}</blockquote>`), textOf(bare));
+  const [withFolder] = await minimalSends(requestOf("network.call", "k:c2", { command: "ls", cwd: "/tmp" }));
+  assert.ok(textOf(withFolder).includes(`<blockquote><b>Command:</b> ${ISOLATE_OPEN}ls${ISOLATE_CLOSE}\n<b>In folder:</b>`));
+  // A hand-built say map with an empty label beside another field is not drawn.
+  const say: PromptSay = { "x.pair": { does: "do a pair", quote: { a: "", b: "B" } } };
+  const pair = requestOf("x.pair", "k:p", { a: "1", b: "2" });
+  assert.deepEqual(renderTelegramMinimal(pair, technicalOf(pair), say), { ok: false, reason: "undeclared" });
+});
+
+test("should-fix 1: a command's notice is computed from the classifier's count and never names the hidden commands", async () => {
+  assert.equal(commandNotice(3, true), "⚠ This runs 3 commands. Only the beginning is shown above: open Full details before deciding.");
+  assert.equal(commandNotice(1, true), "⚠ Only the beginning of this command is shown above: open Full details before deciding.");
+  assert.equal(commandNotice(4, false), "This runs 4 commands, all shown above.");
+  assert.equal(commandNotice(1, false), null);
+  assert.match(commandNotice(null, true) ?? "", /^⚠ More than one command may be here/u);
+  const [card] = await minimalSends(
+    requestOf("network.call", "k:d", { command: DESTRUCTIVE, cwd: "/home/hermes" }, { ttl: 240_000, toolCall: true }),
+  );
+  const seen = outsideDetails(textOf(card));
+  const notice = seen.split("\n").find((line) => line.startsWith("⚠ This runs"));
+  assert.equal(notice, "⚠ This runs 3 commands. Only the beginning is shown above: open Full details before deciding.");
+  assert.ok(!seen.includes("curl -T"), "a hidden command was named on the visible card");
+  assert.ok(!seen.includes(MINIMAL_MORE_LINE), "the generic warning was not replaced for the command line");
+});
+
+test("R2-S1: each quotation is isolated by the runtime; payload isolates are marked; the collapsed block has none of ours", async () => {
+  const [card] = await minimalSends(intentRequest("pay 100 א 5 to 7 ⁨x⁩"));
+  const text = textOf(card);
+  const line = text.split("\n")[1] ?? "";
+  assert.ok(line.startsWith(`<blockquote>${ISOLATE_OPEN}pay 100 א 5 to 7 «U+2068»x«U+2069»${ISOLATE_CLOSE}`), line);
+  const details = text.slice(text.indexOf("<blockquote expandable>"));
+  const technical = recordingChannel({ layout: TTL_ALWAYS });
+  await technical.channel.notify(intentRequest("pay 100 א 5 to 7 ⁨x⁩"));
+  assert.equal(
+    (details.match(/⁨/gu) ?? []).length,
+    sends(technical.sent).reduce((count, entry) => count + (textOf(entry).match(/⁨/gu) ?? []).length, 0),
+    "the runtime's isolate reached the collapsed block",
+  );
+  // The bound counts the isolates.
+  const [long] = await minimalSends(intentRequest("x".repeat(1_000)));
+  const value = (textOf(long).split("\n")[1] ?? "").replace("<blockquote>", "").replace("</blockquote>", "");
+  assert.ok([...value].length <= MINIMAL_QUOTE_MAX + MINIMAL_CUT_MARK.length, String([...value].length));
+});
+
+test("R2-S2: core's phrase wins for core's own classes, whatever a say map says", () => {
+  const say: PromptSay = { "network.call": { does: "tidy up a little", quote: { command: "" } } };
+  const request = requestOf("network.call", "k:t", { command: "rm -rf ~/Documents", cwd: "/home/hermes" });
+  const drawn = renderTelegramMinimal(request, technicalOf(request), say);
+  assert.ok(drawn.ok);
+  assert.equal(drawn.ok && drawn.headline, `<b>${MINIMAL_HEADLINE_PREFIX}contact a website or online service</b>`);
 });

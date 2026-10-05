@@ -52,6 +52,7 @@ import {
   PROMPT_ROWS,
   PROMPT_SAY_NOTES,
   PROMPT_STYLES,
+  BUILTIN_CLASS_PHRASES,
   REQUIRED_PROMPT_ROWS,
   TELEGRAM_PROMPT_LAYOUT,
   WEB_PROMPT_LAYOUT,
@@ -577,17 +578,17 @@ test("a say entry names exactly one class: no pattern can rename several (fix ro
 });
 
 test("say mistakes that would load silently are load errors (fix round 2, S6)", () => {
-  const cases: [string, string[]][] = [
-    ["quote shows nothing", ["      say:", "        digest.share: { does: share, quote: { digest_id: ~ } }"]],
-    ["empty quote", ["      say:", "        digest.share: { does: share, quote: {} }"]],
-    ["does carries the notice mark", ["      say:", '        digest.share: { does: "⚠ share now", quote: { text: Note } }']],
-    ["label carries the notice mark", ["      say:", '        digest.share: { does: share, quote: { text: "⚠ There is more than fits here" } }']],
+  const cases: [string, string[], string][] = [
+    ["quote shows nothing", ["      say:", "        digest.share: { does: share, quote: { digest_id: ~ } }"], "prompt-say-shape"],
+    ["empty quote", ["      say:", "        digest.share: { does: share, quote: {} }"], "prompt-say-shape"],
+    ["does carries the notice mark", ["      say:", '        digest.share: { does: "⚠ share now", quote: { text: Note } }'], "prompt-say-does"],
+    ["label carries the notice mark", ["      say:", '        digest.share: { does: share, quote: { text: "⚠ There is more than fits here" } }'], "prompt-say-label"],
   ];
-  for (const [label, lines] of cases) {
+  for (const [label, lines, keyword] of cases) {
     const typed = load(["channels:", "  telegram:", "    prompt:", ...lines]);
     assert.equal(typed.ok, false, `${label}: loaded on telegram`);
     const untyped = load(["channels:", "  matrix:", "    prompt:", ...lines]);
-    assert.deepEqual([...new Set(keywordsOf(untyped))], ["prompt-say-shape"], label);
+    assert.deepEqual([...new Set(keywordsOf(untyped))], [keyword], label);
   }
 });
 
@@ -614,6 +615,7 @@ test("an unknown style fails the load: by the schema on telegram, by keyword els
 test("a malformed say fails the load, with prompt-say-shape on an untyped channel", () => {
   const cases: [string, string[]][] = [
     ["say is a list", ["      say: [a]"]],
+    // (fix round 3: each case may now carry the more precise say keyword)
     ["bad class pattern", ["      say:", "        Digest.Share: { does: share }"]],
     ["missing does", ["      say:", "        digest.share: { quote: { text: Note } }"]],
     ["empty does", ["      say:", '        digest.share: { does: "" }']],
@@ -631,7 +633,10 @@ test("a malformed say fails the load, with prompt-say-shape on an untyped channe
     const untyped = load(["channels:", "  matrix:", "    prompt:", ...lines]);
     assert.equal(untyped.ok, false, `${label}: loaded on an untyped channel`);
     assert.ok(
-      keywordsOf(untyped).length > 0 && keywordsOf(untyped).every((keyword) => keyword === "prompt-say-shape"),
+      keywordsOf(untyped).length > 0 &&
+        keywordsOf(untyped).every((keyword) =>
+          ["prompt-say-shape", "prompt-say-does", "prompt-say-label"].includes(keyword),
+        ),
       `${label}: ${keywordsOf(untyped).join(",")}`,
     );
   }
@@ -645,4 +650,60 @@ test("the schema's style enum is PROMPT_STYLES, and the new keys sit in the shar
   assert.ok(schema.$defs["promptLayout"]?.properties?.["say"] !== undefined);
   assert.deepEqual(Object.keys(schema.$defs["promptSay"]?.properties ?? {}).sort(), ["does", "note", "quote"]);
   assert.deepEqual([...PROMPT_SAY_NOTES], ["summary", "none"]);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3: built-in phrases win, and operator text cannot pass for the runtime's
+// ---------------------------------------------------------------------------
+
+test("R2-S2: a say entry may not set does for a class core phrases itself; quote and note still load", () => {
+  const refused = load(["channels:", "  matrix:", "    prompt:", "      say:", '        network.call: { does: "tidy up a little", quote: { tool: Tool, input: Input } }']);
+  assert.deepEqual(keywordsOf(refused), ["prompt-say-builtin"]);
+  const typed = load(["channels:", "  telegram:", "    prompt:", "      say:", '        files.delete.scratch: { does: "tidy up a little" }']);
+  assert.equal(typed.ok, false);
+  const quoteOnly = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", "      say:", "        message.send: { quote: { tool: Tool, input: Input } }"]);
+  assert.equal(quoteOnly.ok, true, JSON.stringify(quoteOnly));
+  assert.equal(promptSayFor(quoteOnly, "telegram")["message.send"]?.does, undefined);
+  const noDoes = load(["channels:", "  matrix:", "    prompt:", "      say:", "        digest.share: { quote: { text: Note } }"]);
+  assert.deepEqual(keywordsOf(noDoes), ["prompt-say-does"]);
+  assert.equal(BUILTIN_CLASS_PHRASES["network.call"], "contact a website or online service");
+});
+
+test("R2-S3: does is a plain verb phrase and labels are plain words, so neither can imitate the runtime's notices", () => {
+  const badDoes = [
+    "vote. There is no time limit",
+    "share it! now",
+    "share: Not shown here",
+    "❗ share now",
+    "- share now",
+    "share <b>now</b>",
+    "share & send",
+    "share now?",
+  ];
+  for (const does of badDoes) {
+    const result = load(["channels:", "  matrix:", "    prompt:", "      say:", `        digest.share: { does: ${JSON.stringify(does)}, quote: { text: Note } }`]);
+    assert.deepEqual(keywordsOf(result), ["prompt-say-does"], does);
+  }
+  const badLabels = ["❗Answer", "Answer:", "Not shown here.", "a".repeat(25), "Shared_with"];
+  for (const label of badLabels) {
+    const result = load(["channels:", "  matrix:", "    prompt:", "      say:", `        digest.share: { does: share, quote: { text: ${JSON.stringify(label)} } }`]);
+    assert.deepEqual(keywordsOf(result), ["prompt-say-label"], label);
+  }
+  // The village's own words load.
+  const village = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", "      say:",
+    "        intent.publish.inferred.index:",
+    '          does: "post a wish it guessed from your chats to Index, the village matching service, in your name"',
+    '          quote: { text: "" }',
+    "        village.vote:",
+    '          does: "vote for you in this week\'s village question"',
+    '          quote: { answer: "Answer", question_id: "Question" }',
+  ]);
+  assert.equal(village.ok, true, JSON.stringify(village));
+});
+
+test("R2-B2: an empty label is allowed only when it is the only field quoted", () => {
+  const alone = load(["channels:", "  telegram:", "    prompt:", "      say:", '        digest.share: { does: share, quote: { text: "", digest_id: ~ } }']);
+  assert.equal(alone.ok, true, JSON.stringify(alone));
+  const two = load(["channels:", "  matrix:", "    prompt:", "      say:", '        digest.share: { does: share, quote: { text: "", scope: Scope } }']);
+  assert.deepEqual(keywordsOf(two), ["prompt-say-label"]);
 });

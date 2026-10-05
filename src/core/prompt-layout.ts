@@ -407,7 +407,8 @@ export type PromptSayNote = (typeof PROMPT_SAY_NOTES)[number];
  *   agent's: `summary` (the default) or `none`.
  */
 export interface PromptSayEntry {
-  does: string;
+  /** Absent for a class core phrases itself, where core's phrase always wins (R2-S2). */
+  does?: string;
   quote?: Readonly<Record<string, string | null>>;
   note?: PromptSayNote;
 }
@@ -419,7 +420,32 @@ export type PromptSay = Readonly<Record<string, PromptSayEntry>>;
 export const PROMPT_SAY_DOES_MAX = 120;
 
 /** The longest `quote` label, in characters. */
-export const PROMPT_SAY_LABEL_MAX = 40;
+export const PROMPT_SAY_LABEL_MAX = 24;
+
+/**
+ * The phrases for the classes core itself emits (APRV-489; R3: core supplies
+ * phrases only for its own built-in classes and payload kinds). Here in core so
+ * the loader can refuse a `say.<class>.does` that would override one (fix round
+ * 3, R2-S2): a phrase is the first line of a card, and an operator's friendlier
+ * words for a dangerous built-in class must not replace the runtime's.
+ * `policy.edit` is absent on purpose: a policy edit is always the technical card.
+ */
+export const BUILTIN_CLASS_PHRASES: Readonly<Record<string, string>> = {
+  "network.call": "contact a website or online service",
+  "read.web": "read a web page",
+  "browser.exec": "use a web browser",
+  "cron.manage": "change its scheduled jobs",
+  "process.write": "control a program it is running",
+  "skill.manage": "add or change one of its skills",
+  "agent.delegate": "hand a task to another agent",
+  "message.send": "send a message",
+  "files.delete.scratch": "delete files in its scratch space",
+};
+
+/** Whether core phrases `actionClass` itself. */
+export function isBuiltinPhraseClass(actionClass: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_CLASS_PHRASES, actionClass);
+}
 
 /** The longest payload key a `quote` map may name. */
 export const PROMPT_SAY_KEY_MAX = 64;
@@ -467,12 +493,13 @@ export function promptSayFor(load: PolicyLoadResult, channel: string): PromptSay
   if (say === null || typeof say !== "object" || Array.isArray(say)) return {};
   const out: Record<string, PromptSayEntry> = {};
   for (const [pattern, entry] of Object.entries(say as Record<string, unknown>)) {
-    if (sayEntryErrors(entry, "").length > 0 || !EXACT_CLASS.test(pattern)) continue;
+    if (sayEntryErrors(entry, "", pattern).length > 0 || !EXACT_CLASS.test(pattern)) continue;
     const record = entry as Record<string, unknown>;
     const quote = record["quote"] as Record<string, string | null> | undefined;
     const note = record["note"] as PromptSayNote | undefined;
+    const does = record["does"] as string | undefined;
     out[pattern] = {
-      does: record["does"] as string,
+      ...(does === undefined ? {} : { does }),
       ...(quote === undefined ? {} : { quote: { ...quote } }),
       ...(note === undefined ? {} : { note }),
     };
@@ -522,55 +549,88 @@ function promptObjectOf(entry: unknown): Record<string, unknown> | null {
   return raw as Record<string, unknown>;
 }
 
-/** The shape errors of one `say` entry, each a message suffix; empty means well-formed. */
-function sayEntryErrors(entry: unknown, at: string): { path: string; message: string }[] {
-  const errors: { path: string; message: string }[] = [];
+/**
+ * What a `does` phrase may be (fix round 3, R2-S3): a plain verb phrase that
+ * completes "Your agent wants to …". It starts with a letter (no symbol, emoji
+ * or ⚠ that could pass for the runtime's notices), and carries no sentence
+ * punctuation, no colon and no markup, so operator text cannot read as a second
+ * sentence such as "There is no time limit" or "Not shown here:".
+ */
+const DOES_SHAPE = /^\p{L}[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}.!?…:;<>&]*$/u;
+
+/** What a `quote` label may be: letters, digits and spaces, nothing else (R2-S3). */
+const LABEL_SHAPE = /^[\p{L}\p{N} ]*$/u;
+
+/** The shape errors of one `say` entry for class `className`; empty means well-formed. */
+function sayEntryErrors(entry: unknown, at: string, className: string): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const shape = (path: string, message: string): void => {
+    errors.push({ path, keyword: "prompt-say-shape", message });
+  };
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-    return [{ path: at, message: "expected an object with `does`, and optionally `quote` and `note`" }];
+    shape(at, "expected an object with any of does, quote, note");
+    return errors;
   }
   const record = entry as Record<string, unknown>;
   for (const key of Object.keys(record).sort()) {
     if (key !== "does" && key !== "quote" && key !== "note") {
-      errors.push({ path: `${at}/${key}`, message: "unknown key; a say entry defines does, quote, note" });
+      shape(`${at}/${key}`, "unknown key; a say entry defines does, quote, note");
     }
   }
   const does = record["does"];
-  if (
-    typeof does !== "string" ||
-    does.trim().length === 0 ||
-    [...does].length > PROMPT_SAY_DOES_MAX ||
-    INVISIBLE.test(does) ||
-    does.includes(RESERVED_NOTICE_MARK)
+  const builtin = isBuiltinPhraseClass(className);
+  if (does !== undefined && builtin) {
+    errors.push({
+      path: `${at}/does`,
+      keyword: "prompt-say-builtin",
+      message: `core phrases ${JSON.stringify(className)} itself (${JSON.stringify(BUILTIN_CLASS_PHRASES[className])}); a say entry for it may set quote and note but not does`,
+    });
+  } else if (does === undefined && !builtin) {
+    errors.push({
+      path: `${at}/does`,
+      keyword: "prompt-say-does",
+      message: "a class core does not phrase needs a does phrase",
+    });
+  } else if (
+    does !== undefined &&
+    (typeof does !== "string" ||
+      [...does].length > PROMPT_SAY_DOES_MAX ||
+      !DOES_SHAPE.test(does) ||
+      does.includes(RESERVED_NOTICE_MARK))
   ) {
     errors.push({
       path: `${at}/does`,
-      message: `expected a one-line phrase of 1 to ${String(PROMPT_SAY_DOES_MAX)} characters with no control, format or line-separator characters and no ${RESERVED_NOTICE_MARK}`,
+      keyword: "prompt-say-does",
+      message: `expected a verb phrase of 1 to ${String(PROMPT_SAY_DOES_MAX)} characters that starts with a letter and has no line break, sentence punctuation (. ! ? … : ;), markup (< > &) or ${RESERVED_NOTICE_MARK}`,
     });
   }
   const quote = record["quote"];
   if (quote !== undefined) {
     if (quote === null || typeof quote !== "object" || Array.isArray(quote)) {
-      errors.push({ path: `${at}/quote`, message: "expected a map from payload key to a label or ~" });
+      shape(`${at}/quote`, "expected a map from payload key to a label or ~");
     } else {
       const entries = Object.entries(quote as Record<string, unknown>);
+      const shown = entries.filter(([, label]) => typeof label === "string");
       // A quote map that shows nothing is a minimal card that can never be
       // drawn: refused at load rather than falling back on every request while
       // its author believes the simple card is on (fix round 2, S6).
-      if (!entries.some(([, label]) => typeof label === "string")) {
-        errors.push({ path: `${at}/quote`, message: "the quote map shows no field: give at least one key a label" });
-      }
+      if (shown.length === 0) shape(`${at}/quote`, "the quote map shows no field: give at least one key a label");
       for (const [key, label] of entries) {
         const keyOk = key.length > 0 && [...key].length <= PROMPT_SAY_KEY_MAX && !INVISIBLE.test(key);
-        const labelOk =
-          label === null ||
-          (typeof label === "string" &&
-            [...label].length <= PROMPT_SAY_LABEL_MAX &&
-            !INVISIBLE.test(label) &&
-            !label.includes(RESERVED_NOTICE_MARK));
-        if (!keyOk || !labelOk) {
+        if (!keyOk) shape(`${at}/quote/${key}`, `expected a payload key of 1 to ${String(PROMPT_SAY_KEY_MAX)} characters`);
+        if (label === null) continue;
+        if (typeof label !== "string" || [...label].length > PROMPT_SAY_LABEL_MAX || !LABEL_SHAPE.test(label)) {
           errors.push({
             path: `${at}/quote/${key}`,
-            message: `expected a payload key of 1 to ${String(PROMPT_SAY_KEY_MAX)} characters mapped to a one-line label of at most ${String(PROMPT_SAY_LABEL_MAX)} characters, or ~`,
+            keyword: "prompt-say-label",
+            message: `expected a label of letters, digits and spaces, at most ${String(PROMPT_SAY_LABEL_MAX)} characters, or ~`,
+          });
+        } else if (label.trim().length === 0 && shown.length > 1) {
+          // R2-B2: a value may stand alone only when it is the only quotation.
+          errors.push({
+            path: `${at}/quote/${key}`,
+            keyword: "prompt-say-label",
+            message: "an empty label is allowed only when this is the only field quoted; with two or more, every label must say what the value is",
           });
         }
       }
@@ -578,7 +638,7 @@ function sayEntryErrors(entry: unknown, at: string): { path: string; message: st
   }
   const note = record["note"];
   if (note !== undefined && !(PROMPT_SAY_NOTES as readonly unknown[]).includes(note)) {
-    errors.push({ path: `${at}/note`, message: `expected one of ${PROMPT_SAY_NOTES.join(", ")}` });
+    shape(`${at}/note`, `expected one of ${PROMPT_SAY_NOTES.join(", ")}`);
   }
   return errors;
 }
@@ -666,6 +726,12 @@ export const PROMPT_BLOCK_ERROR_KEYWORDS = [
   "prompt-say-shape",
   /** A `say` key is a class pattern (a `*` segment), not one exact class (fix round 2, S6). */
   "prompt-say-wildcard",
+  /** A `say` entry sets `does` for a class core phrases itself (fix round 3, R2-S2). */
+  "prompt-say-builtin",
+  /** A `does` phrase that is not a plain verb phrase, or is missing for an operator class (fix round 3, R2-S3). */
+  "prompt-say-does",
+  /** A `quote` label that is not plain words, or an empty label beside another quoted field (fix round 3). */
+  "prompt-say-label",
 ] as const;
 
 /** The three row-list keys, each an array of row names. */
@@ -751,8 +817,8 @@ export function promptBlockErrors(policy: Policy): ValidationError[] {
                 : `${JSON.stringify(pattern)} is not a class name`,
             });
           }
-          for (const problem of sayEntryErrors((say as Record<string, unknown>)[pattern], entryAt)) {
-            errors.push({ path: problem.path, keyword: "prompt-say-shape", message: problem.message });
+          for (const problem of sayEntryErrors((say as Record<string, unknown>)[pattern], entryAt, pattern)) {
+            errors.push(problem);
           }
         }
       }
