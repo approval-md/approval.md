@@ -22,9 +22,11 @@
  * [✅ Approve] [✋ Deny]                          the same callback data as the technical card
  * ```
  *
- * The phrase comes from the operator's attested `say.<class>.does`, from the
- * runtime's own table for the classes core emits, or from the payload's
- * structural kind. Nothing the agent writes can reach the first line.
+ * The phrase comes from the runtime's own table for the classes core emits;
+ * else, for a payload the runtime reads itself (a command, a file change, an
+ * email), from that payload's kind with `(type: <class>)`; else, for an opaque
+ * payload only, from the operator's attested `say.<class>.does` (R3-S1).
+ * Nothing the agent writes can reach the first line.
  *
  * ## Quoted text is hostile input
  *
@@ -201,6 +203,12 @@ export interface MinimalCard {
   headline: string;
   /** The collapsed block, HTML, `<blockquote expandable>` included (kept for the settle edit). */
   details: string;
+  /**
+   * Present, and `true`, when the class's `say` entry set a `does` phrase and
+   * the runtime drew its own kind phrase instead, because it reads the payload
+   * itself (R3-S1). Recorded on the decision as `rendering.say_does_ignored`.
+   */
+  sayDoesIgnored?: true;
 }
 
 /** A request the minimal card does not draw, and why. */
@@ -347,11 +355,20 @@ function valueText(value: unknown): string {
  * The runtime's own first-strong isolate around every quoted value (fix round
  * 3, R2-S1). Letters of a right-to-left script reorder the digits and words
  * near them with no control character present (`pay 100 א 5`); inside an
- * isolate a value can reorder only itself, never its label, the cut mark, a
- * neighbouring line or the card's own text. Added AFTER marking, so payload
- * U+2068/U+2069 are still marked and these two never are; counted in every
- * length bound; never inside the collapsed block, which stays the technical
- * card byte for byte.
+ * isolate a value can reorder only what is inside the isolate, never its
+ * label, a neighbouring line or the card's text around it. What is inside
+ * includes the cut mark, which is drawn within the value's isolate: a cut
+ * right-to-left value shows `…(cut; see full details)` at its LEFT edge (the
+ * end, in its reading order). The mark is still on the line and still visible,
+ * and the computed notice under the box says the same thing outside any
+ * isolate. Added AFTER marking, so payload U+2068/U+2069 are still marked and
+ * these two never are; counted in every length bound; never inside the
+ * collapsed block, which stays the technical card byte for byte.
+ *
+ * Quoted values, hidden-field names and the class name in a headline are
+ * isolated. The operator's attested `does` phrase is NOT: it is drawn as
+ * written inside the bold headline, so a right-to-left phrase follows the
+ * ordinary bidirectional rules within that one line (R3-S2).
  */
 export const ISOLATE_OPEN = "\u2068";
 export const ISOLATE_CLOSE = "\u2069";
@@ -421,24 +438,27 @@ export function deadlineLine(request: ChannelRequest): string {
 }
 
 /**
- * The computed line under a command's quote box (fix round 3, should-fix 1),
- * or `null` when the box shows one whole command. `count` is the classifier's
- * own segment count (the technical card's `commands:` row comes from the same
- * tokenizer), or `null` when it cannot read the command. It never names or
- * paraphrases a command the box does not show.
+ * The computed line under a command's quote box when the box does NOT show the
+ * whole command (fix round 4, R3-B1), or `null` when it does.
+ *
+ * A notice of what the box leaves out, and nothing else (SPEC.md §10.3,
+ * amended). A command shown whole gets no line at all, whatever it contains:
+ * the bytes are in the box, and the card makes no claim about how many
+ * commands they are or what they run. The classifier's segment count does not
+ * see commands started inside other commands (a here-document piped into a
+ * shell, `$( … )`, backticks, `bash -c '…'`, `eval`), so the count can only be
+ * a LOWER bound: the cut form says "at least N", and only when N is two or
+ * more. `count` is that count, or `null` when the classifier cannot read the
+ * command. The line never names or paraphrases a command the box does not show.
  */
 export function commandNotice(count: number | null, cut: boolean): string | null {
+  if (!cut) return null;
   if (count === null) {
-    return cut
-      ? "⚠ More than one command may be here, and only the beginning is shown above: open Full details before deciding."
-      : "More than one command may be here: open Full details if you are unsure.";
+    return "⚠ More than one command may be here, and only the beginning is shown above: open Full details before deciding.";
   }
-  if (cut) {
-    return count > 1
-      ? `⚠ This runs ${String(count)} commands. Only the beginning is shown above: open Full details before deciding.`
-      : "⚠ Only the beginning of this command is shown above: open Full details before deciding.";
-  }
-  return count > 1 ? `This runs ${String(count)} commands, all shown above.` : null;
+  return count > 1
+    ? `⚠ This runs at least ${String(count)} commands. Only the beginning is shown above: open Full details before deciding.`
+    : "⚠ Only the beginning of this command is shown above: open Full details before deciding.";
 }
 
 /** The quote-box lines for a payload, or why there are none. */
@@ -456,8 +476,9 @@ function excerptOf(value: unknown, entry: PromptSayEntry | null): Excerpt | Mini
     // B1: no outline of the command inside the box, and none outside it. The
     // classifier's breakdown drops flags and their values, which is exactly
     // where a deletion target or an uploaded file lives. What the card says
-    // instead is COMPUTED and outside the box: how many commands this is, by
-    // the classifier's own count, and whether only the beginning is shown.
+    // instead is COMPUTED, outside the box, and only when the command is cut:
+    // that only the beginning is shown, with the classifier's count as a lower
+    // bound (R3-B1: a whole command carries no count line).
     const segments = commandSegmentWords(command.command);
     return {
       ...excerpt("command", lines, false),
@@ -646,12 +667,21 @@ export function renderTelegramMinimal(
     ? BUILTIN_CLASS_PHRASES[actionClass]
     : undefined;
   // R2-S2: core's own phrase always wins for core's own classes (a say entry
-  // may not set `does` for them; refused at load). An operator class takes its
-  // attested phrase.
+  // may not set `does` for them; refused at load).
+  // R3-S1: the runtime's kind phrase always wins for a payload the runtime
+  // reads itself (a command, a file change, an email), whatever the class: an
+  // operator's `does` is for payloads the runtime cannot read, which is what
+  // `say` exists for. A `does` for a class the classifier emits is refused at
+  // load (`prompt-say-kind`); for any other class the payload's kind is known
+  // only here, so the phrase is ignored here and the card says so to the
+  // caller, which notes it on the decision record.
   let phrase: string;
+  let sayDoesIgnored = false;
   if (builtin !== undefined) phrase = builtin;
-  else if (entry?.does !== undefined) phrase = entry.does;
-  else if (excerpt.kind !== "opaque") phrase = `${KIND_PHRASES[excerpt.kind]} (type: ${className(actionClass)})`;
+  else if (excerpt.kind !== "opaque") {
+    phrase = `${KIND_PHRASES[excerpt.kind]} (type: ${className(actionClass)})`;
+    sayDoesIgnored = entry?.does !== undefined;
+  } else if (entry?.does !== undefined) phrase = entry.does;
   else return { ok: false, reason: "undeclared" };
 
   const headline = `<b>${escapeHtml(`${MINIMAL_HEADLINE_PREFIX}${phrase}`)}</b>`;
@@ -683,5 +713,5 @@ export function renderTelegramMinimal(
   const details = detailsBlock(technical);
   const text = `${lines.join("\n")}\n${details}`;
   if (text.length > MINIMAL_MESSAGE_BUDGET) return { ok: false, reason: "too-long" };
-  return { ok: true, text, headline, details };
+  return { ok: true, text, headline, details, ...(sayDoesIgnored ? { sayDoesIgnored: true as const } : {}) };
 }

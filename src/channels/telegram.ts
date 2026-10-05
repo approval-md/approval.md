@@ -3346,8 +3346,14 @@ export class TelegramChannel implements TestableChannel {
           : await this.sendMinimal(request, nonce, prompt.say);
     if (minimal !== null && minimal.ok) {
       sent = minimal.sent;
-      rendering = { style: "minimal" };
+      // R3-S1: the record notes a `say` phrase the runtime overrode with its own.
+      rendering = minimal.sayDoesIgnored ? { style: "minimal", say_does_ignored: true } : { style: "minimal" };
       card = minimal.card;
+      if (minimal.sayDoesIgnored) {
+        this.complain(
+          `approval: telegram drew its own phrase for ${actionKey}, not the say entry's does: the runtime reads this payload itself`,
+        );
+      }
     } else {
       if (minimal !== null) {
         rendering = { style: "technical", fallback: minimal.reason };
@@ -3393,7 +3399,12 @@ export class TelegramChannel implements TestableChannel {
     nonce: string,
     say: PromptSay,
   ): Promise<
-    | { ok: true; sent: { deliveryId: DeliveryId; rendered: RenderedRequest }; card: { headline: string; details: string } }
+    | {
+        ok: true;
+        sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
+        card: { headline: string; details: string };
+        sayDoesIgnored: boolean;
+      }
     | { ok: false; reason: string }
   > {
     const actionKey = request.action_key.value;
@@ -3448,6 +3459,7 @@ export class TelegramChannel implements TestableChannel {
         rendered: { action_key: actionKey, fields, fullPayloadText: rendering.payloadText },
       },
       card: { headline: drawn.headline, details: drawn.details },
+      sayDoesIgnored: drawn.sayDoesIgnored === true,
     };
   }
 

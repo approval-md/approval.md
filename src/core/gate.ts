@@ -3085,6 +3085,7 @@ function attemptDecide(
     payload["rendering"] = {
       style: options.rendering.style,
       ...(options.rendering.fallback === undefined ? {} : { fallback: options.rendering.fallback }),
+      ...(options.rendering.say_does_ignored === true ? { say_does_ignored: true } : {}),
     };
   }
 

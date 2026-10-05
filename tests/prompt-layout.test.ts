@@ -53,6 +53,8 @@ import {
   PROMPT_SAY_NOTES,
   PROMPT_STYLES,
   BUILTIN_CLASS_PHRASES,
+  isReadableKindClass,
+  PROMPT_BLOCK_ERROR_KEYWORDS,
   REQUIRED_PROMPT_ROWS,
   TELEGRAM_PROMPT_LAYOUT,
   WEB_PROMPT_LAYOUT,
@@ -706,4 +708,33 @@ test("R2-B2: an empty label is allowed only when it is the only field quoted", (
   assert.equal(alone.ok, true, JSON.stringify(alone));
   const two = load(["channels:", "  matrix:", "    prompt:", "      say:", '        digest.share: { does: share, quote: { text: "", scope: Scope } }']);
   assert.deepEqual(keywordsOf(two), ["prompt-say-label"]);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 4: a does over a payload core reads itself is refused at load
+// ---------------------------------------------------------------------------
+
+test("R3-S1: a say entry may not set does for a class the command classifier emits; quote and note still load", () => {
+  const cases: [string, string][] = [
+    ["files.delete.out_of_scope", "tidy up a little"],
+    ["vcs.push.main", "save your work"],
+    ["harness.launch.codex", "ask a friend for help"],
+  ];
+  for (const [cls, does] of cases) {
+    assert.equal(isReadableKindClass(cls), true, cls);
+    const untyped = load(["channels:", "  matrix:", "    prompt:", "      say:", `        ${cls}: { does: ${JSON.stringify(does)} }`]);
+    assert.deepEqual(keywordsOf(untyped), ["prompt-say-kind"], cls);
+    const typed = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", "      say:", `        ${cls}: { does: ${JSON.stringify(does)} }`]);
+    assert.equal(typed.ok, false, `${cls}: a mild phrase over a classifier class loaded`);
+  }
+  // Without does, such an entry loads (no prompt-say-does), and nothing in it can set the phrase.
+  const noDoes = load(["channels:", "  telegram:", "    prompt:", "      style: minimal", "      say:", "        files.delete.out_of_scope: { note: none }"]);
+  assert.equal(noDoes.ok, true, JSON.stringify(noDoes));
+  assert.deepEqual(promptSayFor(noDoes, "telegram")["files.delete.out_of_scope"], { note: "none" });
+  // Core's own classes keep their own keyword; the village's classes are not classifier classes.
+  assert.equal(isReadableKindClass("network.call"), false);
+  for (const cls of ["intent.publish.inferred.index", "intent.publish.stated.index", "digest.share", "village.vote"]) {
+    assert.equal(isReadableKindClass(cls), false, cls);
+  }
+  assert.ok((PROMPT_BLOCK_ERROR_KEYWORDS as readonly string[]).includes("prompt-say-kind"));
 });

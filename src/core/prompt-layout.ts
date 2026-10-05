@@ -59,6 +59,7 @@
  * plain strings for exactly that reason.
  */
 
+import { CLASSIFIER_CLASSES } from "./command-class.js";
 import type { Policy, PolicyLoadResult } from "./policy-load.js";
 import type { ValidationError } from "./validate.js";
 
@@ -381,6 +382,15 @@ export const PROMPT_STYLE_CHANNELS: readonly PromptChannel[] = ["telegram"];
 export interface PromptRendering {
   style: PromptStyle;
   fallback?: string;
+  /**
+   * Present, and `true`, on a minimal card whose class's `say` entry set a
+   * `does` phrase the runtime did not use, because it reads the payload itself
+   * (a command, a file change, an email) and drew its own kind phrase (fix
+   * round 4, R3-S1). Only possible for a class whose payload kind is not known
+   * at load; for the classes the command classifier emits, such a `does` is
+   * refused at load (`prompt-say-kind`).
+   */
+  say_does_ignored?: true;
 }
 
 /** The two words `say.<class>.note` may say. */
@@ -395,7 +405,9 @@ export type PromptSayNote = (typeof PROMPT_SAY_NOTES)[number];
  * - `does` is the plain-words verb phrase the headline completes: "Your agent
  *   wants to <does>". Operator text the resident attested; it is the headline
  *   only for a class this entry matches, chosen by the runtime from the class
- *   the log records. Nothing the agent writes reaches it.
+ *   the log records, and only over an opaque payload: like `quote`, it is
+ *   ignored for the structured kinds, whose phrase the runtime computes (fix
+ *   round 4, R3-S1). Nothing the agent writes reaches it.
  * - `quote` is the closed field set for an OPAQUE payload: every top-level key
  *   the payload may carry, each with the label its value is quoted under, or
  *   `null` (YAML `~`) for "known, deliberately not on the simple card". A
@@ -407,7 +419,12 @@ export type PromptSayNote = (typeof PROMPT_SAY_NOTES)[number];
  *   agent's: `summary` (the default) or `none`.
  */
 export interface PromptSayEntry {
-  /** Absent for a class core phrases itself, where core's phrase always wins (R2-S2). */
+  /**
+   * Absent for a class core phrases itself, where core's phrase always wins
+   * (R2-S2), and for a class the command classifier emits, whose payload core
+   * reads itself (R3-S1). Used only over an OPAQUE payload: over a command, a
+   * file change or an email the runtime's kind phrase is drawn instead.
+   */
   does?: string;
   quote?: Readonly<Record<string, string | null>>;
   note?: PromptSayNote;
@@ -445,6 +462,21 @@ export const BUILTIN_CLASS_PHRASES: Readonly<Record<string, string>> = {
 /** Whether core phrases `actionClass` itself. */
 export function isBuiltinPhraseClass(actionClass: string): boolean {
   return Object.prototype.hasOwnProperty.call(BUILTIN_CLASS_PHRASES, actionClass);
+}
+
+/**
+ * Whether the runtime reads `actionClass`'s payload itself, as far as can be
+ * known at load (fix round 4, R3-S1): a class the command classifier emits
+ * (`CLASSIFIER_CLASSES`, e.g. `files.delete.out_of_scope`, `vcs.push.main`)
+ * is requested over a command or a file change, both payload kinds the minimal
+ * card phrases itself ("run a command (type: …)"). An operator's `does` for
+ * such a class could only put milder words over a payload core understands, so
+ * it is refused at load (`prompt-say-kind`). For any other class the payload's
+ * kind is known only when a request arrives; the card then ignores a `does`
+ * over a payload it reads itself and the decision record notes it.
+ */
+export function isReadableKindClass(actionClass: string): boolean {
+  return !isBuiltinPhraseClass(actionClass) && CLASSIFIER_CLASSES.includes(actionClass);
 }
 
 /** The longest payload key a `quote` map may name. */
@@ -579,13 +611,20 @@ function sayEntryErrors(entry: unknown, at: string, className: string): Validati
   }
   const does = record["does"];
   const builtin = isBuiltinPhraseClass(className);
+  const readable = isReadableKindClass(className);
   if (does !== undefined && builtin) {
     errors.push({
       path: `${at}/does`,
       keyword: "prompt-say-builtin",
       message: `core phrases ${JSON.stringify(className)} itself (${JSON.stringify(BUILTIN_CLASS_PHRASES[className])}); a say entry for it may set quote and note but not does`,
     });
-  } else if (does === undefined && !builtin) {
+  } else if (does !== undefined && readable) {
+    errors.push({
+      path: `${at}/does`,
+      keyword: "prompt-say-kind",
+      message: `the command classifier emits ${JSON.stringify(className)} over a payload the runtime reads and phrases itself ("run a command" or "change a file", with "(type: …)"); a say entry for it may set quote and note but not does`,
+    });
+  } else if (does === undefined && !builtin && !readable) {
     errors.push({
       path: `${at}/does`,
       keyword: "prompt-say-does",
@@ -728,6 +767,8 @@ export const PROMPT_BLOCK_ERROR_KEYWORDS = [
   "prompt-say-wildcard",
   /** A `say` entry sets `does` for a class core phrases itself (fix round 3, R2-S2). */
   "prompt-say-builtin",
+  /** A `say` entry sets `does` for a class the command classifier emits, whose payload core reads itself (fix round 4, R3-S1). */
+  "prompt-say-kind",
   /** A `does` phrase that is not a plain verb phrase, or is missing for an operator class (fix round 3, R2-S3). */
   "prompt-say-does",
   /** A `quote` label that is not plain words, or an empty label beside another quoted field (fix round 3). */
