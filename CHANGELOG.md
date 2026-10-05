@@ -13,9 +13,59 @@ anything reaches npm. `## Unreleased` carries no version, which is what keeps
 it from ever being published as a release body; dating it is the last edit
 before a tag.
 
-## Unreleased
+## 0.4.1 — 2026-10-05
 
 ### Channels
+
+- **TODO, lands when #616 merges (APRV-489): delete this line, keep the entry below.**
+
+- **A minimal Telegram card, chosen by the attested policy (APRV-489).**
+  `channels.telegram.prompt.style: minimal` sends each approval as one short
+  message in plain words: a bold headline the runtime computes from the class
+  ("Your agent wants to …"), the payload's own words quoted from the bound
+  bytes, any model or agent description labelled "not checked" below them, a
+  deadline line ("Open for about 3 days. If you don't answer, your agent will
+  not do this."), Approve and Deny, and the whole technical card, canonical
+  rendering included, collapsed in the same message under "Full details".
+  `channels.telegram.prompt.say` holds the operator's phrase per exact class
+  name and the closed field set of an opaque payload. The box holds payload
+  values only, verbatim; a cut value, a command cut short (with the
+  classifier's count as a lower bound, "at least N commands") and a field
+  left off are announced under it, and a command shown whole carries no count
+  line. The operator's phrase is drawn only over an opaque payload: over a
+  command, a file change or an email the runtime's own phrase wins. Anything the card cannot draw
+  honestly gets the technical card (attestations, policy edits, truncated
+  payloads, abnormal health facts, undeclared or unlisted payload keys,
+  batches and digests, cards over 3800 characters, a card the Bot API
+  refuses), and the decision record states what was shown in
+  `payload.rendering` (an open field in this release). Style and `say` are
+  read for each card, so a re-attested setting needs no restart. `technical` stays the default and its bytes are
+  unchanged; review cards, their note prompt and checkpoint prompts are the
+  same under both styles; `web` and `cli` ignore the key. SPEC §10.3 and §5.2
+  are amended (pending sign-off). **Rollout order:** an older core refuses the
+  new keys and fails the whole policy closed to all-`manual`, so a policy may
+  carry them only once every daemon reading it runs this release.
+
+- **TODO, lands when #619 merges (APRV-492): delete this line, keep the entry below.**
+
+- **A doubled review tap no longer loses the note prompt (APRV-492).** On a
+  Telegram review card, a second OK (or a doubled second Deny) tapped while a
+  `loved`/`disliked` note was still awaited asked for a second prompt and
+  forgot the first before sending it; the relay licenses one prompt per grade
+  tap and refused the second, so the reply to the prompt on screen recorded
+  nothing. A tap that asks the same question (same verdict, grade and account)
+  now sends nothing and leaves the prompt on screen live. A prompt for a
+  different verdict on the same held grade (OK then a confirmed Deny, or a Deny
+  corrected to OK) retires the old prompt before it is sent, as before: the
+  relay refuses that send, and the old prompt must never record the verdict
+  the human changed (PR #619 refutation B1). A prompt for the same verdict and
+  a different grade retires the old one only after the new send succeeds, so
+  a network failure leaves the old prompt live, and a reply to it records the
+  grade that prompt names (accepted residual S2). A prompt that cannot be sent
+  now says so on the card, with how to be asked again. The fields a recorded
+  review carries are unchanged; what changed is which reply records one: the
+  reply to the prompt on screen after a doubled tap, and, after a failed
+  same-verdict replacement, the reply to the old prompt.
 
 - **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
   An attested policy that does not load is refused with the new audit code
