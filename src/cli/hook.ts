@@ -2672,17 +2672,24 @@ function driveSync<T>(steps: GateSteps<T>): T {
   for (;;) {
     const next = steps.next();
     if (next.done === true) return next.value;
-    sleepSync(next.value);
+    if (next.value > 0) sleepSync(next.value);
   }
 }
 
 /**
  * Run `steps` to its verdict, sleeping each pause on the event loop.
  *
- * A zero pause is `setImmediate`, which turns the loop once without waiting:
- * libuv polls its signal pipe in that turn, so a SIGTERM or SIGINT that
- * arrived during the synchronous stretch before it is dispatched to its
- * listeners there.
+ * A zero pause is TWO `setImmediate` hops, and the second is what guarantees a
+ * poll phase in between. libuv hands a signal to its JS listeners only when the
+ * poll phase reads the signal pipe. A single immediate scheduled from a
+ * poll-phase callback runs in the same iteration's check phase, before any
+ * further poll, so a signal that arrived during the synchronous stretch would
+ * still be sitting in the pipe when the spend ran. That is the case whenever
+ * the run is still inside the continuation of the bin's `import()` of `dist/`
+ * on a Node whose module load turns the loop (24, and likely 22; APRV-473
+ * refuter, reproduced on 24). A second immediate scheduled from the check phase
+ * runs in the NEXT iteration's check phase, after that iteration's poll, from
+ * whichever phase the first was scheduled.
  */
 async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
   for (;;) {
@@ -2693,16 +2700,16 @@ async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
     // deadline after every pause, so a shorter pause changes nothing it judges.
     const ms = Math.min(next.value, MAX_TIMER_MS);
     await new Promise<void>((settle) => {
-      if (ms <= 0) setImmediate(settle);
+      if (ms <= 0) setImmediate(() => setImmediate(settle));
       else setTimeout(settle, ms);
     });
   }
 }
 
 /**
- * The pause before anything appends `execution.started` (APRV-473): one turn
- * of the event loop under {@link driveYielding}, nothing under
- * {@link driveSync}.
+ * The pause before anything appends `execution.started` or `gate.bypassed`
+ * (APRV-473): a poll phase of the event loop under {@link driveYielding},
+ * nothing under {@link driveSync}.
  *
  * Everything between two pauses runs synchronously, so a signal that lands
  * during the stdin read, the classification, or the poll read that found the
@@ -6068,7 +6075,7 @@ function bypassBanner(window: OpenWindow, classes: readonly string[], seq: numbe
  * command that ran and left no record is the one state this feature must not be
  * able to reach, so an append failure is a deny.
  */
-function runBypass(
+function* runBypass(
   streams: Streams,
   input: HookInput,
   adapter: HarnessAdapter,
@@ -6085,7 +6092,7 @@ function runBypass(
    * shape.
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
-): number {
+): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
   const scope = hookScope(flags, cwd);
@@ -6181,6 +6188,10 @@ function runBypass(
   // printed the allow is named on it.
   const provenance = harnessProvenance(adapter.kind, input.harnessVersion);
 
+  // APRV-473 refuter: the bypass record is this path's authorization, exactly
+  // as `execution.started` is the gated path's, so a signal held through the
+  // stdin read is dispatched before it is written (`BEFORE_SPEND`).
+  yield BEFORE_SPEND;
   const recorded = recordGateBypass(
     logPath,
     {
@@ -6593,7 +6604,7 @@ function* runHarnessHook(
   // words. The window suspends the POLICY; it never suspends the log.
   const looked = lookupWindow(logPath);
   if (looked.window !== null) {
-    return runBypass(
+    return yield* runBypass(
       streams,
       input,
       adapter,
@@ -7257,6 +7268,12 @@ export function commandHookYielding(
   cwd: string,
   readStdin: () => string = defaultStdin,
 ): Promise<number> {
+  // The loop now turns mid-wait, so an asynchronous stderr failure (EPIPE on a
+  // closed pipe after `announceWait`, where pipes are asynchronous) would
+  // surface as an uncaught exception in the middle of the wait and end it
+  // without withdrawing. Stderr carries progress lines and never the verdict,
+  // so its failure is swallowed (APRV-473 refuter).
+  process.stderr.on("error", () => undefined);
   return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
 }
 

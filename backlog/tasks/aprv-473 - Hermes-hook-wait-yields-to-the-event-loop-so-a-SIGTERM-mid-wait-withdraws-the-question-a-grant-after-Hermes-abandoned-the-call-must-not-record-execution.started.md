@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@claude-c16'
 created_date: '2026-10-04 23:18'
-updated_date: '2026-10-05 01:10'
+updated_date: '2026-10-05 01:33'
 labels:
   - agent-village
 dependencies: []
@@ -62,6 +62,8 @@ SPEC: §10.1 states no interrupt rule. Draft hunk for a human, not applied: afte
 Validation. Under load, 20 iterations of hermes-wait-interrupt + hermes-bin-signal-guard concurrently with cli-hook-hermes-rules: first sweep 18/20, both failures the race test's allow branch dying by SIGTERM after '{}' was written (Node teardown closes the signal handles after the answer; pre-existing window, not a spend after an interruption); test relaxed to accept that. Second sweep 19/20, the one failure the #604 smoke test hitting the same teardown window (death by signal after a block directive was written); smoke relaxed to accept a death after exactly one block object and counts it. Regression proofs: on the synchronous driver 7 of the 8 new tests fail (120 s backstops, the race and held-stdin cases); with zero pauses skipped the held-stdin test fails. Full suite under the CLAIMS lock 00:48Z-01:09Z: npm test exit 0, 5603 tests, 5602 pass, 1 skip, 0 fail. typecheck exit 0, lint exit 0.
 
 AC1 note for the orchestrator: on the serve route there is no SIGTERM; the equivalent is a client disconnect, and by APRV-427 design that leaves the question for the retry rather than withdrawing it. What the serve test pins is the safety half: a later grant is never spent on the departed call. Checked on that reading; a ruling that serve should withdraw too would be a new task.
+
+Refuter (opus-high) on 74546bdf: claims 2 to 4 held; claim 1 refuted by reproduction on Node 24. A single setImmediate scheduled from a poll-phase callback (the continuation of a module load that turned the loop) runs before the next poll, so a held signal was still in libuv's pipe when the spend ran; the held-stdin test failed on Node 24 2/2 and passed on 26. Fixed: the zero pause is two setImmediate hops, which crosses a poll phase from any phase. Node 24: both signal files 14/14 exit 0, held-stdin test 3/3. Should-fix taken: the open-window bypass (runBypass) is a generator now and pauses before recordGateBypass, since gate.bypassed is that path's authorization. Nits taken: driveSync skips zero pauses; docs give the residue as the spend's append and its log read (milliseconds) plus the verification read, not microseconds; the Hermes CLI route swallows stderr errors so an EPIPE mid-wait cannot end the wait unwithdrawn. Not taken: the serve test granting before the thread leaves (the pre-spend callerGone re-check is the guard; left as is). CI on 74546bdf was green on Node 22 (all three shards), so the one-hop pause did not fail there; the fix is still needed for Node 24. After the fix: typecheck 0, lint 0, node26 hermes/serve/hook files 93/93, and gate-window, dark-session, harness-version, cli-hook 279/279. No regression test for the bypass pause: an open window needs the human's gate ceremony, so a test would need a window fixture.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
