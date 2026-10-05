@@ -34,6 +34,20 @@ before a tag.
 
 ### Harnesses
 
+- **`approval hook hermes`: a SIGTERM mid-wait withdraws the question, and a
+  grant after Hermes gave up starts nothing (APRV-473).** The CLI hook run was
+  synchronous end to end, so a SIGTERM during the wait (Hermes's own hook
+  timeout, a gateway shutdown) was held until the wait returned; a human who
+  granted meanwhile got `execution.started` recorded for a call that never ran.
+  The wait's pauses now run on the event loop, on the same cadence and inside
+  the same 240 s window, so the signal reaches the wait's handler within one
+  poll: it withdraws the question this invocation opened, prints the
+  `hook-interrupted` block directive and exits 2, and a later grant is refused
+  `request-withdrawn`. The hook also passes through a poll phase of the loop
+  before every `execution.started` or `gate.bypassed` append, so a signal held
+  through the stdin read blocks instead of spending. Other harnesses, `approval serve` and the Codex bridge
+  run the same steps synchronously, unchanged; serve already noticed a departed
+  client at every poll and never spent a grant on its call.
 - **`approval hook hermes`: a signal while the runtime is still loading no
   longer kills the hook silently (APRV-466).** The runtime's SIGTERM/SIGINT
   guard exists only once `dist/` has loaded, so a signal during that load

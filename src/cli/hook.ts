@@ -1293,10 +1293,11 @@ export const HERMES_SIGNAL_OWNER: unique symbol = Symbol.for("approval-md.hermes
  * 6). The wait's own handler words its message differently ("while waiting for
  * a decision") under the same code.
  *
- * On the CLI the hook run is synchronous from the stdin read to the verdict, so
- * a JS signal listener registered inside it does not get a turn; in practice
- * the bin is the layer that prints this (docs/hermes-hook.md, "Two layers
- * against a signal").
+ * On the CLI the runtime's guard prints it for a signal held through the
+ * synchronous stretch before the first spend (the stdin read, the
+ * classification), at the pause `BEFORE_SPEND` (APRV-473); the bin prints it
+ * for a signal during the load (docs/hermes-hook.md, "Two layers against a
+ * signal").
  */
 export function hermesInterruptedDirective(signal: NodeJS.Signals): string {
   return harnessBlockDirective(
@@ -2639,6 +2640,88 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/**
+ * The gate path from the event to a verdict, as steps (APRV-473).
+ *
+ * Each value the generator yields is a pause in milliseconds: the wait's poll
+ * interval, or `0` for one turn of the event loop and nothing longer. The
+ * return value is the verdict. ONE implementation of classify, register,
+ * request, wait and spend, run by one of two drivers:
+ *
+ * - {@link driveSync} sleeps each pause with `Atomics.wait`. Every caller that
+ *   needs a synchronous answer keeps one: `commandHook` for the in-process
+ *   callers and the serve worker, `decideHarnessCall` for the Codex bridge. A
+ *   zero pause is no pause, so their behaviour is what it was.
+ * - {@link driveYielding} sleeps each pause on a timer, so the event loop turns
+ *   while the hook waits and a JS signal listener runs then. The
+ *   `approval hook hermes` CLI route runs through it: Hermes sends SIGTERM on
+ *   its hook timeout and on gateway shutdown, and a signal held through a
+ *   synchronous wait let a grant that landed afterwards record
+ *   `execution.started` for a call Hermes had already abandoned.
+ *
+ * The pauses are the same durations under either driver, so the deadline
+ * arithmetic and the poll cadence do not depend on which one runs them.
+ */
+type GateSteps<T> = Generator<number, T, undefined>;
+
+/** The longest delay `setTimeout` honours (2^31 - 1 ms). */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** Run `steps` to its verdict, sleeping each pause synchronously. */
+function driveSync<T>(steps: GateSteps<T>): T {
+  for (;;) {
+    const next = steps.next();
+    if (next.done === true) return next.value;
+    if (next.value > 0) sleepSync(next.value);
+  }
+}
+
+/**
+ * Run `steps` to its verdict, sleeping each pause on the event loop.
+ *
+ * A zero pause is TWO `setImmediate` hops, and the second is what guarantees a
+ * poll phase in between. libuv hands a signal to its JS listeners only when the
+ * poll phase reads the signal pipe. A single immediate scheduled from a
+ * poll-phase callback runs in the same iteration's check phase, before any
+ * further poll, so a signal that arrived during the synchronous stretch would
+ * still be sitting in the pipe when the spend ran. That is the case whenever
+ * the run is still inside the continuation of the bin's `import()` of `dist/`
+ * on a Node whose module load turns the loop (24, and likely 22; APRV-473
+ * refuter, reproduced on 24). A second immediate scheduled from the check phase
+ * runs in the NEXT iteration's check phase, after that iteration's poll, from
+ * whichever phase the first was scheduled.
+ */
+async function driveYielding<T>(steps: GateSteps<T>): Promise<T> {
+  for (;;) {
+    const next = steps.next();
+    if (next.done === true) return next.value;
+    // Clamped to the largest delay a timer holds: past it Node fires the timer
+    // at once, and a pause would become a busy poll. The wait re-reads its
+    // deadline after every pause, so a shorter pause changes nothing it judges.
+    const ms = Math.min(next.value, MAX_TIMER_MS);
+    await new Promise<void>((settle) => {
+      if (ms <= 0) setImmediate(() => setImmediate(settle));
+      else setTimeout(settle, ms);
+    });
+  }
+}
+
+/**
+ * The pause before anything appends `execution.started` or `gate.bypassed`
+ * (APRV-473): a poll phase of the event loop under {@link driveYielding},
+ * nothing under {@link driveSync}.
+ *
+ * Everything between two pauses runs synchronously, so a signal that lands
+ * during the stdin read, the classification, or the poll read that found the
+ * grant is held until the next pause. Without this one, the next point it
+ * could be dispatched is after the spend, and a hook interrupted before its
+ * verdict would record the execution of a call its harness had already given
+ * up on. With it, the listener in force runs first: the wait's handler
+ * withdraws the question and blocks, the early guard (`hermesFailClosed`)
+ * blocks, and either one exits the process before the spend is reached.
+ */
+const BEFORE_SPEND = 0;
+
 function truncate(text: string, limit: number): string {
   const collapsed = text.replace(/\s+/gu, " ").trim();
   return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1)}…`;
@@ -3965,6 +4048,13 @@ function renderVerdict(
 }
 
 export function gateHarnessCall(
+  ...args: Parameters<typeof gateHarnessSteps>
+): HarnessVerdict {
+  return driveSync(gateHarnessSteps(...args));
+}
+
+/** {@link gateHarnessCall} as steps, for a driver that yields (APRV-473). */
+function* gateHarnessSteps(
   streams: Streams,
   run: HookRun,
   classes: string[],
@@ -4003,7 +4093,7 @@ export function gateHarnessCall(
    * one, so a floor never puts a question about looking on a human's phone.
    */
   floor: HarnessLoopState | null = null,
-): HarnessVerdict {
+): GateSteps<HarnessVerdict> {
   /**
    * Does the floor route THIS class to a human? (APRV-297.)
    *
@@ -4267,6 +4357,7 @@ export function gateHarnessCall(
       // What there is, since APRV-141, is something to charge: the start event
       // is this execution's authorization, and the registration `fresh` just
       // wrote is what makes it a sampleable one.
+      yield BEFORE_SPEND;
       const charged = recordUnattended(run, task, classes, hash);
       if (charged !== null) {
         return sayDeny(`hook-gate-refused:${charged.code}`, charged.message);
@@ -4277,6 +4368,7 @@ export function gateHarnessCall(
     }
     // Every gated class carried an unspent grant: a human already answered this
     // exact question about these exact bytes, and nobody is asked again.
+    yield BEFORE_SPEND;
     const failed = consumeGrants(run, spendKeys, hash, task);
     if (failed !== null) {
       return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
@@ -4318,14 +4410,32 @@ export function gateHarnessCall(
   // `process.exit` is deliberate and immediate: the default disposition for
   // these signals is to die, and a handler that only withdrew would leave the
   // hook wedged in its poll loop with the harness waiting on it.
+  //
+  // APRV-473. On the `approval hook hermes` CLI route this handler now gets its
+  // turn: the wait yields to the event loop between polls (`driveYielding`), so
+  // a signal is dispatched within one pause of its arrival instead of being
+  // held until the wait returns. It exits, so nothing after it in this function
+  // runs: no poll reads the grant a human gives afterwards, and nothing spends
+  // it. Every other route drives these steps synchronously, where the handler
+  // still runs only after the wait (the CLI) or never (a serve worker thread,
+  // which signals do not reach; its caller's departure is `callerGone`).
   const onSignal = (signal: NodeJS.Signals): void => {
     leaveWait();
-    withdrawPending(
-      run,
-      streams,
-      ownKeys,
-      `the requesting hook process received ${signal} while waiting; the session is ending, so no retry will adopt this request`,
-    );
+    try {
+      withdrawPending(
+        run,
+        streams,
+        ownKeys,
+        `the requesting hook process received ${signal} while waiting; the session is ending, so no retry will adopt this request`,
+      );
+    } catch (cause) {
+      // The withdrawal failed outright (an I/O fault inside the append). The
+      // verdict below still goes out: a block with the question left standing
+      // is the stricter of the two outcomes this handler can still reach.
+      streams.err(
+        `approval: the hook could not withdraw its request after ${signal}: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+      );
+    }
     // APRV-445. On Hermes an exit with nothing on stdout is an ALLOW unless the
     // exit is 2, and a harness tearing down may still read the verdict. So the
     // block directive goes out first, written synchronously because
@@ -4424,7 +4534,7 @@ export function gateHarnessCall(
             );
           }
           tornReads += 1;
-          sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+          yield Math.min(run.intervalMs, Math.max(0, deadline - Date.now()));
           continue;
         }
         // AT the deadline (APRV-427 review). A clean read at this tick would
@@ -4549,6 +4659,14 @@ export function gateHarnessCall(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
+          //
+          // APRV-473. One turn of the event loop first: a signal that arrived
+          // while this read ran is dispatched here, to the handler above, which
+          // withdraws (a no-op now the request is decided, refused
+          // `already-decided`), blocks and exits. The grant is then left
+          // unspent rather than recorded as the start of a call the harness gave
+          // up on.
+          yield BEFORE_SPEND;
           leaveWait();
           // Looked at again now the lock is held: re-taking it may have waited,
           // and a caller that left meanwhile must not have its grant spent on a
@@ -4608,7 +4726,7 @@ export function gateHarnessCall(
           stillLagging,
         );
       }
-      sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+      yield Math.min(run.intervalMs, Math.max(0, deadline - Date.now()));
     }
   } catch (cause) {
     // The thrown path. `commandHarnessHook` turns this into an ordinary
@@ -5957,7 +6075,7 @@ function bypassBanner(window: OpenWindow, classes: readonly string[], seq: numbe
  * command that ran and left no record is the one state this feature must not be
  * able to reach, so an append failure is a deny.
  */
-function runBypass(
+function* runBypass(
   streams: Streams,
   input: HookInput,
   adapter: HarnessAdapter,
@@ -5974,7 +6092,7 @@ function runBypass(
    * shape.
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
-): number {
+): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
   const scope = hookScope(flags, cwd);
@@ -6070,6 +6188,10 @@ function runBypass(
   // printed the allow is named on it.
   const provenance = harnessProvenance(adapter.kind, input.harnessVersion);
 
+  // APRV-473 refuter: the bypass record is this path's authorization, exactly
+  // as `execution.started` is the gated path's, so a signal held through the
+  // stdin read is dispatched before it is written (`BEFORE_SPEND`).
+  yield BEFORE_SPEND;
   const recorded = recordGateBypass(
     logPath,
     {
@@ -6116,14 +6238,14 @@ function runBypass(
   );
 }
 
-function runHarnessHook(
+function* runHarnessHook(
   argv: string[],
   streams: Streams,
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
-): number {
+): GateSteps<number> {
   // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
   // on both a usage error's empty stdout is a harness that runs the call, and
   // on Hermes a non-zero exit with an empty stdout is an allow outright.
@@ -6482,7 +6604,7 @@ function runHarnessHook(
   // words. The window suspends the POLICY; it never suspends the log.
   const looked = lookupWindow(logPath);
   if (looked.window !== null) {
-    return runBypass(
+    return yield* runBypass(
       streams,
       input,
       adapter,
@@ -6502,7 +6624,7 @@ function runHarnessHook(
     streams,
     adapter,
     codexCommand,
-    decideHarnessCall({
+    yield* decideHarnessSteps({
       streams,
       input,
       adapter,
@@ -6603,6 +6725,11 @@ export interface DecideInput {
  * progress and withdrawal lines, which are a report rather than a decision.
  */
 export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
+  return driveSync(decideHarnessSteps(decide));
+}
+
+/** {@link decideHarnessCall} as steps, for a driver that yields (APRV-473). */
+function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   const {
     streams,
     input,
@@ -6892,7 +7019,9 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
     // §6.3), so nothing is requested, decided or granted here. What IS appended
     // since APRV-141 is the execution record itself — the moment the policy
     // authorized this command — because a budget the busiest path does not
-    // charge is not a budget. See `recordUnattended`.
+    // charge is not a budget. See `recordUnattended`. A held signal is
+    // dispatched first (APRV-473, `BEFORE_SPEND`).
+    yield BEFORE_SPEND;
     const charged = recordUnattended(run, task, classes, payloadHash(payload));
     if (charged !== null) {
       return {
@@ -6910,7 +7039,7 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   // do not survive a merge. An initialized-but-empty `.approval/log/` counts as
   // reachable — an audit trail that has recorded nothing is an empty log, not a
   // missing one (see `preflightLog`) — and `register` appends the first line.
-  return gateHarnessCall(
+  return yield* gateHarnessSteps(
     streams,
     run,
     classes,
@@ -6922,19 +7051,19 @@ export function decideHarnessCall(decide: DecideInput): HarnessVerdict {
   );
 }
 
-function commandHarnessHook(
+function* commandHarnessHook(
   argv: string[],
   streams: Streams,
   cwd: string,
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
-): number {
+): GateSteps<number> {
   if (adapter.kind === "hermes") {
-    return hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam);
   }
   try {
-    return runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
   } catch (cause) {
     // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
@@ -6970,7 +7099,7 @@ function commandHarnessHook(
  * nothing on stdout by design. A throw becomes the same block the other
  * adapters' catch produces.
  */
-function hermesFailClosed(
+function* hermesFailClosed(
   argv: string[],
   streams: Streams,
   cwd: string,
@@ -6978,7 +7107,7 @@ function hermesFailClosed(
   adapter: HarnessAdapter,
   /** APRV-427: serve's wait seam, passed through untouched (null on the CLI). */
   waitSeam: HookWaitSeam | null,
-): number {
+): GateSteps<number> {
   let stdout = "";
   const tracked: Streams = {
     out: (text) => {
@@ -7003,15 +7132,17 @@ function hermesFailClosed(
   // only: under `approval serve` (a wait seam) the process's signals belong to
   // the server.
   //
-  // APRV-466, read before trusting any of the above on the CLI: this run is
-  // synchronous from the stdin read through the wait's `Atomics.wait` poll to
-  // the verdict, and a JS listener runs only when the event loop turns, so
-  // neither this guard nor the wait's handler gets a turn there. A signal is
-  // held and dispatched after the run returns, to the `approval` bin's own
-  // guard, which exits with the answer this run gave. The guards are kept for
-  // a run that yields (and for what a later async wait would need), and while
-  // they are registered HERMES_SIGNAL_OWNER tells the bin's guard to step aside
-  // so the two never both print.
+  // A JS listener runs only when the event loop turns (APRV-466). On the CLI
+  // this run is driven by `driveYielding` (APRV-473), so the loop turns at
+  // every pause: between the wait's polls, where the wait's handler answers,
+  // and once before anything appends `execution.started` (`BEFORE_SPEND`),
+  // where whichever of the two is registered answers a signal held through
+  // the synchronous stretch before it (the stdin read, the classification, the
+  // registration). A signal that lands after the last pause is dispatched
+  // once the run has returned, to the `approval` bin's own guard, which exits
+  // with the answer this run gave. While these guards are registered,
+  // HERMES_SIGNAL_OWNER tells the bin's guard to step aside, so the two never
+  // both print.
   const onEarlySignal = (signal: NodeJS.Signals): void => {
     if (raw !== null && isHermesPostEvent(raw)) process.exit(EXIT_OK);
     if (stdout.length === 0) {
@@ -7033,7 +7164,7 @@ function hermesFailClosed(
     owner[HERMES_SIGNAL_OWNER] = true;
   }
   try {
-    return hermesVerdict();
+    return yield* hermesVerdict();
   } finally {
     if (waitSeam === null) {
       owner[HERMES_SIGNAL_OWNER] = ownerBefore;
@@ -7042,10 +7173,10 @@ function hermesFailClosed(
     }
   }
 
-  function hermesVerdict(): number {
+  function* hermesVerdict(): GateSteps<number> {
     let code: number;
     try {
-      code = runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
+      code = yield* runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
     } catch (cause) {
       // A post-event never blocks: the call already ran (see the post path).
       if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
@@ -7117,6 +7248,42 @@ export function commandHook(
    */
   waitSeam: HookWaitSeam | null = null,
 ): number {
+  return driveSync(hookSteps(argv, streams, cwd, readStdin, waitSeam));
+}
+
+/**
+ * {@link commandHook}, with its pauses on the event loop (APRV-473).
+ *
+ * The `approval hook hermes` CLI route, from `main`. The same steps as the
+ * synchronous form; the difference is that a SIGTERM or SIGINT reaches the
+ * listener in force within one pause of arriving, instead of after the run
+ * returns. In the wait that listener withdraws the question this invocation
+ * opened, prints the `hook-interrupted` block directive and exits 2, so a grant
+ * that lands after Hermes abandoned the call is never spent on it. See
+ * {@link GateSteps} and {@link BEFORE_SPEND}.
+ */
+export function commandHookYielding(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string = defaultStdin,
+): Promise<number> {
+  // The loop now turns mid-wait, so an asynchronous stderr failure (EPIPE on a
+  // closed pipe after `announceWait`, where pipes are asynchronous) would
+  // surface as an uncaught exception in the middle of the wait and end it
+  // without withdrawing. Stderr carries progress lines and never the verdict,
+  // so its failure is swallowed (APRV-473 refuter).
+  process.stderr.on("error", () => undefined);
+  return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
+}
+
+function* hookSteps(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  readStdin: () => string,
+  waitSeam: HookWaitSeam | null,
+): GateSteps<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 
@@ -7132,7 +7299,7 @@ export function commandHook(
   // boundary and doctor use, so a kind that can be recorded is a kind that can
   // be invoked, and neither can be added without the other.
   if (isHarnessKind(sub)) {
-    return commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
+    return yield* commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
   }
   if (sub === "classify") return commandClassify(rest, streams, cwd);
   return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);

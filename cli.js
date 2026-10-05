@@ -55,20 +55,21 @@ function hermesInterrupted(signal) {
 // prints the directive when a signal is dispatched while dist/ is loading and
 // the load yields to the loop (it does on Node 24, which turned the loop about
 // thirty times during the load; on Node 26 the load turned it zero times). A
-// signal that is caught but not dispatched until later is held, and the hook
-// run itself is synchronous end to end (`readFileSync` on stdin, an
-// `Atomics.wait` poll), so a signal held into it is dispatched only after the
-// hook has answered. Then `answered` is set (it is set in the same microtask
-// drain as the run's return) and the process exits with the answer the hook
-// gave. Either way the default disposition, death with an empty stdout, is gone
-// from this file's first statement on.
+// signal that is caught but not dispatched during the load is held into the
+// hook run, which turns the loop at every pause since APRV-473: between the
+// wait's polls and once before anything records `execution.started`. There the
+// runtime's own guards answer it (the wait's handler withdraws the question
+// first). A signal that lands after the run's last pause is dispatched after
+// the hook has answered: then `answered` is set (in the same microtask drain as
+// the run's return) and the process exits with the answer the hook gave. Either
+// way the default disposition, death with an empty stdout, is gone from this
+// file's first statement on.
 //
 // Ownership: the runtime's own guards (`hermesFailClosed`, the wait's handler)
-// raise HERMES_SIGNAL_OWNER while they are registered. They are registered and
-// removed inside that synchronous run, so on the CLI they do not get a turn
-// today; the flag is what keeps the two from both printing if the run ever
-// yields. With something on stdout and no answer yet, this exits 2 without
-// printing a second object (unparseable stdout).
+// raise HERMES_SIGNAL_OWNER while they are registered, and this guard steps
+// aside for them, so the two never both print. With something on stdout and no
+// answer yet, this exits 2 without printing a second object (unparseable
+// stdout).
 //
 // What no guard here can cover is the moment before this file's first
 // statement: Node's own bootstrap. A signal there is a death by signal with an

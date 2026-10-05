@@ -448,11 +448,45 @@ search of an ANCESTOR of the home with a filename filter (`search_files` over
 directory this hook can recognise; and a write through a variable other than
 `HERMES_HOME`/`HOME` from outside the home is judged by its spelling.
 
-**SIGTERM while the hook waits.** The wait is a synchronous poll, so a signal's
-handler runs only when the wait ends: the hook keeps waiting, then answers with
-the block directive at exit 2 as a wait that ran out does. The `approval` bin
-also guards the exit: a Hermes hook that leaves with any non-zero code other than
-2 leaves as 2, printing the directive if nothing was printed.
+**SIGTERM while the hook waits withdraws the question (APRV-473).** Hermes
+sends SIGTERM on its own hook timeout and on gateway shutdown, and from that
+moment it has abandoned the tool call. So a SIGTERM or SIGINT that reaches the
+hook while it waits on a human ends the wait at once, in this order:
+
+1. the question this invocation opened is withdrawn (`approval.withdrawn`,
+   reason `cancelled`, the note naming the signal);
+2. stdout carries `{"action":"block","message":"hook-interrupted: the hook
+   received SIGTERM while waiting for a decision; nothing authorizes this call"}`;
+3. the process exits 2.
+
+A grant that arrives afterwards is refused `request-withdrawn`, and nothing
+records `execution.started` for a call Hermes gave up on. If the human's grant
+landed in the log first, between two polls, the withdrawal is refused
+`already-decided` and writes nothing over the decision; the hook still blocks
+and leaves the grant unspent. A question this invocation adopted from an earlier
+tool call is left alone, because a withdrawal belongs to the requester
+(APRV-106).
+
+The wait polls on the same cadence as before (`--interval`, one second by
+default) and the window is the same 240 s; what changed is that the pauses
+between polls run on the event loop, so a signal is dispatched within one pause
+of arriving. The hook also passes through a poll phase of the loop before
+anything appends `execution.started` (the unattended and autonomous charges, a
+carried grant, a grant found by the wait) or `gate.bypassed` (the open window),
+so a signal that landed during the synchronous stretch before it (the stdin
+read, the classification, the poll's own read) is answered with the block
+before anything is spent. That pause is two `setImmediate` hops, because a
+signal reaches its listeners only when libuv's poll phase reads the signal
+pipe, and a single hop scheduled from a poll-phase callback (the continuation
+of a module load that turned the loop) runs before the next poll. What remains
+is the spend itself, from the pause until the record lands, its own read of the
+log included (milliseconds, more on a large log), and the verification read
+after it: a signal that lands there is answered by the verdict the hook
+already reached.
+
+The `approval` bin also guards the exit: a Hermes hook that leaves with any
+non-zero code other than 2 leaves as 2, printing the directive if nothing was
+printed.
 
 **Two layers against a signal (APRV-466).** Hermes sends SIGTERM on its hook
 timeout and on gateway shutdown, and a sandbox restart can deliver one at any
@@ -470,24 +504,32 @@ what Hermes then receives:
 | --- | --- |
 | during Node's own bootstrap, before the bin's first statement | a death by signal with an empty stdout: the Hermes-side layer's to block |
 | while `dist/` loads, and the load yields to the event loop | `{"action":"block","message":"hook-interrupted: ..."}` at exit 2, from the bin; byte for byte what the runtime's own guard prints. On a post event too, where Hermes ignores the exit code |
-| while `dist/` loads without yielding, or during the hook run | the hook's own verdict, then an exit with that verdict. The run is synchronous from the stdin read through the wait's poll, so the signal is held until it returns |
-| after the hook answered | the answer already given |
+| while `dist/` loads without yielding, or during the hook run before its first pause | held until the run's first pause, then answered by the runtime's own guard: the block directive at exit 2, and nothing spent |
+| while the hook waits on a human | the wait's handler: the question withdrawn, `hook-interrupted ... while waiting for a decision` at exit 2 |
+| after the run's last pause, or after the hook answered | the answer the hook reached, already on stdout. During Node's own teardown, after the runtime has closed its signal handles, the process dies by the signal with that answer written |
 
 Whether a cold load of `dist/` yields depends on the Node release: measured on
 this repository, the load turned the event loop about thirty times on Node 24
 and none on Node 26. Either way a pre event ends in a verdict, `{}` at exit 0
 or a block at exit 2, and never in an empty stdout. The runtime's own guards
-(`hermesFailClosed`, and the wait's handler that withdraws the question) are
-registered and removed inside the synchronous run, so on the CLI they never get
-a turn; while they are registered they raise a flag the bin's guard steps aside
-for, so the two can never both print. Run the hook through the `approval` bin:
-`node dist/src/cli/main.js hook hermes` has neither of the bin's guards.
+(`hermesFailClosed`, and the wait's handler that withdraws the question) raise a
+flag while they are registered, and the bin's guard steps aside for it, so the
+two never both print. Run the hook through the `approval` bin:
+`node dist/src/cli/main.js hook hermes` keeps the runtime's guards and has
+neither of the bin's.
 
-A signal held through the wait does not withdraw the question. If a human
-grants it before the wait ends, the hook answers `{}` and records
-`execution.started` for a call Hermes may already have abandoned on its own
-timeout. That is older than this guard (APRV-445) and needs a wait that yields
-to the event loop.
+Which Node the gated deployments run, as of 2026-10-04 (read from each
+repository's main branch): the hosted daemon image builds from
+`node:22-bookworm-slim` (Node 22, the minor floating with the tag); the Agent
+Village checkpoint installs exactly the `NODE_VERSION` its builder is given,
+with no default, a floor of 20, and `22.x.y` as the documented example; the
+gated Hermes image runs the `node` its Hermes base ships. Node 22 is neither of
+the two releases measured above, so whether a cold load yields there is
+unmeasured. The withdraw-on-interrupt rule holds either way: the wait's timer
+pauses and the two-hop pause before a spend each cross a poll phase whichever
+phase they are scheduled from, and `tests/hermes-wait-interrupt.test.ts` was run
+on Node 24 and 26 for that reason (a one-hop pause passed on 26 and failed on
+24).
 
 Neither layer covers the other's stretch: the bin's guard cannot run before Node
 runs it, and the `shell_hooks` patch exists only in the gated image, so a Hermes
