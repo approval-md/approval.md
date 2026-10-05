@@ -13,6 +13,8 @@ anything reaches npm. `## Unreleased` carries no version, which is what keeps
 it from ever being published as a release body; dating it is the last edit
 before a tag.
 
+## Unreleased
+
 ## 0.4.1 — 2026-10-05
 
 ### Channels
