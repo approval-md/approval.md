@@ -48,12 +48,16 @@
  *    writer killed between the create and the write) is gone only once its
  *    mtime is {@link LEGACY_LOCK_RECLAIM_AGE_MS} old.
  * 5. **The reclaim ({@link reclaimStaleLock}) is two atomic steps, and nothing
- *    else is written.** First the claim: `link(2)` of the lock's path to a name
+ *    else is written.** The taker's own complete lockfile is written first,
+ *    under `<lock>.take.<pid>.<nonce>`, so whoever finds a claim beside the
+ *    lock also finds its taker and can judge it (`approval log unlock` refuses
+ *    while one is seen running). Then the claim: `link(2)` of the lock's path to a name
  *    derived from the judged record, `<lock>.stale.<pid>.<created ms>`, which
  *    fails EEXIST for every other reclaimer of the same lockfile, and which is
  *    then read back to prove it names the very file that was judged (inode,
- *    mtime, bytes). Then the take: this writer's own complete lockfile, written
- *    under a name only it uses, is `rename(2)`d over the lock's path. The lock's
+ *    mtime, bytes). Then the take: this writer's own lockfile is `rename(2)`d
+ *    over the lock's path, once the claim and the lock's path are read again
+ *    and are still the judged file. The lock's
  *    path is never empty, so no ordinary `wx` create slips in, and between the
  *    claim and the take nothing in the protocol can change it: the holder is
  *    dead, every other writer's create fails EEXIST, and every other
@@ -89,13 +93,14 @@ import {
   openSync,
   readFileSync,
   readSync,
+  readdirSync,
   readlinkSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { hostname, uptime } from "node:os";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** The holder record's format version. A reader treats any other as not its to judge. */
 export const LOCK_HOLDER_VERSION = 1;
@@ -745,34 +750,120 @@ function claim(lockPath: string, seen: SeenLock, stale: string): Claim {
   return { kind: "claimed" };
 }
 
+/** This process's own complete lockfile, written under a name only it uses, before its claim. */
+interface PreparedTake {
+  temporary: string;
+  own: OwnLock;
+}
+
 /**
- * The take: write this process's complete lockfile under a name only it uses,
- * then `rename(2)` it over the lock's path, which holds the claimed file. The
- * signal guard was installed by the caller before its claim (the claim is the
- * reclaim's first durable state) and is handed back with the lock. On failure
- * the claim is released, so the next writer may claim again, and the guard
- * with it.
+ * Write this process's complete lockfile to `<lock>.take.<pid>.<nonce>`. It is
+ * written BEFORE the claim, so anyone who finds a claim beside the lock also
+ * finds the taker that made it, and can judge whether that taker is running
+ * ({@link scanTakers}). The caller has installed the signal guard.
  */
-function take(
-  lockPath: string,
-  op: LockOp,
-  stale: string,
-  releaseGuard: () => void,
-): { ok: true; own: OwnLock; releaseGuard: () => void } | { ok: false; why: string } {
+function prepareTake(lockPath: string, op: LockOp): { ok: true; prepared: PreparedTake } | { ok: false; why: string } {
   const temporary = `${lockPath}.take.${String(process.pid)}.${randomBytes(8).toString("hex")}`;
   try {
     const own = createLockFile(temporary, op);
     if (own.bytes.length === 0) throw new Error("its holder record could not be written");
-    step("before-take");
-    renameSync(temporary, lockPath);
-    return { ok: true, own: { path: lockPath, ino: own.ino, bytes: own.bytes }, releaseGuard };
+    return { ok: true, prepared: { temporary, own } };
   } catch (cause) {
     unlinkQuietly(temporary);
-    unlinkQuietly(stale);
-    releaseGuard();
-    settleTerminationGuards();
     return { ok: false, why: (cause as Error).message };
   }
+}
+
+/**
+ * The take: `rename(2)` this process's prepared lockfile over the lock's path,
+ * which holds the claimed file. Right before the rename, the claim and the
+ * lock's path are read again and must both still be the judged file: a claim
+ * a person's unlock removed, or a lock that changed hands, is seen here and
+ * nothing is moved. (Not atomic with the rename; it narrows the window, and
+ * {@link scanTakers} is what keeps a person from making it.) The signal guard
+ * was installed by the caller before its claim (the claim is the reclaim's
+ * first durable state) and is handed back with the lock. On failure the guard
+ * is released, and the claim with it when it is still this process's.
+ */
+function take(
+  lockPath: string,
+  prepared: PreparedTake,
+  stale: string,
+  seen: SeenLock,
+  releaseGuard: () => void,
+): { ok: true; own: OwnLock; releaseGuard: () => void } | { ok: false; moved: boolean; why: string } {
+  const fail = (moved: boolean, why: string): { ok: false; moved: boolean; why: string } => {
+    unlinkQuietly(prepared.temporary);
+    releaseGuard();
+    settleTerminationGuards();
+    return { ok: false, moved, why };
+  };
+  try {
+    step("before-take");
+    const claimed = readEntry(stale);
+    const current = readEntry(lockPath);
+    if (claimed.kind !== "file" || !sameLock(claimed.seen, seen) || current.kind !== "file" || !sameLock(current.seen, seen)) {
+      // Not this process's claim any more (or not the judged lock): leave both names as they are.
+      return fail(true, "its claim, or the lock it claimed, is no longer the file it judged");
+    }
+    renameSync(prepared.temporary, lockPath);
+    return { ok: true, own: { path: lockPath, ino: prepared.own.ino, bytes: prepared.own.bytes }, releaseGuard };
+  } catch (cause) {
+    unlinkQuietly(stale);
+    return fail(false, (cause as Error).message);
+  }
+}
+
+/** The most `<lock>.take.*` names judged in one look; more is "cannot rule out a reclaim in flight". */
+const MAX_TAKERS_JUDGED = 16;
+
+/** A reclaim's own lockfile beside the lock, and the judgement of the process that wrote it. */
+interface Taker {
+  name: string;
+  /** `running`: seen running (never unlocked around). `gone`: provably exited. `unchecked`: anything else. */
+  verdict: "running" | "gone" | "unchecked";
+  why: string;
+}
+
+/**
+ * Every `<lock>.take.<pid>.*` beside the lock except `except`, each judged by
+ * the same liveness rule as a lock's holder. A reclaimer writes it before its
+ * claim, so a claim found at a stale name has its taker here.
+ */
+function scanTakers(lockPath: string, except: string | null): { ok: true; takers: Taker[] } | { ok: false; why: string } {
+  const dir = dirname(lockPath);
+  const prefix = `${basename(lockPath)}.take.`;
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => name.startsWith(prefix) && join(dir, name) !== except);
+  } catch (cause) {
+    return { ok: false, why: `the log directory could not be listed (${errnoOf(cause) ?? "an error"})` };
+  }
+  if (names.length > MAX_TAKERS_JUDGED) {
+    return { ok: false, why: `more than ${String(MAX_TAKERS_JUDGED)} \`${prefix}*\` files are beside the lock` };
+  }
+  const takers: Taker[] = [];
+  for (const name of names.sort()) {
+    const entry = readEntry(join(dir, name));
+    if (entry.kind === "absent") continue;
+    if (entry.kind === "unreadable") {
+      takers.push({ name, verdict: "unchecked", why: `${name} is ${entry.why}` });
+      continue;
+    }
+    const parsed = parseHolder(entry.seen.bytes);
+    if (parsed.kind !== "v1") {
+      takers.push({ name, verdict: "unchecked", why: `${name} holds no holder record this version reads` });
+      continue;
+    }
+    const verdict = judge(parsed.holder);
+    takers.push({ name, verdict: verdict.state === "gone" ? "gone" : verdict.running ? "running" : "unchecked", why: verdict.why });
+  }
+  return { ok: true, takers };
+}
+
+/** The refusal for a reclaim in flight whose taker is running. */
+function inFlight(lockfile: string, taker: Taker): string {
+  return `a reclaim of ${lockfile} is in flight (${taker.name}): ${taker.why}; let it finish, or stop that process, rather than unlock`;
 }
 
 /** Options for {@link reclaimStaleLock}. */
@@ -828,26 +919,45 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
   // here on is held until the lock this reclaim takes is released, or settled
   // at once on every path that takes nothing.
   const releaseGuard = guardTerminationWhileLocked();
+  const prepared = prepareTake(lockPath, op);
+  if (!prepared.ok) {
+    releaseGuard();
+    settleTerminationGuards();
+    return { kind: "kept", why: `${note.why}, but this writer could not write its own lockfile (${prepared.why})` };
+  }
   const claimed = claim(lockPath, entry.seen, note.stale);
   if (claimed.kind !== "claimed") {
+    unlinkQuietly(prepared.prepared.temporary);
     releaseGuard();
     settleTerminationGuards();
   }
   switch (claimed.kind) {
     case "moved":
       return { kind: "retry", why: `${lockfile} changed hands while it was being judged` };
-    case "occupied":
-      return claimed.judged
-        ? { kind: "retry", why: `${note.why}, and another writer has claimed its reclaim (${basename(note.stale)}); if no writer is running, \`${unlock}\` finishes it` }
-        : { kind: "kept", why: `${note.why}, but ${basename(note.stale)} already exists and is not that lockfile, so no writer can claim the reclaim; once no writer is running, \`${unlock}\` clears both` };
+    case "occupied": {
+      if (!claimed.judged) {
+        return { kind: "kept", why: `${note.why}, but ${basename(note.stale)} already exists and is not that lockfile, so no writer can claim the reclaim; once no writer is running, \`${unlock}\` clears both` };
+      }
+      // The claimant wrote its own lockfile before its claim: a running one is
+      // waited for, and the human verb is named only when none is seen running.
+      const takers = scanTakers(lockPath, null);
+      const running = takers.ok ? takers.takers.find((taker) => taker.verdict === "running") : undefined;
+      return running !== undefined
+        ? { kind: "retry", why: `${note.why}, and ${inFlight(lockfile, running)}` }
+        : { kind: "retry", why: `${note.why}, and another writer has claimed its reclaim (${basename(note.stale)}); if no writer is running, \`${unlock}\` finishes it` };
+    }
     case "failed":
       return { kind: "kept", why: `${note.why}, but the claim on it failed (link: ${claimed.code}); a human runs \`${unlock}\`` };
     case "claimed":
       break;
   }
   step("claimed");
-  const taken = take(lockPath, op, note.stale, releaseGuard);
-  if (!taken.ok) return { kind: "kept", why: `${note.why}, but this writer could not take the lock (${taken.why})` };
+  const taken = take(lockPath, prepared.prepared, note.stale, entry.seen, releaseGuard);
+  if (!taken.ok) {
+    return taken.moved
+      ? { kind: "retry", why: `${lockfile} changed hands before this writer's take (${taken.why})` }
+      : { kind: "kept", why: `${note.why}, but this writer could not take the lock (${taken.why})` };
+  }
   return { kind: "taken", own: taken.own, releaseGuard: taken.releaseGuard, note };
 }
 
@@ -904,16 +1014,36 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
     }
     why = verdict.why;
   }
+  // A reclaim in flight: its taker's own lockfile is beside the lock before its
+  // claim is. The person cannot tell a stopped reclaimer from a dead one; this
+  // can, so a running one is refused here rather than left to their word.
+  const before = scanTakers(lockPath, null);
+  if (!before.ok) return { kind: "refused", why: `${before.why}, so a reclaim in flight cannot be ruled out; nothing was touched` };
+  const busy = before.takers.find((taker) => taker.verdict === "running");
+  if (busy !== undefined) return { kind: "refused", why: inFlight(lockfile, busy) };
   const note = noteFor(lockPath, holder, entry.seen, now, "operator-cleared", why);
-  // As in a writer's reclaim: guarded from the claim on.
+  // As in a writer's reclaim: guarded from the take's own lockfile and the claim on.
   const releaseGuard = guardTerminationWhileLocked();
+  const prepared = prepareTake(lockPath, "hold");
+  if (!prepared.ok) {
+    releaseGuard();
+    settleTerminationGuards();
+    return { kind: "refused", why: `the lock could not be taken (${prepared.why})` };
+  }
   const refuse = (text: string): UnlockOutcome => {
+    unlinkQuietly(prepared.prepared.temporary);
     releaseGuard();
     settleTerminationGuards();
     return { kind: "refused", why: text };
   };
   let claimed = claim(lockPath, entry.seen, note.stale);
   if (claimed.kind === "occupied") {
+    // Judged again now that a claim is known to exist: its taker wrote its own
+    // lockfile before claiming, so a running one is found here.
+    const again = scanTakers(lockPath, prepared.prepared.temporary);
+    if (!again.ok) return refuse(`${again.why}, so a reclaim in flight cannot be ruled out; nothing was touched`);
+    const busyNow = again.takers.find((taker) => taker.verdict === "running");
+    if (busyNow !== undefined) return refuse(inFlight(lockfile, busyNow));
     // A dead reclaimer's claim, or a planted file: the human says no writer is
     // running, so it goes, and the claim is made again, exclusively.
     unlinkQuietly(note.stale);
@@ -921,8 +1051,12 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
   }
   if (claimed.kind === "moved") return refuse(`${lockfile} changed hands while it was being read: a writer is running; nothing was touched`);
   if (claimed.kind !== "claimed") return refuse(`the claim on ${lockfile} failed (${claimed.kind === "failed" ? claimed.code : "its stale name is taken"})`);
-  const taken = take(lockPath, "hold", note.stale, releaseGuard);
+  const taken = take(lockPath, prepared.prepared, note.stale, entry.seen, releaseGuard);
   if (!taken.ok) return { kind: "refused", why: `the lock could not be taken (${taken.why})` };
+  // Dead reclaimers' own lockfiles: their writers are provably gone, so
+  // nothing would ever move them. Anything not provably gone stays.
+  const after = scanTakers(lockPath, null);
+  if (after.ok) for (const taker of after.takers) if (taker.verdict === "gone") unlinkQuietly(join(dirname(lockPath), taker.name));
   return { kind: "taken", own: taken.own, releaseGuard: taken.releaseGuard, note };
 }
 

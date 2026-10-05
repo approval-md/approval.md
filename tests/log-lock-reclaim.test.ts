@@ -440,7 +440,9 @@ test("two reclaimers of one dead lock: the second's claim fails (EEXIST on the s
   assert.ok(second !== undefined && !second.ok, "the second reclaimer did not take it");
   if (second !== undefined && !second.ok) {
     assert.equal(second.error.code, "lock-timeout");
-    assert.match(second.error.message, /another writer has claimed its reclaim/u);
+    // The claimant (this process) wrote its own lockfile before its claim and
+    // is running, so the second waits for it rather than naming unlock.
+    assert.match(second.error.message, new RegExp(`a reclaim of events\\.jsonl\\.lock is in flight \\(events\\.jsonl\\.lock\\.take\\.${String(process.pid)}\\.`, "u"));
   }
   assert.deepEqual(events(logPath), ["task.registered", "audit.lock_reclaimed", "approval.granted"]);
   assert.deepEqual(residue(logPath), []);
@@ -528,6 +530,84 @@ test("a reclaimer SIGKILLed after its claim leaves a wedge, never a fork: the ne
   assert.deepEqual(residue(logPath), []);
   assert.ok(appendEvent(logPath, granted(28), { lockTimeoutMs: 40 }).ok);
   assert.equal(verify(logPath).status, "clean");
+});
+
+test("a claimant stopped between its claim and its take is seen running: writers wait for it, `approval log unlock` refuses naming its pid, and one reclaim is recorded (R3-2)", { skip: !POSIX }, async () => {
+  const logPath = freshLog();
+  const left = holder({ pid: deadPid() });
+  writeLock(logPath, left);
+  const lockBytes = readFileSync(`${logPath}.lock`);
+  counter += 1;
+  const marker = join(scratch, `stopped-claimant-${String(counter)}`);
+  writeFileSync(
+    `${marker}.mjs`,
+    [
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { setLockSeamForTests } from ${JSON.stringify(LOCK_MODULE)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `let once = false;`,
+      `setLockSeamForTests((step) => { if (step === "claimed" && !once) { once = true; writeFileSync(${JSON.stringify(`${marker}.claimed`)}, "1"); process.kill(process.pid, "SIGSTOP"); } });`,
+      `const r = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(70))}, { lockTimeoutMs: 0 });`,
+      `writeFileSync(${JSON.stringify(`${marker}.result`)}, JSON.stringify(r.ok));`,
+    ].join("\n"),
+  );
+  const claimant = spawn(process.execPath, [`${marker}.mjs`], { stdio: "ignore" });
+  const exited = exitOf(claimant);
+  const pid = String(claimant.pid);
+  try {
+    await waitFor(() => existsSync(`${marker}.claimed`), 10_000);
+    assert.ok(existsSync(staleOf(logPath, left)), "the claimant's claim");
+    assert.ok(residue(logPath).some((name) => name.startsWith(`events.jsonl.lock.take.${pid}.`)), "its own lockfile, written before the claim");
+
+    const told = refused(logPath, 71);
+    assert.match(told, new RegExp(`a reclaim of events\\.jsonl\\.lock is in flight .*pid ${pid} .*is running`, "u"));
+    assert.doesNotMatch(told, /finishes it/u, "a writer does not send the person to unlock around a running reclaimer");
+
+    const unlocked = unlockAppendLock(logPath, left.pid, "human:carter");
+    assert.equal(unlocked.kind, "refused", "the person's unlock is refused while the claimant runs");
+    if (unlocked.kind === "refused") assert.match(unlocked.message, new RegExp(`pid ${pid} .*is running.*rather than unlock`, "u"));
+    assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
+    assert.ok(existsSync(staleOf(logPath, left)), "and so is the claim");
+  } finally {
+    claimant.kill("SIGCONT");
+  }
+  assert.equal((await exited).code, 0);
+  assert.equal(readFileSync(`${marker}.result`, "utf8"), "true", "the claimant took the lock and appended");
+  assert.deepEqual(events(logPath), ["task.registered", "audit.lock_reclaimed", "approval.granted"], "one reclaim record");
+  assert.deepEqual(residue(logPath), []);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a take whose claim was removed and whose lock changed hands moves nothing: the live lock that replaced it survives (R3-2)", () => {
+  const logPath = freshLog();
+  const left = holder({ pid: deadPid() });
+  writeLock(logPath, left);
+  let liveBytes: Buffer | undefined;
+  setLockSeamForTests((step) => {
+    if (step !== "before-take" || liveBytes !== undefined) return;
+    // Between this reclaimer's claim and its rename: its claim is removed and
+    // a live writer holds the lock (what a person's unlock and the next writer
+    // would leave).
+    rmSync(staleOf(logPath, left));
+    rmSync(`${logPath}.lock`);
+    writeLock(logPath, holder());
+    liveBytes = readFileSync(`${logPath}.lock`);
+  });
+  let result: ReturnType<typeof appendEvent>;
+  try {
+    result = appendEvent(logPath, granted(72), { lockTimeoutMs: 20, lockRetryMs: 5 });
+  } finally {
+    setLockSeamForTests(null);
+  }
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "lock-timeout");
+    assert.match(result.error.message, /is running/u, "it judged the new lock afresh");
+  }
+  assert.deepEqual(readFileSync(`${logPath}.lock`), liveBytes, "the live lock is untouched");
+  assert.deepEqual(events(logPath), ["task.registered"]);
+  assert.deepEqual(residue(logPath), [], "its own lockfile was removed, nothing else");
+  rmSync(`${logPath}.lock`);
 });
 
 test("six writers, three appends each, over one stale lock: exactly one reclaim record, every append lands, the chain verifies", async () => {
