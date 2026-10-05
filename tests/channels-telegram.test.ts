@@ -108,6 +108,9 @@ import {
   TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY,
   TELEGRAM_REVIEW_PAYLOAD_NONE,
   REVIEW_PAYLOAD_BUDGET,
+  REVIEW_SUMMARY_MAX,
+  reviewPayloadBudget,
+  telegramVisibleLength,
   REVIEW_RENDER_INPUT_MAX,
   renderReviewCard,
   reviewPayloadView,
@@ -6388,6 +6391,146 @@ test("APRV-480: bytes that fit are shown whole, and the card stays one message",
   assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), drawn.text);
   assert.ok(drawn.text.includes("z".repeat(1200)), "the bytes were not shown whole");
   assert.ok(drawn.text.length <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assertClean(world.unit);
+});
+
+/** `card` with its agent-written summary replaced by `text`. */
+function withSummary(card: ReviewCard, text: string): ReviewCard {
+  return { ...card, fields: { ...card.fields, summary: claimed<string | null>(text, "agent:claude") } };
+}
+
+test("PR #614 refutation F4: an 800-character command and a 1500-character summary make one card that shows the bytes", () => {
+  const world = sampledWorld(1);
+  const material = { command: `echo ${"y".repeat(795)}`, cwd: "/repo" };
+  const card = withSummary(cardCarrying(cardsFor(world)[0] as ReviewCard, material), "s".repeat(1500));
+
+  const view = reviewPayloadView(card);
+  assert.equal(view.kind, "bytes", "the card fell back to the hash with room to spare");
+  const drawn = renderReviewCard(reviewStateFor(card));
+  assert.ok(telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS, "the card overran one message");
+  assert.ok(drawn.text.includes("y".repeat(795)), "the bytes were not shown whole");
+  assert.ok(drawn.text.includes("s".repeat(REVIEW_SUMMARY_MAX)), "the summary lost more than its cap");
+  assert.ok(!drawn.text.includes("s".repeat(REVIEW_SUMMARY_MAX + 1)), "the summary was not capped");
+  assert.match(drawn.text, /\+1100 chars not shown/u);
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: a payload at its budget and a 2500-character summary stay one message, and the tap agrees with the card", () => {
+  const world = sampledWorld(1);
+  const plain = withSummary(cardsFor(world)[0] as ReviewCard, "s".repeat(2500));
+  // The same card with its free-text rows as long as an ordinary card shows
+  // them uncut: the budget must come from what the rows leave, not a constant.
+  // (The class stays real: the canonical rendering repeats it, and a class as
+  // long as these rows leaves no room for any payload, which is the hash view.)
+  const long: ReviewCard = {
+    ...plain,
+    fields: {
+      ...plain.fields,
+      task: computed<string | null>("t".repeat(300), "log"),
+      command_breakdown: computed("b".repeat(300), "classifier"),
+      gloss: claimed("g".repeat(300), "agent:claude"),
+    },
+    verdict: computed("v".repeat(300), "log"),
+  };
+  for (const base of [plain, long]) {
+    const budget = reviewPayloadBudget(base);
+    assert.ok(budget > 0 && budget <= REVIEW_PAYLOAD_BUDGET, `budget ${String(budget)}`);
+    const carrying = (size: number): ReviewCard => cardCarrying(base, { command: "x".repeat(size), cwd: "/repo" });
+    // The longest command this card shows whole, by bisection.
+    let low = 1;
+    let high = REVIEW_PAYLOAD_BUDGET;
+    assert.equal(reviewPayloadView(carrying(low)).kind, "bytes", `no payload fit the card (budget ${String(budget)})`);
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (reviewPayloadView(carrying(mid)).kind === "bytes") low = mid;
+      else high = mid - 1;
+    }
+    const card = carrying(low);
+    for (const state of [
+      reviewStateFor(card),
+      // The longest heading and the longest notice a tap can add.
+      {
+        ...reviewStateFor(card),
+        denyArmed: true,
+        heldReaction: "indifferent" as const,
+        notice: { headline: TELEGRAM_NOT_RECORDED, lines: ["n".repeat(900), "m".repeat(900), "o".repeat(900)] },
+      },
+    ]) {
+      const drawn = renderReviewCard(state);
+      assert.ok(
+        telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS,
+        `the card overran one message: ${String(telegramVisibleLength(drawn.text))}`,
+      );
+      assert.ok(drawn.text.includes(TELEGRAM_REVIEW_PAYLOAD_BYTES), "the drawn card and the view disagree");
+    }
+    // One character more is the hash, on the card and in the view alike.
+    const over = carrying(low + 1);
+    assert.equal(reviewPayloadView(over).kind, "hash");
+    assert.ok(renderReviewCard(reviewStateFor(over)).text.includes(TELEGRAM_REVIEW_PAYLOAD_HASH_ONLY));
+  }
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: every row at its worst, armed, graded and refused, is still one message", () => {
+  const world = sampledWorld(1);
+  const base = cardsFor(world)[0] as ReviewCard;
+  const huge = (seed: string): string => `${seed}&<>`.repeat(2000);
+  const card: ReviewCard = {
+    ...base,
+    fields: {
+      ...base.fields,
+      action_key: computed(huge("k"), "log"),
+      class: computed(huge("c"), "log"),
+      task: computed<string | null>(huge("t"), "log"),
+      summary: claimed<string | null>(huge("s"), huge("a")),
+      command_breakdown: computed(huge("b"), huge("o")),
+      gloss: claimed(huge("g"), huge("a")),
+      payload_hash: computed("f".repeat(64), "log"),
+    },
+    ranAt: computed(huge("r"), "log"),
+    verdict: computed(huge("v"), "log"),
+  };
+  assert.equal(reviewPayloadView(card).kind, "hash");
+  const drawn = renderReviewCard({
+    ...reviewStateFor(card),
+    denyArmed: true,
+    heldReaction: "indifferent",
+    notice: { headline: huge("h"), lines: Array.from({ length: 10 }, () => huge("n")) },
+  });
+  assert.ok(
+    telegramVisibleLength(drawn.text) <= TELEGRAM_MAX_MESSAGE_CHARS,
+    `the worst card overran one message: ${String(telegramVisibleLength(drawn.text))}`,
+  );
+  assertClean(world.unit);
+});
+
+test("PR #614 refutation F4: a card that cannot be offered leaves its sample for a terminal review and the queue advances", async () => {
+  const world = sampledWorld(2);
+  const { channel, setup } = reviewChannelFor(world);
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const offer = channel.offerReview.bind(channel);
+  let failures = 0;
+  channel.offerReview = async (card: ReviewCard) => {
+    if (card.sampleSeq === world.samples[0]) {
+      failures += 1;
+      throw new Error("Bad Request: message is too long");
+    }
+    return offer(card);
+  };
+
+  const first = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(first.reviewCard, undefined);
+  assert.equal(failures, 1);
+  assert.ok(
+    err.some((entry) => entry.includes("review-offer-failed") && entry.includes(`approval audit review ${String(world.samples[0])}`)),
+    `no coded line names the terminal repair: ${err.join("")}`,
+  );
+  const second = await dispatchPending(setup, streams, state, at(91));
+  assert.equal(second.reviewCard?.sample_seq, world.samples[1], "the failed sample blocked the queue");
+  assert.equal(failures, 1, "the failed offer was retried");
+  assert.deepEqual(reviewsIn(world), [], "a failed offer recorded something");
   assertClean(world.unit);
 });
 

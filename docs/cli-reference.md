@@ -4400,7 +4400,7 @@ of three payload regions, and its heading says which:
 | Heading | What the reviewer sees | When |
 | --- | --- | --- |
 | `PAYLOAD — the bytes that ran, shown whole; this review covers them` | the canonical rendering of the bytes, whole, in a `<pre>` block | the runtime holds bytes that hash to the execution's binding and they fit one card |
-| `PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes` | the binding's `sha256`, and why the bytes are absent | nobody holds the bytes, the bytes held do not hash to the binding, or they are longer than one card carries (2000 escaped characters) |
+| `PAYLOAD — NOT SHOWN, hash only; this review does not cover the bytes` | the binding's `sha256`, and why the bytes are absent | nobody holds the bytes, the bytes held do not hash to the binding, or they are longer than this card's payload budget (at most 2000 escaped characters, less when the card's rows leave less room) |
 | `PAYLOAD — none recorded; the execution bound to no payload hash` | nothing to show and nothing to name | the execution and its registration recorded no `payload_hash` |
 
 The bytes are shown whole or not at all: a card is one message edited in place,
@@ -4409,6 +4409,21 @@ does, and a review over half the bytes would claim more than the reviewer read.
 Only the first case lets the review record carry a `payload_hash` (see
 [the review record](#the-review-record)). A terminal review (`approval audit
 review`) shows no payload and so never records one.
+
+**The whole card fits one message (PR #614 refutation F4).** The agent's summary
+is cut at 400 characters and every other row at 300, each with a marker saying
+how many characters are not shown (the registration record keeps the text
+whole); a card whose rows are pathologically long cuts them further, in steps,
+until it fits. A notice shows at most 600 characters, the rest on the
+listener's stderr. The payload budget is what the card's own rows leave under
+Telegram's 4096-character limit after the longest heading and the largest
+notice a tap can add, capped at 2000, and it is computed from the card alone,
+so the card a reviewer saw and the view a tap records cannot disagree. If a
+card still cannot be sent, the listener prints a coded
+`approval: telegram review-offer-failed:` line naming
+`approval audit review <seq> --ok` (or `--deny`), leaves that sample for a
+terminal review, and offers the next one: the sample stays open in
+`approval audit list` and QUEUE.md, and the queue behind it no longer waits.
 
 Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
 first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,

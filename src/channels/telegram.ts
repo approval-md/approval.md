@@ -2255,11 +2255,107 @@ function trimNotice(text: string): string {
  * message, and a second message holding the rest of the bytes would outlive the
  * card it belonged to. So the bytes are shown whole or not at all. Never cut:
  * a review that recorded a payload hash over bytes the reviewer saw half of
- * would claim more than they read. The budget leaves room under
- * {@link TELEGRAM_MAX_MESSAGE_CHARS} for the rows, a refusal notice
- * ({@link REVIEW_NOTICE_MAX} per line) and the headings.
+ * would claim more than they read. This is the CEILING; the budget a given
+ * card gets is {@link reviewPayloadBudget}, which is this or the headroom the
+ * card's own rows leave under {@link TELEGRAM_MAX_MESSAGE_CHARS}, whichever is
+ * smaller (PR #614 refutation F4).
  */
 export const REVIEW_PAYLOAD_BUDGET = 2000;
+
+/**
+ * The longest agent-written summary a review card shows, in characters (PR
+ * #614 refutation F4). The summary is the requesting party's own claim and its
+ * schema sets no length, so before this cap an agent could write a summary
+ * that pushed the card past Telegram's limit, which failed the send and held
+ * the review queue. Longer text is cut with a marker saying how much is not
+ * shown; the registration record keeps it whole.
+ */
+export const REVIEW_SUMMARY_MAX = 400;
+
+/**
+ * How much of each row a review card shows, in characters (PR #614 refutation
+ * F4), tried in order until the card fits one message with the longest
+ * heading, the hash-only payload region and the largest notice a tap can add.
+ * `row` caps the key, class, task, command breakdown, gloss, run time and
+ * outcome; `summary` caps the agent's summary (never above
+ * {@link REVIEW_SUMMARY_MAX}); `origin` caps an author or source label. An
+ * ordinary card fits at the first level and shows its rows as they are; only a
+ * card whose rows are pathologically long is cut further, and the last level
+ * fits whatever the rows hold (pinned by the worst-case test in
+ * `tests/channels-telegram.test.ts`).
+ */
+const REVIEW_CAP_LEVELS: readonly { row: number; summary: number; origin: number }[] = [
+  { row: 300, summary: REVIEW_SUMMARY_MAX, origin: 60 },
+  { row: 160, summary: 240, origin: 40 },
+  { row: 80, summary: 120, origin: 30 },
+  { row: 40, summary: 60, origin: 20 },
+];
+
+/** The longest notice headline a review card shows (F4). Headlines are constants. */
+const REVIEW_NOTICE_HEADLINE_MAX = 100;
+
+/**
+ * The most characters a review card's notice region (a refusal, or the arming
+ * line) shows, all its lines together (PR #614 refutation F4). Each line was
+ * already cut at {@link REVIEW_NOTICE_MAX}; the region had no total, so a
+ * refusal with several long lines could take the card over the limit and make
+ * the redraw that carries it fail. The whole refusal is on the listener's
+ * stderr.
+ */
+export const REVIEW_NOTICE_REGION_MAX = 600;
+
+/** The most characters a settled card's detail lines show together (F4). */
+const REVIEW_SETTLED_REGION_MAX = 3000;
+
+/**
+ * The visible length of HTML this channel wrote: tags removed and each entity
+ * {@link escapeHtml} produces counted as the one character it stands for.
+ * Telegram measures its limit after entity parsing, so this is the number the
+ * limit applies to.
+ */
+export function telegramVisibleLength(html: string): number {
+  return html.replace(/<[^>]*>/gu, "").replace(/&(?:amp|lt|gt);/gu, "x").length;
+}
+
+/** `text` cut at `max` characters with a marker saying how much is not shown. */
+function capReviewText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return `${cut}${reviewCutMarker(text.length - cut.length)}`;
+}
+
+/** The marker a cut row ends with. */
+function reviewCutMarker(hidden: number): string {
+  return `… [+${String(hidden)} chars not shown]`;
+}
+
+/** The longest {@link reviewCutMarker}: a JavaScript string is under 2^53 long. */
+const REVIEW_CUT_MARKER_MAX = reviewCutMarker(Number.MAX_SAFE_INTEGER).length;
+
+/** The line a region ends with when lines were left out. */
+const REVIEW_REGION_OVERFLOW = "… [more on the listener's stderr]";
+
+/**
+ * Lines cut so that together, counting the newline before each, they show at
+ * most `max` characters plus one cut marker and the overflow line.
+ */
+function capReviewRegion(lines: readonly string[], max: number): string[] {
+  const out: string[] = [];
+  let used = 0;
+  for (const entry of lines) {
+    const room = max - used - 1;
+    if (room <= 0) {
+      out.push(REVIEW_REGION_OVERFLOW);
+      break;
+    }
+    const shown = capReviewText(entry, room);
+    out.push(shown);
+    used += shown.length + 1;
+  }
+  return out;
+}
 
 /**
  * The longest payload text, in characters, a review card will even try to
@@ -2320,7 +2416,7 @@ export function reviewPayloadView(card: ReviewCard): ReviewPayloadView {
       return { kind: "hash", hash: rendering.hash, reason: "too-long" };
     }
     const text = payloadRegionText(rendering, card.fields.class.value);
-    if (escapeHtml(text).length <= REVIEW_PAYLOAD_BUDGET) {
+    if (escapeHtml(text).length <= reviewPayloadBudget(card)) {
       return { kind: "bytes", hash: rendering.hash, text };
     }
     return { kind: "hash", hash: rendering.hash, reason: "too-long" };
@@ -2346,6 +2442,122 @@ function reviewPayloadLines(view: ReviewPayloadView): string[] {
     default:
       return [`<b>${escapeHtml(TELEGRAM_REVIEW_PAYLOAD_NONE)}</b>`];
   }
+}
+
+/**
+ * A review card's HTML lines around the payload region, every row cut to its
+ * cap (PR #614 refutation F4): `top` is the key and the computed rows, `bottom`
+ * the claimed ones. Pure over the card, so the payload budget computed from it
+ * and the card drawn from it cannot disagree.
+ */
+function reviewCardFrame(card: ReviewCard): { top: string[]; bottom: string[] } {
+  let frame = reviewCardFrameAt(card, REVIEW_CAP_LEVELS[0] as (typeof REVIEW_CAP_LEVELS)[number]);
+  for (const level of REVIEW_CAP_LEVELS) {
+    frame = reviewCardFrameAt(card, level);
+    if (reviewFixedLength(frame) + REVIEW_HASH_REGION_MAX <= TELEGRAM_MAX_MESSAGE_CHARS) break;
+  }
+  return frame;
+}
+
+function reviewCardFrameAt(
+  card: ReviewCard,
+  caps: (typeof REVIEW_CAP_LEVELS)[number],
+): { top: string[]; bottom: string[] } {
+  const computedLines: Line[] = [];
+  const claimedLines: Line[] = [];
+  for (const row of REVIEW_CARD_ROWS) {
+    const candidate = reviewRow(card.fields, row);
+    if (candidate === null) continue;
+    if (candidate.line.kind === "computed") computedLines.push(candidate.line);
+    else claimedLines.push(candidate.line);
+  }
+  computedLines.push(line("ran_at", card.ranAt, "ran at", card.ranAt.value));
+  computedLines.push(line("verdict", card.verdict, "verdict", card.verdict.value));
+
+  const render = (entry: Line): string =>
+    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(
+      capReviewText(entry.text, entry.field === "summary" ? caps.summary : caps.row),
+    )} <i>(${escapeHtml(capReviewText(entry.origin, caps.origin))})</i>`;
+
+  const author = capReviewText(originOf(card.fields.summary), caps.origin);
+  return {
+    top: [
+      `<code>${escapeHtml(capReviewText(card.fields.action_key.value, caps.row))}</code>`,
+      "",
+      "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
+      ...computedLines.map(render),
+      "",
+    ],
+    bottom: [
+      "",
+      `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
+      ...claimedLines.map(render),
+    ],
+  };
+}
+
+/** The longest heading a live card can wear: Deny armed and a grade held. */
+const REVIEW_HEADING_MAX = Math.max(
+  ...REACTIONS.map(
+    (reaction) =>
+      [TELEGRAM_REVIEW_HEADING, TELEGRAM_REVIEW_ARMED, telegramReviewGradeHeld(reaction)].join(" — ")
+        .length,
+  ),
+);
+
+/**
+ * What a notice can add to a card at most: the blank line and the headline,
+ * each after a newline, then the region (newlines counted), one cut marker and
+ * the overflow line after its newline.
+ */
+const REVIEW_NOTICE_RESERVE =
+  2 +
+  REVIEW_NOTICE_HEADLINE_MAX +
+  REVIEW_CUT_MARKER_MAX +
+  REVIEW_NOTICE_REGION_MAX +
+  REVIEW_CUT_MARKER_MAX +
+  1 +
+  REVIEW_REGION_OVERFLOW.length;
+
+/** The longest hash-only or none payload region, with the newlines around it. */
+const REVIEW_HASH_REGION_MAX = Math.max(
+  ...(
+    [
+      { kind: "hash", hash: "0".repeat(64), reason: "too-long" },
+      { kind: "hash", hash: "0".repeat(64), reason: "unavailable" },
+      { kind: "none" },
+    ] as const
+  ).map((view) => telegramVisibleLength(reviewPayloadLines(view).join("\n")) + 2),
+);
+
+/**
+ * Everything a live card can hold except the payload region: the longest
+ * heading, the frame, the largest notice, and the newlines joining them.
+ */
+function reviewFixedLength(frame: { top: string[]; bottom: string[] }): number {
+  return (
+    REVIEW_HEADING_MAX +
+    1 +
+    telegramVisibleLength([...frame.top, ...frame.bottom].join("\n")) +
+    REVIEW_NOTICE_RESERVE
+  );
+}
+
+/**
+ * How many escaped characters of payload this card can show whole (PR #614
+ * refutation F4): {@link REVIEW_PAYLOAD_BUDGET}, or the room the card's own
+ * rows leave under {@link TELEGRAM_MAX_MESSAGE_CHARS} after the longest heading,
+ * the payload heading and the largest notice a tap can add, whichever is
+ * smaller. Pure over the card, so the view a card is drawn with and the view a
+ * tap records are the same view.
+ */
+export function reviewPayloadBudget(card: ReviewCard): number {
+  const fixed =
+    reviewFixedLength(reviewCardFrame(card)) +
+    // The bytes heading and the newlines around the heading and the payload.
+    TELEGRAM_REVIEW_PAYLOAD_BYTES.length +
+    3;
+  return Math.max(0, Math.min(REVIEW_PAYLOAD_BUDGET, TELEGRAM_MAX_MESSAGE_CHARS - fixed));
 }
 
 /**
@@ -2380,30 +2592,18 @@ export function renderReviewCard(state: ReviewCardState): {
   if (state.settled !== null) {
     return {
       text: [
-        `<b>${escapeHtml(state.settled.headline)}</b>`,
-        `<code>${escapeHtml(key)}</code>`,
+        `<b>${escapeHtml(capReviewText(state.settled.headline, REVIEW_NOTICE_HEADLINE_MAX))}</b>`,
+        `<code>${escapeHtml(capReviewText(key, (REVIEW_CAP_LEVELS[0] as { row: number }).row))}</code>`,
         "",
-        ...state.settled.detail.map((entry) => escapeHtml(trimNotice(entry))),
+        ...capReviewRegion(state.settled.detail.map(trimNotice), REVIEW_SETTLED_REGION_MAX).map(
+          (entry) => escapeHtml(entry),
+        ),
       ].join("\n"),
       keyboard: null,
     };
   }
 
-  const computedLines: Line[] = [];
-  const claimedLines: Line[] = [];
-  for (const row of REVIEW_CARD_ROWS) {
-    const candidate = reviewRow(card.fields, row);
-    if (candidate === null) continue;
-    if (candidate.line.kind === "computed") computedLines.push(candidate.line);
-    else claimedLines.push(candidate.line);
-  }
-  computedLines.push(line("ran_at", card.ranAt, "ran at", card.ranAt.value));
-  computedLines.push(line("verdict", card.verdict, "verdict", card.verdict.value));
-
-  const render = (entry: Line): string =>
-    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
-
-  const author = originOf(card.fields.summary);
+  const frame = reviewCardFrame(card);
   const lines: string[] = [
     `<b>${escapeHtml(
       [
@@ -2412,22 +2612,18 @@ export function renderReviewCard(state: ReviewCardState): {
         ...(state.heldReaction === null ? [] : [telegramReviewGradeHeld(state.heldReaction)]),
       ].join(" — "),
     )}</b>`,
-    `<code>${escapeHtml(key)}</code>`,
-    "",
-    "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
-    ...computedLines.map(render),
-    "",
+    ...frame.top,
     ...reviewPayloadLines(reviewPayloadView(card)),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
-    ...claimedLines.map(render),
+    ...frame.bottom,
   ];
 
   if (state.notice !== null) {
     lines.push(
       "",
-      `<b>${escapeHtml(state.notice.headline)}</b>`,
-      ...state.notice.lines.map((entry) => escapeHtml(trimNotice(entry))),
+      `<b>${escapeHtml(capReviewText(state.notice.headline, REVIEW_NOTICE_HEADLINE_MAX))}</b>`,
+      ...capReviewRegion(state.notice.lines.map(trimNotice), REVIEW_NOTICE_REGION_MAX).map((entry) =>
+        escapeHtml(entry),
+      ),
     );
   }
 

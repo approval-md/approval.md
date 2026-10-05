@@ -1452,6 +1452,15 @@ export interface ReviewWalkthrough {
   current: number | null;
   /** Sample seq -> the message this process sent the card as. */
   readonly delivered: Map<number, DeliveryId>;
+  /**
+   * Samples whose card could not be offered, left for a terminal review (PR
+   * #614 refutation F4). One failed offer is enough: the card is built from the
+   * log, so the next cycle would build the same card and meet the same refusal,
+   * and retrying it every cycle held the whole backlog behind it. The sample
+   * stays OPEN (in `approval audit list` and QUEUE.md); this listener only
+   * stops offering it. Process memory, pruned when the sample closes.
+   */
+  readonly terminalOnly: Set<number>;
   /** Whether any review summary has been sent yet. */
   summarySent: boolean;
   /** The open count the last summary named, so growth can be recognised. */
@@ -1628,6 +1637,7 @@ export function newDispatchState(): DispatchState {
       order: [],
       current: null,
       delivered: new Map(),
+      terminalOnly: new Set(),
       summarySent: false,
       announced: 0,
       logSize: null,
@@ -2294,6 +2304,9 @@ async function dispatchReviews(
   for (const seq of review.delivered.keys()) {
     if (!openSeqs.has(seq)) review.delivered.delete(seq);
   }
+  for (const seq of review.terminalOnly) {
+    if (!openSeqs.has(seq)) review.terminalOnly.delete(seq);
+  }
   if (review.current !== null && !openSeqs.has(review.current)) review.current = null;
   // A count the approver was told that is now too high is the number they
   // watched go down, not growth to announce again.
@@ -2301,7 +2314,9 @@ async function dispatchReviews(
 
   if (review.current !== null) return;
   if (setup.delivery === "paced" && state.paced.current !== null) return;
-  const nextSeq = review.order.find((seq) => !review.delivered.has(seq));
+  const nextSeq = review.order.find(
+    (seq) => !review.delivered.has(seq) && !review.terminalOnly.has(seq),
+  );
   if (nextSeq === undefined) return;
   const card = open.find((entry) => entry.sampleSeq === nextSeq);
   if (card === undefined) return;
@@ -2349,11 +2364,15 @@ async function dispatchReviews(
       );
     }
   } catch (cause) {
-    // The sample stays open and undelivered, so the next cycle offers it again.
+    // PR #614 refutation F4. The sample stays open, and this listener stops
+    // offering it: the next cycle would build the same card from the same log
+    // and fail the same way, and the queue behind it would wait forever. The
+    // coded line names the repair.
+    review.terminalOnly.add(nextSeq);
     streams.err(
-      `approval: telegram could not offer the review of sample seq ${String(nextSeq)} (${actionKey}): ${
+      `approval: telegram review-offer-failed: could not offer the review of sample seq ${String(nextSeq)} (${actionKey}): ${
         cause instanceof Error ? cause.message : String(cause)
-      } — the sample stays open and the next cycle tries again\n`,
+      } — the sample stays open for a terminal review (approval audit review ${String(nextSeq)} --ok or --deny), and this listener offers the next sample instead\n`,
     );
   }
 }
