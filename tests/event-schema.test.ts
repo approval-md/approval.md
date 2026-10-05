@@ -83,7 +83,9 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "policy.proposed": ["payload"],
   "policy.declined": ["payload"],
   "envelope.drift": ["task"],
-  "audit.sampled": [],
+  // PR #614 refutation F2. A sample pins the attested policy it was taken
+  // under, in its payload, so the payload is required.
+  "audit.sampled": ["payload"],
   // APRV-481. A review must name the sample it answers, the execution that
   // sample named, and its verdict, so the payload carrying them is required.
   "audit.reviewed": ["payload"],
@@ -265,6 +267,30 @@ test("APRV-481: a new review names its sample, the execution, and its verdict; a
   // The payload hash is optional, and when present it is a digest.
   const shown = { ...record, payload: { ...payload, payload_hash: "a".repeat(64) } };
   assert.equal(validate("event", shown).ok, true);
+});
+
+test("PR #614 F2: a new sample pins its attested policy; an old one still reads, as not pinned", () => {
+  const record = fixture("audit.sampled");
+  const payload = record["payload"] as Record<string, unknown>;
+  assert.equal(validate("event", record).ok, true);
+
+  const stripped = { ...record, payload: without(payload, "policy_sha256") };
+  const strict = validate("event", stripped);
+  assert.equal(strict.ok, false, "the write boundary accepted a sample that pins no policy");
+  if (!strict.ok) {
+    assert.ok(
+      strict.errors.some((error) => error.keyword === "required" && error.message.includes("policy_sha256")),
+      `the refusal does not name policy_sha256: ${JSON.stringify(strict.errors)}`,
+    );
+  }
+  assert.equal(validate("event", without(record, "payload")).ok, false);
+  // The read boundary: a sample written before the pin verifies unchanged.
+  assert.equal(validate("event", stripped, { mode: "historical" }).ok, true);
+  assert.equal(validate("event", without(record, "payload"), { mode: "historical" }).ok, true);
+  // Widened is the requirement only: a malformed pin is refused on read too.
+  const bad = { ...record, payload: { ...payload, policy_sha256: "ABC" } };
+  assert.equal(validate("event", bad).ok, false);
+  assert.equal(validate("event", bad, { mode: "historical" }).ok, false);
 });
 
 test("an organ attestation names a relative path, a digest, and a human (APRV-272)", () => {

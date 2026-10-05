@@ -2536,6 +2536,10 @@ const SUITES = [
     // fails here. The read boundary is unchanged: `mode: "historical"` swaps in
     // `audit_reviewed_record_historical`, so a pre-APRV-481 review still
     // verifies; the vectors pin the write boundary only, as they always have.
+    // Same unreleased major (PR #614 refutation F2): `audit.sampled` now
+    // REQUIRES `payload.policy_sha256`, so the sample fixture gained it and
+    // `audit-sampled-no-policy-hash` is refused; historical validation swaps
+    // in `audit_sampled_record_historical`.
     vectors_version: "3.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:

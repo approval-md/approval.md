@@ -1598,6 +1598,10 @@ test("APRV-483 refutation: the roster cannot come from a file the reviewer chose
   assertClean(unit);
 });
 
+function sha256Of(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
 test("PR #614 refutation F1: an attested policy that does not load names no roster, so every reviewer is refused", async () => {
   // Three ways to break the bytes the loader refuses and `policy attest` does
   // not: a glob in a roster, a roster entry that is not an identifier, and a
@@ -1611,14 +1615,24 @@ test("PR #614 refutation F1: an attested policy that does not load names no rost
     const unit = ready();
     withRoster(unit, true);
     startSupervised(unit, "task-042:draft", 2);
-    sweep(unit, 5);
-    writeFileSync(unit.policyPath, breakIt(readFileSync(unit.policyPath, "utf8")), "utf8");
+    const validText = readFileSync(unit.policyPath, "utf8");
+    const brokenText = breakIt(validText);
+    writeFileSync(unit.policyPath, brokenText, "utf8");
     assert.equal(loadPolicy({ file: unit.policyPath }).ok, false, `${name}: the broken policy loaded`);
     assert.equal(
       appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(4)).ok,
       true,
       `${name}: attestation of the broken bytes failed, so the probe tests nothing`,
     );
+    const brokenSha = sha256Of(unit.policyPath);
+    // The sweep reads the working file, so it samples under the valid text and
+    // pins the policy in force, which is the broken attestation (PR #614 F2).
+    // With the broken bytes back on disk the review reaches the pinned policy
+    // and the only thing left to refuse it is that the policy does not load.
+    writeFileSync(unit.policyPath, validText, "utf8");
+    sweep(unit, 5);
+    writeFileSync(unit.policyPath, brokenText, "utf8");
+    assert.equal(sampledSubjects(records(unit))[0]?.policySha256, brokenSha, `${name}: the sample pinned another policy`);
     const before = records(unit).length;
     for (const reviewer of ["human:bob", "human:carter"]) {
       const result = reviewSample(
@@ -1639,24 +1653,127 @@ test("PR #614 refutation F1: an attested policy that does not load names no rost
   }
 });
 
+test("PR #614 refutation F2: a sample pins the attested policy, and a re-attestation that renames the rule cannot open the review", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const pinned = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  assert.equal((sample.payload as Record<string, unknown>)["policy_sha256"], pinned);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, pinned);
+
+  // The probe: the class's rule renamed away and the result attested.
+  const attestedText = readFileSync(unit.policyPath, "utf8");
+  writeFileSync(unit.policyPath, attestedText.replace("  files.write.*:\n", "  files.remote.*:\n"), "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true);
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(5)).ok, true);
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      reviewer,
+      null,
+      { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+    );
+    assert.equal(result.ok, false, `${reviewer} reviewed under a policy that no longer names the class`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, new RegExp(pinned, "u"), "the refusal does not name the hash the review needs");
+    }
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+
+  // The pinned path: the bytes the sample was taken under are back on disk, so
+  // the roster is that policy's. Its member reviews; anyone else is refused.
+  writeFileSync(unit.policyPath, attestedText, "utf8");
+  const stranger = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:bob",
+    null,
+    { ...unit.options, clock: fixedClock(at(7)), verdict: "ok" },
+  );
+  assert.equal(stranger.ok, false);
+  if (!stranger.ok) assert.equal(stranger.code, "actor-not-approver");
+  const named = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(8)), verdict: "ok" },
+  );
+  assert.equal(named.ok, true, named.ok ? "" : named.message);
+  assertClean(unit);
+});
+
+test("PR #614 refutation F2: a class that matches no rule in the pinned policy is refused actor-not-approver", async () => {
+  const unit = ready();
+  // `files.write.*` gone and the defaults supervised: the class resolves
+  // supervised with no rule, so the policy names no roster for it.
+  const text = readFileSync(unit.policyPath, "utf8")
+    .replace("defaults:\n  autonomy: manual\n", "defaults:\n  autonomy: supervised\n")
+    .replace("  files.write.*:\n    autonomy: supervised\n", "");
+  writeFileSync(unit.policyPath, text, "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true);
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(1)).ok, true);
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+  const result = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    null,
+    { ...unit.options, clock: fixedClock(at(6)), verdict: "ok" },
+  );
+  assert.equal(result.ok, false, "a class no rule names was approvable by anyone");
+  if (!result.ok) {
+    assert.equal(result.code, "actor-not-approver");
+    assert.match(result.message, /matches no rule/u);
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  assertClean(unit);
+});
+
+test("PR #614 refutation F2: a sample written before samples pinned a policy reads as not pinned", () => {
+  const subjects = sampledSubjects([
+    {
+      seq: 1,
+      ts: T0,
+      event: "audit.sampled",
+      actor: AUDIT_ACTOR,
+      action_key: "task-042:draft",
+      payload: { subject_seq: 1, subject_hash: "f".repeat(64) },
+      alg: "sha256/jcs",
+      prev: null,
+      hash: "e".repeat(64),
+    } as unknown as EventRecord,
+  ]);
+  assert.equal(subjects[0]?.policySha256, null);
+});
+
 test("APRV-481/483 refutation: a sample that names no subject hash or no class is refused, never reviewed", async () => {
   const unit = ready();
   withRoster(unit, true);
   const before = records(unit).length;
   // Two hand-written samples through the real writer: one naming no subject
-  // hash, one naming a hash but no action key and no class.
+  // hash, one naming a hash but no action key and no class. Both pin the
+  // attested policy (PR #614 F2), so the refusals below are about the sample.
+  const pinned = createHash("sha256").update(readFileSync(unit.policyPath)).digest("hex");
   const noHash = appendEvent(unit.logPath, {
     ts: at(3),
     event: "audit.sampled",
     actor: AUDIT_ACTOR,
-    payload: { subject_seq: 1 },
+    payload: { subject_seq: 1, policy_sha256: pinned },
   });
   assert.equal(noHash.ok, true, JSON.stringify(noHash));
   const noClass = appendEvent(unit.logPath, {
     ts: at(4),
     event: "audit.sampled",
     actor: AUDIT_ACTOR,
-    payload: { subject_seq: 1, subject_hash: "f".repeat(64) },
+    payload: { subject_seq: 1, subject_hash: "f".repeat(64), policy_sha256: pinned },
   });
   assert.equal(noClass.ok, true, JSON.stringify(noClass));
   const appended = records(unit).length;

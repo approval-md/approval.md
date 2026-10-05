@@ -405,6 +405,9 @@ test("a moved head re-derives the window and appends once (APRV-214)", () => {
         ts: plus(T0, 30_000),
         event: "audit.sampled",
         actor: "system:daemon",
+        // PR #614 F2: a sample pins the attested policy; any well-formed hash
+        // serves a wedge whose only job is to move the head.
+        payload: { policy_sha256: "a".repeat(64) },
       }, { expectedHead: { seq: head.seq, hash: head.hash } });
       assert.equal(wedge.ok, true, wedge.ok ? "" : wedge.error.message);
     }
@@ -431,6 +434,7 @@ test("a caller may lower the retry bound, and a lost race then refuses (APRV-214
       ts: plus(T0, 30_000),
       event: "audit.sampled",
       actor: "system:daemon",
+      payload: { policy_sha256: "a".repeat(64) },
     }, { expectedHead: { seq: head.seq, hash: head.hash } });
     assert.equal(wedge.ok, true, wedge.ok ? "" : wedge.error.message);
     return plus(T0, 60_000);

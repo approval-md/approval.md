@@ -514,6 +514,8 @@ test("a sampled action with no later review is listed; a reviewed one is not", (
     actor: "system:auditor",
     task: TASK,
     action_key: world.keys[0] as string,
+    // PR #614 F2: a new sample pins the attested policy it was taken under.
+    payload: { policy_sha256: "c".repeat(64) },
   });
   assert.equal(sampledOne.ok, true, JSON.stringify(sampledOne));
 
@@ -523,6 +525,7 @@ test("a sampled action with no later review is listed; a reviewed one is not", (
     actor: "system:auditor",
     task: TASK,
     action_key: "task-100:other:2026-08-05",
+    payload: { policy_sha256: "c".repeat(64) },
   });
   assert.equal(sampledTwo.ok, true, JSON.stringify(sampledTwo));
 

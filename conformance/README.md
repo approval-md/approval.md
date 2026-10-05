@@ -235,8 +235,13 @@ the five review fixtures gained those fields and a review without them is
 refused (`audit-reviewed-no-subject-hash`). The read boundary is not in the
 suite and did not move: historical validation swaps in
 `audit_reviewed_record_historical`, so a review written before the change still
-verifies. If another branch claims 3.0.0 first, the collision rule below gives
-this change the next major at merge.
+verifies. The same release requires an `audit.sampled` record to pin the
+attested policy it was taken under (`payload.policy_sha256`, PR #614 refutation
+F2), so the sample fixture gained the field and a sample without it is refused
+(`audit-sampled-no-policy-hash`); historical validation swaps in
+`audit_sampled_record_historical` for the samples already in logs. If another
+branch claims 3.0.0 first, the collision rule below gives this change the next
+major at merge.
 
 `schema-validation` has no 1.5.0. Two branches minted that number without seeing
 each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
