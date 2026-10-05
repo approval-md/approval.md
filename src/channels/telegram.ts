@@ -2673,10 +2673,82 @@ export class TelegramApiError extends Error {
      * JSON, or carried no description.
      */
     readonly description: string | null = null,
+    /**
+     * The Bot API's `parameters.retry_after`, in seconds, when the failure
+     * carried one (PR #614 recheck NF-2). Telegram sends it with 429 "Too Many
+     * Requests" and means it: a send before it elapses is refused again.
+     * `null` when the body named none.
+     */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "TelegramApiError";
   }
+}
+
+/**
+ * The Bot API refusals that are a fact about the message itself (PR #614
+ * recheck NF-2). Each is a 400 whose `description` says the text, its markup
+ * or its keyboard is unacceptable, so resending the same card meets the same
+ * refusal however long the sender waits:
+ *
+ * - `message is too long`: the text is over 4096 characters after entities;
+ * - `can't parse entities`: the HTML the card was drawn with does not parse;
+ * - `message text is empty` / `text must be non-empty`: nothing to send;
+ * - `reply markup is too long`: the inline keyboard is over its byte limit;
+ * - `BUTTON_DATA_INVALID`: a button's callback data is over 64 bytes or empty;
+ * - `ENTITIES_TOO_LONG` / `entities too long`: too many formatting entities.
+ *
+ * Deliberately absent, because the card cannot cause them and a retry can
+ * clear them: `chat not found`, `bot was blocked`, `not enough rights` (the
+ * chat's state, which a human repairs), every 429, every 5xx, every timeout and
+ * network failure.
+ */
+const TELEGRAM_DETERMINISTIC_SEND_REFUSALS: readonly RegExp[] = [
+  /message is too long/iu,
+  /can't parse entities/iu,
+  /message text is empty|text must be non-empty/iu,
+  /reply markup is too long/iu,
+  /BUTTON_DATA_INVALID/u,
+  /ENTITIES_TOO_LONG|entities too long/iu,
+];
+
+/**
+ * Whether a failed send is the Bot API refusing the message itself, so that
+ * sending the same message again can only fail again (PR #614 recheck NF-2).
+ *
+ * Only an HTTP 400 whose description matches
+ * {@link TELEGRAM_DETERMINISTIC_SEND_REFUSALS} qualifies. Anything else, an
+ * error that is not a {@link TelegramApiError} included, is treated as
+ * transient, which is the direction that keeps a card in front of the
+ * approver: a transient failure misread as deterministic hides a sample from
+ * the phone, and the converse costs a bounded number of retries.
+ */
+export function isDeterministicSendRefusal(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.status === 400 &&
+    cause.description !== null &&
+    TELEGRAM_DETERMINISTIC_SEND_REFUSALS.some((pattern) => pattern.test(cause.description as string))
+  );
+}
+
+/**
+ * The wait, in milliseconds, a failed call's `retry_after` asks for, or `null`
+ * when it named none (PR #614 recheck NF-2).
+ */
+export function retryAfterMsOf(cause: unknown): number | null {
+  if (!(cause instanceof TelegramApiError) || cause.retryAfterSeconds === null) return null;
+  return cause.retryAfterSeconds * 1000;
+}
+
+/** `parameters.retry_after` from a parsed Bot API body, when it is a positive integer. */
+function retryAfterFrom(parsed: unknown): number | null {
+  if (parsed === null || typeof parsed !== "object") return null;
+  const parameters = (parsed as Record<string, unknown>)["parameters"];
+  if (parameters === null || typeof parameters !== "object") return null;
+  const value = (parameters as Record<string, unknown>)["retry_after"];
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 /**
@@ -5449,23 +5521,31 @@ export class TelegramChannel implements TestableChannel {
    * reporting a failure and a second one thrown from the diagnostic would
    * replace the real reason with a worse one.
    */
-  private async describeFailure(response: { text(): Promise<string> }): Promise<string | null> {
+  private async describeFailure(
+    response: { text(): Promise<string> },
+  ): Promise<{ description: string | null; retryAfterSeconds: number | null }> {
+    const nothing = { description: null, retryAfterSeconds: null };
     let body: string;
     try {
       body = await response.text();
     } catch {
-      return null;
+      return nothing;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(body);
     } catch {
-      return null;
+      return nothing;
     }
-    if (parsed === null || typeof parsed !== "object") return null;
+    if (parsed === null || typeof parsed !== "object") return nothing;
     const description = (parsed as Record<string, unknown>)["description"];
-    if (typeof description !== "string" || description.length === 0) return null;
-    return this.redact(description);
+    return {
+      description:
+        typeof description !== "string" || description.length === 0 ? null : this.redact(description),
+      // PR #614 recheck NF-2: a 429 says how long to wait, and the review
+      // walkthrough honours it rather than spending its retry budget early.
+      retryAfterSeconds: retryAfterFrom(parsed),
+    };
   }
 
   /**
@@ -5500,7 +5580,7 @@ export class TelegramChannel implements TestableChannel {
         // was thrown out of were the same "HTTP 400" on the operator's
         // terminal. Read best effort — a status is still worth reporting when
         // the body is missing, truncated, or not JSON at all.
-        const description = await this.describeFailure(response);
+        const { description, retryAfterSeconds } = await this.describeFailure(response);
         throw new TelegramApiError(
           description === null
             ? `${method}: HTTP ${response.status}`
@@ -5508,6 +5588,7 @@ export class TelegramChannel implements TestableChannel {
           method,
           response.status,
           description,
+          retryAfterSeconds,
         );
       }
       raw = await response.text();
@@ -5543,6 +5624,7 @@ export class TelegramChannel implements TestableChannel {
         // failure took (APRV-277).
         null,
         description,
+        retryAfterFrom(envelope),
       );
     }
     return envelope["result"] as T;

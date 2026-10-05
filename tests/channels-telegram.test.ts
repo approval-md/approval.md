@@ -72,6 +72,7 @@ import {
   digestCallbackData,
   digestKeyOf,
   groupForDigest,
+  isDeterministicSendRefusal,
   isMessageNotModified,
   parseCallbackData,
   payloadShapeKey,
@@ -147,6 +148,7 @@ import {
   queueLines,
   reviewHandlerFor,
   summaryLines,
+  REVIEW_OFFER_ATTEMPTS,
   supersededPending,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
@@ -6515,7 +6517,14 @@ test("PR #614 refutation F4: a card that cannot be offered leaves its sample for
   channel.offerReview = async (card: ReviewCard) => {
     if (card.sampleSeq === world.samples[0]) {
       failures += 1;
-      throw new Error("Bad Request: message is too long");
+      // PR #614 recheck NF-2: only the Bot API's refusal of the card itself
+      // makes a sample terminal-only at once; this is that refusal.
+      throw new TelegramApiError(
+        "sendMessage: HTTP 400 (Bad Request: message is too long)",
+        "sendMessage",
+        400,
+        "Bad Request: message is too long",
+      );
     }
     return offer(card);
   };
@@ -6531,6 +6540,204 @@ test("PR #614 refutation F4: a card that cannot be offered leaves its sample for
   assert.equal(second.reviewCard?.sample_seq, world.samples[1], "the failed sample blocked the queue");
   assert.equal(failures, 1, "the failed offer was retried");
   assert.deepEqual(reviewsIn(world), [], "a failed offer recorded something");
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// PR #614 recheck NF-2: a failed offer hides a sample from the phone only when
+// Telegram refused the card itself. A 429, a timeout, a 5xx or a network error
+// is retried, with Telegram's retry_after honoured and a per-sample budget.
+// ---------------------------------------------------------------------------
+
+type ScriptedFailure =
+  | { status: number; description: string; retryAfter?: number }
+  | { network: string };
+
+/**
+ * A fetch that fails the next review-card sends with `failures`, in order, and
+ * passes everything else (later cards, edits, polls) to the mock. A review
+ * card is recognised by its heading, so request messages and summaries are
+ * never consumed.
+ */
+function reviewSendsFail(failures: ScriptedFailure[]): {
+  fetch: NonNullable<TelegramConfig["fetch"]>;
+  cardSends: () => number;
+} {
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  let sends = 0;
+  const fetch: NonNullable<TelegramConfig["fetch"]> = async (url, init) => {
+    if (url.endsWith("/sendMessage")) {
+      const body = JSON.parse(String((init as { body?: unknown }).body ?? "{}")) as { text?: string };
+      if (typeof body.text === "string" && body.text.includes(TELEGRAM_REVIEW_HEADING)) {
+        sends += 1;
+        const failure = failures.shift();
+        if (failure !== undefined) {
+          if ("network" in failure) throw new TypeError(failure.network);
+          const text = JSON.stringify({
+            ok: false,
+            error_code: failure.status,
+            description: failure.description,
+            ...(failure.retryAfter === undefined ? {} : { parameters: { retry_after: failure.retryAfter } }),
+          });
+          return { ok: false, status: failure.status, text: async () => text };
+        }
+      }
+    }
+    return await passthrough(url, init);
+  };
+  return { fetch, cardSends: () => sends };
+}
+
+/** A review channel whose card sends fail as scripted, wired as the listener wires it. */
+function failingReviewChannel(world: Sampled, failures: ScriptedFailure[]) {
+  const scripted = reviewSendsFail(failures);
+  const channel = channelFor({ fetch: scripted.fetch });
+  const setup = setupFor(world, channel, undefined, "paced");
+  const captured = capture();
+  channel.onReview(reviewHandlerFor(setup, captured.streams));
+  return { channel, setup, cardSends: scripted.cardSends, ...captured };
+}
+
+/** `minutes` after T0 plus `seconds`. */
+function atSeconds(minutes: number, seconds: number): string {
+  return new Date(Date.parse(at(minutes)) + seconds * 1000).toISOString();
+}
+
+test("PR #614 recheck NF-2: only the Bot API refusing the card itself is deterministic", () => {
+  const refusal = (status: number | null, description: string | null) =>
+    new TelegramApiError("sendMessage: refused", "sendMessage", status, description);
+  for (const description of [
+    "Bad Request: message is too long",
+    "Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 3",
+    "Bad Request: message text is empty",
+    "Bad Request: text must be non-empty",
+    "Bad Request: reply markup is too long",
+    "Bad Request: BUTTON_DATA_INVALID",
+    "Bad Request: ENTITIES_TOO_LONG",
+  ]) {
+    assert.equal(isDeterministicSendRefusal(refusal(400, description)), true, description);
+  }
+  for (const [status, description] of [
+    [429, "Too Many Requests: retry after 35"],
+    [500, "Internal Server Error"],
+    [502, "Bad Gateway"],
+    [400, "Bad Request: chat not found"],
+    [403, "Forbidden: bot was blocked by the user"],
+    [null, "Bad Request: message is too long"],
+    [400, null],
+  ] as const) {
+    assert.equal(isDeterministicSendRefusal(refusal(status, description)), false, `${String(status)} ${String(description)}`);
+  }
+  assert.equal(isDeterministicSendRefusal(new Error("Bad Request: message is too long")), false, "a bare Error is not the Bot API");
+});
+
+test("PR #614 recheck NF-2: one 429 does not hide the sample, its retry_after is honoured, and later samples still flow", async () => {
+  const world = sampledWorld(3);
+  const { channel, setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 429, description: "Too Many Requests: retry after 150", retryAfter: 150 },
+  ]);
+  const state = newDispatchState();
+  const [first, second, third] = world.samples as [number, number, number];
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.equal(cardSends(), 1);
+  assert.ok(err.some((line) => line.includes("review-offer-retry") && line.includes(`sample seq ${String(first)}`)), err.join(""));
+  assert.equal(err.some((line) => line.includes("review-offer-failed")), false, "a 429 made the sample terminal-only");
+  assert.equal(state.review.terminalOnly.has(first), false, "a 429 hid the sample from the phone");
+
+  // Past the 60-second backoff but inside Telegram's 150 seconds: nothing is
+  // sent, neither the same card nor the next one.
+  const waiting = await dispatchPending(setup, streams, state, atSeconds(92, 0));
+  assert.equal(waiting.reviewCard, undefined, "a card went out inside retry_after");
+  assert.equal(cardSends(), 1, "a send was attempted inside retry_after");
+
+  // After retry_after: the same sample, not the next one.
+  const retried = await dispatchPending(setup, streams, state, atSeconds(92, 31));
+  assert.equal(retried.reviewCard?.sample_seq, first, "the 429'd sample lost its place");
+  await tapReview(channel, "ok");
+  const next = await dispatchPending(setup, streams, state, at(93));
+  assert.equal(next.reviewCard?.sample_seq, second, "the sample after it did not flow");
+  await tapReview(channel, "ok");
+  const last = await dispatchPending(setup, streams, state, at(94));
+  assert.equal(last.reviewCard?.sample_seq, third);
+  await tapReview(channel, "ok");
+  assert.equal(reviewsIn(world).length, 3);
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-2: a deterministic 400 marks the sample terminal-only with the coded line", async () => {
+  const world = sampledWorld(2);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 400, description: "Bad Request: can't parse entities: unexpected end tag" },
+  ]);
+  const state = newDispatchState();
+  const [first, second] = world.samples as [number, number];
+
+  const failed = await dispatchPending(setup, streams, state, at(90));
+  assert.equal(failed.reviewCard, undefined);
+  assert.ok(
+    err.some(
+      (line) =>
+        line.includes("review-offer-failed") &&
+        line.includes("refused the card itself") &&
+        line.includes(`approval audit review ${String(first)}`),
+    ),
+    err.join(""),
+  );
+  assert.equal(state.review.terminalOnly.has(first), true);
+  // No pause and no retry: the next cycle offers the next sample.
+  const next = await dispatchPending(setup, streams, state, atSeconds(90, 1));
+  assert.equal(next.reviewCard?.sample_seq, second);
+  assert.equal(cardSends(), 2, "the refused card was sent again");
+  assertClean(world.unit);
+});
+
+test("PR #614 recheck NF-2: transient failures spend a per-sample budget with backoff, then the sample is terminal-only", async () => {
+  const world = sampledWorld(2);
+  const { setup, cardSends, streams, err } = failingReviewChannel(world, [
+    { status: 500, description: "Internal Server Error" },
+    { network: "fetch failed" },
+    { status: 502, description: "Bad Gateway" },
+    { status: 429, description: "Too Many Requests: retry after 1", retryAfter: 1 },
+    { status: 500, description: "Internal Server Error" },
+  ]);
+  const state = newDispatchState();
+  const [first, second] = world.samples as [number, number];
+  assert.equal(REVIEW_OFFER_ATTEMPTS, 5);
+
+  // Backoff after attempt n is 60 s * 2^(n-1). Each attempt goes out once its
+  // pause has passed, and a cycle inside the pause sends nothing.
+  const attemptsAt = [atSeconds(90, 0), atSeconds(91, 1), atSeconds(93, 2), atSeconds(97, 3), atSeconds(105, 4)];
+  const insidePause = [atSeconds(90, 59), atSeconds(93, 0), atSeconds(97, 0), atSeconds(105, 0)];
+  for (const [index, when] of attemptsAt.entries()) {
+    const cycle = await dispatchPending(setup, streams, state, when);
+    assert.equal(cycle.reviewCard, undefined, `attempt ${String(index + 1)} delivered`);
+    assert.equal(cardSends(), index + 1, `attempt ${String(index + 1)} was not made`);
+    const pause = insidePause[index];
+    if (pause !== undefined) {
+      assert.equal(state.review.terminalOnly.has(first), false, `attempt ${String(index + 1)} hid the sample`);
+      const quiet = await dispatchPending(setup, streams, state, pause);
+      assert.equal(quiet.reviewCard, undefined);
+      assert.equal(cardSends(), index + 1, `a send went out inside the pause after attempt ${String(index + 1)}`);
+    }
+  }
+  assert.equal(err.filter((line) => line.includes("review-offer-retry")).length, 4, err.join(""));
+  assert.ok(
+    err.some(
+      (line) =>
+        line.includes("review-offer-failed") &&
+        line.includes("5 attempts failed") &&
+        line.includes(`approval audit review ${String(first)}`),
+    ),
+    err.join(""),
+  );
+  assert.equal(state.review.terminalOnly.has(first), true, "the spent budget did not hand the sample to the terminal");
+
+  // The queue moves on at once.
+  const next = await dispatchPending(setup, streams, state, atSeconds(105, 5));
+  assert.equal(next.reviewCard?.sample_seq, second);
+  assert.deepEqual(reviewsIn(world), []);
   assertClean(world.unit);
 });
 

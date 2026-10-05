@@ -140,8 +140,10 @@ import {
   actionRefOf,
   decidedLine,
   groupForDigest,
+  isDeterministicSendRefusal,
   isMessageNotModified,
   isTelegramTerminalState,
+  retryAfterMsOf,
   TelegramChannel,
   telegramChatEnvFor,
   telegramTokenEnvFor,
@@ -1454,13 +1456,31 @@ export interface ReviewWalkthrough {
   readonly delivered: Map<number, DeliveryId>;
   /**
    * Samples whose card could not be offered, left for a terminal review (PR
-   * #614 refutation F4). One failed offer is enough: the card is built from the
-   * log, so the next cycle would build the same card and meet the same refusal,
-   * and retrying it every cycle held the whole backlog behind it. The sample
-   * stays OPEN (in `approval audit list` and QUEUE.md); this listener only
-   * stops offering it. Process memory, pruned when the sample closes.
+   * #614 refutation F4). A sample lands here on a Bot API refusal of the card
+   * itself ({@link isDeterministicSendRefusal}: the card is built from the log,
+   * so the next cycle would build the same card and meet the same refusal), or
+   * once its retry budget is spent ({@link REVIEW_OFFER_ATTEMPTS}, PR #614
+   * recheck NF-2). The sample stays OPEN (in `approval audit list` and
+   * QUEUE.md); this listener only stops offering it. Process memory, pruned
+   * when the sample closes.
    */
   readonly terminalOnly: Set<number>;
+  /**
+   * Failed offers per sample that did not (yet) make it terminal-only: a 429,
+   * a timeout, a 5xx, a network error, or any refusal not known to be about
+   * the card (PR #614 recheck NF-2). Process memory, cleared when the offer
+   * succeeds or the sample closes.
+   */
+  readonly offerFailures: Map<number, number>;
+  /**
+   * No review card is offered before this instant (epoch ms), or `null`. Set by
+   * a transient offer failure to the larger of Telegram's `retry_after` and
+   * the backoff for that sample's attempt count (PR #614 recheck NF-2). The
+   * pause is the walkthrough's, not the sample's: a rate limit or an outage is
+   * the chat's, and offering the next sample into it would spend that sample's
+   * budget on the same outage.
+   */
+  offersPausedUntilMs: number | null;
   /** Whether any review summary has been sent yet. */
   summarySent: boolean;
   /** The open count the last summary named, so growth can be recognised. */
@@ -1638,6 +1658,8 @@ export function newDispatchState(): DispatchState {
       current: null,
       delivered: new Map(),
       terminalOnly: new Set(),
+      offerFailures: new Map(),
+      offersPausedUntilMs: null,
       summarySent: false,
       announced: 0,
       logSize: null,
@@ -2307,6 +2329,9 @@ async function dispatchReviews(
   for (const seq of review.terminalOnly) {
     if (!openSeqs.has(seq)) review.terminalOnly.delete(seq);
   }
+  for (const seq of review.offerFailures.keys()) {
+    if (!openSeqs.has(seq)) review.offerFailures.delete(seq);
+  }
   if (review.current !== null && !openSeqs.has(review.current)) review.current = null;
   // A count the approver was told that is now too high is the number they
   // watched go down, not growth to announce again.
@@ -2314,6 +2339,14 @@ async function dispatchReviews(
 
   if (review.current !== null) return;
   if (setup.delivery === "paced" && state.paced.current !== null) return;
+  // PR #614 recheck NF-2: a transient offer failure pauses the walkthrough for
+  // Telegram's `retry_after` or the backoff, whichever is longer. Nothing is
+  // offered, summary included, until it passes.
+  const nowMs = Date.parse(now);
+  if (review.offersPausedUntilMs !== null) {
+    if (Number.isFinite(nowMs) && nowMs < review.offersPausedUntilMs) return;
+    review.offersPausedUntilMs = null;
+  }
   const nextSeq = review.order.find(
     (seq) => !review.delivered.has(seq) && !review.terminalOnly.has(seq),
   );
@@ -2343,6 +2376,7 @@ async function dispatchReviews(
   try {
     const deliveryId = await setup.channel.offerReview(card);
     review.delivered.set(nextSeq, deliveryId);
+    review.offerFailures.delete(nextSeq);
     review.current = nextSeq;
     result.reviewCard = {
       delivery_id: deliveryId,
@@ -2364,17 +2398,55 @@ async function dispatchReviews(
       );
     }
   } catch (cause) {
-    // PR #614 refutation F4. The sample stays open, and this listener stops
-    // offering it: the next cycle would build the same card from the same log
-    // and fail the same way, and the queue behind it would wait forever. The
-    // coded line names the repair.
-    review.terminalOnly.add(nextSeq);
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const attempts = (review.offerFailures.get(nextSeq) ?? 0) + 1;
+    const deterministic = isDeterministicSendRefusal(cause);
+    if (deterministic || attempts >= REVIEW_OFFER_ATTEMPTS) {
+      // PR #614 refutation F4, narrowed by recheck NF-2. The sample stays open,
+      // and this listener stops offering it: either Telegram refused the card
+      // itself, so the next cycle would build the same card from the same log
+      // and meet the same refusal, or the retry budget is spent. The queue
+      // behind it moves on, and the coded line names the repair.
+      review.offerFailures.delete(nextSeq);
+      review.terminalOnly.add(nextSeq);
+      streams.err(
+        `approval: telegram review-offer-failed: could not offer the review of sample seq ${String(nextSeq)} (${actionKey}): ${reason} — ${
+          deterministic
+            ? "Telegram refused the card itself, so every resend would meet the same refusal"
+            : `${String(attempts)} attempts failed`
+        }; the sample stays open for a terminal review (approval audit review ${String(nextSeq)} --ok or --deny), and this listener offers the next sample instead\n`,
+      );
+      return;
+    }
+    // PR #614 recheck NF-2. Anything else (a 429, a timeout, a 5xx, a network
+    // error) can clear on its own, so the sample keeps its place and the
+    // walkthrough pauses: for Telegram's `retry_after` when it named one, and
+    // never less than the backoff for this sample's attempt count.
+    review.offerFailures.set(nextSeq, attempts);
+    const waitMs = Math.max(reviewOfferBackoffMs(attempts), retryAfterMsOf(cause) ?? 0);
+    const base = Number.isFinite(nowMs) ? nowMs : Date.now();
+    review.offersPausedUntilMs = base + waitMs;
     streams.err(
-      `approval: telegram review-offer-failed: could not offer the review of sample seq ${String(nextSeq)} (${actionKey}): ${
-        cause instanceof Error ? cause.message : String(cause)
-      } — the sample stays open for a terminal review (approval audit review ${String(nextSeq)} --ok or --deny), and this listener offers the next sample instead\n`,
+      `approval: telegram review-offer-retry: could not offer the review of sample seq ${String(nextSeq)} (${actionKey}), attempt ${String(attempts)} of ${String(REVIEW_OFFER_ATTEMPTS)}: ${reason} — review cards pause until ${new Date(base + waitMs).toISOString()} and then offer it again\n`,
     );
   }
+}
+
+/**
+ * How many failed offers a sample gets before it is left for a terminal review
+ * (PR #614 recheck NF-2). With {@link reviewOfferBackoffMs} the budget spans
+ * about fifteen minutes of a dark or rate-limited chat (1 + 2 + 4 + 8 minutes
+ * between the five attempts), and a Bot API refusal of the card itself skips
+ * it.
+ */
+export const REVIEW_OFFER_ATTEMPTS = 5;
+
+/** The first pause after a transient offer failure; it doubles per attempt. */
+export const REVIEW_OFFER_BACKOFF_MS = 60_000;
+
+/** The pause after the `attempts`-th failed offer of one sample, before `retry_after`. */
+export function reviewOfferBackoffMs(attempts: number): number {
+  return REVIEW_OFFER_BACKOFF_MS * 2 ** Math.max(0, attempts - 1);
 }
 
 /**
