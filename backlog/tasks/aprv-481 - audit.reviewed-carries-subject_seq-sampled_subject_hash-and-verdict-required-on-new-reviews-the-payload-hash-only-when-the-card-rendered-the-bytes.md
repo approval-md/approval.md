@@ -3,9 +3,10 @@ id: APRV-481
 title: >-
   audit.reviewed carries subject_seq, sampled_subject_hash and verdict (required
   on new reviews); the payload hash only when the card rendered the bytes
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-05 06:51'
+updated_date: '2026-10-05 07:25'
 labels:
   - agentvillage
 dependencies: []
@@ -21,7 +22,40 @@ Supervised-retro core piece (in scope for Oct 11). The follower and dbt halves (
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The schema requires subject_seq, sampled_subject_hash and verdict on new audit.reviewed records; old records still read unchanged
-- [ ] #2 The payload hash field is present only when the card rendered the bytes, absent otherwise; tests cover both
-- [ ] #3 The follower-facing field names are documented in one place and posted for the follower and dbt halves
+- [x] #1 The schema requires subject_seq, sampled_subject_hash and verdict on new audit.reviewed records; old records still read unchanged
+- [x] #2 The payload hash field is present only when the card rendered the bytes, absent otherwise; tests cover both
+- [x] #3 The follower-facing field names are documented in one place and posted for the follower and dbt halves
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit 98bb66c7.
+
+Done:
+- schema/event.schema.json: the audit.reviewed branch now `$ref`s `$defs/audit_reviewed_record`, which requires payload.subject_seq, payload.sampled_subject_hash and payload.verdict, and adds patterns for sampled_subject_hash and payload_hash. `audit_reviewed_record_historical` has the same shape without the three requirements.
+- `WIDENED_DEFS` (src/core/validate.ts) maps the strict definition to the historical one, so the verifier (historical mode) reads old reviews unchanged.
+- reviewSample always writes sampled_subject_hash. A sample with no subject hash is refused `not-sampled`.
+- `ReviewOptions.renderedPayloadHash` is checked against `boundPayloadHash`. A mismatch, or no binding at all, is refused with the new code `rendered-payload-mismatch`. A match is written as payload.payload_hash.
+- The Telegram channel sets `ReviewTap.payloadHash` only when `reviewPayloadView(card).kind === "bytes"`. The CLI never sets it.
+- Fixtures: the five audit.reviewed fixtures were updated, and invalid/audit-reviewed-no-subject-hash.json was added. Conformance schema-validation was regenerated at 3.0.0 (a major: expectations moved), with the README noted.
+- tests/money.test.ts pairing check generalised. tests/render-queue.test.ts hand-written review now carries the fields.
+
+FOLLOWER-FACING FIELD NAMES (single definition: docs/cli-reference.md#the-review-record). For the orchestrator to post to the follower and dbt halves:
+- record: event="audit.reviewed", seq, ts, hash, actor (human:<id>), action_key, task, channel
+- payload.subject_seq (int, REQUIRED): seq of the audit.sampled record. This is NOT the execution's seq.
+- payload.sampled_subject_hash (64-hex, REQUIRED): hash of the execution.started record. Join key to the execution.
+- payload.verdict ("ok"|"denied", REQUIRED, explicit since APRV-482)
+- payload.payload_hash (64-hex, OPTIONAL): present only when the reviewer was shown the bytes whole
+- payload.reaction (disliked|indifferent|liked|loved, optional), payload.note, payload.sender{channel,id,hashed?}, payload.sender_source
+- payload.subject_event="audit.sampled", payload.reviewed=true (constants)
+- denial link: reconciliation.required.payload.review_seq = review seq
+- On reviews written before APRV-481, the three required fields may be missing. Treat that as "not recorded", never as a default.
+
+Touches §11.1 invariant 4 (self-reported fields): the surface's claim that it showed the bytes is verified against the log and never trusted as given.
+
+PROPOSED SPEC HUNK (pending sign-off). §8 event log, after the event-types list:
+"`audit.reviewed` records written since APRV-481 MUST carry `payload.subject_seq` (the seq of the `audit.sampled` it answers), `payload.sampled_subject_hash` (the hash of the `execution.started` that sample named) and `payload.verdict`. Verifiers MUST accept earlier records without them. `payload.payload_hash` MAY be recorded only when the reviewing surface rendered the bound bytes whole, and it MUST equal the execution's binding (Amended APRV-481)."
+§11.2 audit_refusal_codes, new row after `ambiguous-subject`:
+"| `rendered-payload-mismatch` | The reviewing surface said it showed bytes whose hash is not the sampled execution's binding. Nothing is appended. |"
+<!-- SECTION:NOTES:END -->
