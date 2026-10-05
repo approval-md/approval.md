@@ -672,7 +672,12 @@ tools:
   `manual`, which on this harness also needs the `--harness-cap` statement of the
   section on timeouts before a human can be asked at all. Absent, nothing changes.
 - The post half closes a recorded start exactly as it closes a rule-table one,
-  so a failing app counts toward the loop floor like any side-effecting tool.
+  so a failing app counts toward the loop floor like any side-effecting tool,
+  and every recorded start is charged against `daily_actions` budgets.
+- An entry trusts the tool NAME, which on Hermes comes from the MCP servers in
+  `$HERMES_HOME/config.yaml`. That file is a gate organ here already; keep it
+  so, or an agent that could rename a server could move its tools under a looser
+  entry.
 
 For Agent Village the resident template sets `unmapped_tool: record`, so every
 tool call an agent makes is recorded from the first day; an installed app's

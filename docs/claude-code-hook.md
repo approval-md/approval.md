@@ -1025,7 +1025,16 @@ tools:
   allowed, not recorded.
 - **A mapped call is an ordinary gated call.** Its payload is `{tool, input}`, its
   start or request is under the entry's class, and an autonomous start records
-  `harness_tool` too, since several tools may share one class.
+  `harness_tool` too, since several tools may share one class. A recorded start
+  is charged like any autonomous start, so `daily_actions` budgets count every
+  recorded tool call, and a run of failures in a recorded tool counts toward the
+  loop floor like any side-effecting call.
+- **A tool name is only as trustworthy as the configuration that named it.** An
+  entry trusts that `mcp__contextsling__*` is the server the operator
+  installed. An agent able to write the MCP configuration could register a
+  server under a name a looser entry claims, so put that file under
+  `protected_paths` (`.mcp.json` is not a built-in protected path) or keep
+  the loose classes for tools whose server the human controls.
 - **The matcher decides what reaches the hook at all.** Claude Code runs this
   hook only for the tools the `PreToolUse` entry's `matcher` names, and the
   installed matcher names the five gated tools. To gate MCP tools, widen it: add
