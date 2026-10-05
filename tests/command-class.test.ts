@@ -300,19 +300,6 @@ const FIXTURES: readonly Fixture[] = [
   // `log checkpoint` (policy.core), whichever spelling reaches the verb.
   { command: "approval log unlock --pid 4242 --as human:carter", class: "policy.core", rule: "approval-log-unlock", row: "approval" },
   { command: "node ./cli.js log unlock --pid none", class: "policy.core", rule: "approval-log-unlock", row: "node" },
-  // APRV-479 R3-6: a package runner is one more spelling. `npx approval <verb>`
-  // and `npx approval-md <verb>` answer as the `approval` row does for every
-  // verb it refines; any other verb keeps the workspace-tool answer.
-  { command: "npx approval log unlock --pid 5", class: "policy.core", rule: "approval-log-unlock", row: "workspace-tool" },
-  { command: "npx approval-md log unlock --pid 5", class: "policy.core", rule: "approval-log-unlock", row: "workspace-tool" },
-  { command: "npx -y approval-md@0.4.2 log unlock --pid 5", class: "policy.core", rule: "approval-log-unlock", row: "workspace-tool" },
-  { command: "npx -p approval-md approval log unlock --pid 5", class: "policy.core", rule: "approval-log-unlock", row: "workspace-tool" },
-  { command: "npx approval log checkpoint", class: "policy.core", rule: "approval-log-checkpoint", row: "workspace-tool" },
-  { command: "npx approval gate open", class: "policy.core", rule: "approval-gate-open", row: "workspace-tool" },
-  { command: "npx approval-md --json policy apply x.md", class: "policy.core", rule: "approval-policy-apply", row: "workspace-tool" },
-  { command: "npx approval log sync", class: "log.sync", rule: "approval-log-sync", row: "workspace-tool" },
-  { command: "npx approval status", class: "files.write.workspace", rule: "workspace-tool" },
-  { command: "npx approvals log unlock --pid 5", class: "files.write.workspace", rule: "workspace-tool" },
   // The neighbours, which stay pass-through: reading the log is the gate's own
   // business, and `approval log` with no subcommand names no ritual at all.
   { command: "approval log verify", class: GATE_SELF_CLASS, rule: "approval" },

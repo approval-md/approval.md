@@ -216,7 +216,9 @@ before a tag.
   with reason `operator-cleared` (a person's word, never recorded as proof;
   the schema binds that reason to a `human:` actor and no other) under the
   person's `human:` actor (classified `policy.core`, so the hook
-  denies it to an agent). For the village: a Railway recreate gives the service
+  denies it to an agent, as spelled `approval log unlock`; package-runner and
+  script spellings escape that classification for every human-only verb, which
+  APRV-491 takes up). For the village: a Railway recreate gives the service
   a fresh filesystem, so the case this covers is the same-container restart, a
   hook SIGKILLed while its container stays up. A process with no listener for
   SIGTERM, SIGINT or SIGHUP gets one from just before it creates the lockfile
@@ -236,20 +238,6 @@ before a tag.
   the owner's sign-off. Behavior change for older writers: an empty lockfile an
   older version left is taken after ten minutes, and an older writer still
   holding one that long would lose it.
-
-### Classifier
-
-- **`npx approval <verb>` and `npx approval-md <verb>` classify as `approval
-  <verb>` does (APRV-479 round 4, R3-6; a classifier change beyond the lock
-  fix).** The package-runner spelling of the gate's own CLI fell to the
-  `workspace-tool` row (`files.write.workspace`), so `npx approval log unlock`,
-  `npx approval log checkpoint` and `npx approval gate open` bypassed the
-  `policy.core` classification that holds them human-only. Every verb the
-  `approval` row refines (the `policy.core` ceremonies, `log sync`,
-  `log advance`) now answers the same under `npx`, versioned specs and
-  `npx -p approval-md approval …` included; every other verb keeps the
-  workspace-tool answer. `bunx` and `pnpm dlx` are not recognized by the
-  classifier for any tool and are unchanged.
 
 ## 0.4.0 — 2026-10-04
 

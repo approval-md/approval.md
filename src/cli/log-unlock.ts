@@ -14,7 +14,10 @@
  * `APPROVAL_HUMAN`), the schema refuses an `agent:` actor on the record, and
  * `core/command-class.ts` classifies the invocation `policy.core`, which the
  * reference policy holds human-only, so the harness hook denies an agent that
- * tries it.
+ * tries it. Only as `approval …` or `node <cli> …`: `npx approval log unlock`,
+ * `npm exec`, a wrapper script and other spellings classify as workspace
+ * writes, and `--as` / `APPROVAL_HUMAN` are the caller's to set, so the
+ * classification is a speed bump, not the boundary (APRV-491).
  */
 
 import { isAbsolute, resolve } from "node:path";

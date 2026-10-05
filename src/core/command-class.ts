@@ -1752,26 +1752,9 @@ function refineWorkspaceTool(ctx: RuleContext): Refinement {
   if (ctx.bin !== "npx") return unchanged;
   const index = ctx.args.findIndex((arg) => !isFlag(arg));
   if (index === -1) return unchanged;
-  if (isApprovalPackage(ctx.args[index] as string)) {
-    // APRV-479 R3-6. `npx approval log unlock` runs `approval log unlock`, so
-    // every verb the gate's own row refines (the human-only `policy.core`
-    // ceremonies, `log sync`, `log advance`) classifies the same whichever
-    // launcher spelled it; every other verb keeps this row's answer. A leading
-    // `approval` is the bin of `npx -p approval-md approval …`.
-    const rest = ctx.args.slice(index + 1);
-    const words = rest.filter((arg) => !isFlag(arg));
-    return refineApprovalVerb(words[0] === "approval" ? words.slice(1) : words, rest) ?? unchanged;
-  }
   const name = harnessPackage(ctx.args[index] as string);
   if (name === null) return unchanged;
   return harnessRefinement(name, ctx.args.slice(index + 1));
-}
-
-/** The gate's own package as a package runner names it: `approval` (its bin) or `approval-md`, any version. */
-function isApprovalPackage(spec: string): boolean {
-  const at = spec.indexOf("@");
-  const bare = at === -1 ? spec : spec.slice(0, at);
-  return bare === "approval" || bare === "approval-md";
 }
 
 /** The five generated harness rows, one per binary, sharing one refinement. */
@@ -3117,12 +3100,8 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     class: "files.write.workspace",
     // APRV-354: only `npx` naming a harness package changes; see
     // {@link refineWorkspaceTool}, which returns this row's own answer for
-    // every other binary and every other package. APRV-479 R3-6: and `npx`
-    // naming the gate's own package answers as the `approval` row does.
+    // every other binary and every other package.
     emits: [
-      "log.sync",
-      "log.advance",
-      "policy.core",
       HARNESS_PROBE_CLASS,
       ...Object.values(HARNESS_PACKAGES).map((name) => `${HARNESS_LAUNCH_PREFIX}${name}`),
     ],

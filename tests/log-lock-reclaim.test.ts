@@ -1236,12 +1236,6 @@ test("the CLI verb: `approval log unlock` is human-only, says what it did, and t
   const classified = classifyCommand("approval log unlock --pid 31 --as human:carter");
   assert.ok(classified.ok);
   if (classified.ok) assert.deepEqual(classified.classes, ["policy.core"]);
-  // R3-6: whichever launcher spells it.
-  for (const command of ["npx approval log unlock --pid 5", "npx approval log checkpoint", "npx approval gate open"]) {
-    const viaNpx = classifyCommand(command);
-    assert.ok(viaNpx.ok, command);
-    if (viaNpx.ok) assert.equal(viaNpx.segments[0]?.class, "policy.core", command);
-  }
 });
 
 // ---------------------------------------------------------------------------
