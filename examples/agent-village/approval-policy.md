@@ -46,6 +46,21 @@ What it says, in one line each:
   plane into the daemon's environment. The daemon runs `approval up --api-base
   <control plane>/approval-relay`, so core's Telegram channel speaks Bot API to
   the relay.
+- **Residents see the simple card.** `prompt.style: minimal` (APRV-489) sends
+  each proposal as one short message in plain words: what the agent wants to
+  do, the exact words it will post, share or vote, how long the resident has,
+  and Approve and Deny, with the full technical card (the canonical rendering
+  included) collapsed under "Full details". The `say` entries are the
+  operator's words for the three resident-facing classes, keyed by exact class
+  name, and their `quote` maps name and SHOW every key each payload carries
+  (the ids under plain labels, so the "Not shown here" notice appears only when
+  something is really left off), so a payload with any other key is sent as
+  the technical card. `always: [ttl_remaining_ms]` keeps the one
+  `ttl` row the relay's quiet-hours hold reads, inside "Full details".
+  **Rollout order:** `style` and `say` need a core with APRV-489. An older
+  core refuses the keys at the schema, the whole policy fails to load, and
+  every class resolves `manual` (every hooked tool call then waits for a tap),
+  so a tenant receives this block only after its pinned core understands it.
 
 `agent_may_request` is the policy key PR #569 (APRV-445) adds. On a build
 without it, this file fails the schema and every class resolves `manual`, which
@@ -72,6 +87,22 @@ channels:
   telegram:
     token_env: APPROVAL_RELAY_TOKEN      # the relay credential, approvald-only env
     chat_id_env: APPROVAL_RESIDENT_CHAT  # the paired id; the control plane writes this variable
+    prompt:
+      always: [ttl_remaining_ms]         # the relay's quiet hold reads this row; on a minimal card it sits inside Full details
+      style: minimal                     # APRV-489: needs a core with APRV-489; an older core fails this policy closed
+      say:
+        intent.publish.inferred.index:
+          does: "post a wish it guessed from your chats to Index, the village matching service, in your name"
+          quote: { text: "" }
+          note: none
+        digest.share:
+          does: "share a note about you with other people"
+          quote: { scope: "Shared with", expires_at: "Until", text: "Note", digest_id: "Reference" }
+          note: none
+        village.vote:
+          does: "vote for you in this week's village question"
+          quote: { answer: "Answer", question_id: "Question" }
+          note: summary
 
 classes:
   # layer 2: the live gate, propose path only

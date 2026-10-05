@@ -125,6 +125,7 @@ import {
 } from "../channels/contract.js";
 import {
   ageText,
+  attestedPromptOf,
   buildPendingQueue,
   type ChannelTagRefusalCode,
   type TagOptions,
@@ -202,7 +203,7 @@ import {
   type RefusedGestureKind,
 } from "../core/gesture-refusal.js";
 import { attestationRefusal, checkAttestation } from "../core/attest.js";
-import { promptLayoutFor } from "../core/prompt-layout.js";
+import { promptLayoutFor, promptSayFor, promptStyleFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
   isAttestationActionKey,
@@ -971,6 +972,17 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // default, because a layout is not a permission and an unrelated typo in a
     // class rule must not silently redecorate a phone screen.
     layout: promptLayoutFor(policyLoad, "telegram"),
+    // APRV-489. The card style and the operator's plain-words declarations.
+    // Fix round 2 (S4, and the security follow-up on it): resolved for EACH
+    // delivery, and only from ATTESTED bytes: `attestedPromptOf` reads the
+    // policy file once, requires those bytes to hash to the latest attestation
+    // in the verified log, and parses style and `say` from the same buffer. A
+    // re-attested setting reaches the next card without a restart; an edited,
+    // unattested file draws the technical card. The two fixed values below are
+    // only what a channel without the resolver would use.
+    promptStyle: promptStyleFor(policyLoad, "telegram"),
+    say: promptSayFor(policyLoad, "telegram"),
+    promptFor: () => attestedPromptOf(request.logPath, { policy: request.policy }, "telegram"),
     // APRV-456. From the launch flags alone: a relayed channel (an --api-base
     // that is not the Bot API) or --no-stale-copy turns APRV-196's fallback
     // off. The policy loaded above is deliberately not consulted, so nothing

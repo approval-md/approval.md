@@ -43,11 +43,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
   checkAttestation,
+  checkAttestationOfBytes,
   policyFileHash,
   type AttestationStatus,
 } from "../core/attest.js";
@@ -64,13 +65,22 @@ import { loadPayload, payloadStoreDirFor } from "../core/payload-store.js";
 import { explain } from "../core/policy-explain.js";
 import {
   loadPolicy,
+  loadPolicyText,
   POLICY_FILENAMES,
   type LoadPolicyOptions,
   type PolicyLoadResult,
 } from "../core/policy-load.js";
+import {
+  DEFAULT_PROMPT_STYLE,
+  promptSayFor,
+  promptStyleFor,
+  type PromptSay,
+  type PromptStyle,
+} from "../core/prompt-layout.js";
 import { resolve, type Resolution } from "../core/policy-match.js";
 import {
   ATTESTATION_CLASS,
+  inForcePolicyText,
   isAttestationActionKey,
   openProposals,
   type DiffSummary,
@@ -87,6 +97,7 @@ import {
   claimed,
   computed,
   createChannelRequest,
+  LIVE_TOOL_CALL,
   type ChannelRequest,
   type PayloadRendering,
 } from "./contract.js";
@@ -758,6 +769,12 @@ function tagDerivation(
     ...(typeof route["confidence"] === "number"
       ? { confidence: claimed(route["confidence"], registrationActor) }
       : {}),
+    // APRV-489. A tool call the agent is blocked in: the record declared the
+    // harness executes it and how long the harness waits. Symbol-keyed, so no
+    // channel's row list and no JSON output gains a key (see `LIVE_TOOL_CALL`).
+    ...(derivation.declared.execution === "harness" && derivation.declared.harness_cap_ms !== null
+      ? { [LIVE_TOOL_CALL]: computed(true as const, "log") }
+      : {}),
   };
 
   const created = createChannelRequest(fields);
@@ -946,6 +963,64 @@ export type PendingQueueResult =
       skipped: SkippedRequest[];
     }
   | ChannelTagRefusal;
+
+/**
+ * The prompt style and `say` map a channel may draw with RIGHT NOW, taken only
+ * from attested policy bytes (APRV-489, fix round 2, S4 and its security
+ * follow-up).
+ *
+ * The policy file is read ONCE, and those bytes are both checked and used:
+ * they must hash to the latest attestation in the verified log (the digest the
+ * gate decides under), and the style and `say` are parsed from the very same
+ * buffer. There is no second read for the bytes to change between, so an edit
+ * to the file that nobody attested (by the agent the policy governs, in some
+ * deployments) can never switch a card to minimal or reword a class's phrase.
+ *
+ * Anything short of "these bytes are the attested policy" is the technical
+ * card: an unreadable file or log, a file that differs from the attestation, a
+ * log with no attestation. When the attested policy in force (its stored bytes)
+ * does ask for minimal, the answer carries `fallback: "policy-unattested"`, so
+ * the decision record says why the approver saw the technical card; under an
+ * attested technical policy nothing is added, so its records stay unchanged.
+ */
+export function attestedPromptOf(
+  logPath: string,
+  options: TagOptions,
+  channel: string,
+): { style: PromptStyle; say: PromptSay; fallback?: "policy-unattested" } {
+  const technical = { style: DEFAULT_PROMPT_STYLE, say: {} };
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return technical;
+  const path = policyPathOf(options);
+  let bytes: Buffer | null = null;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    bytes = null;
+  }
+  if (bytes !== null && checkAttestationOfBytes(read.records, bytes).status === "attested") {
+    const load = loadPolicyText(
+      path,
+      bytes.toString("utf8"),
+      options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+    );
+    return { style: promptStyleFor(load, channel), say: promptSayFor(load, channel) };
+  }
+  // Not the attested bytes. Say why only when the policy in force wanted minimal.
+  const inForce = inForcePolicyText(read.records, payloadStoreDirFor(logPath));
+  if (!inForce.ok) return technical;
+  const attested = loadPolicyText(
+    path,
+    inForce.text,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  return promptStyleFor(attested, channel) === "minimal"
+    ? { ...technical, fallback: "policy-unattested" }
+    : technical;
+}
 
 /**
  * Build the pending queue: every action key with a live `approval.requested`.

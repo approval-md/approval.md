@@ -17,6 +17,32 @@ before a tag.
 
 ### Channels
 
+- **A minimal Telegram card, chosen by the attested policy (APRV-489).**
+  `channels.telegram.prompt.style: minimal` sends each approval as one short
+  message in plain words: a bold headline the runtime computes from the class
+  ("Your agent wants to …"), the payload's own words quoted from the bound
+  bytes, any model or agent description labelled "not checked" below them, a
+  deadline line ("Open for about 3 days. If you don't answer, your agent will
+  not do this."), Approve and Deny, and the whole technical card, canonical
+  rendering included, collapsed in the same message under "Full details".
+  `channels.telegram.prompt.say` holds the operator's phrase per exact class
+  name and the closed field set of an opaque payload. The box holds payload
+  values only, verbatim; a cut value, a command cut short (with the
+  classifier's count as a lower bound, "at least N commands") and a field
+  left off are announced under it, and a command shown whole carries no count
+  line. The operator's phrase is drawn only over an opaque payload: over a
+  command, a file change or an email the runtime's own phrase wins. Anything the card cannot draw
+  honestly gets the technical card (attestations, policy edits, truncated
+  payloads, abnormal health facts, undeclared or unlisted payload keys,
+  batches and digests, cards over 3800 characters, a card the Bot API
+  refuses), and the decision record states what was shown in
+  `payload.rendering` (an open field in this release). Style and `say` are
+  read for each card, so a re-attested setting needs no restart. `technical` stays the default and its bytes are
+  unchanged; review cards, their note prompt and checkpoint prompts are the
+  same under both styles; `web` and `cli` ignore the key. SPEC §10.3 and §5.2
+  are amended (pending sign-off). **Rollout order:** an older core refuses the
+  new keys and fails the whole policy closed to all-`manual`, so a policy may
+  carry them only once every daemon reading it runs this release.
 - **A doubled review tap no longer loses the note prompt (APRV-492).** On a
   Telegram review card, a second OK (or a doubled second Deny) tapped while a
   `loved`/`disliked` note was still awaited asked for a second prompt and
