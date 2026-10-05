@@ -30,6 +30,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -48,6 +49,7 @@ import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { classifyCommand } from "../src/core/command-class.js";
+import { clearDaemonIdentity, declareDaemonIdentity, setDaemonAllowlist } from "../src/core/daemon-identity.js";
 import { appendEvent, unlockAppendLock, withAppendLock, type EventInput, type EventRecord } from "../src/core/log.js";
 import {
   BOOT_SLACK_S,
@@ -663,6 +665,46 @@ test("six writers, three appends each, over one stale lock: exactly one reclaim 
 // ---------------------------------------------------------------------------
 // Compare-and-append and the rest of the writer, unchanged
 // ---------------------------------------------------------------------------
+
+test("a writer that could not record a reclaim does not make it: a refused daemon stamp or a torn tail keeps the lock, claims nothing, appends nothing (R3-3)", () => {
+  const logPath = freshLog();
+  const left = holder({ pid: deadPid() });
+  writeLock(logPath, left);
+  const lockBytes = readFileSync(`${logPath}.lock`);
+  const asRefusedDaemon = <T>(run: () => T): T => {
+    declareDaemonIdentity({ id: "d-refused", source: "environment" });
+    setDaemonAllowlist(["d-other"]);
+    try {
+      return run();
+    } finally {
+      clearDaemonIdentity();
+    }
+  };
+
+  // The S3 shape: a daemon whose id the attested list does not admit holds the
+  // lock for a whole operation (the export path), over a dead holder's lock.
+  const held = asRefusedDaemon(() => withAppendLock(logPath, () => "exported", { lockTimeoutMs: 0 }));
+  assert.equal(held.ok, false);
+  if (!held.ok) {
+    assert.equal(held.error.code, "lock-timeout");
+    assert.match(held.error.message, /could not record the reclaim \(its records are refused: daemon-not-allowed\)/u);
+  }
+  const unlockedAsDaemon = asRefusedDaemon(() => unlockAppendLock(logPath, left.pid, "human:carter"));
+  assert.equal(unlockedAsDaemon.kind, "refused");
+  if (unlockedAsDaemon.kind === "refused") assert.match(unlockedAsDaemon.message, /daemon-not-allowed.*nothing was touched/u);
+  assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
+  assert.deepEqual(residue(logPath), [], "no claim was made");
+  assert.deepEqual(events(logPath), ["task.registered"], "nothing was appended");
+
+  // A writer killed mid-append leaves a torn tail beside its lock.
+  appendFileSync(logPath, '{"seq":2,"event":"approval.gra');
+  assert.match(refused(logPath, 80), /could not record the reclaim \(the log's tail refuses an append \(corrupt-tail\)/u);
+  const unlockedTorn = unlockAppendLock(logPath, left.pid, "human:carter");
+  assert.equal(unlockedTorn.kind, "refused");
+  if (unlockedTorn.kind === "refused") assert.match(unlockedTorn.message, /corrupt-tail/u);
+  assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
+  assert.deepEqual(residue(logPath), [], "no claim was made");
+});
 
 test("compare-and-append is unchanged: a head read before the reclaim is refused head-moved, and a fresh read appends", () => {
   const logPath = freshLog();

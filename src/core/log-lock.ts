@@ -871,6 +871,12 @@ export interface ReclaimOptions {
   now?: number;
   /** The writer's own write-boundary check of the record it would append: a reclaim it would refuse is not made. */
   recordValid?: (note: ReclaimNote) => boolean;
+  /**
+   * Can this writer append at all right now (its daemon stamp, the log's
+   * tail)? `null` when it can; otherwise why not. Asked before the claim, so a
+   * reclaim whose record would be refused is never made.
+   */
+  recordBlocked?: () => string | null;
 }
 
 /**
@@ -913,6 +919,10 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
   }
   if (!existsSync(logPath)) {
     return { kind: "kept", why: `${note.why}, but the log itself is absent, so there is nothing a reclaim record could follow; a human runs \`${unlock}\`` };
+  }
+  const blocked = options.recordBlocked?.() ?? null;
+  if (blocked !== null) {
+    return { kind: "kept", why: `${note.why}, but this writer could not record the reclaim (${blocked}), so the lock is kept for a writer that can` };
   }
   step("judged");
   // The claim is the reclaim's first durable state: a termination signal from

@@ -607,7 +607,10 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
     }
     if (rounds < MAX_RECLAIM_ROUNDS) {
       rounds += 1;
-      const outcome = reclaimStaleLock(logPath, op, { recordValid: reclaimRecordValid });
+      const outcome = reclaimStaleLock(logPath, op, {
+        recordValid: reclaimRecordValid,
+        recordBlocked: () => reclaimRecordBlocked(logPath),
+      });
       if (outcome.kind === "taken") {
         return { ok: true, own: outcome.own, releaseGuard: outcome.releaseGuard, reclaimed: outcome.note };
       }
@@ -1032,6 +1035,21 @@ function reclaimRecordValid(note: ReclaimNote): boolean {
 }
 
 /**
+ * Why this writer could not append the reclaim record now, or `null` (APRV-479
+ * R3-3): the two refusals {@link recordReclaim} would meet that the schema
+ * check cannot see, its daemon stamp and the log's tail, both read without the
+ * lock. A reclaim whose record would be refused is not made: the lock stays
+ * for a writer that can record it, and nothing is claimed or appended.
+ */
+function reclaimRecordBlocked(logPath: string): string | null {
+  const stamp = daemonStampForAppend();
+  if (stamp.kind === "refuse") return `its records are refused: ${stamp.code}`;
+  const tail = readTail(logPath);
+  if (!tail.ok) return `the log's tail refuses an append (${tail.error.code}), which a human repairs first; \`approval log verify\` shows where`;
+  return null;
+}
+
+/**
  * The record of a lock taken over from a holder that is gone (APRV-479),
  * appended as the first write under the lock that was taken: before the
  * caller's own read of the tail, so the caller's compare-and-append sees it as
@@ -1097,6 +1115,10 @@ export type UnlockResult =
 export function unlockAppendLock(logPath: string, pid: number | null, actor: string): UnlockResult {
   if (!existsSync(logPath)) {
     return { kind: "refused", message: `${logPath} does not exist, so there is no log a record of the unlock could follow; remove ${basename(logPath)}.lock by hand` };
+  }
+  const blocked = reclaimRecordBlocked(logPath);
+  if (blocked !== null) {
+    return { kind: "refused", message: `the record of the unlock could not be appended (${blocked}), so nothing was touched` };
   }
   const taken = takeLockForUnlock(logPath, pid);
   if (taken.kind === "none") return { kind: "none" };
