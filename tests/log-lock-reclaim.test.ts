@@ -27,13 +27,36 @@
  *   append lands, one reclaim record, the chain verifies;
  * - the liveness check is load-bearing: with it replaced by "gone", the live
  *   holder's lock is taken.
+ *
+ * Fix round 1 (the A2 refuter's findings) adds, each failing on 01abbddd:
+ *
+ * - B1: a `/proc` entry this reader cannot see or read is never "gone" on its
+ *   own: absent needs `kill(pid, 0)` to answer ESRCH, and anything unreadable is
+ *   live (decision table; hidepid across uids in a privileged Linux container);
+ * - B2/S4: a boot reading that differs (a wall-clock step on macOS, another
+ *   kernel on Linux) proves nothing, and a running pid keeps its lock;
+ * - B3: a claim is passed over only when its claimant is provably gone, never by
+ *   age: a reclaimer stalled at any step keeps its claim against a writer whose
+ *   clock reads an hour later, and a claimant killed mid-reclaim is succeeded by
+ *   exactly one reclaimer;
+ * - S1: the record of a reclaim is written before the lock is freed and appended
+ *   by whichever writer takes the lock next, so a reclaimer that never gets the
+ *   lock cannot lose it;
+ * - S2: a verb that appends and then waits synchronously (`approval policy
+ *   amend`) dies of Ctrl-C at once rather than at the end of its wait;
+ * - S3: a `/proc` that is not this pid namespace's is not trusted (unit; an
+ *   unshared pid namespace in a privileged Linux container);
+ * - N2: a lockfile that changes hands between the last check and the rename
+ *   (same inode rewritten, or a new inode) survives the reclaim;
+ * - N3: what a killed reclaimer leaves beside the lock is excluded from the
+ *   tenant export.
  */
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -44,7 +67,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -54,15 +77,20 @@ import {
   holderRecord,
   judgeHolder,
   LEGACY_LOCK_RECLAIM_AGE_MS,
+  NODE_LIVENESS_PROBE,
   parseProcStat,
+  procIsOwnNamespace,
   selfIdentity,
   setLockLivenessForTests,
+  setReclaimSeamForTests,
   tryReclaimLock,
   type LivenessProbe,
   type LockHolder,
+  type ProcStatRead,
   type SelfIdentity,
 } from "../src/core/log-lock.js";
 import { verify } from "../src/core/verify.js";
+import { isExcludedPath } from "../src/serve/archive.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-lock-reclaim-"));
 after(() => {
@@ -73,7 +101,9 @@ after(() => {
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const LOG_MODULE = pathToFileURL(join(REPO_ROOT, "dist", "src", "core", "log.js")).href;
+const LOCK_MODULE = pathToFileURL(join(REPO_ROOT, "dist", "src", "core", "log-lock.js")).href;
 const WRITE_LAYER_MODULE = pathToFileURL(join(REPO_ROOT, "dist", "src", "core", "log-write-layer.js")).href;
+const CLI_ENTRY = join(REPO_ROOT, "dist", "src", "cli", "main.js");
 
 const LINUX = process.platform === "linux";
 
@@ -308,28 +338,6 @@ test("a writer releases only its own lockfile", () => {
   rmSync(`${logPath}.lock`);
 });
 
-test("a reclaim already claimed by another writer is left to it, and an abandoned claim is cleared for the next wait", () => {
-  const logPath = freshLog();
-  writeLock(logPath, holder({ pid: deadPid() }));
-  // Another reclaimer's claim: the exclusive link, named by the lockfile's inode.
-  const lockPath = `${logPath}.lock`;
-  const first = tryReclaimLock(logPath, Date.now());
-  assert.equal(first.kind, "reclaimed", "the first claim succeeds and removes the lock");
-  // Put a stale lock back and take the claim by hand, as a reclaimer killed
-  // between its link and its rename would leave it.
-  writeLock(logPath, holder({ pid: deadPid() }));
-  const ino = statSync(lockPath, { bigint: true }).ino.toString();
-  linkSync(lockPath, `${lockPath}.reclaim-${ino}.lock`);
-  const busy = tryReclaimLock(logPath, Date.now());
-  assert.equal(busy.kind, "kept");
-  if (busy.kind === "kept") assert.match(busy.why, /another writer is reclaiming it now/u);
-  const later = tryReclaimLock(logPath, Date.now() + 60_000);
-  assert.equal(later.kind, "kept");
-  if (later.kind === "kept") assert.match(later.why, /abandoned reclaim of it was cleared/u);
-  assert.equal(tryReclaimLock(logPath).kind, "reclaimed", "the next wait reclaims it");
-  assert.deepEqual(residue(logPath), []);
-});
-
 test("describeLogLock names the holder without touching the file", () => {
   const logPath = freshLog();
   assert.equal(describeLogLock(logPath), null);
@@ -379,31 +387,74 @@ test("judgeHolder: the decision table on Linux and elsewhere", () => {
   });
   const noStart = linuxHolder();
   delete noStart.start;
-  const probe = (stat: { state: string; start: string } | null, exists: boolean): LivenessProbe => ({
+  const probe = (stat: ProcStatRead, exists: boolean): LivenessProbe => ({
     linuxStat: () => stat,
     pidExists: () => exists,
   });
+  const ABSENT: ProcStatRead = { kind: "absent" };
+  const stat = (state: string, start: string): ProcStatRead => ({ kind: "stat", state, start });
+  const unreadable = (why: string): ProcStatRead => ({ kind: "unreadable", why });
 
   const cases: Array<[string, ReturnType<typeof judgeHolder>["state"], string | undefined, ReturnType<typeof judgeHolder>]> = [
-    ["linux: no such pid", "gone", "holder-dead", judgeHolder(linuxHolder(), linuxSelf, probe(null, false))],
-    ["linux: zombie", "gone", "holder-dead", judgeHolder(linuxHolder(), linuxSelf, probe({ state: "Z", start: "300" }, true))],
-    ["linux: pid reused", "gone", "holder-replaced", judgeHolder(linuxHolder(), linuxSelf, probe({ state: "S", start: "999" }, true))],
-    ["linux: same process", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe({ state: "S", start: "300" }, true))],
-    ["linux: another pid namespace", "live", undefined, judgeHolder(linuxHolder({ pidns: "pid:[2]" }), linuxSelf, probe(null, false))],
-    ["linux: earlier boot, same host", "gone", "holder-boot-ended", judgeHolder(linuxHolder({ boot: "boot-b" }), linuxSelf, probe({ state: "S", start: "300" }, true))],
-    ["linux: other boot, other host", "live", undefined, judgeHolder(linuxHolder({ boot: "boot-b", host: "elsewhere" }), linuxSelf, probe(null, false))],
-    ["linux: record without boot", "live", undefined, judgeHolder(linuxHolder({ boot: "" }), linuxSelf, probe(null, false))],
-    ["linux: record without start", "live", undefined, judgeHolder(noStart, linuxSelf, probe({ state: "S", start: "300" }, true))],
-    ["linux: written off Linux", "live", undefined, judgeHolder(otherHolder(), linuxSelf, probe(null, false))],
-    ["other: no such pid", "gone", "holder-dead", judgeHolder(otherHolder(), otherSelf, probe(null, false))],
-    ["other: pid exists", "live", undefined, judgeHolder(otherHolder(), otherSelf, probe(null, true))],
-    ["other: another host", "live", undefined, judgeHolder(otherHolder({ host: "elsewhere" }), otherSelf, probe(null, false))],
-    ["other: host rebooted since", "gone", "holder-boot-ended", judgeHolder(otherHolder({ boot: "~900000" }), otherSelf, probe(null, true))],
-    ["other: written on Linux", "live", undefined, judgeHolder(linuxHolder(), otherSelf, probe(null, false))],
+    ["linux: no /proc entry and kill(pid, 0) says ESRCH", "gone", "holder-dead", judgeHolder(linuxHolder(), linuxSelf, probe(ABSENT, false))],
+    // B1: hidepid=invisible hides another uid's process as ENOENT; kill answers EPERM.
+    ["linux: no /proc entry but kill(pid, 0) finds the pid (hidepid)", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe(ABSENT, true))],
+    // B1: hidepid=noaccess (EACCES), an LSM denial, a parse failure: nothing is concluded.
+    ["linux: /proc entry unreadable (EACCES), even with kill saying ESRCH", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe(unreadable("EACCES"), false))],
+    ["linux: /proc entry unreadable (EPERM)", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe(unreadable("EPERM"), false))],
+    ["linux: /proc stat unparseable", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe(unreadable("an unparseable stat line"), false))],
+    ["linux: zombie", "gone", "holder-dead", judgeHolder(linuxHolder(), linuxSelf, probe(stat("Z", "300"), true))],
+    ["linux: pid reused", "gone", "holder-replaced", judgeHolder(linuxHolder(), linuxSelf, probe(stat("S", "999"), true))],
+    ["linux: same process", "live", undefined, judgeHolder(linuxHolder(), linuxSelf, probe(stat("S", "300"), true))],
+    ["linux: another pid namespace", "live", undefined, judgeHolder(linuxHolder({ pidns: "pid:[2]" }), linuxSelf, probe(ABSENT, false))],
+    // S4: an earlier boot of this host and another kernel sharing the volume look the same.
+    ["linux: another boot id, same host (reboot or another kernel)", "live", undefined, judgeHolder(linuxHolder({ boot: "boot-b" }), linuxSelf, probe(ABSENT, false))],
+    ["linux: other boot, other host", "live", undefined, judgeHolder(linuxHolder({ boot: "boot-b", host: "elsewhere" }), linuxSelf, probe(ABSENT, false))],
+    ["linux: record without boot", "live", undefined, judgeHolder(linuxHolder({ boot: "" }), linuxSelf, probe(ABSENT, false))],
+    ["linux: record without start", "live", undefined, judgeHolder(noStart, linuxSelf, probe(stat("S", "300"), true))],
+    ["linux: written off Linux", "live", undefined, judgeHolder(otherHolder(), linuxSelf, probe(ABSENT, false))],
+    // S3: this reader's /proc belongs to another pid namespace.
+    ["linux: this reader's /proc is foreign", "live", undefined, judgeHolder(linuxHolder(), { ...linuxSelf, procIsOwn: false }, probe(ABSENT, false))],
+    ["linux: holder under another time namespace, start differs", "live", undefined, judgeHolder(linuxHolder({ timens: "time:[9]" }), linuxSelf, probe(stat("S", "999"), true))],
+    ["linux: both in one time namespace, start differs", "gone", "holder-replaced", judgeHolder(linuxHolder({ timens: "time:[9]" }), { ...linuxSelf, timens: "time:[9]" }, probe(stat("S", "999"), true))],
+    ["other: no such pid", "gone", "holder-dead", judgeHolder(otherHolder(), otherSelf, probe(ABSENT, false))],
+    ["other: pid exists", "live", undefined, judgeHolder(otherHolder(), otherSelf, probe(ABSENT, true))],
+    ["other: another host", "live", undefined, judgeHolder(otherHolder({ host: "elsewhere" }), otherSelf, probe(ABSENT, false))],
+    // B2: the boot reading moves with every wall-clock step; the pid decides.
+    ["other: boot reading moved, pid exists", "live", undefined, judgeHolder(otherHolder({ boot: "~900000" }), otherSelf, probe(ABSENT, true))],
+    ["other: boot reading moved, pid gone", "gone", "holder-dead", judgeHolder(otherHolder({ boot: "~900000" }), otherSelf, probe(ABSENT, false))],
+    ["other: written on Linux", "live", undefined, judgeHolder(linuxHolder(), otherSelf, probe(ABSENT, false))],
   ];
   for (const [name, state, reason, verdict] of cases) {
     assert.equal(verdict.state, state, name);
     if (verdict.state === "gone") assert.equal(verdict.reason, reason, name);
+  }
+});
+
+test("procIsOwnNamespace: /proc is trusted only when /proc/self names this process", () => {
+  assert.equal(procIsOwnNamespace(() => "8", 8), true);
+  // `unshare --pid --fork` without a /proc remount: process.pid 8, /proc/self -> 15.
+  assert.equal(procIsOwnNamespace(() => "15", 8), false);
+  assert.equal(
+    procIsOwnNamespace(() => {
+      throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
+    }, 8),
+    false,
+  );
+});
+
+test("the real probe: kill(pid, 0) EPERM is a pid that exists, and on Linux a dead pid's /proc entry is absent, never 'gone' by itself", () => {
+  assert.equal(NODE_LIVENESS_PROBE.pidExists(process.pid), true);
+  const dead = deadPid();
+  assert.equal(NODE_LIVENESS_PROBE.pidExists(dead), false);
+  if (typeof process.getuid === "function" && process.getuid() !== 0 && process.platform !== "win32") {
+    // pid 1 belongs to root: EPERM, which is existence.
+    assert.equal(NODE_LIVENESS_PROBE.pidExists(1), true);
+  }
+  if (LINUX) {
+    assert.deepEqual(NODE_LIVENESS_PROBE.linuxStat(dead), { kind: "absent" });
+    const own = NODE_LIVENESS_PROBE.linuxStat(process.pid);
+    assert.equal(own.kind, "stat");
   }
 });
 
@@ -416,13 +467,7 @@ test("parseProcStat counts fields from the last parenthesis, so a command name w
 });
 
 test("this process's own record is judged live by the real check", () => {
-  const verdict = judgeHolder(holder(), selfIdentity(), {
-    linuxStat: (pid) => {
-      const text = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
-      return parseProcStat(text);
-    },
-    pidExists: () => true,
-  });
+  const verdict = judgeHolder(holder(), selfIdentity(), NODE_LIVENESS_PROBE);
   assert.equal(verdict.state, "live");
 });
 
@@ -557,4 +602,403 @@ test("writers racing to reclaim one stale lock: exactly one reclaims, every appe
     assert.equal(existsSync(`${logPath}.lock`), false);
     assert.deepEqual(residue(logPath), []);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: B2 and S4, a boot reading that differs proves nothing
+// ---------------------------------------------------------------------------
+
+test("a running holder whose boot reading differs (a wall-clock step, or another kernel) keeps its lock", () => {
+  const logPath = freshLog();
+  const before = readFileSync(logPath);
+  const self = selfIdentity();
+  // macOS: the holder read its boot before a 700 s clock step (XNU moves
+  // kern.boottime on every clock set). Linux: another kernel's boot id.
+  const boot = self.linux
+    ? "00000000-0000-4000-8000-000000000000"
+    : `~${String(Number((self.boot ?? "~0").slice(1)) - 700)}`;
+  writeLock(logPath, holder({ boot }));
+  const lockBytes = readFileSync(`${logPath}.lock`);
+  const result = appendEvent(logPath, granted(10), { lockTimeoutMs: 80, lockRetryMs: 5 });
+  assert.equal(result.ok, false, "the live holder's lock was not taken");
+  if (!result.ok) {
+    assert.equal(result.error.code, "lock-timeout");
+    assert.match(result.error.message, self.linux ? /another kernel/u : /is running/u);
+  }
+  assert.deepEqual(readFileSync(logPath), before);
+  assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes);
+  assert.deepEqual(residue(logPath), []);
+  rmSync(`${logPath}.lock`);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: S1, the record of a reclaim cannot be lost
+// ---------------------------------------------------------------------------
+
+test("a reclaim whose reclaimer never takes the lock is still recorded, by the next writer that does", () => {
+  const logPath = freshLog();
+  const pid = deadPid();
+  writeLock(logPath, holder({ pid }));
+  // The reclaim alone: this "reclaimer" never takes the lock afterwards.
+  const outcome = tryReclaimLock(logPath);
+  assert.equal(outcome.kind, "reclaimed");
+  assert.equal(existsSync(`${logPath}.lock`), false);
+
+  const other = appendEvent(logPath, granted(11));
+  assert.ok(other.ok, other.ok ? "" : other.error.message);
+  const log = records(logPath);
+  assert.deepEqual(
+    log.map((record) => record.event),
+    ["task.registered", "audit.lock_reclaimed", "approval.granted"],
+    "the next writer recorded the reclaim before its own record",
+  );
+  assert.equal((log[1]?.payload?.["holder"] as { pid?: number } | undefined)?.pid, pid);
+  assert.deepEqual(residue(logPath), []);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+test("a try-once reclaimer whose create another writer wins gets lock-timeout, and the reclaim is recorded exactly once all the same", () => {
+  const logPath = freshLog();
+  const lockPath = `${logPath}.lock`;
+  writeLock(logPath, holder({ pid: deadPid() }));
+  // Another writer wins the create the instant the stale lock is gone, and holds
+  // past this writer's deadline (a try-once caller has none).
+  setReclaimSeamForTests((step) => {
+    if (step === "after-commit") writeLock(logPath, holder());
+  });
+  let lost;
+  try {
+    lost = appendEvent(logPath, granted(12), { lockTimeoutMs: 0 });
+  } finally {
+    setReclaimSeamForTests(null);
+  }
+  assert.equal(lost.ok, false);
+  if (!lost.ok) assert.equal(lost.error.code, "lock-timeout");
+  assert.deepEqual(
+    records(logPath).map((record) => record.event),
+    ["task.registered"],
+  );
+  // That other writer finishes; the next append records the reclaim first.
+  rmSync(lockPath);
+  const next = appendEvent(logPath, granted(13));
+  assert.ok(next.ok);
+  const again = appendEvent(logPath, granted(14));
+  assert.ok(again.ok);
+  assert.deepEqual(
+    records(logPath).map((record) => record.event),
+    ["task.registered", "audit.lock_reclaimed", "approval.granted", "approval.granted"],
+  );
+  assert.deepEqual(residue(logPath), []);
+  assert.equal(verify(logPath).status, "clean");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: B3, exactly one reclaimer, judged by liveness and never by age
+// ---------------------------------------------------------------------------
+
+/**
+ * A reclaimer in its own process, stopped at `step` until the test says go (a
+ * SIGSTOP, a VM pause, a laptop asleep): it writes `<marker>.at` when it stops
+ * there and `<marker>.out` with its outcome when it finishes.
+ */
+function stalledReclaimer(logPath: string, step: string, marker: string): ReturnType<typeof spawn> {
+  const script = `${marker}.mjs`;
+  writeFileSync(
+    script,
+    [
+      `import { setReclaimSeamForTests, tryReclaimLock } from ${JSON.stringify(LOCK_MODULE)};`,
+      `import { existsSync, writeFileSync } from "node:fs";`,
+      `setReclaimSeamForTests((step) => {`,
+      `  if (step !== ${JSON.stringify(step)}) return;`,
+      `  writeFileSync(${JSON.stringify(`${marker}.at`)}, step);`,
+      `  while (!existsSync(${JSON.stringify(`${marker}.go`)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);`,
+      `});`,
+      `const outcome = tryReclaimLock(${JSON.stringify(logPath)});`,
+      `writeFileSync(${JSON.stringify(`${marker}.out`)}, JSON.stringify(outcome));`,
+    ].join("\n"),
+  );
+  return spawn(process.execPath, [script], { stdio: "ignore" });
+}
+
+function exitOf(child: ReturnType<typeof spawn>): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve({ code: child.exitCode, signal: child.signalCode });
+      return;
+    }
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+for (const step of ["claimed", "before-commit"] as const) {
+  test(`a reclaimer stalled at '${step}' keeps its claim against a writer whose clock reads an hour later; it then finishes, and the chain verifies`, async () => {
+    const logPath = freshLog();
+    const lockPath = `${logPath}.lock`;
+    writeLock(logPath, holder({ pid: deadPid() }));
+    const stale = readFileSync(lockPath);
+    const marker = join(scratch, `stalled-${step}-${String(counter)}`);
+    const r1 = stalledReclaimer(logPath, step, marker);
+    const r1Exit = exitOf(r1);
+    try {
+      await waitFor(() => existsSync(`${marker}.at`), 10_000);
+      // An hour later by this writer's clock (a long stall, or a filesystem
+      // clock far behind): the live claimant still holds its claim.
+      const r2 = tryReclaimLock(logPath, Date.now() + 3_600_000);
+      assert.equal(r2.kind, "kept");
+      if (r2.kind === "kept") assert.match(r2.why, /another writer is reclaiming it now/u);
+      const w = appendEvent(logPath, granted(20), { lockTimeoutMs: 100, lockRetryMs: 5 });
+      assert.equal(w.ok, false);
+      if (!w.ok) assert.equal(w.error.code, "lock-timeout");
+      assert.deepEqual(readFileSync(lockPath), stale, "nothing touched the lock while R1 was stalled");
+    } finally {
+      writeFileSync(`${marker}.go`, "go");
+    }
+    assert.equal((await r1Exit).code, 0);
+    assert.equal((JSON.parse(readFileSync(`${marker}.out`, "utf8")) as { kind: string }).kind, "reclaimed");
+    const after = appendEvent(logPath, granted(21));
+    assert.ok(after.ok);
+    const log = records(logPath);
+    assert.deepEqual(
+      log.map((record) => record.event),
+      ["task.registered", "audit.lock_reclaimed", "approval.granted"],
+    );
+    assert.deepEqual(residue(logPath), []);
+    assert.equal(verify(logPath).status, "clean");
+  });
+
+  test(`a reclaimer killed at '${step}' is succeeded by exactly one reclaimer; what it left is excluded from the export`, async () => {
+    const logPath = freshLog();
+    writeLock(logPath, holder({ pid: deadPid() }));
+    const marker = join(scratch, `killed-${step}-${String(counter)}`);
+    const r1 = stalledReclaimer(logPath, step, marker);
+    const r1Exit = exitOf(r1);
+    await waitFor(() => existsSync(`${marker}.at`), 10_000);
+    r1.kill("SIGKILL");
+    assert.equal((await r1Exit).signal, "SIGKILL");
+
+    const results = [
+      appendEvent(logPath, granted(22), { lockTimeoutMs: 500, lockRetryMs: 5 }),
+      appendEvent(logPath, granted(23), { lockTimeoutMs: 500, lockRetryMs: 5 }),
+    ];
+    for (const result of results) assert.ok(result.ok, result.ok ? "" : result.error.message);
+    const log = records(logPath);
+    assert.equal(log.filter((record) => record.event === "audit.lock_reclaimed").length, 1);
+    assert.equal(log.filter((record) => record.event === "approval.granted").length, 2);
+    assert.equal(verify(logPath).status, "clean");
+    // The dead claimant's claim stays (nothing ever removes another's claim);
+    // it is the lock's bookkeeping and never leaves in a tenant export.
+    const left = residue(logPath);
+    assert.ok(left.length >= 1 && left.every((name) => name.endsWith(".claim-0.lock")), left.join(", "));
+    for (const name of left) {
+      assert.ok(name.startsWith("events.jsonl.lock."), name);
+      assert.equal(isExcludedPath(`.approval/log/${name}`, ".approval/log/events.jsonl.lock"), true, name);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1: N2, a lockfile that changes hands at the worst moment survives
+// ---------------------------------------------------------------------------
+
+test("a lockfile rewritten in place (same inode, a new holder) after the claim is left alone, and nothing is recorded", () => {
+  const logPath = freshLog();
+  const lockPath = `${logPath}.lock`;
+  writeLock(logPath, holder({ pid: deadPid() }));
+  const ino = statSync(lockPath, { bigint: true }).ino;
+  const fresh = `${JSON.stringify(holder({ created: new Date().toISOString() }))}\n`;
+  setReclaimSeamForTests((step) => {
+    if (step === "claimed") writeFileSync(lockPath, fresh);
+  });
+  let outcome;
+  try {
+    outcome = tryReclaimLock(logPath);
+  } finally {
+    setReclaimSeamForTests(null);
+  }
+  assert.equal(statSync(lockPath, { bigint: true }).ino, ino, "the same inode, as the case requires");
+  assert.equal(outcome.kind, "kept");
+  assert.equal(readFileSync(lockPath, "utf8"), fresh, "the new holder's lock is where it was");
+  assert.deepEqual(residue(logPath), [], "no claim, no pending record, nothing aside");
+  rmSync(lockPath);
+  assert.ok(appendEvent(logPath, granted(30)).ok);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
+});
+
+test("a lockfile replaced (a new inode) between the last check and the rename is put back, and the pending record withdrawn", () => {
+  const logPath = freshLog();
+  const lockPath = `${logPath}.lock`;
+  writeLock(logPath, holder({ pid: deadPid() }));
+  const fresh = `${JSON.stringify(holder({ created: new Date().toISOString() }))}\n`;
+  // After the last re-check and before the rename: only an actor outside the
+  // protocol (a human rm, an older version's unconditional release) is here.
+  setReclaimSeamForTests((step) => {
+    if (step === "at-commit") {
+      rmSync(lockPath);
+      writeFileSync(lockPath, fresh);
+    }
+  });
+  let outcome;
+  try {
+    outcome = tryReclaimLock(logPath);
+  } finally {
+    setReclaimSeamForTests(null);
+  }
+  assert.equal(outcome.kind, "kept");
+  if (outcome.kind === "kept") assert.match(outcome.why, /was put back/u);
+  assert.equal(readFileSync(lockPath, "utf8"), fresh, "the new holder's lock is back at the path");
+  assert.deepEqual(residue(logPath), []);
+  rmSync(lockPath);
+  assert.ok(appendEvent(logPath, granted(31)).ok);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: N3, the reclaim's files never leave in an export
+// ---------------------------------------------------------------------------
+
+test("the export excludes every file named from the lockfile, and nothing else that merely ends in .lock", () => {
+  const lock = ".approval/log/events.jsonl.lock";
+  for (const name of [
+    "events.jsonl.lock",
+    "events.jsonl.lock.reclaim-12-abcdef012345.claim-0.lock",
+    "events.jsonl.lock.reclaim-12-abcdef012345.0011223344556677.gone.lock",
+    "events.jsonl.lock.reclaim-12-abcdef012345.pending.lock",
+    "events.jsonl.lock.reclaim-12-abcdef012345.0011223344556677.claim.tmp.lock",
+  ]) {
+    assert.equal(isExcludedPath(`.approval/log/${name}`, lock), true, name);
+  }
+  assert.equal(isExcludedPath(".approval/payloads/x.lock", lock), false);
+  assert.equal(isExcludedPath(".approval/log/events.jsonl.locked", lock), false);
+  assert.equal(isExcludedPath(".approval/log/events.jsonl", lock), false);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: B1 and S3 on real Linux, in a disposable privileged container
+// ---------------------------------------------------------------------------
+
+/**
+ * These remount `/proc` or unshare a pid namespace, which only root in a
+ * throwaway container should do. They run when APPROVAL_LOCK_TEST_PRIVILEGED=1
+ * on Linux as root, and are skipped (saying why) everywhere else, CI included:
+ * the decision-table rows above pin the same judgements on every platform.
+ */
+const PRIVILEGED =
+  LINUX && process.env["APPROVAL_LOCK_TEST_PRIVILEGED"] === "1" && typeof process.getuid === "function" && process.getuid() === 0
+    ? false
+    : "needs Linux, root, and APPROVAL_LOCK_TEST_PRIVILEGED=1 in a disposable container (it remounts /proc or unshares a pid namespace)";
+
+/** A holder child (as `uid`, when given) that stalls 2.5 s inside its append, holding the lock. */
+function holderScript(logPath: string, marker: string): string {
+  const script = `${marker}.holder.mjs`;
+  writeFileSync(
+    script,
+    [
+      `process.umask(0);`,
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { appendWriteLayer, setAppendWriteLayerForTests } from ${JSON.stringify(WRITE_LAYER_MODULE)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `const real = appendWriteLayer();`,
+      `setAppendWriteLayerForTests({ ...real, write(fd, data) {`,
+      `  writeFileSync(${JSON.stringify(`${marker}.writing`)}, "x");`,
+      `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);`,
+      `  return real.write(fd, data);`,
+      `} });`,
+      `const result = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(40))});`,
+      `writeFileSync(${JSON.stringify(`${marker}.holder-result`)}, JSON.stringify(result.ok));`,
+    ].join("\n"),
+  );
+  chmodSync(script, 0o644);
+  return script;
+}
+
+function readerScript(logPath: string, marker: string): string {
+  const script = `${marker}.reader.mjs`;
+  writeFileSync(
+    script,
+    [
+      `process.umask(0);`,
+      `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `const result = appendEvent(${JSON.stringify(logPath)}, ${JSON.stringify(granted(41))}, { lockTimeoutMs: 400, lockRetryMs: 5 });`,
+      `writeFileSync(${JSON.stringify(`${marker}.reader-result`)}, JSON.stringify(result.ok ? { ok: true } : { ok: false, code: result.error.code, message: result.error.message }));`,
+    ].join("\n"),
+  );
+  chmodSync(script, 0o644);
+  return script;
+}
+
+function sharedLog(name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `approval-md-lock-${name}-`));
+  chmodSync(dir, 0o777);
+  mkdirSync(join(dir, "log"), { mode: 0o777 });
+  chmodSync(join(dir, "log"), 0o777);
+  const logPath = join(dir, "log", "events.jsonl");
+  const previous = process.umask(0);
+  try {
+    assert.ok(appendEvent(logPath, REGISTERED).ok);
+  } finally {
+    process.umask(previous);
+  }
+  return logPath;
+}
+
+test("B1: under hidepid, a reader of another uid finds a live holder's lock held (lock-timeout), never reclaims it", { skip: PRIVILEGED }, async () => {
+  const remount = spawnSync("mount", ["-o", "remount,hidepid=invisible", "/proc"], { encoding: "utf8" });
+  assert.equal(remount.status, 0, `remount /proc hidepid=invisible: ${remount.stderr}`);
+  try {
+    const logPath = sharedLog("hidepid");
+    const marker = join(dirname(dirname(logPath)), "m");
+    const holderChild = spawn(process.execPath, [holderScript(logPath, marker)], { uid: 1000, gid: 1000, stdio: "ignore" });
+    const holderExit = exitOf(holderChild);
+    await waitFor(() => existsSync(`${marker}.writing`), 10_000);
+    const reader = spawnSync(process.execPath, [readerScript(logPath, marker)], { uid: 65534, gid: 65534 });
+    assert.equal(reader.status, 0);
+    const result = JSON.parse(readFileSync(`${marker}.reader-result`, "utf8")) as { ok: boolean; code?: string; message?: string };
+    assert.equal(result.ok, false, "the reader did not take the live holder's lock");
+    assert.equal(result.code, "lock-timeout");
+    assert.match(result.message ?? "", /\/proc hides it from this process, but kill\(pid, 0\) finds it/u);
+    assert.equal((await holderExit).code, 0);
+    assert.equal(readFileSync(`${marker}.holder-result`, "utf8"), "true");
+    assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
+    assert.equal(verify(logPath).status, "clean");
+  } finally {
+    const restore = spawnSync("mount", ["-o", "remount,hidepid=0", "/proc"], { encoding: "utf8" });
+    if (restore.status !== 0) spawnSync("mount", ["-o", "remount,hidepid=off", "/proc"]);
+  }
+});
+
+test("S3: in a pid namespace whose /proc was not remounted, a reader keeps a live holder's lock (lock-timeout), never reclaims it", { skip: PRIVILEGED }, () => {
+  const logPath = sharedLog("pidns");
+  const marker = join(dirname(dirname(logPath)), "m");
+  const holder = holderScript(logPath, marker);
+  const reader = readerScript(logPath, marker);
+  const driver = `${marker}.driver.mjs`;
+  writeFileSync(
+    driver,
+    [
+      `import { spawn, spawnSync } from "node:child_process";`,
+      `import { existsSync, readlinkSync } from "node:fs";`,
+      `const ownProc = readlinkSync("/proc/self") === String(process.pid);`,
+      // Burn pids first, so the holder's pid in this namespace names an exited
+      // process in the outer /proc that both it and the reader read: before
+      // fix round 1 the reader then judged the live holder dead.
+      `for (let n = 0; n < 64; n += 1) spawnSync("true");`,
+      `const h = spawn(process.execPath, [${JSON.stringify(holder)}], { stdio: "ignore" });`,
+      `const done = new Promise((resolve) => h.on("exit", resolve));`,
+      `while (!existsSync(${JSON.stringify(`${marker}.writing`)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);`,
+      `spawnSync(process.execPath, [${JSON.stringify(reader)}]);`,
+      `await done;`,
+      `console.log(JSON.stringify({ pid: process.pid, ownProc }));`,
+    ].join("\n"),
+  );
+  const run = spawnSync("unshare", ["--pid", "--fork", process.execPath, driver], { encoding: "utf8" });
+  assert.equal(run.status, 0, `unshare: ${run.stderr}`);
+  const inside = JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "{}") as { pid?: number; ownProc?: boolean };
+  assert.equal(inside.ownProc, false, "the case requires a /proc from another pid namespace");
+  const result = JSON.parse(readFileSync(`${marker}.reader-result`, "utf8")) as { ok: boolean; code?: string; message?: string };
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "lock-timeout");
+  assert.match(result.message ?? "", /\/proc belongs to another pid namespace/u);
+  assert.deepEqual(records(logPath).map((record) => record.event), ["task.registered", "approval.granted"]);
+  assert.equal(verify(logPath).status, "clean");
 });

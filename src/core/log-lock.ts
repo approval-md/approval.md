@@ -13,49 +13,64 @@
  * its two seconds and refuses `lock-timeout`, and the tenant's gate stays
  * wedged until a human removes the file.
  *
+ * ## The rule every decision here follows
+ *
+ * A wrong reclaim (two writers under one lock, a forked chain) is far worse than
+ * a missed one (a wedge a human can clear). So a holder is LIVE unless this
+ * process can prove it gone, and every step that could take a live writer's lock
+ * re-proves, immediately before it acts, that it is acting on the file it judged.
+ *
  * ## What this module does about it
  *
  * 1. **The lockfile names its holder.** {@link createLockFile} writes one JSON
  *    line into the file it creates: the pid, the host, the boot, on Linux the
- *    pid namespace and the process start time, when the lock was taken, which
- *    kind of holder it is, and a nonce. An older writer's empty lockfile has no
- *    such record.
+ *    pid and time namespaces and the process start time, when the lock was
+ *    taken, which kind of holder it is, and a nonce. An older writer's empty
+ *    lockfile has no such record.
  * 2. **A lock is reclaimed only from a holder that is provably gone.**
- *    {@link judgeHolder} decides from the record and the platform. On Linux the
- *    proof is exact: the same boot and the same pid namespace as the reader,
- *    and `/proc/<pid>/stat` either absent, a zombie, or naming a process whose
- *    start time is not the holder's. Elsewhere (macOS, the BSDs, Windows) there
- *    is no ps-free way to read another process's start time, so the proof is
- *    weaker and the answer leans the safe way: the same host, and `kill(pid, 0)`
- *    reporting no such process, or the host's boot time having moved. A pid
- *    that exists there is treated as the holder, however old the lock. Anything
- *    that cannot be verified (another host, another container's pid namespace,
- *    a record from a newer format) is LIVE. A live holder is never reclaimed.
+ *    {@link judgeHolder} decides from the record and the platform. On Linux,
+ *    with `/proc` mounted for this process's own pid namespace, in the same boot
+ *    and pid namespace as the holder: `/proc/<pid>` absent AND `kill(pid, 0)`
+ *    answering ESRCH, or `/proc/<pid>/stat` naming a zombie, or naming a process
+ *    whose start time (read in the same time namespace) is not the holder's. A
+ *    `/proc` entry that cannot be read (hidepid, another uid, an LSM) is LIVE,
+ *    and so is an absent entry that `kill(pid, 0)` still finds. Elsewhere (macOS,
+ *    the BSDs, Windows) there is no ps-free way to read another process's start
+ *    time, so the only proof is the same host and `kill(pid, 0)` answering ESRCH;
+ *    a pid that exists there is the holder, however old the lock, and a boot
+ *    reading that moved (a wall-clock step moves it) proves nothing. A holder
+ *    under another kernel (a different boot id: an earlier boot, or a microVM or
+ *    another machine sharing the filesystem, which cannot be told apart), in
+ *    another pid namespace, on another host, or with a record of a newer format
+ *    is LIVE.
  * 3. **An unattributed lockfile ages out.** A lockfile with no holder record
  *    (written by an older version, or by a writer killed between the create and
  *    the write) is reclaimed only once it is {@link LEGACY_LOCK_RECLAIM_AGE_MS}
  *    old. An append holds the lock for milliseconds and the longest holder in
  *    this runtime (`approval log sync`) for seconds.
- * 4. **Reclaim is atomic.** {@link tryReclaimLock}: link the lockfile to a name
- *    keyed by its inode with `link(2)`, which fails if that name exists, so of
- *    any number of writers that judged the same stale lock exactly one goes on;
- *    check that the linked file is still the one judged (inode, bytes, mtime);
- *    rename the lockfile aside, check again, and only then remove it. The
- *    winner then takes the lock with the same `wx` create every writer uses, so
- *    a writer that wins that create first is ordinary contention.
- * 5. **The reclaim is in the log.** `core/log.ts` appends an
- *    `audit.lock_reclaimed` record as the first write under the lock it took
- *    after a reclaim, from a fresh read of the tail: the reclaimer's own
+ * 4. **Exactly one reclaimer, and it acts only on the file it judged.**
+ *    {@link tryReclaimLock}: claim the judged lockfile with an exclusive
+ *    `link(2)` of a file carrying the claimant's own holder record; a claim is
+ *    passed over only when its claimant is provably gone (by the same
+ *    judgement), never because of its age. Re-check the lockfile (inode, mtime,
+ *    bytes) and the claim, write the record of the reclaim beside the lock,
+ *    re-check both again, and rename the lockfile aside: that rename is the
+ *    commit point. The winner then takes the lock with the same `wx` create
+ *    every writer uses, so a writer that wins that create first is ordinary
+ *    contention.
+ * 5. **The reclaim is in the log, and cannot be lost.** The record of the reclaim
+ *    is written to `<lock>.reclaim-<key>.pending.lock` BEFORE the commit point,
+ *    and `core/log.ts` appends every such pending record as `audit.lock_reclaimed`
+ *    as the first write under whichever lock comes next, the reclaimer's or
+ *    another writer's, from a fresh read of the tail: the caller's own
  *    compare-and-append (SPEC.md §11.1 invariant 5) then sees a moved head and
  *    re-reads, as it would after any other writer's record.
- * 6. **SIGTERM does not leave a lock behind.** {@link guardTerminationWhileLocked}
- *    registers a listener for SIGTERM, SIGINT and SIGHUP while this process
- *    holds a lock, for each signal nobody else listens for. A lock is only ever
- *    held inside synchronous code, so a signal that arrives then waits for the
- *    event loop, by which time the lock is released; the listener then puts the
- *    default disposition back and raises the signal again, and the process dies
- *    of it as it would have, without the lockfile. SIGKILL cannot be caught,
- *    which is what 1 to 5 are for.
+ * 6. **A termination signal does not leave a lock behind.**
+ *    {@link guardTerminationWhileLocked} registers a listener for SIGTERM, SIGINT
+ *    and SIGHUP while this process holds a lock, for each signal nobody else
+ *    listens for, and the listener re-raises the signal with its default
+ *    disposition once the lock is released, so the process still dies of it.
+ *    SIGKILL cannot be caught, which is what 1 to 5 are for.
  *
  * ## What it refuses to reclaim
  *
@@ -68,11 +83,12 @@
  *   reason about.
  *
  * Nothing here reads the log, decides a verdict, or writes a record. Its
- * readers are `core/log.ts`'s writer (reclaim, release, the refusal message)
- * and anyone who wants to describe a lockfile (`describeLogLock`).
+ * readers are `core/log.ts`'s writer (reclaim, pending records, release, the
+ * refusal message) and anyone who wants to describe a lockfile
+ * (`describeLogLock`).
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -81,13 +97,14 @@ import {
   openSync,
   readFileSync,
   readSync,
+  readdirSync,
   readlinkSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { hostname, uptime } from "node:os";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** The holder record's format version. A reader treats any other as unverifiable. */
 export const LOCK_HOLDER_VERSION = 1;
@@ -100,33 +117,32 @@ export const LOCK_HOLDER_VERSION = 1;
 export const LEGACY_LOCK_RECLAIM_AGE_MS = 10 * 60_000;
 
 /**
- * How long a reclaim's link may sit before another writer treats the reclaim as
- * abandoned (its reclaimer killed between the link and the rename). A reclaim
- * takes microseconds.
+ * How many claimants of one stale lock may have died mid-reclaim before a writer
+ * stops trying further claims and leaves the lock to a human. Each step past the
+ * first needs a reclaimer to have died between its claim and its release.
  */
-const ABANDONED_RECLAIM_AGE_MS = 10_000;
-
-/**
- * Off Linux the boot is the host's boot time to the second, read as now minus
- * uptime. A clock step moves both readings of it, so two holders' boots are the
- * same boot unless they differ by more than this.
- */
-const BOOT_TOLERANCE_S = 600;
+const MAX_CLAIM_GENERATIONS = 16;
 
 /** `append`: one record. `hold`: a whole operation under `withAppendLock`. */
 export type LockOp = "append" | "hold";
 
-/** What a lockfile written by this version holds, one JSON line. */
-export interface LockHolder {
-  v: typeof LOCK_HOLDER_VERSION;
+/** Who a process is, as far as a liveness judgement can use it. */
+export interface HolderIdentity {
   pid: number;
   host: string;
-  /** Linux: `/proc/sys/kernel/random/boot_id`. Elsewhere: `~<boot epoch seconds>`. */
+  /** Linux: `/proc/sys/kernel/random/boot_id`. Elsewhere: `~<boot epoch seconds>` (recorded, never judged). */
   boot: string;
   /** Linux only: `/proc/self/ns/pid`, so a holder in another container is never judged by pid. */
   pidns?: string;
-  /** Linux only: field 22 of `/proc/<pid>/stat`, clock ticks after boot. */
+  /** Linux only: field 22 of `/proc/self/stat`, clock ticks after boot as this process's time namespace reads it. */
   start?: string;
+  /** Linux only, where the kernel has time namespaces: `/proc/self/ns/time`, so start times are compared only within one. */
+  timens?: string;
+}
+
+/** What a lockfile written by this version holds, one JSON line. */
+export interface LockHolder extends HolderIdentity {
+  v: typeof LOCK_HOLDER_VERSION;
   /** When the lock was taken, RFC 3339. */
   created: string;
   op: LockOp;
@@ -134,7 +150,11 @@ export interface LockHolder {
   nonce: string;
 }
 
-/** Why a lock was reclaimed. The `audit.lock_reclaimed` payload's `reason`. */
+/**
+ * Why a lock was reclaimed. The `audit.lock_reclaimed` payload's `reason`.
+ * `holder-boot-ended` stays in the closed set for the schema's sake; since fix
+ * round 1 of APRV-479 no judgement produces it (a different boot proves nothing).
+ */
 export type LockReclaimReason = "holder-dead" | "holder-replaced" | "holder-boot-ended" | "legacy-aged";
 
 /** The judgement on one holder record. */
@@ -149,14 +169,30 @@ export interface SelfIdentity {
   boot: string | undefined;
   pidns: string | undefined;
   start: string | undefined;
+  /** Linux: `/proc/self/ns/time`, or undefined where the kernel has no time namespaces. */
+  timens?: string | undefined;
   linux: boolean;
+  /**
+   * Linux: whether `/proc` is this process's own pid namespace's procfs
+   * (`/proc/self` names `process.pid`). `false` means no pid read from it can be
+   * trusted, and every holder is LIVE. Absent is taken as `true` (tests).
+   */
+  procIsOwn?: boolean;
 }
+
+/** What `/proc/<pid>/stat` said. */
+export type ProcStatRead =
+  | { kind: "stat"; state: string; start: string }
+  /** ENOENT (or ESRCH while reading): no entry this process can see. Not proof of death on its own. */
+  | { kind: "absent" }
+  /** Any other outcome (EACCES, EPERM, an unparseable line): nothing can be concluded. */
+  | { kind: "unreadable"; why: string };
 
 /** What a liveness judgement may ask of the operating system. Injected by tests. */
 export interface LivenessProbe {
-  /** Linux: the pid's `/proc` state letter and start time, or `null` when there is no such process. */
-  linuxStat(pid: number): { state: string; start: string } | null;
-  /** `kill(pid, 0)`: does any process have this pid (EPERM counts as yes)? */
+  /** Linux: `/proc/<pid>/stat`, as read by this process. */
+  linuxStat(pid: number): ProcStatRead;
+  /** `kill(pid, 0)`: `false` only when it answers ESRCH; success, EPERM and every other error are `true`. */
   pidExists(pid: number): boolean;
 }
 
@@ -164,10 +200,22 @@ export interface LivenessProbe {
 // This process
 // ---------------------------------------------------------------------------
 
+function errnoOf(cause: unknown): string | undefined {
+  return (cause as NodeJS.ErrnoException | undefined)?.code;
+}
+
 function readTrimmed(path: string): string | undefined {
   try {
     const text = readFileSync(path, "utf8").trim();
     return text === "" ? undefined : text;
+  } catch {
+    return undefined;
+  }
+}
+
+function readLinkOrUndefined(path: string): string | undefined {
+  try {
+    return readlinkSync(path, "utf8");
   } catch {
     return undefined;
   }
@@ -188,28 +236,54 @@ export function parseProcStat(text: string): { state: string; start: string } | 
   return { state, start };
 }
 
-function linuxStatOf(pid: number): { state: string; start: string } | null {
+function readProcStat(path: string): ProcStatRead {
   let text: string;
   try {
-    text = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
-  } catch {
-    return null;
+    text = readFileSync(path, "utf8");
+  } catch (cause) {
+    const code = errnoOf(cause);
+    // ENOENT: no entry this process can see (exited, or hidden by hidepid).
+    // ESRCH: the task went away between the open and the read. Either way the
+    // caller must still ask kill(pid, 0) before calling the holder gone.
+    if (code === "ENOENT" || code === "ESRCH") return { kind: "absent" };
+    return { kind: "unreadable", why: code ?? "error" };
   }
-  return parseProcStat(text);
+  const parsed = parseProcStat(text);
+  return parsed === null ? { kind: "unreadable", why: "an unparseable stat line" } : { kind: "stat", ...parsed };
 }
 
-const NODE_PROBE: LivenessProbe = {
-  linuxStat: linuxStatOf,
+/** The real probe: `/proc` and `kill(pid, 0)`. Exported for tests of its two error rules. */
+export const NODE_LIVENESS_PROBE: LivenessProbe = {
+  linuxStat: (pid) => readProcStat(`/proc/${String(pid)}/stat`),
   pidExists(pid) {
     try {
       process.kill(pid, 0);
       return true;
     } catch (cause) {
-      // EPERM: the pid exists and belongs to somebody else. Only ESRCH is "none".
-      return (cause as NodeJS.ErrnoException).code !== "ESRCH";
+      // EPERM: the pid exists and belongs to somebody else (and is how another
+      // uid's process looks under hidepid). Only ESRCH is "none".
+      return errnoOf(cause) !== "ESRCH";
     }
   },
 };
+
+/**
+ * Is `/proc` this process's own pid namespace's procfs? `/proc/self` resolves
+ * to the reader's pid AS THAT PROCFS NUMBERS IT, so it names `process.pid` only
+ * when the procfs belongs to the namespace `process.pid` was issued in. A
+ * container that unshared its pid namespace without remounting `/proc` fails
+ * this, and every `/proc/<pid>` it reads is some other process (APRV-479, S3).
+ */
+export function procIsOwnNamespace(
+  read: (path: string) => string = (path) => readlinkSync(path, "utf8"),
+  pid: number = process.pid,
+): boolean {
+  try {
+    return read("/proc/self") === String(pid);
+  } catch {
+    return false;
+  }
+}
 
 let cachedSelf: SelfIdentity | undefined;
 
@@ -219,19 +293,23 @@ export function selfIdentity(): SelfIdentity {
   const linux = process.platform === "linux";
   let pidns: string | undefined;
   let start: string | undefined;
+  let timens: string | undefined;
   let boot: string | undefined;
+  let procIsOwn: boolean | undefined;
   if (linux) {
     boot = readTrimmed("/proc/sys/kernel/random/boot_id");
-    try {
-      pidns = readlinkSync("/proc/self/ns/pid");
-    } catch {
-      pidns = undefined;
+    procIsOwn = procIsOwnNamespace();
+    if (procIsOwn) {
+      pidns = readLinkOrUndefined("/proc/self/ns/pid");
+      timens = readLinkOrUndefined("/proc/self/ns/time");
+      const own = readProcStat("/proc/self/stat");
+      start = own.kind === "stat" ? own.start : undefined;
     }
-    start = linuxStatOf(process.pid)?.start;
   } else {
     boot = approximateBoot();
   }
-  cachedSelf = { pid: process.pid, host: safeHostname(), boot, pidns, start, linux };
+  cachedSelf = { pid: process.pid, host: safeHostname(), boot, pidns, start, timens, linux };
+  if (procIsOwn !== undefined) cachedSelf.procIsOwn = procIsOwn;
   return cachedSelf;
 }
 
@@ -256,21 +334,66 @@ function safeHostname(): string {
 // The record
 // ---------------------------------------------------------------------------
 
+function identityFields(): HolderIdentity {
+  const self = selfIdentity();
+  const identity: HolderIdentity = { pid: self.pid, host: self.host, boot: self.boot ?? "" };
+  if (self.pidns !== undefined) identity.pidns = self.pidns;
+  if (self.start !== undefined) identity.start = self.start;
+  if (self.timens !== undefined) identity.timens = self.timens;
+  return identity;
+}
+
 /** The record this process writes into a lockfile it creates now. */
 export function holderRecord(op: LockOp, now: Date = new Date()): LockHolder {
-  const self = selfIdentity();
+  const identity = identityFields();
   const record: LockHolder = {
     v: LOCK_HOLDER_VERSION,
-    pid: self.pid,
-    host: self.host,
-    boot: self.boot ?? "",
+    pid: identity.pid,
+    host: identity.host,
+    boot: identity.boot,
     created: now.toISOString(),
     op,
     nonce: randomBytes(8).toString("hex"),
   };
-  if (self.pidns !== undefined) record.pidns = self.pidns;
-  if (self.start !== undefined) record.start = self.start;
+  if (identity.pidns !== undefined) record.pidns = identity.pidns;
+  if (identity.start !== undefined) record.start = identity.start;
+  if (identity.timens !== undefined) record.timens = identity.timens;
   return record;
+}
+
+/** The identity fields of a parsed record, or `null` when any is malformed. */
+function parseIdentity(record: Record<string, unknown>): HolderIdentity | null {
+  const { pid, host, boot, pidns, start, timens } = record;
+  if (
+    typeof pid !== "number" ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof host !== "string" ||
+    typeof boot !== "string" ||
+    (pidns !== undefined && typeof pidns !== "string") ||
+    (start !== undefined && typeof start !== "string") ||
+    (timens !== undefined && typeof timens !== "string")
+  ) {
+    return null;
+  }
+  const identity: HolderIdentity = { pid, host, boot };
+  if (pidns !== undefined) identity.pidns = pidns;
+  if (start !== undefined) identity.start = start;
+  if (timens !== undefined) identity.timens = timens;
+  return identity;
+}
+
+function parseJsonObject(bytes: Buffer | string): Record<string, unknown> | null | "empty" {
+  const text = (typeof bytes === "string" ? bytes : bytes.toString("utf8")).trim();
+  if (text === "") return "empty";
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 /**
@@ -281,68 +404,49 @@ export function holderRecord(op: LockOp, now: Date = new Date()): LockHolder {
 export function parseHolder(
   bytes: Buffer | string,
 ): { kind: "v1"; holder: LockHolder } | { kind: "unknown"; version: unknown } | { kind: "legacy" } {
-  const text = (typeof bytes === "string" ? bytes : bytes.toString("utf8")).trim();
-  if (text === "") return { kind: "legacy" };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return { kind: "legacy" };
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return { kind: "legacy" };
-  const record = value as Record<string, unknown>;
+  const record = parseJsonObject(bytes);
+  if (record === "empty" || record === null) return { kind: "legacy" };
   if (!("v" in record)) return { kind: "legacy" };
   if (record["v"] !== LOCK_HOLDER_VERSION) return { kind: "unknown", version: record["v"] };
-  const { pid, host, boot, created, op, nonce, pidns, start } = record;
+  const identity = parseIdentity(record);
+  const { created, op, nonce } = record;
   if (
-    typeof pid !== "number" ||
-    !Number.isSafeInteger(pid) ||
-    pid <= 0 ||
-    typeof host !== "string" ||
-    typeof boot !== "string" ||
+    identity === null ||
     typeof created !== "string" ||
     (op !== "append" && op !== "hold") ||
-    typeof nonce !== "string" ||
-    (pidns !== undefined && typeof pidns !== "string") ||
-    (start !== undefined && typeof start !== "string")
+    typeof nonce !== "string"
   ) {
     return { kind: "unknown", version: LOCK_HOLDER_VERSION };
   }
-  const holder: LockHolder = { v: LOCK_HOLDER_VERSION, pid, host, boot, created, op, nonce };
-  if (pidns !== undefined) holder.pidns = pidns;
-  if (start !== undefined) holder.start = start;
-  return { kind: "v1", holder };
+  return { kind: "v1", holder: { v: LOCK_HOLDER_VERSION, ...identity, created, op, nonce } };
 }
 
 // ---------------------------------------------------------------------------
 // The judgement
 // ---------------------------------------------------------------------------
 
-function sameBootOffLinux(a: string, b: string): boolean | undefined {
-  const parse = (value: string): number | undefined =>
-    /^~\d+$/u.test(value) ? Number(value.slice(1)) : undefined;
-  const left = parse(a);
-  const right = parse(b);
-  if (left === undefined || right === undefined) return undefined;
-  return Math.abs(left - right) <= BOOT_TOLERANCE_S;
-}
-
 /**
  * Is the process that wrote `holder` provably gone? Pure: the identity of the
  * reader and the operating system's answers are parameters.
  *
  * "Live" means "not provably gone", and covers every case this reader cannot
- * see into. The order matters: the holder's own machine and pid space are
+ * see into. The order matters: the holder's own kernel and pid space are
  * established before any pid is looked up, because a pid means nothing outside
  * the namespace it was issued in.
  */
 export function judgeHolder(
-  holder: LockHolder,
+  holder: HolderIdentity,
   self: SelfIdentity,
   probe: LivenessProbe,
 ): HolderVerdict {
   const who = `pid ${String(holder.pid)} on ${holder.host === "" ? "an unnamed host" : holder.host}`;
   if (self.linux) {
+    if (self.procIsOwn === false) {
+      return {
+        state: "live",
+        why: `${who} cannot be checked: this process's /proc belongs to another pid namespace (/proc/self does not name this process), so no pid read from it can be trusted`,
+      };
+    }
     if (self.boot === undefined || self.pidns === undefined) {
       return { state: "live", why: `${who} cannot be checked: this process cannot read its own boot id or pid namespace` };
     }
@@ -350,21 +454,37 @@ export function judgeHolder(
       return { state: "live", why: `${who} cannot be checked: its record names no boot id or pid namespace` };
     }
     if (holder.boot !== self.boot) {
-      if (holder.host !== "" && holder.host === self.host) {
-        return { state: "gone", reason: "holder-boot-ended", why: `${who} took the lock during an earlier boot of this host` };
-      }
-      return { state: "live", why: `${who} is on another machine (a different boot id), where this process cannot see its processes` };
+      // An earlier boot of this machine and another kernel sharing this
+      // filesystem (a microVM sandbox, another machine with this hostname) look
+      // the same from here, and the second is alive (APRV-479, S4).
+      return {
+        state: "live",
+        why: `${who} took the lock under another kernel (a different boot id: an earlier boot of this machine, or another machine or sandbox kernel sharing this filesystem, which cannot be told apart), where this process cannot see its processes`,
+      };
     }
     if (holder.pidns !== self.pidns) {
       return { state: "live", why: `${who} is in another pid namespace (another container), where this process cannot see its processes` };
     }
     const stat = probe.linuxStat(holder.pid);
-    if (stat === null) return { state: "gone", reason: "holder-dead", why: `${who} has exited` };
+    if (stat.kind === "unreadable") {
+      return { state: "live", why: `${who} cannot be checked: its /proc entry could not be read (${stat.why})` };
+    }
+    if (stat.kind === "absent") {
+      // hidepid hides another uid's processes as ENOENT, so absence alone is
+      // not death: kill(pid, 0) must also find no such process.
+      if (probe.pidExists(holder.pid)) {
+        return { state: "live", why: `${who} is running: /proc hides it from this process, but kill(pid, 0) finds it` };
+      }
+      return { state: "gone", reason: "holder-dead", why: `${who} has exited` };
+    }
     if (stat.state === "Z" || stat.state === "X") {
       return { state: "gone", reason: "holder-dead", why: `${who} has exited (a zombie holds nothing)` };
     }
     if (holder.start === undefined) {
       return { state: "live", why: `${who} is running and its record has no start time to compare` };
+    }
+    if (holder.timens !== self.timens) {
+      return { state: "live", why: `${who} is running under another time namespace, whose start times this process cannot compare` };
     }
     if (stat.start !== holder.start) {
       return { state: "gone", reason: "holder-replaced", why: `${who} exited; the pid now names a process that started later` };
@@ -377,12 +497,9 @@ export function judgeHolder(
   if (holder.pidns !== undefined) {
     return { state: "live", why: `${who} wrote its record under Linux, whose pids this process cannot see` };
   }
-  if (self.boot !== undefined) {
-    const same = sameBootOffLinux(holder.boot, self.boot);
-    if (same === false) {
-      return { state: "gone", reason: "holder-boot-ended", why: `${who} took the lock before this host last booted` };
-    }
-  }
+  // No boot comparison here: off Linux the boot reading is now minus uptime, and
+  // a wall-clock step moves it (XNU adjusts kern.boottime on every clock set),
+  // so a boot that differs proves nothing about a pid (APRV-479, B2).
   if (!probe.pidExists(holder.pid)) return { state: "gone", reason: "holder-dead", why: `${who} has exited` };
   return {
     state: "live",
@@ -390,23 +507,23 @@ export function judgeHolder(
   };
 }
 
-let judgeForTests: ((holder: LockHolder) => HolderVerdict) | null = null;
+let judgeForTests: ((holder: HolderIdentity) => HolderVerdict) | null = null;
 
 /**
  * Replace the liveness judgement (tests only: the mutation check that a live
  * holder's lock survives only because of the check). `null` restores the real
- * one. Nothing in `src/` calls this.
+ * one. It judges reclaim claimants too. Nothing in `src/` calls this.
  */
-export function setLockLivenessForTests(judge: ((holder: LockHolder) => HolderVerdict) | null): void {
+export function setLockLivenessForTests(judge: ((holder: HolderIdentity) => HolderVerdict) | null): void {
   judgeForTests = judge;
 }
 
-function judge(holder: LockHolder): HolderVerdict {
-  return judgeForTests === null ? judgeHolder(holder, selfIdentity(), NODE_PROBE) : judgeForTests(holder);
+function judge(holder: HolderIdentity): HolderVerdict {
+  return judgeForTests === null ? judgeHolder(holder, selfIdentity(), NODE_LIVENESS_PROBE) : judgeForTests(holder);
 }
 
 // ---------------------------------------------------------------------------
-// The lockfile
+// Files
 // ---------------------------------------------------------------------------
 
 /** A lockfile as read: its identity and its bytes. */
@@ -414,11 +531,10 @@ interface SeenLock {
   ino: bigint;
   mtimeNs: bigint;
   mtimeMs: number;
-  ctimeMs: number;
   bytes: Buffer;
 }
 
-/** Read a lockfile through one descriptor, or `null` when there is none. */
+/** Read a file through one descriptor, or `null` when there is none. */
 function readLock(path: string): SeenLock | null {
   let fd: number;
   try {
@@ -440,7 +556,6 @@ function readLock(path: string): SeenLock | null {
       ino: stat.ino,
       mtimeNs: stat.mtimeNs,
       mtimeMs: Number(stat.mtimeMs),
-      ctimeMs: Number(stat.ctimeMs),
       bytes: buffer.subarray(0, length),
     };
   } catch {
@@ -450,6 +565,12 @@ function readLock(path: string): SeenLock | null {
   }
 }
 
+/**
+ * The same file with the same contents: inode, mtime to the nanosecond, and
+ * bytes. Inode alone is not enough (ext4 hands a freed inode to the next file at
+ * once, and a file rewritten in place keeps its inode); the bytes carry a v1
+ * record's random nonce, and a legacy file's mtime is at least ten minutes old.
+ */
 function sameLock(a: SeenLock, b: SeenLock): boolean {
   return a.ino === b.ino && a.mtimeNs === b.mtimeNs && a.bytes.equals(b.bytes);
 }
@@ -459,6 +580,50 @@ function unlinkQuietly(path: string): void {
     unlinkSync(path);
   } catch {
     // A name that is already gone is the outcome wanted.
+  }
+}
+
+/** Remove `path` only if it still holds exactly `bytes` (a name only this process writes). */
+function unlinkIfBytes(path: string, bytes: Buffer): void {
+  const seen = readLock(path);
+  if (seen !== null && seen.bytes.equals(bytes)) unlinkQuietly(path);
+}
+
+/**
+ * Write `bytes` to `tmp` (created `wx`), then `link(2)` it to `path`, which
+ * fails if `path` exists: the content is complete before the name appears, so a
+ * reader never sees a half-written claim or note, and of two writers exactly one
+ * gets the name.
+ */
+function linkExclusive(
+  path: string,
+  tmp: string,
+  bytes: Buffer,
+): { kind: "written" } | { kind: "exists" } | { kind: "error"; code: string } {
+  let complete = false;
+  try {
+    const fd = openSync(tmp, "wx");
+    try {
+      complete = writeSync(fd, bytes, 0, bytes.length) === bytes.length;
+    } finally {
+      closeSync(fd);
+    }
+  } catch (cause) {
+    unlinkQuietly(tmp);
+    return { kind: "error", code: errnoOf(cause) ?? "error" };
+  }
+  if (!complete) {
+    unlinkQuietly(tmp);
+    return { kind: "error", code: "short write" };
+  }
+  try {
+    linkSync(tmp, path);
+    return { kind: "written" };
+  } catch (cause) {
+    const code = errnoOf(cause);
+    return code === "EEXIST" ? { kind: "exists" } : { kind: "error", code: code ?? "error" };
+  } finally {
+    unlinkQuietly(tmp);
   }
 }
 
@@ -511,10 +676,14 @@ export function releaseLockFile(own: OwnLock): void {
   unlinkQuietly(own.path);
 }
 
+// ---------------------------------------------------------------------------
+// The reclaim
+// ---------------------------------------------------------------------------
+
 /** What `tryReclaimLock` found and did. */
 export type ReclaimOutcome =
   | { kind: "reclaimed"; note: ReclaimNote }
-  /** The lockfile was gone by the time it was read or linked: try the create again. */
+  /** The lockfile was gone by the time it was read or claimed: try the create again. */
   | { kind: "vanished" }
   /** The lock stays where it is; `why` says whose it is and why it was kept. */
   | { kind: "kept"; why: string };
@@ -532,23 +701,151 @@ export interface ReclaimNote {
   why: string;
 }
 
+/** A named step inside {@link tryReclaimLock}, where a test may act (a stall, a swap). */
+export type ReclaimStep =
+  | "claimed"
+  | "before-commit"
+  /** After the last re-check, immediately before the rename: only something outside the protocol can act here. */
+  | "at-commit"
+  | "after-commit"
+  | "before-put-back";
+
+let seamForTests: ((step: ReclaimStep) => void) | null = null;
+
+/**
+ * Run `seam` at each named step of every reclaim (tests only: the stalled
+ * reclaimer, the lockfile that changes hands at the worst moment). `null`
+ * removes it. Nothing in `src/` calls this.
+ */
+export function setReclaimSeamForTests(seam: ((step: ReclaimStep) => void) | null): void {
+  seamForTests = seam;
+}
+
+function step(name: ReclaimStep): void {
+  if (seamForTests !== null) seamForTests(name);
+}
+
 function snapshotPathFor(logPath: string): string {
   // `cli/log-sync.ts`'s `snapshotPathFor`, by its documented name.
   return `${logPath}.sync-snapshot`;
 }
 
 /**
+ * The name every file of one reclaim of one judged lockfile starts with. Keyed
+ * by the lockfile's inode AND a digest of its mtime and bytes, so a later
+ * lockfile that happens to reuse the inode is a different reclaim with its own
+ * claims. Every name derived from it starts with `<lockfile>.` (the export
+ * excludes that prefix) and ends in `.lock` (the daemon's watcher ignores it).
+ */
+function reclaimBase(lockPath: string, seen: SeenLock): string {
+  const digest = createHash("sha256")
+    .update(seen.mtimeNs.toString())
+    .update("\0")
+    .update(seen.bytes)
+    .digest("hex")
+    .slice(0, 12);
+  return `${lockPath}.reclaim-${seen.ino.toString()}-${digest}`;
+}
+
+function claimPath(base: string, generation: number): string {
+  return `${base}.claim-${String(generation)}.lock`;
+}
+
+/** A claim this process holds. */
+interface HeldClaim {
+  path: string;
+  /** The next generation's name: it exists only if somebody judged this process gone. */
+  next: string;
+  bytes: Buffer;
+}
+
+function parseClaim(bytes: Buffer): HolderIdentity | null {
+  const record = parseJsonObject(bytes);
+  if (record === "empty" || record === null) return null;
+  if (record["v"] !== LOCK_HOLDER_VERSION || record["kind"] !== "reclaim-claim") return null;
+  return parseIdentity(record);
+}
+
+/**
+ * Take the claim on one judged lockfile. Generation 0 first; a generation whose
+ * claimant is provably gone (killed mid-reclaim) is passed over to the next,
+ * and its file stays where it is (it is never removed, so no two writers can
+ * ever both decide to replace it). A claimant that is live, or that cannot be
+ * judged, holds its claim for as long as it takes: a reclaimer stalled for an
+ * hour is a wedge for an hour, never a second reclaimer (APRV-479, B3).
+ */
+function takeClaim(
+  base: string,
+  nonce: string,
+): { kind: "held"; claim: HeldClaim } | { kind: "busy"; why: string } | { kind: "vanished" } {
+  const record = { v: LOCK_HOLDER_VERSION, kind: "reclaim-claim", ...identityFields(), created: new Date().toISOString(), nonce };
+  const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  for (let generation = 0; generation < MAX_CLAIM_GENERATIONS; generation += 1) {
+    const path = claimPath(base, generation);
+    const linked = linkExclusive(path, `${base}.${nonce}.claim.tmp.lock`, bytes);
+    if (linked.kind === "written") {
+      return { kind: "held", claim: { path, next: claimPath(base, generation + 1), bytes } };
+    }
+    if (linked.kind === "error") {
+      return { kind: "busy", why: `it cannot be reclaimed here: the claim the reclaim needs could not be made (${linked.code})` };
+    }
+    const other = readLock(path);
+    // The claimant finished between the link and this read.
+    if (other === null) return { kind: "vanished" };
+    const claimant = parseClaim(other.bytes);
+    if (claimant === null) {
+      return { kind: "busy", why: `a reclaim of it is claimed in a form this version does not read, so it is left to that claimant` };
+    }
+    const verdict = judge(claimant);
+    if (verdict.state === "live") return { kind: "busy", why: `another writer is reclaiming it now (${verdict.why})` };
+    // That claimant is provably gone: its claim stands, the next one is tried.
+  }
+  return {
+    kind: "busy",
+    why: `${String(MAX_CLAIM_GENERATIONS)} reclaims of it were abandoned by writers that died mid-reclaim, so it is left for a human`,
+  };
+}
+
+/** This process still holds `claim`: its bytes are there, and nobody judged it gone. */
+function claimStillHeld(claim: HeldClaim): boolean {
+  const seen = readLock(claim.path);
+  return seen !== null && seen.bytes.equals(claim.bytes) && !existsSync(claim.next);
+}
+
+/** The judged lockfile is still the one at `lockPath`. */
+function stillJudged(lockPath: string, seen: SeenLock): boolean {
+  const now = readLock(lockPath);
+  return now !== null && sameLock(now, seen);
+}
+
+/**
  * Judge `<logPath>.lock` and, if its holder is provably gone, remove it
- * atomically so the caller's next `wx` create can take the lock.
+ * atomically so the caller's next `wx` create can take the lock, leaving the
+ * record of the reclaim pending beside it for whichever writer holds the lock
+ * next ({@link pendingReclaims}).
  *
- * Exactly one of any number of concurrent callers that judged the same stale
- * lock removes it: the first step is `link(2)` to a name derived from the
- * lockfile's inode, which fails for everyone after the first. That one then
- * checks the linked file is still the one it judged, renames the lockfile aside
- * and checks again, so a lockfile that changed hands in between (a fresh lock
- * on a reused inode, an older writer releasing and another creating) is put
- * back rather than removed. Every name this creates ends in `.lock`, which the
- * daemon's watcher already ignores.
+ * The steps, and why a stall anywhere is harmless:
+ *
+ * 1. Read and judge the lockfile. Touches nothing.
+ * 2. Claim it ({@link takeClaim}). Only claims are written, and only reclaimers
+ *    read them; a live claimant's claim is never passed over, so of any number
+ *    of writers that judged this lockfile exactly one goes on.
+ * 3. Re-check that the lockfile is still the one judged, then write the pending
+ *    record of the reclaim (`<base>.pending.lock`). Nobody can hold the lock
+ *    while the judged lockfile is in place, so nobody reads the record yet.
+ * 4. Re-check the lockfile AND the claim, then rename the lockfile aside. THIS
+ *    RENAME IS THE COMMIT POINT: before it, every name anybody but a reclaimer
+ *    reads is untouched, so a reclaimer stalled or killed anywhere before it
+ *    leaves the lock exactly as it was (a wedge, never a fork); after it, the
+ *    lock is free for the ordinary `wx` create and the record of the reclaim is
+ *    already durable. Inside the claim the judged lockfile can leave the path
+ *    only through this rename, so the re-check immediately before it can be
+ *    wrong only if something outside the protocol (a human `rm`, an older
+ *    version's unconditional release) replaced the file in the instant between.
+ * 5. Check that what was moved is the judged file. If it is not (that same
+ *    out-of-protocol instant), put it back with `link(2)`, which never
+ *    overwrites a lock somebody took meanwhile, and withdraw the record.
+ * 6. Remove the moved file, then the claim. Both names are this reclaim's own.
  */
 export function tryReclaimLock(logPath: string, now: number = Date.now()): ReclaimOutcome {
   const lockPath = `${logPath}.lock`;
@@ -600,71 +897,151 @@ export function tryReclaimLock(logPath: string, now: number = Date.now()): Recla
     };
   }
 
-  // Step 1: the exclusive claim. One name per judged lockfile.
-  const claim = `${lockPath}.reclaim-${seen.ino.toString()}.lock`;
-  try {
-    linkSync(lockPath, claim);
-  } catch (cause) {
-    const code = (cause as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { kind: "vanished" };
-    if (code === "EEXIST") {
-      const other = readLock(claim);
-      if (other !== null && other.ino === seen.ino && now - other.ctimeMs > ABANDONED_RECLAIM_AGE_MS) {
-        // A reclaimer killed between its link and its rename. Its name goes;
-        // the lock stays for the next wait, which claims it afresh.
-        unlinkQuietly(claim);
-        return { kind: "kept", why: `${why}; an abandoned reclaim of it was cleared and the next wait will reclaim it` };
-      }
-      return { kind: "kept", why: `${why}; another writer is reclaiming it now` };
-    }
-    return {
-      kind: "kept",
-      why: `${why}, but it cannot be reclaimed here: this filesystem refused the link the reclaim needs (${code ?? "error"})`,
-    };
-  }
+  const base = reclaimBase(lockPath, seen);
+  const nonce = randomBytes(8).toString("hex");
 
-  // Step 2: is the claimed file still the one judged?
-  const claimed = readLock(claim);
-  if (claimed === null || !sameLock(claimed, seen)) {
-    unlinkQuietly(claim);
-    return { kind: "kept", why: `the lock changed hands while it was being judged` };
-  }
+  // Step 2: the claim.
+  const taken = takeClaim(base, nonce);
+  if (taken.kind === "vanished") return { kind: "vanished" };
+  if (taken.kind === "busy") return { kind: "kept", why: `${why}; ${taken.why}` };
+  const claim = taken.claim;
 
-  // Step 3: move the lockfile aside, and check it is still that file.
-  const aside = `${lockPath}.reclaim-${seen.ino.toString()}.gone.lock`;
-  try {
-    renameSync(lockPath, aside);
-  } catch (cause) {
-    unlinkQuietly(claim);
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { kind: "vanished" };
-    return { kind: "kept", why: `${why}, but it could not be moved aside: ${(cause as Error).message}` };
-  }
-  const moved = readLock(aside);
-  if (moved === null || !sameLock(moved, seen)) {
-    // Something else was at the path by the time of the rename. Put it back if
-    // the path is still free; a writer that took the path meanwhile keeps it.
-    let restored = false;
-    try {
-      linkSync(aside, lockPath);
-      restored = true;
-    } catch {
-      restored = false;
-    }
-    if (restored) unlinkQuietly(aside);
-    unlinkQuietly(claim);
-    return {
-      kind: "kept",
-      why: restored
-        ? `the lock changed hands during the reclaim and was put back`
-        : `the lock changed hands during the reclaim and could not be put back; it is at ${basename(aside)}`,
-    };
-  }
-
-  unlinkQuietly(aside);
-  unlinkQuietly(claim);
   const note: ReclaimNote = { lockfile: basename(lockPath), reason, age_ms: ageMs, why };
   if (holder !== undefined) note.holder = holder;
-  return { kind: "reclaimed", note };
+  // The pending record this reclaim wrote, while it is still this reclaim's to
+  // withdraw (until the commit point).
+  let pendingOwn: { path: string; bytes: Buffer } | null = null;
+  try {
+    step("claimed");
+    // Step 3: still the judged lockfile? Then the record goes down first (S1).
+    if (!stillJudged(lockPath, seen)) {
+      return { kind: "kept", why: `the lock changed hands while it was being judged; nothing was touched` };
+    }
+    const pendingPath = `${base}.pending.lock`;
+    const pendingBytes = Buffer.from(`${JSON.stringify({ v: LOCK_HOLDER_VERSION, kind: "reclaim-pending", note })}\n`, "utf8");
+    const pending = linkExclusive(pendingPath, `${base}.${nonce}.pending.tmp.lock`, pendingBytes);
+    if (pending.kind === "error") {
+      return {
+        kind: "kept",
+        why: `${why}, but the record of the reclaim could not be written beside the lock (${pending.code}), so the lock stays`,
+      };
+    }
+    // "exists": a claimant before this one, provably gone, wrote the record for
+    // this same lockfile; it stands for this reclaim.
+    if (pending.kind === "written") pendingOwn = { path: pendingPath, bytes: pendingBytes };
+
+    step("before-commit");
+    // Step 4: re-check both, immediately before the one step that frees the lock.
+    if (!stillJudged(lockPath, seen) || !claimStillHeld(claim)) {
+      return { kind: "kept", why: `the lock or the claim on it changed during the reclaim; nothing was touched` };
+    }
+    const aside = `${base}.${nonce}.gone.lock`;
+    step("at-commit");
+    try {
+      renameSync(lockPath, aside); // THE COMMIT POINT.
+    } catch (cause) {
+      if (errnoOf(cause) === "ENOENT") return { kind: "vanished" };
+      return { kind: "kept", why: `${why}, but it could not be moved aside: ${(cause as Error).message}` };
+    }
+    step("after-commit");
+
+    // Step 5: was it the judged file?
+    const moved = readLock(aside);
+    if (moved === null || !sameLock(moved, seen)) {
+      // Reachable only from outside the protocol (see step 4). Put the file
+      // back if it is still exactly what was moved and this process still
+      // holds the claim; link(2) never replaces a lock somebody took meanwhile.
+      step("before-put-back");
+      let restored = false;
+      const still = moved === null ? null : readLock(aside);
+      if (moved !== null && still !== null && sameLock(still, moved) && claimStillHeld(claim)) {
+        try {
+          linkSync(aside, lockPath);
+          restored = true;
+        } catch {
+          restored = false;
+        }
+      }
+      if (restored && moved !== null) unlinkIfBytes(aside, moved.bytes);
+      return {
+        kind: "kept",
+        why: restored
+          ? `the lock changed hands during the reclaim and was put back`
+          : `the lock changed hands during the reclaim and could not be put back; it is at ${basename(aside)}`,
+      };
+    }
+
+    // Committed: the pending record now belongs to whichever writer holds the
+    // lock next, this one or another.
+    pendingOwn = null;
+    // Step 6.
+    unlinkIfBytes(aside, seen.bytes);
+    return { kind: "reclaimed", note };
+  } finally {
+    if (pendingOwn !== null) unlinkIfBytes(pendingOwn.path, pendingOwn.bytes);
+    unlinkIfBytes(claim.path, claim.bytes);
+  }
+}
+
+/** A reclaim whose record is waiting to be appended. */
+export interface PendingReclaim {
+  path: string;
+  bytes: Buffer;
+  note: Omit<ReclaimNote, "why"> & { why?: string };
+}
+
+/**
+ * The reclaims of `<logPath>.lock` whose records are not yet in the log, in name
+ * order. Called by the writer that holds the lock, which appends each and then
+ * {@link clearPendingReclaim}s it. A pending file this version cannot read is
+ * left where it is and skipped.
+ */
+export function pendingReclaims(logPath: string): PendingReclaim[] {
+  const directory = dirname(logPath);
+  const prefix = `${basename(logPath)}.lock.reclaim-`;
+  let names: string[];
+  try {
+    names = readdirSync(directory).filter((name) => name.startsWith(prefix) && name.endsWith(".pending.lock"));
+  } catch {
+    return [];
+  }
+  names.sort();
+  const found: PendingReclaim[] = [];
+  for (const name of names) {
+    const path = join(directory, name);
+    const seen = readLock(path);
+    if (seen === null) continue;
+    const record = parseJsonObject(seen.bytes);
+    if (record === "empty" || record === null || record["v"] !== LOCK_HOLDER_VERSION || record["kind"] !== "reclaim-pending") continue;
+    const note = record["note"] as Record<string, unknown> | undefined;
+    if (note === undefined || typeof note !== "object" || note === null) continue;
+    const { lockfile, reason, age_ms: ageMs, holder, why } = note;
+    if (
+      typeof lockfile !== "string" ||
+      (reason !== "holder-dead" && reason !== "holder-replaced" && reason !== "holder-boot-ended" && reason !== "legacy-aged") ||
+      typeof ageMs !== "number"
+    ) {
+      continue;
+    }
+    const parsedNote: PendingReclaim["note"] = { lockfile, reason, age_ms: ageMs };
+    if (typeof why === "string") parsedNote.why = why;
+    if (holder !== undefined) {
+      if (typeof holder !== "object" || holder === null) continue;
+      const { pid, op, created } = holder as Record<string, unknown>;
+      if (typeof pid !== "number" || (op !== "append" && op !== "hold") || typeof created !== "string") continue;
+      parsedNote.holder = { pid, op, created };
+    }
+    found.push({ path, bytes: Buffer.from(seen.bytes), note: parsedNote });
+  }
+  return found;
+}
+
+/**
+ * Remove a pending reclaim once its record is in the log. Only the writer that
+ * holds the lock calls this, so nobody else is removing or replacing it.
+ */
+export function clearPendingReclaim(pending: PendingReclaim): void {
+  unlinkIfBytes(pending.path, pending.bytes);
 }
 
 /**
@@ -730,11 +1107,31 @@ function scheduleGuardRemoval(): void {
 /**
  * Hold SIGTERM, SIGINT and SIGHUP while this process holds a lock, for each one
  * nobody listens for (the default disposition, which would kill the process
- * with the lockfile in place). Returns the release, which the caller runs after
- * the lockfile is removed. A signal that nobody else listens for is then
- * re-raised with its default disposition at the next turn of the event loop, so
- * the process still dies of it, one lock release later. Windows has no such
- * signals to hold; there this is a no-op.
+ * with the lockfile in place). Returns the release, which the caller runs right
+ * after the lockfile is removed.
+ *
+ * Node shows a caught signal to JavaScript only when the event loop turns, and
+ * removing the last listener before that turn drops the signal (both measured on
+ * Node 26). So the guard ends in one of two ways after the release:
+ *
+ * - the event loop turns (the verb returned, or it awaits): a signal that arrived
+ *   while the lock was held is dispatched to the guard, which re-raises it with
+ *   the default disposition, and the process dies of it with the signal's own
+ *   status; or
+ * - synchronous code is about to block first (a poll loop, a child process):
+ *   it calls {@link settleTerminationGuards}, which removes the guard at once,
+ *   so the block runs under the default disposition and a signal during it kills
+ *   the process immediately, as it did before this guard existed.
+ *
+ * The price of the second way is the one thing Node cannot do: a signal that
+ * landed while the lock was being taken or held (milliseconds: the create, a
+ * reclaim, the append) and was not yet dispatched is lost, rather than held for
+ * the length of the block (APRV-479, S2; the hazard in `cli/hook.ts`'s driver
+ * notes is a signal held through a synchronous wait). Node exposes no
+ * synchronous way to learn that a signal is pending, so the guard cannot both
+ * end with the lock and deliver what it caught; it delivers whenever the event
+ * loop turns first, which is every verb that returns or awaits.
+ * Windows has no such signals to hold; there this is a no-op.
  */
 export function guardTerminationWhileLocked(): () => void {
   if (process.platform === "win32") return () => undefined;
@@ -754,4 +1151,16 @@ export function guardTerminationWhileLocked(): () => void {
     locksHeld -= 1;
     if (locksHeld === 0 && guards.size > 0) scheduleGuardRemoval();
   };
+}
+
+/**
+ * Synchronous code about to block (an `Atomics.wait` poll, a `spawnSync`) calls
+ * this first: when no lock is held and a released lock's guard is still waiting
+ * for the event loop, the guard is removed now, so the block is not run with
+ * termination signals held. No-op while a lock is held, and when there is no
+ * guard. See {@link guardTerminationWhileLocked} for what this trades.
+ */
+export function settleTerminationGuards(): void {
+  if (locksHeld > 0 || guards.size === 0) return;
+  removeGuards();
 }
