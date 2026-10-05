@@ -445,8 +445,18 @@ test("the module exposes no mutation, reorder, or truncate operation", async () 
       // operation: nothing here mutates, reorders, or truncates.
       "ALG",
       "APPEND_ERROR_CODES",
+      // APRV-478 exported the lock's default bound and retry cadence, so a
+      // caller that waits for the lock on its own event loop keeps the same
+      // numbers. Constants, not operations.
+      "DEFAULT_LOCK_RETRY_MS",
+      "DEFAULT_LOCK_TIMEOUT_MS",
       "GENESIS_PREV",
       "appendEvent",
+      // APRV-478 added a PROBE of the lockfile's presence. It takes no lock,
+      // writes nothing and authorizes nothing; the one attempt that follows it
+      // is still the atomic create-or-fail with the head compared under the
+      // lock. Nothing here mutates, reorders, or truncates.
+      "appendLockHeld",
       "computeRecordHash",
       // APRV-217 added a subscription to successful appends. It is a
       // NOTIFICATION registrar: a listener is handed a path and no handle, it

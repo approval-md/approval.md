@@ -52,9 +52,35 @@ before a tag.
   later grant is refused `request-withdrawn`; a grant that landed first is left
   unspent. The pause before every spend is the one APRV-473 added, shared by
   all six harnesses. Same poll cadence, same `--timeout`. A signal before the
-  wait still takes the default disposition on these five (APRV-477), and a
-  signal during the spend's own lock wait is answered by the verdict reached
-  (APRV-478).
+  wait still takes the default disposition on these five (APRV-477); a signal
+  while the spend waits for the log's lock is covered by APRV-478, below.
+- **Every harness hook: a signal while the spend waits for the log's lock blocks
+  instead of being dropped (APRV-478).** After the wait found a grant and passed
+  its pause, the spend still waited for `events.jsonl.lock` synchronously (up
+  to two seconds per attempt, behind the daemon or any other writer), so a
+  SIGTERM in that stretch was held, the grant was recorded as
+  `execution.started`, the allow was printed, and the signal was then discarded
+  with the wait's listener; the same on all six harnesses. The wait for the
+  lock now runs on the event loop: while another writer holds it the hook
+  sleeps on a timer and tries every 20 ms, and the pause before the spend comes
+  after that wait, immediately before the spend's one try at the lock. A signal
+  during the wait gets the harness's `hook-interrupted` block, nothing is
+  spent, and the grant stays standing for a retry to carry. The same applies to
+  the unattended and autonomous charges and to an open window's `gate.bypassed`.
+  What remains between the last pause and the record is the spend's own read
+  and its single try at the lock; a try that loses the race goes back to
+  waiting on the event loop until the same two-second bound, and a spend that
+  still has no lock then denies with `append-failed` (`lock-timeout`). A budget
+  refusal's `budget.exceeded` record gets the same retries. A command with
+  several gated classes spends them one at a time, each behind its own pause,
+  so a signal between two of them blocks with the earlier starts already
+  recorded. The trade: the spend's read now sits between seeing the lock free
+  and trying it, so a lock that is only ever free for gaps shorter than that
+  read can run a CLI spend out of its bound (deny, the grant left for a retry)
+  where the old synchronous wait got through. `approval serve`, the Codex
+  bridge and in-process `commandHook` are unchanged: they drive the steps
+  synchronously, have no event loop to wait on, and keep the writer's own
+  synchronous wait exactly as before.
 - **`approval hook hermes`: a SIGTERM mid-wait withdraws the question, and a
   grant after Hermes gave up starts nothing (APRV-473).** The CLI hook run was
   synchronous end to end, so a SIGTERM during the wait (Hermes's own hook

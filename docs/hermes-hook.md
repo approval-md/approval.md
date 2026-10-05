@@ -480,11 +480,17 @@ read, the classification, the poll's own read) is answered with the block
 before anything is spent. That pause is two `setImmediate` hops, because a
 signal reaches its listeners only when libuv's poll phase reads the signal
 pipe, and a single hop scheduled from a poll-phase callback (the continuation
-of a module load that turned the loop) runs before the next poll. What remains
-is the spend itself, from the pause until the record lands, its own read of the
-log included (milliseconds, more on a large log), and the verification read
-after it: a signal that lands there is answered by the verdict the hook
-already reached.
+of a module load that turned the loop) runs before the next poll. The pause
+comes after any wait for the log's lock: while another writer holds it, the
+hook sleeps on a timer and tries again every 20 ms, so a signal during that
+wait is answered with the block too (APRV-478). What remains is the spend
+itself, from the pause until the record lands: its own read of the log
+(milliseconds, more on a large log), one try at the lock, the append, and the
+verification read after it. A signal that lands there is answered by the
+verdict the hook already reached. A call with several gated classes spends
+them one at a time, each behind its own pause, so a signal between two of them
+blocks the call with the earlier classes' starts already recorded (before the
+signal) and the rest unspent.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was
