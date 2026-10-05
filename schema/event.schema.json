@@ -2182,7 +2182,7 @@
       }
     },
     {
-      "$comment": "SPEC.md §8 (proposed, APRV-479, pending sign-off): `<log>.lock` was taken over from a holder that is gone, and this is the first record under the lock that was taken. A `system:log` actor is this runtime's log writer, which proved the holder gone after waiting out its whole lock timeout: its process has exited in the writer's own pid namespace and boot (Linux: `kill(pid, 0)` answers ESRCH with `/proc/<pid>` absent or a zombie, or the pid names a process that started later; elsewhere the same host and boot and `kill(pid, 0)` answering ESRCH), or the lockfile names no holder and is older than the reclaim age. A `human:` actor is a person's `approval log unlock`, for a lock no writer can judge (another container or boot): the reason is then that person's assertion, not a proof. `core/log-lock.ts` states the rules.\n\nNo existing type carries it. The audit records before it are about a gesture on a request, a question answered elsewhere, or a sweep over activity; this is about the log's own lock and nothing else.\n\nAUDIT TIER, on the strict terms `audit.decision_refused` set: it grants nothing, mints no token, settles no request, charges no budget, is not sampled, and NO ENFORCEMENT PATH READS IT. Its `ts` is the write boundary's, like every audit record's.\n\nThe payload names the lockfile by its base name, the reason from a closed set, how long the lock had been held, and, when the lockfile carried a holder record, the holder's pid, kind and start of hold, strictly parsed: nothing else is taken from the file. The holder's host is deliberately not recorded: a log is often committed, and a machine name is not the log's business.",
+      "$comment": "SPEC.md §8 (proposed, APRV-479, pending sign-off): `<log>.lock` was taken over from a holder that is gone, and this is the first record under the lock that was taken. A `system:log` actor is this runtime's log writer, which proved the holder gone after waiting out its whole lock timeout: its process has exited in the writer's own pid namespace and boot (Linux: `kill(pid, 0)` answers ESRCH with `/proc/<pid>` absent or a zombie, or the pid names a process that started later; elsewhere the same host and boot and `kill(pid, 0)` answering ESRCH), or the lockfile names no holder and is older than the reclaim age. A `human:` actor is a person's `approval log unlock`, for a lock no writer can judge (another container or boot): the reason is then that person's assertion, not a proof. `core/log-lock.ts` states the rules.\n\nNo existing type carries it. The audit records before it are about a gesture on a request, a question answered elsewhere, or a sweep over activity; this is about the log's own lock and nothing else.\n\nAUDIT TIER, on the strict terms `audit.decision_refused` set: it grants nothing, mints no token, settles no request, charges no budget, is not sampled, and NO ENFORCEMENT PATH READS IT. Its `ts` is the write boundary's, like every audit record's.\n\nThe payload names the lockfile by its base name, the reason from a closed set, how long the lock had been held, and, when the lockfile carried a holder record, the holder's pid, kind and start of hold, strictly parsed: nothing else is taken from the file. A start of hold that is not plausible (before the log's last record by more than 24 hours, or after the taker's clock by more than 5 minutes) is recorded as null, with no age. The holder's host is deliberately not recorded: a log is often committed, and a machine name is not the log's business.",
       "if": {
         "type": "object",
         "properties": {
@@ -2201,6 +2201,66 @@
           "payload"
         ],
         "allOf": [
+          {
+            "$comment": "`age_ms` is required, and is absent exactly when `holder.created` is null: an implausible `created` is not recorded, and neither is the age derived from it (APRV-479 R3-7).",
+            "if": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "holder": {
+                      "type": "object",
+                      "properties": {
+                        "created": {
+                          "type": "null"
+                        }
+                      },
+                      "required": [
+                        "created"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "holder"
+                  ]
+                }
+              },
+              "required": [
+                "payload"
+              ]
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "not": {
+                    "properties": {
+                      "age_ms": {}
+                    },
+                    "required": [
+                      "age_ms"
+                    ]
+                  }
+                }
+              }
+            },
+            "else": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "age_ms": {}
+                  },
+                  "required": [
+                    "age_ms"
+                  ]
+                }
+              }
+            }
+          },
           {
             "$comment": "A person's assertion is never recorded as the writer's proof, nor the reverse: `operator-cleared` if and only if the actor is `human:`.",
             "if": {
@@ -2253,8 +2313,7 @@
             "additionalProperties": false,
             "required": [
               "lockfile",
-              "reason",
-              "age_ms"
+              "reason"
             ],
             "properties": {
               "lockfile": {
@@ -2274,7 +2333,7 @@
               "age_ms": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "How long the lock had been held when it was taken over, in milliseconds, by the taker's clock: from the holder record's `created`, or from the lockfile's mtime when it had none."
+                "description": "How long the lock had been held when it was taken over, in milliseconds, by the taker's clock: from the holder record's `created`, or from the lockfile's mtime when it had none. Required, except that it is absent exactly when `holder.created` is null (its `created` was implausible, so no age derived from it is recorded)."
               },
               "holder": {
                 "type": "object",
@@ -2298,9 +2357,12 @@
                     "description": "`append`: one record. `hold`: a whole operation under the lock (`log sync`, `log advance`, an export, an unlock)."
                   },
                   "created": {
-                    "type": "string",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "format": "date-time",
-                    "description": "When the holder took the lock, by its own clock."
+                    "description": "When the holder took the lock, by its own clock. `null` when the value the lockfile carried was not plausible: earlier than the log's last record's `ts` minus 24 hours, or later than the taker's clock plus 5 minutes (a value the file chose, recorded as nothing)."
                   }
                 }
               }

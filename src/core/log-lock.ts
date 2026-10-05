@@ -645,15 +645,47 @@ export interface ReclaimNote {
   /** The lockfile's base name. */
   lockfile: string;
   reason: LockReclaimReason;
-  /** From a v1 record only: the strictly parsed pid, op and `created`. */
-  holder?: { pid: number; op: LockOp; created: string };
-  /** How long the lock had been held, from `created` (or an empty lockfile's mtime), by this process's clock. */
-  age_ms: number;
+  /**
+   * From a v1 record only: the strictly parsed pid, op and `created`. `created`
+   * is `null` when it is not plausible ({@link plausibleCreated}).
+   */
+  holder?: { pid: number; op: LockOp; created: string | null };
+  /**
+   * How long the lock had been held, from `created` (or an empty lockfile's
+   * mtime), by this process's clock. Absent exactly when `created` is `null`.
+   */
+  age_ms?: number;
   /** The claim name, removed after the record lands. Never recorded. */
   stale: string;
   /** One line for a person. Never recorded. */
   why: string;
 }
+
+/** How far before the log's last record a holder's `created` may lie and still be recorded. */
+export const CREATED_BEFORE_LAST_RECORD_MS = 24 * 60 * 60_000;
+
+/** How far past this process's clock a holder's `created` may lie and still be recorded. */
+export const CREATED_AFTER_NOW_MS = 5 * 60_000;
+
+/**
+ * The record of a reclaim carries a holder's `created` (and the age derived
+ * from it) only when it is plausible: no earlier than the log's last record's
+ * `ts` minus {@link CREATED_BEFORE_LAST_RECORD_MS}, and no later than now plus
+ * {@link CREATED_AFTER_NOW_MS}. Anything else is a value the file chose (any
+ * canonical instant parses, year 0000 and 9999 included), so the record says
+ * `created: null` and carries no age. With no last record to measure from, no
+ * `created` is plausible. (APRV-479 R3-7, the stricter rule.)
+ */
+export function plausibleCreated(note: ReclaimNote, lastTs: number | null, now: number): ReclaimNote {
+  if (note.holder === undefined || note.holder.created === null) return note;
+  const at = Date.parse(note.holder.created);
+  if (lastTs !== null && at >= lastTs - CREATED_BEFORE_LAST_RECORD_MS && at <= now + CREATED_AFTER_NOW_MS) return note;
+  const bounded: ReclaimNote = { lockfile: note.lockfile, reason: note.reason, holder: { ...note.holder, created: null }, stale: note.stale, why: note.why };
+  return bounded;
+}
+
+/** What the writer knows about the log before it claims: whether it could record a reclaim at all, and its last record's time. */
+export type RecordContext = { ok: true; lastTs: number | null } | { ok: false; why: string };
 
 /** What {@link reclaimStaleLock} found and did. */
 export type ReclaimOutcome =
@@ -906,10 +938,12 @@ export interface ReclaimOptions {
   recordValid?: (note: ReclaimNote) => boolean;
   /**
    * Can this writer append at all right now (its daemon stamp, the log's
-   * tail)? `null` when it can; otherwise why not. Asked before the claim, so a
-   * reclaim whose record would be refused is never made.
+   * tail), and when was the log's last record? Asked before the claim, so a
+   * reclaim whose record would be refused is never made; the last record's
+   * time bounds the `created` the record may carry ({@link plausibleCreated}).
+   * Absent: appendable, with no last record to measure from.
    */
-  recordBlocked?: () => string | null;
+  recordContext?: () => RecordContext;
 }
 
 /**
@@ -929,7 +963,8 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
       why: `${lockfile} is ${entry.why}, not a lockfile any writer made, so it is not this writer's to judge; once no writer is running, a human removes it (\`rm -v ${lockPath}\`)`,
     };
   }
-  const judged = judgeLock(lockPath, entry.seen, options.now ?? Date.now());
+  const now = options.now ?? Date.now();
+  const judged = judgeLock(lockPath, entry.seen, now);
   if (judged.kind === "unjudgeable") {
     return { kind: "kept", why: `${judged.why}, so it is not this writer's to judge; once no writer is running, a human removes it (\`rm -v ${lockPath}\`)` };
   }
@@ -939,23 +974,23 @@ export function reclaimStaleLock(logPath: string, op: LockOp, options: ReclaimOp
       : `a holder this process cannot check is never reclaimed automatically; once it is known to be gone, a human runs \`${unlockCommand(judged.pid)}\``;
     return { kind: "kept", why: `${judged.why}; ${human}` };
   }
-  const { note } = judged;
-  const unlock = unlockCommand(note.holder?.pid ?? null);
-  if (options.recordValid !== undefined && !options.recordValid(note)) {
-    return { kind: "kept", why: `${note.why}, but the record of its reclaim would not be valid, so it is kept; a human runs \`${unlock}\`` };
-  }
+  const unlock = unlockCommand(judged.note.holder?.pid ?? null);
   if (existsSync(`${logPath}.sync-snapshot`)) {
     return {
       kind: "kept",
-      why: `${note.why}, but a log sync snapshot is beside the log, so a sync may have stopped part way; run \`approval log verify\` and \`approval log sync\`, then \`${unlock}\``,
+      why: `${judged.note.why}, but a log sync snapshot is beside the log, so a sync may have stopped part way; run \`approval log verify\` and \`approval log sync\`, then \`${unlock}\``,
     };
   }
   if (!existsSync(logPath)) {
-    return { kind: "kept", why: `${note.why}, but the log itself is absent, so there is nothing a reclaim record could follow; a human runs \`${unlock}\`` };
+    return { kind: "kept", why: `${judged.note.why}, but the log itself is absent, so there is nothing a reclaim record could follow; a human runs \`${unlock}\`` };
   }
-  const blocked = options.recordBlocked?.() ?? null;
-  if (blocked !== null) {
-    return { kind: "kept", why: `${note.why}, but this writer could not record the reclaim (${blocked}), so the lock is kept for a writer that can` };
+  const context = options.recordContext?.() ?? { ok: true, lastTs: null };
+  if (!context.ok) {
+    return { kind: "kept", why: `${judged.note.why}, but this writer could not record the reclaim (${context.why}), so the lock is kept for a writer that can` };
+  }
+  const note = plausibleCreated(judged.note, context.lastTs, now);
+  if (options.recordValid !== undefined && !options.recordValid(note)) {
+    return { kind: "kept", why: `${note.why}, but the record of its reclaim would not be valid, so it is kept; a human runs \`${unlock}\`` };
   }
   step("judged");
   // The claim is the reclaim's first durable state: a termination signal from
@@ -1027,7 +1062,7 @@ export type UnlockOutcome =
  * reclaim, so the record of it (reason `operator-cleared`) is the first under
  * the lock it takes.
  */
-export function takeLockForUnlock(logPath: string, expected: number | null, now: number = Date.now()): UnlockOutcome {
+export function takeLockForUnlock(logPath: string, expected: number | null, lastTs: number | null = null, now: number = Date.now()): UnlockOutcome {
   const lockPath = `${logPath}.lock`;
   const lockfile = basename(lockPath);
   const entry = readEntry(lockPath);
@@ -1065,7 +1100,7 @@ export function takeLockForUnlock(logPath: string, expected: number | null, now:
   if (!before.ok) return { kind: "refused", why: `${before.why}, so a reclaim in flight cannot be ruled out; nothing was touched` };
   const busy = before.takers.find((taker) => taker.verdict === "running");
   if (busy !== undefined) return { kind: "refused", why: inFlight(lockfile, busy) };
-  const note = noteFor(lockPath, holder, entry.seen, now, "operator-cleared", why);
+  const note = plausibleCreated(noteFor(lockPath, holder, entry.seen, now, "operator-cleared", why), lastTs, now);
   // As in a writer's reclaim: guarded from the take's own lockfile and the claim on.
   const releaseGuard = guardTerminationWhileLocked();
   const prepared = prepareTake(lockPath, "hold");

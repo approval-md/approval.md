@@ -2549,13 +2549,15 @@ const SUITES = [
     // 3.1.0 (APRV-479): a MINOR bump, the same shape 2.1.0, 2.3.0 and 2.4.0
     // were, on top of #614's 3.0.0 (conformance/README.md collision rule: one
     // minor above the highest version either side saw). `audit.lock_reclaimed`
-    // is a new event type with eight new fixtures: three accepted (a writer's
+    // is a new event type with ten new fixtures: four accepted (a writer's
     // reclaim from a dead holder carrying its strictly parsed record, one from
-    // an empty lockfile carrying none, and a person's `approval log unlock`
-    // under a `human:` actor with reason `operator-cleared`) and five refused
+    // an empty lockfile carrying none, a person's `approval log unlock` under a
+    // `human:` actor with reason `operator-cleared`, and a holder whose
+    // implausible `created` is recorded as null with no age) and six refused
     // (an `agent:` actor, a reason outside the closed set, a lockfile named by
-    // a path rather than a base name, a record with no `age_ms`, and
-    // `operator-cleared` under a `system:` actor). No existing expectation moves, so
+    // a path rather than a base name, a record with no `age_ms`, an `age_ms`
+    // beside a null `created`, and `operator-cleared` under a `system:`
+    // actor). No existing expectation moves, so
     // an implementation that passed 3.0.0 fails this only by not knowing a type
     // the enum has gained.
     vectors_version: "3.1.0",

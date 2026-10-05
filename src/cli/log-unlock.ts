@@ -100,10 +100,10 @@ export function commandLogUnlock(argv: string[], streams: Streams, cwd: string):
     case "unlocked":
       if (json) {
         streams.out(
-          `${JSON.stringify({ ok: true, unlocked: true, seq: result.record.seq, holder: result.note.holder ?? null, age_ms: result.note.age_ms, actor: result.record.actor })}\n`,
+          `${JSON.stringify({ ok: true, unlocked: true, seq: result.record.seq, holder: result.note.holder ?? null, age_ms: result.note.age_ms ?? null, actor: result.record.actor })}\n`,
         );
       } else {
-        const holder = result.note.holder === undefined ? "a lockfile that named no holder" : `pid ${String(result.note.holder.pid)} (${result.note.holder.op}, since ${result.note.holder.created})`;
+        const holder = result.note.holder === undefined ? "a lockfile that named no holder" : `pid ${String(result.note.holder.pid)} (${result.note.holder.op}, since ${result.note.holder.created ?? "a time its record gave implausibly, not recorded"})`;
         streams.out(`unlocked: took over ${result.note.lockfile} from ${holder}; recorded as audit.lock_reclaimed seq ${String(result.record.seq)} by ${result.record.actor}\n`);
       }
       return EXIT_OK;

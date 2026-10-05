@@ -111,6 +111,7 @@ import {
   type LockOp,
   type OwnLock,
   type ReclaimNote,
+  type RecordContext,
 } from "./log-lock.js";
 import { appendWriteLayer } from "./log-write-layer.js";
 import { validate, type ValidateOptions, type ValidationError } from "./validate.js";
@@ -609,7 +610,7 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: Lo
       rounds += 1;
       const outcome = reclaimStaleLock(logPath, op, {
         recordValid: reclaimRecordValid,
-        recordBlocked: () => reclaimRecordBlocked(logPath),
+        recordContext: () => reclaimRecordContext(logPath),
       });
       if (outcome.kind === "taken") {
         return { ok: true, own: outcome.own, releaseGuard: outcome.releaseGuard, reclaimed: outcome.note };
@@ -671,6 +672,8 @@ function releaseLock(own: OwnLock): void {
 interface TailState {
   seq: number;
   hash: string | null;
+  /** The last record's `ts` as written, when it has one (APRV-479 R3-7). */
+  ts?: string;
 }
 
 type TailOutcome = { ok: true; tail: TailState } | { ok: false; error: AppendError };
@@ -854,7 +857,8 @@ function readTail(logPath: string): TailOutcome {
     };
   }
 
-  return { ok: true, tail: { seq, hash } };
+  const ts = record["ts"];
+  return { ok: true, tail: typeof ts === "string" ? { seq, hash, ts } : { seq, hash } };
 }
 
 /**
@@ -1010,7 +1014,8 @@ function lockedRun<T>(
 
 /** The `audit.lock_reclaimed` payload: the lockfile's base name, the reason, the age, and the strictly parsed holder. */
 function reclaimPayload(note: ReclaimNote): Record<string, unknown> {
-  const payload: Record<string, unknown> = { lockfile: note.lockfile, reason: note.reason, age_ms: note.age_ms };
+  const payload: Record<string, unknown> = { lockfile: note.lockfile, reason: note.reason };
+  if (note.age_ms !== undefined) payload["age_ms"] = note.age_ms;
   if (note.holder !== undefined) payload["holder"] = { pid: note.holder.pid, op: note.holder.op, created: note.holder.created };
   return payload;
 }
@@ -1035,18 +1040,23 @@ function reclaimRecordValid(note: ReclaimNote): boolean {
 }
 
 /**
- * Why this writer could not append the reclaim record now, or `null` (APRV-479
- * R3-3): the two refusals {@link recordReclaim} would meet that the schema
- * check cannot see, its daemon stamp and the log's tail, both read without the
- * lock. A reclaim whose record would be refused is not made: the lock stays
- * for a writer that can record it, and nothing is claimed or appended.
+ * Whether this writer could append the reclaim record now (APRV-479 R3-3): the
+ * two refusals {@link recordReclaim} would meet that the schema check cannot
+ * see, its daemon stamp and the log's tail, both read without the lock. A
+ * reclaim whose record would be refused is not made: the lock stays for a
+ * writer that can record it, and nothing is claimed or appended. When it
+ * could, the last record's `ts`, which bounds the holder `created` the record
+ * may carry (R3-7).
  */
-function reclaimRecordBlocked(logPath: string): string | null {
+function reclaimRecordContext(logPath: string): RecordContext {
   const stamp = daemonStampForAppend();
-  if (stamp.kind === "refuse") return `its records are refused: ${stamp.code}`;
+  if (stamp.kind === "refuse") return { ok: false, why: `its records are refused: ${stamp.code}` };
   const tail = readTail(logPath);
-  if (!tail.ok) return `the log's tail refuses an append (${tail.error.code}), which a human repairs first; \`approval log verify\` shows where`;
-  return null;
+  if (!tail.ok) {
+    return { ok: false, why: `the log's tail refuses an append (${tail.error.code}), which a human repairs first; \`approval log verify\` shows where` };
+  }
+  const lastTs = tail.tail.ts === undefined ? Number.NaN : Date.parse(tail.tail.ts);
+  return { ok: true, lastTs: Number.isFinite(lastTs) ? lastTs : null };
 }
 
 /**
@@ -1116,11 +1126,11 @@ export function unlockAppendLock(logPath: string, pid: number | null, actor: str
   if (!existsSync(logPath)) {
     return { kind: "refused", message: `${logPath} does not exist, so there is no log a record of the unlock could follow; remove ${basename(logPath)}.lock by hand` };
   }
-  const blocked = reclaimRecordBlocked(logPath);
-  if (blocked !== null) {
-    return { kind: "refused", message: `the record of the unlock could not be appended (${blocked}), so nothing was touched` };
+  const context = reclaimRecordContext(logPath);
+  if (!context.ok) {
+    return { kind: "refused", message: `the record of the unlock could not be appended (${context.why}), so nothing was touched` };
   }
-  const taken = takeLockForUnlock(logPath, pid);
+  const taken = takeLockForUnlock(logPath, pid, context.lastTs);
   if (taken.kind === "none") return { kind: "none" };
   if (taken.kind === "refused") return { kind: "refused", message: taken.why };
   let wrote = false;

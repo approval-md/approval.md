@@ -258,6 +258,35 @@ test("a lock left by a dead pid is taken after the wait: the reclaim is the firs
   assert.equal(verify(logPath).status, "clean");
 });
 
+test("a holder `created` the log cannot vouch for is recorded as null with no age: year 9999, year 0000, and a time before the log's last record by more than a day (R3-7)", () => {
+  for (const created of ["9999-12-31T23:59:59.999Z", "0000-01-01T00:00:00.000Z", "2026-10-04T06:59:59.000Z"]) {
+    const logPath = freshLog();
+    const left = holder({ pid: deadPid(), created });
+    writeLock(logPath, left);
+    const result = appendEvent(logPath, granted(3), { lockTimeoutMs: 0 });
+    assert.ok(result.ok, `${created}: ${result.ok ? "" : result.error.message}`);
+    const reclaim = records(logPath)[1] as EventRecord;
+    assert.equal(reclaim.event, "audit.lock_reclaimed");
+    assert.deepEqual(reclaim.payload, { lockfile: "events.jsonl.lock", reason: "holder-dead", holder: { pid: left.pid, op: "append", created: null } }, created);
+    assert.deepEqual(residue(logPath), []);
+    assert.equal(verify(logPath).status, "clean");
+  }
+  // The person's unlock follows the same rule.
+  const logPath = freshLog();
+  writeLock(logPath, holder({ pid: 31, pidns: "pid:[1]", boot: "~1", created: "9999-12-31T23:59:59.999Z" }));
+  assert.equal(unlockAppendLock(logPath, 31, "human:carter").kind, "unlocked");
+  const cleared = records(logPath)[1] as EventRecord;
+  assert.deepEqual(cleared.payload, { lockfile: "events.jsonl.lock", reason: "operator-cleared", holder: { pid: 31, op: "append", created: null } });
+  // A time within a day before the last record, and up to now, is recorded with its age.
+  const within = freshLog();
+  const recent = holder({ pid: deadPid(), created: "2026-10-04T07:00:01.000Z" });
+  writeLock(within, recent);
+  assert.ok(appendEvent(within, granted(4), { lockTimeoutMs: 0 }).ok);
+  const kept = records(within)[1] as EventRecord;
+  assert.deepEqual((kept.payload?.["holder"] as { created: string }).created, recent.created);
+  assert.equal(typeof kept.payload?.["age_ms"], "number");
+});
+
 test("a lock held by a live process is never taken, however old: lock-timeout names the holder, and the lockfile is untouched", () => {
   const logPath = freshLog();
   const before = readFileSync(logPath);
