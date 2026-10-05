@@ -131,37 +131,51 @@ before a tag.
   under another boot id (an earlier boot and another kernel sharing the volume
   cannot be told apart). On macOS and elsewhere the proof is the same host and
   `kill(pid, 0)` answering ESRCH; a running pid is the holder, and a boot reading
-  that moved (every wall-clock step moves it) proves nothing. A lock whose holder
-  is gone is claimed with an exclusive `link(2)` of a file naming the claimant;
-  a claim is passed over only when its claimant is provably gone, never because
-  of its age. The claimant re-checks the lockfile and its claim and renames the
-  lockfile to a pending name beside it (the commit point, which frees the lock
-  and keeps the record of the reclaim in one step). Whichever writer takes the
-  lock next judges each pending file again exactly as it would judge the lock,
-  builds the record only from its own judgement, and appends it, as the new
-  audit-tier `audit.lock_reclaimed` (`system:log`; lockfile, reason, age, holder
-  pid and kind), before its own record, so a reclaimer that never gets the lock
-  cannot lose it and a file planted at a pending name yields only the record a
-  lockfile with the same bytes would have. A live holder's lock is
-  never taken, however old, and neither is one this process cannot check
-  (another host, another kernel, another container, a newer record format); a
-  lockfile with no holder record is taken only once it is ten minutes old; a
-  lock beside a `log sync` snapshot or an absent log is kept. The
-  `lock-timeout` message now names the holder and why its lock was kept. A
-  process that holds the lock with no listener for SIGTERM, SIGINT or SIGHUP
-  gets a listener for that span: a signal then waits for the release and kills
-  the process when the event loop next turns, and a verb that waits
-  synchronously after its append (`approval policy amend`'s prompt, `approval
-  wait`, the child of `approval run`) drops the listener before it blocks, so a
-  signal during the wait ends it at once. The files a reclaim keeps beside the
-  lock (`events.jsonl.lock.reclaim-*`) are excluded from the tenant export.
-  Schema change: the closed event enum gains `audit.lock_reclaimed`
-  (thirty-five types; `schema-validation` vectors 2.10.0). SPEC.md §8 and §11.1
-  wording is proposed in the task notes, pending sign-off. Behavior change for
-  older writers: a lockfile an older version left (empty) is reclaimed after ten
-  minutes, and an older writer still holding one that long would lose it. Still
-  a human's: a lock left by a holder in another pid namespace or under another
-  boot id (a recreated sandbox, a rebooted host) stays until a human removes it.
+  that moved proves nothing. A lockfile that is not a regular file of at most 4
+  KiB (a FIFO, a link, a device) is never opened in a way that can block or
+  follow it, and is kept. A lock whose holder is gone is claimed with an
+  exclusive `link(2)` of a file naming the claimant, passed over only when that
+  claimant is provably gone, never because of its age. The claimant re-checks
+  the lockfile and its claim and renames the lockfile into
+  `events.jsonl.lock.d/pending/` (the commit point, which frees the lock and
+  keeps the evidence in one step); a reclaim whose record would not pass the
+  schema is not made. Whichever writer takes the lock next records every pending
+  file, before anything else, as the new audit-tier `audit.lock_reclaimed`
+  (`system:log`; lockfile, reason, age, holder pid, kind and start of hold, and a
+  `reclaim_id` that stops a duplicate when a writer is killed between recording
+  and clearing). A pending file it cannot judge (another pid namespace or boot,
+  unreadable, malformed, not a regular file) is still recorded, as
+  `unverified` with nothing taken from it, and moved to `quarantine/`, so a
+  planted file can neither silence a real reclaim nor block appends. A writer
+  that cannot list `pending/` appends nothing and refuses with the new append
+  code `reclaim-pending-unreadable`. One hold reads at most 64 pending names and
+  records at most 16, oldest first; claims and quarantined files live in
+  directories no scan reads. A live holder's lock is never taken, however old,
+  and neither is one this process cannot check; a lockfile with no holder record
+  is taken only once it is ten minutes old; a lock beside a `log sync` snapshot
+  or an absent log is kept. The `lock-timeout` message names the holder and why
+  its lock was kept. A process that holds the lock with no listener for SIGTERM,
+  SIGINT or SIGHUP gets one for the hold only: the signal waits for the release
+  and kills the process when the event loop next turns. `approval run` turns
+  the loop between appending `execution.started` and spawning the command, so a
+  stop request during that append ends the process before the command exists;
+  a verb that waits synchronously after its append (`approval policy amend`'s
+  prompt, `approval wait`, `approval codex bridge`'s human wait) drops the
+  listener before it blocks, so a signal during the wait ends it at once (one
+  that landed in the append's own milliseconds is lost there: Node shows a
+  caught signal to JavaScript only when the event loop turns). The reclaim's
+  files (`events.jsonl.lock.d/`) are excluded from the tenant export. Schema
+  change: the closed event enum gains `audit.lock_reclaimed` (thirty-five
+  types; `schema-validation` vectors 2.10.0), and the append-error union gains
+  `reclaim-pending-unreadable` (`refusal-unions` vectors regenerated). SPEC.md
+  §8, §11.1 and §11.2 are amended in their own commit, pending the owner's
+  sign-off. Behavior change for older writers: a lockfile an older version left
+  (empty) is reclaimed after ten minutes, and an older writer still holding one
+  that long would lose it. Still a human's (one command each, in
+  docs/hermes-hook.md): a lock left by a holder in another pid namespace or under
+  another boot id (a recreated sandbox, a rebooted host, any microVM restart),
+  one whose pid was reused on macOS, and one that sixteen claimants died
+  reclaiming.
 
 ## 0.4.0 — 2026-10-04
 

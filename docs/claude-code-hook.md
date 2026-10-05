@@ -1287,9 +1287,11 @@ and then `/proc/<pid>` absent with `kill(pid, 0)` answering ESRCH, a zombie, or
 a later process under the same pid; elsewhere it needs the same host and
 `kill(pid, 0)` answering ESRCH. The reclaim is recorded as
 `audit.lock_reclaimed` by whichever writer takes the lock next, before its own
-record, and a live holder's lock, or one this process cannot check (another
-host, another kernel, another container, a `/proc` it cannot read), is never
-taken; that writer still times out and its refusal names the holder. Until then
+record (as `unverified`, with nothing taken from the file, when that writer
+cannot judge the reclaimed lockfile again), and a live holder's lock, or one
+this process cannot check (another host, another kernel, another container, a
+`/proc` it cannot read, anything at the lock's path that is not a regular file),
+is never taken; that writer still times out and its refusal names the holder. Until then
 every writer refused `lock-timeout` and the gate stayed wedged until a human
 removed the file.
 

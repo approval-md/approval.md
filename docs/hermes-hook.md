@@ -513,15 +513,26 @@ once it is ten minutes old. The first spend that meets such a lock waits out its
 two-second bound on the event loop and then reclaims it on its single try, so
 the self-heal costs that one call two seconds.
 
-What still wedges is a lock this process cannot judge, and in the village that
-is the common kill: a sandbox recreated while a hook was mid-append leaves a lock
-whose holder lived in the old container's pid namespace (and, on a microVM
-runtime, under the old kernel's boot id). No writer takes that lock; every
-writer refuses `lock-timeout` naming it, and a human who has checked that the
-old sandbox is gone removes it from the store root:
-`rm -v .approval/log/events.jsonl.lock`, which prints
-`removed '.approval/log/events.jsonl.lock'`. A lock removed by hand is not
+What still wedges is a lock no writer can prove gone; each costs a human one
+command, run from the store root once they have checked that no writer named in
+`cat .approval/log/events.jsonl.lock` is still running. A hand removal is not
 recorded in the log.
+
+| what happened | why no writer takes the lock | the command |
+| --- | --- | --- |
+| A Linux host rebooted, or the volume moved to another host, while a writer held the lock | another boot id is live | `rm -v .approval/log/events.jsonl.lock` |
+| A container or sandbox was recreated mid-append (the village's common kill) | another pid namespace is live | the same |
+| A microVM or gVisor sandbox restarted (a kernel per sandbox) | another boot id, every time | the same |
+| A macOS host rebooted and the pid was reused, or the hostname changed | a running pid, or another host, is live | the same |
+| A writer was killed between creating the lockfile and writing its record | an empty lockfile ages out after ten minutes | wait, or the same |
+| Sixteen reclaimers of one lockfile were killed mid-reclaim | the claim chain is exhausted | the same |
+| A FIFO, link or oversized file sits at the lock's path | it is never read, so never judged | the same |
+| A writer refuses `reclaim-pending-unreadable` | `events.jsonl.lock.d/pending` cannot be listed | `chmod u+rwx .approval/log/events.jsonl.lock.d/pending` |
+| A writer refuses `lock-timeout` beside a sync snapshot | a sync may have stopped part way (by design) | `approval log verify`, then `approval log sync` |
+
+`rm -v` prints `removed '.approval/log/events.jsonl.lock'` on Linux. What a
+writer recorded as `unverified` sits in `events.jsonl.lock.d/quarantine/`,
+named by the record's `reclaim_id`, for a human to look at; nothing reads it.
 
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was
