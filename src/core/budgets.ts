@@ -98,6 +98,7 @@ import {
 } from "./money.js";
 import { isIntakeLimitName } from "./intake-limits.js";
 import { matchesPattern } from "./policy-match.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /** Length of the rolling `daily` window: 24 hours, in milliseconds. */
 export const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -136,6 +137,16 @@ export interface BudgetScope {
 export interface BudgetAction {
   class: string;
   est_cost_usd?: UsdInput;
+  /**
+   * A record-only start of {@link UNMAPPED_TOOL_CLASS} (APRV-499, ruling H1):
+   * an unattended `execution.started` the harness hook writes for a tool call
+   * no `tools` entry claimed. Such a start is a RECORD of unclassified tool
+   * use, not an approved action, so a global `daily_actions` budget neither
+   * counts it nor refuses it. Set only by the write boundary that records
+   * policy-authorized harness starts (`core/gate.ts`); a human's grant of the
+   * same class is an approved action and is counted like any other.
+   */
+  recordOnly?: boolean;
 }
 
 /**
@@ -355,6 +366,29 @@ function tally(events: EventRecord[]): Consumption {
 }
 
 /**
+ * Is this authorization a record-only start of {@link UNMAPPED_TOOL_CLASS}?
+ * (APRV-499, ruling H1.)
+ *
+ * An `execution.started` of that class that reaches the consumption set is one
+ * no grant in the window covers ({@link authorizations} drops the rest), which
+ * is the start the hook records for a tool call the policy's `tools` mapping
+ * does not claim under `defaults.unmapped_tool: record` (or a `classes` rule
+ * that makes the class unattended). Those are records of unclassified tool
+ * use (a TodoWrite, a web search), not approved actions, so a global
+ * `daily_actions` budget does not count them: a village template that sets
+ * `record` would otherwise spend its action budget on bookkeeping. The grant
+ * of the same class under `ask` IS an approved action, and it is counted
+ * through its `approval.granted`, which this predicate never matches.
+ *
+ * USD is unaffected (these starts declare no cost), and class-scoped limits
+ * are unaffected: a `limits` block on a rule matching
+ * `harness.tool.unmapped` is a ceiling written for exactly these records.
+ */
+function isRecordOnlyUnmappedStart(record: EventRecord): boolean {
+  return record.event === "execution.started" && classOf(record) === UNMAPPED_TOOL_CLASS;
+}
+
+/**
  * Evaluate every applicable budget limit against the log.
  *
  * Conjunctive (SPEC.md §5.2): `pass` is true only when every verdict passes.
@@ -485,6 +519,11 @@ export function evaluateBudgets(
   // of class — that is what makes it global.
   if (globalScopeNames.length > 0) {
     const globalConsumption = tally(windowed);
+    // Ruling H1 (APRV-499): record-only unmapped starts are not actions, so
+    // `daily_actions` neither counts them nor charges the one being admitted.
+    const globalActions = windowed.filter((record) => !isRecordOnlyUnmappedStart(record)).length;
+    const admittedActions =
+      action.recordOnly === true && action.class === UNMAPPED_TOOL_CLASS ? 0 : 1;
     for (const scopeName of globalScopeNames) {
       const budget = globalBudgets[scopeName];
       if (budget === undefined) continue;
@@ -524,7 +563,7 @@ export function evaluateBudgets(
         }
         if (name === DAILY_ACTIONS) {
           verdicts.push(
-            verdict(label, "global", "rolling-24h", globalConsumption.actions, 1, ceiling, unit),
+            verdict(label, "global", "rolling-24h", globalActions, admittedActions, ceiling, unit),
           );
           continue;
         }

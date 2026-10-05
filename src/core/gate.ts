@@ -130,6 +130,7 @@ import {
 // runtime edge from the gate to the audit module for four string literals.
 import type { Reaction } from "./audit.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 import {
   evaluateIntakeLimits,
   intakeRefusalOf,
@@ -4354,7 +4355,14 @@ function attemptHarnessStart(
   const budget = evaluateBudgetsWithTask(
     read.records,
     budgetScopeOf(load, resolution),
-    { class: input.cls, est_cost_usd: cost },
+    {
+      class: input.cls,
+      est_cost_usd: cost,
+      // Ruling H1 (APRV-499): every start this function writes is authorized by
+      // the policy alone, so one of `harness.tool.unmapped` is a record of
+      // unclassified tool use and is not charged to `daily_actions`.
+      ...(input.cls === UNMAPPED_TOOL_CLASS ? { recordOnly: true } : {}),
+    },
     ts,
     input.task,
   );
