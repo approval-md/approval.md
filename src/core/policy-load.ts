@@ -82,6 +82,8 @@ import type { ReadScope } from "./read-scope.js";
 // so the cycle is erased at build and the rule the loader enforces and the rule
 // the decision path applies are one implementation.
 import { checkSenderMappings } from "./sender-identity.js";
+// APRV-499. Same shape again: `tool-map.ts` imports only this module's TYPES.
+import { toolMapErrors, type ToolMapEntry, type UnmappedToolMode } from "./tool-map.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -260,6 +262,15 @@ export interface Policy {
      */
     token_delivery?: TokenDelivery;
     on_expiry?: "reject";
+    /**
+     * Amended SPEC.md §5.2 (APRV-499, proposed): what a harness hook does with
+     * a tool call that neither the adapter's own tables nor any {@link
+     * Policy.tools} entry claims. `record` and `ask` classify it
+     * `harness.tool.unmapped` and supply that class's default autonomy
+     * (`autonomous`, `manual`); absent, the call is not a gate question and
+     * leaves no record, which is every earlier build's behaviour.
+     */
+    unmapped_tool?: UnmappedToolMode;
   };
   /**
    * Amended SPEC.md §5.2 (APRV-38): duration after which a payload whose action
@@ -300,6 +311,14 @@ export interface Policy {
    * symlink cannot smuggle a read out of one.
    */
   read_scope?: ReadScope;
+  /**
+   * Amended SPEC.md §5.2 (APRV-499, proposed): harness tool names mapped to
+   * declared classes, ORDERED, first match wins. Consulted by the harness hook
+   * only for a call the adapter's own tables do not claim; see
+   * `core/tool-map.ts`. Every entry's class is checked against `classes` at
+   * load ({@link loadPolicyText}), and an undeclared one fails the policy closed.
+   */
+  tools?: ToolMapEntry[];
   /**
    * The approver roster (SPEC.md §5.1), and since APRV-324 the operator's
    * attested statement of which transport account each of them decides from.
@@ -801,6 +820,21 @@ export function loadPolicyText(
       "schema-invalid",
       `${resolved.path}: channel prompt layout is not usable`,
       promptErrors,
+      parsed.value,
+    );
+  }
+
+  // APRV-499: every `tools` entry names a class the policy declares, none
+  // names the unmapped-tool class, and no two share a `match`. Relationships
+  // between parts of a schema-valid file, so checked here, and failing in the
+  // same direction as every semantic check on this path: the whole policy,
+  // closed to all-`manual`.
+  const toolErrors = toolMapErrors(policy);
+  if (toolErrors.length > 0) {
+    return failure(
+      "schema-invalid",
+      `${resolved.path}: tools mapping is not usable`,
+      toolErrors,
       parsed.value,
     );
   }

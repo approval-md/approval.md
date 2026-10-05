@@ -4156,6 +4156,15 @@ export interface HarnessStartInput {
   payload_hash?: string;
   /** Canonical decimal USD string (APRV-121); a JSON number is read as the historical form. */
   est_cost_usd?: UsdInput;
+  /**
+   * The harness tool NAME the start records, when the class came from the
+   * policy's tool mapping rather than from what the call does (APRV-499):
+   * a `tools` entry, or `harness.tool.unmapped`. Several tools share one
+   * such class, so the class alone cannot say which ran. The name and never the
+   * arguments: those are bound by `payload_hash` and stay out of the log.
+   * Shape-checked by the event schema at the write boundary.
+   */
+  harness_tool?: string;
 }
 
 export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
@@ -4401,6 +4410,8 @@ function attemptHarnessStart(
     // Without it a reader of a policy-authorized start had to reconstruct the
     // rules in force from the latest `policy.updated` before this seq.
     ...harnessStartPolicyStamp(attested.sha256),
+    // APRV-499: which tool a mapped or unmapped start was, by name only.
+    ...(input.harness_tool === undefined ? {} : { harness_tool: input.harness_tool }),
   };
 
   const appended = append(

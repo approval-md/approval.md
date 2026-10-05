@@ -113,6 +113,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Autonomy, Policy, PolicyLoadErrorCode, PolicyLoadResult } from "./policy-load.js";
 import { agentRequestability, resolve, type Provenance } from "./policy-match.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /**
  * SPEC.md §7's reserved top-level namespaces, in table order.
@@ -493,6 +494,23 @@ function classKeys(policy: Policy | null): string[] {
   return policy?.classes === undefined ? [] : Object.keys(policy.classes);
 }
 
+/**
+ * The classes a policy's harness tool mapping can reach (APRV-499): every
+ * `tools` entry's class, and the unmapped-tool class whenever the policy
+ * declares `defaults.unmapped_tool`.
+ *
+ * Probed because those keys change what a class RESOLVES to without naming it
+ * in `classes`: an amendment adding `unmapped_tool: record` moves
+ * `harness.tool.unmapped` from `defaults.autonomy` to `autonomous`, and a
+ * probe set drawn from `classes` alone would call that no semantic change.
+ */
+function toolClasses(policy: Policy | null): string[] {
+  if (policy === null) return [];
+  const reached = (policy.tools ?? []).map((entry) => entry.class);
+  if (policy.defaults?.unmapped_tool !== undefined) reached.push(UNMAPPED_TOOL_CLASS);
+  return reached;
+}
+
 function channelsOf(policy: Policy | null, approver: string): string[] | null {
   const entry = policy?.approvers?.[approver];
   return entry === undefined ? null : [...entry.channels];
@@ -619,7 +637,13 @@ export function diffPolicies(
   const beforePolicy = policyOf(before);
   const afterPolicy = policyOf(after);
 
-  const probes = union(classKeys(beforePolicy), classKeys(afterPolicy), sampleClasses);
+  const probes = union(
+    classKeys(beforePolicy),
+    classKeys(afterPolicy),
+    toolClasses(beforePolicy),
+    toolClasses(afterPolicy),
+    sampleClasses,
+  );
   const classes: ClassResolutionChange[] = [];
   for (const probe of probes) {
     const previous = snapshot(before, probe);

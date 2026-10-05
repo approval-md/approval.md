@@ -150,7 +150,8 @@ import {
 import { settleTerminationGuards } from "../core/log-lock.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
-import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import { loadPolicy, parseDuration, type Policy, type PolicyLoadResult } from "../core/policy-load.js";
+import { toolMapVerdict } from "../core/tool-map.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
   effectiveReadRoots,
@@ -1075,6 +1076,58 @@ function toolRuleOf(adapter: HarnessAdapter, input: HookInput): ToolRuleVerdict 
     return null;
   }
   return adapter.toolRules(input.toolName, input.toolInput);
+}
+
+/**
+ * Is this call one the adapter's own tables leave unclaimed? (APRV-499.)
+ *
+ * Unclaimed means: not the shell tool, not a file or read tool, not a
+ * pass-through tool, and not a tool the hard-coded rule table answers (gated OR
+ * read). Exactly these calls reach the policy's `tools` mapping and its
+ * unmapped-tool default, and before APRV-499 exactly these were answered "not a
+ * gated tool". The adapter's tables keep precedence because they read the
+ * call's arguments, and a `tools` entry reads only its name.
+ */
+function unclaimedTool(adapter: HarnessAdapter, input: HookInput): boolean {
+  if (input.toolName === adapter.shellTool) return false;
+  if (adapter.fileTools.includes(input.toolName)) return false;
+  if (adapter.readTools.includes(input.toolName)) return false;
+  if (adapter.passThroughTools?.includes(input.toolName) === true) return false;
+  return toolRuleOf(adapter, input) === null;
+}
+
+/**
+ * The policy the hook resolves against, loaded the way {@link decideHarnessSteps}
+ * loads it: `--policy` when given, else the policy directory, else `cwd`.
+ */
+function loadHookPolicy(options: ReturnType<typeof hookScope>["options"], cwd: string): PolicyLoadResult {
+  return loadPolicy(
+    options.policy?.file === undefined
+      ? { dir: options.policy?.dir ?? cwd }
+      : { file: options.policy.file },
+  );
+}
+
+/**
+ * Does the policy leave this unclaimed call outside the gate entirely?
+ * (APRV-499.)
+ *
+ * `true` only when the policy LOADS and neither maps the tool nor declares
+ * `defaults.unmapped_tool`: the pre-APRV-499 answer, kept for every policy that
+ * has not opted in. A policy that does not load answers `false`, so the call
+ * goes on to the path that refuses it (`hook-policy-unavailable`) or, under an
+ * open window, to the bypass: a mapping the runtime cannot read is not evidence
+ * that the tool is unmapped, and every class of an unparseable policy is
+ * `manual` (SPEC.md §5.2, fail closed).
+ */
+function policyLeavesToolUngated(
+  options: ReturnType<typeof hookScope>["options"],
+  cwd: string,
+  toolName: string,
+): boolean {
+  const load = loadHookPolicy(options, cwd);
+  if (!load.ok) return false;
+  return toolMapVerdict(load.policy, toolName).kind === "not-gated";
 }
 
 /**
@@ -4089,12 +4142,20 @@ function* recordUnattended(
   task: string,
   classes: readonly string[],
   hash: string,
+  /** The tool name, for a class the policy's tool mapping chose (APRV-499). */
+  harnessTool?: string,
 ): GateSteps<{ code: string; message: string } | null> {
   for (const cls of classes) {
     const started = yield* spendUnderLock(run.logPath, run.options.append, (append) =>
       startHarnessExecution(
         run.logPath,
-        { task, actionKey: `${task}:${cls}`, cls, payload_hash: hash },
+        {
+          task,
+          actionKey: `${task}:${cls}`,
+          cls,
+          payload_hash: hash,
+          ...(harnessTool === undefined ? {} : { harness_tool: harnessTool }),
+        },
         run.actor,
         { ...run.options, append },
       ),
@@ -5373,7 +5434,14 @@ function runPostToolUse(
     // nothing, and the close below finds no start and says so in its own words.
     !adapter.readTools.includes(input.toolName) &&
     // APRV-445: a tool the rule table gated wrote a start like any other.
-    toolRuleOf(adapter, input)?.kind !== "gated"
+    toolRuleOf(adapter, input)?.kind !== "gated" &&
+    // APRV-499: an unclaimed tool the policy maps, or one it records or asks
+    // about as unmapped, wrote a start too. So did any unclaimed tool whose
+    // policy no longer loads, as far as this half can tell, so that one goes on
+    // to the close, which finds the start or says there is none. Only a policy
+    // that loads and leaves the tool outside the gate keeps this answer.
+    (!unclaimedTool(adapter, input) ||
+      policyLeavesToolUngated(hookScope(flags, cwd).options, cwd, input.toolName))
   ) {
     return report(
       streams,
@@ -5481,6 +5549,11 @@ type ToolDescription =
        * that RUN, and an edit runs nothing.
        */
       segments?: readonly ClassifiedSegment[];
+      /**
+       * The harness tool name, when the class came from the policy's tool
+       * mapping (APRV-499), so the start record can say which tool ran.
+       */
+      harnessTool?: string;
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -5493,6 +5566,13 @@ function describeToolCall(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
   readRoots: readonly string[] = [],
+  /**
+   * The loaded policy whose `tools` mapping and `defaults.unmapped_tool` an
+   * unclaimed call is answered by (APRV-499), or `null` when there is none to
+   * read (the open window over a policy that did not load), in which case an
+   * unclaimed call keeps the not-a-gated-tool allow.
+   */
+  toolPolicy: Policy | null = null,
 ): ToolDescription {
   if (adapter.kind === "codex" && input.toolName === "apply_patch") {
     // APRV-363. The app-server's LEGACY `applyPatchApproval` carries its change
@@ -5713,6 +5793,33 @@ function describeToolCall(
       payload: { tool: input.toolName, input: input.toolInput },
       headline: ruled.headline,
       notes: [],
+    };
+  }
+
+  // APRV-499: a call the adapter's own tables leave unclaimed (every MCP tool
+  // among them) is answered by the policy's `tools` mapping, first match wins,
+  // then by `defaults.unmapped_tool`. Below the rule table and the shell, and
+  // above the read and file branches only because those two never see an
+  // unclaimed call: the predicate excludes them. The payload is the whole call,
+  // as the rule table's is, so a grant binds every argument; only the NAME is
+  // written to the log, on the start record.
+  if (unclaimedTool(adapter, input)) {
+    const verdict =
+      toolPolicy === null ? { kind: "not-gated" as const } : toolMapVerdict(toolPolicy, input.toolName);
+    if (verdict.kind === "not-gated") {
+      return { kind: "allow", reason: `${input.toolName} is not a gated tool` };
+    }
+    const note =
+      verdict.kind === "mapped"
+        ? `tools entry ${String(verdict.index)} (${JSON.stringify(verdict.match)}) maps ${input.toolName} to ${verdict.cls} (APRV-499)`
+        : `${input.toolName} matches no tools entry; defaults.unmapped_tool: ${verdict.mode} (APRV-499)`;
+    return {
+      kind: "gated",
+      classes: [verdict.cls],
+      payload: { tool: input.toolName, input: input.toolInput },
+      headline: `${input.toolName} (${verdict.cls})`,
+      notes: [note],
+      harnessTool: input.toolName,
     };
   }
 
@@ -6378,6 +6485,11 @@ function* runBypass(
       policyRootOf(load, scope.root),
       load.ok ? load.policy.read_scope?.roots : undefined,
     ),
+    // APRV-499. The window suspends the policy's ANSWER, not its mapping: a
+    // mapped or unmapped tool is described under its class here too, so the
+    // bypass record names it. A policy that did not load has no mapping to read,
+    // and an unclaimed call then keeps the not-a-gated-tool allow.
+    load.ok ? load.policy : null,
   );
   if (described.kind === "deny") {
     return deny(
@@ -6811,30 +6923,38 @@ function* runHarnessHook(
     !adapter.fileTools.includes(input.toolName)
   ) {
     if (!adapter.readTools.includes(input.toolName)) {
-      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
-    }
-    // APRV-347, and the placement is the whole of its cost. A read tool call is
-    // the most frequent event a session produces, and before this task it was
-    // answered here with no policy load, no verified read of the log and no
-    // window lookup. Everything below this line is expensive, so the reads that
-    // do not need it must not pay for it.
-    //
-    // The short-circuit is sound because `read_scope` is ADDITIVE: it can only
-    // widen the roots, so a target already inside the BUILT-IN roots is inside
-    // the effective ones whatever the policy says, and the policy need not be
-    // read to know it. A target outside them falls through, the policy is
-    // loaded below, and `describeToolCall` asks again with the widened set —
-    // which is where a policy-declared root actually takes effect.
-    //
-    // The cost of the fast path is a handful of `realpath` calls and no process
-    // spawn, provided the hook is configured with `--dir` as the docs show
-    // (otherwise `hookScope` runs `git rev-parse` to find the primary).
-    const early = hookScope(parsed.flags, cwd);
-    if (
-      credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
-      readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
-    ) {
-      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      // APRV-499: an unclaimed tool is answered here, with one policy load and
+      // no log read, only when the policy loads and neither maps it nor declares
+      // `defaults.unmapped_tool`. Otherwise it goes on to the path below, where
+      // a mapped or unmapped call is classified and a policy that did not load
+      // is refused.
+      if (policyLeavesToolUngated(hookScope(parsed.flags, cwd).options, cwd, input.toolName)) {
+        return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      }
+    } else {
+      // APRV-347, and the placement is the whole of its cost. A read tool call is
+      // the most frequent event a session produces, and before this task it was
+      // answered here with no policy load, no verified read of the log and no
+      // window lookup. Everything below this line is expensive, so the reads that
+      // do not need it must not pay for it.
+      //
+      // The short-circuit is sound because `read_scope` is ADDITIVE: it can only
+      // widen the roots, so a target already inside the BUILT-IN roots is inside
+      // the effective ones whatever the policy says, and the policy need not be
+      // read to know it. A target outside them falls through, the policy is
+      // loaded below, and `describeToolCall` asks again with the widened set —
+      // which is where a policy-declared root actually takes effect.
+      //
+      // The cost of the fast path is a handful of `realpath` calls and no process
+      // spawn, provided the hook is configured with `--dir` as the docs show
+      // (otherwise `hookScope` runs `git rev-parse` to find the primary).
+      const early = hookScope(parsed.flags, cwd);
+      if (
+        credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
+        readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
+      ) {
+        return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      }
     }
   }
 
@@ -7044,7 +7164,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots);
+  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots, load.policy);
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }
@@ -7287,7 +7407,13 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     // charge is not a budget. See `recordUnattended`. A held signal is
     // dispatched first, at the pause it takes before the append (APRV-473,
     // `BEFORE_SPEND`), and a wait for the log's lock yields (APRV-478).
-    const charged = yield* recordUnattended(run, task, classes, payloadHash(payload));
+    const charged = yield* recordUnattended(
+      run,
+      task,
+      classes,
+      payloadHash(payload),
+      described.harnessTool,
+    );
     if (charged !== null) {
       return {
         permission: "deny",

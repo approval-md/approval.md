@@ -87,6 +87,7 @@ import type {
   PolicyLoadResult,
   SupervisionMode,
 } from "./policy-load.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /** Where a {@link Resolution}'s autonomy came from. */
 export type Provenance =
@@ -523,13 +524,13 @@ function fromParentOrDefaults(
   actionClass: string,
   candidates: Candidate[],
 ): Resolution {
-  if (!actionClass.startsWith(ROUTED_NAMESPACE)) return fromDefaults(load, candidates);
+  if (!actionClass.startsWith(ROUTED_NAMESPACE)) return fromDefaults(load, candidates, actionClass);
   const parent = resolve(load, "policy.edit");
   // Only a RULE is inherited. When the `policy.edit` line is itself absent the
   // sub-class has nothing to inherit and falls to `defaults.autonomy`, which is
   // the same answer by a shorter road and keeps `"inherited"` meaning "a
   // `policy.edit` rule decided this".
-  if (parent.provenance !== "rule") return fromDefaults(load, candidates);
+  if (parent.provenance !== "rule") return fromDefaults(load, candidates, actionClass);
   return {
     ...parent,
     provenance: "inherited",
@@ -540,15 +541,42 @@ function fromParentOrDefaults(
   };
 }
 
+/**
+ * The default a class takes when no rule matches it: `defaults.autonomy`, or
+ * for {@link UNMAPPED_TOOL_CLASS} alone, what `defaults.unmapped_tool` says
+ * (APRV-499).
+ *
+ * The unmapped-tool key is a default for one class, read exactly where every
+ * default is read, so a `classes` rule matching `harness.tool.unmapped`
+ * decides it as a rule decides any class. `record` is `autonomous` (the call
+ * proceeds and its start is recorded); `ask` is `manual`. An explicit key for
+ * this one class wins over `defaults.autonomy`, `human-only` included,
+ * because it is the more specific statement of the two. Absent, the class
+ * takes `defaults.autonomy` like any other, which the hook never asks: with
+ * no unmapped-tool key it does not classify an unmapped call at all.
+ */
+function defaultDeclared(
+  load: Extract<PolicyLoadResult, { ok: true }>,
+  actionClass: string,
+): DeclaredAutonomy {
+  if (actionClass === UNMAPPED_TOOL_CLASS) {
+    const mode = load.policy.defaults?.unmapped_tool;
+    if (mode === "record") return "autonomous";
+    if (mode === "ask") return "manual";
+  }
+  // Absent `defaults.autonomy` is `manual`: the schema allows omitting
+  // `defaults` entirely, and by the fail-closed principle the absence of a
+  // grant is not a grant.
+  return load.policy.defaults?.autonomy ?? "manual";
+}
+
 /** Build the no-rule-matched resolution. */
 function fromDefaults(
   load: Extract<PolicyLoadResult, { ok: true }>,
   candidates: Candidate[],
+  actionClass: string,
 ): Resolution {
-  // Absent `defaults.autonomy` is `manual`: the schema allows omitting
-  // `defaults` entirely, and by the fail-closed principle the absence of a
-  // grant is not a grant.
-  const declared = load.policy.defaults?.autonomy ?? "manual";
+  const declared = defaultDeclared(load, actionClass);
   return {
     ...supervisionOf(declared, null),
     declaredAutonomy: declared,
