@@ -492,6 +492,22 @@ them one at a time, each behind its own pause, so a signal between two of them
 blocks the call with the earlier classes' starts already recorded (before the
 signal) and the rest unspent.
 
+A hook killed in the middle of an append no longer wedges the gate (APRV-479).
+Under the `approval` bin a Hermes hook always has a signal listener, so a
+SIGTERM during an append waits for the lock to be released; what used to wedge
+the gate is the kill that cannot be caught (a gateway restart that escalates to
+SIGKILL, a sandbox stopped under it), which left `events.jsonl.lock` behind and
+every later writer, the daemon included, refusing `lock-timeout` until a human
+removed the file. The lockfile now names its holder, and the next writer that
+finds it held takes it back when that holder is provably gone (on Linux: the same
+boot and pid namespace, and `/proc/<pid>` absent, a zombie, or a later process
+under the same pid), appending `audit.lock_reclaimed` before its own record. A
+live holder's lock is never taken, nor one in another container's pid namespace
+or on another machine; a lockfile with no holder record (an older version's) is
+taken only once it is ten minutes old. The first spend that meets such a lock
+waits out its two-second bound on the event loop and then reclaims it on its
+single try, so the self-heal costs that one call two seconds.
+
 The `approval` bin also guards the exit: a Hermes hook that leaves with any
 non-zero code other than 2 leaves as 2, printing the directive if nothing was
 printed.

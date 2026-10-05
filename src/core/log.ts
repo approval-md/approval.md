@@ -62,9 +62,19 @@
  *    with nothing written. Every earlier record, carrying no such field, validates
  *    and verifies unchanged.
  *
+ * 7. **A lock whose holder is provably gone is taken back, and the log says so
+ *    (APRV-479).** The lockfile carries its holder's record, a writer that finds
+ *    it held judges the holder once per wait, and a lock left by a dead holder
+ *    is reclaimed atomically and followed by an `audit.lock_reclaimed` record,
+ *    appended under the new lock from a fresh read of the tail. A live holder's
+ *    lock, and any holder this process cannot check, is never taken.
+ *    `core/log-lock.ts` holds the rules.
+ *
  * Determinism: `ts` is supplied by the caller. This module never reads the
  * clock, because a hash-relevant field sourced from ambient state would make
- * the log irreproducible. `daemon` is ambient in the same sense and is not a
+ * the log irreproducible. The one exception is the record this module writes on
+ * its own behalf, the `audit.lock_reclaimed` of guarantee 7: no caller authors
+ * it, and its `ts` is assigned at the write boundary like any audit record's. `daemon` is ambient in the same sense and is not a
  * counter-example: a log is reproducible per WRITER, the field says which writer,
  * and a verifier re-derives the hash from the record's own bytes either way.
  */
@@ -78,7 +88,6 @@ import {
   mkdirSync,
   openSync,
   readSync,
-  unlinkSync,
 } from "node:fs";
 import { dirname } from "node:path";
 
@@ -86,7 +95,17 @@ import {
   DAEMON_APPEND_REFUSAL_CODES,
   daemonStampForAppend,
 } from "./daemon-identity.js";
+import { systemClock } from "./clock.js";
 import { canonicalize, JcsError } from "./jcs.js";
+import {
+  createLockFile,
+  guardTerminationWhileLocked,
+  releaseLockFile,
+  tryReclaimLock,
+  type LockOp,
+  type OwnLock,
+  type ReclaimNote,
+} from "./log-lock.js";
 import { appendWriteLayer } from "./log-write-layer.js";
 import { validate, type ValidateOptions, type ValidationError } from "./validate.js";
 
@@ -186,6 +205,14 @@ export const GENESIS_PREV = null;
  * same reason, and a closed `source` enum so the next party to do this gains a
  * member rather than a type. `core/question-preempted.ts` states the rest.
  *
+ * `audit.lock_reclaimed` (APRV-479) is the nineteenth: this writer took back
+ * `<log>.lock` from a holder that is provably gone (a writer killed while it
+ * held the lock, which nothing else would ever remove), and says so as the first
+ * record under the lock it then took. None of the audit records above it fits:
+ * no human gesture, no question, no sweep, only the log's own lock. Audit tier on
+ * the same strict terms (nothing reads it to decide anything), `system:` actor,
+ * and `core/log-lock.ts` states when a lock counts as gone.
+ *
  * `gate.path.signed_off` (APRV-338) is the sixteenth: a human's sign-off on the
  * exact bytes of one PROTECTED PATH whose edits classify `policy.edit` or a
  * `policy.edit.*` sub-class (amended SPEC.md §5.2, §8, §10.1). `human:` actor,
@@ -228,6 +255,7 @@ export type EventType =
   | "audit.decision_refused"
   | "audit.gesture_refused"
   | "audit.question_preempted"
+  | "audit.lock_reclaimed"
   | "reconciliation.required"
   | "reconciliation.satisfied"
   | "payload.pruned"
@@ -514,22 +542,37 @@ function directoriesToSync(logPath: string, firstCreatedDir: string | undefined)
   return dirs;
 }
 
-type LockOutcome = { ok: true; path: string } | { ok: false; error: AppendError };
+type LockOutcome =
+  | { ok: true; own: OwnLock; reclaimed?: ReclaimNote }
+  | { ok: false; error: AppendError };
 
 /**
  * Acquire `<logPath>.lock` by `open(…, "wx")` — atomic create-or-fail, which
- * needs no dependency and works on every platform Node supports. Retries with
- * a fixed delay until `timeoutMs` elapses, then reports `lock-timeout`. A
- * stale lock is never stolen: silently breaking someone else's lock is how two
- * writers end up sharing a `seq`.
+ * needs no dependency and works on every platform Node supports — and write
+ * this process's holder record into it (APRV-479). Retries with a fixed delay
+ * until `timeoutMs` elapses, then reports `lock-timeout`.
+ *
+ * A lock is never stolen from a holder that may be alive: silently breaking
+ * someone else's lock is how two writers end up sharing a `seq`. What changed
+ * with APRV-479 is a holder that is PROVABLY gone. The first time a wait finds
+ * the lock held (once per wait, never per retry) it asks
+ * {@link tryReclaimLock}, which judges the holder record and, only when its
+ * process is gone, removes the lockfile atomically; the create is then tried
+ * again at once. A reclaim that another writer's create beat is ordinary
+ * contention, and the note is kept for whichever create this wait wins, so the
+ * record of the reclaim is still the first thing this writer appends. A lock
+ * that was kept is named, with the reason, in the `lock-timeout` message.
  */
-function acquireLock(logPath: string, timeoutMs: number, retryMs: number): LockOutcome {
+function acquireLock(logPath: string, timeoutMs: number, retryMs: number, op: LockOp): LockOutcome {
   const path = `${logPath}.lock`;
   const deadline = Date.now() + timeoutMs;
+  let judged = false;
+  let reclaimed: ReclaimNote | undefined;
+  let kept: string | undefined;
   for (;;) {
     try {
-      closeSync(openSync(path, "wx"));
-      return { ok: true, path };
+      const own = createLockFile(path, op);
+      return reclaimed === undefined ? { ok: true, own } : { ok: true, own, reclaimed };
     } catch (cause) {
       const code = (cause as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") {
@@ -538,7 +581,16 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number): LockO
           error: { code: "io", message: `lockfile ${path} could not be created: ${errorMessage(cause)}` },
         };
       }
+      if (!judged) {
+        judged = true;
+        const outcome = tryReclaimLock(logPath);
+        if (outcome.kind === "reclaimed") reclaimed = outcome.note;
+        if (outcome.kind === "kept") kept = outcome.why;
+        // Reclaimed, or gone by the time it was read: the create again, now.
+        if (outcome.kind !== "kept") continue;
+      }
       if (Date.now() >= deadline) {
+        const holder = kept === undefined ? "" : ` (${kept})`;
         return {
           ok: false,
           error: {
@@ -548,8 +600,8 @@ function acquireLock(logPath: string, timeoutMs: number, retryMs: number): LockO
             // would read as a writer that never tried.
             message:
               timeoutMs <= 0
-                ? `another writer holds ${path}; this append tried the lock once, as its caller asked, and did not wait`
-                : `another writer holds ${path}; gave up after ${timeoutMs}ms`,
+                ? `another writer holds ${path}; this append tried the lock once, as its caller asked, and did not wait${holder}`
+                : `another writer holds ${path}; gave up after ${timeoutMs}ms${holder}`,
           },
         };
       }
@@ -576,12 +628,16 @@ export function appendLockHeld(logPath: string): boolean {
   return existsSync(`${logPath}.lock`);
 }
 
-function releaseLock(path: string): void {
+/**
+ * Remove this process's own lockfile, and only it (APRV-479: a lockfile that is
+ * not the one this process wrote is somebody else's). Best effort: the lock is
+ * advisory and a failed unlink must not mask the append's own result.
+ */
+function releaseLock(own: OwnLock): void {
   try {
-    unlinkSync(path);
+    releaseLockFile(own);
   } catch {
-    // Best effort: the lock is advisory and a failed unlink must not mask the
-    // append's own result.
+    // As above.
   }
 }
 
@@ -870,7 +926,7 @@ export function withAppendLock<T>(
   run: () => T,
   options: LockOptions = {},
 ): LockedResult<T> {
-  return lockedRun(logPath, () => run(), options);
+  return lockedRun(logPath, () => run(), options, "hold");
 }
 
 /**
@@ -882,6 +938,7 @@ function lockedRun<T>(
   logPath: string,
   run: (firstCreatedDir: string | undefined) => T,
   options: LockOptions,
+  op: LockOp,
 ): LockedResult<T> {
   let firstCreatedDir: string | undefined;
   try {
@@ -896,18 +953,81 @@ function lockedRun<T>(
     };
   }
 
-  const lock = acquireLock(
-    logPath,
-    options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
-    options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
-  );
-  if (!lock.ok) return { ok: false, error: lock.error };
-
+  // Before the lockfile exists, so no default-disposition signal can kill this
+  // process between creating it and removing it (APRV-479).
+  const releaseGuard = guardTerminationWhileLocked();
+  let reclaimWrote = false;
   try {
-    return { ok: true, value: run(firstCreatedDir) };
+    const lock = acquireLock(
+      logPath,
+      options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
+      options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
+      op,
+    );
+    if (!lock.ok) return { ok: false, error: lock.error };
+
+    try {
+      if (lock.reclaimed !== undefined) {
+        const recorded = appendReclaimRecord(logPath, lock.reclaimed, firstCreatedDir);
+        reclaimWrote = recorded.wrote;
+        if (!recorded.result.ok) return { ok: false, error: recorded.result.error };
+      }
+      return { ok: true, value: run(firstCreatedDir) };
+    } finally {
+      releaseLock(lock.own);
+    }
   } finally {
-    releaseLock(lock.path);
+    releaseGuard();
+    if (reclaimWrote) noteAppend(logPath);
   }
+}
+
+/**
+ * The record of a reclaimed lock (APRV-479), appended as the first write under
+ * the lock that followed the reclaim: before the caller's own read of the tail,
+ * so the caller's compare-and-append sees it as the moved head it is. Written
+ * through the same path as every other record, with no head precondition (it
+ * decides nothing from the log) and the same daemon stamp. It authorizes
+ * nothing and nothing reads it to decide anything.
+ *
+ * When it cannot be appended the caller's operation is refused with the
+ * writer's own error and the lock is released: a reclaim this writer could not
+ * record is one it does not build on. The lockfile is gone by then, so the next
+ * writer proceeds without a record; that happens only when the log takes no
+ * record at all (a corrupt tail, a full disk, a daemon refused its id), which
+ * every later writer will meet in turn.
+ */
+function appendReclaimRecord(
+  logPath: string,
+  note: ReclaimNote,
+  firstCreatedDir: string | undefined,
+): { result: AppendResult; wrote: boolean } {
+  const stamp = daemonStampForAppend();
+  if (stamp.kind === "refuse") return { result: fail(stamp.code, stamp.message), wrote: false };
+  const payload: Record<string, unknown> = {
+    lockfile: note.lockfile,
+    reason: note.reason,
+    age_ms: note.age_ms,
+  };
+  if (note.holder !== undefined) payload["holder"] = { ...note.holder };
+  const recorded = appendUnderLock(
+    logPath,
+    { ts: systemClock(), event: "audit.lock_reclaimed", actor: "system:log", payload },
+    {},
+    firstCreatedDir,
+    stamp.kind === "stamp" ? stamp.id : null,
+  );
+  if (recorded.result.ok) return recorded;
+  return {
+    result: {
+      ok: false,
+      error: {
+        ...recorded.result.error,
+        message: `${recorded.result.error.message} (this writer reclaimed ${note.lockfile} from a holder that is gone, ${note.why}, and could not record the reclaim, so it appended nothing)`,
+      },
+    },
+    wrote: recorded.wrote,
+  };
 }
 
 /**
@@ -961,7 +1081,41 @@ export function appendEvent(
   // must re-prove a log whose bytes changed even when the append then failed to
   // confirm them durable.
   let wrote = false;
-  const held = lockedRun<AppendResult>(logPath, (firstCreatedDir) => {
+  const held = lockedRun<AppendResult>(
+    logPath,
+    (firstCreatedDir) => {
+      const appended = appendUnderLock(logPath, input, options, firstCreatedDir, daemon);
+      wrote = appended.wrote;
+      return appended.result;
+    },
+    options,
+    "append",
+  );
+
+  const result: AppendResult = held.ok ? held.value : { ok: false, error: held.error };
+  // After the lock is released, for every append that put bytes in the file:
+  // the reader cache must not serve a prefix proof anchored before this write.
+  if (wrote) noteAppend(logPath);
+  return result;
+}
+
+/**
+ * One append, with `<logPath>.lock` already held by this process: read the
+ * tail, compare the head, build, validate, write, fsync. The body of
+ * {@link appendEvent}, shared with the reclaim record (APRV-479) so that record
+ * goes through every check any other record does. `wrote` says whether bytes
+ * may have reached the file, success or not.
+ */
+function appendUnderLock(
+  logPath: string,
+  input: EventInput,
+  options: AppendOptions,
+  firstCreatedDir: string | undefined,
+  daemon: string | null,
+): { result: AppendResult; wrote: boolean } {
+  let wrote = false;
+  const done = (result: AppendResult): { result: AppendResult; wrote: boolean } => ({ result, wrote });
+  const run = (): AppendResult => {
     const tail = readTail(logPath);
     if (!tail.ok) return { ok: false, error: tail.error };
 
@@ -1061,11 +1215,6 @@ export function appendEvent(
     }
 
     return { ok: true, record, line };
-  }, options);
-
-  const result: AppendResult = held.ok ? held.value : { ok: false, error: held.error };
-  // After the lock is released, for every append that put bytes in the file:
-  // the reader cache must not serve a prefix proof anchored before this write.
-  if (wrote) noteAppend(logPath);
-  return result;
+  };
+  return done(run());
 }

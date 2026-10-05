@@ -112,6 +112,38 @@ before a tag.
   gated image's `shell_hooks` patch is there to cover on Hermes's side
   (docs/hermes-hook.md, "Two layers against a signal").
 
+### Log
+
+- **A lock left by a writer that died holding it is reclaimed, and only from a
+  holder that is provably gone (APRV-479).** `events.jsonl.lock` was never
+  stolen, so a writer killed mid-append (a hook under SIGTERM with no listener,
+  any verb under SIGKILL, a Hermes gateway restart) wedged every later writer on
+  `append-failed` / `lock-timeout`, the daemon included, until a human removed
+  the file. The lockfile now carries its holder's record (pid, host, boot, on
+  Linux the pid namespace and process start time, when, which kind of holder, a
+  nonce). A writer that finds it held judges the holder once per wait: on Linux
+  by `/proc/<pid>/stat` (absent, a zombie, or a different start time) in the
+  same boot and pid namespace; on macOS and elsewhere by `kill(pid, 0)` on the
+  same host, a running pid being taken as the holder. A lock whose holder is
+  gone is removed atomically (an exclusive `link(2)` claim keyed by its inode,
+  identity re-checked, renamed aside, re-checked) and the writer then takes the
+  lock with the usual `wx` create and appends a new audit-tier record,
+  `audit.lock_reclaimed` (`system:log`; lockfile, reason, age, holder pid and
+  kind), before its own record, whose compare-and-append then sees the moved
+  head. A live holder's lock is never taken, however old, and neither is one this
+  process cannot check (another host, another container, a newer record
+  format); a lockfile with no holder record is taken only once it is ten minutes
+  old; a lock beside a `log sync` snapshot or an absent log is kept. The
+  `lock-timeout` message now names the holder and why its lock was kept. A
+  process that holds the lock with no listener for SIGTERM, SIGINT or SIGHUP
+  gets a listener for that span, so such a signal waits for the release and
+  then kills the process as before. Schema change: the closed event enum gains
+  `audit.lock_reclaimed` (thirty-five types; `schema-validation` vectors
+  2.10.0). SPEC.md §8 and §11.1 wording is proposed in the task notes, pending
+  sign-off. Behavior change for older writers: a lockfile an older version left
+  (empty) is reclaimed after ten minutes, and an older writer still holding one
+  that long would lose it.
+
 ## 0.4.0 — 2026-10-04
 
 Written on 2026-10-04 against `main` at `70979abe`, 239 non-merge commits after

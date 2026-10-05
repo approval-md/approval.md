@@ -1273,6 +1273,22 @@ the log.
   already recorded and the rest unspent: the same outcome as a spend that fails
   on a later class, and nothing is recorded after the signal.
 
+Neither stretch can leave the log's lock behind any more (APRV-479). A process
+that holds `events.jsonl.lock` (the requests' appends before the wait, the
+spend) and has no listener for SIGTERM, SIGINT or SIGHUP gets one for as long as
+it holds the lock: a signal there waits until the append is done and the
+lockfile removed, and the process then dies of it as it would have, one append
+later. SIGKILL cannot be caught, and a hook killed by it mid-append still leaves
+the lockfile, so the lockfile now names its holder (pid, host, boot, and on Linux
+the pid namespace and start time) and the next writer that finds it takes it
+back when that holder is provably gone: on Linux by its start time, elsewhere by
+`kill(pid, 0)` on the same host. The reclaim is recorded as
+`audit.lock_reclaimed` before that writer's own record, and a live holder's
+lock, or one this process cannot check (another host, another container), is
+never taken; that writer still times out and its refusal names the holder. Until
+then every writer refused `lock-timeout` and the gate stayed wedged until a
+human removed the file.
+
 What Claude Code does with a hook it killed on its own timeout is its own rule
 (see "When the grant can follow the write" below); `--harness-cap` is what keeps
 the hook answering before that kill.
