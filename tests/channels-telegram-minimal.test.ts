@@ -80,8 +80,10 @@ after(() => scratch.cleanup());
 // read at origin/main 220985b (2026-10-05) and at PR #82's head 20a18d1
 // (branch carter/DATA-324-relay-readiness, which tightens the review-card and
 // ForceReply rules). The constants below are identical in both versions except
-// where noted. If the relay changes them, these copies go stale on purpose: the
-// test then pins what core was checked against.
+// where noted. Re-read at origin/main 998093d (2026-10-05, PR #82 merged as
+// 102a5e7, then #81): the review-card, keyboard, note-prompt, markup and ttl
+// rules are unchanged from PR #82's head. If the relay changes them, these
+// copies go stale on purpose: the test then pins what core was checked against.
 
 /** quiet.js `TTL_LINE` (both versions): the quiet hold needs EXACTLY ONE match. */
 const RELAY_TTL_LINE =
@@ -369,48 +371,141 @@ test("a technical card keeps the Reject label; only a minimal card says Deny, an
   assert.equal(mini.length, 1, "a minimal card carries one row: no Defer, no Details button");
 });
 
-test("review cards and the note prompt are byte-identical under both styles, and the relay still reads them (requirement 6a)", async () => {
-  const card: ReviewCard = {
-    sampleSeq: 7,
+/**
+ * A review card as core builds it since PR #614 (APRV-480): the sampled
+ * execution's payload travels with it, so the card draws a payload region. The
+ * `bytes` card shows the bytes whole; the `hash` card names a binding nobody
+ * holds the bytes for.
+ */
+function reviewCardOf(view: "bytes" | "hash", sampleSeq: number): ReviewCard {
+  const value = { command: "curl https://example.org", cwd: "/home/hermes" };
+  return {
+    sampleSeq,
     fields: {
-      action_key: computed("hook:s1:tc4:network.call", "log"),
+      action_key: computed(`hook:s1:tc${String(sampleSeq)}:network.call`, "log"),
       class: computed("network.call", "log"),
       task: computed(null, "log"),
       summary: claimed("Terminal: curl …", AGENT),
       command_breakdown: computed("curl https://example.org", "classifier"),
+      fullPayload: computed(
+        view === "bytes"
+          ? { value, text: JSON.stringify(value, null, 2), hash: payloadHash(value), truncated: false }
+          : null,
+        "payload-binding",
+      ),
+      payload_hash: computed(payloadHash(value), "log"),
     },
     ranAt: computed("ran 2 min ago (seq 6)", "log"),
     ranAtTs: "2026-10-05T10:00:00.000Z",
     verdict: computed("allowed without asking (supervised-retro, rate 0.1)", "policy-match"),
   };
-  const runs: Sent[][] = [];
-  for (const style of [undefined, "minimal"] as const) {
-    const { channel, sent } = recordingChannel({
-      ...(style === undefined ? {} : { promptStyle: style, say: VILLAGE_SAY }),
-      layout: TTL_ALWAYS,
-    });
-    channel.onReview(() => ({ ok: true, headline: "✓ REVIEWED", detail: [], toast: "ok" }));
-    await channel.offerReview(card);
-    // A loved tap asks for the note first, through the ForceReply prompt.
+}
+
+/**
+ * The runtime as PR #614 made it (APRV-482): a tap with no verdict is refused
+ * `verdict-required`, which is what lets the card hold a grade or arm a Deny;
+ * a tap with one records.
+ */
+function reviewRuntime(tap: { verdict?: string }): {
+  ok: boolean;
+  headline: string;
+  detail: string[];
+  toast: string;
+  code?: string;
+} {
+  return tap.verdict === undefined
+    ? {
+        ok: false,
+        code: "verdict-required",
+        headline: "✗ NOT RECORDED",
+        detail: ["verdict-required: a review needs an explicit OK or Deny"],
+        toast: "Not recorded",
+      }
+    : { ok: true, headline: "✓ REVIEWED", detail: [], toast: "ok" };
+}
+
+/** Every Bot API call one review flow makes, under one style. */
+async function reviewFlow(
+  style: "minimal" | "technical" | undefined,
+  card: ReviewCard,
+  taps: readonly ("ok" | "deny" | "disliked" | "indifferent" | "liked" | "loved")[],
+): Promise<Sent[]> {
+  const { channel, sent } = recordingChannel({
+    ...(style === undefined ? {} : { promptStyle: style, say: VILLAGE_SAY }),
+    layout: TTL_ALWAYS,
+  });
+  channel.onReview(reviewRuntime);
+  await channel.offerReview(card);
+  let update = 0;
+  for (const choice of taps) {
+    update += 1;
     await channel.deliverUpdate({
-      update_id: 1,
+      update_id: update,
       callback_query: {
-        id: "cb-1",
+        id: `cb-${String(update)}`,
         from: { id: 42 },
         message: { message_id: 501, chat: { id: 9911 } },
-        data: reviewCallbackData("loved", "n1"),
+        data: reviewCallbackData(choice, "n1"),
       },
     });
-    runs.push(sends(sent));
   }
-  assert.deepEqual(runs[1], runs[0], "minimal style changed a review card or the note prompt");
-  const [cardSend, notePrompt] = runs[0] ?? [];
-  assert.ok(
-    relayReviewCardOf(textOf(cardSend), cardSend?.body["parse_mode"], cardSend?.body["reply_markup"]),
-    "the relay would no longer read core's review card as one",
-  );
-  assert.match(textOf(notePrompt), RELAY_NOTE_PROMPT, "the note prompt left the relay's accepted shape");
-  assert.deepEqual(notePrompt?.body["reply_markup"], { force_reply: true });
+  return sent;
+}
+
+test("review cards and the note prompt are byte-identical under both styles, and the relay still reads them (requirement 6a, after PR #614)", async () => {
+  // Since PR #614 a lone grade is held (the runtime answers verdict-required)
+  // and the note prompt is asked when the verdict follows; a first Deny arms
+  // only on the same answer. Each flow is run with no style key, `technical`
+  // and `minimal`, and every call (sends, redraws, toasts) must be identical.
+  const flows = [
+    { name: "held loved, then OK", card: reviewCardOf("bytes", 7), taps: ["loved", "ok"], prompt: ["LOVED", "ok"] },
+    { name: "armed Deny, then disliked", card: reviewCardOf("bytes", 8), taps: ["deny", "disliked"], prompt: ["DISLIKED", "denied"] },
+    { name: "held disliked, then OK (hash-only card)", card: reviewCardOf("hash", 9), taps: ["disliked", "ok"], prompt: ["DISLIKED", "ok"] },
+    { name: "held liked, then OK, no prompt", card: reviewCardOf("bytes", 10), taps: ["liked", "ok"], prompt: null },
+  ] as const;
+  for (const flow of flows) {
+    const runs: Sent[][] = [];
+    for (const style of [undefined, "technical", "minimal"] as const) {
+      runs.push(await reviewFlow(style, flow.card, flow.taps));
+    }
+    assert.deepEqual(runs[1], runs[0], `${flow.name}: technical changed a review card or the note prompt`);
+    assert.deepEqual(runs[2], runs[0], `${flow.name}: minimal changed a review card or the note prompt`);
+
+    const all = runs[0] ?? [];
+    const [cardSend, notePrompt, ...extra] = sends(all);
+    assert.ok(
+      relayReviewCardOf(textOf(cardSend), cardSend?.body["parse_mode"], cardSend?.body["reply_markup"]),
+      `${flow.name}: the relay would no longer read core's review card as one`,
+    );
+    // The card is PR #614's: its payload region is under the relay's three lines.
+    assert.match(textOf(cardSend), /\n<b>PAYLOAD — /u, `${flow.name}: the card carries no payload region`);
+    // Every redraw keeps core's keyboard under the same nonce, or drops it on settle.
+    for (const edit of all.filter((entry) => entry.method === "editMessageText")) {
+      const markup = edit.body["reply_markup"];
+      if (markup === undefined) continue;
+      assert.ok(
+        relayReviewCardOf(`${RELAY_REVIEW_HEADING}\n<code>k</code>\n`, "HTML", markup),
+        `${flow.name}: a redraw changed the review keyboard`,
+      );
+    }
+    if (flow.prompt === null) {
+      assert.equal(notePrompt, undefined, `${flow.name}: a grade that needs no words asked for some`);
+      continue;
+    }
+    assert.equal(extra.length, 0, `${flow.name}: more than one note prompt`);
+    const matched = RELAY_NOTE_PROMPT.exec(textOf(notePrompt));
+    assert.ok(matched !== null, `${flow.name}: the note prompt left the relay's accepted shape`);
+    assert.deepEqual([matched[1], matched[2]], [...flow.prompt], `${flow.name}: the prompt names another grade or verdict`);
+    assert.equal(matched[3], flow.card.fields.action_key.value);
+    assert.deepEqual(notePrompt?.body["reply_markup"], { force_reply: true });
+    assert.deepEqual(Object.keys(notePrompt?.body ?? {}).sort(), [
+      "chat_id",
+      "disable_web_page_preview",
+      "parse_mode",
+      "reply_markup",
+      "text",
+    ]);
+  }
 });
 
 // ---------------------------------------------------------------------------
