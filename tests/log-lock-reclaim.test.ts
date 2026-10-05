@@ -945,9 +945,15 @@ test("judgeHolder: the decision table on Linux and elsewhere", () => {
   }
 });
 
-test("procIsOwnNamespace: /proc is trusted only when /proc/self names this process", () => {
-  assert.equal(procIsOwnNamespace(() => "8", 8), true);
-  assert.equal(procIsOwnNamespace(() => "15", 8), false);
+test("procIsOwnNamespace: /proc is trusted only when /proc/self names this process and NSpid has exactly that one field", () => {
+  const status = (nspid: string | null) => (): string => `Name:\tnode\nPid:\t8\n${nspid === null ? "" : `NSpid:\t${nspid}\n`}`;
+  assert.equal(procIsOwnNamespace(() => "8", 8, status("8")), true);
+  assert.equal(procIsOwnNamespace(() => "15", 8, status("8")), false);
+  // R3-9: the same number in the parent's procfs and in the reader's own
+  // namespace: /proc/self agrees, NSpid shows two namespaces.
+  assert.equal(procIsOwnNamespace(() => "8", 8, status("8\t8")), false);
+  assert.equal(procIsOwnNamespace(() => "8", 8, status("12\t8")), false);
+  assert.equal(procIsOwnNamespace(() => "8", 8, status(null)), false, "no NSpid line proves nothing");
   assert.equal(
     procIsOwnNamespace(() => {
       throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
@@ -1502,4 +1508,21 @@ test("two uids: a lockfile only its owner or root may link (fs.protected_hardlin
   assert.deepEqual(readFileSync(`${logPath}.lock`), lockBytes, "the lock is untouched");
   assert.deepEqual(residue(logPath), [], "the daemon's own lockfile went with its failed claim");
   assert.deepEqual(events(logPath), ["task.registered"]);
+});
+
+test("NSpid on real Linux: one field in this container's own namespace, two in a child namespace reading the parent's /proc, even when /proc/self is made to agree (R3-9)", { skip: PRIVILEGED }, () => {
+  assert.equal(procIsOwnNamespace(), true, "this container's own /proc");
+  const base = mkdtempSync(join(tmpdir(), "approval-md-lock-nspid-"));
+  const probe = join(base, "nspid.mjs");
+  writeFileSync(
+    probe,
+    [
+      `import { procIsOwnNamespace } from ${JSON.stringify(LOCK_MODULE)};`,
+      // /proc/self is stubbed to agree (the pid coincidence); NSpid is the real one.
+      `console.log(JSON.stringify({ coincidence: procIsOwnNamespace(() => String(process.pid)), real: procIsOwnNamespace() }));`,
+    ].join("\n"),
+  );
+  const run = spawnSync("unshare", ["--pid", "--fork", process.execPath, probe], { encoding: "utf8" });
+  assert.equal(run.status, 0, `unshare: ${run.stderr}`);
+  assert.deepEqual(JSON.parse(run.stdout.trim()), { coincidence: false, real: false });
 });

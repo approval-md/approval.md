@@ -309,14 +309,24 @@ export const NODE_LIVENESS_PROBE: LivenessProbe = {
 /**
  * Is `/proc` this process's own pid namespace's procfs? `/proc/self` resolves
  * to the reader's pid as THAT procfs numbers it, so it names `process.pid` only
- * when the procfs belongs to the namespace `process.pid` was issued in.
+ * when the procfs belongs to the namespace `process.pid` was issued in, or when
+ * the pid happens to be the same number in both (APRV-479 R3-9). So the
+ * `NSpid:` line of `/proc/self/status` must also hold exactly one field, this
+ * pid: it lists the pid in every namespace from the procfs's own down to the
+ * reader's, and one field means they are the same namespace. A kernel without
+ * the line (before 4.1) proves nothing, and every holder is then live.
  */
 export function procIsOwnNamespace(
   read: (path: string) => string = (path) => readlinkSync(path, "utf8"),
   pid: number = process.pid,
+  status: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
   try {
-    return read("/proc/self") === String(pid);
+    if (read("/proc/self") !== String(pid)) return false;
+    const line = status("/proc/self/status").split("\n").find((text) => text.startsWith("NSpid:"));
+    if (line === undefined) return false;
+    const fields = line.slice("NSpid:".length).trim().split(/\s+/u);
+    return fields.length === 1 && fields[0] === String(pid);
   } catch {
     return false;
   }
