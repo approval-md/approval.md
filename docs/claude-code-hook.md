@@ -1185,10 +1185,11 @@ second retry after the grant has been spent is refused through the ordinary path
 it files a fresh request and waits like any other.
 
 **What still withdraws.** Every path where nothing can adopt the question: a
-`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending), an
-unexpected failure mid-wait, and an intake refusal partway through a multi-class
-command. Withdrawal remains requester-only, so an adopted request is never
-withdrawn by the process that adopted it.
+`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending; see
+"When a signal ends the wait" below), an unexpected failure mid-wait, and an
+intake refusal partway through a multi-class command. Withdrawal remains
+requester-only, so an adopted request is never withdrawn by the process that
+adopted it.
 
 **What the human sees.** A pending prompt stays live and keeps its buttons until
 it is answered or the TTL lapses, and every terminal state still annotates the
@@ -1198,6 +1199,50 @@ reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is 
 deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
+
+### When a signal ends the wait (APRV-475)
+
+A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
+Claude Code has stopped waiting for this tool call: its own hook timeout, the
+session ending, a Ctrl-C. The hook ends the wait at once, in this order:
+
+1. the question this invocation opened is withdrawn (`approval.withdrawn`,
+   reason `cancelled`, the note naming the signal);
+2. stdout carries Claude Code's ordinary deny,
+   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`;
+3. the process exits 0, the code at which Claude Code reads that verdict. If
+   stdout cannot take the whole line (a closed pipe, a short write), it exits 2
+   instead, which Claude Code reads as a blocking error on its own.
+
+A grant that arrives afterwards is refused `request-withdrawn`, and nothing
+records `execution.started` for the call. If the human's grant landed in the log
+first, between two polls, the withdrawal is refused `already-decided` and writes
+nothing over the decision; the hook still denies and the grant stays unspent, so
+a retry inside the grace can carry it like any grant. A question this invocation
+adopted from an earlier tool call is left alone, because a withdrawal belongs to
+the requester.
+
+Until APRV-475 the wait was a synchronous poll, so a signal was held until the
+wait returned, and a grant that landed meanwhile was recorded as the start of a
+call Claude Code had abandoned. The pauses between polls now run on the event
+loop, on the same `--interval` cadence and inside the same `--timeout`, so a
+signal is dispatched within one pause. The hook also passes through a poll phase
+of the loop before it records the spend of a grant the wait found, so a signal
+that landed while the poll read that grant is answered with the deny before
+anything is spent. That pause is the same code for every harness this runtime
+gates (`BEFORE_SPEND` in `src/cli/hook.ts`); `docs/hermes-hook.md` explains why
+it is two `setImmediate` hops.
+
+Two stretches are outside that rule, and both stay safe. Before the wait the
+hook registers no signal listener, so a signal there ends the process at once by
+its default disposition, with nothing printed and nothing spent (a request
+already opened stays open as a timed-out one does, under the retry grace
+below). And the spend
+itself, from that last pause until its record lands plus the verification read
+after it, is synchronous: a signal there is answered by the verdict the hook
+already reached. What Claude Code does with a hook it killed on its own timeout
+is its own rule (see "When the grant can follow the write" below);
+`--harness-cap` is what keeps the hook answering before that kill.
 
 ### How long the question outlives the wait (APRV-287)
 

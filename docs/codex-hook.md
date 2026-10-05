@@ -131,6 +131,32 @@ whose enforcement does not depend on this hook. APRV-349 asks separately whether
 the app-server approval protocol can bind what the hook cannot; see
 [docs/codex-app-server-bridge.md](codex-app-server-bridge.md).
 
+## When a signal ends the wait (APRV-475)
+
+A direct `apply_patch` under a manual class waits on a human (Bash never gets
+that far). A `SIGTERM` or `SIGINT` that reaches the hook during that wait means
+Codex has stopped waiting for the call, and the hook ends the wait at once: it
+withdraws the question this invocation opened (`approval.withdrawn`, reason
+`cancelled`, the note naming the signal), prints the ordinary Codex deny,
+`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`
+with no `updatedInput`, and exits 0, the code at which the observed Codex
+release reads that verdict. If stdout cannot take the whole line it exits 2; the
+observed-version evidence does not record how Codex reads exit 2 with an empty
+stdout, so treat that fallback as unverified, like the crash and timeout rows
+above.
+
+A grant that arrives afterwards is refused `request-withdrawn`, and nothing
+records `execution.started` for the call. A grant that landed first, between two
+polls, is left standing and unspent (the withdrawal is refused
+`already-decided`), and the hook still denies. The pauses between polls run on
+the event loop on the same cadence and inside the same `--timeout`, and the hook
+passes through a poll phase of the loop before it spends a grant the wait found,
+the same code for every harness; `docs/claude-code-hook.md` ("When a signal ends
+the wait") states the two stretches outside the rule. The app-server bridge
+(`docs/codex-app-server-bridge.md`) runs the same gate steps synchronously and
+is unchanged: it is a long-lived process, and a client that leaves it arrives
+there as a protocol event.
+
 ## The post-execution phase
 
 `PostToolUse` never appends an outcome on Codex, and it prints no permission

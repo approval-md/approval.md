@@ -34,6 +34,24 @@ before a tag.
 
 ### Harnesses
 
+- **Every harness hook: a SIGTERM mid-wait withdraws the question, answers in
+  that harness's own deny, and a grant after the harness gave up starts nothing
+  (APRV-475).** `approval hook claude-code`, `cursor`, `codex`, `grok` and
+  `muse` now drive their wait through the same yielding driver Hermes got in
+  APRV-473, so a SIGTERM or SIGINT during the wait reaches the wait's handler
+  within one poll instead of being held until the wait returned (when a grant
+  that landed meanwhile was recorded as `execution.started` for a call the
+  harness had abandoned). The handler withdraws the question this invocation
+  opened and prints the harness's ordinary deny under the `hook-interrupted`
+  code, at that harness's deny exit code: the nested `hookSpecificOutput` deny
+  at exit 0 for Claude Code, Codex and Muse, `{permission:"deny"}` at exit 0 for
+  Cursor, `{decision:"deny"}` at exit 2 for Grok. Before, these five exited 2
+  with nothing on stdout. A short or failed write of the directive exits 2. A
+  later grant is refused `request-withdrawn`; a grant that landed first is left
+  unspent. The pause before every spend is the one APRV-473 added, shared by
+  all six harnesses. Same poll cadence, same `--timeout`. A signal before the
+  wait still takes the default disposition on these five (APRV-477 tracks a
+  guard for it).
 - **`approval hook hermes`: a SIGTERM mid-wait withdraws the question, and a
   grant after Hermes gave up starts nothing (APRV-473).** The CLI hook run was
   synchronous end to end, so a SIGTERM during the wait (Hermes's own hook
@@ -45,9 +63,10 @@ before a tag.
   `hook-interrupted` block directive and exits 2, and a later grant is refused
   `request-withdrawn`. The hook also passes through a poll phase of the loop
   before every `execution.started` or `gate.bypassed` append, so a signal held
-  through the stdin read blocks instead of spending. Other harnesses, `approval serve` and the Codex bridge
-  run the same steps synchronously, unchanged; serve already noticed a departed
-  client at every poll and never spent a grant on its call.
+  through the stdin read blocks instead of spending. `approval serve` and the
+  Codex bridge run the same steps synchronously, unchanged (the other CLI
+  harnesses followed in APRV-475); serve already noticed a departed client at
+  every poll and never spent a grant on its call.
 - **`approval hook hermes`: a signal while the runtime is still loading no
   longer kills the hook silently (APRV-466).** The runtime's SIGTERM/SIGINT
   guard exists only once `dist/` has loaded, so a signal during that load

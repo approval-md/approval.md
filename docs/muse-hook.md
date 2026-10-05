@@ -193,6 +193,34 @@ than assumed either way.
   before, which is not a gated one.
 - The harness failing open, per the table above.
 
+## When a signal ends the wait (APRV-475)
+
+A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
+Muse has stopped waiting for the call. The hook ends the wait at once: it
+withdraws the question this invocation opened (`approval.withdrawn`, reason
+`cancelled`, the note naming the signal), prints the one dialect this adapter
+speaks,
+`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}}`,
+and exits 0, the form the probe measured to block. If stdout cannot take the
+whole line it exits 2 instead; an empty stdout at exit 2 is the third form the
+probe measured to block, and a torn line at exit 2 is unparseable output, which
+Muse ignores like any failed hook. A grant that arrives afterwards is refused
+`request-withdrawn`, and nothing records `execution.started` for the call. A
+grant that landed first, between two polls, is left standing and unspent (the
+withdrawal is refused `already-decided`), and the hook still denies.
+
+The pauses between polls run on the event loop on the same cadence and inside
+the same `--timeout`, and the hook passes through a poll phase of the loop
+before it spends a grant the wait found, the same code for every harness.
+`docs/claude-code-hook.md` ("When a signal ends the wait") states the two
+stretches outside the rule. Before the wait the hook registers no signal
+listener, so a signal there ends the process by its default disposition with
+nothing printed and nothing spent, and Muse treats a hook that died as a failed
+hook and runs the call (the first row of the table above). APRV-477 is the
+follow-up for that stretch. The probe did not record whether Muse signals a hook
+it has stopped waiting for (at its timeout it simply continued); the rule above
+holds whenever a signal does arrive.
+
 ## SPEC status
 
 SPEC.md has not been amended for this adapter, deliberately, and for the same

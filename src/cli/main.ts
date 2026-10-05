@@ -1371,8 +1371,12 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
           return HERMES_HOOK_BLOCK_EXIT;
         }
       }
-      const { commandHook } = await import("./hook.js");
-      return commandHook(rest, streams, cwd);
+      // APRV-475. Every other harness hook waits the same way: a SIGTERM or
+      // SIGINT mid-wait reaches the wait's handler, which withdraws the
+      // question this invocation opened and prints that harness's own block
+      // directive. `classify` runs through the same driver and never pauses.
+      const { commandHookYielding } = await import("./hook.js");
+      return await commandHookYielding(rest, streams, cwd);
     }
     // The interoperability verb (APRV-64). `import agents-md` reads permissions
     // PROSE and prints a draft policy block. It is the only verb whose output is

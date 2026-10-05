@@ -572,10 +572,11 @@ second retry after the grant has been spent is refused through the ordinary path
 it files a fresh request and waits like any other.
 
 **What still withdraws.** Every path where nothing can adopt the question: a
-`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending), an
-unexpected failure mid-wait, and an intake refusal partway through a multi-class
-command. Withdrawal remains requester-only, so an adopted request is never
-withdrawn by the process that adopted it.
+`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending; see
+"When a signal ends the wait" below), an unexpected failure mid-wait, and an
+intake refusal partway through a multi-class command. Withdrawal remains
+requester-only, so an adopted request is never withdrawn by the process that
+adopted it.
 
 **What the human sees.** A pending prompt stays live and keeps its buttons until
 it is answered or the TTL lapses, and every terminal state still annotates the
@@ -585,6 +586,32 @@ reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is 
 deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
+
+### When a signal ends the wait (APRV-475)
+
+A `SIGTERM` or `SIGINT` that reaches the hook while it waits on a human means
+Cursor has stopped waiting for this tool call. The hook ends the wait at once:
+it withdraws the question this invocation opened (`approval.withdrawn`, reason
+`cancelled`, the note naming the signal), prints Cursor's ordinary deny,
+
+```json
+{"permission":"deny","user_message":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call","agent_message":"hook-interrupted: the hook received SIGTERM while waiting for a decision; nothing authorizes this call"}
+```
+
+and exits 0, the code at which Cursor reads that verdict. If stdout cannot take
+the whole line it exits 2 instead, which the required `failClosed: true` turns
+into a block. A grant that arrives afterwards is refused `request-withdrawn`,
+and nothing records `execution.started` for the call. A grant that landed first,
+between two polls, is left standing and unspent (the withdrawal is refused
+`already-decided`), and the hook still denies.
+
+The pauses between polls run on the event loop, on the same cadence and inside
+the same `--timeout`, and the hook passes through a poll phase of the loop
+before it spends a grant the wait found. That is the same code for every
+harness; `docs/claude-code-hook.md` ("When a signal ends the wait") states the
+two stretches outside the rule. Before the wait a signal ends the process by its
+default disposition, with nothing spent, and `failClosed` blocks the call; a
+signal during the spend's own append is answered by the verdict already reached.
 
 ### No token is minted for a hook grant
 
