@@ -20,7 +20,8 @@ before a tag.
 - **Supervised-retro review hardening (PR #614 refutation, APRV-480..483).**
   An attested policy that does not load is refused with the new audit code
   `policy-invalid` instead of reading as "no roster". `audit.sampled` now
-  pins the attested policy in force (`payload.policy_sha256`, required on new
+  pins the attested policy its execution ran under (`payload.policy_sha256`,
+  the latest attestation before the `execution.started`; required on new
   records, widened for old ones), and a review reads its roster only from bytes
   hashing to that pin; a class matching no rule there is refused
   `actor-not-approver`. New reviews carry `payload.verdict_source:

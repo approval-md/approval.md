@@ -608,13 +608,16 @@ export function sampleSupervised(
     );
     if (next === undefined) break;
 
-    // PR #614 refutation F2. The sample pins the attested policy in force as it
-    // is taken, so the review is held to the roster of the policy the action
-    // was sampled under and not to whatever a later attestation says. A log
-    // with no attestation cannot have run a supervised action (the executor
-    // refuses `policy-not-attested` on that path), so meeting one here is a fact
-    // about the log an operator must look at, never a sample written unpinned.
-    const policySha256 = latestAttestedSha256(read.records);
+    // PR #614 refutation F2, recheck NF-3. The sample pins the attested policy
+    // the action RAN under (see `executionPolicySha256`), so the review is held
+    // to that policy's roster and not to one attested between the execution and
+    // this sweep. Only an execution older than every attestation in the log
+    // falls back to the latest attestation, the reading before NF-3. A log with
+    // no attestation cannot have run a supervised action (the executor refuses
+    // `policy-not-attested` on that path), so meeting one here is a fact about
+    // the log an operator must look at, never a sample written unpinned.
+    const policySha256 =
+      executionPolicySha256(read.records, next) ?? latestAttestedSha256(read.records);
     if (policySha256 === null) {
       refusals.push(
         refuse(
@@ -659,6 +662,37 @@ function latestAttestedSha256(records: readonly EventRecord[]): string | null {
   return null;
 }
 
+/**
+ * The attested policy the sampled execution ran under, or `null` when the log
+ * cannot say (PR #614 recheck NF-3).
+ *
+ * The latest attestation BEFORE the execution's seq. The log is append-only,
+ * so the attestations before a record's seq are exactly the ones that existed
+ * when it was written, and the latest of them is the policy in force at that
+ * append. That is the value the gate stamps on a harness `execution.started`
+ * (APRV-447: the attestation its write boundary checked, under the same
+ * compare-and-append), so the two agree by construction; reading it from the
+ * log rather than from the stamp also covers the starts no stamp is written on
+ * (`approval run`'s path, and every start older than APRV-447). `null` only
+ * for an execution older than every attestation in the log; the caller then
+ * pins the latest one, the reading samples had before NF-3.
+ *
+ * Read from verified records only, at the moment the sample is drawn, and
+ * never from a caller: the pin is a runtime-written fact about the log.
+ */
+function executionPolicySha256(
+  records: readonly EventRecord[],
+  candidate: AuditCandidate,
+): string | null {
+  let before: string | null = null;
+  for (const record of records) {
+    if (record.seq >= candidate.seq) break;
+    const sha = attestationSha256(record);
+    if (sha !== null) before = sha;
+  }
+  return before;
+}
+
 function appendSample(
   logPath: string,
   candidate: AuditCandidate,
@@ -688,8 +722,9 @@ function appendSample(
     // was in force.
     rate: sampler.rateFor(candidate.class).rate ?? sampler.rate,
     autonomy: "supervised",
-    // PR #614 refutation F2: the attested policy in force as the sample was
-    // taken. Its review reads the class's roster from these bytes only.
+    // PR #614 refutation F2, recheck NF-3: the attested policy the sampled
+    // execution ran under. Its review reads the class's roster from these
+    // bytes only.
     [POLICY_HASH_FIELD]: policySha256,
   };
 
@@ -1080,8 +1115,9 @@ export function reviewSample(
  *
  * - the policy is read ONCE from the file a grant would read
  *   (`core/gate.ts` `policyPathOf`), its bytes must be the policy the sample
- *   pinned (PR #614 refutation F2; for an unpinned pre-fix sample, the latest
- *   attestation's), and the roster is parsed from those same bytes, so neither
+ *   pinned, the one its execution ran under (PR #614 refutation F2, recheck
+ *   NF-3; for an unpinned pre-fix sample, the latest attestation's), and the
+ *   roster is parsed from those same bytes, so neither
  *   an edited file, an unreadable one, a later re-attestation, nor a
  *   `--policy` pointed elsewhere can supply the roster;
  * - a class that matches no rule in that policy is refused
@@ -1113,10 +1149,11 @@ function reviewerRoster(
       subject,
     );
   }
-  // PR #614 refutation F2 (ruling): the roster is the one in force when the
-  // action was SAMPLED. A sample that pinned its policy is reviewed only
-  // against bytes hashing to that pin, so a later re-attestation that renames
-  // or drops the class's rule cannot leave the sample with no roster; a sample
+  // PR #614 refutation F2 (ruling), recheck NF-3: the roster is the one in
+  // force when the action RAN, which the sample pins. A sample that pinned its
+  // policy is reviewed only against bytes hashing to that pin, so a later
+  // re-attestation that renames, re-rosters or drops the class's rule neither
+  // opens the review to a new reviewer nor leaves it with no roster; a sample
   // written before samples pinned one keeps the latest-attestation reading.
   const attested =
     subject.policySha256 === null
@@ -1179,7 +1216,7 @@ function reviewerRoster(
     return refuse(
       "actor-not-approver",
       `class ${cls} matches no rule in the policy ${
-        subject.policySha256 === null ? "in force" : `the sample at seq ${String(subject.seq)} was taken under (sha256 ${subject.policySha256})`
+        subject.policySha256 === null ? "in force" : `the action sampled at seq ${String(subject.seq)} ran under (sha256 ${subject.policySha256})`
       }, so that policy names no approvers roster for it and no reviewer can be shown to be on one. Under supervised-retro a review is the approval, and a class with no rule would otherwise be approvable by anyone. Nothing was appended.`,
       { seq: subject.seq },
     );
@@ -1201,9 +1238,9 @@ function reviewerRoster(
  * #614 refutation F2).
  *
  * The pin is compared with the bytes on disk, never with the latest
- * attestation: the question is which roster governed the action when it was
- * sampled, and that is the pinned policy whether or not a later one has been
- * attested since. The attestation check keeps the pin honest: the sampler
+ * attestation: the question is which roster governed the action when it ran
+ * (recheck NF-3), and that is the pinned policy whether or not a later one has
+ * been attested since. The attestation check keeps the pin honest: the sampler
  * copies the hash from the log, so a pin no earlier attestation names is a
  * record nobody attested, and its bytes are refused like unattested bytes.
  */
@@ -1218,7 +1255,7 @@ function pinnedPolicyRefused(
   if (live !== pinned) {
     return refuse(
       "policy-not-attested",
-      `the sample at seq ${String(subject.seq)} was taken under the policy attested as sha256 ${pinned}, and ${path} now hashes to ${live}. A review is held to the approvers roster in force when the action was sampled, so it needs the policy bytes hashing to ${pinned} on disk. Nothing was appended.`,
+      `the action sampled at seq ${String(subject.seq)} ran under the policy attested as sha256 ${pinned}, and ${path} now hashes to ${live}. A review is held to the approvers roster in force when the action ran, so it needs the policy bytes hashing to ${pinned} on disk. Nothing was appended.`,
       { seq: subject.seq },
     );
   }

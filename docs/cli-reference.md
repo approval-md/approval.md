@@ -3558,15 +3558,22 @@ of a broken policy names no roster, which for a review would mean anyone. Nothin
 resolves from a broken file, so an on-roster reviewer is refused too; the repair
 is a corrected policy, attested.
 
-**The roster is the one in force when the action was sampled (PR #614
-refutation F2).** Every `audit.sampled` the runtime writes pins the attested
-policy in force as it is taken, as `payload.policy_sha256` (the `sha256` the
-latest `policy.updated` attestation names). A review of that sample reads the
+**The roster is the one in force when the action ran (PR #614 refutation F2,
+recheck NF-3).** Every `audit.sampled` the runtime writes pins the attested
+policy the sampled execution ran under, as `payload.policy_sha256`: the
+`sha256` named by the latest `policy.updated` attestation before the
+`execution.started` record, which is the policy the gate checked when it
+recorded the start (a harness start carries the same hash as its own
+`policy_sha256`). A policy attested between the run and the sweep therefore
+changes neither who may review the sample nor whether anyone can. Only an
+execution older than every attestation in the log pins the latest attestation
+at sampling instead. A review of that sample reads the
 roster only from policy bytes that hash to the pin: if the file on disk hashes
 to anything else, including a later attestation, the review is refused
 `policy-not-attested` and the message names the hash it needs. A later
 re-attestation that renames or drops the class's rule therefore cannot leave
-the sample with no roster. A class that matches no rule in the pinned policy
+the sample with no roster, and one that names a different roster cannot open
+it to a reviewer the action's policy did not name. A class that matches no rule in the pinned policy
 (it reached supervised through `defaults.autonomy`) is refused
 `actor-not-approver` with that reason, because the defaults carry no roster
 and for a review "no roster" would mean anyone. A sample written before samples

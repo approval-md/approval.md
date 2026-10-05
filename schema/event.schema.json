@@ -355,7 +355,7 @@
       ]
     },
     "audit_sampled_record": {
-      "$comment": "SPEC.md §5.2/§8 (amended, PR #614 refutation F2): the write-boundary form of an `audit.sampled` record. A sample pins the attested policy in force when it was taken (`policy_sha256`), because a retrospective review is held to the approvers roster of THAT policy: read from whatever policy is in force at review time, a later re-attestation that renamed or dropped the class's rule would leave the sample with no roster at all. `validate(..., { mode: \"historical\" })` replaces this definition with `audit_sampled_record_historical`, so a sample written before the field existed still validates and verifies, and reads as not pinned.",
+      "$comment": "SPEC.md §5.2/§8 (amended, PR #614 refutation F2, recheck NF-3): the write-boundary form of an `audit.sampled` record. A sample pins the attested policy its execution ran under (`policy_sha256`: the latest attestation before the sampled `execution.started`), because a retrospective review is held to the approvers roster of THAT policy: read from whatever policy is in force at review or sampling time, a re-attestation after the run could re-roster the review or leave the sample with no roster at all. `validate(..., { mode: \"historical\" })` replaces this definition with `audit_sampled_record_historical`, so a sample written before the field existed still validates and verifies, and reads as not pinned.",
       "type": "object",
       "properties": {
         "payload": {

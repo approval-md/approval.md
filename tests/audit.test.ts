@@ -1602,6 +1602,56 @@ function sha256Of(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/**
+ * An `audit.sampled` for `key`'s execution pinning `pin`, appended through the
+ * real writer and its schema, as a tampered log or another build would write
+ * it. The sampler never writes these pins (PR #614 recheck NF-3), so this is
+ * how a review is put in front of a pin the sampler would not choose.
+ */
+function handSample(unit: Case, key: string, pin: string, minutes: number): EventRecord {
+  const started = records(unit).find(
+    (record) => record.event === "execution.started" && record.action_key === key,
+  ) as EventRecord;
+  const appended = appendEvent(unit.logPath, {
+    ts: at(minutes),
+    event: "audit.sampled",
+    actor: AUDIT_ACTOR,
+    ...(started.task === undefined ? {} : { task: started.task }),
+    action_key: key,
+    payload: {
+      subject_seq: started.seq,
+      subject_hash: started.hash,
+      subject_event: "execution.started",
+      subject_ts: started.ts,
+      class: (started.payload as Record<string, unknown>)["class"],
+      reason: "supervised-sample",
+      selection: "hmac-sha256/event-hash",
+      rate: 1,
+      autonomy: "supervised",
+      policy_sha256: pin,
+    },
+  });
+  assert.equal(appended.ok, true, JSON.stringify(appended));
+  return (appended as { ok: true; record: EventRecord }).record;
+}
+
+/** `unit`'s policy file replaced by `text`, attested at `minutes`; returns its sha256. */
+function attestText(unit: Case, text: string, minutes: number): string {
+  writeFileSync(unit.policyPath, text, "utf8");
+  assert.equal(loadPolicy({ file: unit.policyPath }).ok, true, "the probe policy does not load");
+  assert.equal(appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(minutes)).ok, true);
+  return sha256Of(unit.policyPath);
+}
+
+/** Review `key` as `reviewer` with an explicit OK. */
+function reviewOk(unit: Case, key: string, reviewer: string, minutes: number) {
+  return reviewSample(unit.logPath, { kind: "action-key", actionKey: key }, reviewer, null, {
+    ...unit.options,
+    clock: fixedClock(at(minutes)),
+    verdict: "ok",
+  });
+}
+
 test("PR #614 refutation F1: an attested policy that does not load names no roster, so every reviewer is refused", async () => {
   // Three ways to break the bytes the loader refuses and `policy attest` does
   // not: a glob in a roster, a roster entry that is not an identifier, and a
@@ -1625,13 +1675,13 @@ test("PR #614 refutation F1: an attested policy that does not load names no rost
       `${name}: attestation of the broken bytes failed, so the probe tests nothing`,
     );
     const brokenSha = sha256Of(unit.policyPath);
-    // The sweep reads the working file, so it samples under the valid text and
-    // pins the policy in force, which is the broken attestation (PR #614 F2).
-    // With the broken bytes back on disk the review reaches the pinned policy
-    // and the only thing left to refuse it is that the policy does not load.
-    writeFileSync(unit.policyPath, validText, "utf8");
-    sweep(unit, 5);
-    writeFileSync(unit.policyPath, brokenText, "utf8");
+    // The sampler pins the policy the execution ran under (PR #614 recheck
+    // NF-3), and no execution runs under bytes that do not load, so a broken
+    // pin arrives only from another build or a loader that has since grown
+    // stricter. The sample is written by hand, through the real writer, with
+    // the broken bytes on disk: the review reaches the pinned policy and the
+    // only thing left to refuse it is that the policy does not load.
+    handSample(unit, "task-042:draft", brokenSha, 5);
     assert.equal(sampledSubjects(records(unit))[0]?.policySha256, brokenSha, `${name}: the sample pinned another policy`);
     const before = records(unit).length;
     for (const reviewer of ["human:bob", "human:carter"]) {
@@ -1752,6 +1802,114 @@ test("PR #614 refutation F2: a sample written before samples pinned a policy rea
     } as unknown as EventRecord,
   ]);
   assert.equal(subjects[0]?.policySha256, null);
+});
+
+test("PR #614 recheck NF-3 (probe F2c): a policy attested between the run and the sweep does not re-roster the review", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+
+  // P2 names bob, not carter, and is attested after the run and before the sweep.
+  const p2 = attestText(unit, p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n"), 3);
+  assert.notEqual(p2, p1);
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1, "the sample did not pin the policy the action ran under");
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+  assert.equal((sample.payload as Record<string, unknown>)["policy_sha256"], p1);
+  const before = records(unit).length;
+
+  // With P2 on disk nobody reviews it, bob included, and the refusal names P1.
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 6);
+    assert.equal(result.ok, false, `${reviewer} reviewed under a policy attested after the run`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, new RegExp(p1, "u"));
+    }
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+
+  // With P1 back on disk the roster is P1's: bob is refused, carter records.
+  writeFileSync(unit.policyPath, p1Text, "utf8");
+  const bob = reviewOk(unit, "task-042:draft", "human:bob", 7);
+  assert.equal(bob.ok, false, "bob reviewed an action that ran under a roster that did not name him");
+  if (!bob.ok) assert.equal(bob.code, "actor-not-approver");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 8);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 recheck NF-3 (reverse): a policy that drops the rule before the sweep leaves the sample reviewable by the approver it ran under", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  const p1 = sha256Of(unit.policyPath);
+  startSupervised(unit, "task-042:draft", 2);
+  // P2 drops the class's rule and keeps it supervised through the defaults, so
+  // the sweep still draws it; P2 names no roster for it, and before NF-3 the
+  // sample pinned P2 and was refused actor-not-approver for every reviewer.
+  attestText(
+    unit,
+    p1Text
+      .replace("defaults:\n  autonomy: manual\n", "defaults:\n  autonomy: supervised\n")
+      .replace("  files.write.*:\n    autonomy: supervised\n    approvers: [carter]\n", ""),
+    3,
+  );
+  sweep(unit, 5);
+  assert.equal(sampledSubjects(records(unit))[0]?.policySha256, p1);
+
+  writeFileSync(unit.policyPath, p1Text, "utf8");
+  const carter = reviewOk(unit, "task-042:draft", "human:carter", 6);
+  assert.equal(carter.ok, true, carter.ok ? "" : carter.message);
+  assertClean(unit);
+});
+
+test("PR #614 recheck (probe F2a): a pin attested only after the sample is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  const p1Text = readFileSync(unit.policyPath, "utf8");
+  startSupervised(unit, "task-042:draft", 2);
+  // P2's hash is written into a sample before anyone attests P2.
+  const p2Text = p1Text.replace("    approvers: [carter]\n", "    approvers: [bob]\n");
+  writeFileSync(unit.policyPath, p2Text, "utf8");
+  const p2 = sha256Of(unit.policyPath);
+  handSample(unit, "task-042:draft", p2, 3);
+  attestText(unit, p2Text, 4);
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 5);
+    assert.equal(result.ok, false, `${reviewer} reviewed under a pin attested after the sample`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, /no attestation before it names that hash/u);
+    }
+  }
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+});
+
+test("PR #614 recheck (probe F2b): a pin no attestation names is refused policy-not-attested", async () => {
+  const unit = ready();
+  withRoster(unit, true);
+  startSupervised(unit, "task-042:draft", 2);
+  // Bytes nobody attested, on disk, and a sample pinning exactly them.
+  const unattestedText = readFileSync(unit.policyPath, "utf8").replace("    approvers: [carter]\n", "    approvers: [bob]\n");
+  writeFileSync(unit.policyPath, unattestedText, "utf8");
+  const pin = sha256Of(unit.policyPath);
+  handSample(unit, "task-042:draft", pin, 3);
+  const before = records(unit).length;
+  for (const reviewer of ["human:bob", "human:carter"]) {
+    const result = reviewOk(unit, "task-042:draft", reviewer, 4);
+    assert.equal(result.ok, false, `${reviewer} reviewed under a pin nobody attested`);
+    if (!result.ok) {
+      assert.equal(result.code, "policy-not-attested");
+      assert.match(result.message, /no attestation before it names that hash/u);
+    }
+  }
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
 });
 
 test("PR #614 refutation F5: every review the runtime writes says its verdict was explicit", async () => {
