@@ -219,11 +219,19 @@ export function readTarEntries(archive: Buffer): TarEntry[] {
  * log is dropped, and only because the export holds that lock while it walks,
  * so the file exists for exactly the span of the copy and means nothing but
  * "somebody was reading when this was made".
+ *
+ * The same holds for the names the lock's reclaim derives from that exact path
+ * (APRV-479), every one `<lockfile>.<something>`: the claim on a dead holder's
+ * lockfile (`.stale.<pid>.<ms>`) and a taker's own lockfile before its rename
+ * (`.take.<pid>.<nonce>`), which a writer killed part way leaves behind. They
+ * are the lock's bookkeeping, they carry the writing machine's hostname and
+ * boot id (which the log itself deliberately does not), and nothing in them is
+ * the tenant's.
  */
 export function isExcludedPath(path: string, excludedLock: string | null = null): boolean {
   const base = path.split("/").at(-1) ?? path;
   if (EXCLUDED_BASENAMES.includes(base)) return true;
-  if (excludedLock !== null && path === excludedLock) return true;
+  if (excludedLock !== null && (path === excludedLock || path.startsWith(`${excludedLock}.`))) return true;
   return EXCLUDED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
@@ -371,7 +379,8 @@ export interface StoreArchive {
  * caller turns that into a refusal naming the link's own relative path.
  */
 export function buildStoreArchive(root: string, logPath: string): StoreArchive {
-  // The one file this server's own append lock creates, as an exact path.
+  // The one file this server's own append lock creates, as an exact path (and,
+  // by `isExcludedPath`, the reclaim's files named from it).
   const lock = storeRelative(root, `${logPath}.lock`);
   const entries: TarEntry[] = [];
   for (const candidate of EXPORTED_PATHS) {

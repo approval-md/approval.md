@@ -467,6 +467,11 @@ test("the module exposes no mutation, reorder, or truncate operation", async () 
       // to prove MORE on its next read.
       "onLogAppended",
       "serializeRecord",
+      // APRV-479 added a person's take-over of a lock a dead writer left. It
+      // APPENDS one record (`audit.lock_reclaimed`, under the human's actor) by
+      // the same path as every append, under the lock it takes; it touches no
+      // existing byte of the log. Nothing here mutates, reorders, or truncates.
+      "unlockAppendLock",
       "verifyRecordHash",
       // APRV-125 added the whole-operation lock holder. It hands its callback
       // no handle and no write primitive: what it grants is EXCLUSION, and a
