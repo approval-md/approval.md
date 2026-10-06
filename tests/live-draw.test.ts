@@ -783,12 +783,29 @@ test("the daemon holds the secret, the asker holds none, and the draw crosses be
     }
     assert.equal(readiness.ready, true, `draw socket did not become ready: ${readiness.detail}; ${stdout}`);
 
+    // A BOUND socket is not yet a SERVING daemon. `Daemon.run()` binds the socket,
+    // then builds the `started` line (two git reads for the anchor, one for the
+    // dangling advances) and runs the first tick, all synchronously on the one
+    // event loop that also answers draws. A connection made in that window is
+    // queued by the kernel and answered only when the loop comes back, which on a
+    // loaded CI shard was past the relay's 500 ms (`DRAW_TIMEOUT_MS`), twice, as
+    // `draw-daemon-stale`. So the test waits for the daemon to SERVE — answer a
+    // status question, which costs no verified read and no MAC — under a window
+    // sized for a loaded host, and only then holds the draw below to the
+    // product's own unchanged 500 ms.
+    const serving = await askDaemonSampling(unit.logPath, 20_000);
+    assert.equal(
+      serving.ok,
+      true,
+      serving.ok ? "" : `the daemon never served a status question: ${serving.reason}: ${serving.detail}; ${stdout}`,
+    );
+
     // This process's environment carries no secret — the hook's situation.
     assert.equal(SECRET_ENV in process.env, false);
 
     const question = questionFor(unit, key);
     const outcome = askDaemonDraw(unit.logPath, question);
-    assert.equal(outcome.ok, true, outcome.ok ? "" : `${outcome.reason}: ${outcome.detail}`);
+    assert.equal(outcome.ok, true, outcome.ok ? "" : `${outcome.reason}: ${outcome.detail}; ${stdout}`);
     if (!outcome.ok) return;
     assert.equal(outcome.answer.selected, isSampled(SECRET, question.payload_hash, RATE));
     assert.equal(
