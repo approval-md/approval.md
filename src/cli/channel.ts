@@ -121,6 +121,7 @@ import { commandTelegram } from "./channel-telegram.js";
 import { commandWeb } from "./channel-web.js";
 import { refusal as renderRefusal, style, tokenPanel, TOKEN_NOTICE } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -296,7 +297,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
       json,
       asFlag === null
         ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>; a decision collected here is recorded by the human-only gate and cannot be attributed to nobody`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; approval decisions are human-only and an agent: or system: actor cannot record one`,
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; approval decisions are human-only and an agent: or system: actor cannot record one`,
       CHANNEL_CLI_HELP,
     );
   }

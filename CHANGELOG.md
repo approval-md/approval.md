@@ -37,7 +37,12 @@ before a tag.
   nowhere else: grants, attestations, reviews and channel decisions still
   require `human:` and refuse it `actor-not-human`. `verdict_source: model` is
   registered for `audit.reviewed` and never written; the event schema refuses
-  both at the write boundary.
+  both at the write boundary. A `human:` id that begins with a reserved kind
+  (`human:model:judge@0.3.0`) is not a person either: every human-only verb,
+  the channel path and `--as` / `APPROVAL_HUMAN` refuse it with their existing
+  `actor-not-human` (or exit 2 at the CLI), where before it was recorded as a
+  human grant on a policy with no approver roster. The reserved kinds are one
+  list, `RESERVED_IDENTITY_KINDS` in `src/core/identity.ts`.
 - **Conformance.** `policy-resolution` 5.0.0 (six new vectors; a major,
   because a 4.0.0 implementation refuses `delegation: {}` and cannot produce
   `delegation-not-supported`) and `schema-validation` 3.3.0 (twenty-one new

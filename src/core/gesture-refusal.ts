@@ -75,6 +75,7 @@ import { appendEvent, type AppendError, type EventRecord, type LogHead } from ".
 import { readVerifiedRecords } from "./state.js";
 import type { GateOptions } from "./gate.js";
 import type { RecordedSender, SenderSource } from "./sender-identity.js";
+import { HUMAN_ACTOR_RULE } from "./identity.js";
 
 /** The actor every record here carries: the gate stating what the gate did. */
 export const GESTURE_REFUSAL_ACTOR = "system:gate";
@@ -171,7 +172,7 @@ export type RecordRefusedGestureResult =
   | GestureRefusalFailure;
 
 /** The gestures this module records: a person's, and nobody else's. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /**
  * Record that a human's gesture was refused.

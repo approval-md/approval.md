@@ -64,6 +64,7 @@ import {
 } from "./log.js";
 import { parseDuration } from "./policy-load.js";
 import { readVerifiedRecords } from "./state.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /** What an open window suspends. One value at v0.1, matching the schema enum. */
 export const GATE_WINDOW_SCOPE = "hook";
@@ -97,7 +98,7 @@ export const MAX_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const HEAD_MOVED_ATTEMPTS = 4;
 
 /** Actors permitted to open or close a window. Narrower than the event schema. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /** Actors a bypass record may name: whoever the harness was running as. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -402,7 +403,7 @@ export function openWindow(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `opening the gate requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; this is the one act that suspends the policy, so an agent must not perform it, and the log was left unchanged`,
+      `opening the gate requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; this is the one act that suspends the policy, so an agent must not perform it, and the log was left unchanged`,
     );
   }
   const reason = input.reason.trim();
@@ -496,7 +497,7 @@ export function closeWindow(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `closing the gate requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; the pair is one ceremony and both halves are the human's. The log was left unchanged`,
+      `closing the gate requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; the pair is one ceremony and both halves are the human's. The log was left unchanged`,
     );
   }
 

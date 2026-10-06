@@ -214,6 +214,7 @@ import {
 import { mintToken, tokenHash, TOKEN_HASH_FIELD } from "./token.js";
 import { validate, type ValidationError } from "./validate.js";
 import { displayHashOf, DISPLAY_HASH_FIELD } from "./wysiwys.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /**
  * The approval-state derivation moved to `core/state.ts` in APRV-20 (finding
@@ -237,7 +238,7 @@ export {
 export const EXPIRY_ACTOR = "system:gate";
 
 /** Actors permitted to decide. Human-only, in code (SPEC.md §10.1). */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /**
  * Does an `approvers` list name this actor (APRV-137, amended SPEC.md §5.2)?
@@ -2889,7 +2890,7 @@ function attemptDecide(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `${decision} is a human-only verb; the actor must match human:<id>, got ${JSON.stringify(actor)}`,
+      `${decision} is a human-only verb; the actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}`,
     );
   }
 

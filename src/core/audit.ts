@@ -104,6 +104,7 @@ import { storedPolicyText } from "./policy-proposal.js";
 import { resolveSampler, type Sampler } from "./sampler.js";
 import { payloadOf, readVerifiedRecords } from "./state.js";
 import type { ValidateOptions } from "./validate.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /**
  * SPEC.md §8: the sampler is the runtime, so its actor is `system:`. Distinct
@@ -113,7 +114,7 @@ import type { ValidateOptions } from "./validate.js";
 export const AUDIT_ACTOR = "system:audit";
 
 /** `human:<id>`, the only actor a review may carry. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /**
  * The `verdict_source` vocabulary of `audit.reviewed` (PR #614 F5): the
@@ -956,7 +957,7 @@ export function reviewSample(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `audit review is human-only: the event's entire content is that a person looked at a sampled action, and a runtime that could mark its own samples reviewed would be a supervision backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `audit review is human-only: the event's entire content is that a person looked at a sampled action, and a runtime that could mark its own samples reviewed would be a supervision backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
 
@@ -1553,7 +1554,7 @@ export function satisfyObligation(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `satisfying a reconciliation obligation is human-only: the event's entire content is that a PERSON judged the obligation discharged, and a runtime that could close its own obligations would be a reconciliation backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `satisfying a reconciliation obligation is human-only: the event's entire content is that a PERSON judged the obligation discharged, and a runtime that could close its own obligations would be a reconciliation backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
 

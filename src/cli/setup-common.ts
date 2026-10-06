@@ -64,6 +64,7 @@ import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { createPrompter, type Prompter } from "./prompt.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 // ---------------------------------------------------------------------------
 // Names
@@ -591,7 +592,7 @@ export function requireHuman(
       false,
       asFlag === null
         ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. \`approval setup identity\` is the verb that establishes it, and it is the one subcommand exempt from this check`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; \`approval setup ${verb}\` stores a credential and is human-only`,
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; \`approval setup ${verb}\` stores a credential and is human-only`,
       helpText,
     ),
   };

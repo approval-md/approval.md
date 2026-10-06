@@ -73,6 +73,7 @@ import { WEB_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -375,7 +376,7 @@ export function commandWeb(
       json,
       asFlag === null
         ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this page collects is recorded against it, and nothing here authenticates it`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; approvals are human-only`,
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; approvals are human-only`,
     );
   }
 

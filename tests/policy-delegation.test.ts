@@ -22,9 +22,11 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { stringify } from "yaml";
 
@@ -37,7 +39,14 @@ import {
   DELEGATION_OFF,
   delegationEngaged,
 } from "../src/core/delegation.js";
-import { MODEL_IDENTITY_PATTERN, parseIdentity, type IdentityRole } from "../src/core/identity.js";
+import { resolveHumanActor } from "../src/core/attest.js";
+import {
+  isHumanActor,
+  MODEL_IDENTITY_PATTERN,
+  parseIdentity,
+  RESERVED_IDENTITY_KINDS,
+  type IdentityRole,
+} from "../src/core/identity.js";
 import { diffPolicies } from "../src/core/policy-diff.js";
 import { explain } from "../src/core/policy-explain.js";
 import {
@@ -56,6 +65,10 @@ after(cleanup);
 
 const REPO_ROOT = join(DEFAULT_SCHEMA_DIR, "..");
 const JUDGE = "model:judge@0.3.0";
+/** The judge wearing a person's prefix (APRV-500 refutation S3). */
+const JUDGE_AS_HUMAN = `human:${JUDGE}`;
+/** dist/tests/policy-delegation.test.js -> dist/src/cli/main.js */
+const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
 /** A policy file text with `delegation` lines appended to a fixed body. */
 function policyText(delegation: readonly string[], extraClasses: readonly string[] = []): string {
@@ -500,7 +513,38 @@ const ENVELOPE = {
   ],
 };
 
-test("every human-only verb refuses a model: actor (actor-not-human), and nothing is written", () => {
+test("a human: id that begins with a reserved kind is no identity for any role (refutation S3)", () => {
+  assert.deepEqual([...RESERVED_IDENTITY_KINDS], ["model"]);
+  const roles: IdentityRole[] = ["reviewer", "decider", "attester", "sender"];
+  const reserved = [JUDGE_AS_HUMAN, "human:Model:judge@0.3.0", "human: model:judge@0.3.0", "human:model:", "human:MODEL:x"];
+  for (const role of roles) {
+    for (const actor of reserved) assert.equal(parseIdentity(actor, role), null, `${role} ${actor}`);
+    // A name that merely starts with the letters is a person's name.
+    assert.deepEqual(parseIdentity("human:modeler", role), { kind: "human", id: "modeler" }, role);
+    assert.deepEqual(parseIdentity("human:alice:model:x", role), { kind: "human", id: "alice:model:x" }, role);
+  }
+  for (const actor of reserved) {
+    assert.equal(isHumanActor(actor), false, actor);
+    assert.equal(resolveHumanActor({ actor }), null, `--as ${actor}`);
+  }
+  for (const actor of [JUDGE, "agent:claude", "system:audit", "human:", "alice"]) assert.equal(isHumanActor(actor), false, actor);
+  for (const actor of ["human:carter", "human:modeler"]) assert.equal(isHumanActor(actor), true, actor);
+
+  const saved = process.env["APPROVAL_HUMAN"];
+  try {
+    process.env["APPROVAL_HUMAN"] = JUDGE_AS_HUMAN;
+    assert.equal(resolveHumanActor(), null, "APPROVAL_HUMAN carrying the judge was taken as a person");
+  } finally {
+    if (saved === undefined) delete process.env["APPROVAL_HUMAN"];
+    else process.env["APPROVAL_HUMAN"] = saved;
+  }
+});
+
+for (const [label, actor] of [
+  ["a model: actor", JUDGE],
+  ["a human:model: actor (refutation S3)", JUDGE_AS_HUMAN],
+] as const) {
+test(`every human-only verb refuses ${label} (actor-not-human), and nothing is written`, () => {
   const unit = newScenario(scratch);
   attest(unit);
   const registered = register(unit.logPath, { task: "task-042", envelope: ENVELOPE }, at(1), "agent:claude");
@@ -524,7 +568,7 @@ test("every human-only verb refuses a model: actor (actor-not-human), and nothin
   const before = readFileSync(unit.logPath, "utf8");
 
   for (const decision of ["grant", "reject", "revoke"] as const) {
-    const refused = decide(unit.logPath, "task-042:chaser", decision, JUDGE, at(3), unit.options);
+    const refused = decide(unit.logPath, "task-042:chaser", decision, actor, at(3), unit.options);
     assert.equal(refused.ok, false, decision);
     if (!refused.ok) assert.equal(refused.code, "actor-not-human", decision);
   }
@@ -532,25 +576,64 @@ test("every human-only verb refuses a model: actor (actor-not-human), and nothin
   const channel = recordChannelDecision(
     unit.logPath,
     { action_key: "task-042:chaser", decision: "grant", deliveryId: "mock-1" },
-    { actor: JUDGE, channel: "mock" },
+    { actor, channel: "mock" },
     { ...unit.options, clock: fixedClock(at(3)) },
   );
   assert.equal(channel.outcome.ok, false);
   if (!channel.outcome.ok) assert.equal(channel.outcome.code, "actor-not-human");
   assert.equal(channel.token, undefined);
 
-  const attested = appendAttestation(unit.logPath, unit.policyPath, JUDGE, at(4));
+  const attested = appendAttestation(unit.logPath, unit.policyPath, actor, at(4));
   assert.equal(attested.ok, false);
   if (!attested.ok) assert.equal(attested.error.code, "actor-not-human");
 
-  const reviewed = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, JUDGE, null, {
+  const reviewed = reviewSample(unit.logPath, { kind: "seq", seq: 1 }, actor, null, {
     ...unit.options,
     verdict: "ok",
   });
   assert.equal(reviewed.ok, false);
   if (!reviewed.ok) assert.equal(reviewed.code, "actor-not-human");
 
-  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a refused model: actor wrote to the log");
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, `a refused ${actor} actor wrote to the log`);
+
+  // Control: the same scenario (no approver roster) records a person's grant
+  // through the same channel path, so the refusals above are about the actor.
+  const person = recordChannelDecision(
+    unit.logPath,
+    { action_key: "task-042:chaser", decision: "grant", deliveryId: "mock-2" },
+    { actor: "human:carter", channel: "mock" },
+    { ...unit.options, clock: fixedClock(at(5)) },
+  );
+  assert.equal(person.outcome.ok, true, person.outcome.ok ? "" : person.outcome.message);
+});
+}
+
+test("the CLI refuses --as and APPROVAL_HUMAN carrying human:model: at exit 2, before anything is written (refutation S3)", () => {
+  const unit = newScenario(scratch);
+  const run = (args: string[], env: Record<string, string> = {}) => {
+    const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+    if (env["APPROVAL_HUMAN"] === undefined) delete childEnv["APPROVAL_HUMAN"];
+    const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd: unit.dir, encoding: "utf8", env: childEnv });
+    assert.equal(result.error, undefined, String(result.error));
+    return { code: result.status ?? -1, stderr: result.stderr };
+  };
+  const flagged = [
+    ["policy", "attest", "--as", JUDGE_AS_HUMAN],
+    ["grant", "task-042:chaser", "--as", JUDGE_AS_HUMAN],
+    ["reject", "task-042:chaser", "--as", JUDGE_AS_HUMAN],
+    ["revoke", "task-042:chaser", "--as", JUDGE_AS_HUMAN],
+    ["audit", "review", "task-042:chaser", "--ok", "--as", JUDGE_AS_HUMAN],
+  ];
+  for (const args of flagged) {
+    const refused = run(args);
+    assert.equal(refused.code, 2, `${args.join(" ")}: ${refused.stderr}`);
+    assert.match(refused.stderr, /reserved identity kind/u, args.join(" "));
+  }
+  for (const args of [["grant", "task-042:chaser"], ["policy", "attest"], ["audit", "review", "task-042:chaser", "--ok"]]) {
+    const refused = run(args, { APPROVAL_HUMAN: JUDGE_AS_HUMAN });
+    assert.equal(refused.code, 2, `${args.join(" ")} under APPROVAL_HUMAN: ${refused.stderr}`);
+  }
+  assert.equal(existsSync(unit.logPath), false, "a refused --as wrote a log");
 });
 
 test("verdict_source model is reserved: registered, never written, refused at the write boundary", () => {
