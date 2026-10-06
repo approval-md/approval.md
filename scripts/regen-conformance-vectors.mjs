@@ -2727,12 +2727,16 @@ const SUITES = [
     // fails `unmapped-tool-record-resolves-autonomous`. Two controls pin the new
     // load-time refusals of a `tools` entry (an undeclared class, the reserved
     // unmapped class), each failing the whole policy closed.
-    // 4.1.0 (APRV-500): new vectors, no moved expectation. The reserved
-    // `delegation` block: its off form loads and changes nothing, any other
-    // value fails the load with the new code `delegation-not-supported`, and
-    // its relationship checks (exact class keys, the max_autonomy pin) fail as
-    // `schema-invalid`.
-    vectors_version: "4.1.0",
+    // 5.0.0 (APRV-500): a MAJOR bump for the reason 2.0.0 and 4.0.0 were
+    // ones. No existing expectation moved, but the algorithm line gained the
+    // reserved `delegation` block, and an implementation that read 4.0.0 and
+    // implemented exactly what it said refuses `delegation: {}` as
+    // `schema-invalid` (the policy schema is closed), so it fails
+    // `delegation-off-block-changes-nothing` and `delegation-empty-block-loads`,
+    // and it cannot produce the new failure class `delegation-not-supported`.
+    // The block's relationship checks (exact class keys, the max_autonomy pin)
+    // fail as `schema-invalid` and win over the reservation.
+    vectors_version: "5.0.0",
     algorithm:
       "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, the reserved delegation block, §7 irreversibility floor",
     description:

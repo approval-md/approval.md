@@ -38,9 +38,10 @@ before a tag.
   require `human:` and refuse it `actor-not-human`. `verdict_source: model` is
   registered for `audit.reviewed` and never written; the event schema refuses
   both at the write boundary.
-- **Conformance.** `policy-resolution` 4.1.0 (six new vectors) and
-  `schema-validation` 3.3.0 (twenty-one new fixtures). No existing expectation
-  moves. The SPEC amendment is proposed in the APRV-500 task, pending sign-off.
+- **Conformance.** `policy-resolution` 5.0.0 (six new vectors; a major,
+  because a 4.0.0 implementation refuses `delegation: {}` and cannot produce
+  `delegation-not-supported`) and `schema-validation` 3.3.0 (twenty-one new
+  fixtures). No existing expectation moves. The SPEC amendment is proposed in the APRV-500 task, pending sign-off.
 
 ### Harnesses
 
