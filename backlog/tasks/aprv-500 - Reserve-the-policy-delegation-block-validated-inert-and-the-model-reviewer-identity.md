@@ -109,6 +109,7 @@ Refutation: `/Users/carter/dev/agentvillage/private/handover/lanes-main/A11-refu
 
 ## Remaining
 
+- SPEC amendment applied in PR #626, pending sign-off.
 - Carter: attest the SPEC proposal above (or amend it).
 - Refuter (orchestrator dispatches): see the noticed-and-accepted list in the PR body.
 - Template (R2) carries the block only with a fleet-wide 0.4.2 pin.
