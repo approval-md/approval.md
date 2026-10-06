@@ -73,6 +73,7 @@ import {
 } from "./attest.js";
 import type { EventRecord } from "./log.js";
 import { readVerifiedRecords, type LogReadRefusalCode } from "./state.js";
+import { isHumanActor } from "./identity.js";
 
 /** The two refusals only the bootstrap can give, beside the read and append codes. */
 export const BOOTSTRAP_REFUSAL_CODES = [
@@ -117,7 +118,7 @@ export function appendBootstrapAttestation(
   actor: string,
   options: BootstrapOptions = {},
 ): BootstrapResult {
-  if (!/^human:.+/u.test(actor)) {
+  if (!isHumanActor(actor)) {
     // Decided before the log is read, so the refusal is the same whatever state
     // the store is in. `appendAttestation` would refuse it too; answering here
     // keeps an agent actor from learning anything about the log first.

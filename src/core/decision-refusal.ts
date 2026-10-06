@@ -107,6 +107,7 @@ import { appendEvent, type AppendError, type EventInput, type EventRecord, type 
 import { readVerifiedRecords, requestState, type Decision } from "./state.js";
 import type { GateOptions } from "./gate.js";
 import type { RecordedSender, SenderSource } from "./sender-identity.js";
+import { HUMAN_ACTOR_RULE } from "./identity.js";
 
 /**
  * The actor every record here carries. `system:`, and the same id the runtime's
@@ -129,7 +130,7 @@ export const POLICY_DRIFT_REASON = "policy-drift";
  * which is a failure discovered at the write boundary rather than a rule stated
  * where it belongs.
  */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /** Who decided what, on which surface — everything the record needs about the tap. */
 export interface RefusedDecision {

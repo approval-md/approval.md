@@ -58,6 +58,7 @@ import {
 import { payloadHash } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import type { ValidationError } from "./validate.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /**
  * Actors permitted to attest. Deliberately narrower than the event schema's
@@ -65,7 +66,7 @@ import type { ValidationError } from "./validate.js";
  * able to perform, so `agent:` and `system:` are refused here — in code, not
  * only in prose.
  */
-const HUMAN_ACTOR = /^human:.+/;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /** Environment variable naming the human on whose behalf the CLI attests. */
 export const HUMAN_ACTOR_ENV = "APPROVAL_HUMAN";
@@ -275,7 +276,7 @@ export function appendAttestation(
       ok: false,
       error: {
         code: "actor-not-human",
-        message: `attestation requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; attestation is the one verb an agent must not perform, and the log was left unchanged`,
+        message: `attestation requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; attestation is the one verb an agent must not perform, and the log was left unchanged`,
       },
     };
   }
@@ -675,7 +676,7 @@ export function appendOrganAttestation(
       ok: false,
       error: {
         code: "actor-not-human",
-        message: `attesting a gate organ requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; the organs are the files that install the hook, so an agent that could attest one could vouch for its own way out of the gate, and the log was left unchanged`,
+        message: `attesting a gate organ requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; the organs are the files that install the hook, so an agent that could attest one could vouch for its own way out of the gate, and the log was left unchanged`,
       },
     };
   }
@@ -990,7 +991,7 @@ export function appendPathSignOff(
       ok: false,
       error: {
         code: "actor-not-human",
-        message: `signing off a protected path requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; this record is what resolves the pending-sign-off suffix, so an agent that could write one could ratify its own text, and the log was left unchanged`,
+        message: `signing off a protected path requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; this record is what resolves the pending-sign-off suffix, so an agent that could write one could ratify its own text, and the log was left unchanged`,
       },
     };
   }

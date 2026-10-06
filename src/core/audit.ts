@@ -104,6 +104,7 @@ import { storedPolicyText } from "./policy-proposal.js";
 import { resolveSampler, type Sampler } from "./sampler.js";
 import { payloadOf, readVerifiedRecords } from "./state.js";
 import type { ValidateOptions } from "./validate.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /**
  * SPEC.md §8: the sampler is the runtime, so its actor is `system:`. Distinct
@@ -113,7 +114,24 @@ import type { ValidateOptions } from "./validate.js";
 export const AUDIT_ACTOR = "system:audit";
 
 /** `human:<id>`, the only actor a review may carry. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
+
+/**
+ * The `verdict_source` vocabulary of `audit.reviewed` (PR #614 F5): the
+ * values this runtime WRITES. One, `explicit`: the reviewer said the verdict.
+ */
+export const VERDICT_SOURCES = ["explicit"] as const;
+
+/**
+ * `verdict_source` values RESERVED for a later core and never written by this
+ * one (APRV-500, amended SPEC.md §10.3 proposed). `model` will mark a review
+ * given by the judge (`model:<name>@<version>`, `delegation.reviewers`).
+ * Registered here so the word cannot be taken for anything else; refused at the
+ * write boundary (`event.schema.json` keeps `const: "explicit"` and a
+ * `^human:` actor), and a follower that meets it MAY ignore it, which is the
+ * safe failure: a model review is then never counted as a human approval.
+ */
+export const RESERVED_VERDICT_SOURCES = ["model"] as const;
 
 /**
  * The closed set of audit refusal codes. Frozen public API in the same sense the
@@ -939,7 +957,7 @@ export function reviewSample(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `audit review is human-only: the event's entire content is that a person looked at a sampled action, and a runtime that could mark its own samples reviewed would be a supervision backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `audit review is human-only: the event's entire content is that a person looked at a sampled action, and a runtime that could mark its own samples reviewed would be a supervision backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
 
@@ -1536,7 +1554,7 @@ export function satisfyObligation(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `satisfying a reconciliation obligation is human-only: the event's entire content is that a PERSON judged the obligation discharged, and a runtime that could close its own obligations would be a reconciliation backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `satisfying a reconciliation obligation is human-only: the event's entire content is that a PERSON judged the obligation discharged, and a runtime that could close its own obligations would be a reconciliation backlog that empties itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
 

@@ -69,6 +69,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 const COMMON_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -202,7 +203,7 @@ function requireHuman(
       json,
       asFlag === null
         ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; \`approval vault ${verb}\` is human-only and an agent: or system: actor cannot perform it`,
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; \`approval vault ${verb}\` is human-only and an agent: or system: actor cannot perform it`,
       helpText,
     ),
   };

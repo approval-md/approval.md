@@ -74,6 +74,7 @@ import { POLICY_ATTEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
@@ -467,7 +468,7 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
       return usageError(
         streams,
         json,
-        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; attestation is human-only and an agent: or system: actor cannot perform it`,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; attestation is human-only and an agent: or system: actor cannot perform it`,
       );
     }
     return usageError(

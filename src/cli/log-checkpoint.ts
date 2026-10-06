@@ -30,6 +30,7 @@ import { LOG_CHECKPOINT_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 const CHECKPOINT_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -92,7 +93,7 @@ export function commandLogCheckpoint(argv: string[], streams: Streams, cwd: stri
       json,
       asFlag === null
         ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; \`approval log checkpoint\` is human-only and an agent: or system: actor cannot perform it`,
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; \`approval log checkpoint\` is human-only and an agent: or system: actor cannot perform it`,
     );
   }
 

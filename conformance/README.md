@@ -218,6 +218,20 @@ the class still decides it. Two controls pin the load-time refusals of a
 `tools` entry (an undeclared class, and the reserved unmapped class), each
 failing the whole policy closed.
 
+`policy-resolution` reached **5.0.0** at APRV-500, a major for the reason 2.0.0
+and 4.0.0 were ones: no expectation moved, and the `algorithm` line gained the
+reserved `delegation` block. The policy schema is closed, so an implementation
+that read 4.0.0 and implemented exactly what it said refuses `delegation: {}`
+as `schema-invalid`: it fails `delegation-off-block-changes-nothing` and
+`delegation-empty-block-loads`, and it cannot produce the new failure class
+`delegation-not-supported`, which a block in any other than its off form must
+fail the load with. Two controls pin the block's relationship checks (a listed
+class that is not an exact key of `classes`, and the `max_autonomy` pin): each
+fails `schema-invalid` even though the block is switched on, because a
+relationship failure is checked before the reservation and wins over it. If
+another branch claims 5.0.0 first, the collision rule below gives this change
+the next major at merge.
+
 `policy-resolution` reached **3.0.0** at APRV-317. A class rule may now
 explicitly retain autonomous or supervised behavior for a truthful
 `reversible: false` action. Every equally most-specific rule must opt in, and

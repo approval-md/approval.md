@@ -60,6 +60,7 @@ import {
   renderReadRoots,
 } from "./read-scope.js";
 import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
+import { describeDelegation } from "./delegation.js";
 
 /**
  * Action-class grammar for a *concrete* class (not a pattern).
@@ -265,6 +266,13 @@ export function explain(
   }
 
   decisionPath.push(`policy loaded from ${load.source.path}`);
+
+  // APRV-500. Said only when the policy declares the block, so no other
+  // explanation grows a line; a loaded policy's block is always off in this
+  // core, and the line says so, because an author reading the trace of a policy
+  // that names a judge should be told the judge decides nothing here.
+  const delegation = describeDelegation(load.policy);
+  if (delegation !== null) decisionPath.push(delegation);
 
   // APRV-347. The read scope is the fact a reader of a read class most needs
   // and cannot get anywhere else: the autonomy answers "what happens", and this

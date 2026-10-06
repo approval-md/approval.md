@@ -106,6 +106,7 @@ import {
   verifyTokenSpend,
   type TokenRefusal,
 } from "./token.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 export {
   isLoopEscalated,
@@ -1466,7 +1467,7 @@ export type ResolveResult =
   | ExecuteRefusal;
 
 /** Actors permitted to resolve. A fact nobody observed is not an observation. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /**
  * Close a dangling execution with what a human actually observed.
@@ -1512,7 +1513,7 @@ export function resolveExecution(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `resolve is human-only: it records what a person observed about an execution nobody watched finish, and an agent-attested outcome would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `resolve is human-only: it records what a person observed about an execution nobody watched finish, and an agent-attested outcome would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
   if (note.trim().length === 0) {
@@ -1669,7 +1670,7 @@ export function reconcileExecution(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `reconcile is human-only: it records what a person established about an execution whose outcome the runtime could not observe, and an agent-attested resolution would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+      `reconcile is human-only: it records what a person established about an execution whose outcome the runtime could not observe, and an agent-attested resolution would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}.`,
     );
   }
   if (note.trim().length === 0) {

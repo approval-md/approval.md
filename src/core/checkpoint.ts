@@ -115,6 +115,7 @@ import {
 } from "./log.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
 import { readVerifiedRecords } from "./state.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /** The one signature scheme at v0.1. Recorded on every checkpoint. */
 export const CHECKPOINT_ALG = "ed25519";
@@ -133,7 +134,7 @@ export const CHECKPOINT_DOMAIN = "approval.md/log-checkpoint/v1";
 export const CHECKPOINT_KEY_CREDENTIAL = "approval.checkpoint.key";
 
 /** Actors permitted to sign a checkpoint, in code as well as in the schema. */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 // ---------------------------------------------------------------------------
 // The refusal union
@@ -578,7 +579,7 @@ function signAndAppendOnce(
     return {
       ok: false,
       code: "actor-not-human",
-      message: `signing a checkpoint requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; a checkpoint is the one witness an agent process is not supposed to be able to produce, and the log was left unchanged`,
+      message: `signing a checkpoint requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}${reservedKindNote(actor)}; a checkpoint is the one witness an agent process is not supposed to be able to produce, and the log was left unchanged`,
     };
   }
 

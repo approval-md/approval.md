@@ -95,6 +95,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style, tokenPanel } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 /** Identity accepted by the proposing verbs: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -767,7 +768,7 @@ export function commandDecide(
       return usageError(
         streams,
         json,
-        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; ${decision} is human-only and an agent: or system: actor cannot perform it`,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; ${decision} is human-only and an agent: or system: actor cannot perform it`,
         helpText,
       );
     }

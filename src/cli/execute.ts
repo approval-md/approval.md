@@ -158,6 +158,7 @@ import {
   type TableRow,
 } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import { reservedKindNote } from "../core/identity.js";
 
 /** Identity accepted by `run`: a person or an agent, never the runtime. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -2448,7 +2449,7 @@ export function commandResolve(
         json,
         asFlag0 === null
           ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
-          : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag0)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
+          : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag0)}${reservedKindNote(asFlag0)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
         RESOLVE_HELP,
       );
     }
@@ -2509,7 +2510,7 @@ export function commandResolve(
       return usageError(
         streams,
         json,
-        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
         RESOLVE_HELP,
       );
     }
@@ -2633,7 +2634,7 @@ export function commandReconcile(argv: string[], streams: Streams, cwd: string):
       return usageError(
         streams,
         json,
-        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; reconcile records what a person established and an agent: or system: actor cannot perform it`,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}${reservedKindNote(asFlag)}; reconcile records what a person established and an agent: or system: actor cannot perform it`,
         RECONCILE_HELP,
       );
     }

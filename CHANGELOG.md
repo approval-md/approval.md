@@ -15,6 +15,39 @@ before a tag.
 
 ## Unreleased
 
+### Policy
+
+- **The `delegation` block is reserved, validated and inert (APRV-500).** A
+  policy may carry one top-level `delegation` block, `{model, classes,
+  max_autonomy, daily_cap, escalate_on, advice, reviewers}`, the shape the judge
+  (a pinned model reviewer, adviser and delegated approver) will take in a later
+  release. This core implements none of it. The block loads only in its off
+  form (`model: null`, every list empty, `max_autonomy: manual`, `daily_cap:
+  0`, `advice: false`, or simply `{}`), which changes no resolution, request
+  or record. Any other value fails the policy closed with the new load code
+  `delegation-not-supported`, so every class resolves `manual` and no setting
+  an author believes is in force is silently ignored. The block's relationships
+  to the rest of the file (exact class keys, no `human-only` or `autonomous`
+  class, the `max_autonomy` pin, the escalation floors, reviewer identities)
+  are checked first and fail as `schema-invalid`. `policy check` notes a
+  declared block; `policy diff` shows its paths. Cores before 0.4.2 refuse the
+  key outright, so a template carries it only once the fleet runs 0.4.2.
+- **The `model:` identity and `verdict_source: model` are reserved.**
+  `model:<name>@<major>.<minor>.<patch>` parses in `delegation.reviewers` and
+  nowhere else: grants, attestations, reviews and channel decisions still
+  require `human:` and refuse it `actor-not-human`. `verdict_source: model` is
+  registered for `audit.reviewed` and never written; the event schema refuses
+  both at the write boundary. A `human:` id that begins with a reserved kind
+  (`human:model:judge@0.3.0`) is not a person either: every human-only verb,
+  the channel path and `--as` / `APPROVAL_HUMAN` refuse it with their existing
+  `actor-not-human` (or exit 2 at the CLI), where before it was recorded as a
+  human grant on a policy with no approver roster. The reserved kinds are one
+  list, `RESERVED_IDENTITY_KINDS` in `src/core/identity.ts`.
+- **Conformance.** `policy-resolution` 5.0.0 (six new vectors; a major,
+  because a 4.0.0 implementation refuses `delegation: {}` and cannot produce
+  `delegation-not-supported`) and `schema-validation` 3.3.0 (twenty-one new
+  fixtures). No existing expectation moves. The SPEC amendment is proposed in the APRV-500 task, pending sign-off.
+
 ### Harnesses
 
 - **The policy decides the tools a harness adapter does not know (APRV-499).**

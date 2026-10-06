@@ -67,6 +67,13 @@ import {
   parseProtectedEntry,
   type ProtectedPathEntry,
 } from "./command-class.js";
+import {
+  DELEGATION_NOT_SUPPORTED,
+  delegationEngaged,
+  delegationEngagedErrors,
+  delegationErrors,
+  type DelegationBlock,
+} from "./delegation.js";
 import { scanFences, type FenceScan } from "./md-fence.js";
 // The routing floor (APRV-266) needs the resolver's own strictness table and
 // its own resolution of two classes, so this module imports the matcher that
@@ -320,6 +327,14 @@ export interface Policy {
    */
   tools?: ToolMapEntry[];
   /**
+   * Amended SPEC.md §5.2 (APRV-500, proposed): the judge's bounds, RESERVED.
+   * This core validates the block ({@link loadPolicyText}) and loads it only in
+   * its off form, which changes nothing; any other value fails the load with
+   * `delegation-not-supported`. Nothing outside `core/delegation.ts` and the
+   * display surfaces reads it. See `core/delegation.ts`.
+   */
+  delegation?: DelegationBlock;
+  /**
    * The approver roster (SPEC.md §5.1), and since APRV-324 the operator's
    * attested statement of which transport account each of them decides from.
    *
@@ -499,7 +514,17 @@ export type PolicyLoadErrorCode =
    * two people has no reading under which a decision from that account names
    * anybody. See {@link checkSenderMappings}.
    */
-  | "sender-ambiguous";
+  | "sender-ambiguous"
+  /**
+   * Amended SPEC.md §5.2 (APRV-500, proposed): the policy declares a
+   * `delegation` block that is not in its off form, and this core reserves the
+   * block without implementing any of it. Distinct from `schema-invalid`
+   * because the file is valid and its grammar checks pass: the fault is that
+   * the runtime would be silently ignoring a setting its author believes is in
+   * force. Fails closed like every other code here. A later core that
+   * implements the judge drops it.
+   */
+  | "delegation-not-supported";
 
 /**
  * Result of {@link loadPolicy}.
@@ -839,6 +864,20 @@ export function loadPolicyText(
     );
   }
 
+  // APRV-500: the `delegation` block's relationships to the rest of the file
+  // (exact class keys, the max_autonomy pin, escalation floors, reviewer
+  // identities). Checked even though this core loads only the off form, which
+  // passes them vacuously, so the grammar is exercised before it holds power.
+  const delegationGrammar = delegationErrors(policy);
+  if (delegationGrammar.length > 0) {
+    return failure(
+      "schema-invalid",
+      `${resolved.path}: delegation block is not usable`,
+      delegationGrammar,
+      parsed.value,
+    );
+  }
+
   const ttlText = policy.defaults?.approval_ttl;
   let approvalTtlMs: number | null = null;
   if (ttlText !== undefined) {
@@ -957,11 +996,29 @@ export function loadPolicyText(
     return failure("sender-ambiguous", `${resolved.path}: ${senders}`, undefined, parsed.value);
   }
 
-  // APRV-266: the routing floor is the LAST gate on a load, because it is the
-  // only check here that needs the resolved policy rather than the parsed one.
+  // APRV-266: the routing floor is the last RELATIONSHIP gate on a load,
+  // because it is the only check here that needs the resolved policy rather
+  // than the parsed one. Only the delegation reservation (APRV-500) follows it.
   const floor = checkProtectedRouteFloor(loaded);
   if (floor !== null) {
     return failure("protected-route-floor", `${resolved.path}: ${floor}`, undefined, parsed.value);
+  }
+
+  // APRV-500, the reservation (design rule 8). Last, because it is the one
+  // refusal of a file that is otherwise wholly valid: every check above passed,
+  // and the only fault is that this core would ignore what the block asks for.
+  // An off block (every key absent or at its off value) passes and changes
+  // nothing; anything else takes the whole policy closed to all-`manual`.
+  const engaged = delegationEngaged(policy.delegation);
+  if (engaged.length > 0) {
+    return failure(
+      DELEGATION_NOT_SUPPORTED,
+      `${resolved.path}: delegation is reserved in this core and not supported: ${engaged
+        .map((key) => `delegation.${key}`)
+        .join(", ")} ${engaged.length === 1 ? "is" : "are"} not off. Remove the block, or set every key to its off value (model: null, classes: [], max_autonomy: manual, daily_cap: 0, escalate_on: [], advice: false, reviewers: [])`,
+      delegationEngagedErrors(engaged),
+      parsed.value,
+    );
   }
   return loaded;
 }

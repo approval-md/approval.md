@@ -10,9 +10,9 @@
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",
     "conformance/vectors/hook-tool-map.v1.json": "1b24277f47cc1e996b336ba2ff3c8633c5502188667e8896d88fc03f28fea9c0",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
-    "conformance/vectors/policy-resolution.v1.json": "ee4a1020e0be20ff582846b4f98e2ca93ed827c6a712cb470161cc9672d640f1",
+    "conformance/vectors/policy-resolution.v1.json": "50b25f60cb8f56d495cede5f06529d186ba0037f009a57a99a03d2f900728ff2",
     "conformance/vectors/refusal-unions.v1.json": "2f4058c1a910a700cf29713a34992c102c72fe15b745469e26e0fcb7d1408644",
-    "conformance/vectors/schema-validation.v1.json": "638490a4f910dea186ebb51aa898d9d51f6e441000c469b9fb77aae6bc4bf31e",
+    "conformance/vectors/schema-validation.v1.json": "6d9540f43eaa01a35b957b64f4b4e041d06e55c1d737f4400b0bad23fafe26eb",
     "tests/conformance-harness.ts": "ca33d651230c1c1d7246b46b15919321fff85b625bb1d055ed9703f95eed2c67"
   }
 }

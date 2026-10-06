@@ -77,12 +77,13 @@ import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "./po
 import { loadPolicyText, POLICY_FILENAMES, type PolicyLoadResult } from "./policy-load.js";
 import { readVerifiedRecords } from "./state.js";
 import type { GateRefusal, GateRefusalCode } from "./gate.js";
+import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
 
 /** Actors permitted to propose: a person or an agent, never the runtime. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
 /** Actors permitted to answer a proposal. Human-only, in code (SPEC.md §11). */
-const HUMAN_ACTOR = /^human:.+/u;
+const HUMAN_ACTOR = HUMAN_ACTOR_RULE;
 
 /**
  * The event an agent appends to ask for an attestation.
@@ -781,7 +782,7 @@ export function decideAttestation(
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
-      `${decision} is a human-only verb; attestation is the one act an agent must not perform, and the actor must match human:<id>, got ${JSON.stringify(actor)}`,
+      `${decision} is a human-only verb; attestation is the one act an agent must not perform, and the actor must match human:<id>, got ${JSON.stringify(actor)}${reservedKindNote(actor)}`,
     );
   }
 

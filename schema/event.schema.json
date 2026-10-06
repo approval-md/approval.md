@@ -70,7 +70,7 @@
     "actor": {
       "type": "string",
       "pattern": "^(human|agent|system):.+",
-      "description": "SPEC.md §8: who caused the event, as `<kind>:<id>` (the example record uses `human:carter`). Three kinds: `human:` for a person acting through a channel or the CLI, `agent:` for an agent-originated event, and `system:` for events the daemon originates with no external prompt (for example `approval.expired`, which fires on TTL lapse rather than on any actor's action). Approval decisions are restricted to `human:` — see the per-type rules below."
+      "description": "SPEC.md §8: who caused the event, as `<kind>:<id>` (the example record uses `human:carter`). Three kinds: `human:` for a person acting through a channel or the CLI, `agent:` for an agent-originated event, and `system:` for events the daemon originates with no external prompt (for example `approval.expired`, which fires on TTL lapse rather than on any actor's action). Approval decisions are restricted to `human:` — see the per-type rules below. A fourth kind, `model:<name>@<version>` (the judge, a pinned model reviewer), is RESERVED by APRV-500 (amended SPEC.md §5.2 proposed) and deliberately absent from this pattern: no record written by this release carries it, so a `model:` actor is refused here at the write boundary until a later core admits it on named events."
     },
     "alg": {
       "const": "sha256/jcs",
@@ -274,7 +274,7 @@
             "verdict_source": {
               "type": "string",
               "const": "explicit",
-              "description": "SPEC.md §5.2 (amended, PR #614 refutation F5): how the verdict was given. `explicit` is the only value: since APRV-482 a verdict is said by the reviewer (`--ok`/`--deny`, a card's OK or second Deny) and never defaulted. A review written before then may carry `verdict: \"ok\"` that the runtime filled in for a grade-only tap or a bare terminal review, and nothing else in the record tells the two apart, so this field is the discriminator a follower reads: present means explicit, absent (on an old record) means the verdict may have been defaulted. REQUIRED on new records."
+              "description": "SPEC.md §5.2 (amended, PR #614 refutation F5): how the verdict was given. `explicit` is the only value: since APRV-482 a verdict is said by the reviewer (`--ok`/`--deny`, a card's OK or second Deny) and never defaulted. A review written before then may carry `verdict: \"ok\"` that the runtime filled in for a grade-only tap or a bare terminal review, and nothing else in the record tells the two apart, so this field is the discriminator a follower reads: present means explicit, absent (on an old record) means the verdict may have been defaulted. REQUIRED on new records. A second value, `model` (a review given by the judge, `model:<name>@<version>`), is RESERVED by APRV-500 (amended SPEC.md §10.3 proposed): registered so the word means nothing else, never written by this release, and refused here by the `const`. A follower that meets it may ignore it, and then never counts a model review as a human approval."
             },
             "payload_hash": {
               "type": "string",
