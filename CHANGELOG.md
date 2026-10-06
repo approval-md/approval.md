@@ -15,6 +15,8 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.2 — 2026-10-06
+
 ### Policy
 
 - **The `delegation` block is reserved, validated and inert (APRV-500).** A
@@ -93,6 +95,15 @@ before a tag.
   start a mapped or unmapped call writes (including a grant's spend) carries
   `harness_tool`. A tool name the record cannot carry is refused `hook-io`
   (`tool-name-invalid`) before anything is appended.
+- **Known property, not a fix: record-only calls are outside the global
+  action budget.** Under `defaults.unmapped_tool: record`, every unmapped
+  harness tool call (every MCP tool no `tools` entry claims, not only
+  bookkeeping tools such as `TodoWrite`) is exempt from every global
+  `daily_actions` budget and from the loop floor's streaks. Class-scoped
+  `limits` on `harness.tool.unmapped` and every `daily_usd` budget still meter
+  it. An operator who wants `daily_actions` as a backstop over such calls
+  declares a class limit on `harness.tool.unmapped`, or maps the tools to
+  classes of their own with `tools`.
 - **`harness.tool.unmapped` is reserved to the harness hook.** A task envelope,
   `approval propose` or an HTTP registration declaring it is refused
   `envelope-invalid`, as is a token-minting `approval request` for it (the hook
@@ -104,6 +115,19 @@ before a tag.
 - **Conformance.** `policy-resolution` 4.0.0 (the `harness.tool.unmapped`
   default narrows the no-rule-matched rule for one class), `schema-validation`
   3.2.0 (six new fixtures), and a new `hook-tool-map` 1.0.0 suite.
+
+### Upgrade order
+
+- **Every runtime on 0.4.2 before any policy carries the new keys.** The
+  policy schema is closed, so 0.4.1 and every earlier core refuse `tools`,
+  `defaults.unmapped_tool` and `delegation` (even `delegation: {}`) as
+  `schema-invalid` and fail the whole policy closed to all-`manual`. A
+  template or control plane writes those keys only after every hook and
+  daemon that reads the policy is pinned to 0.4.2. Emit `delegation: {}` or
+  omit the key; a bare `delegation:` is `schema-invalid` on 0.4.2 too.
+- Conformance at this release: `policy-resolution` 5.0.0 (4.0.0 from APRV-499,
+  5.0.0 from APRV-500), `schema-validation` 3.3.0, and the new `hook-tool-map`
+  1.0.0. `refusal-unions` stays 28.0.0: no refusal code was added.
 
 ## 0.4.1 — 2026-10-05
 
