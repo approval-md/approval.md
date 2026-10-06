@@ -606,3 +606,106 @@ test("the same records and timestamp always yield deeply equal verdicts", () => 
   assert.deepEqual(third, first);
   assert.equal(first.pass, true);
 });
+
+// --- APRV-499 ruling H1: record-only unmapped starts vs. grant spends -------
+
+const UNMAPPED = "harness.tool.unmapped";
+const HASH_A = "3c987d69fe833bbea2b588ea7e7bc0848bbfb90703b298729a3d2d6d45346011";
+
+/**
+ * A harness grant of {@link UNMAPPED} at `grantTs`, then the hook's spend of it
+ * at `spendTs`, written as `consumeHarnessGrant` writes it: `execution:
+ * "harness"`, `grant_origin`, `grant_seq` naming the grant, and (when
+ * `harnessTool` is given) the tool name.
+ */
+function grantThenSpend(grantTs: string, spendTs: string, harnessTool: string | null): EventRecord[] {
+  scratchCounter += 1;
+  const path = join(scratch, `log-${String(scratchCounter)}`, "events.jsonl");
+  const key = `hook:cc-sess:t-${String(scratchCounter)}:${UNMAPPED}`;
+  const granted = appendEvent(path, {
+    ts: grantTs,
+    event: "approval.granted",
+    actor: "human:carter",
+    task: `hook:cc-sess:t-${String(scratchCounter)}`,
+    action_key: key,
+    payload: { class: UNMAPPED, est_cost_usd: "0", payload_hash: HASH_A, execution: "harness" },
+  });
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.error.message);
+  if (!granted.ok) return [];
+  const spendPayload: Record<string, unknown> = {
+    class: UNMAPPED,
+    est_cost_usd: "0",
+    execution: "harness",
+    payload_hash: HASH_A,
+    grant_origin: "carried",
+    grant_seq: granted.record.seq,
+  };
+  if (harnessTool !== null) spendPayload["harness_tool"] = harnessTool;
+  const spent = appendEvent(path, {
+    ts: spendTs,
+    event: "execution.started",
+    actor: "agent:claude-code",
+    task: `hook:cc-sess:t-${String(scratchCounter)}`,
+    action_key: key,
+    payload: spendPayload,
+  });
+  assert.equal(spent.ok, true, spent.ok ? "" : spent.error.message);
+  return spent.ok ? [granted.record, spent.record] : [granted.record];
+}
+
+test("APRV-499 SF1: a granted unmapped spend whose grant aged out of the window still counts against daily_actions", () => {
+  // The recheck's probe S2a: grant at T-30h (an approval_ttl in days lets the
+  // tap and the retry straddle the window), the hook's carried spend at T-1h.
+  const records = grantThenSpend(before(30 * 60 * 60 * 1000), before(60 * 60 * 1000), "TodoWrite");
+  assert.equal(records.length, 2);
+  const result = evaluateBudgets(
+    records,
+    globalScope({ global: { daily_actions: 1 } }),
+    { class: "files.write.workspace" },
+    EVAL_TS,
+  );
+  const actions = verdictFor(result.verdicts, "global.daily_actions");
+  assert.equal(actions.consumed, "1", "a human-granted action is counted (ruling H1: granted ones count)");
+  assert.equal(actions.pass, false);
+  assert.equal(result.pass, false);
+});
+
+test("APRV-499 SF1 control: the same grant spend without harness_tool counts identically", () => {
+  const records = grantThenSpend(before(30 * 60 * 60 * 1000), before(60 * 60 * 1000), null);
+  assert.equal(records.length, 2);
+  const result = evaluateBudgets(
+    records,
+    globalScope({ global: { daily_actions: 1 } }),
+    { class: "files.write.workspace" },
+    EVAL_TS,
+  );
+  const actions = verdictFor(result.verdicts, "global.daily_actions");
+  assert.equal(actions.consumed, "1");
+  assert.equal(actions.pass, false);
+});
+
+test("APRV-499 H1: a policy-authorized unmapped start naming its tool (no grant fields) is not counted", () => {
+  const records = log({
+    ts: before(60 * 60 * 1000),
+    event: "execution.started",
+    actor: "agent:claude-code",
+    task: "hook:cc-sess:t-rec",
+    action_key: `hook:cc-sess:t-rec:${UNMAPPED}`,
+    payload: {
+      class: UNMAPPED,
+      est_cost_usd: "0",
+      execution: "harness",
+      payload_hash: HASH_A,
+      harness_tool: "TodoWrite",
+    },
+  });
+  const result = evaluateBudgets(
+    records,
+    globalScope({ global: { daily_actions: 1 } }),
+    { class: "files.write.workspace" },
+    EVAL_TS,
+  );
+  const actions = verdictFor(result.verdicts, "global.daily_actions");
+  assert.equal(actions.consumed, "0", "a record of unclassified tool use is not an action");
+  assert.equal(actions.pass, true);
+});

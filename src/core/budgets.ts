@@ -395,10 +395,22 @@ function tally(events: EventRecord[]): Consumption {
  * that name (`toolMapStartRefusal`). Nothing in the tool call's arguments is
  * read: the class comes from the attested mapping and the name from the
  * harness's own event.
+ *
+ * A GRANT SPEND is never record-only (APRV-499 fix round 2, recheck SF1). The
+ * hook's spend of a human grant (`consumeHarnessGrant`) carries `harness_tool`
+ * too, and {@link authorizations} drops it only while its `approval.granted`
+ * is inside the window. A grant older than 24 h (an `approval_ttl` in days)
+ * leaves the spend as the window's only trace of a human-approved action, and
+ * it must be counted, as ruling H1 says granted ones are. The spend is told
+ * apart by the fields that function always writes and the policy-authorized
+ * start never does: `grant_origin` (unconditional on a grant spend) and
+ * `grant_seq`. Either one present means "counted". The literals are spelled
+ * here rather than imported because `core/gate.ts` imports this module.
  */
 function isRecordOnlyUnmappedStart(record: EventRecord): boolean {
   if (record.event !== "execution.started" || classOf(record) !== UNMAPPED_TOOL_CLASS) return false;
   const payload = payloadOf(record);
+  if (payload["grant_origin"] !== undefined || payload["grant_seq"] !== undefined) return false;
   return payload["execution"] === "harness" && typeof payload["harness_tool"] === "string";
 }
 
