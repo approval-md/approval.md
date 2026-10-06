@@ -4681,6 +4681,9 @@ function* gateHarnessSteps(
     const registered = register(run.logPath, { task, envelope }, run.actor, {
       ...run.options,
       ...(provenance === null ? {} : { harness: provenance }),
+      // APRV-499: the hook is the one caller that may declare the reserved
+      // harness.tool.unmapped class.
+      toolMapHook: true,
     });
     if (!registered.ok) {
       return sayDeny(`hook-gate-refused:${registered.code}`, registered.message);

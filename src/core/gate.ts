@@ -1326,6 +1326,13 @@ export interface RegisterOptions extends GateOptions {
   harness?: HarnessProvenance;
   /** Set by `propose` alone: the `propose:` task namespace is its (APRV-445). */
   proposal?: true;
+  /**
+   * Set by the harness hook alone (APRV-499, claude-edge ruling): the one
+   * caller that may declare {@link UNMAPPED_TOOL_CLASS}. A CALL option for the
+   * reason `harness` is one: an envelope is authored by the party under
+   * oversight, and no CLI flag, task file or HTTP route sets this.
+   */
+  toolMapHook?: true;
 }
 
 /**
@@ -1387,6 +1394,23 @@ function attemptRegister(
       `the envelope failed schema validation; nothing was appended`,
       { errors: validation.errors },
     );
+  }
+
+  // APRV-499 (claude-edge ruling): `harness.tool.unmapped` is reserved to the
+  // harness hook, the way `harness.launch.*` is reserved to a rule. It names
+  // "a tool call no `tools` entry claimed", a fact only the hook establishes,
+  // and under `unmapped_tool: record` it resolves autonomous, so a task
+  // envelope, `approval propose` or an HTTP registration declaring it would be
+  // borrowing that autonomy for an action nobody classified. Refused before
+  // the log is read; nothing is appended.
+  if (options.toolMapHook !== true) {
+    const reserved = actionsOf(resolved.envelope).find((action) => action.class === UNMAPPED_TOOL_CLASS);
+    if (reserved !== undefined) {
+      return refuse(
+        "envelope-invalid",
+        `action ${JSON.stringify(reserved.idempotency_key)} declares class ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: it names a tool call that no \`tools\` entry of the attested policy claimed, and only the hook observes that. Declare the action under the class that describes what it does. Nothing was appended.`,
+      );
+    }
   }
 
   const read = readGateRecords(logPath);
@@ -4244,7 +4268,15 @@ function toolMapStartRefusal(
   load: PolicyLoadResult,
   input: HarnessStartInput,
 ): GateRefusal | null {
-  if (input.harness_tool === undefined) return null;
+  if (input.harness_tool === undefined) {
+    // APRV-499 (claude-edge ruling): only the hook's record of a tool it names
+    // may use the reserved class.
+    if (input.cls !== UNMAPPED_TOOL_CLASS) return null;
+    return refuse(
+      "not-granted",
+      `class ${UNMAPPED_TOOL_CLASS} is reserved to the harness hook's record of a tool call it names (harness_tool), and the start of ${input.actionKey} names none; nothing authorizes it here and nothing was appended.`,
+    );
+  }
   const verdict = load.ok ? toolMapVerdict(load.policy, input.harness_tool) : null;
   const expected =
     verdict === null || verdict.kind === "not-gated"

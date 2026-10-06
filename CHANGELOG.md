@@ -59,6 +59,11 @@ before a tag.
   start a mapped or unmapped call writes (including a grant's spend) carries
   `harness_tool`. A tool name the record cannot carry is refused `hook-io`
   (`tool-name-invalid`) before anything is appended.
+- **`harness.tool.unmapped` is reserved to the harness hook.** A task envelope,
+  `approval propose` or an HTTP registration declaring it is refused
+  `envelope-invalid`, `approval run` refuses a key declared under it
+  (`harness-executed`), and a policy-path start of it without `harness_tool` is
+  refused `not-granted`; nothing is appended in any case.
 - **Conformance.** `policy-resolution` 4.0.0 (the `harness.tool.unmapped`
   default narrows the no-rule-matched rule for one class), `schema-validation`
   3.2.0 (six new fixtures), and a new `hook-tool-map` 1.0.0 suite.

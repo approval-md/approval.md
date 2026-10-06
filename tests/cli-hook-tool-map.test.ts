@@ -25,7 +25,8 @@ import { fileURLToPath } from "node:url";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
-import { startHarnessExecution } from "../src/core/gate.js";
+import { startExecution } from "../src/core/execute.js";
+import { propose, register, startHarnessExecution } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -766,4 +767,121 @@ test("H1 attack 2: a refused unmapped call writes no start, and failed side-effe
   const routed = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-atk-todo4", ["--timeout", "50ms"]));
   assert.equal(routed.permission, "deny");
   assert.match(routed.reason, /loop-escalated/);
+});
+
+// ---------------------------------------------------------------------------
+// Ruling (claude-edge): harness.tool.unmapped is reserved to the hook
+// ---------------------------------------------------------------------------
+
+function envelopeDeclaring(cls: string, key: string): Record<string, unknown> {
+  return {
+    origin: { app: "claude-code", created_by: "agent:cc" },
+    state: "proposed",
+    actions: [{ class: cls, summary: "x", idempotency_key: key, payload_hash: "a".repeat(64) }],
+  };
+}
+
+test("reserved: a task envelope declaring harness.tool.unmapped is refused and nothing is appended", () => {
+  const dir = ready(policy(["  unmapped_tool: record"], [...CLASSES]));
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const before = logRecords(dir).length;
+  const refusedRun = register(
+    logPath,
+    { task: "task-reserved", envelope: envelopeDeclaring("harness.tool.unmapped", "task-reserved:a") },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(refusedRun.ok, false);
+  assert.equal(refusedRun.ok ? "" : refusedRun.code, "envelope-invalid");
+  assert.match(refusedRun.ok ? "" : refusedRun.message, /reserved to the harness hook/);
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+  // The same envelope under an ordinary class registers, so the refusal is the class.
+  const control = register(
+    logPath,
+    { task: "task-control", envelope: envelopeDeclaring("exec.local", "task-control:a") },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(control.ok, true, control.ok ? "" : control.message);
+});
+
+test("reserved: approval propose of harness.tool.unmapped is refused and nothing is appended", () => {
+  const dir = ready(
+    policy(
+      ["  unmapped_tool: ask"],
+      [...CLASSES, "  harness.tool.unmapped:", "    autonomy: manual", "    agent_may_request: true"],
+    ),
+  );
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const before = logRecords(dir).length;
+  const proposed = propose(
+    logPath,
+    { cls: "harness.tool.unmapped", actionKey: "harness.tool.unmapped:p-1", summary: "x", payload: { tool: "TodoWrite" } },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(proposed.ok, false);
+  assert.match(proposed.ok ? "" : proposed.message, /reserved to the harness hook/);
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+});
+
+test("reserved: approval run cannot start a key the hook registered under harness.tool.unmapped", () => {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  const asked = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-res-run", ["--timeout", "50ms"]));
+  assert.equal(asked.permission, "deny");
+  const key = "hook:cc-sess-tools:t-res-run:harness.tool.unmapped";
+  const before = logRecords(dir).length;
+  const started = startExecution(
+    join(dir, ".approval", "log", "events.jsonl"),
+    key,
+    { policy: { dir }, presentedPayloadHash: payloadHash({ tool: "TodoWrite", input: { todos: [] } }) },
+    "agent:cc",
+  );
+  assert.equal(started.ok, false);
+  assert.equal(started.ok ? "" : started.code, "harness-executed");
+  // The CLI verb, the same.
+  const cli = runCli(["run", key, "--as", "agent:cc", "--", "true"], dir);
+  assert.notEqual(cli.code, 0);
+  assert.match(cli.stdout + cli.stderr, /harness-executed/);
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+});
+
+test("reserved: a policy-path start of harness.tool.unmapped without harness_tool is refused", () => {
+  const dir = ready(policy(["  unmapped_tool: record"], [...CLASSES]));
+  const before = logRecords(dir).length;
+  const started = startHarnessExecution(
+    join(dir, ".approval", "log", "events.jsonl"),
+    {
+      task: "hook:cc-sess-tools:t-res-noname",
+      actionKey: "hook:cc-sess-tools:t-res-noname:harness.tool.unmapped",
+      cls: "harness.tool.unmapped",
+      payload_hash: "a".repeat(64),
+    },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(started.ok, false);
+  assert.equal(started.ok ? "" : started.code, "not-granted");
+  assert.equal(logRecords(dir).length, before);
+});
+
+test("reserved: the hook still registers and records under the class (a supervised-retro rule), and asks under ask", () => {
+  const dir = ready(
+    policy(
+      ["  unmapped_tool: record"],
+      [...CLASSES, "  harness.tool.unmapped:", "    autonomy: supervised-retro"],
+    ),
+  );
+  const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-res-retro"));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  const registered = logRecords(dir).filter((record) => record["event"] === "task.registered");
+  assert.equal(registered.length, 1);
+  const [start] = starts(dir);
+  assert.ok(start !== undefined, "no execution.started was appended");
+  assert.equal((start["payload"] as Record<string, unknown>)["harness_tool"], "TodoWrite");
+
+  const askDir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  const asked = claudeVerdict(claude(askDir, "TodoWrite", { todos: [] }, "t-res-ask", ["--timeout", "50ms"]));
+  assert.match(asked.reason, /^hook-timeout: /);
+  assert.equal(logRecords(askDir).filter((record) => record["event"] === "approval.requested").length, 1);
 });

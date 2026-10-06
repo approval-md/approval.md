@@ -1050,6 +1050,11 @@ tools:
   calls have tripped it. The exemption needs a harness start carrying
   `harness_tool`, which the gate writes only after checking the name against
   the attested mapping; a task that merely declares the class gets none.
+- **`harness.tool.unmapped` belongs to the hook.** Only the hook may declare it.
+  A task envelope, `approval propose` or an HTTP registration naming it is
+  refused `envelope-invalid`, and `approval run` refuses a key declared under it
+  (`harness-executed`), so the autonomy `record` gives the class reaches only the
+  calls the hook itself found unmapped.
 - **A tool name the record cannot carry is refused by name.** Under a mapping or
   an unmapped default, a name outside 1 to 256 of letters, digits, `_`, `.`,
   `:` and `-` is refused `hook-io` with `tool-name-invalid` before anything is
