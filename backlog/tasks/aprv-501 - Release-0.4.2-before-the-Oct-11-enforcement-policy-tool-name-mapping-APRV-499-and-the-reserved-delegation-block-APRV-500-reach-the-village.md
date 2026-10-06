@@ -41,5 +41,7 @@ SPEC.md not edited (sha256 3b1de87a, the 0.4.1 bytes). The attest list for Carte
 
 Targeted checks only (no full suite): `npx tsc -p tsconfig.json` exit 0; `node scripts/run-tests.mjs --only release-notes site-version-guard docs-guard demo-wordmark daemon-git-evidence version harness-version` exit 0, 94 pass, 0 fail; `node --test dist/tests/docs-guard.test.js` exit 0, 17/17; `node conformance/run.mjs` exit 0, 553 passed, 0 failed, 225 controls; `node scripts/release-notes.mjs 0.4.2` exit 0 (111 lines, starts `### Policy`), `v0.4.2` exit 0, `--check` exit 0 listing `0.4.2 2026-10-06` first; `npm pack --dry-run` exit 0, `approval-md-0.4.2.tgz`, 936 entries = 0.4.1's published 900 + 27 new schema fixtures + 9 dist files (core/tool-map, delegation, identity .js/.d.ts/.js.map), nothing stray.
 
+Draft PR #625 (Release 0.4.2) opened against main.
+
 Remaining: AC #1 needs CI green on the PR head and the SPEC attests (the PR stays a draft until then); AC #2 and #3 are Carter's.
 <!-- SECTION:NOTES:END -->
