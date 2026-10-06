@@ -100,6 +100,7 @@ A harness `execution.started` whose class came from the policy's tool mapping (a
 
 ## Remaining / for the orchestrator
 
+- SPEC amendment applied in PR #626, pending sign-off.
 - Refuter scope (noticed and accepted): see the PR body.
 - Follow-ups not done here: `.mcp.json` is not a built-in protected path (an agent able to write it could name a server a loose entry claims; documented, operator adds it to `protected_paths`); `approval hook classify` has no tool-name form; the open-window path with a mapped tool is covered by code (describeToolCall gets the loaded policy) but by no test.
 <!-- SECTION:NOTES:END -->
