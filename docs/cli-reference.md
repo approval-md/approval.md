@@ -2068,7 +2068,9 @@ to decide whether to fix itself, stop retrying, or ask a human.
   attestation (detail: `not-attested` | `hash-mismatch` | `unreadable`). Run
   `approval policy attest`.
 - `envelope-invalid` — the envelope failed `envelope.schema.json`, or the task
-  file has no frontmatter or no `approval:` key.
+  file has no frontmatter or no `approval:` key. Also: an envelope, a proposal
+  or a token-minting `request` naming the class `harness.tool.unmapped`, which
+  is reserved to the harness hook (APRV-499).
 - `task-file-unreadable` — the task file could not be read (exit 4).
 - `task-already-registered` — this task id already has a `task.registered` record.
 - `envelope-missing` — the file carries no `approval:` envelope AND the log holds
@@ -2237,7 +2239,9 @@ Frozen public API in the same sense the gate's codes are.
   is wrong and nothing is recoverable: the grant is complete, and it authorized
   a process that runs the command itself rather than through `approval run`.
   Distinct from `token-mismatch`, which would send an agent hunting for a token
-  that deliberately never existed.
+  that deliberately never existed. Also returned by `run` and `consume` for any
+  grant on the class `harness.tool.unmapped`, which only the harness hook may
+  spend (APRV-499).
 - `class-human-only` — the class the grant authorizes resolves to `human-only`,
   so the token may not be spent and `approval token` reports it unspendable
   rather than live. The gate refuses the request that would mint such a token,

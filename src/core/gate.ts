@@ -2092,6 +2092,21 @@ function attemptRequest(
     );
   }
 
+  // APRV-499 fix round 2 (recheck SF2), the request-time half of the
+  // registration refusal above: `harness.tool.unmapped` is asked about only by
+  // the harness hook, and always as a harness request (`execution: "harness"`,
+  // which mints no token). A token-minting request on the class, which is what
+  // `approval request` makes after the hook's own question was withdrawn, would
+  // put a credential in front of a human that only `approval consume` could
+  // spend, and that path refuses it (`harness-executed`). Refused before the
+  // log is read; nothing is appended.
+  if (input.cls === UNMAPPED_TOOL_CLASS && input.execution !== "harness") {
+    return refuse(
+      "envelope-invalid",
+      `action ${JSON.stringify(input.actionKey)} is declared under ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: only the hook asks about it, as a harness request that mints no token, and nothing else may request it. Nothing was appended.`,
+    );
+  }
+
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 

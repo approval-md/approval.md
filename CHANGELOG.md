@@ -54,16 +54,20 @@ before a tag.
 - **Record-only starts are records, not actions.** A `harness.tool.unmapped`
   start written under `unmapped_tool: record` with no human grant is not
   charged to a global `daily_actions` budget and does not accrue to the loop
-  floor; a granted one counts as before. The gate re-checks the named tool's
+  floor; a granted one counts as before, including a spend whose grant is
+  older than the 24 h window. The gate re-checks the named tool's
   class against the attested mapping before it writes such a start, and every
   start a mapped or unmapped call writes (including a grant's spend) carries
   `harness_tool`. A tool name the record cannot carry is refused `hook-io`
   (`tool-name-invalid`) before anything is appended.
 - **`harness.tool.unmapped` is reserved to the harness hook.** A task envelope,
   `approval propose` or an HTTP registration declaring it is refused
-  `envelope-invalid`, `approval run` refuses a key declared under it
-  (`harness-executed`), and a policy-path start of it without `harness_tool` is
-  refused `not-granted`; nothing is appended in any case.
+  `envelope-invalid`, as is a token-minting `approval request` for it (the hook
+  asks only as a harness request, which mints no token). `approval run` and
+  `approval consume` refuse a grant under it (`harness-executed`), so a token a
+  log already holds for the class cannot be spent, and a policy-path start of
+  it without `harness_tool` is refused `not-granted`; nothing is appended in any
+  case.
 - **Conformance.** `policy-resolution` 4.0.0 (the `harness.tool.unmapped`
   default narrows the no-rule-matched rule for one class), `schema-validation`
   3.2.0 (six new fixtures), and a new `hook-tool-map` 1.0.0 suite.

@@ -26,8 +26,10 @@ import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import { startExecution } from "../src/core/execute.js";
-import { propose, register, startHarnessExecution } from "../src/core/gate.js";
+import { propose, register, request, startHarnessExecution } from "../src/core/gate.js";
+import { appendEvent } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
+import { consumeToken, mintToken, tokenHash } from "../src/core/token.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -884,4 +886,134 @@ test("reserved: the hook still registers and records under the class (a supervis
   const asked = claudeVerdict(claude(askDir, "TodoWrite", { todos: [] }, "t-res-ask", ["--timeout", "50ms"]));
   assert.match(asked.reason, /^hook-timeout: /);
   assert.equal(logRecords(askDir).filter((record) => record["event"] === "approval.requested").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2 (recheck SF2): the reservation holds at request and at consume
+// ---------------------------------------------------------------------------
+
+const SF2_TASK = "hook:cc-sess-tools:t-sf2";
+const SF2_KEY = `${SF2_TASK}:harness.tool.unmapped`;
+
+/**
+ * Steps 1 and 2 of the recheck's flow (S5): the hook registers and asks for
+ * TodoWrite under `unmapped_tool: ask`, then the agent withdraws the hook's
+ * own request. Returns the directory and the hook's request record.
+ */
+function hookAskedThenWithdrawn(): { dir: string; asked: Record<string, unknown> } {
+  const dir = ready(policy(["  unmapped_tool: ask"], [...CLASSES]));
+  const verdict = claudeVerdict(claude(dir, "TodoWrite", { todos: [] }, "t-sf2", ["--timeout", "50ms"]));
+  assert.equal(verdict.permission, "deny");
+  const requested = logRecords(dir).filter((record) => record["event"] === "approval.requested");
+  assert.equal(requested.length, 1);
+  const [asked] = requested;
+  assert.ok(asked !== undefined);
+  assert.equal(asked["action_key"], SF2_KEY);
+  const withdrawn = runCli(["withdraw", SF2_TASK, "--action", SF2_KEY, "--as", "agent:cc"], dir);
+  assert.equal(withdrawn.code, 0, withdrawn.stderr);
+  return { dir, asked };
+}
+
+test("SF2: after withdrawing the hook's request, `approval request` on the reserved class is refused and nothing is appended", () => {
+  const { dir } = hookAskedThenWithdrawn();
+  const before = logRecords(dir).length;
+  // Step 3 of the recheck's flow, the CLI verb an agent reaches.
+  const cli = runCli(
+    ["request", SF2_TASK, "--action", SF2_KEY, "--payload", "-", "--as", "agent:cc", "--json"],
+    dir,
+    JSON.stringify({ tool: "TodoWrite", input: { todos: [] } }),
+  );
+  assert.equal(cli.code, 1, cli.stdout + cli.stderr);
+  assert.match(cli.stdout + cli.stderr, /envelope-invalid/);
+  assert.match(cli.stdout + cli.stderr, /reserved to the harness hook/);
+  // The core function, the same: no in-process caller can mint a token here.
+  const core = request(
+    join(dir, ".approval", "log", "events.jsonl"),
+    { task: SF2_TASK, actionKey: SF2_KEY, cls: "harness.tool.unmapped", summary: "x", payload_hash: "a".repeat(64) },
+    "agent:cc",
+    { policy: { dir } },
+  );
+  assert.equal(core.ok, false);
+  assert.equal(core.ok ? "" : core.code, "envelope-invalid");
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+  assert.equal(
+    logRecords(dir).filter((record) => record["event"] === "approval.granted").length,
+    0,
+    "no grant can follow: there is no token-minting request to grant",
+  );
+});
+
+test("SF2: a token grant on the reserved class (a log an earlier runtime wrote) cannot be spent by `approval consume` or `approval run`", () => {
+  // Steps 3 and 4 of the recheck's flow as the runtime BEFORE this fix wrote
+  // them: a token-minting re-request of the hook's key and a human's grant of
+  // it. No verb of this runtime can write them any more (the test above), so
+  // they are appended at the log layer, exactly as tests/token.test.ts writes
+  // a pre-APRV-17 grant, and they pass the same write-boundary validation.
+  const { dir, asked } = hookAskedThenWithdrawn();
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const askedPayload = { ...(asked["payload"] as Record<string, unknown>) };
+  delete askedPayload["execution"];
+  delete askedPayload["harness_cap_ms"];
+  const boundHash = askedPayload["payload_hash"];
+  assert.equal(typeof boundHash, "string");
+  const now = new Date().toISOString();
+  const rerequested = appendEvent(logPath, {
+    ts: now,
+    event: "approval.requested",
+    actor: "agent:cc",
+    task: SF2_TASK,
+    action_key: SF2_KEY,
+    payload: askedPayload,
+  });
+  assert.equal(rerequested.ok, true, rerequested.ok ? "" : rerequested.error.message);
+  const token = mintToken();
+  const grantPayload: Record<string, unknown> = {
+    class: "harness.tool.unmapped",
+    est_cost_usd: askedPayload["est_cost_usd"] ?? "0",
+    payload_hash: boundHash,
+    token_sha256: tokenHash(token),
+  };
+  if (typeof askedPayload["policy_sha256"] === "string") grantPayload["policy_sha256"] = askedPayload["policy_sha256"];
+  const grantedRecord = appendEvent(logPath, {
+    ts: now,
+    event: "approval.granted",
+    actor: "human:alice",
+    task: SF2_TASK,
+    action_key: SF2_KEY,
+    payload: grantPayload,
+  });
+  assert.equal(grantedRecord.ok, true, grantedRecord.ok ? "" : grantedRecord.error.message);
+  const before = logRecords(dir).length;
+
+  // Step 5: `approval run` refuses the class (fix round 1).
+  const run = runCli(["run", SF2_KEY, "--token", token, "--as", "agent:cc", "--", "true"], dir);
+  assert.notEqual(run.code, 0);
+  assert.match(run.stdout + run.stderr, /harness-executed/);
+
+  // Step 6: `approval consume` refuses it too, with the same code (fix round 2).
+  const consumed = runCli(
+    ["consume", SF2_KEY, "--token", token, "--payload-hash", String(boundHash), "--as", "agent:cc", "--json"],
+    dir,
+  );
+  assert.equal(consumed.code, 1, consumed.stdout + consumed.stderr);
+  assert.match(consumed.stdout + consumed.stderr, /harness-executed/);
+  assert.match(consumed.stdout + consumed.stderr, /reserved to the harness hook/);
+
+  // The core spend, the same: the refusal lives in the shared verification.
+  const core = consumeToken(logPath, SF2_KEY, token, "agent:cc", {
+    policyDir: dir,
+    presentedPayloadHash: String(boundHash),
+  });
+  assert.equal(core.ok, false);
+  assert.equal(core.ok ? "" : core.code, "harness-executed");
+  // The reservation's words, not verifyToken's "granted as a harness-executed
+  // request": the token itself verified (live, unspent, bound), and only the
+  // class refused it.
+  assert.match(core.ok ? "" : core.message, /reserved to the harness hook/);
+  assert.doesNotMatch(core.ok ? "" : core.message, /no execution token was minted/);
+
+  assert.equal(logRecords(dir).length, before, "nothing was appended");
+  assert.equal(starts(dir).length, 0, "no execution.started under the reserved class");
+  const verified = runCli(["log", "verify"], dir);
+  assert.equal(verified.code, 0, verified.stdout + verified.stderr);
 });

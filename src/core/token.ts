@@ -114,6 +114,7 @@ import {
   type LogReadRefusal,
   type RequestState,
 } from "./state.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /** Token entropy. 32 bytes = 256 bits, rendered as 64 lowercase hex chars. */
 export const TOKEN_BYTES = 32;
@@ -691,6 +692,21 @@ export function verifyTokenSpend(
     load.ok ? load.durations.approvalTtlMs : null,
   );
   if (!verified.ok) return verified;
+
+  // APRV-499 fix round 2 (recheck SF2), the mirror of `core/execute.ts`'s
+  // `attemptStart` refusal: `harness.tool.unmapped` is reserved to the harness
+  // hook, whose spend goes through `consumeHarnessGrant` and names the tool it
+  // ran. A token grant on that class (reachable only by withdrawing the hook's
+  // harness request and re-requesting the key by hand) is not `approval
+  // consume`'s to spend either, so no start without a `harness_tool` can be
+  // written under the class. Same code and same words as `approval run`.
+  if (verified.class === UNMAPPED_TOOL_CLASS) {
+    return refuse(
+      "harness-executed",
+      `action ${actionKey} is declared under ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: the harness runs such a call itself and the hook records it, so the token granted at seq ${verified.grantSeq} may not be spent by \`approval consume\` or \`approval run\`. No execution.started was written.`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
 
   const reserved = humanOnlyClassRefusal(
     load,
