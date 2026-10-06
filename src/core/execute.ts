@@ -95,6 +95,7 @@ import { isLoopEscalated } from "./loop.js";
 import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 import { humanOnlyRefusal, resolve } from "./policy-match.js";
 import type { SandboxState } from "./sandbox.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
@@ -805,6 +806,17 @@ function attemptStart(
       "execution-indeterminate",
       `action ${actionKey}'s execution ended in an unknown outcome (execution.indeterminate at seq ${String(custody.indeterminateSeq)}${custody.reason === null ? "" : `, ${custody.reason}`}): the side effect was attempted and nobody knows whether it committed. Running it again would be a blind double-execution, so it is refused, and the token and the idempotency key stay spent. Establish what actually happened and record it with \`approval execution reconcile\`; if it did not happen, declare a fresh action and request that.`,
       { seq: custody.indeterminateSeq ?? custody.seq },
+    );
+  }
+
+  // APRV-499 (claude-edge ruling): `harness.tool.unmapped` is reserved to the
+  // harness hook, which records the call and lets the HARNESS run it. A key the
+  // hook registered under that class is not `approval run`'s to spend, in the
+  // words a harness grant already gets here. Nothing is appended.
+  if (declared.class === UNMAPPED_TOOL_CLASS) {
+    return refuse(
+      "harness-executed",
+      `action ${actionKey} is declared under ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: the harness runs such a call itself and the hook records it, so \`approval run\` may not start it. No execution.started was written.`,
     );
   }
 

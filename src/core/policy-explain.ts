@@ -59,6 +59,7 @@ import {
   effectiveReadRoots,
   renderReadRoots,
 } from "./read-scope.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /**
  * Action-class grammar for a *concrete* class (not a pattern).
@@ -292,7 +293,7 @@ export function explain(
 
   const candidates = annotate(final.candidates, final.matched?.pattern ?? null);
   describeCandidates(decisionPath, actionClass, candidates);
-  describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates);
+  describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates, actionClass);
 
   const overridden = final.floorApplied
     ? { pattern: final.matched?.pattern ?? null, autonomy: base.declaredAutonomy }
@@ -455,6 +456,7 @@ function describeWinner(
   provenance: Provenance,
   autonomy: Autonomy,
   candidates: ExplanationCandidate[],
+  actionClass: string,
 ): void {
   if (provenance === "rule") {
     const winner = candidates.find((candidate) => candidate.winner);
@@ -475,6 +477,13 @@ function describeWinner(
     decisionPath.push(
       `no rule matched this policy.edit sub-class; it inherits the policy.edit line (SPEC §5.2, APRV-266) -> ${autonomy}`,
     );
+    return;
+  }
+  // APRV-499: the one class whose default is not `defaults.autonomy` when the
+  // policy says what to do with an unmapped harness tool.
+  const unmapped = load.policy.defaults?.unmapped_tool;
+  if (actionClass === UNMAPPED_TOOL_CLASS && unmapped !== undefined) {
+    decisionPath.push(`no rule matched; defaults.unmapped_tool: ${unmapped} (APRV-499) -> ${autonomy}`);
     return;
   }
   if (load.policy.defaults?.autonomy === undefined) {

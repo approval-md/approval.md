@@ -1,0 +1,18 @@
+{
+  "seq": 12,
+  "ts": "2026-10-05T22:50:00Z",
+  "event": "execution.started",
+  "task": "hook:sess-1:tu-4",
+  "action_key": "hook:sess-1:tu-4:harness.tool.unmapped",
+  "actor": "agent:claude-code",
+  "payload": {
+    "class": "harness.tool.unmapped",
+    "est_cost_usd": "0",
+    "execution": "harness",
+    "payload_hash": "3c987d69fe833bbea2b588ea7e7bc0848bbfb90703b298729a3d2d6d45346011",
+    "harness_tool": "mcp tool\nwith a line break"
+  },
+  "alg": "sha256/jcs",
+  "prev": "d973375d6aeec5e6cd2de3a0f7dc8f5bc1d9be77225f9af0f851e7fc519a07c3",
+  "hash": "4b7e0c2d9a8f6e5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a291807f6e5d4"
+}

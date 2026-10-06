@@ -629,6 +629,69 @@ to the session itself (the next section) — here there is no path, argv or dire
 to expose at all. The repair for this one is to do the work through `terminal`,
 where the words are visible, or through `approval run` with a granted token.
 
+### Tools the table does not know: the policy's `tools` mapping (APRV-499)
+
+Everything above is code: the shell, the two file tools, the two read tools,
+`execute_code` and the rule table. A Hermes tool none of them names (`todo`,
+`memory`, `web_search`, `vision_analyze`, and every MCP tool a tenant installs)
+used to be answered `{}` with "is not a gated tool" on stderr and no record. Two
+policy keys now decide those calls, so a new app is a policy line rather than a
+release of this runtime:
+
+```yaml
+# an excerpt of the approval-policy block
+defaults:
+  autonomy: manual
+  unmapped_tool: record          # or ask; absent = not gated, no record
+classes:
+  marketplace.*:                 { autonomy: manual }
+  marketplace.app.read:          { autonomy: autonomous }
+tools:
+  - match: mcp_zzz_post          # exact
+    class: marketplace.zzz.post
+  - match: "mcp_zzz_*"           # every other tool of that server
+    class: marketplace.app.read
+```
+
+- **First match wins**, over the WHOLE tool name, case-sensitively, with `*` as
+  the only wildcard (any run of characters, including none).
+- **The rule table and the built-in tools keep precedence.** An entry naming
+  `cronjob_manage`, `send_message`, `browser_*`, `terminal` or `write_file` is
+  inert: the table reads the call's `action` and arguments (`cronjob_manage list`
+  is a read, `create` is `cron.manage`), an entry reads only the name, and a
+  name-only line must not loosen a call the runtime classified from what it does.
+  `execute_code` stays refused before anything reads the policy.
+- **Every `class` must be declared** in `classes`, exactly or under a trailing
+  `<prefix>.*` family. A malformed or undeclared entry fails the policy closed,
+  and then an unknown tool is blocked `hook-policy-unavailable` with the rest,
+  rather than allowed; the block names the entries at fault and the repair.
+- **"Not a gated tool" needs the attested policy.** `todo`, `memory` or an MCP
+  tool is allowed unrecorded only when the policy maps nothing for it, declares
+  no `unmapped_tool`, and is the file a human last attested. An unattested edit
+  is blocked `hook-gate-refused:policy-not-attested`, as `terminal` is, so
+  removing a line on disk loosens nothing until the resident attests it.
+- **`unmapped_tool: record`** judges an unclaimed call under
+  `harness.tool.unmapped`, which resolves `autonomous` unless a `classes` rule
+  says otherwise: the `{}` allow, plus an `execution.started` naming the tool in
+  `harness_tool` and binding `{tool, input}` by hash only. **`ask`** resolves it
+  `manual`, which on this harness also needs the `--harness-cap` statement of the
+  section on timeouts before a human can be asked at all. Absent, nothing changes.
+- The post half closes a recorded start exactly as it closes a rule-table one.
+  A MAPPED app's start is charged against `daily_actions` and its failures count
+  toward the loop floor like any side-effecting tool. A record-only
+  `harness.tool.unmapped` start (no human grant) is neither (ruling H1): it is a
+  record of unclassified tool use, so `todo` and `web_search` do not spend the
+  resident's action budget or floor the session. A tripped floor still routes
+  an unmapped call to a human.
+- An entry trusts the tool NAME, which on Hermes comes from the MCP servers in
+  `$HERMES_HOME/config.yaml`. That file is a gate organ here already; keep it
+  so, or an agent that could rename a server could move its tools under a looser
+  entry.
+
+For Agent Village the resident template sets `unmapped_tool: record`, so every
+tool call an agent makes is recorded from the first day; an installed app's
+`tools` lines and per-app classes are a settings change the resident attests.
+
 ## The working directory is not where you think, and unbound calls are refused
 
 This is the finding of APRV-415, it came from the live run rather than from the

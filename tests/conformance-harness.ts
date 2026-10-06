@@ -38,6 +38,7 @@
 
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -957,6 +958,111 @@ function readScopeInput(input: Record<string, unknown>, dir: string): Record<str
   return tool === "Read" ? { file_path: target } : { pattern: "**/*.ts", path: target };
 }
 
+// --- hook-tool-map (APRV-499) ----------------------------------------------
+
+/**
+ * The policy's tool-name mapping, per harness, as a language-neutral suite.
+ *
+ * Each vector carries its policy TEXT. The runner writes it into a scratch gate
+ * root, attests it unless the vector says `attest: false` (a policy that must
+ * fail to load is given a bare log directory instead, so the refusal measured is
+ * the policy's and not a missing log's), sends one PreToolUse envelope, and
+ * reports the verdict plus what the log gained.
+ */
+function runHookToolMap(input: Record<string, unknown>): Expectation {
+  const harness = str(input, "harness");
+  if (harness !== "claude-code" && harness !== "hermes") {
+    throw new ConformanceError(`hook-tool-map has no envelope for harness ${JSON.stringify(harness)}`);
+  }
+  const dir = gateHome();
+  const policyPath = join(dir, "APPROVAL.md");
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  writeFileSync(policyPath, str(input, "policy"), "utf8");
+  if (input["attest"] === false) {
+    mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  } else {
+    const attested = appendAttestation(logPath, policyPath, "human:conformance");
+    if (!attested.ok) {
+      throw new ConformanceError(`the vector's policy could not be attested: ${attested.error.code}`);
+    }
+  }
+  const logLines = (): string[] =>
+    existsSync(logPath)
+      ? readFileSync(logPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
+      : [];
+  const before = logLines().length;
+  const toolInput = input["tool_input"];
+  if (toolInput === null || typeof toolInput !== "object" || Array.isArray(toolInput)) {
+    throw new ConformanceError("vector input.tool_input must be an object");
+  }
+  const body =
+    harness === "hermes"
+      ? {
+          hook_event_name: "pre_tool_call",
+          session_id: "conformance-tool-map",
+          tool_use_id: "conformance-tu-1",
+          cwd: dir,
+          profile: "default",
+          extra: { turn_id: "conformance-turn" },
+          tool_name: str(input, "tool"),
+          tool_input: toolInput,
+        }
+      : {
+          hook_event_name: "PreToolUse",
+          session_id: "conformance-tool-map",
+          tool_use_id: "conformance-tu-1",
+          cwd: dir,
+          tool_name: str(input, "tool"),
+          tool_input: toolInput,
+        };
+  const argv = [harness, "--dir", dir];
+  const timeout = input["timeout"];
+  if (typeof timeout === "string") argv.push("--timeout", timeout);
+
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = commandHook(
+    argv,
+    { out: (line) => out.push(line), err: (line) => err.push(line) },
+    dir,
+    () => JSON.stringify(body),
+  );
+  const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
+  let permission: string;
+  let reason: string;
+  if (harness === "hermes") {
+    const blocked = parsed["action"] === "block";
+    permission = blocked ? "deny" : "allow";
+    reason = blocked ? String(parsed["message"]) : err.join("");
+    if (code !== (blocked ? 2 : 0)) {
+      throw new ConformanceError(`the hermes verdict ${permission} was answered at exit ${String(code)}`);
+    }
+  } else {
+    if (code !== 0) throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
+    const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;
+    permission = String(nested?.["permissionDecision"]);
+    reason = String(nested?.["permissionDecisionReason"]);
+  }
+
+  const appended = logLines()
+    .slice(before)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const start = appended.find((record) => record["event"] === "execution.started");
+  const requested = appended.find((record) => record["event"] === "approval.requested");
+  const startPayload = (start?.["payload"] ?? {}) as Record<string, unknown>;
+  const requestPayload = (requested?.["payload"] ?? {}) as Record<string, unknown>;
+  const colon = reason.indexOf(":");
+  return {
+    valid: permission === "allow",
+    permission,
+    ...(permission === "deny" && colon > 0 ? { failure_class: reason.slice(0, colon) } : {}),
+    gated: permission === "deny" || !reason.includes("is not a gated tool"),
+    recorded_class: start === undefined ? null : (startPayload["class"] ?? null),
+    harness_tool: start === undefined ? null : (startPayload["harness_tool"] ?? null),
+    requested_class: requested === undefined ? null : (requestPayload["class"] ?? null),
+  };
+}
+
 // --- command-class (APRV-353, APRV-352) -------------------------------------
 
 /**
@@ -1040,6 +1146,7 @@ const EXECUTORS: Readonly<Record<string, Executor>> = {
   "schema-validation": runSchemaValidation,
   "gate-verdicts": runGateVerdict,
   "hook-read-scope": runHookReadScope,
+  "hook-tool-map": runHookToolMap,
   "command-class": runCommandClass,
 };
 

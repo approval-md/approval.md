@@ -3008,7 +3008,7 @@ function checkHarnessWiring(dir: string): DoctorCheck {
   const passthroughLine =
     unhandled.length === 0
       ? ""
-      : ` MATCHED AND NOT CLASSIFIED: ${unhandled.join(", ")} ${unhandled.length === 1 ? "is" : "are"} in the matcher and this runtime's Claude Code adapter handles ${unhandled.length === 1 ? "it" : "them"} as neither a shell, file nor read tool, so every such call spawns the hook and is answered \`allow\` with "is not a gated tool". The cost is real and the coverage is not.`;
+      : ` MATCHED AND NOT CLASSIFIED: ${unhandled.join(", ")} ${unhandled.length === 1 ? "is" : "are"} in the matcher and this runtime's Claude Code adapter handles ${unhandled.length === 1 ? "it" : "them"} as neither a shell, file nor read tool, so every such call spawns the hook and is answered \`allow\` with "is not a gated tool" unless the policy maps it in \`tools\` or declares \`defaults.unmapped_tool\` (APRV-499, docs/claude-code-hook.md "Tools the adapter does not know"). Without either, the cost is real and the coverage is not.`;
 
   return {
     check,

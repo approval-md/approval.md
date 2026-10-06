@@ -106,10 +106,22 @@
  * adapter's verdict (`cli/hook.ts`) and the write boundary that re-checks it
  * (`core/gate.ts`'s `startHarnessExecution`), and both use
  * {@link isSideEffectingClass} so neither can drift from the other.
+ *
+ * ## Record-only unmapped starts accrue nothing (APRV-499, ruling H1)
+ *
+ * A start of `harness.tool.unmapped` that no human granted is the hook's record
+ * of a tool call the policy's `tools` mapping does not claim (a TodoWrite, a web
+ * search) under `defaults.unmapped_tool: record`. It is a record, not an
+ * approved action, so its outcome is transparent to every streak in both
+ * directions, as a read's is. What it does NOT get is the read's ROUTING
+ * exemption: the class is side-effecting by {@link isSideEffectingClass}, so a
+ * floor that other calls tripped still routes an unmapped call to a human,
+ * because nothing establishes that an unclassified tool only looks.
  */
 
 import type { EventRecord } from "./log.js";
 import { payloadOf } from "./state.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /**
  * Consecutive failures that force a task to manual (SPEC.md §10.2). Three, and
@@ -161,14 +173,57 @@ function classByActionKey(records: EventRecord[]): Map<string, string> {
 }
 
 /**
+ * The action keys of record-only {@link UNMAPPED_TOOL_CLASS} starts (APRV-499,
+ * ruling H1): a start of that class whose key carries no `approval.granted`.
+ *
+ * Such a start is what the harness hook writes for a tool call the policy's
+ * `tools` mapping does not claim, under `defaults.unmapped_tool: record` (or a
+ * `classes` rule that makes the class unattended). It is a record of
+ * unclassified tool use and not an approved action, so its outcome is
+ * TRANSPARENT to every streak, exactly as a read's is: a failure accrues
+ * nothing and a completion clears nothing. A granted one (`ask`) is a human-
+ * approved action and is counted like any other.
+ */
+function recordOnlyKeys(records: EventRecord[], classes: Map<string, string>): Set<string> {
+  const granted = new Set<string>();
+  for (const record of records) {
+    if (record.event !== "approval.granted") continue;
+    if (typeof record.action_key === "string") granted.add(record.action_key);
+  }
+  // The class alone is not enough (a task envelope may declare it): the start
+  // must be a harness start naming its tool, which only the policy-authorized
+  // harness start writes, after checking the name against the attested
+  // mapping (`core/gate.ts`, `toolMapStartRefusal`). An outcome whose key has
+  // no such start, a refused start that wrote nothing among them, keeps
+  // counting exactly as before.
+  const keys = new Set<string>();
+  for (const record of records) {
+    if (record.event !== "execution.started") continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    if (classes.get(key) !== UNMAPPED_TOOL_CLASS || granted.has(key)) continue;
+    const payload = payloadOf(record);
+    if (payload["execution"] !== "harness" || typeof payload["harness_tool"] !== "string") continue;
+    keys.add(key);
+  }
+  return keys;
+}
+
+/**
  * Does this outcome record belong to a class the streak counts?
  *
  * Fail closed twice over: an outcome whose key names no start, and a start that
- * recorded no class, both answer `true`.
+ * recorded no class, both answer `true`. A record-only unmapped start (ruling
+ * H1, {@link recordOnlyKeys}) answers `false`.
  */
-function outcomeIsSideEffecting(record: EventRecord, classes: Map<string, string>): boolean {
+function outcomeIsSideEffecting(
+  record: EventRecord,
+  classes: Map<string, string>,
+  transparent: Set<string>,
+): boolean {
   const key = record.action_key;
   if (typeof key !== "string" || key.length === 0) return true;
+  if (transparent.has(key)) return false;
   const cls = classes.get(key);
   return cls === undefined ? true : isSideEffectingClass(cls);
 }
@@ -206,6 +261,7 @@ export interface TaskLoopState {
 export function loopEscalation(records: EventRecord[]): TaskLoopState[] {
   const states = new Map<string, TaskLoopState>();
   const classes = classByActionKey(records);
+  const transparent = recordOnlyKeys(records, classes);
 
   const stateFor = (task: string): TaskLoopState => {
     const existing = states.get(task);
@@ -227,7 +283,7 @@ export function loopEscalation(records: EventRecord[]): TaskLoopState[] {
     if (record.event !== "execution.failed" && record.event !== "execution.completed") continue;
     // APRV-280. Checked before the counter moves and before the task is even
     // registered: a read is transparent, not a zero.
-    if (!outcomeIsSideEffecting(record, classes)) continue;
+    if (!outcomeIsSideEffecting(record, classes, transparent)) continue;
     if (record.event === "execution.failed") {
       const state = stateFor(task);
       state.consecutiveFailures += 1;
@@ -358,13 +414,14 @@ interface ToolCallOutcome {
 function toolCallOutcomes(records: EventRecord[]): ToolCallOutcome[] {
   const byTask = new Map<string, ToolCallOutcome>();
   const classes = classByActionKey(records);
+  const transparent = recordOnlyKeys(records, classes);
   for (const record of records) {
     if (record.event !== "execution.failed" && record.event !== "execution.completed") continue;
     const task = record.task;
     if (typeof task !== "string" || task.length === 0) continue;
     const session = harnessSessionOf(task);
     if (session === null) continue;
-    if (!outcomeIsSideEffecting(record, classes)) continue;
+    if (!outcomeIsSideEffecting(record, classes, transparent)) continue;
     const existing = byTask.get(task);
     const failed = record.event === "execution.failed";
     if (existing === undefined) {

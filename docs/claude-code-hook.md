@@ -967,6 +967,116 @@ is a gate on what is ASKED for. For custody over what a process CAN open, the
 Seatbelt read jail in [docs/sandboxed-exec.md](./sandboxed-exec.md) denies file
 reads by default and opens the same roots.
 
+### Tools the adapter does not know (APRV-499)
+
+The adapter knows `Bash`, the four file tools and the three read tools. Every
+other tool a session calls, `WebFetch`, `Task`, `TodoWrite` and every MCP tool
+(`mcp__<server>__<tool>`) among them, used to be answered `allow` with "is not a
+gated tool" and no record. Two policy keys now say what happens to those calls,
+and adding an app to a session needs a policy line rather than a release of this
+runtime:
+
+```yaml
+# an excerpt of the approval-policy block
+defaults:
+  autonomy: manual
+  unmapped_tool: record          # or ask; absent = not gated, no record
+
+classes:
+  marketplace.*:                 { autonomy: manual }
+  marketplace.app.read:          { autonomy: autonomous }
+  marketplace.contextsling.publish: { autonomy: manual }
+
+tools:
+  - match: mcp__contextsling__publish
+    class: marketplace.contextsling.publish
+  - match: "mcp__contextsling__*"
+    class: marketplace.app.read
+```
+
+- **`tools` is an ordered list, and the first match wins.** `match` is compared
+  against the whole tool name, case-sensitively; `*` is the only wildcard and
+  matches any run of characters, including none. Put the narrow line first:
+  above, `publish` takes its own class and every other tool of that server is a
+  recorded read. Swap the two lines and the glob claims `publish` too.
+- **The adapter's own tables come first, always.** A `tools` entry is consulted
+  only for a call that `Bash`, the file tools and the read tools do not claim, so
+  a catch-all `- match: "*"` reaches `WebFetch` and never reaches `Bash`. Those
+  tables read the call's arguments, and an entry reads only its name.
+- **Every `class` must be declared.** It has to be an exact key of `classes` or
+  sit under a trailing family key (`marketplace.*` covers
+  `marketplace.contextsling.publish`). An undeclared class, a `match` with `**`
+  or a character outside letters, digits, `_`, `.`, `:` and `-`, a wildcard in a
+  `class`, two entries with the same `match`, or an entry naming
+  `harness.tool.unmapped` makes the whole policy fail to load, and every class is
+  then `manual`. Under a policy that does not load, a tool the adapter does not
+  know is refused `hook-policy-unavailable` like every gated call, instead of the
+  old allow: a mapping the runtime cannot read is not evidence that a tool is
+  unmapped. The refusal lists the first entries at fault and the repair (fix
+  them, then `approval policy attest`).
+- **"Not a gated tool" is believed only of the attested policy.** A tool the
+  adapter does not know is allowed unrecorded only when the policy loads, maps
+  nothing for it, declares no `unmapped_tool`, and is byte-for-byte the policy
+  a human last attested. An edited or never-attested file is refused
+  `hook-gate-refused:policy-not-attested` for these calls exactly as it is for
+  `Bash`, so deleting a `tools` line or the `unmapped_tool` key on disk
+  loosens nothing until a human attests the edit. This costs one verified read
+  of the log per such call (resumed behind the daemon's snapshot where there is
+  one). Under an open window, a policy that does not load or is not attested
+  cannot vouch for a tool either: the call is recorded as `gate.bypassed` under
+  `harness.tool.unmapped`.
+- **`defaults.unmapped_tool` covers what no entry claims.** `record` classifies
+  the call `harness.tool.unmapped`, which resolves `autonomous` when no `classes`
+  rule matches it: the call proceeds and leaves an `execution.started` carrying
+  `harness_tool` (the tool name) and the hash of `{tool, input}`, so the
+  arguments never reach the log. `ask` resolves the same class `manual`, so the
+  call waits for a human, and the request carries the whole call as its
+  payload. A `classes` line for `harness.tool.unmapped` decides it instead
+  (`supervised-retro` to sample the recorded calls, `human-only` to refuse them).
+  Absent, which is every policy written before the key existed, nothing changes:
+  allowed, not recorded.
+- **A mapped call is an ordinary gated call.** Its payload is `{tool, input}`, its
+  start or request is under the entry's class, and every start it writes
+  (autonomous, supervised, or the spend of a human's grant) records
+  `harness_tool` too, since several tools may share one class. A mapped start
+  is charged like any autonomous start: `daily_actions` counts it, and a run of
+  its failures counts toward the loop floor.
+- **A record-only unmapped start is a record, not an action** (ruling H1). A
+  `harness.tool.unmapped` start no human granted is not counted by a global
+  `daily_actions` budget and is not refused by a spent one, and its failures
+  and completions are invisible to the loop floor. A granted one (`ask`) counts
+  like any approved action, and a `limits` block on a rule matching the class
+  still meters it. The floor still ROUTES an unmapped call to a human once other
+  calls have tripped it. The exemption needs a harness start carrying
+  `harness_tool`, which the gate writes only after checking the name against
+  the attested mapping; a task that merely declares the class gets none.
+- **`harness.tool.unmapped` belongs to the hook.** Only the hook may declare it.
+  A task envelope, `approval propose` or an HTTP registration naming it is
+  refused `envelope-invalid`, and `approval run` refuses a key declared under it
+  (`harness-executed`), so the autonomy `record` gives the class reaches only the
+  calls the hook itself found unmapped.
+- **A tool name the record cannot carry is refused by name.** Under a mapping or
+  an unmapped default, a name outside 1 to 256 of letters, digits, `_`, `.`,
+  `:` and `-` is refused `hook-io` with `tool-name-invalid` before anything is
+  appended.
+- **A tool name is only as trustworthy as the configuration that named it.** An
+  entry trusts that `mcp__contextsling__*` is the server the operator
+  installed. An agent able to write the MCP configuration could register a
+  server under a name a looser entry claims, so put that file under
+  `protected_paths` (`.mcp.json` is not a built-in protected path) or keep
+  the loose classes for tools whose server the human controls.
+- **The matcher decides what reaches the hook at all.** Claude Code runs this
+  hook only for the tools the `PreToolUse` entry's `matcher` names, and the
+  installed matcher names the five gated tools. To gate MCP tools, widen it: add
+  `|mcp__.*` for every MCP tool, or match every tool, and register the same
+  matcher on `PostToolUse` so recorded starts are closed. Every matched call is a
+  process start and, for a tool the adapter does not know, one policy load.
+
+The Agent Village's resident template sets `unmapped_tool: record`, so every
+tool call a resident's agent makes is on the record from the first day, and an
+installed app adds its own `tools` lines and classes as a settings change the
+resident attests.
+
 ### What the approver reads (APRV-124)
 
 The prompt binds to the payload, and the payload is the thing being done, whole.

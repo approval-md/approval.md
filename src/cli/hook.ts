@@ -85,7 +85,7 @@ import {
   sep,
 } from "node:path";
 
-import { attestationRefusal, checkAttestation } from "../core/attest.js";
+import { attestationRefusal, checkAttestation, checkAttestationOfBytes } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
@@ -150,7 +150,20 @@ import {
 import { settleTerminationGuards } from "../core/log-lock.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
-import { loadPolicy, parseDuration } from "../core/policy-load.js";
+import {
+  loadPolicy,
+  loadPolicyText,
+  parseDuration,
+  POLICY_FILENAMES,
+  type Policy,
+  type PolicyLoadResult,
+} from "../core/policy-load.js";
+import {
+  isRecordableToolName,
+  toolMapVerdict,
+  UNMAPPED_TOOL_CLASS,
+  type ToolMapVerdict,
+} from "../core/tool-map.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
   effectiveReadRoots,
@@ -1075,6 +1088,136 @@ function toolRuleOf(adapter: HarnessAdapter, input: HookInput): ToolRuleVerdict 
     return null;
   }
   return adapter.toolRules(input.toolName, input.toolInput);
+}
+
+/**
+ * Is this call one the adapter's own tables leave unclaimed? (APRV-499.)
+ *
+ * Unclaimed means: not the shell tool, not a file or read tool, not a
+ * pass-through tool, and not a tool the hard-coded rule table answers (gated OR
+ * read). Exactly these calls reach the policy's `tools` mapping and its
+ * unmapped-tool default, and before APRV-499 exactly these were answered "not a
+ * gated tool". The adapter's tables keep precedence because they read the
+ * call's arguments, and a `tools` entry reads only its name.
+ */
+function unclaimedTool(adapter: HarnessAdapter, input: HookInput): boolean {
+  if (input.toolName === adapter.shellTool) return false;
+  if (adapter.fileTools.includes(input.toolName)) return false;
+  if (adapter.readTools.includes(input.toolName)) return false;
+  if (adapter.passThroughTools?.includes(input.toolName) === true) return false;
+  return toolRuleOf(adapter, input) === null;
+}
+
+/**
+ * The policy file's bytes, found the way `loadPolicy` finds them: `--policy`
+ * when given, else the first of {@link POLICY_FILENAMES} in the policy
+ * directory, else in `cwd`. `null` when there is none to read.
+ *
+ * Read ONCE and handed to both the parse and the attestation hash (APRV-142's
+ * rule, applied to this hook's unclaimed-tool answer), so no file swap between
+ * the two can attest one policy and decide by another.
+ */
+function readHookPolicyBytes(
+  options: ReturnType<typeof hookScope>["options"],
+  cwd: string,
+): { path: string; bytes: Buffer } | null {
+  const candidates =
+    options.policy?.file === undefined
+      ? POLICY_FILENAMES.map((filename) => join(options.policy?.dir ?? cwd, filename))
+      : [options.policy.file];
+  for (const candidate of candidates) {
+    try {
+      return { path: candidate, bytes: readFileSync(candidate) };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Where an unclaimed call stands under the policy IN FORCE (APRV-499; fix
+ * round 1, refutation B1).
+ *
+ * - `ungated`: the policy loads, neither maps the tool nor declares
+ *   `defaults.unmapped_tool`, AND those exact bytes are the ones a human last
+ *   attested. Only this answer lets a call through as "not a gated tool".
+ * - `decide`: the policy maps the tool, declares an unmapped default, or does
+ *   not load. The gated path below decides it, and refuses it where it must.
+ * - `unattested`: the on-disk policy would leave the tool ungated, but it is
+ *   not the attested policy (edited since, never attested, or the log that
+ *   would say so cannot be read and verified). Refused with the gate's own
+ *   `policy-not-attested`, the answer Bash gets under the same file.
+ *
+ * Why the attestation is checked here at all. Before APRV-499 the not-gated
+ * answer did not depend on the policy, so there was nothing to attest. Now it
+ * does: an attested `tools` entry, or `unmapped_tool: ask`, gates a call, and
+ * deleting that line on disk would loosen the call at once if the on-disk file
+ * were believed. SPEC.md §5.2: an edited policy is inoperative until a human
+ * re-attests it. The check runs only on the not-gated branch; every other
+ * branch already reaches an attestation check on the gated path.
+ *
+ * `records` is the VERIFIED log, or `null` when it could not be read or did
+ * not verify, which is not evidence of an attestation and answers
+ * `unattested`.
+ */
+type UnclaimedStanding =
+  | { kind: "ungated" }
+  | { kind: "decide" }
+  | { kind: "unattested"; code: string; detail: string };
+
+function unclaimedStanding(
+  options: ReturnType<typeof hookScope>["options"],
+  cwd: string,
+  toolName: string,
+  records: EventRecord[] | null,
+): UnclaimedStanding {
+  const read = readHookPolicyBytes(options, cwd);
+  if (read === null) return { kind: "decide" };
+  const load = loadPolicyText(read.path, read.bytes.toString("utf8"));
+  if (!load.ok) return { kind: "decide" };
+  if (toolMapVerdict(load.policy, toolName).kind !== "not-gated") return { kind: "decide" };
+  if (records === null) {
+    return {
+      kind: "unattested",
+      code: "hook-io",
+      detail: `${toolName} is outside the gate only under an attested policy, and the log that would show the attestation could not be read and verified; nothing was appended`,
+    };
+  }
+  const refusal = attestationRefusal(checkAttestationOfBytes(records, read.bytes));
+  if (refusal === null) return { kind: "ungated" };
+  return {
+    kind: "unattested",
+    code: `hook-gate-refused:${refusal.code}`,
+    detail: `${refusal.message}. ${toolName} is a tool this adapter does not classify, and whether the policy gates it (a \`tools\` entry, \`defaults.unmapped_tool\`) is a question only the attested policy answers, so the on-disk file is not read as "not a gated tool" until a human attests it. Nothing was appended.`,
+  };
+}
+
+/**
+ * {@link unclaimedStanding} for a caller that has not read the log: the fast
+ * path and the post-execution half. One verified read, resumed behind the
+ * daemon's snapshot (APRV-188) where there is one.
+ */
+function unclaimedUngated(flags: Record<string, string | boolean>, cwd: string, toolName: string): boolean {
+  const { logPath, options } = hookScope(flags, cwd);
+  useVerifiedSnapshots(true);
+  const read = readVerifiedRecords(logPath);
+  return unclaimedStanding(options, cwd, toolName, read.ok ? read.records : null).kind === "ungated";
+}
+
+/**
+ * The `hook-policy-unavailable` detail (APRV-499, refutation S2): the load's
+ * own code and message, the first per-entry errors it computed, and the
+ * repair, so the human reading the refusal is told what to change.
+ */
+function policyUnavailableDetail(load: Extract<PolicyLoadResult, { ok: false }>): string {
+  const errors = load.errors ?? [];
+  const shown = errors
+    .slice(0, 5)
+    .map((error) => `${error.path.length === 0 ? "(root)" : error.path}: ${error.message}`);
+  const more = errors.length > shown.length ? `; and ${String(errors.length - shown.length)} more` : "";
+  const listed = shown.length === 0 ? "" : ` (${shown.join("; ")}${more})`;
+  return `${load.code}: ${load.message}${listed}; every class resolves to manual and the hook cannot verify a decision. Repair: correct ${shown.length === 0 ? "the policy file" : "each entry named above"}, then have a human attest the result (\`approval policy attest\`); an edited policy is inoperative until then`;
 }
 
 /**
@@ -3661,6 +3804,13 @@ interface HookRun {
    * configures no channel is a question nothing is delivering.
    */
   channels: readonly string[];
+  /**
+   * The harness tool name, when the call's class came from the policy's tool
+   * mapping (APRV-499). Every `execution.started` this invocation writes, the
+   * policy-authorized start and the spend of a human's grant alike, carries it
+   * as `harness_tool` (refutation S3).
+   */
+  harnessTool?: string;
 }
 
 /**
@@ -3891,6 +4041,8 @@ function* consumeGrants(
         append,
         presentedPayloadHash: hash,
         spendingTask: task,
+        // APRV-499 (refutation S3): a mapped or unmapped spend names its tool.
+        ...(run.harnessTool === undefined ? {} : { harnessTool: run.harnessTool }),
       }),
     );
     if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
@@ -4090,11 +4242,18 @@ function* recordUnattended(
   classes: readonly string[],
   hash: string,
 ): GateSteps<{ code: string; message: string } | null> {
+  const harnessTool = run.harnessTool;
   for (const cls of classes) {
     const started = yield* spendUnderLock(run.logPath, run.options.append, (append) =>
       startHarnessExecution(
         run.logPath,
-        { task, actionKey: `${task}:${cls}`, cls, payload_hash: hash },
+        {
+          task,
+          actionKey: `${task}:${cls}`,
+          cls,
+          payload_hash: hash,
+          ...(harnessTool === undefined ? {} : { harness_tool: harnessTool }),
+        },
         run.actor,
         { ...run.options, append },
       ),
@@ -4522,6 +4681,9 @@ function* gateHarnessSteps(
     const registered = register(run.logPath, { task, envelope }, run.actor, {
       ...run.options,
       ...(provenance === null ? {} : { harness: provenance }),
+      // APRV-499: the hook is the one caller that may declare the reserved
+      // harness.tool.unmapped class.
+      toolMapHook: true,
     });
     if (!registered.ok) {
       return sayDeny(`hook-gate-refused:${registered.code}`, registered.message);
@@ -5373,7 +5535,14 @@ function runPostToolUse(
     // nothing, and the close below finds no start and says so in its own words.
     !adapter.readTools.includes(input.toolName) &&
     // APRV-445: a tool the rule table gated wrote a start like any other.
-    toolRuleOf(adapter, input)?.kind !== "gated"
+    toolRuleOf(adapter, input)?.kind !== "gated" &&
+    // APRV-499: an unclaimed tool the policy maps, or one it records or asks
+    // about as unmapped, wrote a start too. So did any unclaimed tool whose
+    // policy no longer loads or is not the attested one, as far as this half
+    // can tell, so that one goes on to the close, which finds the start or says
+    // there is none. Only an ATTESTED policy that loads and leaves the tool
+    // outside the gate keeps this answer (fix round 1, refutation B1).
+    (!unclaimedTool(adapter, input) || unclaimedUngated(flags, cwd, input.toolName))
   ) {
     return report(
       streams,
@@ -5481,9 +5650,19 @@ type ToolDescription =
        * that RUN, and an edit runs nothing.
        */
       segments?: readonly ClassifiedSegment[];
+      /**
+       * The harness tool name, when the class came from the policy's tool
+       * mapping (APRV-499), so the start record can say which tool ran.
+       */
+      harnessTool?: string;
     }
-  /** A tool call this hook does not gate at all. */
-  | { kind: "allow"; reason: string }
+  /**
+   * A tool call this hook does not gate at all. `unclaimed` marks the
+   * not-a-gated-tool answer for a call the adapter's tables leave to the
+   * policy (APRV-499), which a caller may let through only under an attested
+   * policy (see {@link unclaimedStanding}).
+   */
+  | { kind: "allow"; reason: string; unclaimed?: true }
   /** The classifier could not read it, or the input was malformed. */
   | { kind: "deny"; code: string; detail: string };
 
@@ -5493,6 +5672,22 @@ function describeToolCall(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
   readRoots: readonly string[] = [],
+  /**
+   * The loaded policy whose `tools` mapping and `defaults.unmapped_tool` an
+   * unclaimed call is answered by (APRV-499), or `null` when there is none to
+   * read (the open window over a policy that did not load).
+   */
+  toolPolicy: Policy | null = null,
+  /**
+   * May an unclaimed call the policy leaves outside the gate be described as
+   * "not a gated tool"? (APRV-499 fix round 1, refutations B1 and S1.) The
+   * closed path passes `true` and checks the attestation on the allow it gets
+   * back. The open window passes `true` only for an attested policy that
+   * loads; otherwise an unclaimed call is described under
+   * `harness.tool.unmapped`, so the bypass RECORDS it rather than letting it
+   * run unrecorded on the word of a file nobody vouched for.
+   */
+  ungatedAllowed = true,
 ): ToolDescription {
   if (adapter.kind === "codex" && input.toolName === "apply_patch") {
     // APRV-363. The app-server's LEGACY `applyPatchApproval` carries its change
@@ -5713,6 +5908,45 @@ function describeToolCall(
       payload: { tool: input.toolName, input: input.toolInput },
       headline: ruled.headline,
       notes: [],
+    };
+  }
+
+  // APRV-499: a call the adapter's own tables leave unclaimed (every MCP tool
+  // among them) is answered by the policy's `tools` mapping, first match wins,
+  // then by `defaults.unmapped_tool`. Below the rule table and the shell, and
+  // above the read and file branches only because those two never see an
+  // unclaimed call: the predicate excludes them. The payload is the whole call,
+  // as the rule table's is, so a grant binds every argument; only the NAME is
+  // written to the log, on the start record.
+  if (unclaimedTool(adapter, input)) {
+    const verdict: ToolMapVerdict =
+      toolPolicy === null ? { kind: "not-gated" } : toolMapVerdict(toolPolicy, input.toolName);
+    if (verdict.kind === "not-gated" && ungatedAllowed) {
+      return { kind: "allow", reason: `${input.toolName} is not a gated tool`, unclaimed: true };
+    }
+    // Refutation S4: a name the record could not carry is refused here, by
+    // name, before anything is appended, rather than at the write boundary.
+    if (!isRecordableToolName(input.toolName)) {
+      return {
+        kind: "deny",
+        code: "hook-io",
+        detail: `tool-name-invalid: ${JSON.stringify(input.toolName.slice(0, 80))}${input.toolName.length > 80 ? "…" : ""} is classified by the policy's tool mapping, and a tool so classified is recorded by name, which must be 1 to 256 of letters, digits, _, ., : and - (the characters a tools entry can match). Nothing was appended`,
+      };
+    }
+    const cls = verdict.kind === "not-gated" ? UNMAPPED_TOOL_CLASS : verdict.cls;
+    const note =
+      verdict.kind === "mapped"
+        ? `tools entry ${String(verdict.index)} (${JSON.stringify(verdict.match)}) maps ${input.toolName} to ${verdict.cls} (APRV-499)`
+        : verdict.kind === "unmapped"
+          ? `${input.toolName} matches no tools entry; defaults.unmapped_tool: ${verdict.mode} (APRV-499)`
+          : `${input.toolName} is outside the gate only under an attested policy that loads, and this one ${toolPolicy === null ? "did not load" : "is not attested"}, so it is described as ${UNMAPPED_TOOL_CLASS} (APRV-499)`;
+    return {
+      kind: "gated",
+      classes: [cls],
+      payload: { tool: input.toolName, input: input.toolInput },
+      headline: `${input.toolName} (${cls})`,
+      notes: [note],
+      harnessTool: input.toolName,
     };
   }
 
@@ -6378,6 +6612,17 @@ function* runBypass(
       policyRootOf(load, scope.root),
       load.ok ? load.policy.read_scope?.roots : undefined,
     ),
+    // APRV-499. The window suspends the policy's ANSWER, not its mapping: a
+    // mapped or unmapped tool is described under its class here too, so the
+    // bypass record names it.
+    load.ok ? load.policy : null,
+    // Fix round 1 (refutations S1 and B1): "not a gated tool" is believed only
+    // from an attested policy that loads. A policy that did not load, or one
+    // nobody attested, cannot say a tool is outside the gate, so the call is
+    // described under harness.tool.unmapped and the bypass records it: a
+    // window being open does not let a call run unrecorded.
+    unclaimedStanding(scope.options, cwd, input.toolName, decidedOn?.records ?? null).kind ===
+      "ungated",
   );
   if (described.kind === "deny") {
     return deny(
@@ -6811,30 +7056,42 @@ function* runHarnessHook(
     !adapter.fileTools.includes(input.toolName)
   ) {
     if (!adapter.readTools.includes(input.toolName)) {
-      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
-    }
-    // APRV-347, and the placement is the whole of its cost. A read tool call is
-    // the most frequent event a session produces, and before this task it was
-    // answered here with no policy load, no verified read of the log and no
-    // window lookup. Everything below this line is expensive, so the reads that
-    // do not need it must not pay for it.
-    //
-    // The short-circuit is sound because `read_scope` is ADDITIVE: it can only
-    // widen the roots, so a target already inside the BUILT-IN roots is inside
-    // the effective ones whatever the policy says, and the policy need not be
-    // read to know it. A target outside them falls through, the policy is
-    // loaded below, and `describeToolCall` asks again with the widened set —
-    // which is where a policy-declared root actually takes effect.
-    //
-    // The cost of the fast path is a handful of `realpath` calls and no process
-    // spawn, provided the hook is configured with `--dir` as the docs show
-    // (otherwise `hookScope` runs `git rev-parse` to find the primary).
-    const early = hookScope(parsed.flags, cwd);
-    if (
-      credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
-      readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
-    ) {
-      return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      // APRV-499: an unclaimed tool is answered here, with one policy load,
+      // only when the policy loads and neither maps it nor declares
+      // `defaults.unmapped_tool`. Otherwise it goes on to the path below, where
+      // a mapped or unmapped call is classified and a policy that did not load
+      // is refused.
+      // Fix round 1 (refutation B1): and only when those bytes are the ATTESTED
+      // policy, which costs one verified read of the log. Anything else goes on
+      // to the path below, which refuses it in the gate's own words or, under
+      // an open window, records the bypass.
+      if (unclaimedUngated(parsed.flags, cwd, input.toolName)) {
+        return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      }
+    } else {
+      // APRV-347, and the placement is the whole of its cost. A read tool call is
+      // the most frequent event a session produces, and before this task it was
+      // answered here with no policy load, no verified read of the log and no
+      // window lookup. Everything below this line is expensive, so the reads that
+      // do not need it must not pay for it.
+      //
+      // The short-circuit is sound because `read_scope` is ADDITIVE: it can only
+      // widen the roots, so a target already inside the BUILT-IN roots is inside
+      // the effective ones whatever the policy says, and the policy need not be
+      // read to know it. A target outside them falls through, the policy is
+      // loaded below, and `describeToolCall` asks again with the widened set —
+      // which is where a policy-declared root actually takes effect.
+      //
+      // The cost of the fast path is a handful of `realpath` calls and no process
+      // spawn, provided the hook is configured with `--dir` as the docs show
+      // (otherwise `hookScope` runs `git rev-parse` to find the primary).
+      const early = hookScope(parsed.flags, cwd);
+      if (
+        credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
+        readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
+      ) {
+        return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
+      }
     }
   }
 
@@ -7031,7 +7288,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     return {
       permission: "deny",
       code: "hook-policy-unavailable",
-      detail: `${load.code}: ${load.message}; every class resolves to manual and the hook cannot verify a decision`,
+      detail: policyUnavailableDetail(load),
     };
   }
   const protectedPaths = load.policy.protected_paths ?? [];
@@ -7044,12 +7301,40 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots);
+  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots, load.policy);
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }
   if (described.kind === "allow") {
-    return { permission: "allow", reason: described.reason };
+    if (described.unclaimed !== true) return { permission: "allow", reason: described.reason };
+    // APRV-499 fix round 1 (refutation B1): the on-disk policy leaves this call
+    // outside the gate, and that is believed only of the ATTESTED policy. The
+    // log is required for that, exactly as it is for an unattended Bash call.
+    if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+      return {
+        permission: "deny",
+        code: "hook-log-unreachable",
+        detail: `no log at ${logPath}, so whether the policy that leaves ${input.toolName} ungated is the attested one cannot be established; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
+      };
+    }
+    let records = windowRecords;
+    if (records === null) {
+      const read = readVerifiedRecords(logPath);
+      if (!read.ok) return { permission: "deny", code: "hook-io", detail: read.message };
+      records = read.records;
+    }
+    const standing = unclaimedStanding(options, cwd, input.toolName, records);
+    if (standing.kind === "ungated") return { permission: "allow", reason: described.reason };
+    if (standing.kind === "unattested") {
+      return { permission: "deny", code: standing.code, detail: standing.detail };
+    }
+    // The file changed between the two reads of this one decision: refuse,
+    // and the next call decides against whatever is there then.
+    return {
+      permission: "deny",
+      code: "hook-policy-unavailable",
+      detail: `the policy file changed while ${input.toolName} was being decided; nothing was appended, and a retry is decided against the file as it then stands`,
+    };
   }
   const { classes, payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
@@ -7110,6 +7395,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     // changed when an operator reordered their policy would read as a change of
     // state.
     channels: Object.keys(load.policy.channels ?? {}).sort(),
+    ...(described.harnessTool === undefined ? {} : { harnessTool: described.harnessTool }),
   };
 
   const resolutions = classes.map((cls) => resolvePolicy(load, cls));

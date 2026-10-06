@@ -130,6 +130,7 @@ import {
 // runtime edge from the gate to the audit module for four string literals.
 import type { Reaction } from "./audit.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { toolMapVerdict, UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 import {
   evaluateIntakeLimits,
   intakeRefusalOf,
@@ -1325,6 +1326,13 @@ export interface RegisterOptions extends GateOptions {
   harness?: HarnessProvenance;
   /** Set by `propose` alone: the `propose:` task namespace is its (APRV-445). */
   proposal?: true;
+  /**
+   * Set by the harness hook alone (APRV-499, claude-edge ruling): the one
+   * caller that may declare {@link UNMAPPED_TOOL_CLASS}. A CALL option for the
+   * reason `harness` is one: an envelope is authored by the party under
+   * oversight, and no CLI flag, task file or HTTP route sets this.
+   */
+  toolMapHook?: true;
 }
 
 /**
@@ -1386,6 +1394,23 @@ function attemptRegister(
       `the envelope failed schema validation; nothing was appended`,
       { errors: validation.errors },
     );
+  }
+
+  // APRV-499 (claude-edge ruling): `harness.tool.unmapped` is reserved to the
+  // harness hook, the way `harness.launch.*` is reserved to a rule. It names
+  // "a tool call no `tools` entry claimed", a fact only the hook establishes,
+  // and under `unmapped_tool: record` it resolves autonomous, so a task
+  // envelope, `approval propose` or an HTTP registration declaring it would be
+  // borrowing that autonomy for an action nobody classified. Refused before
+  // the log is read; nothing is appended.
+  if (options.toolMapHook !== true) {
+    const reserved = actionsOf(resolved.envelope).find((action) => action.class === UNMAPPED_TOOL_CLASS);
+    if (reserved !== undefined) {
+      return refuse(
+        "envelope-invalid",
+        `action ${JSON.stringify(reserved.idempotency_key)} declares class ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: it names a tool call that no \`tools\` entry of the attested policy claimed, and only the hook observes that. Declare the action under the class that describes what it does. Nothing was appended.`,
+      );
+    }
   }
 
   const read = readGateRecords(logPath);
@@ -2064,6 +2089,21 @@ function attemptRequest(
     return refuse(
       "actor-invalid",
       `request requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  // APRV-499 fix round 2 (recheck SF2), the request-time half of the
+  // registration refusal above: `harness.tool.unmapped` is asked about only by
+  // the harness hook, and always as a harness request (`execution: "harness"`,
+  // which mints no token). A token-minting request on the class, which is what
+  // `approval request` makes after the hook's own question was withdrawn, would
+  // put a credential in front of a human that only `approval consume` could
+  // spend, and that path refuses it (`harness-executed`). Refused before the
+  // log is read; nothing is appended.
+  if (input.cls === UNMAPPED_TOOL_CLASS && input.execution !== "harness") {
+    return refuse(
+      "envelope-invalid",
+      `action ${JSON.stringify(input.actionKey)} is declared under ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: only the hook asks about it, as a harness request that mints no token, and nothing else may request it. Nothing was appended.`,
     );
   }
 
@@ -3734,6 +3774,16 @@ export interface ConsumeHarnessOptions extends GateOptions {
    * else, absence included, records `carried`.
    */
   spendingTask?: string;
+  /**
+   * The harness tool NAME of the call doing the spending, when its class came
+   * from the policy's tool mapping (APRV-499, refutation S3): written to the
+   * start as `harness_tool`, exactly as the policy-authorized start writes it,
+   * so every start a mapped or unmapped harness call produces names its tool.
+   * It authorizes nothing: the spend is bound by `presentedPayloadHash`, whose
+   * payload already carries the name, so a name that disagreed with the
+   * approved bytes would have been refused `payload-mismatch` first.
+   */
+  harnessTool?: string;
 }
 
 /**
@@ -4111,6 +4161,8 @@ function attemptHarnessConsume(
     payload[HARNESS_SPENDING_TASK] = options.spendingTask;
   }
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
+  // APRV-499 (refutation S3): which tool a mapped or unmapped spend was.
+  if (options.harnessTool !== undefined) payload["harness_tool"] = options.harnessTool;
 
   const appended = append(
     logPath,
@@ -4156,6 +4208,15 @@ export interface HarnessStartInput {
   payload_hash?: string;
   /** Canonical decimal USD string (APRV-121); a JSON number is read as the historical form. */
   est_cost_usd?: UsdInput;
+  /**
+   * The harness tool NAME the start records, when the class came from the
+   * policy's tool mapping rather than from what the call does (APRV-499):
+   * a `tools` entry, or `harness.tool.unmapped`. Several tools share one
+   * such class, so the class alone cannot say which ran. The name and never the
+   * arguments: those are bound by `payload_hash` and stay out of the log.
+   * Shape-checked by the event schema at the write boundary.
+   */
+  harness_tool?: string;
 }
 
 export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
@@ -4202,6 +4263,49 @@ export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal
  * field because a start event with no `payload_hash` is a record that says
  * something ran without saying what — the state APRV-140 closed everywhere else.
  */
+/**
+ * Is the class this harness start names the one the ATTESTED policy's tool
+ * mapping gives its tool? (APRV-499, fix round 1.)
+ *
+ * The hook classifies an unclaimed tool call from a policy read of its own,
+ * and this function attests the bytes it reads itself, so between the two a
+ * file swap could have the hook classify under one mapping while the start is
+ * recorded under another. For every class that is a belt to braces (the
+ * resolution here is the attested one), but the class `harness.tool.unmapped`
+ * also decides whether `daily_actions` and the loop floor count the start
+ * (ruling H1), so the name and the class are checked against the attested
+ * mapping here, where the append happens: a start naming `harness_tool` must
+ * carry exactly the class that mapping gives that name, and a start of
+ * `harness.tool.unmapped` written without a name is an ordinary declared
+ * action, budgeted and counted like any other.
+ */
+function toolMapStartRefusal(
+  load: PolicyLoadResult,
+  input: HarnessStartInput,
+): GateRefusal | null {
+  if (input.harness_tool === undefined) {
+    // APRV-499 (claude-edge ruling): only the hook's record of a tool it names
+    // may use the reserved class.
+    if (input.cls !== UNMAPPED_TOOL_CLASS) return null;
+    return refuse(
+      "not-granted",
+      `class ${UNMAPPED_TOOL_CLASS} is reserved to the harness hook's record of a tool call it names (harness_tool), and the start of ${input.actionKey} names none; nothing authorizes it here and nothing was appended.`,
+    );
+  }
+  const verdict = load.ok ? toolMapVerdict(load.policy, input.harness_tool) : null;
+  const expected =
+    verdict === null || verdict.kind === "not-gated"
+      ? null
+      : verdict.kind === "mapped"
+        ? verdict.cls
+        : UNMAPPED_TOOL_CLASS;
+  if (expected === input.cls) return null;
+  return refuse(
+    ATTESTATION_REFUSAL,
+    `the start of ${input.actionKey} names harness tool ${JSON.stringify(input.harness_tool)} under class ${input.cls}, and the attested policy's tool mapping ${expected === null ? "does not gate that tool at all" : `gives it class ${expected}`}; the call was classified against policy bytes other than the attested ones, so nothing was appended. Retry once the policy file is the attested one (\`approval policy attest\` after an intended edit).`,
+  );
+}
+
 export function startHarnessExecution(
   logPath: string,
   input: HarnessStartInput,
@@ -4341,11 +4445,27 @@ function attemptHarnessStart(
     if (refusal !== null) return refusal;
   }
 
+  // APRV-499 fix round 1: a start that names a harness tool is re-judged
+  // against the ATTESTED mapping, inside the attempt that appends. Before the
+  // budget verdict, which writes.
+  const mapped = toolMapStartRefusal(load, input);
+  if (mapped !== null) return mapped;
+
   const cost = costOf(input.est_cost_usd);
   const budget = evaluateBudgetsWithTask(
     read.records,
     budgetScopeOf(load, resolution),
-    { class: input.cls, est_cost_usd: cost },
+    {
+      class: input.cls,
+      est_cost_usd: cost,
+      // Ruling H1 (APRV-499): every start this function writes is authorized by
+      // the policy alone, so one of `harness.tool.unmapped` naming its tool
+      // (checked against the attested mapping above) is a record of
+      // unclassified tool use and is not charged to `daily_actions`.
+      ...(input.cls === UNMAPPED_TOOL_CLASS && input.harness_tool !== undefined
+        ? { recordOnly: true }
+        : {}),
+    },
     ts,
     input.task,
   );
@@ -4401,6 +4521,8 @@ function attemptHarnessStart(
     // Without it a reader of a policy-authorized start had to reconstruct the
     // rules in force from the latest `policy.updated` before this seq.
     ...harnessStartPolicyStamp(attested.sha256),
+    // APRV-499: which tool a mapped or unmapped start was, by name only.
+    ...(input.harness_tool === undefined ? {} : { harness_tool: input.harness_tool }),
   };
 
   const appended = append(

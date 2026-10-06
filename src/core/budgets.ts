@@ -98,6 +98,7 @@ import {
 } from "./money.js";
 import { isIntakeLimitName } from "./intake-limits.js";
 import { matchesPattern } from "./policy-match.js";
+import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /** Length of the rolling `daily` window: 24 hours, in milliseconds. */
 export const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -136,6 +137,18 @@ export interface BudgetScope {
 export interface BudgetAction {
   class: string;
   est_cost_usd?: UsdInput;
+  /**
+   * A record-only start of {@link UNMAPPED_TOOL_CLASS} (APRV-499, ruling H1):
+   * an unattended `execution.started` the harness hook writes for a tool call
+   * no `tools` entry claimed. Such a start is a RECORD of unclassified tool
+   * use, not an approved action, so a global `daily_actions` budget neither
+   * counts it nor refuses it. Set only by the write boundary that records
+   * policy-authorized harness starts (`core/gate.ts`), and only for a start
+   * carrying `harness_tool` that the attested mapping leaves unclaimed; a
+   * human's grant of the same class is an approved action and is counted like
+   * any other.
+   */
+  recordOnly?: boolean;
 }
 
 /**
@@ -355,6 +368,53 @@ function tally(events: EventRecord[]): Consumption {
 }
 
 /**
+ * Is this authorization a record-only start of {@link UNMAPPED_TOOL_CLASS}?
+ * (APRV-499, ruling H1.)
+ *
+ * An `execution.started` of that class that reaches the consumption set is one
+ * no grant in the window covers ({@link authorizations} drops the rest), which
+ * is the start the hook records for a tool call the policy's `tools` mapping
+ * does not claim under `defaults.unmapped_tool: record` (or a `classes` rule
+ * that makes the class unattended). Those are records of unclassified tool
+ * use (a TodoWrite, a web search), not approved actions, so a global
+ * `daily_actions` budget does not count them: a village template that sets
+ * `record` would otherwise spend its action budget on bookkeeping. The grant
+ * of the same class under `ask` IS an approved action, and it is counted
+ * through its `approval.granted`, which this predicate never matches.
+ *
+ * USD is unaffected (these starts declare no cost), and class-scoped limits
+ * are unaffected: a `limits` block on a rule matching
+ * `harness.tool.unmapped` is a ceiling written for exactly these records.
+ *
+ * WHO can produce one. The class alone is not enough, because a task envelope
+ * may DECLARE `harness.tool.unmapped` for any action and the proposal path
+ * would record its start under that class. The start must also be a harness
+ * start (`execution: "harness"`) carrying `harness_tool`, which only
+ * `core/gate.ts`'s policy-authorized harness start writes, and only after
+ * re-deriving, from the ATTESTED policy it holds, that no `tools` entry claims
+ * that name (`toolMapStartRefusal`). Nothing in the tool call's arguments is
+ * read: the class comes from the attested mapping and the name from the
+ * harness's own event.
+ *
+ * A GRANT SPEND is never record-only (APRV-499 fix round 2, recheck SF1). The
+ * hook's spend of a human grant (`consumeHarnessGrant`) carries `harness_tool`
+ * too, and {@link authorizations} drops it only while its `approval.granted`
+ * is inside the window. A grant older than 24 h (an `approval_ttl` in days)
+ * leaves the spend as the window's only trace of a human-approved action, and
+ * it must be counted, as ruling H1 says granted ones are. The spend is told
+ * apart by the fields that function always writes and the policy-authorized
+ * start never does: `grant_origin` (unconditional on a grant spend) and
+ * `grant_seq`. Either one present means "counted". The literals are spelled
+ * here rather than imported because `core/gate.ts` imports this module.
+ */
+function isRecordOnlyUnmappedStart(record: EventRecord): boolean {
+  if (record.event !== "execution.started" || classOf(record) !== UNMAPPED_TOOL_CLASS) return false;
+  const payload = payloadOf(record);
+  if (payload["grant_origin"] !== undefined || payload["grant_seq"] !== undefined) return false;
+  return payload["execution"] === "harness" && typeof payload["harness_tool"] === "string";
+}
+
+/**
  * Evaluate every applicable budget limit against the log.
  *
  * Conjunctive (SPEC.md §5.2): `pass` is true only when every verdict passes.
@@ -485,6 +545,11 @@ export function evaluateBudgets(
   // of class — that is what makes it global.
   if (globalScopeNames.length > 0) {
     const globalConsumption = tally(windowed);
+    // Ruling H1 (APRV-499): record-only unmapped starts are not actions, so
+    // `daily_actions` neither counts them nor charges the one being admitted.
+    const globalActions = windowed.filter((record) => !isRecordOnlyUnmappedStart(record)).length;
+    const admittedActions =
+      action.recordOnly === true && action.class === UNMAPPED_TOOL_CLASS ? 0 : 1;
     for (const scopeName of globalScopeNames) {
       const budget = globalBudgets[scopeName];
       if (budget === undefined) continue;
@@ -524,7 +589,7 @@ export function evaluateBudgets(
         }
         if (name === DAILY_ACTIONS) {
           verdicts.push(
-            verdict(label, "global", "rolling-24h", globalConsumption.actions, 1, ceiling, unit),
+            verdict(label, "global", "rolling-24h", globalActions, admittedActions, ceiling, unit),
           );
           continue;
         }

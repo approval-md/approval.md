@@ -41,6 +41,12 @@
           "default": "manual",
           "examples": ["manual", "sealed"]
         },
+        "unmapped_tool": {
+          "type": "string",
+          "enum": ["record", "ask"],
+          "description": "SPEC.md §5.2 (APRV-499, proposed): what a harness hook does with a tool call that neither the harness adapter's own tables (its shell, file, read and pass-through tools and its hard-coded rule table) nor any `tools` entry claims. `record`: the call is classified `harness.tool.unmapped`, which resolves `autonomous` when no `classes` rule matches it, so it proceeds and leaves an `execution.started` naming the tool. `ask`: the same class resolves `manual` when no rule matches it, so the call waits for a human. A `classes` rule matching `harness.tool.unmapped` decides it instead, exactly as a rule decides any class over `defaults.autonomy`. ABSENT, the behaviour of every policy written before the key existed: such a call is not a gate question, is allowed, and leaves no record.",
+          "examples": ["record", "ask"]
+        },
         "on_expiry": {
           "type": "string",
           "enum": ["reject"],
@@ -82,6 +88,39 @@
         [
           { "path": "SPEC.md", "class": "policy.edit.spec" },
           { "path": ".github/workflows/", "class": "policy.edit.ci" }
+        ]
+      ]
+    },
+    "tools": {
+      "type": "array",
+      "description": "SPEC.md §5.2 (APRV-499, proposed): the classes a harness's OWN tool calls are judged under, by tool name, for the calls the harness adapter's built-in tables do not claim (every MCP tool, `mcp__<server>__<tool>` on Claude Code, among them). ORDERED: the first entry whose `match` matches the tool name decides, and later entries are not read. The adapter's own tables keep precedence over every entry, because they read the call's arguments and an entry reads only its name: an entry matching `terminal`, `Bash` or a Hermes `cronjob_manage` is inert. An entry's `class` must be declared by `classes`, as an exact key or under a trailing family key `<prefix>.*` whose literal prefix it extends (checked at load); an undeclared class fails the policy closed, because a mapping to a class nothing prices would resolve by `defaults.autonomy` and read as a decision nobody made. Absent or empty: no tool is mapped.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["match", "class"],
+        "properties": {
+          "match": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^(?:[A-Za-z0-9_.:-]|\\*(?!\\*))+$",
+            "description": "The harness tool name this entry claims, compared case-sensitively against the WHOLE name. `*` is the only wildcard and matches any run of characters, including none, so `mcp__contextsling__*` claims every tool of that MCP server and `*` claims every tool nothing earlier claimed. Two `*` in a row, and every character outside letters, digits, `_`, `.`, `:` and `-`, are schema violations: a pattern language half-implemented here would be a mapping the author believed was in force and the runtime did not apply.",
+            "examples": ["mcp__contextsling__*", "mcp__zzz__post", "web_search"]
+          },
+          "class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[a-z0-9][a-z0-9_-]*(?:\\.[a-z0-9][a-z0-9_-]*)*$",
+            "description": "The concrete class (no wildcard) the call is judged under. It must be an exact key of `classes` or extend the literal prefix of a declared trailing family key (`marketplace.*` covers `marketplace.contextsling.publish`), and it may not be `harness.tool.unmapped`, which names the calls no entry claimed (both checked at load).",
+            "examples": ["marketplace.contextsling.publish", "marketplace.app.read"]
+          }
+        }
+      },
+      "examples": [
+        [
+          { "match": "mcp__contextsling__publish", "class": "marketplace.contextsling.publish" },
+          { "match": "mcp__contextsling__*", "class": "marketplace.app.read" }
         ]
       ]
     },

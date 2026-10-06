@@ -1008,6 +1008,38 @@
       }
     },
     {
+      "$comment": "SPEC.md §8 (APRV-499, proposed): a harness `execution.started` whose class came from the policy's tool mapping (a `tools` entry, or `harness.tool.unmapped` under `defaults.unmapped_tool`) carries `harness_tool`, the harness tool NAME the call was made under, because several tools share one such class and the class alone cannot say which ran. The name only: the call's arguments are bound by `payload_hash` and are never written to the log. OPTIONAL and additive: every record written before the field existed still validates and still verifies, and a start on any other path records none. Only the SHAPE is constrained here: the characters a `tools` match may name (letters, digits, `_`, `.`, `:`, `-`), at most 256 of them, so a name outside that set refuses the append rather than writing bytes no mapping could have named.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.started"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "harness_tool": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "description": "SPEC.md §8 (APRV-499, proposed): the harness tool name a policy-mapped or unmapped harness execution was made under.",
+                "examples": ["mcp__contextsling__publish"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §10.3 (amended, APRV-38): a decision collected as part of a batch gesture carries the batch's channel delivery id as a first-class payload field. Optional — a unit decision has no batch — and constrained only when present, so the field can never arrive as an empty string or a number that audit would have to guess at.",
       "if": {
         "type": "object",
