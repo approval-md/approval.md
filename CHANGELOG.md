@@ -37,7 +37,12 @@ before a tag.
   gates the named-argument tier, which had the flaw on 0.4.3:
   `cp .approval/env .approval/log/events.jsonl` was `account.credential`, which
   an open window over a policy that does not load let through, and it is
-  `log.mutate`. A bare `< file` is the same read, so the `$(< file)`
+  `log.mutate`. A segment naming both a credential path and a `log.mutate` or
+  `policy.core` path carries both classes (the protected one first, the
+  credential read as a second entry over the same text), so a policy that holds
+  `account.credential` stricter than the protected class still refuses it and
+  `cp .approval/env APPROVAL.md` stays `account.credential` in either direction,
+  as SPEC.md §7 says. A bare `< file` is the same read, so the `$(< file)`
   substitution now taints its segment and is refused `opaque`; a secret-named
   variable in any redirection target is `credential-env`; and `sudo cat <
   .approval/env` stays an opaque refusal. In an effectful segment a protected
@@ -50,8 +55,8 @@ before a tag.
   pure classifier and `approval hook classify` now agree with it. The write
   side needed nothing: `> ~/.hermes/.env` and `>> .approval/policy` were
   already `policy.core` (APRV-198) and are now pinned beside the read side.
-- **Conformance.** `command-class` 1.6.0 (twenty-four new vectors, three of
-  them refusal controls; no existing expectation moved). Totals 577/577.
+- **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
+  them refusal controls; no existing expectation moved). Totals 580/580.
 
 ### Behavior changes for an existing policy
 
@@ -64,7 +69,8 @@ before a tag.
   protected class, or the refusal for a binary the table does not know). A
   command naming a credential file beside a `log.mutate` or `policy.core` path
   (`cp .approval/env .approval/log/events.jsonl`, `cp .approval/env
-  APPROVAL.md`) moves from `account.credential` to that protected class. An
+  APPROVAL.md`) now carries that protected class first, with
+  `account.credential` kept beside it. An
   effectful command fed a protected file through `<` moves from its own class
   to the file's protected class. A command substitution
   that is nothing but `< credential` moves from inert to an `opaque` refusal.

@@ -4203,6 +4203,64 @@ test("the window never reaches a human-only class (APRV-214)", () => {
   assertClean(dir);
 });
 
+test("APRV-503 recheck SHOULD-FIX-R1: a credential beside a protected path is still refused where the credential class is the stricter one", () => {
+  // `readyWithHumanOnlyCredentials` holds account.credential human-only and
+  // leaves policy.core and log.mutate at manual: the ordering under which a
+  // single protected class would LOSE the credential answer. The command
+  // carries both classes, so the human-only one is refused, with the gate
+  // closed and through an open window alike, as on main.
+  const commands = [
+    "cp .approval/env APPROVAL.md",
+    "cp .approval/env .approval/QUEUE.md",
+    "node x.js APPROVAL.md $APPROVAL_TG_TOKEN",
+    "rm -rf .approval/log $APPROVAL_TG_TOKEN",
+  ];
+
+  const closed = readyWithHumanOnlyCredentials();
+  for (const [index, command] of commands.entries()) {
+    const before = rawLog(closed);
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      closed,
+      bashEvent(command, `tu-503-r1-closed-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    assert.match(verdict.reason, /account\.credential/u, command);
+    assert.equal(rawLog(closed), before, `${command}: a human-only refusal files no request`);
+  }
+  assertClean(closed);
+
+  const open = readyWithHumanOnlyCredentials();
+  openTestWindow(open);
+  const beforeWindow = rawLog(open);
+  for (const [index, command] of commands.entries()) {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s"],
+      open,
+      bashEvent(command, `tu-503-r1-open-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    // The log write is refused by the window's own unconditional check, which
+    // names log.mutate; every other row is refused as the human-only credential.
+    assert.match(verdict.reason, command.includes(".approval/log") ? /log\.mutate/u : /account\.credential/u, command);
+  }
+  // And the redirect shape of BLOCKING-1 still names the log.
+  const redirected = runCli(
+    ["hook", "claude-code", "--timeout", "1s"],
+    open,
+    bashEvent("rm -rf .approval/log < .approval/env", "tu-503-r1-open-redirect"),
+  );
+  const redirectedVerdict = verdictOf(redirected);
+  assert.equal(redirectedVerdict.permission, "deny", redirectedVerdict.reason);
+  assert.match(redirectedVerdict.reason, /log\.mutate/u);
+  assert.equal(rawLog(open), beforeWindow, "a refused bypass appends nothing");
+  assertClean(open);
+});
+
 test("the window never reaches a command the classifier cannot read (APRV-214)", () => {
   const dir = ready();
   openTestWindow(dir);

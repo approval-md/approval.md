@@ -4170,7 +4170,22 @@ function matchRule(
 }
 
 type SegmentOutcome =
-  | { ok: true; class: string; rule: string; path?: string; sandbox?: SandboxWrapper }
+  | {
+      ok: true;
+      class: string;
+      rule: string;
+      path?: string;
+      sandbox?: SandboxWrapper;
+      /**
+       * A credential touch the segment ALSO makes, beside a protected class
+       * that outranks it in the classifier's own precedence (APRV-503 recheck,
+       * SHOULD-FIX-R1). Reported as a second classified segment over the same
+       * text, so the command's `classes` carries both and a policy that holds
+       * `account.credential` stricter than `policy.core` or `log.mutate` still
+       * sees it: the hook refuses when ANY class is human-only.
+       */
+      also?: CredentialOutcome;
+    }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
 function classifySegment(
@@ -4259,16 +4274,28 @@ function classifySegment(
   // mechanism is unchanged and the hook's tiers and the channel's protected-path
   // view are keyed on the rule.
   const redirected = strictestProtected(writeTargets, protectedPaths);
+  const bin = words[cursor];
   if (redirected !== null) {
+    // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
+    // AND reads credential material (`cat .approval/env > APPROVAL.md`, `cat <
+    // ~/.hermes/.env > APPROVAL.md`) carries both classes. The protected class
+    // still answers the segment; the credential touch rides beside it.
+    const writerArgs = bin === undefined ? [] : words.slice(cursor + 1);
+    const writer = bin === undefined ? null : (pathSegments(bin).slice(-1)[0] ?? bin);
+    const touched =
+      (writer === null
+        ? null
+        : credentialTouch(writer, writerArgs, writerArgs.filter((arg) => !isFlag(arg)))) ??
+      redirectCredentialTouch(readTargets, redirectTargets);
     return {
       ok: true,
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
+      ...(touched === null ? {} : { also: touched }),
     };
   }
 
-  const bin = words[cursor];
   if (bin === undefined) {
     // A bare input redirection opens its target, and inside `$(…)` it IS the
     // read: `$(< ~/.hermes/.env)` is bash for "the file's contents" (APRV-503).
@@ -4329,8 +4356,10 @@ function classifySegment(
   // segment goes on through the table and the protected scan exactly as it
   // would without the credential word, a protected class or a refusal stands,
   // and the credential class answers only where that walk ends on an answer it
-  // is stricter than (a read, `gate.self`). Write targets need no check here: a
-  // protected one has already answered above.
+  // is stricter than (a read, `gate.self`). Where the walk ends on the
+  // protected class, the credential touch is carried beside it as a second
+  // class of the command (`also`), never dropped. Write targets need no check
+  // here: a protected one has already answered above, carrying it the same way.
   const credential = credentialTouch(basename, args, positionals);
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
   const outranking =
@@ -4406,8 +4435,22 @@ function classifySegment(
     // A deferred credential answer (above) names the path that outranked it,
     // which is the strictest protected path among the words that are not the
     // credential read itself: the segment's answer without that word.
+    //
+    // The credential touch is NOT dropped (APRV-503 recheck, SHOULD-FIX-R1): it
+    // rides beside the protected class as a second class of the command, so
+    // the precedence above decides what the segment is called and never what a
+    // policy gets to see. A policy holding `account.credential` stricter than
+    // `policy.core` still refuses `cp .approval/env APPROVAL.md`, and SPEC.md
+    // §7's "a copy is classified `account.credential` in either direction"
+    // holds as written.
     if (deferredCredential !== null && outranking !== null) {
-      return { ok: true, class: outranking.surface, rule: "protected-path", path: outranking.path };
+      return {
+        ok: true,
+        class: outranking.surface,
+        rule: "protected-path",
+        path: outranking.path,
+        also: deferredCredential,
+      };
     }
     const named = strictestProtected(positionals, protectedPaths, true);
     const fed = strictestProtected(readTargets, protectedPaths);
@@ -4538,6 +4581,19 @@ export function classifyCommand(
       ...(outcome.sandbox === undefined ? {} : { sandbox: outcome.sandbox }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
+    // APRV-503 recheck: the credential touch a protected answer outranked, as
+    // its own entry over the same segment text. The shape a pipeline already
+    // has (one entry per class-bearing part), so every reader of `segments`
+    // and `classes` sees it without learning a new field.
+    if (outcome.also !== undefined) {
+      segments.push({
+        text: segment.text,
+        class: outcome.also.class,
+        rule: outcome.also.rule,
+        ...(outcome.also.path === undefined ? {} : { path: outcome.also.path }),
+      });
+      if (!classes.includes(outcome.also.class)) classes.push(outcome.also.class);
+    }
   }
   return { ok: true, segments, classes };
 }

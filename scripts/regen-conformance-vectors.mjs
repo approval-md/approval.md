@@ -2053,50 +2053,73 @@ const commandClassVectors = [
     description: "a quoted < is one word of data and never a redirection",
     input: { command: "grep '<' notes.md" },
   },
-  // The precedence half (APRV-503 refutation, BLOCKING-1). A credential `<`
-  // target never displaces a protected class that outranks the credential
-  // class (`log.mutate`, then `policy.core`) named by the segment: each of
-  // these answers exactly what the command answers without its `<`, which is
-  // why the open window, refusing `log.mutate` with no policy consulted, still
-  // refuses them. The last vector is the other side of the rule: where the
-  // walk ends on a read, the credential class still answers.
+  // The precedence half (APRV-503 refutation, BLOCKING-1, and the recheck's
+  // SHOULD-FIX-R1). A credential path, named or redirected, never displaces a
+  // protected class that outranks the credential class (`log.mutate`, then
+  // `policy.core`) named by the segment: the segment's FIRST entry is exactly
+  // what the command answers without the credential word, which is why the
+  // open window, refusing `log.mutate` with no policy consulted, still refuses
+  // them. And the credential read is never dropped either: it rides as a
+  // second entry over the same text, so `classes` carries both and a policy
+  // holding `account.credential` stricter than the protected class still sees
+  // it. A write-only binary's credential positional is a write, not a read, and
+  // carries nothing. Where the walk ends on a read, the credential class alone
+  // answers.
   {
     id: "credential-redirect-does-not-displace-a-log-delete",
     description:
-      "rm of the log directory with a credential file on stdin: the < is a no-op for rm, so the segment is log.mutate with the log path bound, as it is without the <",
+      "rm of the log directory with a credential file on stdin: the < is a no-op for rm, so the segment is log.mutate with the log path bound, as it is without the <, and the credential read rides beside it as a second class",
     input: { command: "rm -rf .approval/log < .approval/env" },
   },
   {
     id: "credential-redirect-does-not-displace-a-log-append",
-    description: "tee appending to the live log with the environment map on stdin: log.mutate, not account.credential",
+    description: "tee appending to the live log with the environment map on stdin: log.mutate first, the credential read carried beside it",
     input: { command: "tee -a .approval/log/events.jsonl < .approval/env" },
   },
   {
     id: "credential-redirect-does-not-displace-a-log-replace",
-    description: "mv onto the live log with the Hermes home's .env on stdin: log.mutate",
+    description: "mv onto the live log with the Hermes home's .env on stdin: log.mutate, plus the credential read",
     input: { command: "mv x .approval/log/events.jsonl < ~/.hermes/.env" },
   },
   {
     id: "credential-redirect-does-not-displace-a-log-truncate",
-    description: "truncate of the live log with the vault on stdin: log.mutate",
+    description: "truncate of the live log with the vault on stdin: log.mutate, plus the credential read",
     input: { command: "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc" },
   },
   {
     id: "credential-redirect-does-not-displace-policy-core",
     description:
-      "policy.core outranks the credential class as well, whatever a policy makes of the two: a copy into the gate's directory with the environment map on stdin is policy.core",
+      "policy.core outranks the credential class as well, whatever a policy makes of the two: a copy into the gate's directory with the environment map on stdin is policy.core, with the credential read carried as a second class",
     input: { command: "cp x .approval/policy.yaml < .approval/env" },
   },
   {
     id: "named-credential-does-not-displace-a-log-overwrite",
     description:
-      "the named-argument twin, which answered account.credential before APRV-503: a cp of the environment map onto the live log is log.mutate, as a cp of any file there is",
+      "the named-argument twin, which answered account.credential before APRV-503: a cp of the environment map onto the live log is log.mutate, as a cp of any file there is, and still carries account.credential (SPEC.md §7: a copy is account.credential in either direction)",
     input: { command: "cp .approval/env .approval/log/events.jsonl" },
   },
   {
     id: "named-credential-does-not-displace-policy-core",
-    description: "a cp of the environment map onto the policy file is policy.core, as a cp of any file there is",
+    description:
+      "a cp of the environment map onto the policy file is policy.core, as a cp of any file there is, and carries account.credential beside it",
     input: { command: "cp .approval/env APPROVAL.md" },
+  },
+  {
+    id: "named-credential-into-the-gate-directory-carries-both",
+    description: "a cp of the environment map onto the queue file: policy.core and account.credential, both in classes",
+    input: { command: "cp .approval/env .approval/QUEUE.md" },
+  },
+  {
+    id: "secret-variable-beside-the-policy-file-carries-both",
+    description:
+      "a script handed the policy file and a secret-named variable: policy.core for the file, account.credential (credential-env) for the variable",
+    input: { command: "node x.js APPROVAL.md $APPROVAL_TG_TOKEN" },
+  },
+  {
+    id: "protected-write-redirection-beside-a-credential-read-carries-both",
+    description:
+      "a credential read written into the policy file: the write redirection answers first (redirect-protected, policy.core) and the read rides beside it",
+    input: { command: "cat .approval/env > APPROVAL.md" },
   },
   {
     id: "named-credential-with-nothing-stricter-is-a-credential-read",
@@ -3308,7 +3331,12 @@ const SUITES = [
     // NAMED credential tier is gated the same way, so `cp .approval/env
     // .approval/log/events.jsonl` is `log.mutate` (it was `account.credential`
     // on main, an expectation no committed vector held), and a cp with nothing
-    // stricter beside it keeps the credential class.
+    // stricter beside it keeps the credential class. The third fix round
+    // (recheck SHOULD-FIX-R1) changed the expectation of seven vectors added
+    // in rounds one and two, and added three: the credential read now rides
+    // beside the protected class as a second entry, so `classes` carries both.
+    // Still 1.6.0, for the same reason: none of those vectors has ever been
+    // merged, so no implementation was held to the single-class answer.
     vectors_version: "1.6.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

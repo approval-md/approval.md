@@ -221,7 +221,7 @@ Five overrides sit on top of the table:
   `.approval/keys/` and `.approval/env`, a word expanding `$APPROVAL_*`,
   `$TELEGRAM_*` or `$VAULT_*` (minus the runtime's own non-secret names), and a
   bare `env`. A WRITE to those files is `policy.core`; a READ of them is
-  `account.credential`, and `cp` is direction-blind onto the credential class unless it also names a `log.mutate` or `policy.core` path.
+  `account.credential`, and `cp` is direction-blind onto the credential class (with a `log.mutate` or `policy.core` path also named, it carries that class too).
   `sudo cat .approval/env` stays opaque: the credential check sits below the
   opaque one, so a refusal is never softened into a request. No rule can print
   a value — the classifier reads command text and never an environment. An
@@ -230,7 +230,7 @@ Five overrides sit on top of the table:
   binary (`cat < .approval/env`, `tee out.txt < .approval/env`, a bare `$(<
   file)`). A credential path, named or redirected, never lowers a
   `log.mutate` or `policy.core` answer: a segment that also names such a path
-  keeps that path's class. A protected `<` target in an effectful segment takes
+  carries that path's class first and `account.credential` beside it. A protected `<` target in an effectful segment takes
   the protected class. A here-string (`<<<`) is refused as `unparseable`.
 - **`.approval-journal/` is not protected** (APRV-195). The journal of
   `approval journal write` is a SIBLING of the approval home, not a directory
