@@ -15,6 +15,61 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.3 — 2026-10-07
+
+### Harnesses
+
+- **A Hermes resident's agent can run the overlay's skill scripts under
+  enforcement (APRV-502).** The overlay's AGENTS.md runs every skill script
+  through `terminal`, and the first two are the gates of a resident's first
+  message (`bun skills/agent-profile/scripts/profile.ts`,
+  `bun skills/index-network/scripts/welcome.ts`). The command classifier knew
+  `bun` only through its package-manager rows and had no row for `python3` at
+  all, so on 0.4.2 under `APPROVALD_ENFORCE=1` every one of them was denied
+  `hook-unclassified`, and residents got the fallback welcome and the default
+  name. Two rules now classify an interpreter running a skill script as
+  `exec.local`, with the script path bound: `skill-script` (bun, python,
+  python3) and `node-skill-script` (the `node` row). The script must be
+  `skills/<skill>/scripts/<file>` (relative, `./` allowed) or an absolute path
+  ending `.hermes[/profiles/<p>]/skills/<skill>/scripts/<file>`; flags before
+  it come from a short allowlist of inert flags (`bun --bun`, `python3 -I`, and
+  a few more). Inline code, stdin, `python3 -m`, any other flag, a
+  `--flag=value`, a `..` or `.` segment, a glob, a variable, a substituted word
+  and a path outside those two roots keep the earlier refusal. Every protected
+  and credential tier still answers first: a script under
+  `$HERMES_HOME/scripts/` is not this shape, and a path under `.approval`,
+  `agent-hooks/`, `config.yaml` or `.env` in the segment keeps `policy.core` or
+  `account.credential`. Both rule ids are in `CODE_EXECUTING_RULES`, so
+  `APPROVAL_HOOK_REQUIRE_SANDBOX` covers them.
+- **The hook checks a skill script against the disk, and only tightens.** From
+  the call's working directory (the Hermes `workdir`), a script whose real path
+  leaves the real `skills/<skill>/scripts/` directory it was spelled in is
+  refused `hook-unclassified`, and one whose real path is a protected or
+  credential file takes that file's class. Where the hook cannot read the path
+  (EACCES) or the file is absent, the text answer stands and a note says so.
+  That is the hosted case: under co-location the daemon user cannot read the
+  resident's 0700 home, so there the text check is the whole check.
+  `docs/hermes-hook.md` and `docs/claude-code-hook.md` state the rule and this
+  limit.
+
+### What did not change
+
+- No SPEC class change: `exec.local` is SPEC §7's existing class for "scripts
+  inside the workspace", which no classifier row emitted until now. No policy
+  key, no schema, no refusal code, no conformance version. A policy with no
+  `exec.local` line resolves it by `defaults.autonomy` like any other class,
+  so a policy whose defaults are not autonomous needs an `exec.local` line for
+  these calls to run unattended. Nothing depends on `HERMES_HOME`, which the
+  daemon under `approval serve` does not carry.
+
+### Upgrade order
+
+- **Agent Village:** the control plane pins `APPROVAL_MD_VERSION=0.4.3` and
+  its `APPROVAL_MD_INTEGRITY`, then one update per box. The checkpoint rebake
+  follows later and is not on the critical path. Nothing in a policy has to
+  change first, and a box still on 0.4.2 keeps denying skill scripts exactly as
+  it does today.
+
 ## 0.4.2 — 2026-10-06
 
 ### Policy
