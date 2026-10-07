@@ -357,7 +357,7 @@ Tool names and argument keys are Hermes's own, read off its tool registrations:
 
 | Tool | Role | Path carried in |
 | --- | --- | --- |
-| `terminal` | shell | `command`, with a **per-call `workdir`** |
+| `terminal` | shell (an interpreter running `skills/<skill>/scripts/<file>` is `exec.local`, APRV-502) | `command`, with a **per-call `workdir`** |
 | `write_file` | file write | `path` (plus `content`) |
 | `patch` | file edit | `path` (plus `old_string`, `new_string`, `mode`, `replace_all`) |
 | `read_file` | read | `path` (plus `offset`, `limit`) |
@@ -438,6 +438,35 @@ A glob or an unexpandable variable in a write is `policy.core` only when the
 write lands in one of the gate's own directories, or when a pattern in the path
 could itself name `.hermes`, `.approval` or an organ (`../.h*/.env`); anywhere
 else under the home it is a workspace write.
+
+**Skill scripts run as `exec.local` (APRV-502).** The overlay's AGENTS.md routes
+every skill script through `terminal` (`bun skills/index-network/scripts/welcome.ts`,
+`python3 skills/agent-commons/scripts/search_forum.py --q x`), and until 0.4.3
+the classifier had no row for `bun <file>` or `python3` at all, so under
+enforcement each one was denied `hook-unclassified`. Rules `skill-script` (bun,
+python, python3) and `node-skill-script` (node) classify an interpreter whose
+first non-flag word is `skills/<skill>/scripts/<file>` (relative, `./` allowed)
+or an absolute path ending `.hermes[/profiles/<p>]/skills/<skill>/scripts/<file>`.
+Flags before the script come from a short allowlist of inert flags (`bun --bun`,
+`--smol`; `python3 -I -u -B -E -s -S -O -q` and clusters of them; three inert
+`node` flags); anything else, a `--flag=value`, inline code, stdin, a `..` or
+`.` segment, a glob, a variable (`$HERMES_HOME/skills/…`, `~/.hermes/…`) or a
+substituted word keeps the earlier refusal. A script under `$HERMES_HOME/scripts/`
+is not this shape, and every protected and credential path in the segment
+answers first. A policy that names no `exec.local` line resolves it by
+`defaults.autonomy`.
+
+The hook then looks at the disk from the call's `workdir` (and from any literal
+`cd` before the script): the real script must sit under the real
+`skills/<skill>/scripts/` directory it was spelled in, or the call is refused
+`hook-unclassified`; a real path landing on `.env`, `config.yaml`,
+`agent-hooks/`, `scripts/` or another organ takes that path's class. **Where the
+hook cannot read the path, or the file does not exist, the text answer stands**
+and a note says the disk pass could not look. That is the hosted case: under
+co-location the daemon runs as `approvald` and the resident's home is 0700
+`hermes`, so `realpath` fails with EACCES and the classifier's text check is the
+whole check. Refusing there would deny every skill script on every box. The
+same is true after a `cd` whose target the text cannot name.
 
 What stays unclassified or out of reach, stated so nobody assumes otherwise:
 inline programs (`python3 -c`, `node -e`) are refused as opaque; `dd` and

@@ -134,7 +134,8 @@ an addition).
 | `harness-launch-claude` | claude | (any) | harness.launch.claude, read.shell (APRV-354) |
 | `harness-launch-cursor` | cursor-agent | (any) | harness.launch.cursor, read.shell (APRV-354) |
 | `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
-| `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
+| `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance, exec.local (rule `node-skill-script` for a skill script, APRV-502) |
+| `skill-script` | bun, python, python3 | a skill-script path § | exec.local (APRV-502) |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
@@ -150,6 +151,28 @@ an addition).
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
 | `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
 | `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
+
+§ APRV-502. `skill-script` (bun, python, python3) and `node-skill-script` (the
+`node` row) match only an interpreter whose first non-flag word is a skill
+script: relative `skills/<skill>/scripts/<file>` (a leading `./` is allowed),
+or an absolute path ending `.hermes/skills/<skill>/scripts/<file>` or
+`.hermes/profiles/<p>/skills/<skill>/scripts/<file>`. Every segment must be
+non-empty, neither `.` nor `..`, and free of `$`, backticks, glob and brace
+characters. Flags before the script come from an allowlist (bun `--bun`,
+`--smol`; node `--no-warnings`, `--enable-source-maps`,
+`--experimental-strip-types`; python `-I -u -B -E -s -S -O -q`, alone or
+clustered); any other flag, a `--flag=value`, inline code, stdin or a
+substituted word means the row does not match, so the command keeps its earlier
+answer. Words after the script are its arguments. Protected and credential paths
+anywhere in the segment still answer first. The hook then checks the disk: where
+it can read it, the real script must sit under the real
+`skills/<skill>/scripts/` directory it was spelled in (resolved from the
+per-call working directory), or the command is refused `hook-unclassified`; a
+real path on a protected or credential file takes that class. Where it cannot
+read it, or the file is absent, the text answer stands: under co-location the
+daemon user cannot read a Hermes home (mode 0700), so on a hosted box the
+classifier's text check is the whole check. Both rule ids are in
+`CODE_EXECUTING_RULES`.
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
