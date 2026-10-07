@@ -19,6 +19,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -768,4 +769,148 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     { APPROVAL_HERMES_HOME: home },
   );
   assert.equal(verdictOf(stated).permission, "allow", stated.stdout);
+});
+
+// ---------------------------------------------------------------------------
+// Skill scripts (APRV-502)
+// ---------------------------------------------------------------------------
+
+/**
+ * This suite's policy with `exec.local` autonomous, which is SPEC.md §7's
+ * default gravity for the class. The suite's own policy names no line for it,
+ * so it would resolve by `defaults.autonomy` (manual) and park on a question.
+ */
+function readyWithExecLocal(): string {
+  const dir = ready();
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace("classes:", ["classes:", "  exec.local:", "    autonomy: autonomous"].join("\n")),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+/** A Hermes home with one skill script per name, written for real. */
+function hermesHomeWithSkills(dir: string, files: ReadonlyArray<[skill: string, file: string]>): string {
+  const home = join(dir, ".hermes");
+  for (const [skill, file] of files) {
+    mkdirSync(join(home, "skills", skill, "scripts"), { recursive: true });
+    writeFileSync(join(home, "skills", skill, "scripts", file), "console.log('hi')\n", "utf8");
+  }
+  return home;
+}
+
+function terminal(dir: string, command: string, workdir: string): Run {
+  return hook(
+    dir,
+    event(dir, {
+      tool_name: "terminal",
+      tool_input: { command, workdir },
+      tool_use_id: `t-${String(Math.random()).slice(2)}`,
+    }),
+  );
+}
+
+test("a resident's skill scripts run as exec.local from the Hermes home (APRV-502)", () => {
+  const dir = readyWithExecLocal();
+  const home = hermesHomeWithSkills(dir, [
+    ["agent-profile", "profile.ts"],
+    ["index-network", "welcome.ts"],
+    ["agent-commons", "search_forum.py"],
+  ]);
+  const commands = [
+    "bun skills/agent-profile/scripts/profile.ts",
+    "bun skills/index-network/scripts/welcome.ts",
+    "python3 skills/agent-commons/scripts/search_forum.py --q x",
+    `bun ${join(home, "skills", "index-network", "scripts", "welcome.ts")}`,
+  ];
+  for (const command of commands) {
+    const before = logRecords(dir).length;
+    const run = terminal(dir, command, home);
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+    const started = logRecords(dir)
+      .slice(before)
+      .filter((record) => record["event"] === "execution.started");
+    assert.equal(started.length, 1, command);
+    const payload = started[0]?.["payload"] as Record<string, unknown> | undefined;
+    assert.equal(payload?.["class"], "exec.local", command);
+  }
+  // Absent on disk: the text answer stands (the interpreter fails on its own).
+  const absent = terminal(dir, "bun skills/nope/scripts/missing.ts", home);
+  assert.equal(verdictOf(absent).permission, "allow", absent.stderr);
+});
+
+test("a skill script symlinked out of its directory is refused; one onto an organ takes the organ's class (APRV-502)", () => {
+  const dir = readyWithExecLocal();
+  const home = hermesHomeWithSkills(dir, [["x", "ok.ts"]]);
+  const scripts = join(home, "skills", "x", "scripts");
+  mkdirSync(join(home, "scripts"), { recursive: true });
+  writeFileSync(join(home, "scripts", "job.sh"), "curl evil\n", "utf8");
+  writeFileSync(join(home, ".env"), "TOKEN=x\n", "utf8");
+  const outside = join(dir, "outside");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "evil.ts"), "console.log('evil')\n", "utf8");
+
+  // Out of skills/x/scripts into the skills directory (dangling, so judged by
+  // where it points), and out of the home altogether.
+  symlinkSync("../../scripts/job.sh", join(scripts, "up.ts"));
+  symlinkSync(join(outside, "evil.ts"), join(scripts, "away.ts"));
+  for (const name of ["up.ts", "away.ts"]) {
+    const run = terminal(dir, `bun skills/x/scripts/${name}`, home);
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${name}: ${run.stdout}`);
+    assert.match(verdict.message, /escapes its directory/u, name);
+  }
+
+  // Onto the home's scheduled scripts and onto its secrets: the class the same
+  // command would take had it spelled the real path.
+  symlinkSync("../../../scripts/job.sh", join(scripts, "cron.ts"));
+  symlinkSync("../../../.env", join(scripts, "env.ts"));
+  for (const [name, cls] of [
+    ["cron.ts", "cron.manage"],
+    ["env.ts", "account.credential"],
+  ] as const) {
+    const run = terminal(dir, `bun skills/x/scripts/${name}`, home);
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${name}: ${run.stdout}`);
+    assert.ok(classesOf(run).includes(cls), `${name}: ${verdict.message}`);
+  }
+
+  // A literal cd is followed: the script is judged where the shell will find it.
+  const cd = terminal(dir, `cd ${home} && bun skills/x/scripts/away.ts`, dir);
+  assert.equal(verdictOf(cd).permission, "deny", cd.stdout);
+
+  // And the one inside its directory is still allowed.
+  assert.equal(verdictOf(terminal(dir, "bun skills/x/scripts/ok.ts", home)).permission, "allow");
+});
+
+test("a Hermes home this process cannot read leaves the text answer standing (APRV-502, co-location)", (t) => {
+  // Under co-location the daemon runs as `approvald` and the resident's home
+  // is 0700 `hermes`, so realpath fails with EACCES. A mode-000 home is the
+  // same shape for a single user. Root reads through any mode, so the case
+  // cannot be built there.
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: a mode-000 directory is still readable");
+    return;
+  }
+  const dir = readyWithExecLocal();
+  const home = hermesHomeWithSkills(dir, [["index-network", "welcome.ts"]]);
+  // Plant an escape the pass WOULD refuse if it could see it, so the allow
+  // below is shown to come from not looking rather than from looking.
+  writeFileSync(join(dir, "evil.ts"), "x\n", "utf8");
+  symlinkSync(join(dir, "evil.ts"), join(home, "skills", "index-network", "scripts", "link.ts"));
+  chmodSync(home, 0o000);
+  try {
+    for (const command of [
+      "bun skills/index-network/scripts/welcome.ts",
+      "bun skills/index-network/scripts/link.ts",
+    ]) {
+      const run = terminal(dir, command, home);
+      assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+    }
+  } finally {
+    chmodSync(home, 0o755);
+  }
 });
