@@ -7,7 +7,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-07 00:32'
-updated_date: '2026-10-07 01:04'
+updated_date: '2026-10-07 01:20'
 labels:
   - agent-village
 dependencies: []
@@ -31,14 +31,14 @@ Release: 0.4.3 (CHANGELOG section, version strings in the files APRV-501's d784c
 - [x] #2 Negative cases stay refused or stricter: bun /path/to/evil.ts, bun evil.ts, bun skills/x/scripts/../../.approval/x, python3 -c ..., bun -e ..., python3 -m x, python3 - , an unknown or value-taking flag before the script (bun --cwd /etc ...), a substituted or variable word, a glob, a script under .hermes/scripts (cron.manage), any path under .approval / agent-hooks / .env / config.yaml (policy.core), an unexpanded $HERMES_HOME spelling, an absolute path outside the .hermes grammar
 - [x] #3 Hook disk pass in the classifyForHook chain only tightens, like resolvedPathClasses: where the hook CAN read the disk, the realpath of the script must sit under the real skills/<skill>/scripts directory it was spelled in (resolved from the per-call cwd) or the segment refuses, and a real path landing on a protected or credential path takes that class; where it cannot read (EACCES: under co-location the daemon user cannot read the Hermes home, verified 2026-10-07) or the file is absent, the text answer stands and a note says so. Tested through the compiled hook hermes path with workdir: allow, symlink-escape deny, protected-landing deny, unreadable-home allow
 - [x] #4 approval hook classify -- bun skills/index-network/scripts/welcome.ts prints exec.local with the rule named; the rule ids are in CODE_EXECUTING_RULES; docs/hermes-hook.md and docs/claude-code-hook.md name the rule and the disk pass's limits
-- [ ] #5 Release 0.4.3 prepared as the last commit of the same PR: CHANGELOG 0.4.3 section dated from the GitHub Date header with a fresh empty Unreleased above it, version strings in the nine files d784cb4a touched, docs/releases/0.4.3.md, release-notes test lists; node scripts/release-notes.mjs 0.4.3 --check exit 0; targeted tests + tsc + lint green; CI green on the PR
+- [x] #5 Release 0.4.3 prepared as the last commit of the same PR: CHANGELOG 0.4.3 section dated from the GitHub Date header with a fresh empty Unreleased above it, version strings in the nine files d784cb4a touched, docs/releases/0.4.3.md, release-notes test lists; node scripts/release-notes.mjs 0.4.3 --check exit 0; targeted tests + tsc + lint green; CI green on the PR
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Done (lane A502, claude-bountify/A502), four commits on lane/aprv-502-skill-scripts:
-d4d18c09 classifier + fixtures; 8dce4e0f hook disk pass + tests; c5ca77bc docs; 051e48b2 release 0.4.3.
+d4d18c09 classifier + fixtures; 8dce4e0f hook disk pass + tests; c5ca77bc docs; 632d3653 task file; 8f0a891d release 0.4.3 (last code commit).
 
 What was built
 - src/core/command-class.ts: new row `skill-script` (bun, python, python3) after every existing bun row, matched through a new `skillScript` row flag (same device as `probe`), so an argv outside the shape does not match the row and keeps today's answer (unclassified/opaque) rather than being refined into a different refusal. `node` gets `node-skill-script` inside refineNode, after the -e/-p refusal and the gate-entrypoint branch. Both emit `exec.local` and bind the script as `path`; both are in CODE_EXECUTING_RULES. Path shape: relative `skills/<skill>/scripts/<file>` (leading `./` stripped), or absolute ending `.hermes[/profiles/<p>]/skills/<skill>/scripts/<file>`; every segment non-empty, not `.`/`..`, not `-`-leading, no `* ? [ ] { } $ backtick ~ \`. Flag allowlist: bun `--bun --smol`; node `--no-warnings --enable-source-maps --experimental-strip-types`; python `-[IuBEsSOq]+`. Anything else (incl. `--flag=value`, lone `-`, `--`) = no match. `substituted` is now computed before matchRule and passed in, so a substituted word means no match.
@@ -68,4 +68,6 @@ Evidence (exit codes read directly)
 Remaining (human-only, not this lane)
 - Carter: tag v0.4.3, publish, move control-plane pins (APPROVAL_MD_VERSION=0.4.3 + APPROVAL_MD_INTEGRITY), fleet update round.
 - Check the village resident policy resolves exec.local autonomous (own line or defaults) before relying on the fix.
+
+- CI on PR #629 at head 8f0a891d: gh pr checks 629 exit 0; full gate node 22 shards 1/3, 2/3, 3/3 pass, classify tier pass, protected paths pass, ci pass (docs guard, node 20 floor and records tier skipped by the workflow's tiering). Not merged: the orchestrator merges after a refuter.
 <!-- SECTION:NOTES:END -->
