@@ -1324,6 +1324,15 @@ interface RuleContext {
    * (APRV-114's fetch refinement) needs to know that one of them is a hole.
    */
   substituted: boolean;
+  /**
+   * Did the segment carry a `NAME=value` assignment before the binary (or
+   * before a sandbox wrapper around it)? The classifier strips assignments to
+   * find the binary, so a rule never sees them; a rule whose answer rests on
+   * the argv saying WHICH file runs needs to know the environment may say
+   * otherwise (APRV-502: `BUN_OPTIONS='--cwd ../x'`, `NODE_OPTIONS`,
+   * `PYTHONPATH`, `PYTHONSTARTUP`, `HOME`).
+   */
+  assigned: boolean;
   /** What the caller knows about the machine (APRV-267). Never read from here. */
   context: ClassifierContext;
 }
@@ -1373,7 +1382,8 @@ export interface CommandRule {
   /**
    * Match only an argv that runs a skill script (APRV-502): allowlisted inert
    * flags, then a `skills/<skill>/scripts/<file>` path, with no word of the
-   * segment carrying a command substitution ({@link skillScriptArg}).
+   * segment carrying a command substitution and no `NAME=value` assignment
+   * before the binary ({@link skillScriptArg}, {@link matchRule}).
    *
    * The same device as `probe`, for the same reason: the row is a SHAPE, and
    * an argv outside the shape must not match it at all, so `bun --cwd /etc x`
@@ -2903,7 +2913,10 @@ export const NODE_SKILL_SCRIPT_RULE = "node-skill-script";
  * file runs nor where code comes from. A flag that takes a value (`--cwd`,
  * `--require`, `--import`, `-W`, `-X`) is absent on purpose, because its value
  * would be a second thing the interpreter loads or a different directory the
- * script path is read from.
+ * script path is read from. The same flags spelled through the environment
+ * (`BUN_OPTIONS`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `HOME`) are
+ * refused the same way: any `NAME=value` prefix on the segment declines the
+ * shape ({@link matchRule}, `RuleContext.assigned`).
  */
 const SKILL_SCRIPT_FLAGS: Readonly<Record<string, readonly string[]>> = {
   bun: ["--bun", "--smol"],
@@ -3027,9 +3040,11 @@ function refineNode(ctx: RuleContext): Refinement | null {
       }
     );
   }
-  // APRV-502. A substituted word is a hole in the text, so the skill-script
-  // reading is declined and the segment keeps the answer it had before.
-  const skill = ctx.substituted ? null : skillScriptArg("node", ctx.args);
+  // APRV-502. A substituted word is a hole in the text, and an assignment
+  // prefix (`NODE_OPTIONS='--require …'`) is a flag spelled through the
+  // environment, so either declines the skill-script reading and the segment
+  // keeps the answer it had before.
+  const skill = ctx.substituted || ctx.assigned ? null : skillScriptArg("node", ctx.args);
   if (skill !== null) {
     return { class: SKILL_SCRIPT_CLASS, rule: NODE_SKILL_SCRIPT_RULE, path: skill };
   }
@@ -4008,19 +4023,30 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
  * The argv is read for two purposes only: a `probe` row matches an argv that
  * is nothing but version or help flags (APRV-397), and a `skillScript` row
  * matches an argv that runs a skill script (APRV-502). No other row reads it.
+ *
+ * `substituted` and `assigned` are read by the `skillScript` row alone: a
+ * substituted word is a hole in the text, and an assignment prefix is a flag
+ * spelled through the environment (`BUN_OPTIONS='--cwd ../x'` makes bun read
+ * a different directory's file), so either one means the shape is not matched
+ * and the segment keeps the answer it had before (fail closed).
  */
 function matchRule(
   bin: string,
   sub: string | null,
   args: readonly string[],
   substituted = false,
+  assigned = false,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    // APRV-502: a substituted word is a hole in the text, so the shape is not
-    // matched and the segment keeps the answer it had before (fail closed).
-    if (rule.skillScript === true && (substituted || skillScriptArg(bin, args) === null)) continue;
+    // APRV-502: see the doc comment above; any of the three declines the row.
+    if (
+      rule.skillScript === true &&
+      (substituted || assigned || skillScriptArg(bin, args) === null)
+    ) {
+      continue;
+    }
     if (rule.subs !== undefined) {
       if (sub === null || !rule.subs.includes(sub)) continue;
     }
@@ -4069,6 +4095,8 @@ function classifySegment(
   const words = segment.words.map((word) => word.text);
   let cursor = 0;
   while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+  // APRV-502: read by the skill-script shape only ({@link matchRule}).
+  const assigned = cursor > 0;
 
   // APRV-193. A sandbox wrapper is not a command: it is a room, and what
   // matters is what runs inside it. `approval sandbox -- npm install` is
@@ -4162,7 +4190,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted);
+  const rule = matchRule(basename, sub, args, substituted, assigned);
   if (rule === null) {
     return {
       ok: false,
@@ -4174,7 +4202,7 @@ function classifySegment(
     };
   }
 
-  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, context };
+  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, assigned, context };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };

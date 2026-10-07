@@ -842,7 +842,7 @@ test("a resident's skill scripts run as exec.local from the Hermes home (APRV-50
   assert.equal(verdictOf(absent).permission, "allow", absent.stderr);
 });
 
-test("a skill script symlinked out of its directory is refused; one onto an organ takes the organ's class (APRV-502)", () => {
+test("a skill script symlinked out of its directory, or onto an organ, is refused (APRV-502)", () => {
   const dir = readyWithExecLocal();
   const home = hermesHomeWithSkills(dir, [["x", "ok.ts"]]);
   const scripts = join(home, "skills", "x", "scripts");
@@ -864,18 +864,21 @@ test("a skill script symlinked out of its directory is refused; one onto an orga
     assert.match(verdict.message, /escapes its directory/u, name);
   }
 
-  // Onto the home's scheduled scripts and onto its secrets: the class the same
-  // command would take had it spelled the real path.
+  // Onto the home's scheduled scripts and onto its secrets: refused, naming the
+  // landing. Taking the landing's class instead would answer the symlinked
+  // spelling more loosely than the direct one (`bun <home>/scripts/job.sh` is
+  // refused by text) wherever that class is autonomous (the refutation's S2).
   symlinkSync("../../../scripts/job.sh", join(scripts, "cron.ts"));
   symlinkSync("../../../.env", join(scripts, "env.ts"));
-  for (const [name, cls] of [
-    ["cron.ts", "cron.manage"],
-    ["env.ts", "account.credential"],
+  for (const [name, landing] of [
+    ["cron.ts", /scripts\/job\.sh, a protected path \(cron\.manage\)/u],
+    ["env.ts", /\.env, a credential path \(account\.credential\)/u],
   ] as const) {
     const run = terminal(dir, `bun skills/x/scripts/${name}`, home);
     const verdict = verdictOf(run);
     assert.equal(verdict.permission, "deny", `${name}: ${run.stdout}`);
-    assert.ok(classesOf(run).includes(cls), `${name}: ${verdict.message}`);
+    assert.match(verdict.message, /escapes its directory/u, name);
+    assert.match(verdict.message, landing, name);
   }
 
   // A literal cd is followed: the script is judged where the shell will find it.
@@ -884,6 +887,64 @@ test("a skill script symlinked out of its directory is refused; one onto an orga
 
   // And the one inside its directory is still allowed.
   assert.equal(verdictOf(terminal(dir, "bun skills/x/scripts/ok.ts", home)).permission, "allow");
+});
+
+test("no component of skills/<skill>/scripts may be a symlink; a symlinked workdir is fine (APRV-502)", () => {
+  const dir = readyWithExecLocal();
+  const outside = join(dir, "outside");
+  mkdirSync(join(outside, "skills", "x", "scripts"), { recursive: true });
+  writeFileSync(join(outside, "f.ts"), "console.log('evil')\n", "utf8");
+  writeFileSync(join(outside, "skills", "x", "scripts", "f.ts"), "console.log('evil')\n", "utf8");
+
+  // The `scripts` directory, the `<skill>` directory, and the `skills`
+  // directory, each a symlink to somewhere else. Every file sits under the
+  // resolved root, which is why containment alone let these through.
+  const scriptsLinked = join(dir, "w1");
+  mkdirSync(join(scriptsLinked, "skills", "e"), { recursive: true });
+  symlinkSync(outside, join(scriptsLinked, "skills", "e", "scripts"));
+  const skillLinked = join(dir, "w2");
+  mkdirSync(join(skillLinked, "skills"), { recursive: true });
+  symlinkSync(join(outside, "skills", "x"), join(skillLinked, "skills", "e"));
+  const skillsLinked = join(dir, "w3");
+  mkdirSync(skillsLinked, { recursive: true });
+  symlinkSync(join(outside, "skills"), join(skillsLinked, "skills"));
+  for (const [workdir, command] of [
+    [scriptsLinked, "bun skills/e/scripts/f.ts"],
+    [skillLinked, "bun skills/e/scripts/f.ts"],
+    [skillsLinked, "bun skills/x/scripts/f.ts"],
+    [skillsLinked, "node skills/x/scripts/f.ts"],
+  ] as const) {
+    const run = terminal(dir, command, workdir);
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${workdir} ${command}: ${run.stdout}`);
+    assert.match(verdict.message, /is a symlink/u, `${workdir} ${command}`);
+  }
+
+  // The same directories spelled through the absolute `.hermes` shape.
+  const home = join(dir, "h2", ".hermes");
+  mkdirSync(home, { recursive: true });
+  symlinkSync(join(outside, "skills"), join(home, "skills"));
+  const absolute = terminal(dir, `bun ${join(home, "skills", "x", "scripts", "f.ts")}`, dir);
+  assert.equal(verdictOf(absolute).permission, "deny", absolute.stdout);
+
+  // A symlinked working directory (or Hermes home) is the base itself, which is
+  // resolved on both sides, so a real skills/x/scripts under it is allowed.
+  const real = join(dir, "real-home");
+  mkdirSync(join(real, "skills", "x", "scripts"), { recursive: true });
+  writeFileSync(join(real, "skills", "x", "scripts", "ok.ts"), "console.log('hi')\n", "utf8");
+  const linkedWorkdir = join(dir, "linked-home");
+  symlinkSync(real, linkedWorkdir);
+  const allowed = terminal(dir, "bun skills/x/scripts/ok.ts", linkedWorkdir);
+  assert.equal(verdictOf(allowed).permission, "allow", `${allowed.stdout} ${allowed.stderr}`);
+  const linkedHermes = join(dir, "h3");
+  mkdirSync(linkedHermes, { recursive: true });
+  symlinkSync(real, join(linkedHermes, ".hermes"));
+  const allowedAbsolute = terminal(
+    dir,
+    `bun ${join(linkedHermes, ".hermes", "skills", "x", "scripts", "ok.ts")}`,
+    dir,
+  );
+  assert.equal(verdictOf(allowedAbsolute).permission, "allow", allowedAbsolute.stdout);
 });
 
 test("a Hermes home this process cannot read leaves the text answer standing (APRV-502, co-location)", (t) => {

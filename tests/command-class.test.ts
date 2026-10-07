@@ -1909,8 +1909,6 @@ const SKILL_SCRIPTS: ReadonlyArray<[command: string, rule: string, path: string]
   ["bun ./skills/x/scripts/f.ts", "skill-script", "./skills/x/scripts/f.ts"],
   ["bun /home/hermes/.hermes/skills/x/scripts/f.ts", "skill-script", "/home/hermes/.hermes/skills/x/scripts/f.ts"],
   ["bun /home/hermes/.hermes/profiles/p1/skills/x/scripts/f.ts", "skill-script", "/home/hermes/.hermes/profiles/p1/skills/x/scripts/f.ts"],
-  // An assignment prefix is not the command, as everywhere else.
-  ["NO_COLOR=1 bun skills/x/scripts/f.ts", "skill-script", "skills/x/scripts/f.ts"],
 ];
 
 for (const [command, rule, path] of SKILL_SCRIPTS) {
@@ -1966,6 +1964,19 @@ const NOT_SKILL_SCRIPTS: ReadonlyArray<[command: string, want: string]> = [
   // `-c` inside a cluster is not an allowlisted letter, so the row does not
   // match; the opaque table reads only a bare `-c`, so this stays unclassified.
   ["python3 -Ic skills/x/scripts/f.py", "unclassified"],
+  // Any assignment prefix declines the shape: it is a flag spelled through the
+  // environment. `BUN_OPTIONS='--cwd ../x'` makes bun 1.4 run a DIFFERENT
+  // directory's skills/x/scripts/f.ts, and NODE_OPTIONS, PYTHONPATH,
+  // PYTHONSTARTUP and HOME load other code or move the home. Even a harmless
+  // one (`NO_COLOR=1`) declines, because the rule cannot tell them apart.
+  ["BUN_OPTIONS='--cwd ../evil' bun skills/x/scripts/f.ts", "unclassified"],
+  ["BUN_OPTIONS='--preload /home/h/evil.ts' bun skills/x/scripts/f.ts", "unclassified"],
+  ["PYTHONPATH=/tmp/evil python3 skills/x/scripts/f.py", "unclassified"],
+  ["PYTHONSTARTUP=/tmp/evil.py python3 skills/x/scripts/f.py", "unclassified"],
+  ["HOME=/x bun skills/x/scripts/f.ts", "unclassified"],
+  ["HOME=/x bun /home/h/.hermes/skills/x/scripts/f.ts", "unclassified"],
+  ["NO_COLOR=1 bun skills/x/scripts/f.ts", "unclassified"],
+  ["NO_COLOR=1 approval sandbox -- bun skills/x/scripts/f.ts", "unclassified"],
   // A substituted, variable or globbed word.
   ["bun skills/x/scripts/$F", "unclassified"],
   ['bun "skills/x/scripts/$(echo f).ts"', "unclassified"],
@@ -2019,6 +2030,10 @@ test("the skill-script rule leaves every other bun, node and python argv where i
     // pre-APRV-502 answer.
     ["node skills/x/scripts/f.ts $(cat args.txt)", "files.write.workspace", "node-script"],
     ["node --require ./x.js skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
+    // An assignment prefix declines it too (`NODE_OPTIONS='--require …'` is
+    // the same flag spelled through the environment).
+    ["NODE_OPTIONS='--require ./x.js' node skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
+    ["HOME=/x node skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
     ["node cli.js status", GATE_SELF_CLASS, "node-approval-cli"],
   ];
   for (const [command, cls, rule] of cases) {

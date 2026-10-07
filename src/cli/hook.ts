@@ -2713,9 +2713,11 @@ type SkillScriptJudgement =
   | { kind: "inside" }
   /** The disk could not be read, or the file is not there: the text stands. */
   | { kind: "unseen"; why: string }
-  /** The real file lands on a protected or credential path. */
-  | { kind: "protected"; cls: string; real: string }
-  /** The real file is somewhere else, or the disk answered in a way this pass cannot vouch for. */
+  /**
+   * The real file is somewhere else (a credential or protected path, outside
+   * the real root, or under a symlinked component of the root), or the disk
+   * answered in a way this pass cannot vouch for.
+   */
   | { kind: "refused"; detail: string };
 
 /** The `code` of a filesystem error, or `null`. */
@@ -2730,7 +2732,10 @@ function fsErrorCode(error: unknown): string | null {
  *
  * `script` is the path the classifier bound, `skills/<skill>/scripts/<file>`
  * or an absolute `.hermes` spelling of it, so its parent is the spelled root
- * `<…>/skills/<skill>/scripts` and nothing needs re-parsing.
+ * `<base>/skills/<skill>/scripts` and nothing needs re-parsing. `<base>` is
+ * the directory the shape was spelled from: the working directory for the
+ * relative shape, the `.hermes` or `.hermes/profiles/<p>` directory for the
+ * absolute one. Both shapes put exactly three segments between base and root.
  *
  * ## Why an unreadable or absent script lets the text answer stand
  *
@@ -2749,14 +2754,23 @@ function fsErrorCode(error: unknown): string | null {
  * in both cases is the shape: no `..`, no variable, no glob, and every
  * protected and credential tier ahead of the rule.
  *
- * Where the disk CAN be read, the real path of the script must sit strictly
- * under the real path of the directory it was spelled in, so a symlink out of
- * `skills/<skill>/scripts/` refuses. A dangling symlink is judged by where it
- * points, resolved through the deepest existing ancestor of its target, so a
- * link whose target does not exist YET cannot be placed now and filled later.
- * A real path landing on a credential or protected path takes that path's
- * class, which is the class the same command would take if it had spelled the
- * real path itself (`bun /home/h/.hermes/.env` is a credential read by text).
+ * ## Where the disk CAN be read, everything off the plain shape refuses
+ *
+ * - A real path landing on a credential or protected path refuses, naming the
+ *   landing. It does not take the landing's class: for `bun` and `python3` the
+ *   direct spelling of a protected path is refused by the classifier (the
+ *   protected scan runs only after a table row matches), so taking the class
+ *   would answer a symlinked spelling MORE loosely than the direct one under a
+ *   policy where that class is looser than a refusal (the A502 refutation's
+ *   S2: `cron.manage` autonomous in the village template).
+ * - No component of `skills/<skill>/scripts` may be a symlink: the real root
+ *   must equal `realpath(base)/skills/<skill>/scripts`. A symlinked base or
+ *   working directory is fine, because both sides are resolved.
+ * - The real path of the script must sit strictly under that real root, so a
+ *   file symlink out of `skills/<skill>/scripts/` refuses. A dangling symlink
+ *   is judged by where it points, resolved through the deepest existing
+ *   ancestor of its target, so a link whose target does not exist YET cannot
+ *   be placed now and filled later.
  */
 function judgeSkillScript(
   script: string,
@@ -2796,19 +2810,41 @@ function judgeSkillScript(
     real = canonicalPath(resolvePathSegments(dirname(spelled), target));
   }
 
-  if (isCredentialPath(real)) return { kind: "protected", cls: "account.credential", real };
+  if (isCredentialPath(real)) {
+    return {
+      kind: "refused",
+      detail: `${script} resolves to ${real}, a credential path (account.credential)`,
+    };
+  }
   const protectedClass = protectedPathClass(real, protectedPaths);
-  if (protectedClass !== null) return { kind: "protected", cls: protectedClass, real };
+  if (protectedClass !== null) {
+    return {
+      kind: "refused",
+      detail: `${script} resolves to ${real}, a protected path (${protectedClass})`,
+    };
+  }
 
+  // `<base>/skills/<skill>/scripts`: three segments up from the root is base.
+  const skill = basename(dirname(root));
+  const base = dirname(dirname(dirname(root)));
   let realRoot: string;
+  let realBase: string;
   try {
     realRoot = realpathSync(root);
+    realBase = realpathSync(base);
   } catch (error) {
-    // The script resolved and its own directory did not: two reads of one
+    // The script resolved and a directory above it did not: two reads of one
     // disk disagreeing. Nothing here can vouch for that.
     return {
       kind: "refused",
       detail: `${root} could not be resolved (${fsErrorCode(error) ?? "unknown error"}) although the script inside it did`,
+    };
+  }
+  const expectedRoot = join(realBase, "skills", skill, "scripts");
+  if (realRoot !== expectedRoot) {
+    return {
+      kind: "refused",
+      detail: `${root} resolves to ${realRoot}, not ${expectedRoot}: a component of skills/${skill}/scripts is a symlink`,
     };
   }
   if (!isBelow(real, realRoot)) {
@@ -2853,14 +2889,16 @@ function skillScriptCwds(
  * Check every skill-script segment against the disk (APRV-502).
  *
  * IMPURE by design and by contract, like the other passes: it resolves paths.
- * It only ever TIGHTENS. A segment whose script escapes the directory it was
- * spelled in turns the whole classification into an `unclassified` failure
- * (which the hook denies as `hook-unclassified`); one whose script lands on a
- * protected or credential path takes that class, keeping its rule id so
- * `APPROVAL_HOOK_REQUIRE_SANDBOX` still sees code being run; and one the disk
- * cannot show (unreadable, absent, or after a `cd` the text cannot name) keeps
- * the text's `exec.local` with a note saying the pass could not look. See
- * {@link judgeSkillScript} for why that last case is deliberate.
+ * It only ever TIGHTENS. A segment whose script resolves anywhere but a file
+ * under the real `skills/<skill>/scripts/` directory it was spelled in (a
+ * credential or protected landing, a path outside the real root, a symlinked
+ * component of the root) turns the whole classification into an
+ * `unclassified` failure naming the landing, which the hook denies as
+ * `hook-unclassified`; and one the disk cannot show (unreadable, absent, or
+ * after a `cd` the text cannot name) keeps the text's `exec.local` with a note
+ * saying the pass could not look. See {@link judgeSkillScript} for why that
+ * last case is deliberate, and why a protected landing refuses rather than
+ * taking the landing's class.
  *
  * `cwd` is the directory the command runs in: the per-call Hermes `workdir`
  * when the harness states one (absolute only), the hook's own directory
@@ -2880,12 +2918,8 @@ export function refineSkillScripts(
   }
 
   const notes: string[] = [];
-  const segments: ClassifiedSegment[] = [];
   for (const [index, segment] of result.segments.entries()) {
-    if (!SKILL_SCRIPT_RULES.includes(segment.rule) || segment.class !== "exec.local") {
-      segments.push(segment);
-      continue;
-    }
+    if (!SKILL_SCRIPT_RULES.includes(segment.rule) || segment.class !== "exec.local") continue;
     const script = segment.path;
     if (script === undefined) {
       // The classifier binds the script on every segment of these rules, so
@@ -2905,10 +2939,8 @@ export function refineSkillScripts(
       notes.push(
         `skill-script-unverified: an earlier cd moves to a directory the text cannot name, so ${script} was not checked against the disk and stays exec.local`,
       );
-      segments.push(segment);
       continue;
     }
-    let tightened: ClassifiedSegment = segment;
     for (const from of cwds) {
       const judged = judgeSkillScript(script, from, protectedPaths);
       if (judged.kind === "refused") {
@@ -2917,7 +2949,7 @@ export function refineSkillScripts(
             ok: false,
             code: "unclassified",
             segment: segment.text,
-            detail: `skill script escapes its directory: ${judged.detail}. A skill script must be a file under the skills/<skill>/scripts/ directory it is spelled in`,
+            detail: `skill script escapes its directory: ${judged.detail}. A skill script must be a file under the real skills/<skill>/scripts/ directory it is spelled in, with no symlink in that directory's own path`,
           },
           notes,
         };
@@ -2926,25 +2958,10 @@ export function refineSkillScripts(
         notes.push(
           `skill-script-unverified: ${judged.why}, so the disk pass could not look and ${script} stays exec.local`,
         );
-        continue;
-      }
-      if (judged.kind === "protected" && tightened.class === "exec.local") {
-        notes.push(
-          `skill-script-resolved: ${script} resolves to ${judged.real}, which is ${judged.cls}`,
-        );
-        tightened = { ...segment, class: judged.cls, path: judged.real };
       }
     }
-    segments.push(tightened);
   }
-  if (segments.every((segment, at) => segment === result.segments[at])) {
-    return { result, notes };
-  }
-  const classes: string[] = [];
-  for (const segment of segments) {
-    if (!classes.includes(segment.class)) classes.push(segment.class);
-  }
-  return { result: { ok: true, segments, classes }, notes };
+  return { result, notes };
 }
 
 /**
