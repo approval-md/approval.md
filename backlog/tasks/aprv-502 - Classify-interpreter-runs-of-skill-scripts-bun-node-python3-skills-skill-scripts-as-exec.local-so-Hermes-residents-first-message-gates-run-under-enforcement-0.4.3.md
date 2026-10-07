@@ -7,7 +7,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-07 00:32'
-updated_date: '2026-10-07 02:08'
+updated_date: '2026-10-07 02:25'
 labels:
   - agent-village
 dependencies: []
@@ -28,10 +28,10 @@ Release: 0.4.3 (CHANGELOG section, version strings in the files APRV-501's d784c
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Pure classifier: bun skills/agent-profile/scripts/profile.ts, bun skills/index-network/scripts/welcome.ts, python3 skills/agent-commons/scripts/search_forum.py --q x, node skills/x/scripts/f.ts, bun --bun ... and python3 -I ... classify exec.local with the script path bound; fixture-tested
-- [x] #2 Negative cases stay refused or stricter: bun /path/to/evil.ts, bun evil.ts, bun skills/x/scripts/../../.approval/x, python3 -c ..., bun -e ..., python3 -m x, python3 - , an unknown or value-taking flag before the script (bun --cwd /etc ...), a substituted or variable word, a glob, a script under .hermes/scripts (cron.manage), any path under .approval / agent-hooks / .env / config.yaml (policy.core), an unexpanded $HERMES_HOME spelling, an absolute path outside the .hermes grammar
-- [x] #3 Hook disk pass in the classifyForHook chain only tightens, like resolvedPathClasses: where the hook CAN read the disk, the realpath of the script must sit under the real skills/<skill>/scripts directory it was spelled in (resolved from the per-call cwd) or the segment refuses, and a real path landing on a protected or credential path takes that class; where it cannot read (EACCES: under co-location the daemon user cannot read the Hermes home, verified 2026-10-07) or the file is absent, the text answer stands and a note says so. Tested through the compiled hook hermes path with workdir: allow, symlink-escape deny, protected-landing deny, unreadable-home allow
-- [x] #4 approval hook classify -- bun skills/index-network/scripts/welcome.ts prints exec.local with the rule named; the rule ids are in CODE_EXECUTING_RULES; docs/hermes-hook.md and docs/claude-code-hook.md name the rule and the disk pass's limits
-- [x] #5 Release 0.4.3 prepared as the last commit of the same PR: CHANGELOG 0.4.3 section dated from the GitHub Date header with a fresh empty Unreleased above it, version strings in the nine files d784cb4a touched, docs/releases/0.4.3.md, release-notes test lists; node scripts/release-notes.mjs 0.4.3 --check exit 0; targeted tests + tsc + lint green; CI green on the PR
+- [x] #2 Negative cases stay refused or stricter: bun /path/to/evil.ts, bun evil.ts, bun skills/x/scripts/../../.approval/x, python3 -c ..., bun -e ..., python3 -m x, python3 - , an unknown or value-taking flag before the script (bun --cwd /etc ...), any NAME=value assignment prefix (BUN_OPTIONS, NODE_OPTIONS, PYTHONPATH, HOME), a substituted or variable word, a glob, a script under .hermes/scripts (cron.manage), any path under .approval / agent-hooks / .env / config.yaml (policy.core), an unexpanded HERMES_HOME variable spelling, an absolute path outside the .hermes grammar
+- [x] #3 Hook disk pass in the classifyForHook chain only tightens, like resolvedPathClasses: where the hook CAN read the disk, the script's real path must sit under realpath(base)/skills/<skill>/scripts with no symlinked component of that chain, or the segment REFUSES (unclassified, naming the landing); a real path on a protected or credential path refuses too (refuter S2: taking the landing's class answered a symlinked spelling more loosely than the direct one); where it cannot read (EACCES: under co-location the daemon user cannot read the Hermes home, verified 2026-10-07) or the file is absent, the text answer stands and a note says so. Tested through the compiled hook hermes path with workdir: allow, file-symlink escape deny, dir-symlink deny, protected-landing deny, unreadable-home allow, symlinked workdir allow
+- [x] #4 approval hook classify -- bun skills/index-network/scripts/welcome.ts prints exec.local with the rule named; the rule ids are in CODE_EXECUTING_RULES; docs/hermes-hook.md, docs/claude-code-hook.md and docs/cursor-hook.md name the rule and the disk pass's limits
+- [x] #5 Release 0.4.3 prepared as the last commits of the same PR: CHANGELOG 0.4.3 section dated from the GitHub Date header with a fresh empty Unreleased above it, a Daemon section for DRAW_TIMEOUT_MS 2000 ms (row 58) and a 'Behavior changes for an existing policy' section (node skills/... class move, say.exec.local entry flip); version strings in the nine files d784cb4a touched, docs/releases/0.4.3.md, release-notes test lists; node scripts/release-notes.mjs --check exit 0; targeted tests + tsc + lint green; CI green on the PR
 <!-- AC:END -->
 
 ## Implementation Notes
