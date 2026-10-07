@@ -450,17 +450,24 @@ or an absolute path ending `.hermes[/profiles/<p>]/skills/<skill>/scripts/<file>
 Flags before the script come from a short allowlist of inert flags (`bun --bun`,
 `--smol`; `python3 -I -u -B -E -s -S -O -q` and clusters of them; three inert
 `node` flags); anything else, a `--flag=value`, inline code, stdin, a `..` or
-`.` segment, a glob, a variable (`$HERMES_HOME/skills/…`, `~/.hermes/…`) or a
-substituted word keeps the earlier refusal. A script under `$HERMES_HOME/scripts/`
+`.` segment, a glob, a variable (`$HERMES_HOME/skills/…`, `~/.hermes/…`), a
+substituted word, or any `NAME=value` assignment before the interpreter keeps
+the earlier refusal. The assignment rule covers `BUN_OPTIONS='--cwd ../x'`,
+which makes bun run a different directory's file, and `NODE_OPTIONS`,
+`PYTHONPATH`, `PYTHONSTARTUP` and `HOME`; even `NO_COLOR=1` declines. A script under `$HERMES_HOME/scripts/`
 is not this shape, and every protected and credential path in the segment
 answers first. A policy that names no `exec.local` line resolves it by
 `defaults.autonomy`.
 
 The hook then looks at the disk from the call's `workdir` (and from any literal
 `cd` before the script): the real script must sit under the real
-`skills/<skill>/scripts/` directory it was spelled in, or the call is refused
-`hook-unclassified`; a real path landing on `.env`, `config.yaml`,
-`agent-hooks/`, `scripts/` or another organ takes that path's class. **Where the
+`skills/<skill>/scripts/` directory it was spelled in, and no component of
+`skills/<skill>/scripts` may itself be a symlink (a symlinked `workdir` or
+Hermes home is fine, since both sides are resolved). Anything else is refused
+`hook-unclassified`, naming where the script lands. A real path landing on
+`.env`, `config.yaml`, `agent-hooks/`, `scripts/` or another organ is refused
+the same way rather than given that path's class, because the direct spelling
+(`bun ~/.hermes/scripts/job.sh`) is refused too. **Where the
 hook cannot read the path, or the file does not exist, the text answer stands**
 and a note says the disk pass could not look. That is the hosted case: under
 co-location the daemon runs as `approvald` and the resident's home is 0700

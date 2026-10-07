@@ -161,15 +161,19 @@ non-empty, neither `.` nor `..`, and free of `$`, backticks, glob and brace
 characters. Flags before the script come from an allowlist (bun `--bun`,
 `--smol`; node `--no-warnings`, `--enable-source-maps`,
 `--experimental-strip-types`; python `-I -u -B -E -s -S -O -q`, alone or
-clustered); any other flag, a `--flag=value`, inline code, stdin or a
-substituted word means the row does not match, so the command keeps its earlier
-answer. Words after the script are its arguments. Protected and credential paths
+clustered); any other flag, a `--flag=value`, inline code, stdin, a
+substituted word, or any `NAME=value` assignment before the interpreter
+(`BUN_OPTIONS`, `NODE_OPTIONS`, `PYTHONPATH` and `HOME` move the file or load
+other code, so even `NO_COLOR=1` declines) means the row does not match, so the
+command keeps its earlier answer. Words after the script are its arguments. Protected and credential paths
 anywhere in the segment still answer first. The hook then checks the disk: where
 it can read it, the real script must sit under the real
 `skills/<skill>/scripts/` directory it was spelled in (resolved from the
-per-call working directory), or the command is refused `hook-unclassified`; a
-real path on a protected or credential file takes that class. Where it cannot
-read it, or the file is absent, the text answer stands: under co-location the
+per-call working directory), and no component of `skills/<skill>/scripts` may
+itself be a symlink (a symlinked working directory is fine). Anything else is
+refused `hook-unclassified` with the landing named, a real path on a protected
+or credential file included: it is refused rather than given that file's class.
+Where it cannot read it, or the file is absent, the text answer stands: under co-location the
 daemon user cannot read a Hermes home (mode 0700), so on a hosted box the
 classifier's text check is the whole check. Both rule ids are in
 `CODE_EXECUTING_RULES`.
