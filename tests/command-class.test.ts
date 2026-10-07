@@ -21,6 +21,7 @@ import {
   isProtectedPath,
   protectedPathClass,
   CLASSIFIER_CLASSES,
+  CODE_EXECUTING_RULES,
   COMMAND_RULES,
   GATE_SELF_CLASS,
   NON_SECRET_ENV_NAMES,
@@ -282,6 +283,11 @@ const FIXTURES: readonly Fixture[] = [
 
   // -- workspace tools ------------------------------------------------------
   { command: "node scripts/run-tests.mjs", class: "files.write.workspace", rule: "node-script", row: "node" },
+  // APRV-502: an interpreter running a skill script is `exec.local`. The
+  // negatives, and the path binding, are in the APRV-502 section at the end.
+  { command: "bun skills/agent-profile/scripts/profile.ts", class: "exec.local", rule: "skill-script" },
+  { command: "python3 skills/agent-commons/scripts/search_forum.py --q x", class: "exec.local", rule: "skill-script" },
+  { command: "node skills/x/scripts/f.ts", class: "exec.local", rule: "node-skill-script", row: "node" },
   { command: "node dist/src/cli/main.js log verify", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "node ./cli.js status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "approval queue --json", class: GATE_SELF_CLASS, rule: "approval" },
@@ -1877,4 +1883,155 @@ test("a journal entry that expands a secret-named variable is still a credential
   assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
   if (!result.ok) return;
   assert.deepEqual(result.classes, ["account.credential"]);
+});
+
+// ---------------------------------------------------------------------------
+// Skill scripts (APRV-502)
+// ---------------------------------------------------------------------------
+
+/**
+ * An interpreter running `skills/<skill>/scripts/<file>` is `exec.local`, with
+ * the script path bound. The Agent Village residents' first-message gates are
+ * the first two rows: under enforcement on 0.4.2 both answered `unclassified`,
+ * which denies.
+ */
+const SKILL_SCRIPTS: ReadonlyArray<[command: string, rule: string, path: string]> = [
+  ["bun skills/agent-profile/scripts/profile.ts", "skill-script", "skills/agent-profile/scripts/profile.ts"],
+  ["bun skills/index-network/scripts/welcome.ts", "skill-script", "skills/index-network/scripts/welcome.ts"],
+  ["python3 skills/agent-commons/scripts/search_forum.py --q x", "skill-script", "skills/agent-commons/scripts/search_forum.py"],
+  ["python skills/agent-commons/scripts/search_forum.py", "skill-script", "skills/agent-commons/scripts/search_forum.py"],
+  ["node skills/x/scripts/f.ts", "node-skill-script", "skills/x/scripts/f.ts"],
+  ["node --no-warnings --experimental-strip-types skills/x/scripts/f.ts a b", "node-skill-script", "skills/x/scripts/f.ts"],
+  ["bun --bun skills/x/scripts/f.ts", "skill-script", "skills/x/scripts/f.ts"],
+  ["bun --smol --bun skills/x/scripts/f.ts --flag=value", "skill-script", "skills/x/scripts/f.ts"],
+  ["python3 -I skills/x/scripts/f.py", "skill-script", "skills/x/scripts/f.py"],
+  ["python3 -IB -u skills/x/scripts/f.py", "skill-script", "skills/x/scripts/f.py"],
+  ["bun ./skills/x/scripts/f.ts", "skill-script", "./skills/x/scripts/f.ts"],
+  ["bun /home/hermes/.hermes/skills/x/scripts/f.ts", "skill-script", "/home/hermes/.hermes/skills/x/scripts/f.ts"],
+  ["bun /home/hermes/.hermes/profiles/p1/skills/x/scripts/f.ts", "skill-script", "/home/hermes/.hermes/profiles/p1/skills/x/scripts/f.ts"],
+  // An assignment prefix is not the command, as everywhere else.
+  ["NO_COLOR=1 bun skills/x/scripts/f.ts", "skill-script", "skills/x/scripts/f.ts"],
+];
+
+for (const [command, rule, path] of SKILL_SCRIPTS) {
+  test(`skill script: ${command} is exec.local with the script bound`, () => {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["exec.local"]);
+    assert.equal(result.segments[0]?.rule, rule);
+    assert.equal(result.segments[0]?.path, path);
+  });
+}
+
+/**
+ * Everything outside the shape keeps the answer it had before the rule
+ * existed: refused (`unclassified` or `opaque`), or a stricter class that a
+ * protected-path tier gives it. `refused` names the failure code; a string
+ * starting with a class name names the class.
+ */
+const NOT_SKILL_SCRIPTS: ReadonlyArray<[command: string, want: string]> = [
+  // Outside both roots.
+  ["bun /path/to/evil.ts", "unclassified"],
+  ["bun evil.ts", "unclassified"],
+  ["bun /etc/skills/x/scripts/f.ts", "unclassified"],
+  ["bun skills/x/scripts/sub/f.ts", "unclassified"],
+  ["bun .hermes/skills/x/scripts/f.ts", "unclassified"],
+  ["bun skills/x/f.ts", "unclassified"],
+  // Dot segments, empty segments, a trailing slash.
+  ["bun skills/x/scripts/../../.approval/x", "unclassified"],
+  ["bun skills/../scripts/f.ts", "unclassified"],
+  ["bun skills/x/scripts/./f.ts", "unclassified"],
+  ["bun skills//x/scripts/f.ts", "unclassified"],
+  ["bun skills/x/scripts/", "unclassified"],
+  ["bun /home/h/../h/.hermes/skills/x/scripts/f.ts", "unclassified"],
+  // Inline code, stdin, a module.
+  ["python3 -c 'print(1)'", "opaque"],
+  ["python -c 'print(1)'", "opaque"],
+  ["node -e 'console.log(1)'", "opaque"],
+  ["node --eval 1 skills/x/scripts/f.ts", "opaque"],
+  ["node -p 1", "opaque"],
+  ["bun -e 'console.log(1)'", "unclassified"],
+  ["python3 -m x", "unclassified"],
+  ["python3 -m skills.x.scripts.f", "unclassified"],
+  ["python3 -", "unclassified"],
+  ["python3 - skills/x/scripts/f.py", "unclassified"],
+  // A flag outside the allowlist, a value-taking flag, `--flag=value`, `--`.
+  ["bun --cwd /etc skills/x/scripts/f.ts", "unclassified"],
+  ["bun --smol=1 skills/x/scripts/f.ts", "unclassified"],
+  ["bun --preload ./evil.ts skills/x/scripts/f.ts", "unclassified"],
+  ["bun -- skills/x/scripts/f.ts", "unclassified"],
+  ["python3 -W ignore skills/x/scripts/f.py", "unclassified"],
+  ["python3 -X dev skills/x/scripts/f.py", "unclassified"],
+  // `-c` inside a cluster is not an allowlisted letter, so the row does not
+  // match; the opaque table reads only a bare `-c`, so this stays unclassified.
+  ["python3 -Ic skills/x/scripts/f.py", "unclassified"],
+  // A substituted, variable or globbed word.
+  ["bun skills/x/scripts/$F", "unclassified"],
+  ['bun "skills/x/scripts/$(echo f).ts"', "unclassified"],
+  ["bun skills/x/scripts/f.ts $(cat args.txt)", "unclassified"],
+  ["bun skills/*/scripts/f.ts", "unclassified"],
+  ["bun skills/x/scripts/f?.ts", "unclassified"],
+  ["bun skills/{a,b}/scripts/f.ts", "unclassified"],
+  ["bun skills/x/scripts/-f.ts", "unclassified"],
+  // An unexpanded home spelling: the text cannot say where it points.
+  ["bun $HERMES_HOME/skills/x/scripts/f.ts", "unclassified"],
+  ["bun ${HERMES_HOME}/skills/x/scripts/f.ts", "unclassified"],
+  ["bun ~/.hermes/skills/x/scripts/f.ts", "unclassified"],
+  // The scheduled-scripts directory stays out of this rule, and a protected
+  // path anywhere in the segment takes its tier's class first.
+  ["bun ~/.hermes/scripts/job.sh", "unclassified"],
+  ["bun /home/h/.hermes/scripts/job.sh", "unclassified"],
+  ["bun skills/x/scripts/f.ts /home/h/.hermes/scripts/job.sh", "cron.manage"],
+  ["bun skills/x/scripts/f.ts .approval/x", "policy.core"],
+  ["bun skills/x/scripts/f.ts /home/h/.hermes/agent-hooks/x", "policy.core"],
+  ["bun skills/x/scripts/f.ts /home/h/.hermes/config.yaml", "policy.core"],
+  ["bun skills/x/scripts/f.ts > /home/h/.hermes/.env", "policy.core"],
+  ["python3 skills/x/scripts/f.py /home/h/.hermes/.env", "account.credential"],
+  ["bun skills/x/scripts/APPROVAL.md", "policy.core"],
+  ["bun /home/h/.approval/.hermes/skills/x/scripts/f.ts", "policy.core"],
+  ["bun /home/h/.hermes/skills/x/scripts/f.ts > .approval/log/events.jsonl", "log.mutate"],
+];
+
+for (const [command, want] of NOT_SKILL_SCRIPTS) {
+  test(`not a skill script: ${command} stays ${want}`, () => {
+    const result = classifyCommand(command);
+    if (want === "unclassified" || want === "opaque") {
+      assert.equal(result.ok, false, result.ok ? `classified ${result.classes.join(", ")}` : "");
+      if (result.ok) return;
+      assert.equal(result.code, want, result.detail);
+      return;
+    }
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, [want]);
+  });
+}
+
+test("the skill-script rule leaves every other bun, node and python argv where it was", () => {
+  const cases: Array<[string, string, string]> = [
+    ["bun run build", "files.write.workspace", "npm-script"],
+    ["bun install", "deps.install", "npm-install-lockfile"],
+    ["bun --version", "read.shell", "npm-version"],
+    ["bun publish", "release.publish", "npm-publish"],
+    ["node scripts/run-tests.mjs", "files.write.workspace", "node-script"],
+    // A substituted word declines the skill-script reading; node keeps its
+    // pre-APRV-502 answer.
+    ["node skills/x/scripts/f.ts $(cat args.txt)", "files.write.workspace", "node-script"],
+    ["node --require ./x.js skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
+    ["node cli.js status", GATE_SELF_CLASS, "node-approval-cli"],
+  ];
+  for (const [command, cls, rule] of cases) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, `${command}: ${result.ok ? "" : result.detail}`);
+    if (!result.ok) continue;
+    assert.equal(result.segments[0]?.class, cls, command);
+    assert.equal(result.segments[0]?.rule, rule, command);
+  }
+});
+
+test("both skill-script rule ids are code-executing (APRV-193's list)", () => {
+  assert.ok(CODE_EXECUTING_RULES.includes("skill-script"));
+  assert.ok(CODE_EXECUTING_RULES.includes("node-skill-script"));
+  assert.ok(CLASSIFIER_CLASSES.includes("exec.local"));
 });

@@ -1370,6 +1370,17 @@ export interface CommandRule {
    * answer it has today.
    */
   probe?: boolean;
+  /**
+   * Match only an argv that runs a skill script (APRV-502): allowlisted inert
+   * flags, then a `skills/<skill>/scripts/<file>` path, with no word of the
+   * segment carrying a command substitution ({@link skillScriptArg}).
+   *
+   * The same device as `probe`, for the same reason: the row is a SHAPE, and
+   * an argv outside the shape must not match it at all, so `bun --cwd /etc x`
+   * and `python3 -m x` keep the `unclassified` answer they have today rather
+   * than being refined into some other refusal.
+   */
+  skillScript?: boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -2864,9 +2875,144 @@ function refineApproval(ctx: RuleContext): Refinement {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Skill scripts (APRV-502)
+// ---------------------------------------------------------------------------
+
+/**
+ * The class an interpreter run of a skill script takes: SPEC.md §7's
+ * `exec.local`, "tests, lint, build, scripts inside the workspace". No new
+ * class is minted; the classifier simply had no row that emitted this one.
+ */
+const SKILL_SCRIPT_CLASS = "exec.local";
+
+/** The rule id for `bun` / `python` / `python3` running a skill script. */
+export const SKILL_SCRIPT_RULE = "skill-script";
+
+/** The rule id `refineNode` returns for `node` running a skill script. */
+export const NODE_SKILL_SCRIPT_RULE = "node-skill-script";
+
+/**
+ * The flags an interpreter may carry BEFORE a skill script, per binary
+ * (APRV-502). An ALLOWLIST: a flag outside it, a `--flag=value`, a lone `-`
+ * (stdin) or `--` means the rule does not match at all, so the command keeps
+ * exactly the answer it had before this rule existed (`unclassified` for
+ * `bun --cwd /etc …` and `python3 -m x`, opaque for `python3 -c`, `node -e`).
+ *
+ * Every flag here is inert in the sense that matters: it changes neither WHICH
+ * file runs nor where code comes from. A flag that takes a value (`--cwd`,
+ * `--require`, `--import`, `-W`, `-X`) is absent on purpose, because its value
+ * would be a second thing the interpreter loads or a different directory the
+ * script path is read from.
+ */
+const SKILL_SCRIPT_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  bun: ["--bun", "--smol"],
+  node: ["--no-warnings", "--enable-source-maps", "--experimental-strip-types"],
+  python: [],
+  python3: [],
+};
+
+/**
+ * Python's inert single-letter flags, alone or clustered (`-I`, `-IB`, `-OO`):
+ * isolated mode, unbuffered, no bytecode, ignore `PYTHON*` variables, no user
+ * site, no `site` import, optimise, quiet. None of them takes a value, so a
+ * cluster cannot hide one; `-c`, `-m`, `-W` and `-X` are not letters here.
+ */
+const PYTHON_SKILL_SCRIPT_FLAGS = /^-[IuBEsSOq]+$/u;
+
+/**
+ * One segment of a skill-script path: non-empty, not `.` or `..`, not
+ * flag-shaped, and free of anything a shell could expand (`$`, backtick, a
+ * glob or brace character, a home shortcut) or a platform could read as a
+ * separator (`\`).
+ */
+function isSkillScriptSegment(segment: string): boolean {
+  if (segment.length === 0 || segment === "." || segment === "..") return false;
+  if (segment.startsWith("-")) return false;
+  return !/[*?[\]{}$`~\\]/u.test(segment);
+}
+
+/**
+ * Is `word` a skill-script path, in exactly one of the two shapes (APRV-502)?
+ *
+ * - Relative: `skills/<skill>/scripts/<file>`, with any number of leading
+ *   `./` normalised away. Four segments, no more: `skills/x/scripts/sub/f.ts`
+ *   and `.hermes/skills/x/scripts/f.ts` are not this shape.
+ * - Absolute: a path ending `.hermes/skills/<skill>/scripts/<file>` or
+ *   `.hermes/profiles/<p>/skills/<skill>/scripts/<file>`, the same Hermes-home
+ *   grammar {@link protectedPathClass} reads (a profile home is a home of its
+ *   own, one level down).
+ *
+ * Every segment of either shape, the absolute prefix included, must pass
+ * {@link isSkillScriptSegment}: an empty segment (`skills//x`), a `.` or `..`
+ * anywhere, a glob, a variable or a backtick, and the shape does not match.
+ * An unexpanded `$HERMES_HOME/skills/…` or `~/.hermes/skills/…` is therefore
+ * not this rule; the text cannot say where it points.
+ *
+ * Text only, like everything in this file. Whether the file really sits in
+ * the directory it was spelled in is `src/cli/hook.ts`'s disk pass, which can
+ * only tighten this answer.
+ */
+export function isSkillScriptPath(word: string): boolean {
+  if (word.startsWith("/")) {
+    const parts = word.slice(1).split("/");
+    if (!parts.every(isSkillScriptSegment)) return false;
+    const n = parts.length;
+    const tail = (offset: number): boolean =>
+      parts[n - offset] === ".hermes" && parts[n - 4] === "skills" && parts[n - 2] === "scripts";
+    if (n >= 5 && tail(5)) return true;
+    return n >= 7 && parts[n - 6] === "profiles" && tail(7);
+  }
+  let rest = word;
+  while (rest.startsWith("./")) rest = rest.slice(2);
+  const parts = rest.split("/");
+  return (
+    parts.length === 4 &&
+    parts.every(isSkillScriptSegment) &&
+    parts[0] === "skills" &&
+    parts[2] === "scripts"
+  );
+}
+
+/**
+ * The skill script this interpreter argv runs, or `null` when the argv is not
+ * exactly `[allowlisted flags…] <skill-script path> [arguments…]` (APRV-502).
+ *
+ * Words AFTER the script are the script's own arguments and are not read here:
+ * `python3 skills/agent-commons/scripts/search_forum.py --q x` is the shape.
+ * They are still scanned for protected and credential paths by
+ * `classifySegment`, which runs after the table and can only tighten.
+ */
+export function skillScriptArg(bin: string, args: readonly string[]): string | null {
+  const allowed = SKILL_SCRIPT_FLAGS[bin];
+  if (allowed === undefined) return null;
+  const python = bin === "python" || bin === "python3";
+  for (const arg of args) {
+    if (!arg.startsWith("-")) return isSkillScriptPath(arg) ? arg : null;
+    if (allowed.includes(arg)) continue;
+    if (python && PYTHON_SKILL_SCRIPT_FLAGS.test(arg)) continue;
+    // Anything else: a value-taking flag, `--flag=value`, inline code (`-c`,
+    // `-e`, `-m`, `-p`), a lone `-` (stdin) or `--`. Not this rule.
+    return null;
+  }
+  return null;
+}
+
+/** `bun` / `python` / `python3` running a skill script; binds the script path. */
+function refineSkillScript(ctx: RuleContext): Refinement {
+  // `matchRule` only lets this row match when `skillScriptArg` found a script,
+  // so the fallback is unreachable; it is spelled as the row's own answer
+  // rather than as a `null`, which would be read as "opaque".
+  const script = skillScriptArg(ctx.bin, ctx.args);
+  return script === null
+    ? { class: SKILL_SCRIPT_CLASS, rule: SKILL_SCRIPT_RULE }
+    : { class: SKILL_SCRIPT_CLASS, rule: SKILL_SCRIPT_RULE, path: script };
+}
+
 /**
  * `node` — an inline script is opaque, the gate's own entry point is
- * pass-through, and anything else is a workspace script.
+ * pass-through, a skill script is `exec.local` (APRV-502), and anything else
+ * is a workspace script.
  */
 function refineNode(ctx: RuleContext): Refinement | null {
   if (hasFlag(ctx.args, ["-e", "--eval", "-p", "--print"])) return null;
@@ -2880,6 +3026,12 @@ function refineNode(ctx: RuleContext): Refinement | null {
         rule: "node-approval-cli",
       }
     );
+  }
+  // APRV-502. A substituted word is a hole in the text, so the skill-script
+  // reading is declined and the segment keeps the answer it had before.
+  const skill = ctx.substituted ? null : skillScriptArg("node", ctx.args);
+  if (skill !== null) {
+    return { class: SKILL_SCRIPT_CLASS, rule: NODE_SKILL_SCRIPT_RULE, path: skill };
   }
   return { class: "files.write.workspace", rule: "node-script" };
 }
@@ -3084,8 +3236,23 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     id: "node",
     bins: ["node"],
     class: "files.write.workspace",
-    emits: [GATE_SELF_CLASS, "log.sync", "log.advance", "policy.core"],
+    emits: [GATE_SELF_CLASS, "log.sync", "log.advance", "policy.core", SKILL_SCRIPT_CLASS],
     refine: refineNode,
+  },
+  // APRV-502. An interpreter running a skill script, `exec.local`. Below every
+  // `bun` row of the package-manager group, so `bun run x`, `bun install` and
+  // `bun --version` keep their classes; `skillScript` makes the row match ONLY
+  // the exact shape, so every other `bun`, `python` or `python3` argv keeps the
+  // answer it had before the row existed. `node` reaches the same answer
+  // inside {@link refineNode}, because its row has no `subs` to sit beside.
+  // Named in {@link CODE_EXECUTING_RULES}: a skill script is code the runtime
+  // did not author.
+  {
+    id: SKILL_SCRIPT_RULE,
+    bins: ["bun", "python", "python3"],
+    class: SKILL_SCRIPT_CLASS,
+    skillScript: true,
+    refine: refineSkillScript,
   },
   {
     id: "approval",
@@ -3612,6 +3779,13 @@ export const CODE_EXECUTING_RULES: readonly string[] = [
   "npm-script",
   /** `node <script>` — the plainest spelling of "run what I just wrote". */
   "node-script",
+  /**
+   * `bun` / `python3` / `node` running `skills/<skill>/scripts/<file>`
+   * (APRV-502). A skill script is a file in the workspace an agent may have
+   * written a minute ago, exactly as `node x.mjs` is.
+   */
+  SKILL_SCRIPT_RULE,
+  NODE_SKILL_SCRIPT_RULE,
   /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
   "workspace-tool",
   /**
@@ -3831,13 +4005,22 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
 /**
  * Find the first table row matching this binary, subcommand and argv.
  *
- * The argv is read for one purpose only (APRV-397): a `probe` row matches an
- * argv that is nothing but version or help flags, and no other row reads it.
+ * The argv is read for two purposes only: a `probe` row matches an argv that
+ * is nothing but version or help flags (APRV-397), and a `skillScript` row
+ * matches an argv that runs a skill script (APRV-502). No other row reads it.
  */
-function matchRule(bin: string, sub: string | null, args: readonly string[]): CommandRule | null {
+function matchRule(
+  bin: string,
+  sub: string | null,
+  args: readonly string[],
+  substituted = false,
+): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
+    // APRV-502: a substituted word is a hole in the text, so the shape is not
+    // matched and the segment keeps the answer it had before (fail closed).
+    if (rule.skillScript === true && (substituted || skillScriptArg(bin, args) === null)) continue;
     if (rule.subs !== undefined) {
       if (sub === null || !rule.subs.includes(sub)) continue;
     }
@@ -3976,7 +4159,10 @@ function classifySegment(
   const credential = credentialTouch(basename, args, positionals);
   if (credential !== null) return { ok: true, ...credential };
   const sub = positionals[0] ?? null;
-  const rule = matchRule(basename, sub, args);
+  const substituted = segment.words
+    .slice(cursor + 1)
+    .some((word) => word.substitutions.length > 0);
+  const rule = matchRule(basename, sub, args, substituted);
   if (rule === null) {
     return {
       ok: false,
@@ -3988,9 +4174,6 @@ function classifySegment(
     };
   }
 
-  const substituted = segment.words
-    .slice(cursor + 1)
-    .some((word) => word.substitutions.length > 0);
   const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, context };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
