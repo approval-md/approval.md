@@ -52,6 +52,16 @@ before a tag.
   `docs/hermes-hook.md` and `docs/claude-code-hook.md` state the rule and this
   limit.
 
+### Daemon
+
+- **The live-draw wait is 2000 ms, from 500 (`DRAW_TIMEOUT_MS`).** The daemon
+  answers a draw on the same event loop that runs `decide()` and `tick()`, so a
+  healthy daemon on a loaded box could miss the half-second window and the
+  asking child recorded `stale` for a daemon that was only busy (seen on the
+  Agent Village fleet on 2026-10-06; the #627 harness covers the wait). One
+  constant; the follow-up that takes `decide()` and `tick()` off the draw loop
+  and records `draw-daemon-busy` distinctly from `stale` is its own task.
+
 ### What did not change
 
 - No SPEC class change: `exec.local` is SPEC §7's existing class for "scripts

@@ -107,8 +107,18 @@ export const DRAW_MAC_DOMAIN = "approval.md/live-draw/v1";
  */
 export const DRAW_SOCKET_PATH_LIMIT = 100;
 
-/** How long the asking child waits for a connection and an answer. */
-export const DRAW_TIMEOUT_MS = 500;
+/**
+ * How long the asking child waits for a connection and an answer.
+ *
+ * 2000 ms since 0.4.3 (was 500; Carter's ruling, 2026-10-07). The daemon
+ * answers draws on the same event loop that runs `decide()` and `tick()`, so a
+ * healthy daemon on a loaded box could miss the half-second window and the
+ * asker recorded `stale` for a daemon that was only busy (seen on the Agent
+ * Village fleet on 2026-10-06). One constant, covered by the #627 harness;
+ * taking `decide()` and `tick()` off the draw-answering loop, with a distinct
+ * `draw-daemon-busy` outcome, is the follow-up task.
+ */
+export const DRAW_TIMEOUT_MS = 2000;
 
 /** The whole child invocation, including Node's own start. */
 export const DRAW_SPAWN_TIMEOUT_MS = 5_000;
