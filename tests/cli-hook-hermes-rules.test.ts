@@ -772,6 +772,57 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
 });
 
 // ---------------------------------------------------------------------------
+// APRV-503: a redirected read of the home's secrets, through the compiled hook
+// ---------------------------------------------------------------------------
+
+test("APRV-503: < from the home's secrets is account.credential, by every spelling the hook can resolve", () => {
+  const dir = ready();
+  const home = join(dir, ".hermes");
+  mkdirSync(join(home, "workspace"), { recursive: true });
+  writeFileSync(join(home, ".env"), "TOKEN=x\n", "utf8");
+  writeFileSync(join(home, "auth.json"), "{}\n", "utf8");
+  writeFileSync(join(home, "notes.md"), "hello\n", "utf8");
+  symlinkSync(home, join(dir, "h"));
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  writeFileSync(join(dir, ".approval", "env"), "SECRET=1\n", "utf8");
+  const workspace = join(home, "workspace");
+
+  const denied: Array<[string, string]> = [
+    // AC #2: the relative spelling, run from the home. The text names no home;
+    // the disk pass resolves the `<` target against the call's workdir.
+    ["cat < .env", home],
+    ["cat 0< .env", home],
+    ["head -1 < auth.json", home],
+    ["cat < .env | base64", home],
+    ["sort < ./.env", home],
+    // A `..` out of a directory under the home, and a symlinked parent.
+    ["cat < ../.env", workspace],
+    ["cat < h/.env", dir],
+    ["cat < .env", join(dir, "h")],
+    // The text spellings, which the pure classifier answers on its own.
+    [`cat < ${home}/.env`, dir],
+    ["cat < .approval/env", dir],
+    ["cat < .hermes/.env", dir],
+  ];
+  for (const [command, workdir] of denied) {
+    const run = hook(dir, event(dir, { tool_name: "terminal", tool_input: { command, workdir } }));
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command} in ${workdir}: ${run.stdout} ${run.stderr}`);
+    assert.ok(classesOf(run).includes("account.credential"), `${command} in ${workdir}: ${verdict.message}`);
+    assert.equal(classesOf(run).includes("policy.core"), false, `${command}: a read is not an organ write`);
+  }
+
+  // An ordinary file in the home, read the same way, is the read it always was.
+  for (const [command, workdir] of [
+    ["cat < notes.md", home],
+    ["wc -l < ../notes.md", workspace],
+  ] as const) {
+    const run = hook(dir, event(dir, { tool_name: "terminal", tool_input: { command, workdir } }));
+    assert.equal(verdictOf(run).permission, "allow", `${command} in ${workdir}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Skill scripts (APRV-502)
 // ---------------------------------------------------------------------------
 

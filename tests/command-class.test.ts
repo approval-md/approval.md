@@ -1618,6 +1618,418 @@ test("an opaque relauncher stays opaque even over credential material", () => {
 });
 
 // ---------------------------------------------------------------------------
+// APRV-503: an input redirection is the named argument it stands in for
+// ---------------------------------------------------------------------------
+
+/**
+ * Credential material read through `<`, at any descriptor, by any binary.
+ *
+ * Until APRV-503 the lexer recorded these targets and no rule read them, so
+ * every row below answered `read.shell` (or `unclassified`, or a workspace
+ * write) while the same file named as an argument answered
+ * `account.credential`. `read.shell` is autonomous under the Agent Village
+ * template, which made a human-only class reachable by a literal spelling.
+ * `path` is the target word, verbatim, as it is for a named argument.
+ */
+const REDIRECT_CREDENTIAL_FIXTURES: ReadonlyArray<{ command: string; path?: string; classes?: string[] }> = [
+  { command: "cat < ~/.hermes/.env", path: "~/.hermes/.env" },
+  { command: "cat < .approval/env", path: ".approval/env" },
+  { command: "cat 0< $HOME/.hermes/.env", path: "$HOME/.hermes/.env" },
+  { command: "cat 3< ~/.hermes/.env", path: "~/.hermes/.env" },
+  { command: "cat <~/.hermes/.env", path: "~/.hermes/.env" },
+  { command: "cat<.approval/env", path: ".approval/env" },
+  { command: 'cat < "~/.hermes/.env"', path: "~/.hermes/.env" },
+  { command: "grep x < .approval/vault.enc", path: ".approval/vault.enc" },
+  { command: "head -1 < /home/hermes/.hermes/auth.json", path: "/home/hermes/.hermes/auth.json" },
+  { command: "head -c 64 < .hermes/profiles/p1/.env", path: ".hermes/profiles/p1/.env" },
+  { command: "sort < .approval/keys/id_ed25519", path: ".approval/keys/id_ed25519" },
+  // A `..` in the spelling is matched by segment, as it is for an argument.
+  { command: "cat < ../.hermes/.env", path: "../.hermes/.env" },
+  { command: "cat < skills/../.approval/env", path: "skills/../.approval/env" },
+  // Readers the table does not know are named rather than `unclassified`.
+  { command: "less < .approval/env", path: ".approval/env" },
+  { command: "python3 < ~/.hermes/.env", path: "~/.hermes/.env" },
+  // The write-only binaries are exempt for a NAMED credential (that is a write
+  // to the gate's directory), never for a `<`: tee copies the secret out.
+  { command: "tee out.txt < .approval/env", path: ".approval/env" },
+  // An exec.local shape does not outrank the credential tier.
+  { command: "bun skills/x/scripts/f.ts < ~/.hermes/.env", path: "~/.hermes/.env" },
+  // A bare redirection opens the file; a write redirection beside the read
+  // does not turn the read into a workspace write.
+  { command: "< ~/.hermes/.env", path: "~/.hermes/.env" },
+  { command: "cat < ~/.hermes/.env > out.txt", path: "~/.hermes/.env" },
+  // Inside a pipeline the read segment carries the class into the union.
+  {
+    command: "cat < ~/.hermes/.env | grep KEY",
+    path: "~/.hermes/.env",
+    classes: ["account.credential", "read.shell"],
+  },
+  // A secret-named variable in a redirection target expands into a file name,
+  // which a missing file prints on stderr: the argument rule, read or write.
+  { command: "cat < $APPROVAL_TG_TOKEN" },
+  { command: "echo x > $TELEGRAM_BOT_TOKEN" },
+];
+
+for (const fixture of REDIRECT_CREDENTIAL_FIXTURES) {
+  test(`APRV-503 redirect credential: ${fixture.command}`, () => {
+    const result = classifyCommand(fixture.command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, fixture.classes ?? ["account.credential"]);
+    const segment = result.segments[0];
+    assert.equal(segment?.class, "account.credential");
+    assert.equal(segment?.rule, fixture.path === undefined ? "credential-env" : "credential-path");
+    assert.equal(segment?.path, fixture.path);
+  });
+}
+
+test("APRV-503: a redirected credential classifies exactly as the named argument does", () => {
+  // The task's statement, as a pair per file: the class is the argument's, and
+  // the redirection adds nothing a named argument would not have said.
+  for (const file of ["~/.hermes/.env", ".approval/env", ".approval/vault.enc", "/data/.hermes/auth.json"]) {
+    const named = classifyCommand(`cat ${file}`);
+    const redirected = classifyCommand(`cat < ${file}`);
+    assert.ok(named.ok && redirected.ok, file);
+    if (!named.ok || !redirected.ok) continue;
+    assert.deepEqual(redirected.classes, named.classes, file);
+    assert.equal(redirected.segments[0]?.rule, named.segments[0]?.rule, file);
+  }
+});
+
+test("APRV-503: the bash $(< file) idiom reads the file, so its substitution is not inert", () => {
+  // `$(< f)` is bash for the contents of f, and its inner command is NOTHING but
+  // the redirection. That inner segment used to answer `read.shell`, which made
+  // the substitution inert and the outer `echo` a plain read.
+  for (const command of ['echo "$(< ~/.hermes/.env)"', "echo $(<.approval/env)"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, false, command);
+    if (result.ok) continue;
+    assert.equal(result.code, "opaque", command);
+    assert.match(result.detail, /account\.credential/u, command);
+  }
+  // A substitution reading an ordinary file stays inert, as it always was.
+  const ordinary = classifyCommand('echo "$(< README.md)"');
+  assert.ok(ordinary.ok);
+  if (!ordinary.ok) return;
+  assert.deepEqual(ordinary.classes, ["read.shell"]);
+});
+
+test("APRV-503: opaque stays opaque over a redirected credential, as over a named one", () => {
+  // The redirect check sits where the argument check sits: below the opaque
+  // table, so a refusal is never softened into a request.
+  for (const command of ["sudo cat < .approval/env", "exec < ~/.hermes/.env; cat", "xargs cat < .approval/env"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, false, command);
+    if (result.ok) continue;
+    assert.equal(result.code, "opaque", command);
+  }
+});
+
+test("APRV-503: a here-string is refused, with a detail of its own", () => {
+  // It was refused before this task (as a heredoc with no terminator word) and
+  // still is. Parsing it would only ever LOOSEN an answer: `cat <<< hello` would
+  // become a read, and a credential read through one already has spellings
+  // that classify. So the code is pinned and the detail names the construct.
+  for (const command of ['cat <<< "$(cat ~/.hermes/.env)"', "cat <<< hello", "cat <<<$(< .approval/env)"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, false, command);
+    if (result.ok) continue;
+    assert.equal(result.code, "unparseable", command);
+    assert.match(result.detail, /here-string/u, command);
+  }
+  // A heredoc is not a here-string and still classifies by its command.
+  const heredoc = classifyCommand("cat <<EOF\nx\nEOF");
+  assert.ok(heredoc.ok);
+});
+
+test("APRV-503: an ordinary input redirection stays a read", () => {
+  for (const command of [
+    "cat < ./notes.md",
+    "cat < README.md",
+    "sort < skills/x/scripts/data.txt",
+    "wc -l < src/core/command-class.ts",
+    // Not a credential file: `.env` outside a Hermes home is what `cat .env` is.
+    // The hook's disk pass resolves it against the call's directory.
+    "cat < .env",
+    "cat 0<&3",
+    // Reading the policy is a read, as `cat APPROVAL.md` is.
+    "cat < APPROVAL.md",
+    "cat < .approval/QUEUE.md",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["read.shell"], command);
+  }
+  // `/etc/passwd` is no credential path: the read tier answers, unchanged.
+  const passwd = classifyCommand("cat < /etc/passwd");
+  assert.ok(passwd.ok);
+  if (!passwd.ok) return;
+  assert.deepEqual(passwd.classes, ["read.shell"]);
+});
+
+test("APRV-503: a quoted < is data, never a redirection", () => {
+  for (const command of ["grep '<' file", "cat '<'", 'echo "a < b"', "grep '< notes.md' README.md", "cat \\< README.md"]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["read.shell"], command);
+    assert.equal(result.segments.length, 1, command);
+  }
+  // A quoted word that SPELLS a credential path is judged as the argument it
+  // is (the credential tier offers no prose skip, before or after this task):
+  // the quoted `<` adds nothing, so the answer is the one without it.
+  for (const [quoted, plain] of [
+    ['echo "cat < ~/.hermes/.env"', 'echo "cat ~/.hermes/.env"'],
+    ["grep '<' .approval/env", "grep x .approval/env"],
+  ] as const) {
+    const a = classifyCommand(quoted);
+    const b = classifyCommand(plain);
+    assert.ok(a.ok && b.ok, quoted);
+    if (!a.ok || !b.ok) continue;
+    assert.deepEqual(a.classes, b.classes, quoted);
+    assert.equal(a.segments[0]?.rule, b.segments[0]?.rule, quoted);
+  }
+});
+
+test("APRV-503: a protected file fed to an effectful command takes the protected class", () => {
+  // The positional scan's rule, extended to the input redirection it stands in
+  // for, with the strictest surface winning and the target bound as the path.
+  const rows: ReadonlyArray<[string, string, string]> = [
+    ["npm test < APPROVAL.md", "policy.core", "APPROVAL.md"],
+    ["node x.js < .approval/QUEUE.md", "policy.core", ".approval/QUEUE.md"],
+    ["node x.js < .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    ["node x.js < CLAUDE.md", "policy.edit", "CLAUDE.md"],
+    // The stricter of a positional and a redirection answers.
+    ["node CLAUDE.md < .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    // Equal rank: the positional is named, as it was before this task.
+    ["node APPROVAL.md < .approval/QUEUE.md", "policy.core", "APPROVAL.md"],
+  ];
+  for (const [command, cls, path] of rows) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, [cls], command);
+    assert.equal(result.segments[0]?.rule, "protected-path", command);
+    assert.equal(result.segments[0]?.path, path, command);
+  }
+  // A policy-routed path is judged the same way.
+  const routed = classifyCommand("node x.js < SPEC.md", ["SPEC.md"]);
+  assert.ok(routed.ok);
+  if (!routed.ok) return;
+  assert.deepEqual(routed.classes, ["policy.edit"]);
+});
+
+/** Rows whose credential word is a WRITE target of a write-only binary. */
+const WRITE_ONLY_CREDENTIAL_ROWS: ReadonlySet<string> = new Set([
+  "tee .approval/log/events.jsonl .approval/env",
+  // `mv` is in CREDENTIAL_WRITE_BINS: moving the file is a write of the gate's
+  // directory, not a read of the material (APRV-194), so nothing is carried.
+  "mv .approval/env .approval/log/x",
+]);
+
+test("APRV-503 refutation BLOCKING-1: a credential < never displaces log.mutate or policy.core", () => {
+  // The downgrade the refuter proved: appending `< <credential>` to a
+  // log-mutating command flipped `log.mutate` (refused by the open window with
+  // no policy consulted) to `account.credential` (bypassed by the window when
+  // the policy does not load). The `<` is a no-op for these binaries, so the
+  // answer must be the one the command gets without it, path included.
+  const rows: ReadonlyArray<[withRedirect: string, without: string, cls: string, path: string]> = [
+    ["rm -rf .approval/log < .approval/env", "rm -rf .approval/log", "log.mutate", ".approval/log"],
+    [
+      "tee -a .approval/log/events.jsonl < .approval/env",
+      "tee -a .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    [
+      "mv x .approval/log/events.jsonl < ~/.hermes/.env",
+      "mv x .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    [
+      "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc",
+      "truncate -s0 .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    // policy.core outranks the credential class too, for every policy's
+    // ordering of the three (refutation SHOULD-FIX-1).
+    ["cp x .approval/policy.yaml < .approval/env", "cp x .approval/policy.yaml", "policy.core", ".approval/policy.yaml"],
+    ["cp x APPROVAL.md < ~/.hermes/.env", "cp x APPROVAL.md", "policy.core", "APPROVAL.md"],
+    // Writing a credential file from another one is an edit of the gate's
+    // directory, the class the write alone has.
+    ["tee .approval/env < .approval/vault.enc", "tee .approval/env", "policy.core", ".approval/env"],
+    // A protected `<` target that is no credential outranks too.
+    ["node x.js < APPROVAL.md < .approval/env", "node x.js < APPROVAL.md", "policy.core", "APPROVAL.md"],
+  ];
+  for (const [withRedirect, without, cls, path] of rows) {
+    const a = classifyCommand(withRedirect);
+    const b = classifyCommand(without);
+    assert.ok(a.ok && b.ok, withRedirect);
+    if (!a.ok || !b.ok) continue;
+    // The protected answer is exactly the one without the credential word;
+    // the credential touch rides beside it as a second entry over the same
+    // text (APRV-503 recheck, SHOULD-FIX-R1), unless the binary only writes
+    // what it names, in which case there is no credential read to carry.
+    const carried = !WRITE_ONLY_CREDENTIAL_ROWS.has(withRedirect);
+    assert.deepEqual(a.classes, carried ? [cls, "account.credential"] : [cls], withRedirect);
+    assert.deepEqual(a.segments[0], { ...b.segments[0], text: withRedirect }, withRedirect);
+    assert.equal(a.segments.length, carried ? 2 : 1, withRedirect);
+    if (carried) {
+      assert.equal(a.segments[1]?.class, "account.credential", withRedirect);
+      assert.equal(a.segments[1]?.text, withRedirect, withRedirect);
+    }
+    assert.equal(a.segments[0]?.rule, "protected-path", withRedirect);
+    assert.equal(a.segments[0]?.path, path, withRedirect);
+  }
+
+  // A binary the table does not know keeps the refusal it has without the `<`,
+  // rather than being named by the weaker class.
+  const unknown = classifyCommand("shred .approval/log/events.jsonl < .approval/env");
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) assert.equal(unknown.code, "unclassified");
+
+  // Where the walk ends on an answer the credential class is STRICTER than, the
+  // credential class still answers: a reader is not scanned for protected
+  // paths, so its `<` is the read that matters; `policy.edit` ranks below it.
+  for (const command of [
+    "cat .approval/log/events.jsonl < .approval/env",
+    "node x.js CLAUDE.md < .approval/env",
+    "approval status .approval/log < .approval/env",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.equal(result.segments[0]?.rule, "credential-path", command);
+  }
+});
+
+test("APRV-503 fix round 2: a NAMED credential never displaces log.mutate or policy.core either", () => {
+  // The named-argument twin of BLOCKING-1, present on main before APRV-503:
+  // `credentialTouch` answered above the protected scan, so `cp .approval/env
+  // .approval/log/events.jsonl` was `account.credential` and an open window
+  // over a policy that does not load would let it overwrite the log. A
+  // credential path, named or redirected, never lowers either class: the
+  // answer is the one the command has with an ordinary file in that position.
+  const rows: ReadonlyArray<[withCredential: string, without: string, cls: string, path: string]> = [
+    ["cp .approval/env .approval/log/events.jsonl", "cp x .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    ["mv .approval/env .approval/log/x", "mv x .approval/log/x", "log.mutate", ".approval/log/x"],
+    ["cp .approval/vault.enc .approval/log/events.jsonl", "cp x .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    // A write-only binary already declined the credential tier; pinned anyway.
+    ["tee .approval/log/events.jsonl .approval/env", "tee .approval/log/events.jsonl x", "log.mutate", ".approval/log/events.jsonl"],
+    // The variable shape of the same tier.
+    ["rm -rf .approval/log $APPROVAL_TG_TOKEN", "rm -rf .approval/log x", "log.mutate", ".approval/log"],
+    // policy.core outranks the credential class as well.
+    ["cp .approval/env APPROVAL.md", "cp x APPROVAL.md", "policy.core", "APPROVAL.md"],
+    ["cp ~/.hermes/.env .approval/policy.yaml", "cp x .approval/policy.yaml", "policy.core", ".approval/policy.yaml"],
+  ];
+  for (const [withCredential, without, cls, path] of rows) {
+    const a = classifyCommand(withCredential);
+    const b = classifyCommand(without);
+    assert.ok(a.ok && b.ok, withCredential);
+    if (!a.ok || !b.ok) continue;
+    // The protected answer is exactly the one without the credential word;
+    // the credential touch rides beside it as a second entry over the same
+    // text (APRV-503 recheck, SHOULD-FIX-R1), unless the binary only writes
+    // what it names, in which case there is no credential read to carry.
+    const carried = !WRITE_ONLY_CREDENTIAL_ROWS.has(withCredential);
+    assert.deepEqual(a.classes, carried ? [cls, "account.credential"] : [cls], withCredential);
+    assert.deepEqual(a.segments[0], { ...b.segments[0], text: withCredential }, withCredential);
+    assert.equal(a.segments.length, carried ? 2 : 1, withCredential);
+    if (carried) {
+      assert.equal(a.segments[1]?.class, "account.credential", withCredential);
+      assert.equal(a.segments[1]?.text, withCredential, withCredential);
+    }
+    assert.equal(a.segments[0]?.rule, "protected-path", withCredential);
+    assert.equal(a.segments[0]?.path, path, withCredential);
+  }
+
+  // Unmoved: the credential class still answers where nothing outranks it, and
+  // a reader still takes it whatever else it names.
+  for (const command of [
+    "cp .approval/vault.enc /tmp/vault.enc",
+    "cp /tmp/vault.enc .approval/vault.enc",
+    "cp .approval/env CLAUDE.md",
+    "cat .approval/env .approval/log/events.jsonl",
+    "grep x .approval/env APPROVAL.md",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.equal(result.segments[0]?.rule, "credential-path", command);
+  }
+});
+
+test("APRV-503 recheck SHOULD-FIX-R1: a segment naming a credential AND an outranking protected path carries both classes", () => {
+  // The precedence decides what the segment is CALLED (the first entry, which
+  // the approver sees first); it never decides what a policy gets to see. A
+  // policy holding `account.credential` stricter than `policy.core` or
+  // `log.mutate` still refuses, because the hook refuses when ANY class is
+  // human-only, and SPEC.md §7's "a copy is classified account.credential in
+  // either direction" holds as written.
+  const rows: ReadonlyArray<[string, string[], string | undefined]> = [
+    ["cp .approval/env APPROVAL.md", ["policy.core", "account.credential"], ".approval/env"],
+    ["cp .approval/env .approval/QUEUE.md", ["policy.core", "account.credential"], ".approval/env"],
+    ["node x.js APPROVAL.md $APPROVAL_TG_TOKEN", ["policy.core", "account.credential"], undefined],
+    ["rm -rf .approval/log $APPROVAL_TG_TOKEN", ["log.mutate", "account.credential"], undefined],
+    ["rm -rf .approval/log < .approval/env", ["log.mutate", "account.credential"], ".approval/env"],
+    ["cp .approval/env .approval/log/events.jsonl", ["log.mutate", "account.credential"], ".approval/env"],
+    // A protected WRITE redirection beside a credential read, named or
+    // redirected: the write still answers first and the read rides beside it.
+    ["cat .approval/env > APPROVAL.md", ["policy.core", "account.credential"], ".approval/env"],
+    ["cat < ~/.hermes/.env > APPROVAL.md", ["policy.core", "account.credential"], "~/.hermes/.env"],
+  ];
+  for (const [command, classes, credentialPath] of rows) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, classes, command);
+    assert.equal(result.segments.length, 2, command);
+    assert.equal(result.segments[0]?.class, classes[0], command);
+    const credential = result.segments[1];
+    assert.equal(credential?.class, "account.credential", command);
+    assert.equal(credential?.text, result.segments[0]?.text, command);
+    assert.equal(credential?.path, credentialPath, command);
+    assert.equal(credential?.rule, credentialPath === undefined ? "credential-env" : "credential-path", command);
+  }
+  // Nothing is carried where there is no credential read: a write of the
+  // credential file by a write-only binary or a redirection is one class.
+  for (const command of ["echo TOKEN=x > .approval/env", "tee .approval/env", "rm .approval/env"]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["policy.core"], command);
+    assert.equal(result.segments.length, 1, command);
+  }
+});
+
+test("APRV-503: the write side was already covered, and stays so", () => {
+  // Output redirections onto a protected or credential path take the organ's
+  // class (APRV-198, `redirect-protected`); a write to credential material is
+  // `policy.core`, the edit of the gate's own directory.
+  const rows: ReadonlyArray<[string, string]> = [
+    ["echo x > ~/.hermes/.env", "policy.core"],
+    ["echo x >> ~/.hermes/.env", "policy.core"],
+    ["echo x >> .approval/policy", "policy.core"],
+    ["echo x > .approval/env", "policy.core"],
+    ["echo x 2> ~/.hermes/auth.json", "policy.core"],
+    ["echo x >| APPROVAL.md", "policy.core"],
+    ["echo x >> .approval/log/events.jsonl", "log.mutate"],
+  ];
+  for (const [command, cls] of rows) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, [cls], command);
+    assert.equal(result.segments[0]?.rule, "redirect-protected", command);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // APRV-380: the login-shell unwrap
 // ---------------------------------------------------------------------------
 

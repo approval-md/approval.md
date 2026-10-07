@@ -814,16 +814,25 @@ interface CredentialOutcome {
  * appear in the log" invariant survives a refusal message that names what it
  * refused.
  */
+/**
+ * Does this binary only WRITE the paths it names? ({@link CREDENTIAL_WRITE_BINS}
+ * plus `sed -i`.) Then a credential path among its positionals is a write to the
+ * gate's directory rather than a read of the material.
+ */
+function credentialWritesOnly(basename: string, args: readonly string[]): boolean {
+  const inPlaceSed =
+    basename === "sed" &&
+    (hasFlag(args, ["--in-place"]) ||
+      args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--")));
+  return CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed;
+}
+
 function credentialTouch(
   basename: string,
   args: readonly string[],
   positionals: readonly string[],
 ): CredentialOutcome | null {
-  const inPlaceSed =
-    basename === "sed" &&
-    (hasFlag(args, ["--in-place"]) ||
-      args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--")));
-  const writesOnly = CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed;
+  const writesOnly = credentialWritesOnly(basename, args);
   if (!writesOnly) {
     const named = positionals.find((arg) => isCredentialPath(arg));
     if (named !== undefined) {
@@ -835,6 +844,46 @@ function credentialTouch(
     if (secretEnvReference(word) !== null) {
       return { class: CREDENTIAL_CLASS, rule: "credential-env" };
     }
+  }
+  return null;
+}
+
+/**
+ * Is this segment a credential touch through a REDIRECTION? (APRV-503.)
+ *
+ * The same two shapes {@link credentialTouch} reads from the argument list, read
+ * from the redirection targets, which the lexer keeps out of the word list. An
+ * input redirection's direction is known in a way a positional's is not: `<`
+ * (and `0<`, `3<`, any descriptor) opens its target for READING, whatever the
+ * binary in front of it is, so a credential file there is a read of the
+ * material and the {@link CREDENTIAL_WRITE_BINS} exemption does not apply
+ * (`tee out.txt < .approval/env` copies the secret out). Until this, `cat <
+ * ~/.hermes/.env` was `read.shell` while `cat ~/.hermes/.env` was
+ * `account.credential`, and so was `echo "$(< ~/.hermes/.env)"`, the bash idiom
+ * whose inner command is nothing but the redirection.
+ *
+ * A secret-named variable in ANY redirection target, read or write, carries the
+ * secret the way it does in an argument: the shell expands it into a file name,
+ * and a missing file prints that name on stderr.
+ *
+ * The rule id is the argument rule's own, so a channel, a doc table and a
+ * policy reader see one mechanism; `path` names the target word.
+ *
+ * This answers WHETHER a redirect touches credential material, not which
+ * class the segment takes: `classifySegment` defers it whenever the segment
+ * names a protected path that outranks the credential class
+ * ({@link outranksCredential}), so a redirect can never loosen an answer.
+ */
+function redirectCredentialTouch(
+  readTargets: readonly string[],
+  allTargets: readonly string[],
+): CredentialOutcome | null {
+  const named = readTargets.find((target) => isCredentialPath(target));
+  if (named !== undefined) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+  }
+  if (allTargets.some((target) => secretEnvReference(target) !== null)) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-env" };
   }
   return null;
 }
@@ -1073,6 +1122,19 @@ function lex(command: string): LexResult {
     if (redirect !== null) {
       const op = redirect[2] as string;
       index += (redirect[0] as string).length;
+      if (op === "<<" && command[index] === "<") {
+        // A here-string (`<<<word`). Refused, as it always was, and named
+        // (APRV-503): the shell expands its word, and that word is the
+        // command's stdin. Parsing it would only ever loosen a refusal
+        // (`cat <<< hello` would become a read), while a credential read
+        // through it already has spellings that classify, so the refusal is
+        // the fail-closed answer and the detail says how to rewrite it.
+        return {
+          ok: false,
+          detail:
+            "a here-string (<<<) is not read by this classifier; pipe the text in with printf or name the file as an argument",
+        };
+      }
       if (op === "<<" || op === "<<-") {
         while (command[index] === " " || command[index] === "\t") index += 1;
         const terminator = readWord();
@@ -3672,6 +3734,58 @@ function protectedRank(surface: string): number {
 }
 
 /**
+ * Does this protected surface outrank `account.credential`? (APRV-503.)
+ *
+ * Where the credential class sits in {@link PROTECTED_PRECEDENCE}: below
+ * `log.mutate` and `policy.core`, above `policy.edit` and its routed
+ * sub-classes. `log.mutate` is the one class the open window refuses with no
+ * policy consulted, and `policy.core` is an edit of the gate's own organs; a
+ * credential READ named by a redirection must never displace either of them,
+ * under any policy's ordering of the three. `policy.edit` is prose about the
+ * gate, and a secret leaving the machine is the stricter statement.
+ */
+function outranksCredential(surface: string): boolean {
+  return protectedRank(surface) <= protectedRank("policy.core");
+}
+
+/**
+ * The protected path, if any, that outranks a credential answer for this
+ * segment (APRV-503). `null` when none does, which is when the credential tier
+ * may answer at once.
+ *
+ * Scanned as the protected scan reads the segment: the positionals with the
+ * prose skip, and the `<` targets. A credential file is ALSO a protected path
+ * (`.approval/env` lies under the gate's directory), so the words that ARE the
+ * credential read are left out, or every credential read would outrank itself:
+ * the `<` targets that are credential files, and the credential positionals of
+ * a binary that reads what it names. A write-only binary's credential
+ * positional stays in, because for it that word is a write to the gate's
+ * directory (`tee .approval/env < .approval/vault.enc` is `policy.core`, as
+ * `tee .approval/env` is). On equal rank the positional is the one named.
+ */
+function outrankingProtected(
+  positionals: readonly string[],
+  readTargets: readonly string[],
+  writesOnly: boolean,
+  protectedPaths: readonly ProtectedPathEntry[],
+): { surface: string; path: string } | null {
+  const named = strictestProtected(
+    writesOnly ? positionals : positionals.filter((arg) => !isCredentialPath(arg)),
+    protectedPaths,
+    true,
+  );
+  const fed = strictestProtected(
+    readTargets.filter((target) => !isCredentialPath(target)),
+    protectedPaths,
+  );
+  const found =
+    fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
+      ? named
+      : fed;
+  return found !== null && outranksCredential(found.surface) ? found : null;
+}
+
+/**
  * Is this word PROSE that merely spells a protected path, rather than a path?
  * (APRV-409.)
  *
@@ -4056,7 +4170,22 @@ function matchRule(
 }
 
 type SegmentOutcome =
-  | { ok: true; class: string; rule: string; path?: string; sandbox?: SandboxWrapper }
+  | {
+      ok: true;
+      class: string;
+      rule: string;
+      path?: string;
+      sandbox?: SandboxWrapper;
+      /**
+       * A credential touch the segment ALSO makes, beside a protected class
+       * that outranks it in the classifier's own precedence (APRV-503 recheck,
+       * SHOULD-FIX-R1). Reported as a second classified segment over the same
+       * text, so the command's `classes` carries both and a policy that holds
+       * `account.credential` stricter than `policy.core` or `log.mutate` still
+       * sees it: the hook refuses when ANY class is human-only.
+       */
+      also?: CredentialOutcome;
+    }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
 function classifySegment(
@@ -4132,23 +4261,49 @@ function classifySegment(
     // a write. `2>/dev/null` is the suffix an agent writes on half its reads,
     // and until this it turned every one of them into `files.write.workspace`.
     .filter((target) => !isDiscardTarget(target));
+  // APRV-503: the paths this segment READS through `<`, at any descriptor. They
+  // are judged where a named argument is judged, below: a credential target is
+  // `account.credential` and a protected one joins the effectful scan.
+  const readTargets = segment.redirects
+    .filter((redirect) => redirect.op === "<")
+    .map((redirect) => redirect.target.text);
+  const redirectTargets = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
   // mechanism is unchanged and the hook's tiers and the channel's protected-path
   // view are keyed on the rule.
   const redirected = strictestProtected(writeTargets, protectedPaths);
+  const bin = words[cursor];
   if (redirected !== null) {
+    // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
+    // AND reads credential material (`cat .approval/env > APPROVAL.md`, `cat <
+    // ~/.hermes/.env > APPROVAL.md`) carries both classes. The protected class
+    // still answers the segment; the credential touch rides beside it.
+    const writerArgs = bin === undefined ? [] : words.slice(cursor + 1);
+    const writer = bin === undefined ? null : (pathSegments(bin).slice(-1)[0] ?? bin);
+    const touched =
+      (writer === null
+        ? null
+        : credentialTouch(writer, writerArgs, writerArgs.filter((arg) => !isFlag(arg)))) ??
+      redirectCredentialTouch(readTargets, redirectTargets);
     return {
       ok: true,
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
+      ...(touched === null ? {} : { also: touched }),
     };
   }
 
-  const bin = words[cursor];
   if (bin === undefined) {
+    // A bare input redirection opens its target, and inside `$(…)` it IS the
+    // read: `$(< ~/.hermes/.env)` is bash for "the file's contents" (APRV-503).
+    // Nothing here can outrank it: there are no positionals, and a protected
+    // write target has already answered above, so the precedence rule the
+    // binary path applies below has nothing to defer to.
+    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
+    if (bareCredential !== null) return { ok: true, ...bareCredential };
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
     return writeTargets.length > 0
@@ -4184,8 +4339,38 @@ function classifySegment(
   // stays opaque (a refusal) rather than being softened into a request, and
   // above the binary table so a reader the table does not know (`base64`,
   // `xxd`, `less`) is named rather than answered `unclassified` (APRV-194).
+  // APRV-503: the same tier read from the redirection targets, at the same
+  // place in the order (`sudo cat < .approval/env` stays a refusal, and `less
+  // < .approval/env` is named rather than `unclassified`).
+  //
+  // A credential path, named or redirected, never lowers a `log.mutate` or
+  // `policy.core` answer (APRV-503 refutation, BLOCKING-1 and its named-argument
+  // twin). Both classes outrank `account.credential` ({@link
+  // outranksCredential}), and the open window refuses `log.mutate` with no
+  // policy consulted while it bypasses `account.credential` under a policy that
+  // does not load: `rm -rf .approval/log < .approval/env` and `cp .approval/env
+  // .approval/log/events.jsonl` were both relabelled `account.credential` by an
+  // early return here, and so both reached the log through a window. So the
+  // credential answer is taken HERE only when the segment names no protected
+  // path that outranks it. When one is named the answer is DEFERRED: the
+  // segment goes on through the table and the protected scan exactly as it
+  // would without the credential word, a protected class or a refusal stands,
+  // and the credential class answers only where that walk ends on an answer it
+  // is stricter than (a read, `gate.self`). Where the walk ends on the
+  // protected class, the credential touch is carried beside it as a second
+  // class of the command (`also`), never dropped. Write targets need no check
+  // here: a protected one has already answered above, carrying it the same way.
   const credential = credentialTouch(basename, args, positionals);
-  if (credential !== null) return { ok: true, ...credential };
+  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  const outranking =
+    credential === null && redirectCredential === null
+      ? null
+      : outrankingProtected(positionals, readTargets, credentialWritesOnly(basename, args), protectedPaths);
+  if (outranking === null) {
+    if (credential !== null) return { ok: true, ...credential };
+    if (redirectCredential !== null) return { ok: true, ...redirectCredential };
+  }
+  const deferredCredential = credential ?? redirectCredential;
   const sub = positionals[0] ?? null;
   const substituted = segment.words
     .slice(cursor + 1)
@@ -4231,12 +4416,60 @@ function classifySegment(
   // a directory path is a sentence rather than a file. Redirection targets
   // above, and the apply-patch and file-tool paths elsewhere, are paths by
   // construction and are not offered the skip.
+  //
+  // APRV-503: an INPUT redirection's target is scanned here too, as the named
+  // argument it stands in for (`node x.js < APPROVAL.md` is `node x.js
+  // APPROVAL.md` with the file on stdin), and without the prose skip, because a
+  // redirection target is a path by construction. Its direction is known to be a
+  // read, so this is the stricter of two defensible answers, which is the one
+  // the protected tier takes everywhere else. A read segment keeps `read.*`
+  // either way: `cat < APPROVAL.md` reads the policy as `cat APPROVAL.md` does.
+  //
+  // The rule, stated exactly. The strictest surface among the positionals and
+  // the `<` targets answers; on equal rank the positional's path is the one
+  // bound. So a `<` target can move an effectful segment only to a STRICTER
+  // protected class than its positionals earned (`node CLAUDE.md < APPROVAL.md`
+  // is `policy.core`), never to a looser one, and a segment whose positionals
+  // earn no protected class can only move from its own class to a protected one.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
+    // A deferred credential answer (above) names the path that outranked it,
+    // which is the strictest protected path among the words that are not the
+    // credential read itself: the segment's answer without that word.
+    //
+    // The credential touch is NOT dropped (APRV-503 recheck, SHOULD-FIX-R1): it
+    // rides beside the protected class as a second class of the command, so
+    // the precedence above decides what the segment is called and never what a
+    // policy gets to see. A policy holding `account.credential` stricter than
+    // `policy.core` still refuses `cp .approval/env APPROVAL.md`, and SPEC.md
+    // §7's "a copy is classified `account.credential` in either direction"
+    // holds as written.
+    if (deferredCredential !== null && outranking !== null) {
+      return {
+        ok: true,
+        class: outranking.surface,
+        rule: "protected-path",
+        path: outranking.path,
+        also: deferredCredential,
+      };
+    }
     const named = strictestProtected(positionals, protectedPaths, true);
-    if (named !== null) {
-      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+    const fed = strictestProtected(readTargets, protectedPaths);
+    const touched =
+      fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
+        ? named
+        : fed;
+    if (touched !== null) {
+      return { ok: true, class: touched.surface, rule: "protected-path", path: touched.path };
     }
   }
+
+  // APRV-503: a credential answer deferred above, because the segment also
+  // names a protected path that outranks it. The walk did not end on that
+  // protected class (a reader, or the gate's own CLI, is not scanned), so it
+  // ended on an answer the credential class is stricter than, and the credential
+  // class answers: `cat .approval/log/events.jsonl < .approval/env` reads the
+  // environment map. A named credential is reported ahead of a redirected one.
+  if (deferredCredential !== null) return { ok: true, ...deferredCredential };
 
   // A read command with a write redirection writes. `ls > out.txt` creates a
   // file, and the class has to say so.
@@ -4348,6 +4581,19 @@ export function classifyCommand(
       ...(outcome.sandbox === undefined ? {} : { sandbox: outcome.sandbox }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
+    // APRV-503 recheck: the credential touch a protected answer outranked, as
+    // its own entry over the same segment text. The shape a pipeline already
+    // has (one entry per class-bearing part), so every reader of `segments`
+    // and `classes` sees it without learning a new field.
+    if (outcome.also !== undefined) {
+      segments.push({
+        text: segment.text,
+        class: outcome.also.class,
+        rule: outcome.also.rule,
+        ...(outcome.also.path === undefined ? {} : { path: outcome.also.path }),
+      });
+      if (!classes.includes(outcome.also.class)) classes.push(outcome.also.class);
+    }
   }
   return { ok: true, segments, classes };
 }

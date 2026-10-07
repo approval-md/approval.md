@@ -472,6 +472,30 @@ test("hook classify prints exec.local and the rule for a skill script, and refus
   assert.match(parsedEscaped.detail ?? "", /escapes its directory/u);
 });
 
+test("hook classify names the credential class for a redirected read (APRV-503)", () => {
+  // The verb a session is told to run when in doubt has to show the tier, or
+  // the tier does not exist where it is used: `cat < ~/.hermes/.env` answered
+  // `read.shell` here until this task.
+  const dir = caseDir();
+  const run = runCli(["hook", "classify", "--", "cat < ~/.hermes/.env"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^account\.credential {2,}credential-path {2,}cat < ~\/\.hermes\/\.env$/mu);
+  assert.match(run.stdout, /^classes: account\.credential$/mu);
+
+  for (const command of ["cat < .approval/env", "cat 0< $HOME/.hermes/.env", "cat < ~/.hermes/.env | grep KEY"]) {
+    const json = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(json.code, 0, json.stderr);
+    const parsed = JSON.parse(json.stdout) as { ok: boolean; classes: string[] };
+    assert.equal(parsed.ok, true, command);
+    assert.ok(parsed.classes.includes("account.credential"), `${command}: ${json.stdout}`);
+    assert.equal(parsed.classes.includes("read.shell") && parsed.classes.length === 1, false, command);
+  }
+
+  // An ordinary file on stdin is the read it always was.
+  const ordinary = runCli(["hook", "classify", "--json", "--", "cat < ./notes.md"], dir);
+  assert.deepEqual((JSON.parse(ordinary.stdout) as Record<string, unknown>)["classes"], ["read.shell"]);
+});
+
 test("hook classify keeps a body-carrying fetch at network.call", () => {
   const dir = caseDir();
   for (const command of ["curl -X POST https://example.com", "curl -d a=b https://example.com"]) {
@@ -4129,6 +4153,38 @@ test("the window never reaches the log directory (APRV-214)", () => {
   assertClean(dir);
 });
 
+test("APRV-503 refutation BLOCKING-1: a credential < does not carry a log write through a window over a policy that will not load", () => {
+  // The refuter's proof, end to end: with a window open and no policy, a
+  // credential class is bypassed (the human-only check needs a loaded policy)
+  // while `log.mutate` is refused unconditionally. Appending `< .approval/env`
+  // to a log-mutating command must therefore not relabel it.
+  const dir = ready();
+  openTestWindow(dir);
+  const before = rawLog(dir);
+  const commands = [
+    "rm -rf .approval/log < .approval/env",
+    "tee -a .approval/log/events.jsonl < .approval/env",
+    "mv x .approval/log/events.jsonl < ~/.hermes/.env",
+    "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc",
+    // Fix round 2: the named-argument twin, which main itself relabelled.
+    "cp .approval/env .approval/log/events.jsonl",
+    "mv .approval/vault.enc .approval/log/events.jsonl",
+  ];
+  for (const [index, command] of commands.entries()) {
+    const run = runCli(
+      ["hook", "claude-code", "--policy", join(dir, "nowhere.md"), "--timeout", "1s"],
+      dir,
+      bashEvent(command, `tu-window-503-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    assert.match(verdict.reason, /log\.mutate/u, command);
+  }
+  assert.equal(rawLog(dir), before, "a refused bypass appends nothing");
+  assertClean(dir);
+});
+
 test("the window never reaches a human-only class (APRV-214)", () => {
   const dir = readyWithHumanOnlyCredentials();
   openTestWindow(dir);
@@ -4145,6 +4201,64 @@ test("the window never reaches a human-only class (APRV-214)", () => {
   assert.match(verdict.reason, /account\.credential/u);
   assert.equal(rawLog(dir), before);
   assertClean(dir);
+});
+
+test("APRV-503 recheck SHOULD-FIX-R1: a credential beside a protected path is still refused where the credential class is the stricter one", () => {
+  // `readyWithHumanOnlyCredentials` holds account.credential human-only and
+  // leaves policy.core and log.mutate at manual: the ordering under which a
+  // single protected class would LOSE the credential answer. The command
+  // carries both classes, so the human-only one is refused, with the gate
+  // closed and through an open window alike, as on main.
+  const commands = [
+    "cp .approval/env APPROVAL.md",
+    "cp .approval/env .approval/QUEUE.md",
+    "node x.js APPROVAL.md $APPROVAL_TG_TOKEN",
+    "rm -rf .approval/log $APPROVAL_TG_TOKEN",
+  ];
+
+  const closed = readyWithHumanOnlyCredentials();
+  for (const [index, command] of commands.entries()) {
+    const before = rawLog(closed);
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      closed,
+      bashEvent(command, `tu-503-r1-closed-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    assert.match(verdict.reason, /account\.credential/u, command);
+    assert.equal(rawLog(closed), before, `${command}: a human-only refusal files no request`);
+  }
+  assertClean(closed);
+
+  const open = readyWithHumanOnlyCredentials();
+  openTestWindow(open);
+  const beforeWindow = rawLog(open);
+  for (const [index, command] of commands.entries()) {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s"],
+      open,
+      bashEvent(command, `tu-503-r1-open-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    // The log write is refused by the window's own unconditional check, which
+    // names log.mutate; every other row is refused as the human-only credential.
+    assert.match(verdict.reason, command.includes(".approval/log") ? /log\.mutate/u : /account\.credential/u, command);
+  }
+  // And the redirect shape of BLOCKING-1 still names the log.
+  const redirected = runCli(
+    ["hook", "claude-code", "--timeout", "1s"],
+    open,
+    bashEvent("rm -rf .approval/log < .approval/env", "tu-503-r1-open-redirect"),
+  );
+  const redirectedVerdict = verdictOf(redirected);
+  assert.equal(redirectedVerdict.permission, "deny", redirectedVerdict.reason);
+  assert.match(redirectedVerdict.reason, /log\.mutate/u);
+  assert.equal(rawLog(open), beforeWindow, "a refused bypass appends nothing");
+  assertClean(open);
 });
 
 test("the window never reaches a command the classifier cannot read (APRV-214)", () => {

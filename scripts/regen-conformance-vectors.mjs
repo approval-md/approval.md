@@ -1961,6 +1961,184 @@ const commandClassVectors = [
       "a read never reaches the positional protected-path scan, so this answer is the one it always was and the fix did not widen a read into a write",
     input: { command: 'cat ".github/workflows/pages.yml deploys the site on push"' },
   },
+  // --- input redirection (APRV-503) ------------------------------------------
+  //
+  // A `<` target is the named argument it stands in for. A credential file read
+  // through one is `account.credential` with the target bound, whatever the
+  // binary and whatever the descriptor; a protected file fed to an effectful
+  // command takes the protected class; an ordinary file, the policy file under
+  // a reader, and a quoted `<` stay what they were. The refusals are pinned in
+  // both directions: the redirect tier sits below the opaque table exactly as
+  // the argument tier does, and a here-string is refused rather than parsed.
+  {
+    id: "redirect-read-of-the-hermes-env-is-a-credential-read",
+    description:
+      "the shape the APRV-502 refutation found answering read.shell: the Hermes home's .env read through <, which is the same read as naming it, so it takes account.credential with the target bound",
+    input: { command: "cat < ~/.hermes/.env" },
+  },
+  {
+    id: "redirect-read-of-the-approval-env-is-a-credential-read",
+    description: "the approval home's environment map, read through <: account.credential",
+    input: { command: "cat < .approval/env" },
+  },
+  {
+    id: "redirect-read-at-an-explicit-descriptor",
+    description:
+      "a descriptor prefix does not change the direction: 0< (and any N<) opens the target for reading, and a variable-led spelling is matched by segment as an argument is",
+    input: { command: "cat 0< $HOME/.hermes/.env" },
+  },
+  {
+    id: "redirect-read-of-the-vault-under-grep",
+    description: "a different reader and the sealed store: the class is the tier's, not the binary's",
+    input: { command: "grep x < .approval/vault.enc" },
+  },
+  {
+    id: "redirect-read-by-a-write-only-binary",
+    description:
+      "tee is exempt from the credential tier when it NAMES the file, because then it writes the gate's directory; a < is always a read, so tee copying the environment map out is account.credential",
+    input: { command: "tee out.txt < .approval/env" },
+  },
+  {
+    id: "redirect-read-by-a-binary-the-table-does-not-know",
+    description:
+      "a reader with no row is named for what it reads rather than refused as unclassified, as it is when the file is an argument",
+    input: { command: "less < .approval/env" },
+  },
+  {
+    id: "redirect-read-inside-a-pipeline",
+    description:
+      "the read segment carries the credential class into the union, and the downstream segment keeps its own",
+    input: { command: "cat < ~/.hermes/.env | grep KEY" },
+  },
+  {
+    id: "redirect-only-substitution-is-not-inert",
+    description:
+      "$(< file) is bash for the file's contents and its inner command is nothing but the redirection: that inner segment is a credential read, so the substitution taints its segment and the command is refused opaque",
+    input: { command: 'echo "$(< ~/.hermes/.env)"' },
+    control: true,
+  },
+  {
+    id: "redirect-read-under-sudo-stays-opaque",
+    description:
+      "the redirect tier sits below the opaque table, where the argument tier sits: a relauncher stays a refusal and is never softened into a request",
+    input: { command: "sudo cat < .approval/env" },
+    control: true,
+  },
+  {
+    id: "here-string-is-refused",
+    description:
+      "a here-string is refused as unparseable, as it was before this vector existed: parsing it could only loosen an answer, and a credential read through one has spellings that classify",
+    input: { command: 'cat <<< "$(cat ~/.hermes/.env)"' },
+    control: true,
+  },
+  {
+    id: "redirect-read-of-an-ordinary-file-is-a-read",
+    description: "an ordinary file on stdin is the read it always was",
+    input: { command: "cat < ./notes.md" },
+  },
+  {
+    id: "redirect-read-of-the-policy-file-is-a-read",
+    description:
+      "reading the policy is a read, through < as through an argument: the protected tier gates effectful segments, and a reader is not one",
+    input: { command: "cat < APPROVAL.md" },
+  },
+  {
+    id: "protected-file-fed-to-an-effectful-command",
+    description:
+      "an effectful segment whose input redirection is a protected file takes that file's class, as it does when the file is a positional, under the protected-path rule with the target bound",
+    input: { command: "node x.js < .approval/QUEUE.md" },
+  },
+  {
+    id: "quoted-angle-bracket-is-data",
+    description: "a quoted < is one word of data and never a redirection",
+    input: { command: "grep '<' notes.md" },
+  },
+  // The precedence half (APRV-503 refutation, BLOCKING-1, and the recheck's
+  // SHOULD-FIX-R1). A credential path, named or redirected, never displaces a
+  // protected class that outranks the credential class (`log.mutate`, then
+  // `policy.core`) named by the segment: the segment's FIRST entry is exactly
+  // what the command answers without the credential word, which is why the
+  // open window, refusing `log.mutate` with no policy consulted, still refuses
+  // them. And the credential read is never dropped either: it rides as a
+  // second entry over the same text, so `classes` carries both and a policy
+  // holding `account.credential` stricter than the protected class still sees
+  // it. A write-only binary's credential positional is a write, not a read, and
+  // carries nothing. Where the walk ends on a read, the credential class alone
+  // answers.
+  {
+    id: "credential-redirect-does-not-displace-a-log-delete",
+    description:
+      "rm of the log directory with a credential file on stdin: the < is a no-op for rm, so the segment is log.mutate with the log path bound, as it is without the <, and the credential read rides beside it as a second class",
+    input: { command: "rm -rf .approval/log < .approval/env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-append",
+    description: "tee appending to the live log with the environment map on stdin: log.mutate first, the credential read carried beside it",
+    input: { command: "tee -a .approval/log/events.jsonl < .approval/env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-replace",
+    description: "mv onto the live log with the Hermes home's .env on stdin: log.mutate, plus the credential read",
+    input: { command: "mv x .approval/log/events.jsonl < ~/.hermes/.env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-truncate",
+    description: "truncate of the live log with the vault on stdin: log.mutate, plus the credential read",
+    input: { command: "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-policy-core",
+    description:
+      "policy.core outranks the credential class as well, whatever a policy makes of the two: a copy into the gate's directory with the environment map on stdin is policy.core, with the credential read carried as a second class",
+    input: { command: "cp x .approval/policy.yaml < .approval/env" },
+  },
+  {
+    id: "named-credential-does-not-displace-a-log-overwrite",
+    description:
+      "the named-argument twin, which answered account.credential before APRV-503: a cp of the environment map onto the live log is log.mutate, as a cp of any file there is, and still carries account.credential (SPEC.md §7: a copy is account.credential in either direction)",
+    input: { command: "cp .approval/env .approval/log/events.jsonl" },
+  },
+  {
+    id: "named-credential-does-not-displace-policy-core",
+    description:
+      "a cp of the environment map onto the policy file is policy.core, as a cp of any file there is, and carries account.credential beside it",
+    input: { command: "cp .approval/env APPROVAL.md" },
+  },
+  {
+    id: "named-credential-into-the-gate-directory-carries-both",
+    description: "a cp of the environment map onto the queue file: policy.core and account.credential, both in classes",
+    input: { command: "cp .approval/env .approval/QUEUE.md" },
+  },
+  {
+    id: "secret-variable-beside-the-policy-file-carries-both",
+    description:
+      "a script handed the policy file and a secret-named variable: policy.core for the file, account.credential (credential-env) for the variable",
+    input: { command: "node x.js APPROVAL.md $APPROVAL_TG_TOKEN" },
+  },
+  {
+    id: "protected-write-redirection-beside-a-credential-read-carries-both",
+    description:
+      "a credential read written into the policy file: the write redirection answers first (redirect-protected, policy.core) and the read rides beside it",
+    input: { command: "cat .approval/env > APPROVAL.md" },
+  },
+  {
+    id: "named-credential-with-nothing-stricter-is-a-credential-read",
+    description:
+      "where no named path outranks it the credential class still answers, cp direction-blind as APRV-194 made it",
+    input: { command: "cp .approval/vault.enc /tmp/vault.enc" },
+  },
+  {
+    id: "credential-redirect-under-a-reader-of-the-log-is-a-credential-read",
+    description:
+      "a reader is not scanned for protected paths, so naming the log as its file earns nothing stricter and the credential read through < answers",
+    input: { command: "cat .approval/log/events.jsonl < .approval/env" },
+  },
+  {
+    id: "redirect-write-onto-the-hermes-env-is-unmoved",
+    description:
+      "the write side was already covered and is pinned here beside the read side: a write redirection onto the Hermes home's .env is policy.core under redirect-protected",
+    input: { command: "echo x > ~/.hermes/.env" },
+  },
 ];
 
 const gateVectors = [
@@ -3119,7 +3297,47 @@ const SUITES = [
     // whitespace in front of the protected run leaves no head at all. The two
     // remaining controls say the rule stops at the positional scan: a
     // redirection target and a read are unmoved.
-    vectors_version: "1.5.0",
+    //
+    // 1.6.0 (APRV-503): a MINOR bump, the same shape a fifth time. Fifteen new
+    // `redirect-*` / `here-string-*` / `protected-file-fed-*` /
+    // `quoted-angle-bracket-*` vectors pin that an input redirection's target
+    // is judged as the named argument it stands in for: a credential file read
+    // through `<` (any descriptor, any binary, a bare `$(< f)` included) is
+    // `account.credential`, and a protected file fed to an effectful command
+    // takes the protected class.
+    //
+    // Why MINOR and not MAJOR, asked and answered. No committed expectation in
+    // this file moves: regenerating with the new classifier leaves every 1.5.0
+    // vector byte-identical, and the suite has never carried an input
+    // redirection, so no implementation that passed 1.5.0 was told the old
+    // `read.shell` answer. Nothing in this suite's algorithm or description
+    // line states a rule about redirections (the MAJOR precedent is
+    // `policy-resolution` 2.0.0). What moved outside the file moved in the
+    // stricter direction: a read became a human-only class. Three of the
+    // fifteen are refusals pinned as controls (the `$(< f)` taint, `sudo`
+    // over a redirect, the here-string), and four pin answers that did not
+    // move (an ordinary file, the policy file under a reader, a quoted `<`,
+    // and the write side, which APRV-198 already covered).
+    //
+    // 1.6.0 STAYS 1.6.0 after the refutation's fix round added six
+    // `credential-redirect-*` vectors to it, by the rule 1.4.0 set: a version
+    // is claimed at merge rather than at branch, and 1.6.0 has not been merged,
+    // so no implementation was ever held to the set without them. Five pin that
+    // a credential `<` never displaces `log.mutate` or `policy.core` named by
+    // the segment (the first cut answered `account.credential` for all five,
+    // which the open window bypasses under a policy that does not load); the
+    // sixth pins that a reader still takes the credential class. The second fix
+    // round added three `named-credential-*` vectors under the same rule: the
+    // NAMED credential tier is gated the same way, so `cp .approval/env
+    // .approval/log/events.jsonl` is `log.mutate` (it was `account.credential`
+    // on main, an expectation no committed vector held), and a cp with nothing
+    // stricter beside it keeps the credential class. The third fix round
+    // (recheck SHOULD-FIX-R1) changed the expectation of seven vectors added
+    // in rounds one and two, and added three: the credential read now rides
+    // beside the protected class as a second entry, so `classes` carries both.
+    // Still 1.6.0, for the same reason: none of those vectors has ever been
+    // merged, so no implementation was held to the single-class answer.
+    vectors_version: "1.6.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

@@ -484,11 +484,35 @@ Five overrides sit on top of the table:
   the credential check sits below the opaque one and a refusal must not be
   softened into a request.
 
+  **An input redirection is the argument it stands in for** (APRV-503). A `<`
+  target, at any descriptor (`0<`, `3<`), is read with the same check: `cat <
+  ~/.hermes/.env`, `grep x < .approval/vault.enc` and `tee out.txt <
+  .approval/env` are `account.credential` with the target bound as the path,
+  and so is a bare `< file`, which makes `echo "$(< ~/.hermes/.env)"` an opaque
+  refusal (its substitution reads a credential). A `<` is a read whatever the
+  binary, so the write-only exemption that sends `tee .approval/env` to
+  `policy.core` does not apply to it. A secret-named variable in any
+  redirection target counts as it does in an argument. The redirect check sits
+  where the argument check sits: `sudo cat < .approval/env` stays opaque. A
+  credential path, named or redirected, never lowers a `log.mutate` or
+  `policy.core` answer: when the segment also names a path of either class, it
+  answers what it answers without the credential word (`rm -rf .approval/log <
+  .approval/env` and `cp .approval/env .approval/log/events.jsonl` are
+  `log.mutate`, which an open window refuses with no policy consulted). The
+  credential read is not dropped: the segment carries both classes, the
+  protected one first and `account.credential` as a second entry over the same
+  text, so a policy that holds the credential class stricter still refuses. A
+  here-string (`<<<`) is refused as `unparseable` rather than parsed, as it
+  always was, now with a detail of its own. In an effectful segment a protected
+  `<` target joins the positional scan above (`node x.js < APPROVAL.md` is
+  `policy.core`, rule `protected-path`); under a reader it is a read, as `cat
+  APPROVAL.md` is.
+
   **Precedence with the protected classes:** a WRITE to those files is
   `policy.core` — it edits the gate's own directory — and a READ of them is
   `account.credential`, because what leaves the machine is the secret. `cp` is
   the deliberate exception: it is direction-blind, and a `cp` touching
-  credential material is `account.credential` either way. Nothing here reads an
+  credential material is `account.credential` either way, and when it also names a `log.mutate` or `policy.core` path it carries that class too, first (APRV-503). Nothing here reads an
   environment, so a refusal can only ever name a variable's NAME; no rule can
   print a value.
   **`.approval-journal/` is NOT any of these** (APRV-195). The journal of

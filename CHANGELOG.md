@@ -15,6 +15,66 @@ before a tag.
 
 ## Unreleased
 
+### Security
+
+- **A credential file read through an input redirection is
+  `account.credential` (APRV-503).** The classifier judged a reader's named
+  arguments against the credential tier and ignored its `<` target, so `cat
+  ~/.hermes/.env` was `account.credential` while `cat < ~/.hermes/.env`, `cat <
+  .approval/env` and `head -1 < /home/hermes/.hermes/auth.json` were
+  `read.shell`, which is autonomous under the Agent Village template. The same
+  hole covered `echo "$(< ~/.hermes/.env)"`, the bash idiom whose inner command
+  is nothing but the redirection. Now every `<` target, at any descriptor (`0<`,
+  `3<`), is put through the check a named argument goes through, at the same
+  place in the order: a credential target is `account.credential` with the
+  target bound (rule `credential-path`) for any binary, `tee out.txt <
+  .approval/env` included. A credential path, named or redirected, never
+  lowers a `log.mutate` or `policy.core` answer: when the segment also names a
+  protected path of either class, it answers what it answers without the
+  credential word. So `rm -rf .approval/log < .approval/env` stays
+  `log.mutate`, which the open window refuses with no policy consulted, and
+  `cp x APPROVAL.md < .approval/env` stays `policy.core`. The same rule now
+  gates the named-argument tier, which had the flaw on 0.4.3:
+  `cp .approval/env .approval/log/events.jsonl` was `account.credential`, which
+  an open window over a policy that does not load let through, and it is
+  `log.mutate`. A segment naming both a credential path and a `log.mutate` or
+  `policy.core` path carries both classes (the protected one first, the
+  credential read as a second entry over the same text), so a policy that holds
+  `account.credential` stricter than the protected class still refuses it and
+  `cp .approval/env APPROVAL.md` stays `account.credential` in either direction,
+  as SPEC.md §7 says. A bare `< file` is the same read, so the `$(< file)`
+  substitution now taints its segment and is refused `opaque`; a secret-named
+  variable in any redirection target is `credential-env`; and `sudo cat <
+  .approval/env` stays an opaque refusal. In an effectful segment a protected
+  `<` target joins the positional protected-path scan, so `node x.js <
+  APPROVAL.md` is `policy.core`; under a reader it stays a read, as `cat
+  APPROVAL.md` is. A here-string (`<<<`) was refused `unparseable` before this
+  change and still is, now with its own detail. No new class and no new rule
+  id. The Hermes hook's disk pass already resolved `<` targets against the
+  call's `workdir`, so `cat < .env` run from the home was refused there; the
+  pure classifier and `approval hook classify` now agree with it. The write
+  side needed nothing: `> ~/.hermes/.env` and `>> .approval/policy` were
+  already `policy.core` (APRV-198) and are now pinned beside the read side.
+- **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
+  them refusal controls; no existing expectation moved). Totals 580/580.
+
+### Behavior changes for an existing policy
+
+- **No answer moves to a looser class.** A command whose `<` target is a
+  credential file moves from `read.shell` (or `unclassified`,
+  `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,
+  by binary) to `account.credential`, which every shipped policy holds
+  human-only, except where the segment also names a `log.mutate` or
+  `policy.core` path: those keep the answer they have without the `<` (the
+  protected class, or the refusal for a binary the table does not know). A
+  command naming a credential file beside a `log.mutate` or `policy.core` path
+  (`cp .approval/env .approval/log/events.jsonl`, `cp .approval/env
+  APPROVAL.md`) now carries that protected class first, with
+  `account.credential` kept beside it. An
+  effectful command fed a protected file through `<` moves from its own class
+  to the file's protected class. A command substitution
+  that is nothing but `< credential` moves from inert to an `opaque` refusal.
+
 ## 0.4.3 — 2026-10-07
 
 ### Harnesses
