@@ -22,6 +22,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -434,6 +435,41 @@ test("hook classify reports the read class for a GET-shaped fetch", () => {
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /^read\.web {2,}web-read {2,}curl https:\/\/example\.com$/mu);
   assert.match(run.stdout, /^classes: read\.web$/mu);
+});
+
+test("hook classify prints exec.local and the rule for a skill script, and refuses one that escapes (APRV-502)", () => {
+  const dir = caseDir();
+  // No file on disk: the text answer stands, and it is the one the resident's
+  // first-message gate needs.
+  const run = runCli(["hook", "classify", "--", "bun skills/index-network/scripts/welcome.ts"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /^exec\.local {2,}skill-script {2,}bun skills\/index-network\/scripts\/welcome\.ts$/mu,
+  );
+  assert.match(run.stdout, /^classes: exec\.local$/mu);
+
+  // A real file inside its directory: the same answer, with the path bound.
+  mkdirSync(join(dir, "skills", "x", "scripts"), { recursive: true });
+  writeFileSync(join(dir, "skills", "x", "scripts", "f.ts"), "console.log(1)\n", "utf8");
+  const inside = runCli(["hook", "classify", "--json", "--", "bun skills/x/scripts/f.ts"], dir);
+  const parsedInside = JSON.parse(inside.stdout) as {
+    ok: boolean;
+    classes: string[];
+    segments: Array<{ rule: string; path?: string }>;
+  };
+  assert.equal(parsedInside.ok, true, inside.stdout);
+  assert.deepEqual(parsedInside.classes, ["exec.local"]);
+  assert.equal(parsedInside.segments[0]?.path, "skills/x/scripts/f.ts");
+
+  // A symlink out of the directory it was spelled in: refused.
+  writeFileSync(join(dir, "outside.ts"), "console.log(2)\n", "utf8");
+  symlinkSync(join(dir, "outside.ts"), join(dir, "skills", "x", "scripts", "g.ts"));
+  const escaped = runCli(["hook", "classify", "--json", "--", "bun skills/x/scripts/g.ts"], dir);
+  const parsedEscaped = JSON.parse(escaped.stdout) as { ok: boolean; code?: string; detail?: string };
+  assert.equal(parsedEscaped.ok, false, escaped.stdout);
+  assert.equal(parsedEscaped.code, "unclassified");
+  assert.match(parsedEscaped.detail ?? "", /escapes its directory/u);
 });
 
 test("hook classify keeps a body-carrying fetch at network.call", () => {

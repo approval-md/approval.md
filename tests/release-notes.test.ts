@@ -124,7 +124,7 @@ test("every dated section in the real changelog is listed, newest first", () => 
   };
   assert.deepEqual(
     dated.map((entry) => `${entry.version} ${entry.date}`),
-    ["0.4.2 2026-10-06", "0.4.1 2026-10-05", "0.4.0 2026-10-04", "0.3.0 2026-09-20", "0.2.0 2026-09-12", "0.1.0 2026-09-08"],
+    ["0.4.3 2026-10-07", "0.4.2 2026-10-06", "0.4.1 2026-10-05", "0.4.0 2026-10-04", "0.3.0 2026-09-20", "0.2.0 2026-09-12", "0.1.0 2026-09-08"],
   );
   assert.deepEqual(
     complaints,
@@ -266,7 +266,7 @@ test("the CLI exits 1 on an undated section in a named changelog", () => {
 test("--check lists the dated versions and exits 0 on the real changelog", () => {
   const result = run(["--check"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "0.4.2 2026-10-06\n0.4.1 2026-10-05\n0.4.0 2026-10-04\n0.3.0 2026-09-20\n0.2.0 2026-09-12\n0.1.0 2026-09-08\n");
+  assert.equal(result.stdout, "0.4.3 2026-10-07\n0.4.2 2026-10-06\n0.4.1 2026-10-05\n0.4.0 2026-10-04\n0.3.0 2026-09-20\n0.2.0 2026-09-12\n0.1.0 2026-09-08\n");
   assert.equal(result.stderr, "");
 });
 

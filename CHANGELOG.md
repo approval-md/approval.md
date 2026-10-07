@@ -15,6 +15,104 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.3 — 2026-10-07
+
+### Harnesses
+
+- **A Hermes resident's agent can run the overlay's skill scripts under
+  enforcement (APRV-502).** The overlay's AGENTS.md runs every skill script
+  through `terminal`, and the first two are the gates of a resident's first
+  message (`bun skills/agent-profile/scripts/profile.ts`,
+  `bun skills/index-network/scripts/welcome.ts`). The command classifier knew
+  `bun` only through its package-manager rows and had no row for `python3` at
+  all, so on 0.4.2 under `APPROVALD_ENFORCE=1` every one of them was denied
+  `hook-unclassified`, and residents got the fallback welcome and the default
+  name. Two rules now classify an interpreter running a skill script as
+  `exec.local`, with the script path bound: `skill-script` (bun, python,
+  python3) and `node-skill-script` (the `node` row). The script must be
+  `skills/<skill>/scripts/<file>` (relative, `./` allowed) or an absolute path
+  ending `.hermes[/profiles/<p>]/skills/<skill>/scripts/<file>`; flags before
+  it come from a short allowlist of inert flags (`bun --bun`, `python3 -I`, and
+  a few more). Inline code, stdin, `python3 -m`, any other flag, a
+  `--flag=value`, a `..` or `.` segment, a glob, a variable, a substituted word,
+  any `NAME=value` assignment before the interpreter, and a path outside those
+  two roots keep the earlier refusal. The assignment rule is there because
+  `BUN_OPTIONS='--cwd ../x'` makes bun run a different directory's file, and
+  `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP` and `HOME` load other code or
+  move the home; even `NO_COLOR=1` declines, since the rule cannot tell a
+  harmless variable from one of those. Every protected
+  and credential tier still answers first: a script under
+  `$HERMES_HOME/scripts/` is not this shape, and a path under `.approval`,
+  `agent-hooks/`, `config.yaml` or `.env` in the segment keeps `policy.core` or
+  `account.credential`. Both rule ids are in `CODE_EXECUTING_RULES`, so
+  `APPROVAL_HOOK_REQUIRE_SANDBOX` covers them.
+- **The hook checks a skill script against the disk, and only tightens.** From
+  the call's working directory (the Hermes `workdir`), the real script must sit
+  under the real `skills/<skill>/scripts/` directory it was spelled in, and no
+  component of `skills/<skill>/scripts` may itself be a symlink (a symlinked
+  working directory or Hermes home is fine). Anything else is refused
+  `hook-unclassified` with the landing named, and that includes a real path on
+  a protected or credential file: the direct spelling of such a path through
+  `bun` or `python3` is refused by the classifier, so the symlinked spelling is
+  refused too rather than taking the file's class. Where the hook cannot read the path
+  (EACCES) or the file is absent, the text answer stands and a note says so.
+  That is the hosted case: under co-location the daemon user cannot read the
+  resident's 0700 home, so there the text check is the whole check.
+  `docs/hermes-hook.md` and `docs/claude-code-hook.md` state the rule and this
+  limit.
+
+### Daemon
+
+- **The live-draw wait is 2000 ms, from 500 (`DRAW_TIMEOUT_MS`).** The daemon
+  answers a draw on the same event loop that runs `decide()` and `tick()`, so a
+  healthy daemon on a loaded box could miss the half-second window and the
+  asking child recorded `stale` for a daemon that was only busy (seen on the
+  Agent Village fleet on 2026-10-06; the #627 harness covers the wait). One
+  constant; the follow-up that takes `decide()` and `tick()` off the draw loop
+  and records `draw-daemon-busy` distinctly from `stale` is its own task.
+
+### Behavior changes for an existing policy
+
+- **`node skills/<skill>/scripts/<file>` moves from `files.write.workspace` to
+  `exec.local`.** On 0.4.2 it was rule `node-script`, class
+  `files.write.workspace`; on 0.4.3 it is `node-skill-script`, class
+  `exec.local`. Wherever a policy resolves the two classes differently, the
+  answer moves with them: in this repository's own policy
+  (`files.write.workspace` autonomous, no `exec.local` line, defaults manual) an
+  unattended call becomes a question, and in a policy where `exec.local` is the
+  looser of the two it becomes looser. Every other `node` argv keeps
+  `node-script`, including a skill script behind an assignment prefix or a flag
+  off the allowlist.
+- **A `say` entry for `exec.local` changes meaning.** `exec.local` is now in
+  `CLASSIFIER_CLASSES`, so the minimal card phrases its payload itself
+  ("run a command"). A `channels.<channel>.prompt.say.exec.local` entry that
+  carries `does` loaded on 0.4.2 and is refused on 0.4.3 (`prompt-say-kind`,
+  `schema-invalid`), so a policy carrying one stops loading on upgrade and fails
+  closed (everything manual, and the hook answers `policy-unavailable`). The
+  reverse flips too: an entry with only `quote` or `note`, refused on 0.4.2
+  (`prompt-say-does`), loads on 0.4.3. No policy in this repository carries
+  such an entry; one that does should drop the `does` key before upgrading.
+
+### What did not change
+
+- No SPEC class change: `exec.local` is SPEC §7's existing class for "scripts
+  inside the workspace", which no classifier row emitted until now. No policy
+  key, no schema file, no refusal code, no conformance version; the one
+  load-time difference is the `say` entry above. A policy with no
+  `exec.local` line resolves it by `defaults.autonomy` like any other class,
+  so a policy whose defaults are not autonomous needs an `exec.local` line for
+  these calls to run unattended. Nothing depends on `HERMES_HOME`, which the
+  daemon under `approval serve` does not carry.
+
+### Upgrade order
+
+- **Agent Village:** the control plane pins `APPROVAL_MD_VERSION=0.4.3` and
+  its `APPROVAL_MD_INTEGRITY`, then one update per box. The checkpoint rebake
+  follows later and is not on the critical path. Nothing in a policy has to
+  change first unless it carries a `say` entry for `exec.local` with a `does`
+  phrase (above), and a box still on 0.4.2 keeps denying skill scripts exactly
+  as it does today.
+
 ## 0.4.2 — 2026-10-06
 
 ### Policy

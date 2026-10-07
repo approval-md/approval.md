@@ -73,7 +73,16 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
@@ -95,7 +104,9 @@ import {
   CONTRIBUTOR_SUFFIX,
   GATE_SELF_CLASS,
   isCredentialPath,
+  NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
+  SKILL_SCRIPT_RULE,
   type ClassifiedSegment,
   type CommandClassification,
   type ProtectedPathEntry,
@@ -2685,13 +2696,281 @@ export function refineWriteScope(
   return { result: { ok: true, segments, classes }, notes };
 }
 
+// ===========================================================================
+// Skill scripts, the disk half (APRV-502)
+// ===========================================================================
+
 /**
- * The classifier, its context, and all four impure refinements, in the one
+ * The rules whose segments this pass judges: an interpreter running
+ * `skills/<skill>/scripts/<file>`, which the pure classifier answers
+ * `exec.local` from the TEXT alone.
+ */
+const SKILL_SCRIPT_RULES: readonly string[] = [SKILL_SCRIPT_RULE, NODE_SKILL_SCRIPT_RULE];
+
+/** What the disk says about one skill script, read from one directory. */
+type SkillScriptJudgement =
+  /** The real file sits under the real directory it was spelled in. */
+  | { kind: "inside" }
+  /** The disk could not be read, or the file is not there: the text stands. */
+  | { kind: "unseen"; why: string }
+  /**
+   * The real file is somewhere else (a credential or protected path, outside
+   * the real root, or under a symlinked component of the root), or the disk
+   * answered in a way this pass cannot vouch for.
+   */
+  | { kind: "refused"; detail: string };
+
+/** The `code` of a filesystem error, or `null`. */
+function fsErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = (error as { code: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+/**
+ * Judge one skill script from one working directory (APRV-502).
+ *
+ * `script` is the path the classifier bound, `skills/<skill>/scripts/<file>`
+ * or an absolute `.hermes` spelling of it, so its parent is the spelled root
+ * `<base>/skills/<skill>/scripts` and nothing needs re-parsing. `<base>` is
+ * the directory the shape was spelled from: the working directory for the
+ * relative shape, the `.hermes` or `.hermes/profiles/<p>` directory for the
+ * absolute one. Both shapes put exactly three segments between base and root.
+ *
+ * ## Why an unreadable or absent script lets the text answer stand
+ *
+ * This pass can only tighten, like {@link resolvedPathClasses}, and where the
+ * disk cannot be read it has nothing to tighten WITH. That case is not
+ * hypothetical; it is the production shape. Under co-location the daemon that
+ * answers `approval hook hermes` runs as the `approvald` user and the resident's
+ * Hermes home (`/home/hermes/.hermes`) is mode 0700 owned by `hermes`, so
+ * `realpath` of the script fails with EACCES on every live box (checked
+ * read-only on one 2026-10-07). Refusing there would deny every skill script
+ * fleet-wide, which is the outage APRV-502 exists to end, so the answer is the
+ * text's and a note says the disk pass could not look. `resolvedPathClasses`
+ * has exactly the same property for the same reason. An absent file
+ * (ENOENT, ENOTDIR) is treated the same way: there is nothing on disk to run,
+ * and the interpreter will fail on its own. What the text already guarantees
+ * in both cases is the shape: no `..`, no variable, no glob, and every
+ * protected and credential tier ahead of the rule.
+ *
+ * ## Where the disk CAN be read, everything off the plain shape refuses
+ *
+ * - A real path landing on a credential or protected path refuses, naming the
+ *   landing. It does not take the landing's class: for `bun` and `python3` the
+ *   direct spelling of a protected path is refused by the classifier (the
+ *   protected scan runs only after a table row matches), so taking the class
+ *   would answer a symlinked spelling MORE loosely than the direct one under a
+ *   policy where that class is looser than a refusal (the A502 refutation's
+ *   S2: `cron.manage` autonomous in the village template).
+ * - No component of `skills/<skill>/scripts` may be a symlink: the real root
+ *   must equal `realpath(base)/skills/<skill>/scripts`. A symlinked base or
+ *   working directory is fine, because both sides are resolved.
+ * - The real path of the script must sit strictly under that real root, so a
+ *   file symlink out of `skills/<skill>/scripts/` refuses. A dangling symlink
+ *   is judged by where it points, resolved through the deepest existing
+ *   ancestor of its target, so a link whose target does not exist YET cannot
+ *   be placed now and filled later.
+ */
+function judgeSkillScript(
+  script: string,
+  cwd: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+): SkillScriptJudgement {
+  const spelled = resolvePathSegments(cwd, script);
+  const root = dirname(spelled);
+  let real: string;
+  try {
+    real = realpathSync(spelled);
+  } catch (error) {
+    const code = fsErrorCode(error);
+    if (code === "EACCES" || code === "EPERM") {
+      return { kind: "unseen", why: `${spelled} cannot be read by this process (${code})` };
+    }
+    if (code === "ELOOP") {
+      return { kind: "refused", detail: `${spelled} is a symlink loop (ELOOP)` };
+    }
+    if (code !== "ENOENT" && code !== "ENOTDIR") {
+      return { kind: "refused", detail: `${spelled} could not be resolved (${code ?? "unknown error"})` };
+    }
+    // Absent, or a dangling symlink. Only the second has anything to judge.
+    let target: string | null = null;
+    try {
+      if (lstatSync(spelled).isSymbolicLink()) target = readlinkSync(spelled);
+    } catch (inner) {
+      const innerCode = fsErrorCode(inner);
+      if (innerCode === "EACCES" || innerCode === "EPERM") {
+        return { kind: "unseen", why: `${spelled} cannot be read by this process (${innerCode})` };
+      }
+      target = null;
+    }
+    if (target === null) {
+      return { kind: "unseen", why: `${spelled} does not exist (${code})` };
+    }
+    real = canonicalPath(resolvePathSegments(dirname(spelled), target));
+  }
+
+  if (isCredentialPath(real)) {
+    return {
+      kind: "refused",
+      detail: `${script} resolves to ${real}, a credential path (account.credential)`,
+    };
+  }
+  const protectedClass = protectedPathClass(real, protectedPaths);
+  if (protectedClass !== null) {
+    return {
+      kind: "refused",
+      detail: `${script} resolves to ${real}, a protected path (${protectedClass})`,
+    };
+  }
+
+  // `<base>/skills/<skill>/scripts`: three segments up from the root is base.
+  const skill = basename(dirname(root));
+  const base = dirname(dirname(dirname(root)));
+  let realRoot: string;
+  let realBase: string;
+  try {
+    realRoot = realpathSync(root);
+    realBase = realpathSync(base);
+  } catch (error) {
+    // The script resolved and a directory above it did not: two reads of one
+    // disk disagreeing. Nothing here can vouch for that.
+    return {
+      kind: "refused",
+      detail: `${root} could not be resolved (${fsErrorCode(error) ?? "unknown error"}) although the script inside it did`,
+    };
+  }
+  const expectedRoot = join(realBase, "skills", skill, "scripts");
+  if (realRoot !== expectedRoot) {
+    return {
+      kind: "refused",
+      detail: `${root} resolves to ${realRoot}, not ${expectedRoot}: a component of skills/${skill}/scripts is a symlink`,
+    };
+  }
+  if (!isBelow(real, realRoot)) {
+    return {
+      kind: "refused",
+      detail: `${script} resolves to ${real}, outside the directory it was spelled in (${realRoot})`,
+    };
+  }
+  return { kind: "inside" };
+}
+
+/**
+ * The directories a segment of a command line may run in: the hook's `cwd`,
+ * plus every directory an earlier literal `cd` or `pushd` could have moved to
+ * (a `cd` may or may not have run, `||` and a failing `cd` included, so both
+ * sides are kept, as {@link resolvedPathClasses} keeps them). `null` when an
+ * earlier segment moves to a directory the text cannot name: `cd $X`, `cd ~`,
+ * a bare `cd`, `cd -`, `popd`, or a `cd` carrying flags.
+ */
+function skillScriptCwds(
+  segments: readonly ClassifiedSegment[],
+  index: number,
+  cwd: string,
+): string[] | null {
+  let cwds = [cwd];
+  for (const earlier of segments.slice(0, index)) {
+    const parsed = commandSegmentWords(earlier.text)?.[0];
+    if (parsed === undefined) continue;
+    const bin = basename(parsed.bin);
+    if (bin === "popd") return null;
+    if (bin !== "cd" && bin !== "pushd") continue;
+    const target = parsed.args[0];
+    if (parsed.args.length !== 1 || target === undefined || target.startsWith("-")) return null;
+    if (/[$`*?[{~]/u.test(target)) return null;
+    cwds = [...new Set([...cwds, ...cwds.map((from) => resolvePathSegments(from, target))])];
+    if (cwds.length > 64) return null;
+  }
+  return cwds;
+}
+
+/**
+ * Check every skill-script segment against the disk (APRV-502).
+ *
+ * IMPURE by design and by contract, like the other passes: it resolves paths.
+ * It only ever TIGHTENS. A segment whose script resolves anywhere but a file
+ * under the real `skills/<skill>/scripts/` directory it was spelled in (a
+ * credential or protected landing, a path outside the real root, a symlinked
+ * component of the root) turns the whole classification into an
+ * `unclassified` failure naming the landing, which the hook denies as
+ * `hook-unclassified`; and one the disk cannot show (unreadable, absent, or
+ * after a `cd` the text cannot name) keeps the text's `exec.local` with a note
+ * saying the pass could not look. See {@link judgeSkillScript} for why that
+ * last case is deliberate, and why a protected landing refuses rather than
+ * taking the landing's class.
+ *
+ * `cwd` is the directory the command runs in: the per-call Hermes `workdir`
+ * when the harness states one (absolute only), the hook's own directory
+ * elsewhere. It is used only to tighten, so a working directory the party under
+ * oversight reported cannot loosen anything here (SPEC.md §11.1 invariant 4).
+ * Nothing here reads `HERMES_HOME`: the daemon under `approval serve` does not
+ * carry it.
+ */
+export function refineSkillScripts(
+  result: CommandClassification,
+  cwd: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  if (!result.segments.some((segment) => SKILL_SCRIPT_RULES.includes(segment.rule))) {
+    return { result, notes: [] };
+  }
+
+  const notes: string[] = [];
+  for (const [index, segment] of result.segments.entries()) {
+    if (!SKILL_SCRIPT_RULES.includes(segment.rule) || segment.class !== "exec.local") continue;
+    const script = segment.path;
+    if (script === undefined) {
+      // The classifier binds the script on every segment of these rules, so
+      // a segment without one is two reads of the same bytes disagreeing.
+      return {
+        result: {
+          ok: false,
+          code: "unclassified",
+          segment: segment.text,
+          detail: `skill-script segment carries no script path, so it cannot be checked against the disk`,
+        },
+        notes,
+      };
+    }
+    const cwds = skillScriptCwds(result.segments, index, cwd);
+    if (cwds === null) {
+      notes.push(
+        `skill-script-unverified: an earlier cd moves to a directory the text cannot name, so ${script} was not checked against the disk and stays exec.local`,
+      );
+      continue;
+    }
+    for (const from of cwds) {
+      const judged = judgeSkillScript(script, from, protectedPaths);
+      if (judged.kind === "refused") {
+        return {
+          result: {
+            ok: false,
+            code: "unclassified",
+            segment: segment.text,
+            detail: `skill script escapes its directory: ${judged.detail}. A skill script must be a file under the real skills/<skill>/scripts/ directory it is spelled in, with no symlink in that directory's own path`,
+          },
+          notes,
+        };
+      }
+      if (judged.kind === "unseen") {
+        notes.push(
+          `skill-script-unverified: ${judged.why}, so the disk pass could not look and ${script} stays exec.local`,
+        );
+      }
+    }
+  }
+  return { result, notes };
+}
+
+/**
+ * The classifier, its context, and all five impure refinements, in the one
  * order every caller must use.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are four refinements in the chain.
+ * that stays true now there are five refinements in the chain.
  *
  * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
  * the strict one (APRV-347), so it is passed explicitly at every call site: an
@@ -2719,9 +2998,18 @@ export function classifyForHook(
   // it is the narrowest, and because nothing after it would re-read a segment
   // it has already tightened.
   const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd);
+  // APRV-502. Touches only the two skill-script rules, which no pass above
+  // reads, so its place in the chain changes nothing for any other segment.
+  const scripted = refineSkillScripts(written.result, cwd, protectedPaths);
   return {
-    result: written.result,
-    notes: [...rewritten.notes, ...scratched.notes, ...scoped.notes, ...written.notes],
+    result: scripted.result,
+    notes: [
+      ...rewritten.notes,
+      ...scratched.notes,
+      ...scoped.notes,
+      ...written.notes,
+      ...scripted.notes,
+    ],
   };
 }
 

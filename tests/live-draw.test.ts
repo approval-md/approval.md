@@ -788,11 +788,11 @@ test("the daemon holds the secret, the asker holds none, and the draw crosses be
     // dangling advances) and runs the first tick, all synchronously on the one
     // event loop that also answers draws. A connection made in that window is
     // queued by the kernel and answered only when the loop comes back, which on a
-    // loaded CI shard was past the relay's 500 ms (`DRAW_TIMEOUT_MS`), twice, as
+    // loaded CI shard was past the relay's `DRAW_TIMEOUT_MS` (500 ms at the time), twice, as
     // `draw-daemon-stale`. So the test waits for the daemon to SERVE — answer a
     // status question, which costs no verified read and no MAC — under a window
     // sized for a loaded host, and only then holds the draw below to the
-    // product's own unchanged 500 ms.
+    // product's own unchanged timeout.
     const serving = await askDaemonSampling(unit.logPath, 20_000);
     assert.equal(
       serving.ok,
