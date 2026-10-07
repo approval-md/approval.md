@@ -28,7 +28,12 @@ before a tag.
   `3<`), is put through the check a named argument goes through, at the same
   place in the order: a credential target is `account.credential` with the
   target bound (rule `credential-path`) for any binary, `tee out.txt <
-  .approval/env` included; a bare `< file` is the same read, so the `$(< file)`
+  .approval/env` included, unless the segment also names a protected path that
+  outranks the credential class (`log.mutate`, then `policy.core`). Then the
+  segment answers what it answers without the `<`: `rm -rf .approval/log <
+  .approval/env` stays `log.mutate`, which the open window refuses with no
+  policy consulted, and `cp x APPROVAL.md < .approval/env` stays
+  `policy.core`. A bare `< file` is the same read, so the `$(< file)`
   substitution now taints its segment and is refused `opaque`; a secret-named
   variable in any redirection target is `credential-env`; and `sudo cat <
   .approval/env` stays an opaque refusal. In an effectful segment a protected
@@ -41,15 +46,19 @@ before a tag.
   pure classifier and `approval hook classify` now agree with it. The write
   side needed nothing: `> ~/.hermes/.env` and `>> .approval/policy` were
   already `policy.core` (APRV-198) and are now pinned beside the read side.
-- **Conformance.** `command-class` 1.6.0 (fifteen new vectors, three of them
-  refusal controls; no existing expectation moved). Totals 568/568.
+- **Conformance.** `command-class` 1.6.0 (twenty-one new vectors, three of
+  them refusal controls; no existing expectation moved). Totals 574/574.
 
 ### Behavior changes for an existing policy
 
-- **Every move is stricter.** A command whose `<` target is a credential file
-  moves from `read.shell` (or `unclassified`, `files.write.workspace` or
-  `exec.local`, by binary) to `account.credential`, which every shipped policy
-  holds human-only. An effectful command fed a protected file through `<` moves
+- **No answer moves to a looser class.** A command whose `<` target is a
+  credential file moves from `read.shell` (or `unclassified`,
+  `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,
+  by binary) to `account.credential`, which every shipped policy holds
+  human-only, except where the segment also names a `log.mutate` or
+  `policy.core` path: those keep the answer they have without the `<` (the
+  protected class, or the refusal for a binary the table does not know). An
+  effectful command fed a protected file through `<` moves
   from its own class to the file's protected class. A command substitution
   that is nothing but `< credential` moves from inert to an `opaque` refusal.
 

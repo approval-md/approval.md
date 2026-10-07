@@ -2053,6 +2053,46 @@ const commandClassVectors = [
     description: "a quoted < is one word of data and never a redirection",
     input: { command: "grep '<' notes.md" },
   },
+  // The precedence half (APRV-503 refutation, BLOCKING-1). A credential `<`
+  // target never displaces a protected class that outranks the credential
+  // class (`log.mutate`, then `policy.core`) named by the segment: each of
+  // these answers exactly what the command answers without its `<`, which is
+  // why the open window, refusing `log.mutate` with no policy consulted, still
+  // refuses them. The last vector is the other side of the rule: where the
+  // walk ends on a read, the credential class still answers.
+  {
+    id: "credential-redirect-does-not-displace-a-log-delete",
+    description:
+      "rm of the log directory with a credential file on stdin: the < is a no-op for rm, so the segment is log.mutate with the log path bound, as it is without the <",
+    input: { command: "rm -rf .approval/log < .approval/env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-append",
+    description: "tee appending to the live log with the environment map on stdin: log.mutate, not account.credential",
+    input: { command: "tee -a .approval/log/events.jsonl < .approval/env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-replace",
+    description: "mv onto the live log with the Hermes home's .env on stdin: log.mutate",
+    input: { command: "mv x .approval/log/events.jsonl < ~/.hermes/.env" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-a-log-truncate",
+    description: "truncate of the live log with the vault on stdin: log.mutate",
+    input: { command: "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc" },
+  },
+  {
+    id: "credential-redirect-does-not-displace-policy-core",
+    description:
+      "policy.core outranks the credential class as well, whatever a policy makes of the two: a copy into the gate's directory with the environment map on stdin is policy.core",
+    input: { command: "cp x .approval/policy.yaml < .approval/env" },
+  },
+  {
+    id: "credential-redirect-under-a-reader-of-the-log-is-a-credential-read",
+    description:
+      "a reader is not scanned for protected paths, so naming the log as its file earns nothing stricter and the credential read through < answers",
+    input: { command: "cat .approval/log/events.jsonl < .approval/env" },
+  },
   {
     id: "redirect-write-onto-the-hermes-env-is-unmoved",
     description:
@@ -3238,6 +3278,15 @@ const SUITES = [
     // over a redirect, the here-string), and four pin answers that did not
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
+    //
+    // 1.6.0 STAYS 1.6.0 after the refutation's fix round added six
+    // `credential-redirect-*` vectors to it, by the rule 1.4.0 set: a version
+    // is claimed at merge rather than at branch, and 1.6.0 has not been merged,
+    // so no implementation was ever held to the set without them. Five pin that
+    // a credential `<` never displaces `log.mutate` or `policy.core` named by
+    // the segment (the first cut answered `account.credential` for all five,
+    // which the open window bypasses under a policy that does not load); the
+    // sixth pins that a reader still takes the credential class.
     vectors_version: "1.6.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

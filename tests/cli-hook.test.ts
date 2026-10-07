@@ -4153,6 +4153,35 @@ test("the window never reaches the log directory (APRV-214)", () => {
   assertClean(dir);
 });
 
+test("APRV-503 refutation BLOCKING-1: a credential < does not carry a log write through a window over a policy that will not load", () => {
+  // The refuter's proof, end to end: with a window open and no policy, a
+  // credential class is bypassed (the human-only check needs a loaded policy)
+  // while `log.mutate` is refused unconditionally. Appending `< .approval/env`
+  // to a log-mutating command must therefore not relabel it.
+  const dir = ready();
+  openTestWindow(dir);
+  const before = rawLog(dir);
+  const commands = [
+    "rm -rf .approval/log < .approval/env",
+    "tee -a .approval/log/events.jsonl < .approval/env",
+    "mv x .approval/log/events.jsonl < ~/.hermes/.env",
+    "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc",
+  ];
+  for (const [index, command] of commands.entries()) {
+    const run = runCli(
+      ["hook", "claude-code", "--policy", join(dir, "nowhere.md"), "--timeout", "1s"],
+      dir,
+      bashEvent(command, `tu-window-503-${String(index)}`),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${command}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: /u, command);
+    assert.match(verdict.reason, /log\.mutate/u, command);
+  }
+  assert.equal(rawLog(dir), before, "a refused bypass appends nothing");
+  assertClean(dir);
+});
+
 test("the window never reaches a human-only class (APRV-214)", () => {
   const dir = readyWithHumanOnlyCredentials();
   openTestWindow(dir);

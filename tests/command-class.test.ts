@@ -1820,6 +1820,75 @@ test("APRV-503: a protected file fed to an effectful command takes the protected
   assert.deepEqual(routed.classes, ["policy.edit"]);
 });
 
+test("APRV-503 refutation BLOCKING-1: a credential < never displaces log.mutate or policy.core", () => {
+  // The downgrade the refuter proved: appending `< <credential>` to a
+  // log-mutating command flipped `log.mutate` (refused by the open window with
+  // no policy consulted) to `account.credential` (bypassed by the window when
+  // the policy does not load). The `<` is a no-op for these binaries, so the
+  // answer must be the one the command gets without it, path included.
+  const rows: ReadonlyArray<[withRedirect: string, without: string, cls: string, path: string]> = [
+    ["rm -rf .approval/log < .approval/env", "rm -rf .approval/log", "log.mutate", ".approval/log"],
+    [
+      "tee -a .approval/log/events.jsonl < .approval/env",
+      "tee -a .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    [
+      "mv x .approval/log/events.jsonl < ~/.hermes/.env",
+      "mv x .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    [
+      "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc",
+      "truncate -s0 .approval/log/events.jsonl",
+      "log.mutate",
+      ".approval/log/events.jsonl",
+    ],
+    // policy.core outranks the credential class too, for every policy's
+    // ordering of the three (refutation SHOULD-FIX-1).
+    ["cp x .approval/policy.yaml < .approval/env", "cp x .approval/policy.yaml", "policy.core", ".approval/policy.yaml"],
+    ["cp x APPROVAL.md < ~/.hermes/.env", "cp x APPROVAL.md", "policy.core", "APPROVAL.md"],
+    // Writing a credential file from another one is an edit of the gate's
+    // directory, the class the write alone has.
+    ["tee .approval/env < .approval/vault.enc", "tee .approval/env", "policy.core", ".approval/env"],
+    // A protected `<` target that is no credential outranks too.
+    ["node x.js < APPROVAL.md < .approval/env", "node x.js < APPROVAL.md", "policy.core", "APPROVAL.md"],
+  ];
+  for (const [withRedirect, without, cls, path] of rows) {
+    const a = classifyCommand(withRedirect);
+    const b = classifyCommand(without);
+    assert.ok(a.ok && b.ok, withRedirect);
+    if (!a.ok || !b.ok) continue;
+    assert.deepEqual(a.classes, [cls], withRedirect);
+    assert.deepEqual(a.segments, b.segments.map((segment) => ({ ...segment, text: withRedirect })), withRedirect);
+    assert.equal(a.segments[0]?.rule, "protected-path", withRedirect);
+    assert.equal(a.segments[0]?.path, path, withRedirect);
+  }
+
+  // A binary the table does not know keeps the refusal it has without the `<`,
+  // rather than being named by the weaker class.
+  const unknown = classifyCommand("shred .approval/log/events.jsonl < .approval/env");
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) assert.equal(unknown.code, "unclassified");
+
+  // Where the walk ends on an answer the credential class is STRICTER than, the
+  // credential class still answers: a reader is not scanned for protected
+  // paths, so its `<` is the read that matters; `policy.edit` ranks below it.
+  for (const command of [
+    "cat .approval/log/events.jsonl < .approval/env",
+    "node x.js CLAUDE.md < .approval/env",
+    "approval status .approval/log < .approval/env",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.equal(result.segments[0]?.rule, "credential-path", command);
+  }
+});
+
 test("APRV-503: the write side was already covered, and stays so", () => {
   // Output redirections onto a protected or credential path take the organ's
   // class (APRV-198, `redirect-protected`); a write to credential material is

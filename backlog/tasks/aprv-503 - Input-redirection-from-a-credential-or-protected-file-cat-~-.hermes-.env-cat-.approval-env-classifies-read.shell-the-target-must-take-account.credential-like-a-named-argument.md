@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude-b1/A503'
 created_date: '2026-10-07 01:53'
-updated_date: '2026-10-07 03:27'
+updated_date: '2026-10-07 03:57'
 labels:
   - agent-village
 dependencies: []
@@ -24,7 +24,7 @@ Found by the APRV-502 security refutation (2026-10-07, lanes-bountify/A502-refut
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 cat < ~/.hermes/.env, cat < .approval/env, grep x < .approval/vault.enc and the here-string form classify account.credential in the pure classifier; cat < README.md stays read.shell
+- [x] #1 cat < ~/.hermes/.env, cat < .approval/env and grep x < .approval/vault.enc classify account.credential in the pure classifier; cat <<< "$(cat ~/.hermes/.env)" is refused (unparseable) with a detail naming the rewrite; cat < README.md stays read.shell
 - [x] #2 Through the compiled Hermes hook with workdir set to the home, cat < .env (relative) is account.credential
 - [x] #3 No fixture in tests/command-class.test.ts changes class except the redirect cases added; conformance 553/553
 <!-- AC:END -->
@@ -51,4 +51,9 @@ Done (claude-b1/A503, 2026-10-07):
 - Second finding, different code path: unquoted heredoc bodies are never classified (cat <<EOF with $(rm -rf ~) in the body is read.shell). Filed as APRV-504, not fixed here.
 Evidence: node --test dist/tests/command-class.test.js (+quoting, routing, ref-delete, harness-launch), protected-path-guard*.test.js, conformance.test.js, conformance-regen.test.js, release-notes.test.js, demo-finale-credential.test.js: 974/974 pass, exit 0. Hook files cli-hook, cli-hook-hermes, cli-hook-hermes-rules, cli-hook-cursor, cli-hook-codex, cli-hook-read-scope, cli-hook-write-scope, cli-hook-scope, cli-hook-rewrite: 299/299, exit 0. node conformance/run.mjs: 568/568 (553 + 15 new command-class vectors at 1.6.0; the 86 existing vectors byte-identical), exit 0. npm run lint exit 0; npm run typecheck exit 0.
 AC #1 left unticked on one clause: the here-string form is REFUSED (unparseable), not account.credential; every other named case classifies account.credential and cat < README.md stays read.shell. Needs a ruling: accept the refusal and restate the clause, or parse <<<.
+
+Fix round (claude-b1/A503-fix, refutation lanes-b1/A503-refute.md): BLOCKING-1 confirmed. The first cut returned the redirect-credential answer early, above the protected scan, so rm -rf .approval/log < .approval/env became account.credential (main: log.mutate), and the open window over a non-loading policy ALLOWED it (log.mutate is refused unconditionally in runBypass, account.credential only inside load.ok).
+Rule now: a credential < target answers early only when the segment names no protected path that outranks account.credential (outranksCredential: log.mutate, then policy.core; scanned over the positionals with the prose skip and the non-credential < targets; protected write targets already answered above). Otherwise the answer is deferred: the segment goes through the table and the protected scan exactly as without the <, and takes account.credential only if that walk ends on a read or gate.self (where credential is stricter); a protected class or a refusal (unclassified for an unknown binary) stands. policy.edit ranks below the credential class. Effect: the four refuter commands and cp x .approval/policy.yaml < .approval/env give exactly their no-redirect answer (log.mutate / policy.core); every validated tightening (less/python3/tee/git apply/bun < credential, $(< credential)) is unchanged. AC #1 restated per the coordinator ruling (here-string refused unparseable with a rewrite detail) and ticked.
+Tests: unit test (with/without-< segment equality for 8 commands, shred stays unclassified, reader/policy.edit/gate.self keep credential); window e2e through approval hook claude-code with --policy nowhere: all four DENY hook-class-human-only log.mutate, nothing appended. Six credential-redirect-* vectors added inside command-class 1.6.0 (unmerged version stays, per the 1.4.0 precedent); the 101 earlier vectors unmoved. Evidence: classifier/protected/conformance files 975/975 exit 0; hook files 300/300 exit 0; conformance 574/574 exit 0; lint 0; typecheck 0.
+Pre-existing, outside this diff, NOT fixed: the POSITIONAL credential tier has the same shape for non-write binaries on main: cp .approval/env .approval/log/events.jsonl is account.credential (credentialTouch answers before the protected scan; cp is not in CREDENTIAL_WRITE_BINS), so the window over a non-loading policy would bypass a log overwrite. Reported to the coordinator for a ruling/task.
 <!-- SECTION:NOTES:END -->

@@ -493,7 +493,11 @@ Five overrides sit on top of the table:
   binary, so the write-only exemption that sends `tee .approval/env` to
   `policy.core` does not apply to it. A secret-named variable in any
   redirection target counts as it does in an argument. The redirect check sits
-  where the argument check sits: `sudo cat < .approval/env` stays opaque. A
+  where the argument check sits: `sudo cat < .approval/env` stays opaque. It
+  never displaces a protected class that outranks it: when the segment also
+  names a `log.mutate` or `policy.core` path, it answers what it answers
+  without the `<` (`rm -rf .approval/log < .approval/env` is `log.mutate`, which
+  an open window refuses with no policy consulted). A
   here-string (`<<<`) is refused as `unparseable` rather than parsed, as it
   always was, now with a detail of its own. In an effectful segment a protected
   `<` target joins the positional scan above (`node x.js < APPROVAL.md` is

@@ -228,8 +228,9 @@ Five overrides sit on top of the table:
   input redirection is judged as the argument it stands in for (APRV-503): a
   credential `<` target at any descriptor is `account.credential` whatever the
   binary (`cat < .approval/env`, `tee out.txt < .approval/env`, a bare `$(<
-  file)`), and a protected `<` target in an effectful segment takes the
-  protected class. A here-string (`<<<`) is refused as `unparseable`.
+  file)`), unless the segment also names a `log.mutate` or `policy.core` path,
+  which keeps its class. A protected `<` target in an effectful segment takes
+  the protected class. A here-string (`<<<`) is refused as `unparseable`.
 - **`.approval-journal/` is not protected** (APRV-195). The journal of
   `approval journal write` is a SIBLING of the approval home, not a directory
   inside it, so nothing above was loosened to let an agent write there: a write
