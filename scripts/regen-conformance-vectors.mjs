@@ -2088,6 +2088,23 @@ const commandClassVectors = [
     input: { command: "cp x .approval/policy.yaml < .approval/env" },
   },
   {
+    id: "named-credential-does-not-displace-a-log-overwrite",
+    description:
+      "the named-argument twin, which answered account.credential before APRV-503: a cp of the environment map onto the live log is log.mutate, as a cp of any file there is",
+    input: { command: "cp .approval/env .approval/log/events.jsonl" },
+  },
+  {
+    id: "named-credential-does-not-displace-policy-core",
+    description: "a cp of the environment map onto the policy file is policy.core, as a cp of any file there is",
+    input: { command: "cp .approval/env APPROVAL.md" },
+  },
+  {
+    id: "named-credential-with-nothing-stricter-is-a-credential-read",
+    description:
+      "where no named path outranks it the credential class still answers, cp direction-blind as APRV-194 made it",
+    input: { command: "cp .approval/vault.enc /tmp/vault.enc" },
+  },
+  {
     id: "credential-redirect-under-a-reader-of-the-log-is-a-credential-read",
     description:
       "a reader is not scanned for protected paths, so naming the log as its file earns nothing stricter and the credential read through < answers",
@@ -3286,7 +3303,12 @@ const SUITES = [
     // a credential `<` never displaces `log.mutate` or `policy.core` named by
     // the segment (the first cut answered `account.credential` for all five,
     // which the open window bypasses under a policy that does not load); the
-    // sixth pins that a reader still takes the credential class.
+    // sixth pins that a reader still takes the credential class. The second fix
+    // round added three `named-credential-*` vectors under the same rule: the
+    // NAMED credential tier is gated the same way, so `cp .approval/env
+    // .approval/log/events.jsonl` is `log.mutate` (it was `account.credential`
+    // on main, an expectation no committed vector held), and a cp with nothing
+    // stricter beside it keeps the credential class.
     vectors_version: "1.6.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

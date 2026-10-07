@@ -4166,6 +4166,9 @@ test("APRV-503 refutation BLOCKING-1: a credential < does not carry a log write 
     "tee -a .approval/log/events.jsonl < .approval/env",
     "mv x .approval/log/events.jsonl < ~/.hermes/.env",
     "truncate -s0 .approval/log/events.jsonl < .approval/vault.enc",
+    // Fix round 2: the named-argument twin, which main itself relabelled.
+    "cp .approval/env .approval/log/events.jsonl",
+    "mv .approval/vault.enc .approval/log/events.jsonl",
   ];
   for (const [index, command] of commands.entries()) {
     const run = runCli(

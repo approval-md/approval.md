@@ -1889,6 +1889,53 @@ test("APRV-503 refutation BLOCKING-1: a credential < never displaces log.mutate 
   }
 });
 
+test("APRV-503 fix round 2: a NAMED credential never displaces log.mutate or policy.core either", () => {
+  // The named-argument twin of BLOCKING-1, present on main before APRV-503:
+  // `credentialTouch` answered above the protected scan, so `cp .approval/env
+  // .approval/log/events.jsonl` was `account.credential` and an open window
+  // over a policy that does not load would let it overwrite the log. A
+  // credential path, named or redirected, never lowers either class: the
+  // answer is the one the command has with an ordinary file in that position.
+  const rows: ReadonlyArray<[withCredential: string, without: string, cls: string, path: string]> = [
+    ["cp .approval/env .approval/log/events.jsonl", "cp x .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    ["mv .approval/env .approval/log/x", "mv x .approval/log/x", "log.mutate", ".approval/log/x"],
+    ["cp .approval/vault.enc .approval/log/events.jsonl", "cp x .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    // A write-only binary already declined the credential tier; pinned anyway.
+    ["tee .approval/log/events.jsonl .approval/env", "tee .approval/log/events.jsonl x", "log.mutate", ".approval/log/events.jsonl"],
+    // The variable shape of the same tier.
+    ["rm -rf .approval/log $APPROVAL_TG_TOKEN", "rm -rf .approval/log x", "log.mutate", ".approval/log"],
+    // policy.core outranks the credential class as well.
+    ["cp .approval/env APPROVAL.md", "cp x APPROVAL.md", "policy.core", "APPROVAL.md"],
+    ["cp ~/.hermes/.env .approval/policy.yaml", "cp x .approval/policy.yaml", "policy.core", ".approval/policy.yaml"],
+  ];
+  for (const [withCredential, without, cls, path] of rows) {
+    const a = classifyCommand(withCredential);
+    const b = classifyCommand(without);
+    assert.ok(a.ok && b.ok, withCredential);
+    if (!a.ok || !b.ok) continue;
+    assert.deepEqual(a.classes, [cls], withCredential);
+    assert.deepEqual(a.segments, b.segments.map((segment) => ({ ...segment, text: withCredential })), withCredential);
+    assert.equal(a.segments[0]?.rule, "protected-path", withCredential);
+    assert.equal(a.segments[0]?.path, path, withCredential);
+  }
+
+  // Unmoved: the credential class still answers where nothing outranks it, and
+  // a reader still takes it whatever else it names.
+  for (const command of [
+    "cp .approval/vault.enc /tmp/vault.enc",
+    "cp /tmp/vault.enc .approval/vault.enc",
+    "cp .approval/env CLAUDE.md",
+    "cat .approval/env .approval/log/events.jsonl",
+    "grep x .approval/env APPROVAL.md",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) continue;
+    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.equal(result.segments[0]?.rule, "credential-path", command);
+  }
+});
+
 test("APRV-503: the write side was already covered, and stays so", () => {
   // Output redirections onto a protected or credential path take the organ's
   // class (APRV-198, `redirect-protected`); a write to credential material is
