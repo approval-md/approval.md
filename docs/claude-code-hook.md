@@ -484,6 +484,22 @@ Five overrides sit on top of the table:
   the credential check sits below the opaque one and a refusal must not be
   softened into a request.
 
+  **An input redirection is the argument it stands in for** (APRV-503). A `<`
+  target, at any descriptor (`0<`, `3<`), is read with the same check: `cat <
+  ~/.hermes/.env`, `grep x < .approval/vault.enc` and `tee out.txt <
+  .approval/env` are `account.credential` with the target bound as the path,
+  and so is a bare `< file`, which makes `echo "$(< ~/.hermes/.env)"` an opaque
+  refusal (its substitution reads a credential). A `<` is a read whatever the
+  binary, so the write-only exemption that sends `tee .approval/env` to
+  `policy.core` does not apply to it. A secret-named variable in any
+  redirection target counts as it does in an argument. The redirect check sits
+  where the argument check sits: `sudo cat < .approval/env` stays opaque. A
+  here-string (`<<<`) is refused as `unparseable` rather than parsed, as it
+  always was, now with a detail of its own. In an effectful segment a protected
+  `<` target joins the positional scan above (`node x.js < APPROVAL.md` is
+  `policy.core`, rule `protected-path`); under a reader it is a read, as `cat
+  APPROVAL.md` is.
+
   **Precedence with the protected classes:** a WRITE to those files is
   `policy.core` — it edits the gate's own directory — and a READ of them is
   `account.credential`, because what leaves the machine is the secret. `cp` is

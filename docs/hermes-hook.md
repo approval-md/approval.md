@@ -421,7 +421,10 @@ it from the tenant's home), and nothing an agent writes reaches the hook
 process's environment. A read pattern (`cat .e*`) is expanded against its
 directory when that directory exists, and is a credential read when it could
 match a credential name and the directory is unknown. `<` input redirection is a
-read of its target. A copy or move into a directory (`cp x .`, `mv -t DIR`,
+read of its target, here and in the pure classifier (APRV-503): `cat <
+~/.hermes/.env` is `account.credential` from the text alone, and `cat < .env`
+run with the home as `workdir` is `account.credential` once this pass resolves
+the target. A copy or move into a directory (`cp x .`, `mv -t DIR`,
 `--target-directory=`) writes `<dir>/<source name>`, and `tar -x` / `unzip`
 write unknown names into `-C`/`-d` or the working directory.
 

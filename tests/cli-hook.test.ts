@@ -472,6 +472,30 @@ test("hook classify prints exec.local and the rule for a skill script, and refus
   assert.match(parsedEscaped.detail ?? "", /escapes its directory/u);
 });
 
+test("hook classify names the credential class for a redirected read (APRV-503)", () => {
+  // The verb a session is told to run when in doubt has to show the tier, or
+  // the tier does not exist where it is used: `cat < ~/.hermes/.env` answered
+  // `read.shell` here until this task.
+  const dir = caseDir();
+  const run = runCli(["hook", "classify", "--", "cat < ~/.hermes/.env"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^account\.credential {2,}credential-path {2,}cat < ~\/\.hermes\/\.env$/mu);
+  assert.match(run.stdout, /^classes: account\.credential$/mu);
+
+  for (const command of ["cat < .approval/env", "cat 0< $HOME/.hermes/.env", "cat < ~/.hermes/.env | grep KEY"]) {
+    const json = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(json.code, 0, json.stderr);
+    const parsed = JSON.parse(json.stdout) as { ok: boolean; classes: string[] };
+    assert.equal(parsed.ok, true, command);
+    assert.ok(parsed.classes.includes("account.credential"), `${command}: ${json.stdout}`);
+    assert.equal(parsed.classes.includes("read.shell") && parsed.classes.length === 1, false, command);
+  }
+
+  // An ordinary file on stdin is the read it always was.
+  const ordinary = runCli(["hook", "classify", "--json", "--", "cat < ./notes.md"], dir);
+  assert.deepEqual((JSON.parse(ordinary.stdout) as Record<string, unknown>)["classes"], ["read.shell"]);
+});
+
 test("hook classify keeps a body-carrying fetch at network.call", () => {
   const dir = caseDir();
   for (const command of ["curl -X POST https://example.com", "curl -d a=b https://example.com"]) {

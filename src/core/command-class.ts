@@ -839,6 +839,41 @@ function credentialTouch(
   return null;
 }
 
+/**
+ * Is this segment a credential touch through a REDIRECTION? (APRV-503.)
+ *
+ * The same two shapes {@link credentialTouch} reads from the argument list, read
+ * from the redirection targets, which the lexer keeps out of the word list. An
+ * input redirection's direction is known in a way a positional's is not: `<`
+ * (and `0<`, `3<`, any descriptor) opens its target for READING, whatever the
+ * binary in front of it is, so a credential file there is a read of the
+ * material and the {@link CREDENTIAL_WRITE_BINS} exemption does not apply
+ * (`tee out.txt < .approval/env` copies the secret out). Until this, `cat <
+ * ~/.hermes/.env` was `read.shell` while `cat ~/.hermes/.env` was
+ * `account.credential`, and so was `echo "$(< ~/.hermes/.env)"`, the bash idiom
+ * whose inner command is nothing but the redirection.
+ *
+ * A secret-named variable in ANY redirection target, read or write, carries the
+ * secret the way it does in an argument: the shell expands it into a file name,
+ * and a missing file prints that name on stderr.
+ *
+ * The rule id is the argument rule's own, so a channel, a doc table and a
+ * policy reader see one mechanism; `path` names the target word.
+ */
+function redirectCredentialTouch(
+  readTargets: readonly string[],
+  allTargets: readonly string[],
+): CredentialOutcome | null {
+  const named = readTargets.find((target) => isCredentialPath(target));
+  if (named !== undefined) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+  }
+  if (allTargets.some((target) => secretEnvReference(target) !== null)) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-env" };
+  }
+  return null;
+}
+
 /** `printenv` prints one variable, or all of them. */
 function refinePrintenv(ctx: RuleContext): Refinement {
   if (ctx.positionals.length === 0) {
@@ -1073,6 +1108,19 @@ function lex(command: string): LexResult {
     if (redirect !== null) {
       const op = redirect[2] as string;
       index += (redirect[0] as string).length;
+      if (op === "<<" && command[index] === "<") {
+        // A here-string (`<<<word`). Refused, as it always was, and named
+        // (APRV-503): the shell expands its word, and that word is the
+        // command's stdin. Parsing it would only ever loosen a refusal
+        // (`cat <<< hello` would become a read), while a credential read
+        // through it already has spellings that classify, so the refusal is
+        // the fail-closed answer and the detail says how to rewrite it.
+        return {
+          ok: false,
+          detail:
+            "a here-string (<<<) is not read by this classifier; pipe the text in with printf or name the file as an argument",
+        };
+      }
       if (op === "<<" || op === "<<-") {
         while (command[index] === " " || command[index] === "\t") index += 1;
         const terminator = readWord();
@@ -4132,6 +4180,13 @@ function classifySegment(
     // a write. `2>/dev/null` is the suffix an agent writes on half its reads,
     // and until this it turned every one of them into `files.write.workspace`.
     .filter((target) => !isDiscardTarget(target));
+  // APRV-503: the paths this segment READS through `<`, at any descriptor. They
+  // are judged where a named argument is judged, below: a credential target is
+  // `account.credential` and a protected one joins the effectful scan.
+  const readTargets = segment.redirects
+    .filter((redirect) => redirect.op === "<")
+    .map((redirect) => redirect.target.text);
+  const redirectTargets = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
@@ -4149,6 +4204,10 @@ function classifySegment(
 
   const bin = words[cursor];
   if (bin === undefined) {
+    // A bare input redirection opens its target, and inside `$(…)` it IS the
+    // read: `$(< ~/.hermes/.env)` is bash for "the file's contents" (APRV-503).
+    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
+    if (bareCredential !== null) return { ok: true, ...bareCredential };
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
     return writeTargets.length > 0
@@ -4186,6 +4245,12 @@ function classifySegment(
   // `xxd`, `less`) is named rather than answered `unclassified` (APRV-194).
   const credential = credentialTouch(basename, args, positionals);
   if (credential !== null) return { ok: true, ...credential };
+  // APRV-503: the same tier, read from the redirection targets, at the same
+  // place in the order: below the opaque checks (`sudo cat < .approval/env`
+  // stays a refusal) and above the binary table (`less < .approval/env` and
+  // `python3 < ~/.hermes/.env` are named rather than `unclassified`).
+  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  if (redirectCredential !== null) return { ok: true, ...redirectCredential };
   const sub = positionals[0] ?? null;
   const substituted = segment.words
     .slice(cursor + 1)
@@ -4231,10 +4296,24 @@ function classifySegment(
   // a directory path is a sentence rather than a file. Redirection targets
   // above, and the apply-patch and file-tool paths elsewhere, are paths by
   // construction and are not offered the skip.
+  //
+  // APRV-503: an INPUT redirection's target is scanned here too, as the named
+  // argument it stands in for (`node x.js < APPROVAL.md` is `node x.js
+  // APPROVAL.md` with the file on stdin), and without the prose skip, because a
+  // redirection target is a path by construction. Its direction is known to be a
+  // read, so this is the stricter of two defensible answers, which is the one
+  // the protected tier takes everywhere else. A read segment keeps `read.*`
+  // either way: `cat < APPROVAL.md` reads the policy as `cat APPROVAL.md` does.
+  // Among equal ranks the positional wins, so every existing answer is unmoved.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
     const named = strictestProtected(positionals, protectedPaths, true);
-    if (named !== null) {
-      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+    const fed = strictestProtected(readTargets, protectedPaths);
+    const touched =
+      fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
+        ? named
+        : fed;
+    if (touched !== null) {
+      return { ok: true, class: touched.surface, rule: "protected-path", path: touched.path };
     }
   }
 
