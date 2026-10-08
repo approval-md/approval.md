@@ -3,10 +3,10 @@ id: APRV-482
 title: >-
   A review verdict needs an explicit affirmative: a reaction-only tap or a bare
   CLI review no longer writes verdict ok
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 10:25'
+updated_date: '2026-10-08 01:14'
 labels:
   - agentvillage
 dependencies: []
@@ -56,4 +56,6 @@ Fix round 2 (impact-scoped recheck of PR #614).
 - Test: 'PR #614 recheck NF-1: an unmapped or off-roster account's Deny arms nothing, so the approver is never blocked' (the recheck's F3 scenario: 999 and dana refused and nothing armed; carter's grade, Deny, Deny not blocked, recorded denied + indifferent). Mutation (arm on any refusal) fails it.
 - Side effect: each first Deny now prints the runtime's 'telegram review refused (verdict-required)' stderr line and counts in pollOnce's reviews, exactly as a lone grade already did.
 - Residual (accepted by design): a roster member's armed Deny still blocks other accounts' verdict taps on that card until that member finishes, /skip, or a restart; only an account that may review can cause it.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; shipped in PR #614 (APRV-480..483 supervised-retro core) merged 27980de0 on 2026-10-05; released in 0.4.1 (v0.4.1, PR #622 5f9b9c3d).
 <!-- SECTION:NOTES:END -->
