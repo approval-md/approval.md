@@ -3,10 +3,10 @@ id: APRV-500
 title: >-
   Reserve the policy delegation block (validated, inert) and the model reviewer
   identity
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 23:20'
-updated_date: '2026-10-05 23:33'
+updated_date: '2026-10-08 01:15'
 labels:
   - policy
   - schema
@@ -114,4 +114,6 @@ Refutation: `/Users/carter/dev/agentvillage/private/handover/lanes-main/A11-refu
 - Refuter (orchestrator dispatches): see the noticed-and-accepted list in the PR body.
 - Template (R2) carries the block only with a fleet-wide 0.4.2 pin.
 - Stage 2 (adviser) precondition: the S4 deny list above is refused at parse time before the adviser ships.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; PR #624 merged 046176d0 (2026-10-06), SPEC hunks 7-8 signed off at seq 84047 (PR #626 60d2d2cd), released in 0.4.2 (PR #625 9f796b03).
 <!-- SECTION:NOTES:END -->

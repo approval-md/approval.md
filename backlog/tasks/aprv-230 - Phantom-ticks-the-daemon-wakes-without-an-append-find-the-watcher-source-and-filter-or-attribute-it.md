@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-230'
 created_date: '2026-09-02 18:17'
-updated_date: '2026-09-06 08:18'
+updated_date: '2026-10-08 01:13'
 labels:
   - daemon
   - performance
@@ -33,7 +33,7 @@ Observed on the primary 2026-09-02 after APRV-212 shipped, with --debounce 250ms
 - [x] #2 Events provably from bookkeeping files (the append lockfile, editor swap files, .DS_Store) no longer schedule a tick, with a test per filtered name
 - [x] #3 The tick line gains an additive woke_by field (log | tasks | interval) and the filename that woke it when one was reported, and the human formatter prints it
 - [x] #4 The APRV-212 no-self-wake test still passes and a new test proves a lockfile create/remove in the log dir does not tick
-- [ ] #5 docs/cli-reference.md daemon run section documents the trace flag and the woke_by field; npm test passes; lint clean
+- [x] #5 docs/cli-reference.md daemon run section documents the trace flag and the woke_by field; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -183,4 +183,6 @@ installed tree, every production dependency admits the Node 20 floor
 ajv-formats declare no range), so that case is environmental and untouched by this diff,
 which adds no dependency. The daemon suites, cli-help, cli-long-help, cli-coverage,
 daemon-tick-cost and daemon-projection were run here and are green.
+
+2026-10-08 sweep (claude-b3/SWEEP-APRV-1): AC5 ticked: docs/cli-reference.md documents --trace-watch (line 6457) and woke_by (line 6448) on origin/main; delivered by merged PR #233 (2cd995a0, commit 521047a5). AC1 (live primary classification) stays open.
 <!-- SECTION:NOTES:END -->
