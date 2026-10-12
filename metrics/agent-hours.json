@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-05T10:30:09.580Z",
+  "generated_at": "2026-10-12T10:30:15.777Z",
   "repo": "approval-md/approval.md",
   "method": {
     "active_time": "sum of gaps between consecutive transcript events, each capped at gap_seconds, attributed to the most recent assistant model",
@@ -31,11 +31,11 @@
       "input_tokens": 19925848
     },
     "claude-opus": {
-      "hours": 318.5,
-      "sessions": 953,
-      "turns": 95361,
-      "output_tokens": 31196448,
-      "input_tokens": 19264071681
+      "hours": 319.2,
+      "sessions": 1051,
+      "turns": 96154,
+      "output_tokens": 31653890,
+      "input_tokens": 19295503630
     },
     "claude-sonnet": {
       "hours": 9.7,
@@ -74,7 +74,7 @@
       "approx": true
     }
   },
-  "total_hours": 673.6,
+  "total_hours": 674.3,
   "weeks": {
     "2026-W32": {
       "claude-fable": 15.8,
@@ -136,7 +136,10 @@
     },
     "2026-W41": {
       "claude-fable": 3.7,
-      "claude-opus": 6
+      "claude-opus": 6.4
+    },
+    "2026-W42": {
+      "claude-opus": 0.4
     }
   }
 }
