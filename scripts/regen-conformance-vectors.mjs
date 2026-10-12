@@ -2139,6 +2139,519 @@ const commandClassVectors = [
       "the write side was already covered and is pinned here beside the read side: a write redirection onto the Hermes home's .env is policy.core under redirect-protected",
     input: { command: "echo x > ~/.hermes/.env" },
   },
+  // --- date: the clock, read and never set (APRV-508) ------------------------
+  //
+  // A SHAPE row: the display forms match it and every setting form keeps the
+  // `unclassified` refusal the binary had before the row existed. The refusals
+  // are controls, because each is an input an implementation that read `date`
+  // as a plain reader would wrongly allow.
+  {
+    id: "date-bare-is-a-read",
+    description: "a bare date prints the time and touches nothing",
+    input: { command: "date" },
+  },
+  {
+    id: "date-format-is-a-read",
+    description: "one operand starting with + is an output format",
+    input: { command: "date '+%Y-%m-%d %H:%M:%S %Z'" },
+  },
+  {
+    id: "date-display-flags-are-a-read",
+    description: "-u, -R and -I with its value attached print in another layout; nothing else changes",
+    input: { command: "date -u -R && date -Iseconds && date --rfc-3339=seconds" },
+  },
+  {
+    id: "date-string-is-a-read",
+    description: "-d parses a string and prints it; the clock is not set",
+    input: { command: "date -d 'next monday' +%F" },
+  },
+  {
+    id: "date-zone-assignment-is-a-read",
+    description: "TZ in front of the binary picks the zone it prints in and is the one kind of assignment the row admits",
+    input: { command: "TZ=Asia/Kolkata date" },
+  },
+  {
+    id: "date-in-a-substitution-is-a-read",
+    description: "the shape agents write: date inside $(…), an inert read substitution",
+    input: { command: 'echo "since $(date -u -d "1 hour ago" +%FT%TZ)"' },
+  },
+  {
+    id: "date-at-the-end-of-a-pipeline-is-a-read",
+    description: "a four-segment pipeline ending in date, refused once in production, reads in every segment",
+    input: { command: "printenv HOME | cut -d/ -f2 | tr a-z A-Z | date -u +%FT%TZ" },
+  },
+  {
+    id: "date-reference-to-a-credential-is-a-credential-touch",
+    description: "a reference to a credential file is named for what it touches: the credential tier answers before any row",
+    input: { command: "date -r ~/.hermes/.env" },
+  },
+  {
+    id: "bracket-is-test",
+    description: "[ is test under its other name, and the closing ] is an argument",
+    input: { command: "[ -f README.md ]" },
+  },
+  {
+    id: "date-set-flag-refuses",
+    description: "-s sets the system clock: no rule, as before the row existed",
+    input: { command: "date -s '2020-01-01 00:00'" },
+    control: true,
+  },
+  {
+    id: "date-set-long-refuses",
+    description: "--set is the same act; so is any abbreviation getopt would accept for it",
+    input: { command: "date --set=2020-01-01" },
+    control: true,
+  },
+  {
+    id: "date-bare-operand-refuses",
+    description: "an operand not starting with + is MMDDhhmm[[CC]YY][.ss], which sets the clock on GNU and BSD alike",
+    input: { command: "date 101209002026" },
+    control: true,
+  },
+  {
+    id: "date-file-refuses",
+    description: "-f reads a file's lines and echoes the bad ones back, a read of its contents the row does not name",
+    input: { command: "date -f dates.txt" },
+    control: true,
+  },
+  {
+    id: "date-reference-refuses",
+    description: "-r FILE reads a file's metadata; the row admits no form that opens a file, in any spelling",
+    input: { command: "date -r README.md" },
+    control: true,
+  },
+  {
+    id: "date-reference-abbreviation-refuses",
+    description: "getopt and clap both accept a unique long-option prefix, so --ref is --reference and is refused",
+    input: { command: "date --ref=README.md" },
+    control: true,
+  },
+  {
+    id: "date-clustered-file-refuses",
+    description: "-f inside a cluster reads the file as -f alone does",
+    input: { command: "date -uf dates.txt" },
+    control: true,
+  },
+  {
+    id: "date-flag-shaped-value-refuses",
+    description: "a value starting with - is the value to getopt and may be the next flag to clap (uutils), here --set",
+    input: { command: "date -d -s now" },
+    control: true,
+  },
+  {
+    id: "date-zone-path-refuses",
+    description: "a TZ value that is a path makes date open that file as a zone",
+    input: { command: "TZ=/etc/shadow date" },
+    control: true,
+  },
+  {
+    id: "date-zone-climb-refuses",
+    description: "a TZ value climbing out of the zone database with .. is a path too",
+    input: { command: "TZ=Asia/../../etc/shadow date" },
+    control: true,
+  },
+  {
+    id: "date-embedded-zone-path-refuses",
+    description: "a TZ=\"…\" inside a -d string is resolved as the variable is, so a path there is refused",
+    input: { command: "date -d 'TZ=\"/etc/shadow\" now'" },
+    control: true,
+  },
+  {
+    id: "date-unreadable-word-refuses",
+    description: "an unquoted expansion may split into flags this parse never saw, so a word carrying $ declines the row",
+    input: { command: "date +$FMT" },
+    control: true,
+  },
+  {
+    id: "date-foreign-assignment-refuses",
+    description: "an assignment other than the zone or the locale (LD_PRELOAD, PATH) declines the row",
+    input: { command: "LD_PRELOAD=./x.so date" },
+    control: true,
+  },
+  {
+    id: "date-end-of-options-refuses",
+    description: "-- then an operand is a clock set to uutils (`date -- 0101`); -- is never admitted",
+    input: { command: 'date -- 0101' },
+    control: true,
+  },
+  {
+    id: "date-unlisted-cluster-refuses",
+    description: "a cluster is admitted only by its exact spelling, so -us (and every cluster not listed) is refused",
+    input: { command: 'date -us now' },
+    control: true,
+  },
+  {
+    id: "date-attached-short-value-refuses",
+    description: "GNU and clap read -d=x differently, so no attached short value is admitted",
+    input: { command: 'date -d=@0' },
+    control: true,
+  },
+  {
+    id: "date-local-binary-refuses",
+    description: "./date is whatever program sits in the working directory; a shape row vouches only for the system's binary",
+    input: { command: './date' },
+    control: true,
+  },
+  {
+    id: "uptime-is-a-read",
+    description: "uptime with no arguments prints the load and touches nothing",
+    input: { command: 'uptime' },
+  },
+  {
+    id: "uptime-file-refuses",
+    description: "uptime FILE reads that utmp file, so an operand is refused",
+    input: { command: 'uptime /var/log/wtmp' },
+    control: true,
+  },
+  {
+    id: "whoami-is-a-read",
+    description: "whoami prints the effective user",
+    input: { command: 'whoami' },
+  },
+  {
+    id: "hostname-is-a-read",
+    description: "hostname with one display flag prints the name",
+    input: { command: 'hostname -s' },
+  },
+  {
+    id: "hostname-operand-sets-refuses",
+    description: "an operand SETS the host name",
+    input: { command: 'hostname newname' },
+    control: true,
+  },
+  {
+    id: "hostname-end-of-options-sets-refuses",
+    description: "-- then a new name sets it as well",
+    input: { command: 'hostname -- newname' },
+    control: true,
+  },
+  {
+    id: "hostname-file-refuses",
+    description: "-F sets the host name from a file",
+    input: { command: 'hostname -F /etc/hostname' },
+    control: true,
+  },
+  {
+    id: "hostname-file-abbreviation-refuses",
+    description: "an abbreviation of --file is --file to the option parser",
+    input: { command: 'hostname --fi=/etc/hostname' },
+    control: true,
+  },
+  {
+    id: "df-is-a-read",
+    description: "df with display flags prints the mount table",
+    input: { command: 'df -hT' },
+  },
+  {
+    id: "df-path-refuses",
+    description: "a path operand is not in the grammar",
+    input: { command: 'df -h /etc' },
+    control: true,
+  },
+  {
+    id: "free-is-a-read",
+    description: "free with display flags prints memory use",
+    input: { command: 'free -h' },
+  },
+  {
+    id: "free-repeat-refuses",
+    description: "-s repeats the report on a timer and holds the turn",
+    input: { command: 'free -s 1' },
+    control: true,
+  },
+  {
+    id: "seq-is-a-read",
+    description: "seq prints numbers",
+    input: { command: 'seq -w 1 10' },
+  },
+  {
+    id: "seq-flag-after-number-refuses",
+    description: "uutils reads a word after a number as another number, GNU as a flag; the grammar admits neither",
+    input: { command: 'seq 1 10 -w' },
+    control: true,
+  },
+  {
+    id: "seq-hex-refuses",
+    description: "only decimal numbers are in the grammar",
+    input: { command: 'seq 0x10' },
+    control: true,
+  },
+  {
+    id: "paste-is-a-read",
+    description: "paste reads its file operands, scoped as cat's are",
+    input: { command: 'paste -d, a.txt b.txt' },
+  },
+  {
+    id: "paste-separate-delimiter-refuses",
+    description: "a separate -d value would be taken for a file by the read scope",
+    input: { command: 'paste -d , a.txt b.txt' },
+    control: true,
+  },
+  {
+    id: "dup-to-file-onto-the-policy-is-policy-core",
+    description: "bash reads >&WORD as >WORD 2>&1 when WORD is not a descriptor, so this truncates the policy file (refutation M1)",
+    input: { command: "paste /dev/null >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-file-under-a-test-is-policy-core",
+    description: "the same write behind [ (refutation M1)",
+    input: { command: "[ -f x ] >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-file-under-cat-is-policy-core",
+    description: "the same write behind cat, which was a read on 0.4.3 as well (refutation M1)",
+    input: { command: "cat /dev/null >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-plus-word-is-a-write",
+    description: "a word starting with + after >& is a file, not a descriptor (refutation M1)",
+    input: { command: "date >& +x" },
+  },
+  {
+    id: "dup-to-decimal-is-a-write",
+    description: "10.5 is not a descriptor, so >&10.5 writes the file 10.5 (refutation M1)",
+    input: { command: "seq 1 >&10.5" },
+  },
+  {
+    id: "dup-to-digits-and-letters-is-a-write",
+    description: "1x is not a descriptor, so >&1x writes the file 1x (refutation M1)",
+    input: { command: "paste a >&1x" },
+  },
+  {
+    id: "descriptor-dup-is-unmoved",
+    description: "2>&1 copies a descriptor and touches no file",
+    input: { command: "date -u 2>&1" },
+  },
+  {
+    id: "dup-in-from-a-word-refuses",
+    description: "<& with a word that is not a descriptor is not read by this classifier",
+    input: { command: "cat <&notes" },
+    control: true,
+  },
+  {
+    id: "bare-zone-assignment-refuses",
+    description: "a bare TZ= reaches a later date when TZ is exported, so it is not a read (refutation S1)",
+    input: { command: "TZ=/etc/x; date" },
+    control: true,
+  },
+  {
+    id: "bare-path-assignment-refuses",
+    description: "a bare PATH= picks which program every later command runs (refutation S1)",
+    input: { command: "PATH=/tmp/x; cat f" },
+    control: true,
+  },
+  {
+    id: "date-lowercase-embedded-zone-refuses",
+    description: "the TZ= inside a -d string is matched case-insensitively (refutation S2)",
+    input: { command: "date -d 'tz=\"/etc/x\" now'" },
+    control: true,
+  },
+  {
+    id: "test-array-subscript-refuses",
+    description: "bash evaluates a -v subscript as arithmetic, $(\u2026) included (refutation S3)",
+    input: { command: "test -v 'a[$(id)]'" },
+    control: true,
+  },
+  {
+    id: "bracket-array-subscript-refuses",
+    description: "[ is test, and refuses the same (refutation S3)",
+    input: { command: "[ -v 'a[$(id)]' ]" },
+    control: true,
+  },
+  {
+    id: "seq-past-the-cap-refuses",
+    description: "seq prints at most 100,000 values (refutation S4)",
+    input: { command: "seq 1e18" },
+    control: true,
+  },
+  {
+    id: "seq-zero-increment-refuses",
+    description: "a zero increment never ends (refutation S4)",
+    input: { command: "seq 1 0 5" },
+    control: true,
+  },
+  {
+    id: "dup-target-substitution-refuses",
+    description: "a $(\u2026) inside a >& target runs before the redirect opens and is classified like any other (recheck M-R1)",
+    input: { command: "cat a >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "dup-target-quoted-substitution-refuses",
+    description: "the same inside double quotes (recheck M-R1)",
+    input: { command: "cat a >&\"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "dup-target-substitution-under-date-refuses",
+    description: "the same behind date (recheck M-R1)",
+    input: { command: "date >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "dup-target-substitution-under-paste-refuses",
+    description: "the same behind paste (recheck M-R1)",
+    input: { command: "paste a >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "write-target-substitution-refuses",
+    description: "a $(\u2026) in a > target; a hole on 0.4.3 as well (recheck M-R1)",
+    input: { command: "cat a > x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "bare-write-target-substitution-refuses",
+    description: "the same with no command (recheck M-R1)",
+    input: { command: "> \"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "append-target-substitution-refuses",
+    description: "the same in a >> target (recheck M-R1)",
+    input: { command: "cat a >> x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "read-target-substitution-refuses",
+    description: "a $(\u2026) in a < target ran under read.shell on 0.4.3 (recheck M-R1)",
+    input: { command: "cat a < \"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "write-target-backtick-refuses",
+    description: "a backtick in a redirection target is refused, as everywhere",
+    input: { command: "cat a > x`id`" },
+    control: true,
+  },
+  {
+    id: "write-target-process-substitution-refuses",
+    description: "a process substitution as a redirection target is not read",
+    input: { command: "cat a > >(rm x)" },
+    control: true,
+  },
+  {
+    id: "printf-into-path-refuses",
+    description: "printf -v PATH assigns PATH, the bare assignment refused by name (recheck S-R1)",
+    input: { command: "printf -v PATH %s /tmp/x; cat f" },
+    control: true,
+  },
+  {
+    id: "printf-attached-into-zone-refuses",
+    description: "the attached spelling into TZ (recheck S-R1)",
+    input: { command: "printf -vTZ %s /etc/x; date" },
+    control: true,
+  },
+  {
+    id: "bare-home-assignment-refuses",
+    description: "HOME moves where cd goes (recheck N-R1, S-R1)",
+    input: { command: "HOME=/tmp/x; cd" },
+    control: true,
+  },
+  {
+    id: "seq-beyond-double-precision-refuses",
+    description: "a range a double cannot count exactly could print trillions (recheck S-R2)",
+    input: { command: "seq 1000000000000000000000000000000 1000000000000000050000000000000" },
+    control: true,
+  },
+  {
+    id: "read-target-read-substitution-is-a-read",
+    description: "a read-only $(\u2026) in a < target stays inert",
+    input: { command: "cat < \"notes-$(date +%F).md\"" },
+  },
+  {
+    id: "heredoc-delimiter-substitution-refuses",
+    description: "bash takes a heredoc delimiter literally, so a $(\u2026) in it moves where the body ends; the line after bash's terminator would hide as body",
+    input: { command: "cat <<$(rm y)\nx\n$(rm y)\nrm -rf z\n" },
+    control: true,
+  },
+  {
+    id: "heredoc-delimiter-variable-refuses",
+    description: "the same for a $ variable in the delimiter",
+    input: { command: "cat <<$X\nbody\n$X\nrm -rf z\n" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-substitution-refuses",
+    description: "an unquoted heredoc body is expanded when read, so its $(\u2026) runs and is classified (APRV-504)",
+    input: { command: "cat <<EOF\n$(rm -rf y)\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-credential-substitution-refuses",
+    description: "the same with a credential read in the body (APRV-504)",
+    input: { command: "cat <<EOF\n$(cat ~/.hermes/.env)\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-backtick-refuses",
+    description: "a backtick in an unquoted body is opaque, as in double quotes (APRV-504)",
+    input: { command: "cat <<EOF\n`rm y`\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-arithmetic-refuses",
+    description: "an arithmetic expansion in an unquoted body is opaque (APRV-504)",
+    input: { command: "cat <<EOF\n$((1+1))\nEOF" },
+    control: true,
+  },
+  {
+    id: "assignment-value-substitution-refuses",
+    description: "a $(\u2026) in an assignment value runs and is classified",
+    input: { command: "X=$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "array-subscript-substitution-refuses",
+    description: "a $(\u2026) in an array subscript runs and is classified",
+    input: { command: "a[$(rm -rf y)]=1" },
+    control: true,
+  },
+  {
+    id: "nested-expansion-substitution-refuses",
+    description: "a $(\u2026) nested in ${\u2026} runs and is classified",
+    input: { command: "echo ${X:-$(rm -rf y)}" },
+    control: true,
+  },
+  {
+    id: "process-substitution-argument-refuses",
+    description: "a process substitution as an argument is not read",
+    input: { command: "cat <(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "heredoc-quoted-body-is-inert",
+    description: "a quoted delimiter's body is data, never expanded (APRV-504)",
+    input: { command: "cat <<'EOF'\n$(rm y)\nEOF" },
+  },
+  {
+    id: "heredoc-body-read-substitution-is-a-read",
+    description: "a read-only $(\u2026) in an unquoted body is inert",
+    input: { command: "cat <<EOF\ntoday $(date +%F)\nEOF" },
+  },
+  {
+    id: "comment-hides-no-heredoc-refuses",
+    description: "bash ends the line at a # that begins a word, so #<<EOF opens no heredoc and the next lines are commands (found by the shell differential)",
+    input: { command: "cat #<<EOF\nx\nevil\nEOF" },
+    control: true,
+  },
+  {
+    id: "comment-after-carriage-return-is-a-word-refuses",
+    description: "after a carriage return bash reads # as a word character, so the ; after it still separates a command",
+    input: { command: "date \r# ; evil" },
+    control: true,
+  },
+  {
+    id: "commented-substitution-is-a-read",
+    description: "a $(\u2026) after a word-initial # is a comment and never runs",
+    input: { command: "date -u # $(rm -rf y)" },
+  },
+  {
+    id: "paste-end-of-options-refuses",
+    description: "-- is never admitted",
+    input: { command: 'paste -- a.txt' },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -3319,6 +3832,37 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Eighty-nine
+    // new vectors. Three pin comments as bash reads them (a `#` that begins a
+    // word ends the line), found by tests/command-class-shell-differential. Twelve pin a substitution in every position the shell
+    // expands: an unquoted heredoc body (APRV-504, folded in: its `$(…)` ran
+    // under `read.shell`), a heredoc delimiter carrying `$` (refused: bash
+    // takes it literally, and a guessed terminator hid the lines after it),
+    // an assignment value, an array subscript, a nested `${…}`, process
+    // substitution. Fifteen pin the recheck fixes: a `$(…)` in ANY redirection
+    // target is classified (it ran unclassified under `<`, `>`, `>>` on 0.4.3,
+    // and under `>&` once that became a target), `printf -v` into a steering
+    // variable, a bare `HOME=`, and a `seq` range past double precision.
+    // Fifteen more pin the PR #636 refutation fixes: `>&WORD` with a
+    // non-descriptor WORD is a write (it was skipped as a dup, so `cat
+    // /dev/null >& APPROVAL.md` read as `read.shell`, on 0.4.3 too; no
+    // committed vector carried a `>&`, so no expectation moves), `<&WORD`
+    // refuses, a bare steering assignment (`TZ=`, `PATH=`) is not a read, a
+    // lowercase `tz=` in `-d`, a `test -v` subscript, and an endless or
+    // oversized `seq`. The rest pin the system-information readers (`uptime`, `whoami`,
+    // `hostname`, `df`, `free`, `seq`, `paste`) in their display forms and,
+    // as controls, the forms that set something, read something or parse
+    // differently between GNU and uutils (`hostname NAME`, `hostname -- NAME`,
+    // `seq 1 10 -w`); and `date` in its display forms as `read.shell` (rule
+    // `date-read`), inside `$(…)` and at the end of a pipeline, `[` as `test`,
+    // and as `unclassified` (the answer every `date` had before) its setting
+    // forms, every file-reading form (`-f`, `-r` in any spelling or cluster, a
+    // zone path in TZ or inside a `-d` string), a flag-shaped value, an
+    // unreadable word and a foreign assignment. No
+    // committed expectation in this file moves: the suite has never carried a
+    // `date` vector. What moved outside it is a refusal becoming an answer,
+    // for the display forms only.
+    //
     // 1.6.0 STAYS 1.6.0 after the refutation's fix round added six
     // `credential-redirect-*` vectors to it, by the rule 1.4.0 set: a version
     // is claimed at merge rather than at branch, and 1.6.0 has not been merged,
@@ -3337,7 +3881,7 @@ const SUITES = [
     // beside the protected class as a second entry, so `classes` carries both.
     // Still 1.6.0, for the same reason: none of those vectors has ever been
     // merged, so no implementation was held to the single-class answer.
-    vectors_version: "1.6.0",
+    vectors_version: "1.7.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

@@ -58,9 +58,103 @@ before a tag.
 - **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
   them refusal controls; no existing expectation moved). Totals 580/580.
 
+- **Heredocs: an unquoted body's substitutions are classified, and a
+  delimiter carrying `$` is refused (APRV-504, folded into APRV-508). Both
+  were holes in 0.4.3.** The lexer skipped every heredoc body as data, but
+  bash expands an unquoted body (`<<EOF`) when it reads it, so `cat <<EOF`
+  with `$(rm -rf y)` or `$(cat ~/.hermes/.env)` in the body was `read.shell`.
+  Its `$(…)` now go through the recursive check, and a backtick or an
+  arithmetic expansion there is `opaque`, as inside double quotes. A quoted
+  delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) keeps the body inert. And bash
+  takes a delimiter literally while the lexer set a `$(…)` in it aside, so
+  `cat <<$(x)` ended the body at a line bash never looks for and every command
+  after bash's real terminator was swallowed unclassified: a delimiter
+  carrying `$` or a backtick is now refused `unparseable`.
+- **A `#` that begins a word is a comment, as bash reads it (APRV-508). This
+  was a hole in 0.4.3.** The lexer read `#` as an ordinary word character, so
+  `cat #<<EOF` opened a heredoc that bash never sees (bash ends the line at
+  the `#`), and the commands on the lines after it were swallowed as body and
+  never classified. Found by a new shell differential test
+  (`tests/command-class-shell-differential.test.ts`) that runs every command
+  string through a real bash with stub-only `PATH` and checks that nothing
+  the classifier admits runs a command it did not classify.
+- **A command substitution in a redirection target is classified (APRV-508,
+  PR #636 recheck M-R1). This was a hole in 0.4.3.** The classifier walked
+  the `$(…)` in a segment's words and never the ones in its redirection
+  targets, which the shell expands the same way and runs before the command
+  starts. So `cat a < "x$(rm -rf y)"` was `read.shell` and `cat a >
+  x$(rm -rf y)` was `files.write.workspace` with the `rm` unclassified, on
+  0.4.3. Every target's substitutions now go through the same recursive check
+  as an argument's: a refused inner command refuses the segment, and one that
+  is not a read makes it `opaque`.
+- **`>&WORD` to a file is a write (APRV-508, PR #636 refutation M1).** The
+  lexer skipped every `>&`/`<&` as a descriptor dup, but bash reads `>&WORD`
+  with a WORD that is not a descriptor as `>WORD 2>&1`. So `cat /dev/null >&
+  APPROVAL.md` truncated the policy file while classifying `read.shell` (on
+  0.4.3 too). Now the word after `>&` is read in full: digits with an
+  optional trailing `-`, or a lone `-`, is a dup or close as before; any other
+  word is a write redirection, judged by the protected-path and write checks
+  (`policy.core` for the policy file). After `<&`, a word that is not a
+  descriptor is refused `unparseable`.
+- **A bare steering assignment is not a read (APRV-508, refutation S1).**
+  `TZ=…`, `TZDIR=…`, `PATH=…`, `LOCPATH=…`, `GCONV_PATH=…`, `LANG=…`,
+  `LANGUAGE=…`, `LC_*=…`, `LD_*=…`, `HOME=…` and `CDPATH=…` in a segment of
+  their own, or set through `printf -v NAME`, reach every
+  later command when the variable is exported, so `PATH=/tmp/x; cat f` and
+  `TZ=/etc/x; date` are `unclassified` rather than `read.shell`. Other bare
+  assignments (`NOW=$(date +%s)`) still read.
+- **`test` and `[` refuse an array subscript (APRV-508, refutation S3).** bash
+  evaluates a `-v`/`-R` operand's subscript as arithmetic, `$(…)` included, so
+  `test -v 'a[$(id)]'` runs a command. Such an operand, and an unquoted
+  substitution (whose output the shell splits into words), is `unclassified`.
+
+### Classifier
+
+- **`date` reads the clock (APRV-508).** `date` was `unclassified`, so a hosted
+  agent behind the gate could not tell what day it was: `date` was refused
+  `hook-unclassified` and the `python3 -c` fallback `hook-opaque`. A new shape
+  row, `date-read`, answers `read.shell` for the display forms only, through
+  an exact-spelling allow-grammar read for GNU and uutils `date` at once (the
+  hosted boxes run uutils 0.10): a bare `date`, one `+FORMAT` operand,
+  `-u`/`--utc`/`--universal`, `-R`/`--rfc-2822`/`--rfc-email`,
+  `-I[precision]`/`--iso-8601[=precision]`, `--rfc-3339 precision`,
+  `-d`/`-ud`/`--date STRING`, `--debug`, `--resolution`, `--help`,
+  `--version`, the clusters `-uR`/`-Ru` and no others, each flag at most once,
+  and `TZ=Zone date`. The zone and locale variables are the only assignments
+  admitted, and only with values that name no file. Every setting form (`-s`,
+  `--set`, a bare `MMDDhhmm[[CC]YY][.ss]` operand, `--`), every form that opens
+  a file (`-f`, `-r` in any spelling, a zone path in `TZ` or in a `TZ="…"`
+  inside a `-d` string), a value starting with `-`, an attached short value,
+  abbreviations, unlisted clusters, words carrying `$`, backticks, globs or
+  braces, and a `date` spelled from outside the system binary directories
+  (`./date`) keep the `unclassified` refusal. `timedatectl` and `python3 -c`
+  are unchanged.
+- **The system-information readers (APRV-508).** `uptime`, `whoami`,
+  `hostname`, `df`, `free`, `seq` (at most 100,000 values) and `paste` are
+  `read.shell` in their display forms, each through its own strict allow-grammar (`sysinfo-read`,
+  `hostname-read`, `df-read`, `free-read`, `seq-read`, `paste-read`): exact
+  flag spellings, listed clusters only, no `--`, no option twice, operands only
+  where the tool's grammar names one (numbers for `seq`, files for `paste`,
+  read-scoped as `cat`'s are). `hostname NAME` and `hostname -F FILE` SET the
+  host name and stay `unclassified`, as do `uptime FILE`, `df PATH`, `free -s`
+  and every other form outside the grammars. A differential test runs every
+  admitted argv from a mixed alphabet against GNU coreutils and, when
+  `APPROVAL_DIFF_UUTILS` names it, uutils coreutils.
+- **`[` reads as `test` does (APRV-508).** It joins the `read-shell` row.
+
 ### Behavior changes for an existing policy
 
-- **No answer moves to a looser class.** A command whose `<` target is a
+- **Some answers move to a stricter class** (APRV-508 refutation): a command
+  with `>&WORD` onto a file moves from its read class to the write class of
+  that file (`policy.core` for the policy file); `<&WORD` with a non-descriptor
+  word, a bare steering assignment, `test`/`[` with a `-v`/`-R` subscript or an
+  unquoted substitution move from `read.shell` to a refusal.
+- **Some answers move to a looser class, on purpose** (APRV-508): `date`,
+  `uptime`, `whoami`, `hostname`, `df`, `free`, `seq` and `paste` in their
+  display forms, and `[`, move from `unclassified` to `read.shell`. No form
+  that sets the clock or the host name, or that opens a file other than
+  `paste`'s scoped operands, moves.
+- **No other answer moves to a looser class.** A command whose `<` target is a
   credential file moves from `read.shell` (or `unclassified`,
   `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,
   by binary) to `account.credential`, which every shipped policy holds

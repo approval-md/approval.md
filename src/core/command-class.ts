@@ -48,6 +48,15 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
+import { isDateDisplay } from "./date-argv.js";
+import {
+  isBareInfo,
+  isDfDisplay,
+  isFreeDisplay,
+  isHostnameDisplay,
+  isPasteRead,
+  isSeqDisplay,
+} from "./sysinfo-argv.js";
 import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
@@ -921,6 +930,12 @@ interface LexSegment {
   text: string;
   words: LexWord[];
   redirects: LexRedirect[];
+  /**
+   * The `$(…)` found in the bodies of unquoted heredocs consumed on this
+   * segment's line (APRV-504, folded into APRV-508). The shell expands them
+   * when the body is read, so they are classified like any other.
+   */
+  bodySubstitutions: string[];
   /** Set when the segment contains a construct whose effect cannot be read. */
   opaque: string | null;
 }
@@ -935,6 +950,11 @@ const OPERATOR_CHARS = new Set(["&", "|", ";", "(", ")", "<", ">", "\n"]);
 interface PendingHeredoc {
   terminator: string;
   stripTabs: boolean;
+  /**
+   * Does the shell expand the body? It does unless some part of the delimiter
+   * is quoted (`<<'EOF'`, `<<"EOF"`, `<<E"OF"`, `<<\EOF`).
+   */
+  expands: boolean;
 }
 
 /**
@@ -981,22 +1001,25 @@ function lex(command: string): LexResult {
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
+  let bodySubstitutions: string[] = [];
   let opaque: string | null = null;
   let segmentStart = 0;
   let index = 0;
   const pending: PendingHeredoc[] = [];
 
   const flush = (end: number): void => {
-    if (words.length > 0 || redirects.length > 0 || opaque !== null) {
+    if (words.length > 0 || redirects.length > 0 || bodySubstitutions.length > 0 || opaque !== null) {
       segments.push({
         text: command.slice(segmentStart, end).trim(),
         words,
         redirects,
+        bodySubstitutions,
         opaque,
       });
     }
     words = [];
     redirects = [];
+    bodySubstitutions = [];
     opaque = null;
     segmentStart = end;
   };
@@ -1103,12 +1126,24 @@ function lex(command: string): LexResult {
       const boundary = index;
       index += 1;
       // Heredoc bodies belong to the line that opened them, so they are
-      // consumed here and never classified. A body is data, not commands.
+      // consumed here. A quoted delimiter's body is data. An UNQUOTED one is
+      // expanded by the shell when it is read (APRV-504, folded into
+      // APRV-508): its `$(…)` run, so they are collected for recursive
+      // classification, and a backtick or an arithmetic expansion there is
+      // opaque, exactly as inside double quotes.
       while (pending.length > 0) {
         const heredoc = pending.shift() as PendingHeredoc;
         const consumed = skipHeredocBody(command, index, heredoc);
         if (consumed === null) {
           return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
+        }
+        if (heredoc.expands) {
+          const body = heredocBodyExpansions(command, index, consumed);
+          if (body === null) {
+            return { ok: false, detail: `heredoc <<${heredoc.terminator} has a substitution that does not close` };
+          }
+          bodySubstitutions.push(...body.substitutions);
+          if (body.opaque !== null) opaque = body.opaque;
         }
         index = consumed;
       }
@@ -1137,16 +1172,55 @@ function lex(command: string): LexResult {
       }
       if (op === "<<" || op === "<<-") {
         while (command[index] === " " || command[index] === "\t") index += 1;
+        const delimiterStart = index;
         const terminator = readWord();
         if (terminator === null) {
           return { ok: false, detail: "heredoc has no terminator word" };
         }
-        pending.push({ terminator: terminator.text, stripTabs: op === "<<-" });
+        // APRV-508: bash takes a heredoc delimiter literally (quote removal
+        // only, no expansion), while `readWord` sets a substitution's text
+        // aside. So `cat <<$(x)` waited here for a terminator line bash never
+        // looks for, and every command line after bash's real terminator was
+        // swallowed as body and never classified. A delimiter carrying `$` or
+        // a backtick is refused rather than guessed at.
+        if (/[$`]/u.test(command.slice(delimiterStart, index))) {
+          return {
+            ok: false,
+            detail: "a heredoc delimiter carrying $ or a backtick is not read by this classifier; use a plain word such as EOF",
+          };
+        }
+        const raw = command.slice(delimiterStart, index);
+        pending.push({
+          terminator: terminator.text,
+          stripTabs: op === "<<-",
+          expands: !terminator.quoted && !raw.includes("\\"),
+        });
         continue;
       }
       if (op === ">&" || op === "<&") {
-        // `2>&1` and friends: a file descriptor dup, no path involved.
-        while (index < command.length && /[\d-]/u.test(command[index] as string)) index += 1;
+        // `2>&1`, `>&2`, `3<&0`, `2>&-`: a descriptor dup or close, no path
+        // involved. Anything else after `>&` is a FILE (APRV-508 refutation
+        // M1): bash reads `>&word` as `>word 2>&1`, so `paste a >& APPROVAL.md`
+        // truncates the policy file. The word is read in full, as the shell
+        // reads it, and is a dup only when it is exactly digits with an
+        // optional trailing `-`, or a lone `-`. A word whose value the text
+        // cannot settle (`>&$fd`) is taken as a file: a write is the stricter
+        // reading. After `<&` a non-descriptor word is refused.
+        while (command[index] === " " || command[index] === "\t") index += 1;
+        const target = readWord();
+        if (target === null || target.text === "") {
+          return { ok: false, detail: `redirection ${op} has no target` };
+        }
+        const dup =
+          target.substitutions.length === 0 && (/^\d+-?$/u.test(target.text) || target.text === "-");
+        if (dup) continue;
+        if (op === "<&") {
+          return {
+            ok: false,
+            detail: `redirection <&${target.text} names no file descriptor; this classifier does not read it`,
+          };
+        }
+        redirects.push({ op: ">", target });
         continue;
       }
       while (command[index] === " " || command[index] === "\t") index += 1;
@@ -1163,6 +1237,19 @@ function lex(command: string): LexResult {
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
       segmentStart = index;
+      continue;
+    }
+
+    // A comment (APRV-508, found by the shell differential). bash ends the
+    // line at a `#` that begins a word, so `cat #<<EOF` is `cat` and the
+    // lines after it are commands; read as a word, the `#<<EOF` opened a
+    // heredoc here and swallowed them. The comment runs to the newline, which
+    // is left for the loop. Only a `#` after a space, a tab, a newline or an
+    // operator begins a word to bash; after a carriage return (whitespace to
+    // this loop, a word character to bash) it does not, and is read as a word.
+    if (ch === "#" && (index === 0 || /[ \t\n;&|()<>]/u.test(command[index - 1] as string))) {
+      const newline = command.indexOf("\n", index);
+      index = newline === -1 ? command.length : newline;
       continue;
     }
 
@@ -1289,6 +1376,49 @@ function closingDoubleQuote(command: string, start: number): number | null {
 }
 
 /** Consume a heredoc body; returns the index after it, or `null` if unclosed. */
+/**
+ * The expansions in an unquoted heredoc body, `command[start, end)`: every
+ * `$(…)` for recursive classification, and a backtick or an arithmetic
+ * expansion as opaque. A backslash escapes the next character, as it does in a
+ * body; quotes are literal there, except inside a `$(…)`, which
+ * {@link readSubstitution} scans as the shell does. `null` when a substitution
+ * runs past the body.
+ */
+function heredocBodyExpansions(
+  command: string,
+  start: number,
+  end: number,
+): { substitutions: string[]; opaque: string | null } | null {
+  const substitutions: string[] = [];
+  let opaque: string | null = null;
+  for (let index = start; index < end; index += 1) {
+    const ch = command[index] as string;
+    if (ch === "\\") {
+      index += 1;
+      continue;
+    }
+    if (ch === "`") {
+      opaque = "backtick command substitution in a heredoc body";
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "[") {
+      opaque = "arithmetic expansion in a heredoc body";
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "(") {
+      if (command[index + 2] === "(") {
+        opaque = "arithmetic expansion in a heredoc body";
+        continue;
+      }
+      const scan = readSubstitution(command, index + 1);
+      if (scan === null || scan.end >= end) return null;
+      substitutions.push(scan.inner);
+      index = scan.end;
+    }
+  }
+  return { substitutions, opaque };
+}
+
 function skipHeredocBody(command: string, start: number, heredoc: PendingHeredoc): number | null {
   let index = start;
   for (;;) {
@@ -1453,6 +1583,19 @@ export interface CommandRule {
    * than being refined into some other refusal.
    */
   skillScript?: boolean;
+  /**
+   * Match only an argv this predicate accepts (APRV-508).
+   *
+   * The general form of `probe` and `skillScript`: the row is a SHAPE, and an
+   * argv outside it does not match the row at all, so the segment keeps the
+   * answer it had before the row existed (`unclassified`, for a binary no other
+   * row names). Before the predicate is asked, a shape row is declined by a
+   * substituted word (its text is a hole) and by a binary spelled with a path
+   * outside the system directories ({@link isSystemBinWord}: `./date` is
+   * whatever program sits in the working directory). `assignments` are the
+   * `NAME=value` words in front of the binary, verbatim.
+   */
+  shape?: (args: readonly string[], assignments: readonly string[]) => boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -3445,9 +3588,67 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   },
 
   // -- reads ---------------------------------------------------------------
+  // APRV-508. `date` prints the time or sets the clock, with one binary and
+  // overlapping flags, so it is a shape row rather than a seat in the read
+  // table: only the display forms {@link isDateDisplay} reads match, and every
+  // setting form (`-s`, `--set`, a bare `MMDDhhmm` operand), every file-reading
+  // form (`-f`, `-r`) and everything else keeps the `unclassified` refusal it
+  // had. The only assignments the row admits are the zone and the locale, with
+  // values that cannot name a file (`TZ=Asia/Kolkata date`).
+  {
+    id: "date-read",
+    bins: ["date"],
+    class: "read.shell",
+    shape: isDateDisplay,
+  },
+  // APRV-508. The system-information readers, each a strict allow-grammar in
+  // `sysinfo-argv.ts`: `hostname NAME` sets the host name, `free -s` loops,
+  // `uptime FILE` reads a utmp file, so none of them is a plain seat in the
+  // read table. No assignment rides in front of any of them.
+  {
+    id: "sysinfo-read",
+    bins: ["uptime", "whoami"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isBareInfo(args),
+  },
+  {
+    id: "hostname-read",
+    bins: ["hostname"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isHostnameDisplay(args),
+  },
+  {
+    id: "df-read",
+    bins: ["df"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isDfDisplay(args),
+  },
+  {
+    id: "free-read",
+    bins: ["free"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isFreeDisplay(args),
+  },
+  {
+    id: "seq-read",
+    bins: ["seq"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isSeqDisplay(args),
+  },
+  // `paste` reads the files it names, and the read scope takes them exactly as
+  // it takes `cat`'s (`paste: "all"` in read-scope.ts).
+  {
+    id: "paste-read",
+    bins: ["paste"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isPasteRead(args),
+  },
   {
     id: "read-shell",
     bins: [
+      // APRV-508: `[` is `test` under its other name; the closing `]` is an
+      // argument. Both read nothing but their operands and the file modes.
+      "[",
       "basename",
       "cat",
       "cd",
@@ -4132,6 +4333,34 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
 }
 
 /**
+ * Does this `NAME=value` set a variable that steers which program runs, what
+ * it loads, which file it reads as a zone, locale or converter, or where `cd`
+ * goes? (APRV-508 refutation S1; `HOME` and `CDPATH` from the recheck.)
+ */
+function isSteeringAssignment(word: string): boolean {
+  const name = word.slice(0, word.indexOf("="));
+  if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
+    return true;
+  }
+  return name.startsWith("LC_") || name.startsWith("LD_");
+}
+
+/** The directories a shape row's binary may be spelled from, besides a bare name. */
+const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/"];
+
+/**
+ * Is this command word the system's binary rather than a file the agent can
+ * place? A bare name is looked up on PATH; a path in a system directory names
+ * that file. `./date` or `/tmp/x/date` is whatever program sits there, and a
+ * shape row (APRV-508) does not vouch for it.
+ */
+function isSystemBinWord(word: string): boolean {
+  if (!word.includes("/")) return true;
+  if (word.includes("..") || word.includes("//")) return false;
+  return SYSTEM_BIN_DIRS.some((dir) => word.startsWith(dir) && !word.slice(dir.length).includes("/"));
+}
+
+/**
  * Find the first table row matching this binary, subcommand and argv.
  *
  * The argv is read for two purposes only: a `probe` row matches an argv that
@@ -4143,6 +4372,10 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
  * spelled through the environment (`BUN_OPTIONS='--cwd ../x'` makes bun read
  * a different directory's file), so either one means the shape is not matched
  * and the segment keeps the answer it had before (fail closed).
+ *
+ * A `shape` row (APRV-508) reads the argv through its own predicate, which is
+ * handed the assignment words so it can admit the harmless ones (`TZ=Zone`)
+ * and decline the rest; a substituted word declines it outright.
  */
 function matchRule(
   bin: string,
@@ -4150,10 +4383,13 @@ function matchRule(
   args: readonly string[],
   substituted = false,
   assigned = false,
+  assignments: readonly string[] = [],
+  binWord: string = bin,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
+    if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
       rule.skillScript === true &&
@@ -4200,7 +4436,19 @@ function classifySegment(
   // `$(…)` is classified recursively. A substitution that only reads is inert;
   // anything else taints the segment, because its effect happens before the
   // outer command even starts and the outer class would not describe it.
-  for (const word of segment.words) {
+  //
+  // Redirection targets are words too, and the shell expands them the same
+  // way (APRV-508 recheck M-R1): `cat a < "x$(rm -rf y)"` runs the `rm` before
+  // `cat` opens anything. Until this loop read them, a substitution in a
+  // target ran with no class of its own, under `read.shell` for a `<` and
+  // under the write class for a `>`, on 0.4.3 as well.
+  const expanded = [
+    ...segment.words,
+    ...segment.redirects.map((redirect) => redirect.target),
+    // APRV-504: the `$(…)` of an unquoted heredoc body run when it is read.
+    { text: "", quoted: false, substitutions: segment.bodySubstitutions },
+  ];
+  for (const word of expanded) {
     for (const inner of word.substitutions) {
       const nested = classifyCommand(inner, protectedPaths, context);
       if (!nested.ok) {
@@ -4226,6 +4474,8 @@ function classifySegment(
   while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
   // APRV-502: read by the skill-script shape only ({@link matchRule}).
   const assigned = cursor > 0;
+  // APRV-508: the same words, for a `shape` row that admits some.
+  const assignments = words.slice(0, cursor);
 
   // APRV-193. A sandbox wrapper is not a command: it is a room, and what
   // matters is what runs inside it. `approval sandbox -- npm install` is
@@ -4304,6 +4554,22 @@ function classifySegment(
     // binary path applies below has nothing to defer to.
     const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
     if (bareCredential !== null) return { ok: true, ...bareCredential };
+    // APRV-508 refutation S1: an assignment on its own sets a shell variable,
+    // and when that variable is already exported (PATH and LANG always are)
+    // the new value reaches every later command on the line. `TZ=/etc/x;
+    // date` opens the file the date row refuses to let `TZ=/etc/x date`
+    // open, and `PATH=/tmp/x; cat f` runs whatever `cat` sits there. So the
+    // variables that pick which program runs, which libraries it loads, or
+    // which file it reads as a zone, a locale or a charset converter are not
+    // answered as reads.
+    const steering = assignments.find((word) => isSteeringAssignment(word));
+    if (steering !== undefined) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for the assignment ${steering.slice(0, steering.indexOf("="))}=…: it steers which program or file later commands use`,
+      };
+    }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
     return writeTargets.length > 0
@@ -4334,6 +4600,46 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // APRV-508 recheck S-R1: `printf -v NAME` assigns NAME, so `printf -v PATH
+  // %s /tmp/x; cat f` is the bare `PATH=/tmp/x` the assignment rule above
+  // refuses, spelled through a builtin. A steering NAME (a subscript stripped:
+  // `PATH[0]` is PATH), or a NAME the text cannot read, is refused.
+  if (basename === "printf") {
+    for (let at = 0; at < args.length; at += 1) {
+      const arg = args[at] as string;
+      if (arg === "--") break;
+      const name = arg === "-v" ? args[at + 1] : arg.startsWith("-v") ? arg.slice(2) : undefined;
+      if (name === undefined) continue;
+      const bare = name.replace(/\[.*$/su, "");
+      if (/[$`]/u.test(name) || isSteeringAssignment(`${bare}=`)) {
+        return {
+          ok: false,
+          code: "unclassified",
+          detail: `no rule for printf -v ${name}: it sets a variable that steers which program or file later commands use`,
+        };
+      }
+    }
+  }
+
+  // APRV-508 refutation S3: `test -v 'a[$(id)]'` evaluates the subscript as
+  // arithmetic, and bash expands a `$(…)` inside it, so the operand runs a
+  // command. `[` is `test`; both refuse a `-v`/`-R` operand carrying `[`, and
+  // an unquoted substitution, whose output the shell would split into words
+  // (a `-v` and a subscript among them) that this text never shows.
+  if (basename === "test" || basename === "[") {
+    const operandWords = segment.words.slice(cursor + 1);
+    const probe = args.findIndex(
+      (arg, at) => (arg === "-v" || arg === "-R") && (args[at + 1] ?? "").includes("["),
+    );
+    if (probe !== -1 || operandWords.some((word) => word.substitutions.length > 0 && !word.quoted)) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for ${basename} with an array subscript or an unquoted substitution: the shell may evaluate it as a command`,
+      };
+    }
+  }
 
   // Credential material, below the opaque checks so `sudo cat .approval/env`
   // stays opaque (a refusal) rather than being softened into a request, and
@@ -4375,7 +4681,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned);
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin);
   if (rule === null) {
     return {
       ok: false,
