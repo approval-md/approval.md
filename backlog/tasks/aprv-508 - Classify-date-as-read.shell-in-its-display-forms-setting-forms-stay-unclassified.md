@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-12 04:14'
-updated_date: '2026-10-12 07:21'
+updated_date: '2026-10-12 07:52'
 labels:
   - classifier
   - agent-village
@@ -61,6 +61,8 @@ Revision 3 (PR #636 refutation, 1 M / 5 S / 4 N; note APPROVAL-636-refute.md). M
 Revision 4 (recheck at ad26073, 1 M / 3 S). M-R1: classifySegment walked substitutions in segment.words only; redirection targets (which the shell expands before the command runs) were never classified, so cat a < "x$(rm -rf y)" was read.shell and cat a > x$(rm -rf y) a plain write on main and 0.4.3, and ad26073's >& target made four more rows regress. The recursive loop now runs over words and every redirect target: a nested refusal refuses, a non-read class is opaque. Backticks and process substitution in targets were already refused (pinned). S-R1: printf -v NAME / -vNAME is unclassified when NAME (subscript stripped) is a steering variable or carries $/backtick; HOME and CDPATH join the steering list (bare assignments too). S-R2: seq operands must have at most 15 significant digits and |x| <= 2^53, so the double count is exact enough. +15 vectors (14 controls); no committed expectation moved.
 
 Revision 5 (security review: command-injection / classifier bypass): audited every position the shell expands. Already classified or refused: argument words, assignment values, array subscripts, nested ${...}, $[...], arithmetic (opaque), backticks (opaque), process substitution and here-strings (unparseable), redirect targets (M-R1). Two holes found and fixed, both live on 0.4.3: unquoted heredoc bodies were never classified (APRV-504, folded in and closed), and a heredoc delimiter carrying $ made the lexer wait for a terminator bash never uses, hiding later commands (now refused unparseable). +12 vectors.
+
+Revision 6 (two more security findings: heredoc-body substitution, and parser-differential). The heredoc-body finding was against 8254257f and is closed by 5db96a10 (bodies classified; quoted delimiters inert; here-strings refused). For the parser differential, added tests/command-class-shell-differential.test.ts: every curated construct the coordinator listed plus 3000 seeded mutations run through a real bash (stub-only PATH; stubs log their names; no real program runs), oracle: an admitted command never runs the unruled stub evil, and a read-only verdict never runs rm. It found one real bypass on the first run, live on 0.4.3: the lexer read # as a word character, so cat #<<EOF opened a heredoc bash never sees and hid the following lines' commands. Fix: a # beginning a word (after start, space, tab, newline or an operator; not after CR, which bash treats as a word char) is a comment to end of line. A scratch harness then ran 46,000 more mutations under bash 3.2: 0 bypasses, with bash running evil in ~9,000 of them. +3 vectors.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

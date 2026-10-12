@@ -1240,6 +1240,19 @@ function lex(command: string): LexResult {
       continue;
     }
 
+    // A comment (APRV-508, found by the shell differential). bash ends the
+    // line at a `#` that begins a word, so `cat #<<EOF` is `cat` and the
+    // lines after it are commands; read as a word, the `#<<EOF` opened a
+    // heredoc here and swallowed them. The comment runs to the newline, which
+    // is left for the loop. Only a `#` after a space, a tab, a newline or an
+    // operator begins a word to bash; after a carriage return (whitespace to
+    // this loop, a word character to bash) it does not, and is read as a word.
+    if (ch === "#" && (index === 0 || /[ \t\n;&|()<>]/u.test(command[index - 1] as string))) {
+      const newline = command.indexOf("\n", index);
+      index = newline === -1 ? command.length : newline;
+      continue;
+    }
+
     const word = readWord();
     if (word === null) {
       return { ok: false, detail: "unterminated quote or command substitution" };

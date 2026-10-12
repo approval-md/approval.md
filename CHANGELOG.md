@@ -70,6 +70,14 @@ before a tag.
   `cat <<$(x)` ended the body at a line bash never looks for and every command
   after bash's real terminator was swallowed unclassified: a delimiter
   carrying `$` or a backtick is now refused `unparseable`.
+- **A `#` that begins a word is a comment, as bash reads it (APRV-508). This
+  was a hole in 0.4.3.** The lexer read `#` as an ordinary word character, so
+  `cat #<<EOF` opened a heredoc that bash never sees (bash ends the line at
+  the `#`), and the commands on the lines after it were swallowed as body and
+  never classified. Found by a new shell differential test
+  (`tests/command-class-shell-differential.test.ts`) that runs every command
+  string through a real bash with stub-only `PATH` and checks that nothing
+  the classifier admits runs a command it did not classify.
 - **A command substitution in a redirection target is classified (APRV-508,
   PR #636 recheck M-R1). This was a hole in 0.4.3.** The classifier walked
   the `$(…)` in a segment's words and never the ones in its redirection

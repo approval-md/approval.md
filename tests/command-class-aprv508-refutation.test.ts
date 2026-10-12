@@ -259,3 +259,20 @@ test("an inert body stays inert: quoted delimiters, escapes and read-only substi
     assert.deepEqual(classesOf(command), ["read.shell"], JSON.stringify(command));
   }
 });
+
+// -- Comments (found by tests/command-class-shell-differential.test.ts) -----
+
+test("a # that begins a word is a comment, as in bash; one inside a word is not", () => {
+  // bash: `cat`, then `evil` runs. Read as a word, `#<<EOF` opened a heredoc
+  // that swallowed `evil`.
+  assert.equal(classesOf("cat #<<EOF\nEO\\'F \nevil\nEOF"), "refused:unclassified");
+  assert.equal(classesOf("date # c\nevil"), "refused:unclassified");
+  assert.deepEqual(classesOf("date ;# c\nrm -rf y"), ["read.shell", "files.write.workspace"]);
+  // A commented-out substitution never runs.
+  assert.deepEqual(classesOf("date # $(rm -rf y)"), ["read.shell"]);
+  // Mid-word, after a carriage return, and quoted, # is text.
+  assert.equal(classesOf("date x#y; evil"), "refused:unclassified");
+  assert.equal(classesOf("date \r# ; evil"), "refused:unclassified");
+  assert.equal(classesOf("date '#' ; evil"), "refused:unclassified");
+  assert.deepEqual(classesOf("echo ${X#x}"), ["read.shell"]);
+});

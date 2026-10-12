@@ -2630,6 +2630,23 @@ const commandClassVectors = [
     input: { command: "cat <<EOF\ntoday $(date +%F)\nEOF" },
   },
   {
+    id: "comment-hides-no-heredoc-refuses",
+    description: "bash ends the line at a # that begins a word, so #<<EOF opens no heredoc and the next lines are commands (found by the shell differential)",
+    input: { command: "cat #<<EOF\nx\nevil\nEOF" },
+    control: true,
+  },
+  {
+    id: "comment-after-carriage-return-is-a-word-refuses",
+    description: "after a carriage return bash reads # as a word character, so the ; after it still separates a command",
+    input: { command: "date \r# ; evil" },
+    control: true,
+  },
+  {
+    id: "commented-substitution-is-a-read",
+    description: "a $(\u2026) after a word-initial # is a comment and never runs",
+    input: { command: "date -u # $(rm -rf y)" },
+  },
+  {
     id: "paste-end-of-options-refuses",
     description: "-- is never admitted",
     input: { command: 'paste -- a.txt' },
@@ -3815,8 +3832,9 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Eighty-six
-    // new vectors. Twelve pin a substitution in every position the shell
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Eighty-nine
+    // new vectors. Three pin comments as bash reads them (a `#` that begins a
+    // word ends the line), found by tests/command-class-shell-differential. Twelve pin a substitution in every position the shell
     // expands: an unquoted heredoc body (APRV-504, folded in: its `$(…)` ran
     // under `read.shell`), a heredoc delimiter carrying `$` (refused: bash
     // takes it literally, and a guessed terminator hid the lines after it),
