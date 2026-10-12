@@ -2560,6 +2560,76 @@ const commandClassVectors = [
     input: { command: "cat < \"notes-$(date +%F).md\"" },
   },
   {
+    id: "heredoc-delimiter-substitution-refuses",
+    description: "bash takes a heredoc delimiter literally, so a $(\u2026) in it moves where the body ends; the line after bash's terminator would hide as body",
+    input: { command: "cat <<$(rm y)\nx\n$(rm y)\nrm -rf z\n" },
+    control: true,
+  },
+  {
+    id: "heredoc-delimiter-variable-refuses",
+    description: "the same for a $ variable in the delimiter",
+    input: { command: "cat <<$X\nbody\n$X\nrm -rf z\n" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-substitution-refuses",
+    description: "an unquoted heredoc body is expanded when read, so its $(\u2026) runs and is classified (APRV-504)",
+    input: { command: "cat <<EOF\n$(rm -rf y)\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-credential-substitution-refuses",
+    description: "the same with a credential read in the body (APRV-504)",
+    input: { command: "cat <<EOF\n$(cat ~/.hermes/.env)\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-backtick-refuses",
+    description: "a backtick in an unquoted body is opaque, as in double quotes (APRV-504)",
+    input: { command: "cat <<EOF\n`rm y`\nEOF" },
+    control: true,
+  },
+  {
+    id: "heredoc-body-arithmetic-refuses",
+    description: "an arithmetic expansion in an unquoted body is opaque (APRV-504)",
+    input: { command: "cat <<EOF\n$((1+1))\nEOF" },
+    control: true,
+  },
+  {
+    id: "assignment-value-substitution-refuses",
+    description: "a $(\u2026) in an assignment value runs and is classified",
+    input: { command: "X=$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "array-subscript-substitution-refuses",
+    description: "a $(\u2026) in an array subscript runs and is classified",
+    input: { command: "a[$(rm -rf y)]=1" },
+    control: true,
+  },
+  {
+    id: "nested-expansion-substitution-refuses",
+    description: "a $(\u2026) nested in ${\u2026} runs and is classified",
+    input: { command: "echo ${X:-$(rm -rf y)}" },
+    control: true,
+  },
+  {
+    id: "process-substitution-argument-refuses",
+    description: "a process substitution as an argument is not read",
+    input: { command: "cat <(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "heredoc-quoted-body-is-inert",
+    description: "a quoted delimiter's body is data, never expanded (APRV-504)",
+    input: { command: "cat <<'EOF'\n$(rm y)\nEOF" },
+  },
+  {
+    id: "heredoc-body-read-substitution-is-a-read",
+    description: "a read-only $(\u2026) in an unquoted body is inert",
+    input: { command: "cat <<EOF\ntoday $(date +%F)\nEOF" },
+  },
+  {
     id: "paste-end-of-options-refuses",
     description: "-- is never admitted",
     input: { command: 'paste -- a.txt' },
@@ -3745,8 +3815,13 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Seventy-four
-    // new vectors. Fifteen pin the recheck fixes: a `$(…)` in ANY redirection
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Eighty-six
+    // new vectors. Twelve pin a substitution in every position the shell
+    // expands: an unquoted heredoc body (APRV-504, folded in: its `$(…)` ran
+    // under `read.shell`), a heredoc delimiter carrying `$` (refused: bash
+    // takes it literally, and a guessed terminator hid the lines after it),
+    // an assignment value, an array subscript, a nested `${…}`, process
+    // substitution. Fifteen pin the recheck fixes: a `$(…)` in ANY redirection
     // target is classified (it ran unclassified under `<`, `>`, `>>` on 0.4.3,
     // and under `>&` once that became a target), `printf -v` into a steering
     // variable, a bare `HOME=`, and a `seq` range past double precision.

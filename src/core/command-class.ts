@@ -930,6 +930,12 @@ interface LexSegment {
   text: string;
   words: LexWord[];
   redirects: LexRedirect[];
+  /**
+   * The `$(…)` found in the bodies of unquoted heredocs consumed on this
+   * segment's line (APRV-504, folded into APRV-508). The shell expands them
+   * when the body is read, so they are classified like any other.
+   */
+  bodySubstitutions: string[];
   /** Set when the segment contains a construct whose effect cannot be read. */
   opaque: string | null;
 }
@@ -944,6 +950,11 @@ const OPERATOR_CHARS = new Set(["&", "|", ";", "(", ")", "<", ">", "\n"]);
 interface PendingHeredoc {
   terminator: string;
   stripTabs: boolean;
+  /**
+   * Does the shell expand the body? It does unless some part of the delimiter
+   * is quoted (`<<'EOF'`, `<<"EOF"`, `<<E"OF"`, `<<\EOF`).
+   */
+  expands: boolean;
 }
 
 /**
@@ -990,22 +1001,25 @@ function lex(command: string): LexResult {
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
+  let bodySubstitutions: string[] = [];
   let opaque: string | null = null;
   let segmentStart = 0;
   let index = 0;
   const pending: PendingHeredoc[] = [];
 
   const flush = (end: number): void => {
-    if (words.length > 0 || redirects.length > 0 || opaque !== null) {
+    if (words.length > 0 || redirects.length > 0 || bodySubstitutions.length > 0 || opaque !== null) {
       segments.push({
         text: command.slice(segmentStart, end).trim(),
         words,
         redirects,
+        bodySubstitutions,
         opaque,
       });
     }
     words = [];
     redirects = [];
+    bodySubstitutions = [];
     opaque = null;
     segmentStart = end;
   };
@@ -1112,12 +1126,24 @@ function lex(command: string): LexResult {
       const boundary = index;
       index += 1;
       // Heredoc bodies belong to the line that opened them, so they are
-      // consumed here and never classified. A body is data, not commands.
+      // consumed here. A quoted delimiter's body is data. An UNQUOTED one is
+      // expanded by the shell when it is read (APRV-504, folded into
+      // APRV-508): its `$(…)` run, so they are collected for recursive
+      // classification, and a backtick or an arithmetic expansion there is
+      // opaque, exactly as inside double quotes.
       while (pending.length > 0) {
         const heredoc = pending.shift() as PendingHeredoc;
         const consumed = skipHeredocBody(command, index, heredoc);
         if (consumed === null) {
           return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
+        }
+        if (heredoc.expands) {
+          const body = heredocBodyExpansions(command, index, consumed);
+          if (body === null) {
+            return { ok: false, detail: `heredoc <<${heredoc.terminator} has a substitution that does not close` };
+          }
+          bodySubstitutions.push(...body.substitutions);
+          if (body.opaque !== null) opaque = body.opaque;
         }
         index = consumed;
       }
@@ -1146,11 +1172,29 @@ function lex(command: string): LexResult {
       }
       if (op === "<<" || op === "<<-") {
         while (command[index] === " " || command[index] === "\t") index += 1;
+        const delimiterStart = index;
         const terminator = readWord();
         if (terminator === null) {
           return { ok: false, detail: "heredoc has no terminator word" };
         }
-        pending.push({ terminator: terminator.text, stripTabs: op === "<<-" });
+        // APRV-508: bash takes a heredoc delimiter literally (quote removal
+        // only, no expansion), while `readWord` sets a substitution's text
+        // aside. So `cat <<$(x)` waited here for a terminator line bash never
+        // looks for, and every command line after bash's real terminator was
+        // swallowed as body and never classified. A delimiter carrying `$` or
+        // a backtick is refused rather than guessed at.
+        if (/[$`]/u.test(command.slice(delimiterStart, index))) {
+          return {
+            ok: false,
+            detail: "a heredoc delimiter carrying $ or a backtick is not read by this classifier; use a plain word such as EOF",
+          };
+        }
+        const raw = command.slice(delimiterStart, index);
+        pending.push({
+          terminator: terminator.text,
+          stripTabs: op === "<<-",
+          expands: !terminator.quoted && !raw.includes("\\"),
+        });
         continue;
       }
       if (op === ">&" || op === "<&") {
@@ -1319,6 +1363,49 @@ function closingDoubleQuote(command: string, start: number): number | null {
 }
 
 /** Consume a heredoc body; returns the index after it, or `null` if unclosed. */
+/**
+ * The expansions in an unquoted heredoc body, `command[start, end)`: every
+ * `$(…)` for recursive classification, and a backtick or an arithmetic
+ * expansion as opaque. A backslash escapes the next character, as it does in a
+ * body; quotes are literal there, except inside a `$(…)`, which
+ * {@link readSubstitution} scans as the shell does. `null` when a substitution
+ * runs past the body.
+ */
+function heredocBodyExpansions(
+  command: string,
+  start: number,
+  end: number,
+): { substitutions: string[]; opaque: string | null } | null {
+  const substitutions: string[] = [];
+  let opaque: string | null = null;
+  for (let index = start; index < end; index += 1) {
+    const ch = command[index] as string;
+    if (ch === "\\") {
+      index += 1;
+      continue;
+    }
+    if (ch === "`") {
+      opaque = "backtick command substitution in a heredoc body";
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "[") {
+      opaque = "arithmetic expansion in a heredoc body";
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "(") {
+      if (command[index + 2] === "(") {
+        opaque = "arithmetic expansion in a heredoc body";
+        continue;
+      }
+      const scan = readSubstitution(command, index + 1);
+      if (scan === null || scan.end >= end) return null;
+      substitutions.push(scan.inner);
+      index = scan.end;
+    }
+  }
+  return { substitutions, opaque };
+}
+
 function skipHeredocBody(command: string, start: number, heredoc: PendingHeredoc): number | null {
   let index = start;
   for (;;) {
@@ -4342,7 +4429,12 @@ function classifySegment(
   // `cat` opens anything. Until this loop read them, a substitution in a
   // target ran with no class of its own, under `read.shell` for a `<` and
   // under the write class for a `>`, on 0.4.3 as well.
-  const expanded = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+  const expanded = [
+    ...segment.words,
+    ...segment.redirects.map((redirect) => redirect.target),
+    // APRV-504: the `$(…)` of an unquoted heredoc body run when it is read.
+    { text: "", quoted: false, substitutions: segment.bodySubstitutions },
+  ];
   for (const word of expanded) {
     for (const inner of word.substitutions) {
       const nested = classifyCommand(inner, protectedPaths, context);

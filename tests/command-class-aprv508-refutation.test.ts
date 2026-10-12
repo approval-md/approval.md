@@ -191,3 +191,71 @@ test("recheck S-R2: seq counts only operands a double holds exactly", () => {
     assert.deepEqual(classesOf(command), ["read.shell"], command);
   }
 });
+
+// -- Substitutions in every position ----------------------------------------
+
+test("a $(…) in every position the shell expands is classified, or the segment is refused", () => {
+  const RM = "rm -rf y";
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    // Argument words, bare and quoted.
+    [`echo $(${RM})`, "refused:opaque"],
+    [`echo "x$(${RM})"`, "refused:opaque"],
+    // Assignment values, alone and in front of a command.
+    [`X=$(${RM})`, "refused:opaque"],
+    [`X=$(${RM}) cat f`, "refused:opaque"],
+    // Array subscripts, in an assignment, an expansion and arithmetic.
+    [`a[$(${RM})]=1`, "refused:opaque"],
+    [`echo \${a[$(${RM})]}`, "refused:opaque"],
+    [`(( a[$(${RM})] ))`, "refused:opaque"],
+    [`declare a[$(${RM})]=1`, "refused:opaque"],
+    // ${…} with a nested $(…).
+    [`echo \${X:-$(${RM})}`, "refused:opaque"],
+    [`echo "\${X/a/$(${RM})}"`, "refused:opaque"],
+    // Redirection targets (M-R1), every operator.
+    [`cat a > x$(${RM})`, "refused:opaque"],
+    [`cat a 2>"$(${RM})"`, "refused:opaque"],
+    [`cat a < "x$(${RM})"`, "refused:opaque"],
+    [`cat a >&x$(${RM})`, "refused:opaque"],
+    // Heredoc delimiters (taken literally by bash, and refused here so the
+    // body's end is never guessed) and unquoted heredoc bodies (APRV-504).
+    [`cat <<$(${RM})\nx\n$(${RM})\nrm -rf z\n`, "refused:unparseable"],
+    [`cat <<E$(${RM})\nx\nE$(${RM})\nrm -rf z\nE\n`, "refused:unparseable"],
+    [`cat <<$X\nbody\n$X\nrm -rf z\n`, "refused:unparseable"],
+    [`cat <<EOF\n$(${RM})\nEOF`, "refused:opaque"],
+    [`cat <<-EOF\n\t$(${RM})\n\tEOF`, "refused:opaque"],
+    [`cat <<EOF; echo hi\n$(${RM})\nEOF`, "refused:opaque"],
+    [`cat <<EOF\n$(cat ~/.hermes/.env)\nEOF`, "refused:opaque"],
+    [`cat <<EOF\n$(${RM}\nEOF`, "refused:unparseable"],
+    // Backticks, anywhere.
+    [`echo \`${RM}\``, "refused:opaque"],
+    [`echo \${X:-\`${RM}\`}`, "refused:opaque"],
+    [`cat a > x\`id\``, "refused:opaque"],
+    ["cat <<EOF\n`rm y`\nEOF", "refused:opaque"],
+    // Arithmetic expansion, anywhere.
+    [`echo $((1+$(${RM})))`, "refused:opaque"],
+    ["cat <<EOF\n$((1+1))\nEOF", "refused:opaque"],
+    // Process substitution, as an argument and as a target.
+    [`cat <(${RM})`, "refused:unparseable"],
+    [`echo x | tee >(${RM})`, "refused:unparseable"],
+    [`cat a > >(${RM})`, "refused:unparseable"],
+    // A here-string.
+    [`cat <<<$(${RM})`, "refused:unparseable"],
+  ];
+  for (const [command, expected] of cases) {
+    assert.equal(classesOf(command), expected, JSON.stringify(command));
+  }
+});
+
+test("an inert body stays inert: quoted delimiters, escapes and read-only substitutions", () => {
+  for (const command of [
+    "cat <<'EOF'\n$(rm y)\nEOF",
+    'cat <<"EOF"\n$(rm y)\nEOF',
+    'cat <<E"OF"\n$(rm y)\nEOF',
+    "cat <<\\EOF\n$(rm y)\nEOF",
+    "cat <<EOF\n\\$(rm y)\nEOF",
+    "cat <<EOF\ntoday $(date +%F)\nEOF",
+    "cat <<EOF\nprice $5 and $HOME\nEOF",
+  ]) {
+    assert.deepEqual(classesOf(command), ["read.shell"], JSON.stringify(command));
+  }
+});

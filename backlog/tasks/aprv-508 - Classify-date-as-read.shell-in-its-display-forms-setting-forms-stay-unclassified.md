@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-12 04:14'
-updated_date: '2026-10-12 06:56'
+updated_date: '2026-10-12 07:21'
 labels:
   - classifier
   - agent-village
@@ -59,6 +59,8 @@ Revision 2 (second security review, parser-differential / validation bypass in c
 Revision 3 (PR #636 refutation, 1 M / 5 S / 4 N; note APPROVAL-636-refute.md). M1: lex() read >&/<& as dups only and skipped [0-9-]; bash reads >&WORD (WORD not a descriptor) as >WORD 2>&1, so cat /dev/null >& APPROVAL.md truncated the policy while classifying read.shell (on main and 0.4.3 too; this PR had added four carriers). Now the full word after >&/<& is read: ^\d+-?$ or - is a dup/close; any other word after >& is a write redirect {op: '>'} that the protected-path and write checks see (a word with a substitution is taken as a file, the stricter reading); after <& it is refused unparseable. S1: a bare assignment of TZ, TZDIR, PATH, LOCPATH, GCONV_PATH, LANG, LANGUAGE, LC_*, LD_* in its own segment is unclassified. S2: the TZ= match inside -d is case-insensitive. S3: test and [ refuse a -v/-R operand containing [ and any unquoted substitution (whose output the shell would split, possibly into -v and a subscript); quoted substitutions still read. S4: seq admits at most 100,000 values (SEQ_MAX_VALUES) and refuses a zero increment or non-finite bound. N4: kept APRV-508 per coordinator (the other lane moved to APRV-510). S5 (free/hostname real-tool coverage) and N1-N3 are informational and unchanged. Vectors: +15 (8 controls), command-class 1.7.0 now 59 new vectors; no committed expectation moved.
 
 Revision 4 (recheck at ad26073, 1 M / 3 S). M-R1: classifySegment walked substitutions in segment.words only; redirection targets (which the shell expands before the command runs) were never classified, so cat a < "x$(rm -rf y)" was read.shell and cat a > x$(rm -rf y) a plain write on main and 0.4.3, and ad26073's >& target made four more rows regress. The recursive loop now runs over words and every redirect target: a nested refusal refuses, a non-read class is opaque. Backticks and process substitution in targets were already refused (pinned). S-R1: printf -v NAME / -vNAME is unclassified when NAME (subscript stripped) is a steering variable or carries $/backtick; HOME and CDPATH join the steering list (bare assignments too). S-R2: seq operands must have at most 15 significant digits and |x| <= 2^53, so the double count is exact enough. +15 vectors (14 controls); no committed expectation moved.
+
+Revision 5 (security review: command-injection / classifier bypass): audited every position the shell expands. Already classified or refused: argument words, assignment values, array subscripts, nested ${...}, $[...], arithmetic (opaque), backticks (opaque), process substitution and here-strings (unparseable), redirect targets (M-R1). Two holes found and fixed, both live on 0.4.3: unquoted heredoc bodies were never classified (APRV-504, folded in and closed), and a heredoc delimiter carrying $ made the lexer wait for a terminator bash never uses, hiding later commands (now refused unparseable). +12 vectors.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

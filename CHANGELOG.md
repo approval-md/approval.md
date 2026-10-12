@@ -58,6 +58,18 @@ before a tag.
 - **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
   them refusal controls; no existing expectation moved). Totals 580/580.
 
+- **Heredocs: an unquoted body's substitutions are classified, and a
+  delimiter carrying `$` is refused (APRV-504, folded into APRV-508). Both
+  were holes in 0.4.3.** The lexer skipped every heredoc body as data, but
+  bash expands an unquoted body (`<<EOF`) when it reads it, so `cat <<EOF`
+  with `$(rm -rf y)` or `$(cat ~/.hermes/.env)` in the body was `read.shell`.
+  Its `$(…)` now go through the recursive check, and a backtick or an
+  arithmetic expansion there is `opaque`, as inside double quotes. A quoted
+  delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) keeps the body inert. And bash
+  takes a delimiter literally while the lexer set a `$(…)` in it aside, so
+  `cat <<$(x)` ended the body at a line bash never looks for and every command
+  after bash's real terminator was swallowed unclassified: a delimiter
+  carrying `$` or a backtick is now refused `unparseable`.
 - **A command substitution in a redirection target is classified (APRV-508,
   PR #636 recheck M-R1). This was a hole in 0.4.3.** The classifier walked
   the `$(…)` in a segment's words and never the ones in its redirection
