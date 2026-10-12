@@ -4234,12 +4234,14 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
 
 /**
  * Does this `NAME=value` set a variable that steers which program runs, what
- * it loads, or which file it reads as a zone, locale or converter? (APRV-508
- * refutation S1.)
+ * it loads, which file it reads as a zone, locale or converter, or where `cd`
+ * goes? (APRV-508 refutation S1; `HOME` and `CDPATH` from the recheck.)
  */
 function isSteeringAssignment(word: string): boolean {
   const name = word.slice(0, word.indexOf("="));
-  if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE"].includes(name)) return true;
+  if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
+    return true;
+  }
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 
@@ -4334,7 +4336,14 @@ function classifySegment(
   // `$(…)` is classified recursively. A substitution that only reads is inert;
   // anything else taints the segment, because its effect happens before the
   // outer command even starts and the outer class would not describe it.
-  for (const word of segment.words) {
+  //
+  // Redirection targets are words too, and the shell expands them the same
+  // way (APRV-508 recheck M-R1): `cat a < "x$(rm -rf y)"` runs the `rm` before
+  // `cat` opens anything. Until this loop read them, a substitution in a
+  // target ran with no class of its own, under `read.shell` for a `<` and
+  // under the write class for a `>`, on 0.4.3 as well.
+  const expanded = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+  for (const word of expanded) {
     for (const inner of word.substitutions) {
       const nested = classifyCommand(inner, protectedPaths, context);
       if (!nested.ok) {
@@ -4486,6 +4495,27 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // APRV-508 recheck S-R1: `printf -v NAME` assigns NAME, so `printf -v PATH
+  // %s /tmp/x; cat f` is the bare `PATH=/tmp/x` the assignment rule above
+  // refuses, spelled through a builtin. A steering NAME (a subscript stripped:
+  // `PATH[0]` is PATH), or a NAME the text cannot read, is refused.
+  if (basename === "printf") {
+    for (let at = 0; at < args.length; at += 1) {
+      const arg = args[at] as string;
+      if (arg === "--") break;
+      const name = arg === "-v" ? args[at + 1] : arg.startsWith("-v") ? arg.slice(2) : undefined;
+      if (name === undefined) continue;
+      const bare = name.replace(/\[.*$/su, "");
+      if (/[$`]/u.test(name) || isSteeringAssignment(`${bare}=`)) {
+        return {
+          ok: false,
+          code: "unclassified",
+          detail: `no rule for printf -v ${name}: it sets a variable that steers which program or file later commands use`,
+        };
+      }
+    }
+  }
 
   // APRV-508 refutation S3: `test -v 'a[$(id)]'` evaluates the subscript as
   // arithmetic, and bash expands a `$(…)` inside it, so the operand runs a

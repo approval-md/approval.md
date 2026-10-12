@@ -58,6 +58,15 @@ before a tag.
 - **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
   them refusal controls; no existing expectation moved). Totals 580/580.
 
+- **A command substitution in a redirection target is classified (APRV-508,
+  PR #636 recheck M-R1). This was a hole in 0.4.3.** The classifier walked
+  the `$(…)` in a segment's words and never the ones in its redirection
+  targets, which the shell expands the same way and runs before the command
+  starts. So `cat a < "x$(rm -rf y)"` was `read.shell` and `cat a >
+  x$(rm -rf y)` was `files.write.workspace` with the `rm` unclassified, on
+  0.4.3. Every target's substitutions now go through the same recursive check
+  as an argument's: a refused inner command refuses the segment, and one that
+  is not a read makes it `opaque`.
 - **`>&WORD` to a file is a write (APRV-508, PR #636 refutation M1).** The
   lexer skipped every `>&`/`<&` as a descriptor dup, but bash reads `>&WORD`
   with a WORD that is not a descriptor as `>WORD 2>&1`. So `cat /dev/null >&
@@ -69,7 +78,8 @@ before a tag.
   descriptor is refused `unparseable`.
 - **A bare steering assignment is not a read (APRV-508, refutation S1).**
   `TZ=…`, `TZDIR=…`, `PATH=…`, `LOCPATH=…`, `GCONV_PATH=…`, `LANG=…`,
-  `LANGUAGE=…`, `LC_*=…` and `LD_*=…` in a segment of their own reach every
+  `LANGUAGE=…`, `LC_*=…`, `LD_*=…`, `HOME=…` and `CDPATH=…` in a segment of
+  their own, or set through `printf -v NAME`, reach every
   later command when the variable is exported, so `PATH=/tmp/x; cat f` and
   `TZ=/etc/x; date` are `unclassified` rather than `read.shell`. Other bare
   assignments (`NOW=$(date +%s)`) still read.

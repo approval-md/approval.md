@@ -2471,6 +2471,95 @@ const commandClassVectors = [
     control: true,
   },
   {
+    id: "dup-target-substitution-refuses",
+    description: "a $(\u2026) inside a >& target runs before the redirect opens and is classified like any other (recheck M-R1)",
+    input: { command: "cat a >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "dup-target-quoted-substitution-refuses",
+    description: "the same inside double quotes (recheck M-R1)",
+    input: { command: "cat a >&\"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "dup-target-substitution-under-date-refuses",
+    description: "the same behind date (recheck M-R1)",
+    input: { command: "date >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "dup-target-substitution-under-paste-refuses",
+    description: "the same behind paste (recheck M-R1)",
+    input: { command: "paste a >&x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "write-target-substitution-refuses",
+    description: "a $(\u2026) in a > target; a hole on 0.4.3 as well (recheck M-R1)",
+    input: { command: "cat a > x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "bare-write-target-substitution-refuses",
+    description: "the same with no command (recheck M-R1)",
+    input: { command: "> \"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "append-target-substitution-refuses",
+    description: "the same in a >> target (recheck M-R1)",
+    input: { command: "cat a >> x$(rm -rf y)" },
+    control: true,
+  },
+  {
+    id: "read-target-substitution-refuses",
+    description: "a $(\u2026) in a < target ran under read.shell on 0.4.3 (recheck M-R1)",
+    input: { command: "cat a < \"x$(rm -rf y)\"" },
+    control: true,
+  },
+  {
+    id: "write-target-backtick-refuses",
+    description: "a backtick in a redirection target is refused, as everywhere",
+    input: { command: "cat a > x`id`" },
+    control: true,
+  },
+  {
+    id: "write-target-process-substitution-refuses",
+    description: "a process substitution as a redirection target is not read",
+    input: { command: "cat a > >(rm x)" },
+    control: true,
+  },
+  {
+    id: "printf-into-path-refuses",
+    description: "printf -v PATH assigns PATH, the bare assignment refused by name (recheck S-R1)",
+    input: { command: "printf -v PATH %s /tmp/x; cat f" },
+    control: true,
+  },
+  {
+    id: "printf-attached-into-zone-refuses",
+    description: "the attached spelling into TZ (recheck S-R1)",
+    input: { command: "printf -vTZ %s /etc/x; date" },
+    control: true,
+  },
+  {
+    id: "bare-home-assignment-refuses",
+    description: "HOME moves where cd goes (recheck N-R1, S-R1)",
+    input: { command: "HOME=/tmp/x; cd" },
+    control: true,
+  },
+  {
+    id: "seq-beyond-double-precision-refuses",
+    description: "a range a double cannot count exactly could print trillions (recheck S-R2)",
+    input: { command: "seq 1000000000000000000000000000000 1000000000000000050000000000000" },
+    control: true,
+  },
+  {
+    id: "read-target-read-substitution-is-a-read",
+    description: "a read-only $(\u2026) in a < target stays inert",
+    input: { command: "cat < \"notes-$(date +%F).md\"" },
+  },
+  {
     id: "paste-end-of-options-refuses",
     description: "-- is never admitted",
     input: { command: 'paste -- a.txt' },
@@ -3656,8 +3745,12 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Fifty-nine
-    // new vectors. Fifteen pin the PR #636 refutation fixes: `>&WORD` with a
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Seventy-four
+    // new vectors. Fifteen pin the recheck fixes: a `$(…)` in ANY redirection
+    // target is classified (it ran unclassified under `<`, `>`, `>>` on 0.4.3,
+    // and under `>&` once that became a target), `printf -v` into a steering
+    // variable, a bare `HOME=`, and a `seq` range past double precision.
+    // Fifteen more pin the PR #636 refutation fixes: `>&WORD` with a
     // non-descriptor WORD is a write (it was skipped as a dup, so `cat
     // /dev/null >& APPROVAL.md` read as `read.shell`, on 0.4.3 too; no
     // committed vector carried a `>&`, so no expectation moves), `<&WORD`

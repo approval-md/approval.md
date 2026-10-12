@@ -124,3 +124,70 @@ test("refutation S4: seq is capped at 100,000 values and never runs forever", ()
     assert.equal(classesOf(command), "refused:unclassified", command);
   }
 });
+
+// -- Recheck at ad26073 -----------------------------------------------------
+
+test("recheck M-R1: a substitution inside any redirection target is classified", () => {
+  // All eight from the recheck: the four `>&` rows ad26073 regressed, and the
+  // four that were live on main and 0.4.3 (`>`, a bare `>`, `>>`, `<`).
+  for (const command of [
+    "cat a >&x$(rm -rf y)",
+    'cat a >&"x$(rm -rf y)"',
+    "date >&x$(rm -rf y)",
+    "paste a >&x$(rm -rf y)",
+    "cat a > x$(rm -rf y)",
+    '> "x$(rm -rf y)"',
+    "cat a >> x$(rm -rf y)",
+    'cat a < "x$(rm -rf y)"',
+  ]) {
+    assert.equal(classesOf(command), "refused:opaque", command);
+  }
+  // A nested refusal refuses the segment.
+  assert.equal(classesOf('cat a < "x$(frobnicate)"'), "refused:unclassified");
+  // Backticks and process substitution in a target were already refused.
+  for (const command of ["cat a > x`id`", "cat a >&x`id`", "cat a < x`id`"]) {
+    assert.equal(classesOf(command), "refused:opaque", command);
+  }
+  for (const command of ["cat a > >(rm x)", "cat a < <(rm x)"]) {
+    assert.equal(classesOf(command), "refused:unparseable", command);
+  }
+  // A read-only substitution in a target stays inert.
+  assert.deepEqual(classesOf('cat < "notes-$(date +%F).md"'), ["read.shell"]);
+  assert.deepEqual(classesOf('date -u > "stamp-$(date +%s).txt"'), ["files.write.workspace"]);
+});
+
+test("recheck S-R1: printf -v into a steering variable is not a read", () => {
+  for (const command of [
+    "printf -v TZ %s /etc/x; date",
+    "printf -v LC_ALL %s /tmp/x; date",
+    "printf -v PATH %s /tmp/x; cat f",
+    "printf -vPATH %s /tmp/x; cat f",
+    "printf -v 'PATH[0]' %s /tmp/x",
+    "printf -v HOME %s /tmp/x; cd",
+    "printf -v CDPATH %s /tmp",
+    "printf -v $NAME %s x",
+  ]) {
+    assert.equal(classesOf(command), "refused:unclassified", command);
+  }
+  for (const command of ["printf -v X %s 1", "printf '%s\\n' a", "printf -- '-v PATH'"]) {
+    assert.deepEqual(classesOf(command), ["read.shell"], command);
+  }
+  for (const command of ["HOME=/tmp/x; cd", "CDPATH=/tmp; cd x"]) {
+    assert.equal(classesOf(command), "refused:unclassified", command);
+  }
+});
+
+test("recheck S-R2: seq counts only operands a double holds exactly", () => {
+  for (const command of [
+    "seq 1000000000000000000000000000000 1000000000000000050000000000000",
+    "seq 10000000000000000000000000000000000000000 10000000000000000000000500000000000000000",
+    "seq 1234567890123456 1234567890123457",
+    "seq 9007199254740993 9007199254740994",
+    "seq 1e300 1e300",
+  ]) {
+    assert.equal(classesOf(command), "refused:unclassified", command);
+  }
+  for (const command of ["seq 123456789012340 123456789012345", "seq 0.000001 0.000001 0.01", "seq -5 5"]) {
+    assert.deepEqual(classesOf(command), ["read.shell"], command);
+  }
+});

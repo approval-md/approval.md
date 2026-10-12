@@ -224,6 +224,20 @@ const SEQ_NUMBER = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/u;
  */
 export const SEQ_MAX_VALUES = 100_000;
 
+/**
+ * Can a double hold this number exactly enough to count with? (Recheck S-R2.)
+ * GNU and uutils count digit strings exactly, so a range narrower than half a
+ * ULP of its ends (`seq 1e30-ish 1e30-ish+5e13`) reads as one value to a
+ * double and prints fifty trillion. No more than 15 significant digits, and no
+ * magnitude above 2^53, keeps every admitted operand exact enough.
+ */
+function isCountable(word: string): boolean {
+  const mantissa = word.replace(/^[-+]/u, "").replace(/[eE].*$/u, "").replace(".", "");
+  const significant = mantissa.replace(/^0+/u, "");
+  if (significant.length > 15) return false;
+  return Math.abs(Number(word)) <= 2 ** 53;
+}
+
 /** How many values `seq FIRST [INCREMENT] LAST` prints; Infinity when it never ends. */
 function seqCount(numbers: readonly number[]): number {
   const [first, increment, last] =
@@ -291,7 +305,9 @@ export function isSeqDisplay(args: readonly string[]): boolean {
   const format = args.some((arg) => arg === "-f" || arg === "--format" || arg.startsWith("--format="));
   if (width && format) return false;
   if (numbers < 1 || numbers > 3) return false;
-  return seqCount(args.slice(args.length - numbers).map(Number)) <= SEQ_MAX_VALUES;
+  const operands = args.slice(args.length - numbers);
+  if (!operands.every((word) => isCountable(word))) return false;
+  return seqCount(operands.map(Number)) <= SEQ_MAX_VALUES;
 }
 
 /**
