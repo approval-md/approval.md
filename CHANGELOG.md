@@ -15,7 +15,27 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.4 — 2026-10-12
+
 ### Security
+
+**Holes in 0.4.3 that this release closes.** Each one let a command run that
+the classifier never classified, or classified as a read. Upgrade every
+install that relies on the hook for enforcement.
+
+- `cat < ~/.hermes/.env` and other credential reads through a `<` redirection
+  were `read.shell` (APRV-503).
+- A `$(…)` in a redirection target ran unclassified: `cat a < "x$(rm -rf y)"`
+  was `read.shell` (APRV-508).
+- `>&WORD` onto a file was read as a descriptor dup: `cat /dev/null >&
+  APPROVAL.md` truncated the policy file as `read.shell` (APRV-508).
+- An unquoted heredoc body's `$(…)` ran unclassified, and a heredoc delimiter
+  carrying `$` hid the commands after bash's real terminator (APRV-504,
+  APRV-508).
+- A `#` that begins a word was read as text, so `cat #<<EOF` hid the next
+  lines' commands as a heredoc body bash never opens (APRV-508).
+
+The entries below give the detail.
 
 - **A credential file read through an input redirection is
   `account.credential` (APRV-503).** The classifier judged a reader's named
@@ -142,6 +162,12 @@ before a tag.
   `APPROVAL_DIFF_UUTILS` names it, uutils coreutils.
 - **`[` reads as `test` does (APRV-508).** It joins the `read-shell` row.
 
+### Conformance
+
+- `command-class` 1.7.0: eighty-nine new vectors (APRV-508), every one a new
+  input; no committed expectation moved. 1.6.0 (APRV-503) is listed under
+  Security above.
+
 ### Behavior changes for an existing policy
 
 - **Some answers move to a stricter class** (APRV-508 refutation): a command
@@ -168,6 +194,22 @@ before a tag.
   effectful command fed a protected file through `<` moves from its own class
   to the file's protected class. A command substitution
   that is nothing but `< credential` moves from inert to an `opaque` refusal.
+
+### What did not change
+
+- No SPEC class change, no policy key, no schema file, no refusal code. Every
+  new answer uses a class the taxonomy already had (`read.shell`, the write
+  and protected classes) or a refusal it already produced (`unclassified`,
+  `opaque`, `unparseable`).
+
+### Upgrade order
+
+- **Agent Village:** publish 0.4.4 and read its integrity back, then the
+  control plane pins `APPROVAL_MD_VERSION=0.4.4` and its
+  `APPROVAL_MD_INTEGRITY`, then one update per box (the overlay roll that
+  carries the date-timestamp change does this). Set the pins before that roll,
+  or it installs 0.4.3 again. The checkpoint rebake follows later and is not
+  on the critical path.
 
 ## 0.4.3 — 2026-10-07
 
