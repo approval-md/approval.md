@@ -2388,6 +2388,89 @@ const commandClassVectors = [
     control: true,
   },
   {
+    id: "dup-to-file-onto-the-policy-is-policy-core",
+    description: "bash reads >&WORD as >WORD 2>&1 when WORD is not a descriptor, so this truncates the policy file (refutation M1)",
+    input: { command: "paste /dev/null >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-file-under-a-test-is-policy-core",
+    description: "the same write behind [ (refutation M1)",
+    input: { command: "[ -f x ] >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-file-under-cat-is-policy-core",
+    description: "the same write behind cat, which was a read on 0.4.3 as well (refutation M1)",
+    input: { command: "cat /dev/null >& APPROVAL.md" },
+  },
+  {
+    id: "dup-to-plus-word-is-a-write",
+    description: "a word starting with + after >& is a file, not a descriptor (refutation M1)",
+    input: { command: "date >& +x" },
+  },
+  {
+    id: "dup-to-decimal-is-a-write",
+    description: "10.5 is not a descriptor, so >&10.5 writes the file 10.5 (refutation M1)",
+    input: { command: "seq 1 >&10.5" },
+  },
+  {
+    id: "dup-to-digits-and-letters-is-a-write",
+    description: "1x is not a descriptor, so >&1x writes the file 1x (refutation M1)",
+    input: { command: "paste a >&1x" },
+  },
+  {
+    id: "descriptor-dup-is-unmoved",
+    description: "2>&1 copies a descriptor and touches no file",
+    input: { command: "date -u 2>&1" },
+  },
+  {
+    id: "dup-in-from-a-word-refuses",
+    description: "<& with a word that is not a descriptor is not read by this classifier",
+    input: { command: "cat <&notes" },
+    control: true,
+  },
+  {
+    id: "bare-zone-assignment-refuses",
+    description: "a bare TZ= reaches a later date when TZ is exported, so it is not a read (refutation S1)",
+    input: { command: "TZ=/etc/x; date" },
+    control: true,
+  },
+  {
+    id: "bare-path-assignment-refuses",
+    description: "a bare PATH= picks which program every later command runs (refutation S1)",
+    input: { command: "PATH=/tmp/x; cat f" },
+    control: true,
+  },
+  {
+    id: "date-lowercase-embedded-zone-refuses",
+    description: "the TZ= inside a -d string is matched case-insensitively (refutation S2)",
+    input: { command: "date -d 'tz=\"/etc/x\" now'" },
+    control: true,
+  },
+  {
+    id: "test-array-subscript-refuses",
+    description: "bash evaluates a -v subscript as arithmetic, $(\u2026) included (refutation S3)",
+    input: { command: "test -v 'a[$(id)]'" },
+    control: true,
+  },
+  {
+    id: "bracket-array-subscript-refuses",
+    description: "[ is test, and refuses the same (refutation S3)",
+    input: { command: "[ -v 'a[$(id)]' ]" },
+    control: true,
+  },
+  {
+    id: "seq-past-the-cap-refuses",
+    description: "seq prints at most 100,000 values (refutation S4)",
+    input: { command: "seq 1e18" },
+    control: true,
+  },
+  {
+    id: "seq-zero-increment-refuses",
+    description: "a zero increment never ends (refutation S4)",
+    input: { command: "seq 1 0 5" },
+    control: true,
+  },
+  {
     id: "paste-end-of-options-refuses",
     description: "-- is never admitted",
     input: { command: 'paste -- a.txt' },
@@ -3573,8 +3656,14 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Forty-four
-    // new vectors pin the system-information readers (`uptime`, `whoami`,
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Fifty-nine
+    // new vectors. Fifteen pin the PR #636 refutation fixes: `>&WORD` with a
+    // non-descriptor WORD is a write (it was skipped as a dup, so `cat
+    // /dev/null >& APPROVAL.md` read as `read.shell`, on 0.4.3 too; no
+    // committed vector carried a `>&`, so no expectation moves), `<&WORD`
+    // refuses, a bare steering assignment (`TZ=`, `PATH=`) is not a read, a
+    // lowercase `tz=` in `-d`, a `test -v` subscript, and an endless or
+    // oversized `seq`. The rest pin the system-information readers (`uptime`, `whoami`,
     // `hostname`, `df`, `free`, `seq`, `paste`) in their display forms and,
     // as controls, the forms that set something, read something or parse
     // differently between GNU and uutils (`hostname NAME`, `hostname -- NAME`,

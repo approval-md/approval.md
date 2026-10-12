@@ -58,6 +58,26 @@ before a tag.
 - **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
   them refusal controls; no existing expectation moved). Totals 580/580.
 
+- **`>&WORD` to a file is a write (APRV-508, PR #636 refutation M1).** The
+  lexer skipped every `>&`/`<&` as a descriptor dup, but bash reads `>&WORD`
+  with a WORD that is not a descriptor as `>WORD 2>&1`. So `cat /dev/null >&
+  APPROVAL.md` truncated the policy file while classifying `read.shell` (on
+  0.4.3 too). Now the word after `>&` is read in full: digits with an
+  optional trailing `-`, or a lone `-`, is a dup or close as before; any other
+  word is a write redirection, judged by the protected-path and write checks
+  (`policy.core` for the policy file). After `<&`, a word that is not a
+  descriptor is refused `unparseable`.
+- **A bare steering assignment is not a read (APRV-508, refutation S1).**
+  `TZ=…`, `TZDIR=…`, `PATH=…`, `LOCPATH=…`, `GCONV_PATH=…`, `LANG=…`,
+  `LANGUAGE=…`, `LC_*=…` and `LD_*=…` in a segment of their own reach every
+  later command when the variable is exported, so `PATH=/tmp/x; cat f` and
+  `TZ=/etc/x; date` are `unclassified` rather than `read.shell`. Other bare
+  assignments (`NOW=$(date +%s)`) still read.
+- **`test` and `[` refuse an array subscript (APRV-508, refutation S3).** bash
+  evaluates a `-v`/`-R` operand's subscript as arithmetic, `$(…)` included, so
+  `test -v 'a[$(id)]'` runs a command. Such an operand, and an unquoted
+  substitution (whose output the shell splits into words), is `unclassified`.
+
 ### Classifier
 
 - **`date` reads the clock (APRV-508).** `date` was `unclassified`, so a hosted
@@ -80,8 +100,8 @@ before a tag.
   (`./date`) keep the `unclassified` refusal. `timedatectl` and `python3 -c`
   are unchanged.
 - **The system-information readers (APRV-508).** `uptime`, `whoami`,
-  `hostname`, `df`, `free`, `seq` and `paste` are `read.shell` in their display
-  forms, each through its own strict allow-grammar (`sysinfo-read`,
+  `hostname`, `df`, `free`, `seq` (at most 100,000 values) and `paste` are
+  `read.shell` in their display forms, each through its own strict allow-grammar (`sysinfo-read`,
   `hostname-read`, `df-read`, `free-read`, `seq-read`, `paste-read`): exact
   flag spellings, listed clusters only, no `--`, no option twice, operands only
   where the tool's grammar names one (numbers for `seq`, files for `paste`,
@@ -94,6 +114,11 @@ before a tag.
 
 ### Behavior changes for an existing policy
 
+- **Some answers move to a stricter class** (APRV-508 refutation): a command
+  with `>&WORD` onto a file moves from its read class to the write class of
+  that file (`policy.core` for the policy file); `<&WORD` with a non-descriptor
+  word, a bare steering assignment, `test`/`[` with a `-v`/`-R` subscript or an
+  unquoted substitution move from `read.shell` to a refusal.
 - **Some answers move to a looser class, on purpose** (APRV-508): `date`,
   `uptime`, `whoami`, `hostname`, `df`, `free`, `seq` and `paste` in their
   display forms, and `[`, move from `unclassified` to `read.shell`. No form

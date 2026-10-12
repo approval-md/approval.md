@@ -1154,8 +1154,29 @@ function lex(command: string): LexResult {
         continue;
       }
       if (op === ">&" || op === "<&") {
-        // `2>&1` and friends: a file descriptor dup, no path involved.
-        while (index < command.length && /[\d-]/u.test(command[index] as string)) index += 1;
+        // `2>&1`, `>&2`, `3<&0`, `2>&-`: a descriptor dup or close, no path
+        // involved. Anything else after `>&` is a FILE (APRV-508 refutation
+        // M1): bash reads `>&word` as `>word 2>&1`, so `paste a >& APPROVAL.md`
+        // truncates the policy file. The word is read in full, as the shell
+        // reads it, and is a dup only when it is exactly digits with an
+        // optional trailing `-`, or a lone `-`. A word whose value the text
+        // cannot settle (`>&$fd`) is taken as a file: a write is the stricter
+        // reading. After `<&` a non-descriptor word is refused.
+        while (command[index] === " " || command[index] === "\t") index += 1;
+        const target = readWord();
+        if (target === null || target.text === "") {
+          return { ok: false, detail: `redirection ${op} has no target` };
+        }
+        const dup =
+          target.substitutions.length === 0 && (/^\d+-?$/u.test(target.text) || target.text === "-");
+        if (dup) continue;
+        if (op === "<&") {
+          return {
+            ok: false,
+            detail: `redirection <&${target.text} names no file descriptor; this classifier does not read it`,
+          };
+        }
+        redirects.push({ op: ">", target });
         continue;
       }
       while (command[index] === " " || command[index] === "\t") index += 1;
@@ -4211,6 +4232,17 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
   return null;
 }
 
+/**
+ * Does this `NAME=value` set a variable that steers which program runs, what
+ * it loads, or which file it reads as a zone, locale or converter? (APRV-508
+ * refutation S1.)
+ */
+function isSteeringAssignment(word: string): boolean {
+  const name = word.slice(0, word.indexOf("="));
+  if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE"].includes(name)) return true;
+  return name.startsWith("LC_") || name.startsWith("LD_");
+}
+
 /** The directories a shape row's binary may be spelled from, besides a bare name. */
 const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/"];
 
@@ -4408,6 +4440,22 @@ function classifySegment(
     // binary path applies below has nothing to defer to.
     const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
     if (bareCredential !== null) return { ok: true, ...bareCredential };
+    // APRV-508 refutation S1: an assignment on its own sets a shell variable,
+    // and when that variable is already exported (PATH and LANG always are)
+    // the new value reaches every later command on the line. `TZ=/etc/x;
+    // date` opens the file the date row refuses to let `TZ=/etc/x date`
+    // open, and `PATH=/tmp/x; cat f` runs whatever `cat` sits there. So the
+    // variables that pick which program runs, which libraries it loads, or
+    // which file it reads as a zone, a locale or a charset converter are not
+    // answered as reads.
+    const steering = assignments.find((word) => isSteeringAssignment(word));
+    if (steering !== undefined) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for the assignment ${steering.slice(0, steering.indexOf("="))}=…: it steers which program or file later commands use`,
+      };
+    }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
     return writeTargets.length > 0
@@ -4438,6 +4486,25 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // APRV-508 refutation S3: `test -v 'a[$(id)]'` evaluates the subscript as
+  // arithmetic, and bash expands a `$(…)` inside it, so the operand runs a
+  // command. `[` is `test`; both refuse a `-v`/`-R` operand carrying `[`, and
+  // an unquoted substitution, whose output the shell would split into words
+  // (a `-v` and a subscript among them) that this text never shows.
+  if (basename === "test" || basename === "[") {
+    const operandWords = segment.words.slice(cursor + 1);
+    const probe = args.findIndex(
+      (arg, at) => (arg === "-v" || arg === "-R") && (args[at + 1] ?? "").includes("["),
+    );
+    if (probe !== -1 || operandWords.some((word) => word.substitutions.length > 0 && !word.quoted)) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for ${basename} with an array subscript or an unquoted substitution: the shell may evaluate it as a command`,
+      };
+    }
+  }
 
   // Credential material, below the opaque checks so `sudo cat .approval/env`
   // stays opaque (a refusal) rather than being softened into a request, and

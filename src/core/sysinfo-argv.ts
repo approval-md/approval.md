@@ -217,6 +217,27 @@ export function isFreeDisplay(args: readonly string[]): boolean {
 /** A decimal number, signed or not, with an optional exponent. No hex, `inf` or `nan`. */
 const SEQ_NUMBER = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/u;
 
+/**
+ * The most values an admitted `seq` prints (refutation S4). `seq 1e18` is a
+ * read in the sense that it changes nothing, but it holds the turn the way
+ * `free -s` does, so a range past this is not admitted.
+ */
+export const SEQ_MAX_VALUES = 100_000;
+
+/** How many values `seq FIRST [INCREMENT] LAST` prints; Infinity when it never ends. */
+function seqCount(numbers: readonly number[]): number {
+  const [first, increment, last] =
+    numbers.length === 1
+      ? [1, 1, numbers[0] as number]
+      : numbers.length === 2
+        ? [numbers[0] as number, 1, numbers[1] as number]
+        : [numbers[0] as number, numbers[1] as number, numbers[2] as number];
+  if (![first, increment, last].every((n) => Number.isFinite(n))) return Infinity;
+  if (increment === 0) return Infinity;
+  const steps = Math.floor((last - first) / increment);
+  return steps < 0 ? 0 : steps + 1;
+}
+
 /** One floating-point directive, `%%` escapes around it, nothing else. */
 const SEQ_FORMAT = /^(?:[^%]|%%)*%[-+ #0]*\d*(?:\.\d+)?[eEfFgG](?:[^%]|%%)*$/u;
 
@@ -269,7 +290,8 @@ export function isSeqDisplay(args: readonly string[]): boolean {
   const width = args.includes("-w") || args.includes("--equal-width");
   const format = args.some((arg) => arg === "-f" || arg === "--format" || arg.startsWith("--format="));
   if (width && format) return false;
-  return numbers >= 1 && numbers <= 3;
+  if (numbers < 1 || numbers > 3) return false;
+  return seqCount(args.slice(args.length - numbers).map(Number)) <= SEQ_MAX_VALUES;
 }
 
 /**

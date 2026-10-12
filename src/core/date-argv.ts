@@ -144,7 +144,9 @@ export function isDateAssignment(word: string): boolean {
  * date string, and resolve it as the variable would be resolved.
  */
 function isDateString(value: string): boolean {
-  const embedded = /TZ\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S*))/gu;
+  // Case-insensitive (refutation S2): GNU's prefix is `TZ=` exactly, but a
+  // parser that folds case would read `tz="/etc/x"` as a zone path too.
+  const embedded = /TZ\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S*))/giu;
   for (let match = embedded.exec(value); match !== null; match = embedded.exec(value)) {
     const zone = match[1] ?? match[2] ?? match[3] ?? "";
     if (!isZoneValue(zone)) return false;
