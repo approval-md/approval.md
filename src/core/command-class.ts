@@ -105,7 +105,34 @@ export interface ClassifiedSegment {
    * profile is the caller's, and a profile a caller wrote can allow anything.
    */
   sandbox?: SandboxWrapper;
+  /**
+   * The program an `exec.code` segment runs, present only on such a segment
+   * (APRV-510). Text only, like everything this file returns: the hook hashes
+   * the inline source, or reads and hashes the file, and binds the hash and the
+   * length, never the text (SPEC.md §11.1 invariant 3).
+   */
+  execCode?: ExecCodeSource;
 }
+
+/**
+ * What an `exec.code` segment runs, as the classifier read it (APRV-510).
+ *
+ * `source` is the inline program (`python3 -c <source>`, `node -e <source>`,
+ * `deno eval <source>`) or the file path as written (`python3 <source>`,
+ * `bun <source>`). `argv` is the segment's argv from the binary on, verbatim,
+ * and `sourceIndex` names the word of `argv` that carries `source`, so a
+ * caller can bind the argv with that one word replaced by its hash.
+ */
+export interface ExecCodeSource {
+  interpreter: string;
+  mode: ExecCodeMode;
+  source: string;
+  argv: string[];
+  sourceIndex: number;
+}
+
+/** How an `exec.code` segment carries its program (APRV-510). */
+export type ExecCodeMode = "inline" | "file";
 
 /**
  * Who wrote the profile a wrapped command runs under (APRV-193).
@@ -918,6 +945,17 @@ interface LexWord {
   quoted: boolean;
   /** Inner text of each `$(…)` in this word, for recursive classification. */
   substitutions: string[];
+  /**
+   * Is `text` exactly the bytes the shell would hand the command for this
+   * word? (APRV-510.) `false` when the shell would still change it: a `$`
+   * outside single quotes (a parameter expansion), an unquoted glob or brace
+   * character, a leading unquoted `~`, or a backslash inside double quotes
+   * before a character the shell keeps it for (this lexer drops every such
+   * backslash, the shell drops only five). Read by the `exec.code` shape alone,
+   * which hashes a word and so needs the word's bytes to be the program's
+   * bytes; every other reader keeps reading `text` exactly as before.
+   */
+  exact: boolean;
 }
 
 interface LexRedirect {
@@ -938,6 +976,32 @@ interface LexSegment {
   bodySubstitutions: string[];
   /** Set when the segment contains a construct whose effect cannot be read. */
   opaque: string | null;
+  /**
+   * Did this segment open a heredoc (`<<EOF`, `<<-EOF`)? (APRV-510.) The body
+   * is skipped and never classified, and an unquoted body still expands
+   * (APRV-504), so the `exec.code` shape declines a segment carrying one.
+   */
+  heredoc: boolean;
+  /**
+   * Does this segment's stdin come from somewhere the text names as input:
+   * the previous segment of a pipeline (`a | b`, `a |& b`), or a descriptor
+   * duplicated onto it (`<&3`)? (APRV-510, security review round 2.) A program
+   * can read its real source from stdin (`echo '<src>' | python3 -c
+   * 'exec(sys.stdin.read())'`), outside the hash, so the `exec.code` shape
+   * declines a segment fed this way.
+   */
+  stdinFed: boolean;
+  /**
+   * Is this segment inside a subshell `( … )`? (APRV-510, refuter rS2.) A
+   * redirection or heredoc written after the closing `)` feeds the stdin of
+   * every command inside it (`(python3 -c '…') < evil.py`), and lands on a
+   * segment of its own, so `stdinFed`, `heredoc` and `redirects` never reach
+   * the program's segment. The `exec.code` shape declines any segment inside a
+   * subshell at all, the stricter form of "a subshell carrying a redirection".
+   * A depth that goes negative (an unmatched `)`, as in a `case` pattern)
+   * counts as inside.
+   */
+  subshell: boolean;
 }
 
 type LexResult =
@@ -1003,6 +1067,9 @@ function lex(command: string): LexResult {
   let redirects: LexRedirect[] = [];
   let bodySubstitutions: string[] = [];
   let opaque: string | null = null;
+  let heredoc = false;
+  let stdinFed = false;
+  let depth = 0;
   let segmentStart = 0;
   let index = 0;
   const pending: PendingHeredoc[] = [];
@@ -1015,12 +1082,19 @@ function lex(command: string): LexResult {
         redirects,
         bodySubstitutions,
         opaque,
+        heredoc,
+        stdinFed,
+        subshell: depth !== 0,
       });
+      // Kept across an EMPTY flush, so the `&` of `|&` (or a newline after a
+      // trailing `|`) does not drop the pipe into the next real segment.
+      stdinFed = false;
     }
     words = [];
     redirects = [];
     bodySubstitutions = [];
     opaque = null;
+    heredoc = false;
     segmentStart = end;
   };
 
@@ -1032,6 +1106,7 @@ function lex(command: string): LexResult {
   const readWord = (): LexWord | null => {
     let text = "";
     let quoted = false;
+    let exact = true;
     const substitutions: string[] = [];
     const start = index;
 
@@ -1044,6 +1119,9 @@ function lex(command: string): LexResult {
       if (ch === "\\") {
         const next = command[index + 1];
         if (next === undefined) {
+          // APRV-510 (refuter N1): a backslash ending the input is dropped by
+          // a shell that reads the line as a script, so the text is not its.
+          exact = false;
           text += "\\";
           continue;
         }
@@ -1068,6 +1146,7 @@ function lex(command: string): LexResult {
         text += scan.text;
         substitutions.push(...scan.substitutions);
         if (scan.opaque !== null) opaque = scan.opaque;
+        if (!scan.exact) exact = false;
         quoted = true;
         index = scan.end;
         continue;
@@ -1099,6 +1178,12 @@ function lex(command: string): LexResult {
         continue;
       }
 
+      // APRV-510: what the shell would still expand in an unquoted run. The
+      // text is kept as it always was; only the `exact` flag records it.
+      if (ch === "$" || ch === "*" || ch === "?" || ch === "[" || ch === "{") exact = false;
+      // Bash expands an unquoted `~` at a word's start and after `=` or `:` in
+      // an assignment-shaped argument; any unquoted `~` is treated as one.
+      if (ch === "~") exact = false;
       text += ch;
     }
 
@@ -1106,7 +1191,7 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
-    return { text, quoted, substitutions };
+    return { text, quoted, substitutions, exact };
   };
 
   while (index < command.length) {
@@ -1171,6 +1256,7 @@ function lex(command: string): LexResult {
         };
       }
       if (op === "<<" || op === "<<-") {
+        heredoc = true;
         while (command[index] === " " || command[index] === "\t") index += 1;
         const delimiterStart = index;
         const terminator = readWord();
@@ -1198,6 +1284,13 @@ function lex(command: string): LexResult {
         continue;
       }
       if (op === ">&" || op === "<&") {
+        // APRV-510: a dup ONTO stdin (`<&3`, `0<&3`, `<&-`) feeds the command
+        // input the text never names. Set before the dup or refusal below, so
+        // every `<&` form closes `exec.code` for the segment it feeds. Bash's
+        // `n>&m` is `dup2(m, n)` whichever way the arrow points, so a `>&`
+        // whose descriptor prefix is 0 (`0>&3`, `0>& 1`, `00>&9`) feeds stdin
+        // exactly as `0<&3` does and closes the class too (refuter rS1).
+        if (op === "<&" || (op === ">&" && /^0+$/u.test(redirect[1] ?? ""))) stdinFed = true;
         // `2>&1`, `>&2`, `3<&0`, `2>&-`: a descriptor dup or close, no path
         // involved. Anything else after `>&` is a FILE (APRV-508 refutation
         // M1): bash reads `>&word` as `>word 2>&1`, so `paste a >& APPROVAL.md`
@@ -1234,8 +1327,14 @@ function lex(command: string): LexResult {
 
     if (ch === "&" || ch === "|" || ch === ";" || ch === "(" || ch === ")") {
       const boundary = index;
+      // APRV-510: a single `|` (or `|&`) pipes the previous segment into the next.
+      const pipe = ch === "|" && command[index + 1] !== "|";
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
+      // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
+      if (ch === "(") depth += 1;
+      if (ch === ")") depth -= 1;
+      if (pipe) stdinFed = true;
       segmentStart = index;
       continue;
     }
@@ -1287,18 +1386,29 @@ const QUOTED_BACKTICK_OPAQUE =
 function readDoubleQuoted(
   command: string,
   start: number,
-): { text: string; end: number; substitutions: string[]; opaque: string | null } | null {
+): {
+  text: string;
+  end: number;
+  substitutions: string[];
+  opaque: string | null;
+  exact: boolean;
+} | null {
   let text = "";
   const substitutions: string[] = [];
   let opaque: string | null = null;
+  // APRV-510, see `LexWord.exact`.
+  let exact = true;
   let index = start + 1;
 
   for (; index < command.length; index += 1) {
     const ch = command[index] as string;
-    if (ch === '"') return { text, end: index, substitutions, opaque };
+    if (ch === '"') return { text, end: index, substitutions, opaque, exact };
     if (ch === "\\") {
       const next = command[index + 1];
       if (next === undefined) break;
+      // The shell keeps the backslash before any other character; this lexer
+      // drops it, so the text is no longer the shell's bytes.
+      if (!DOUBLE_QUOTE_ESCAPES.has(next)) exact = false;
       if (next !== "\n") text += next;
       index += 1;
       continue;
@@ -1324,10 +1434,17 @@ function readDoubleQuoted(
       index = scan.end;
       continue;
     }
+    if (ch === "$") exact = false;
     text += ch;
   }
   return null;
 }
+
+/**
+ * The characters a backslash escapes inside double quotes, in the shell's own
+ * reading (APRV-510): before anything else the backslash is kept.
+ */
+const DOUBLE_QUOTE_ESCAPES: ReadonlySet<string> = new Set(["$", "`", '"', "\\", "\n"]);
 
 /**
  * Scan `(…)` starting at the opening paren, honouring nesting and quotes, and
@@ -1499,6 +1616,23 @@ export interface ClassifierContext {
    * here, forgetting it cannot loosen anything.
    */
   unwrapShell?: boolean;
+  /**
+   * May an opaque PROGRAM be classified `exec.code` rather than refused
+   * (APRV-510)?
+   *
+   * `false` by default, and the default is today's answer exactly: `python3 -c`,
+   * `node -e`, `perl -e`, `ruby -e` and `deno eval` stay `opaque`, `bun -e`,
+   * `python3 <file>` and `bun <file>.ts` stay `unclassified`. `src/cli/hook.ts`
+   * passes `true` only when the loaded policy declares
+   * `exec.code.custody: attested`, the operator's statement that the agent's
+   * code cannot reach credentials it should not hold. Like `scratchRoots`, a
+   * caller that forgets it gets the stricter answer: a refusal.
+   *
+   * It opens a SHAPE and nothing wider ({@link execCodeShape}): `bash -c`,
+   * `sh -c`, `eval`, a pipe into an interpreter and `python3 -` (stdin) are
+   * refused whatever this says.
+   */
+  execCode?: boolean;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -1596,6 +1730,14 @@ export interface CommandRule {
    * `NAME=value` words in front of the binary, verbatim.
    */
   shape?: (args: readonly string[], assignments: readonly string[]) => boolean;
+  /**
+   * Match only an argv in the `exec.code` shape, and only when the caller
+   * opened the class (APRV-510, {@link ClassifierContext.execCode},
+   * {@link execCodeShape}). The `probe`, `skillScript` and `shape` device again:
+   * an argv outside the shape does not match the row at all, so it keeps the
+   * answer it has today.
+   */
+  execCode?: boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -3227,6 +3369,227 @@ function refineSkillScript(ctx: RuleContext): Refinement {
     : { class: SKILL_SCRIPT_CLASS, rule: SKILL_SCRIPT_RULE, path: script };
 }
 
+// ---------------------------------------------------------------------------
+// Opaque agent code (APRV-510)
+// ---------------------------------------------------------------------------
+
+/**
+ * The class an opaque program takes once a policy opens it: an inline program
+ * or an interpreter run of a file the gate cannot read as a skill script.
+ * Under `exec.*` (SPEC.md §7) beside `exec.local`, and deliberately not under
+ * it: `exec.local` is code in the workspace the runtime may name, this is code
+ * whose effect nothing here reads. A record of it says the program EXISTED
+ * (its hash and length), never what it did: every tool call the program then
+ * makes through the harness is its own hook event, and a shell command it
+ * spawns is not seen at all.
+ */
+export const EXEC_CODE_CLASS = "exec.code";
+
+/** The table row that matches the `exec.code` shape. */
+export const EXEC_CODE_ROW = "exec-code";
+
+/** The rule id of an inline program (`python3 -c`, `node -e`, ...). */
+export const EXEC_CODE_INLINE_RULE = "exec-code-inline";
+
+/** The rule id of an interpreter running a file (`python3 x.py`, `bun x.ts`). */
+export const EXEC_CODE_FILE_RULE = "exec-code-file";
+
+/**
+ * The inline-program flag of each interpreter the shape knows (APRV-510).
+ * `deno` is absent because its inline form is a subcommand (`deno eval`).
+ * `node -p` / `--print` is absent on purpose: the brief's list, kept tight.
+ */
+const EXEC_CODE_INLINE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  python: ["-c"],
+  python3: ["-c"],
+  node: ["-e", "--eval"],
+  bun: ["-e", "--eval"],
+  perl: ["-e", "-E"],
+  ruby: ["-e"],
+};
+
+/** Every binary the `exec.code` row may match. */
+const EXEC_CODE_BINS: readonly string[] = [...Object.keys(EXEC_CODE_INLINE_FLAGS), "deno"];
+
+/**
+ * The interpreters whose FILE runs take `exec.code`. `node <file>` is absent:
+ * the table already answers it (`node-script`, `files.write.workspace`), and a
+ * name the table classifies from its arguments is not re-read here.
+ */
+const EXEC_CODE_FILE_BINS: ReadonlySet<string> = new Set(["python", "python3", "bun"]);
+
+/**
+ * The file a `bun` run must name to be read as a file rather than a
+ * subcommand: bun prefers a subcommand over a file of the same name, so only a
+ * word that cannot be one (a script extension) is taken.
+ */
+const BUN_SCRIPT_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/u;
+
+/** Where an `exec.code` argv carries its program (an index into the args). */
+export interface ExecCodeShape {
+  mode: ExecCodeMode;
+  /** Index into the args (the words after the binary) of the source word. */
+  index: number;
+}
+
+/** A word as {@link execCodeShape} needs it: its text and whether the shell would change it. */
+interface ExecShapeWord {
+  exact: boolean;
+  substitutions: readonly string[];
+}
+
+/**
+ * The `exec.code` shape of an interpreter argv, or `null` (APRV-510).
+ *
+ * An ALLOWLIST, like {@link skillScriptArg}, and the same flags are inert here:
+ *
+ * - inline: `[inert flags…] <inline flag> <program>`, and NOTHING after the
+ *   program, for every interpreter. A word after it is handed to the program
+ *   (`sys.argv`, `process.argv`, `ARGV`), and a one-line loader
+ *   (`python3 -c 'import sys; exec(sys.argv[1])' '<real program>'`) would put
+ *   the real program there, outside the hash and inside the argv the payload
+ *   carries verbatim (security review of APRV-510, finding 3a). `deno` is
+ *   exactly `deno eval <program>`;
+ * - file (python, python3 and bun only): `[inert flags…] <path> [args…]`,
+ *   where the path is not a skill script (those are `exec.local`, APRV-502)
+ *   and, for `bun`, carries a script extension.
+ *
+ * Anything else is not the shape: a value-taking flag, `--flag=value`, `-m`,
+ * a lone `-` (stdin), an inline flag with no program, two programs, a cluster
+ * hiding the inline flag (`-Ic`), and, when `words` is given, a source word the
+ * shell would still change (`LexWord.exact`) or one built from a substitution:
+ * the hash binds the program's bytes, so the word must BE them.
+ */
+export function execCodeShape(
+  bin: string,
+  args: readonly string[],
+  words: readonly ExecShapeWord[] | null = null,
+): ExecCodeShape | null {
+  const exactAt = (index: number): boolean => {
+    if (words === null) return true;
+    const word = words[index];
+    return word !== undefined && word.exact && word.substitutions.length === 0;
+  };
+  if (bin === "deno") {
+    if (args.length !== 2 || args[0] !== "eval") return null;
+    return exactAt(1) ? { mode: "inline", index: 1 } : null;
+  }
+  const inline = EXEC_CODE_INLINE_FLAGS[bin];
+  if (inline === undefined) return null;
+  const python = bin === "python" || bin === "python3";
+  const inert = SKILL_SCRIPT_FLAGS[bin] ?? [];
+  for (const [position, arg] of args.entries()) {
+    if (inline.includes(arg)) {
+      const index = position + 1;
+      if (index !== args.length - 1) return null;
+      return exactAt(index) ? { mode: "inline", index } : null;
+    }
+    if (!arg.startsWith("-")) {
+      if (!EXEC_CODE_FILE_BINS.has(bin)) return null;
+      if (isSkillScriptPath(arg)) return null;
+      // Refuter N5: a device or process path is a descriptor, not a program
+      // file (`/dev/stdin`, `/dev/fd/0`, `/proc/self/fd/0`).
+      if (arg.startsWith("/dev/") || arg.startsWith("/proc/")) return null;
+      if (bin === "bun" && !BUN_SCRIPT_FILE.test(arg)) return null;
+      return exactAt(position) ? { mode: "file", index: position } : null;
+    }
+    if (inert.includes(arg)) continue;
+    if (python && PYTHON_SKILL_SCRIPT_FLAGS.test(arg)) continue;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Is `bin` an interpreter spelling the `exec.code` row accepts? A bare name
+ * (found on the PATH the harness's shell started with: a segment earlier in
+ * the same command that can change name resolution closes the class for the
+ * rest of the line, see {@link movesNameResolution}), or an absolute path in
+ * one of the `bin` directories of {@link SYSTEM_BIN_DIRS}: `/bin`, `/usr/bin`
+ * and `/usr/local/bin` (security review of APRV-510, finding 1).
+ *
+ * One list for the whole classifier (refuter N6, the reconcile with APRV-508):
+ * a shape row's binary and an interpreter are spelled from the same system
+ * directories, read by the same {@link isSystemBinWord} (`..` and `//`
+ * refused). The interpreter reads the stricter part of it: the `sbin`
+ * directories hold administrative tools, never an interpreter, and
+ * `/opt/homebrew/bin` (admitted before the reconcile) is in neither. It is a
+ * rule about SPELLING rather than about who can write there:
+ * `/usr/local/bin` is often owned by the user on macOS (refuter N3), and a
+ * bare `python3` resolves through it anyway. What the rule refuses is a
+ * spelling the agent chooses outright (`/home/hermes/x/bin/python3`, a venv,
+ * the workspace, a Homebrew path). Anything else, a relative path
+ * (`./python3`, `.venv/bin/python`) included, keeps today's answer.
+ */
+function isExecCodeInterpreter(bin: string): boolean {
+  if (!bin.includes("/")) return true;
+  const cut = bin.lastIndexOf("/");
+  if (cut >= bin.length - 1 || !isSystemBinWord(bin)) return false;
+  return !bin.slice(0, cut + 1).endsWith("/sbin/");
+}
+
+/**
+ * The builtins that can change which program a bare name runs: `PATH` (`export`,
+ * `declare`, `set`), a function or alias of that name, the hash table.
+ */
+const NAME_RESOLUTION_BUILTINS: ReadonlySet<string> = new Set([
+  "export",
+  "declare",
+  "typeset",
+  "readonly",
+  "local",
+  "set",
+  "unset",
+  "alias",
+  "unalias",
+  "hash",
+  "enable",
+  "builtin",
+  "command",
+  "function",
+  // Refuter S4: builtins that WRITE a shell variable (PATH among them).
+  "read",
+  "readarray",
+  "mapfile",
+  "getopts",
+  "let",
+]);
+
+/**
+ * Can this segment change what a LATER bare interpreter name resolves to?
+ * (Security review of APRV-510, finding 1.) A bare assignment (`PATH=/tmp/x`,
+ * which reaches the lookup when `PATH` is exported, as it always is) or one of
+ * {@link NAME_RESOLUTION_BUILTINS}. Text only, and deliberately broad: a
+ * segment this answers `true` for only closes `exec.code` for the rest of the
+ * command line, which leaves those segments their pre-APRV-510 answer.
+ */
+function movesNameResolution(segment: LexSegment): boolean {
+  const words = segment.words.map((word) => word.text);
+  let cursor = 0;
+  while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+  const bin = words[cursor];
+  if (bin === undefined) return cursor > 0;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  // Refuter S4: `printf -v PATH …` assigns a variable, and the `printf` row
+  // reads it as `read.shell`.
+  if (base === "printf" && words.slice(cursor + 1).some((word) => word.startsWith("-v"))) {
+    return true;
+  }
+  return NAME_RESOLUTION_BUILTINS.has(base);
+}
+
+/** The `exec.code` row's answer: inline or file, with the file bound as the path. */
+function refineExecCode(ctx: RuleContext): Refinement {
+  const shape = execCodeShape(ctx.bin, ctx.args);
+  if (shape === null || shape.mode === "inline") {
+    // `matchRule` lets this row match only the shape, so `null` is unreachable;
+    // it is answered as the row's own class rather than as a `null` refinement,
+    // which this table reads as "opaque".
+    return { class: EXEC_CODE_CLASS, rule: EXEC_CODE_INLINE_RULE };
+  }
+  return { class: EXEC_CODE_CLASS, rule: EXEC_CODE_FILE_RULE, path: ctx.args[shape.index] as string };
+}
+
 /**
  * `node` — an inline script is opaque, the gate's own entry point is
  * pass-through, a skill script is `exec.local` (APRV-502), and anything else
@@ -3450,6 +3813,19 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   ...HARNESS_RULES,
 
   // -- workspace tools -----------------------------------------------------
+  // APRV-510. Opaque agent code, matched ONLY when the caller opened the class
+  // and the argv is exactly the shape ({@link execCodeShape}). Above `node`, so
+  // `node -e` reaches it before `refineNode` answers opaque; below every `bun`
+  // row of the package-manager group, so a `bun` argv the table already
+  // classifies keeps its class. With the class closed the row never matches,
+  // and every argv keeps the answer it had before the row existed.
+  {
+    id: EXEC_CODE_ROW,
+    bins: EXEC_CODE_BINS,
+    class: EXEC_CODE_CLASS,
+    execCode: true,
+    refine: refineExecCode,
+  },
   // APRV-193: three of the rules below hand control to code the runtime did not
   // author, and they are named in {@link CODE_EXECUTING_RULES}.
   {
@@ -4116,6 +4492,12 @@ export const CODE_EXECUTING_RULES: readonly string[] = [
    */
   SKILL_SCRIPT_RULE,
   NODE_SKILL_SCRIPT_RULE,
+  /**
+   * `python3 -c`, `node -e` and kin, and an interpreter running a file that is
+   * not a skill script, once a policy opens `exec.code` (APRV-510).
+   */
+  EXEC_CODE_INLINE_RULE,
+  EXEC_CODE_FILE_RULE,
   /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
   "workspace-tool",
   /**
@@ -4345,7 +4727,11 @@ function isSteeringAssignment(word: string): boolean {
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 
-/** The directories a shape row's binary may be spelled from, besides a bare name. */
+/**
+ * The directories a shape row's binary (APRV-508) and an `exec.code`
+ * interpreter (APRV-510, {@link isExecCodeInterpreter}) may be spelled from,
+ * besides a bare name. The classifier's one system-bin list.
+ */
 const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/"];
 
 /**
@@ -4385,11 +4771,17 @@ function matchRule(
   assigned = false,
   assignments: readonly string[] = [],
   binWord: string = bin,
+  /**
+   * Did the caller open `exec.code` AND does this segment have the shape?
+   * (APRV-510.) Computed by `classifySegment`, which holds the words.
+   */
+  execShaped = false,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
     if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
+    if (rule.execCode === true && !execShaped) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
       rule.skillScript === true &&
@@ -4421,6 +4813,8 @@ type SegmentOutcome =
        * sees it: the hook refuses when ANY class is human-only.
        */
       also?: CredentialOutcome;
+      /** The program an `exec.code` answer runs (APRV-510). */
+      execCode?: ExecCodeSource;
     }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
@@ -4594,8 +4988,31 @@ function classifySegment(
     return { ok: false, code: "opaque", detail: `${basename} ${opaqueReason}` };
   }
 
+  // APRV-510. The `exec.code` shape, read only when the caller opened the
+  // class, and declined by anything that would make the hashed words differ
+  // from the program that runs: an assignment prefix (`PYTHONSTARTUP`,
+  // `NODE_OPTIONS`), a substitution anywhere in the segment, a heredoc, any
+  // redirection other than a write to a discard device (stdin is a second
+  // program, a write target is a second effect), a segment inside a subshell
+  // (a redirection after its `)` feeds the program's stdin; refuter rS2), an
+  // interpreter spelled by a relative path, or a source word the shell would
+  // still change.
+  const execWords = segment.words.slice(cursor + 1);
+  const execShape =
+    context.execCode === true &&
+    !assigned &&
+    !segment.heredoc &&
+    !segment.stdinFed &&
+    !segment.subshell &&
+    segment.words.every((word) => word.substitutions.length === 0) &&
+    segment.redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
+    (segment.words[cursor]?.exact ?? false) &&
+    isExecCodeInterpreter(bin)
+      ? execCodeShape(basename, args, execWords)
+      : null;
+
   const inlineFlags = INLINE_SOURCE_BINS[basename];
-  if (inlineFlags !== undefined && hasFlag(args, inlineFlags)) {
+  if (inlineFlags !== undefined && hasFlag(args, inlineFlags) && execShape === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
   }
 
@@ -4681,7 +5098,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin);
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null);
   if (rule === null) {
     return {
       ok: false,
@@ -4803,12 +5220,27 @@ function classifySegment(
     }
   }
 
+  // APRV-510: the program, for the hook to hash. Attached only when the
+  // segment's FINAL class is `exec.code`: a protected or credential answer
+  // above has already replaced it, and carries no program.
+  const execCode: ExecCodeSource | null =
+    cls === EXEC_CODE_CLASS && rule.id === EXEC_CODE_ROW && execShape !== null
+      ? {
+          interpreter: basename,
+          mode: execShape.mode,
+          source: args[execShape.index] as string,
+          argv: words.slice(cursor),
+          sourceIndex: execShape.index + 1,
+        }
+      : null;
+
   return {
     ok: true,
     class: cls,
     rule: ruleId,
     ...(boundPath === undefined ? {} : { path: boundPath }),
     ...(sandbox === null ? {} : { sandbox }),
+    ...(execCode === null ? {} : { execCode }),
   };
 }
 
@@ -4851,7 +5283,14 @@ export function classifyCommand(
 
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
+  // APRV-510 (security review, finding 1): once a segment may have changed
+  // what a bare name resolves to, `exec.code` is closed for the rest of the
+  // line, so a later `python3 -c` keeps its pre-APRV-510 refusal.
+  let execContext = context;
   for (const segment of lexed.segments) {
+    if (execContext.execCode === true && movesNameResolution(segment)) {
+      execContext = { ...execContext, execCode: false };
+    }
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with
@@ -4859,7 +5298,14 @@ export function classifyCommand(
     // and the recursion is one level deep by construction.
     const script = context.unwrapShell === false ? null : loginShellScript(segment);
     if (script !== null) {
-      const inner = classifyCommand(script, protectedPaths, { ...context, unwrapShell: false });
+      // APRV-510: and with `exec.code` closed. `bash -c` and `sh -c` stay out of
+      // the class's scope, so a program inside an unwrapped shell script keeps
+      // the refusal it had before the class existed.
+      const inner = classifyCommand(script, protectedPaths, {
+        ...context,
+        unwrapShell: false,
+        execCode: false,
+      });
       if (!inner.ok) {
         // The refusal is the INNER one, reported against the inner segment: an
         // operator told `hook-opaque` for `zsh` learns nothing, and one told
@@ -4875,7 +5321,7 @@ export function classifyCommand(
       }
       continue;
     }
-    const outcome = classifySegment(segment, protectedPaths, context);
+    const outcome = classifySegment(segment, protectedPaths, execContext);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }
@@ -4885,6 +5331,7 @@ export function classifyCommand(
       rule: outcome.rule,
       ...(outcome.path === undefined ? {} : { path: outcome.path }),
       ...(outcome.sandbox === undefined ? {} : { sandbox: outcome.sandbox }),
+      ...(outcome.execCode === undefined ? {} : { execCode: outcome.execCode }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
     // APRV-503 recheck: the credential touch a protected answer outranked, as

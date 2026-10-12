@@ -74,6 +74,7 @@ import {
   delegationErrors,
   type DelegationBlock,
 } from "./delegation.js";
+import type { ExecBlock } from "./exec-code.js";
 import { scanFences, type FenceScan } from "./md-fence.js";
 // The routing floor (APRV-266) needs the resolver's own strictness table and
 // its own resolution of two classes, so this module imports the matcher that
@@ -334,6 +335,13 @@ export interface Policy {
    * display surfaces reads it. See `core/delegation.ts`.
    */
   delegation?: DelegationBlock;
+  /**
+   * Amended SPEC.md §5.2 (APRV-510, proposed; 0.4.5 candidate): what the
+   * operator attests about opaque agent code. Absent, the `exec.code` class is
+   * closed and every refusal is what it was before the key existed. Read by
+   * `core/exec-code.ts` alone; see there for what each key opens.
+   */
+  exec?: ExecBlock;
   /**
    * The approver roster (SPEC.md §5.1), and since APRV-324 the operator's
    * attested statement of which transport account each of them decides from.

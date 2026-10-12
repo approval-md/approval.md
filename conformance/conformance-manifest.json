@@ -7,12 +7,13 @@
     "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
     "conformance/vectors/command-class.v1.json": "2793fdc980a317677988edbac9014a06a7fa007754e79e7ccd764a84f43e16a1",
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
+    "conformance/vectors/hook-exec-code.v1.json": "20a804844fef99d99983ca8e5c9aadddc659aff4369f2060ff9de80578b5fcd5",
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",
     "conformance/vectors/hook-tool-map.v1.json": "1b24277f47cc1e996b336ba2ff3c8633c5502188667e8896d88fc03f28fea9c0",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "50b25f60cb8f56d495cede5f06529d186ba0037f009a57a99a03d2f900728ff2",
-    "conformance/vectors/refusal-unions.v1.json": "2f4058c1a910a700cf29713a34992c102c72fe15b745469e26e0fcb7d1408644",
-    "conformance/vectors/schema-validation.v1.json": "6d9540f43eaa01a35b957b64f4b4e041d06e55c1d737f4400b0bad23fafe26eb",
-    "tests/conformance-harness.ts": "ca33d651230c1c1d7246b46b15919321fff85b625bb1d055ed9703f95eed2c67"
+    "conformance/vectors/refusal-unions.v1.json": "b9ca9a0cabbeaa3e0609dbe1cf147a0ad68bd8bdfe6e52fa7c2ea6c4e9cddb10",
+    "conformance/vectors/schema-validation.v1.json": "4e40cb39397f4627f502ea9845e7afb2919cdcd010e18677cea338dac9c66544",
+    "tests/conformance-harness.ts": "4563ec3663397a1c15c524418f364074e8d45fab9b861243ac379bb8d21df854"
   }
 }
