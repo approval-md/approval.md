@@ -66,21 +66,24 @@ before a tag.
   row, `date-read`, answers `read.shell` for the display forms only: a bare
   `date`, one `+FORMAT` operand, `-u`/`--utc`/`--universal`,
   `-R`/`--rfc-2822`/`--rfc-email`, `-I[FMT]`/`--iso-8601[=FMT]`,
-  `--rfc-3339=FMT`, `-d`/`--date STRING`, short flags clustered as getopt
-  allows, and `TZ=Zone date` (the zone and locale variables are the only
-  assignments admitted). `-r FILE`/`--reference FILE` prints the file's
-  modification time and is treated as `stat FILE` is: `read.shell`,
-  `account.credential` for a credential path, and a read-scope target. Every
-  setting form (`-s`, `--set`, a bare `MMDDhhmm[[CC]YY][.ss]` operand), `-f`/
-  `--file`, `--reference=FILE`, abbreviated long options, and words carrying
-  `$`, backticks, globs or braces keep the `unclassified` refusal.
-  `timedatectl` and `python3 -c` are unchanged.
+  `--rfc-3339=FMT`, `-d`/`--date STRING`, `--debug`, `--resolution`,
+  `--help`, `--version`, short flags clustered as both getopt and clap allow,
+  and `TZ=Zone date`. The zone and locale variables are the only assignments
+  admitted, and only with values that name no file. The row is matched for
+  GNU and uutils `date` (the hosted boxes run uutils 0.10) at once, taking the
+  stricter reading where they differ. Every setting form (`-s`, `--set`, a
+  bare `MMDDhhmm[[CC]YY][.ss]` operand), every form that opens a file
+  (`-f`/`--file`, `-r`/`--reference` in any spelling, a zone path in `TZ` or
+  in a `TZ="…"` inside a `-d` string), a value starting with `-`, abbreviated
+  long options, and words carrying `$`, backticks, globs or braces keep the
+  `unclassified` refusal. `timedatectl` and `python3 -c` are unchanged.
+- **`[` reads as `test` does (APRV-508).** It joins the `read-shell` row.
 
 ### Behavior changes for an existing policy
 
-- **One answer moves to a looser class, on purpose: `date` in its display
-  forms** (APRV-508) moves from `unclassified` to `read.shell`. Its setting
-  forms do not move.
+- **Two answers move to a looser class, on purpose** (APRV-508): `date` in its
+  display forms, and `[`, move from `unclassified` to `read.shell`. No setting
+  or file-reading form of `date` moves.
 - **No other answer moves to a looser class.** A command whose `<` target is a
   credential file moves from `read.shell` (or `unclassified`,
   `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,

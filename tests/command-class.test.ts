@@ -696,6 +696,7 @@ const FIXTURES: readonly Fixture[] = [
   // pinned in `tests/command-class-date.test.ts`.
   { command: "date", class: "read.shell", rule: "date-read" },
   { command: "TZ=Asia/Kolkata date '+%a %F %T %Z'", class: "read.shell", rule: "date-read" },
+  { command: "[ -f README.md ]", class: "read.shell", rule: "read-shell" },
 
   // -- the read shapes an agent actually types (APRV-283) -------------------
   // Reported as `files.write.workspace` by `approval hook classify`. The bare

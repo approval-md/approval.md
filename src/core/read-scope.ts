@@ -42,8 +42,6 @@
  * runtime that cannot read its own policy, log and workspace cannot run at all.
  */
 
-import { parseDateDisplay } from "./date-argv.js";
-
 /**
  * The class a read outside every root takes.
  *
@@ -162,12 +160,6 @@ export function effectiveReadRoots(options: {
  *   UNLESS the pattern arrived through a flag (`-e`, `-f`), in which case every
  *   positional is a path and the shape collapses to `all`.
  * - `walk`: `find`'s shape — positionals up to the first primary are paths.
- * - `reference` (APRV-508): `date`'s shape. Its operand is an output format and
- *   its `-d` value a date string, neither of them a file; the one file it
- *   opens is the `-r` / `--reference` value, whose modification time it prints
- *   the way `stat` does. A `date` naming no reference reads no file, so it is
- *   answered `null` (not a scoped reader) rather than `[]` (the working
- *   directory): `date` alone must not become a read of the directory it ran in.
  *
  * Binaries absent from this table are absent on purpose, and each omission is a
  * decision not to widen anything:
@@ -195,7 +187,7 @@ export function effectiveReadRoots(options: {
  * `gunzip` and `base64 -o` take write classes in the classifier, and this module
  * scopes `read.shell` alone.
  */
-export type ReadTargetShape = "all" | "after-pattern" | "walk" | "reference";
+export type ReadTargetShape = "all" | "after-pattern" | "walk";
 
 /** Which readers take paths, and where. Keyed by the binary's basename. */
 export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
@@ -203,7 +195,6 @@ export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
   cat: "all",
   cksum: "all",
   cut: "all",
-  date: "reference",
   diff: "all",
   du: "all",
   file: "all",
@@ -300,10 +291,6 @@ export function readTargetsOf(
       return patternCameFromFlag(args) ? [...positionals] : positionals.slice(1);
     case "walk":
       return walkTargets(args.length === 0 ? positionals : args);
-    case "reference": {
-      const references = parseDateDisplay(args)?.references ?? [];
-      return references.length === 0 ? null : references;
-    }
   }
 }
 

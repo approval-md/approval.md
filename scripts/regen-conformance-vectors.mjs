@@ -2171,14 +2171,24 @@ const commandClassVectors = [
     input: { command: "TZ=Asia/Kolkata date" },
   },
   {
-    id: "date-reference-is-a-read",
-    description: "-r FILE prints the file's modification time, which is what stat FILE prints, and takes stat's class",
-    input: { command: "date -r README.md" },
+    id: "date-in-a-substitution-is-a-read",
+    description: "the shape agents write: date inside $(…), an inert read substitution",
+    input: { command: 'echo "since $(date -u -d "1 hour ago" +%FT%TZ)"' },
+  },
+  {
+    id: "date-at-the-end-of-a-pipeline-is-a-read",
+    description: "a four-segment pipeline ending in date, refused once in production, reads in every segment",
+    input: { command: "printenv HOME | cut -d/ -f2 | tr a-z A-Z | date -u +%FT%TZ" },
   },
   {
     id: "date-reference-to-a-credential-is-a-credential-touch",
-    description: "the same reference on a credential file is account.credential, as stat of that file is",
+    description: "a reference to a credential file is named for what it touches: the credential tier answers before any row",
     input: { command: "date -r ~/.hermes/.env" },
+  },
+  {
+    id: "bracket-is-test",
+    description: "[ is test under its other name, and the closing ] is an argument",
+    input: { command: "[ -f README.md ]" },
   },
   {
     id: "date-set-flag-refuses",
@@ -2205,9 +2215,45 @@ const commandClassVectors = [
     control: true,
   },
   {
-    id: "date-attached-reference-refuses",
-    description: "--reference=FILE hides the file inside a flag word, out of reach of the credential and read-scope checks",
-    input: { command: "date --reference=README.md" },
+    id: "date-reference-refuses",
+    description: "-r FILE reads a file's metadata; the row admits no form that opens a file, in any spelling",
+    input: { command: "date -r README.md" },
+    control: true,
+  },
+  {
+    id: "date-reference-abbreviation-refuses",
+    description: "getopt and clap both accept a unique long-option prefix, so --ref is --reference and is refused",
+    input: { command: "date --ref=README.md" },
+    control: true,
+  },
+  {
+    id: "date-clustered-file-refuses",
+    description: "-f inside a cluster reads the file as -f alone does",
+    input: { command: "date -uf dates.txt" },
+    control: true,
+  },
+  {
+    id: "date-flag-shaped-value-refuses",
+    description: "a value starting with - is the value to getopt and may be the next flag to clap (uutils), here --set",
+    input: { command: "date -d -s now" },
+    control: true,
+  },
+  {
+    id: "date-zone-path-refuses",
+    description: "a TZ value that is a path makes date open that file as a zone",
+    input: { command: "TZ=/etc/shadow date" },
+    control: true,
+  },
+  {
+    id: "date-zone-climb-refuses",
+    description: "a TZ value climbing out of the zone database with .. is a path too",
+    input: { command: "TZ=Asia/../../etc/shadow date" },
+    control: true,
+  },
+  {
+    id: "date-embedded-zone-path-refuses",
+    description: "a TZ=\"…\" inside a -d string is resolved as the variable is, so a path there is refused",
+    input: { command: "date -d 'TZ=\"/etc/shadow\" now'" },
     control: true,
   },
   {
@@ -3402,11 +3448,13 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Fourteen new
-    // `date-*` vectors pin `date` in its display forms as `read.shell` (rule
-    // `date-read`) and its setting forms (`-s`, `--set`, a bare clock operand),
-    // `-f`, the attached reference, an unreadable word and a foreign
-    // assignment as `unclassified`, the answer every `date` had before. No
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Twenty-two
+    // new vectors pin `date` in its display forms as `read.shell` (rule
+    // `date-read`), inside `$(…)` and at the end of a pipeline, `[` as `test`,
+    // and as `unclassified` (the answer every `date` had before) its setting
+    // forms, every file-reading form (`-f`, `-r` in any spelling or cluster, a
+    // zone path in TZ or inside a `-d` string), a flag-shaped value, an
+    // unreadable word and a foreign assignment. No
     // committed expectation in this file moves: the suite has never carried a
     // `date` vector. What moved outside it is a refusal becoming an answer,
     // for the display forms only.

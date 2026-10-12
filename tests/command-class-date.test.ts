@@ -10,10 +10,13 @@
  * 1. every display form an agent types is `read.shell` under `date-read`;
  * 2. every setting form, and everything the parse cannot read literally, stays
  *    `unclassified` (the answer it had before the row existed);
- * 3. `-r FILE` is a stat, and is treated as `stat FILE` is: a credential path
- *    is `account.credential`, and the file is a read-scope target;
+ * 3. no form reads a file: `-f` and `-r` in every spelling, a zone or locale
+ *    value that is a path, and a `TZ="…"` path inside a `-d` string all stay
+ *    refused, so no `date` is a read the read scope would have to judge;
  * 4. the zone and locale assignments are admitted, and no other assignment is;
- * 5. `timedatectl` and `python3 -c` are not widened.
+ * 5. `date` inside `$(…)` and pipelines classifies as the agents write it;
+ * 6. `[` reads as `test` does;
+ * 7. `timedatectl` and `python3 -c` are not widened.
  *
  * Pure: no disk, no clock, no log.
  */
@@ -22,8 +25,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { classifyCommand } from "../src/core/command-class.js";
-import { parseDateDisplay } from "../src/core/date-argv.js";
-import { READ_OUT_OF_SCOPE_CLASS, readTargetsOf } from "../src/core/read-scope.js";
+import { isDateAssignment, isDateDisplay, isZoneValue } from "../src/core/date-argv.js";
+import { readTargetsOf } from "../src/core/read-scope.js";
 
 function classified(command: string, roots?: readonly string[]): { class: string; rule: string; path?: string } {
   const result = classifyCommand(command, [], roots === undefined ? {} : { readRoots: roots });
@@ -62,9 +65,17 @@ const DISPLAY: readonly string[] = [
   "date -d tomorrow",
   "date -d 'next monday' +%F",
   "date -d@1760000000",
-  "date -d '-1 day' +%F",
   "date --date=@0",
   "date --date '2026-10-12 09:00 IST' -u",
+  "date -d 'TZ=\"Asia/Kolkata\" 09:00' +%R",
+  "date -d '1 day ago' +%F",
+  "date -u +%Y-%m-%dT%H:%M:%SZ",
+  "date --debug -d tomorrow",
+  "date --resolution",
+  "date --help",
+  "date -h",
+  "date --version",
+  "date -V",
   "date -uR",
   "date -ud @0",
   "date -uIseconds",
@@ -73,10 +84,11 @@ const DISPLAY: readonly string[] = [
   "TZ=UTC date -R",
   "LC_ALL=C TZ=Europe/Paris date '+%c'",
   "LANG=en_US.UTF-8 date",
+  "TZ=:Asia/Kolkata date",
+  "TZ=Etc/GMT+5 date",
+  "TZ=IST-5:30 date",
+  "TZ= date",
   "/bin/date -u",
-  "date -r README.md",
-  "date -ur README.md +%s",
-  "date --reference README.md",
 ];
 
 for (const command of DISPLAY) {
@@ -131,18 +143,41 @@ const REFUSED: ReadonlyArray<readonly [string, string]> = [
   ["date -f dates.txt", "-f reads a file's lines and echoes the bad ones"],
   ["date --file=dates.txt", "the long form"],
   ["date --file dates.txt", "the long form, separate value"],
-  ["date --reference=README.md", "the =-attached reference hides FILE from the credential and scope checks"],
-  ["date -rREADME.md", "the attached short reference, the same"],
-  ["date -r -x", "a flag-shaped reference"],
+  ["date -r README.md", "-r reads a file's metadata; the row reads no file"],
+  ["date -r /etc/shadow", "the same, outside every root"],
+  ["date -ur README.md +%s", "-r inside a cluster"],
+  ["date --reference README.md", "the long form"],
+  ["date --reference=README.md", "the long form, attached"],
+  ["date --ref=README.md", "an abbreviation of --reference"],
+  ["date -rREADME.md", "the attached short form"],
+  ["date -r=README.md", "clap's -r=FILE"],
   ["date -r", "a reference with no file"],
+  ["date -uf dates.txt", "-f inside a cluster"],
+  ["date --fi=dates.txt", "an abbreviation of --file"],
+  ["date -d '-1 day' +%F", "a flag-shaped value: getopt takes it as the value, clap as a flag"],
+  ["date -d -s now", "a flag-shaped value that clap would read as --set"],
+  ["date --date -s", "the long form"],
+  ["date --rfc-3339 -s", "the same for --rfc-3339"],
+  ["date -d 'TZ=\"/etc/shadow\" now'", "a TZ path inside the date string opens that file"],
+  ["date -d 'TZ=\":/etc/shadow\" now'", "the POSIX colon form"],
+  ["date -d 'TZ=\"../../etc/shadow\" now'", "a climb out of the zone database"],
+  ["date --date='TZ=/etc/shadow now'", "unquoted, attached"],
+  ["TZ=/etc/shadow date", "a zone value that is an absolute path"],
+  ["TZ=:/etc/shadow date", "the POSIX colon form"],
+  ["TZ=../../../etc/shadow date", "a relative climb"],
+  ["TZ=Asia/../../etc/shadow date", "a climb behind a real region"],
+  ["TZ=~/zone date", "a home-relative path"],
+  ["TZ=$ZONE date", "a value this file cannot read"],
+  ["TZDIR=/tmp TZ=x date", "TZDIR moves the zone database"],
+  ["LC_ALL=/tmp/loc date", "a locale value that is a path"],
+  ["LANG=../x date", "a locale climb"],
+  ["LOCPATH=/tmp date", "LOCPATH moves the locale database"],
   ["date -d", "a date flag with no value"],
   ["date --date", "the long form with no value"],
   ["date --rfc-3339", "a required value missing"],
   ["date --se=2020-01-01", "getopt abbreviation of --set: only exact names are read"],
   ["date --da=tomorrow", "an abbreviation even of a display flag"],
-  ["date --debug", "not a display form this row names"],
-  ["date --help", "not a display form this row names"],
-  ["date --version", "not a display form this row names"],
+  ["date --u", "an abbreviation of --utc"],
   ["date -j -f %s 0", "BSD parse forms stay out"],
   ["date -v+1d", "BSD adjust stays out"],
   ["date -- +%s", "a bare -- is not read"],
@@ -184,11 +219,13 @@ test("APRV-508: sudo date stays a refusal of its own", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. -r FILE is a stat, treated as stat is
+// 3. No form reads a file
 // ---------------------------------------------------------------------------
 
-test("APRV-508: date -r and stat agree on a credential path", () => {
-  for (const command of ["date -r ~/.hermes/.env", "date --reference .approval/env", "stat ~/.hermes/.env"]) {
+test("APRV-508: a credential path in a date argv is still a credential touch", () => {
+  // The credential tier answers before any row is matched, so a refused
+  // reference to a credential file is named for what it touches.
+  for (const command of ["date -r ~/.hermes/.env", "date --reference .approval/env"]) {
     const segment = classified(command);
     assert.equal(segment.class, "account.credential", command);
     assert.equal(segment.rule, "credential-path", command);
@@ -201,39 +238,83 @@ test("APRV-508: a secret-named variable is a credential touch before the shape i
   assert.equal(segment.rule, "credential-env");
 });
 
-test("APRV-508: date -r and stat agree on the read scope", () => {
-  const roots = ["/work", "/private/tmp"];
-  for (const command of ["date -r /etc/hosts", "date -ur /etc/hosts +%s", "stat /etc/hosts"]) {
-    const segment = classified(command, roots);
-    assert.equal(segment.class, READ_OUT_OF_SCOPE_CLASS, command);
-    assert.equal(segment.path, "/etc/hosts", command);
-  }
-  assert.equal(classified("date -r /work/README.md", roots).class, "read.shell");
-});
-
-test("APRV-508: a date naming no reference reads no file, under any roots", () => {
-  const roots = ["/work"];
+test("APRV-508: date is not a scoped reader, and stays read.shell under any roots", () => {
+  // No admitted form opens a file, so there is nothing for the read scope to
+  // judge: `null` means the hook's disk pass leaves the segment alone and does
+  // NOT check the working directory in its place.
+  assert.equal(readTargetsOf("date", [], []), null);
+  assert.equal(readTargetsOf("date", ["tomorrow", "+%F"], ["-d", "tomorrow", "+%F"]), null);
   for (const command of ["date", "date -d /etc/hosts", "date +/etc/hosts", "date -u -d tomorrow +%F"]) {
-    const segment = classified(command, roots);
+    const segment = classified(command, ["/work"]);
     assert.equal(segment.class, "read.shell", command);
     assert.equal(segment.rule, "date-read", command);
   }
 });
 
-test("APRV-508: readTargetsOf names the reference and nothing else", () => {
-  // `null` is "not a scoped reader": the hook's disk pass leaves the segment
-  // alone, and does NOT check the working directory in its place.
-  assert.equal(readTargetsOf("date", [], []), null);
-  assert.equal(readTargetsOf("date", ["tomorrow", "+%F"], ["-d", "tomorrow", "+%F"]), null);
-  assert.deepEqual(readTargetsOf("date", ["/etc/hosts"], ["-r", "/etc/hosts"]), ["/etc/hosts"]);
-  assert.deepEqual(
-    readTargetsOf("/bin/date", ["now", "a.txt", "+%s"], ["-d", "now", "--reference", "a.txt", "+%s"]),
-    ["a.txt"],
-  );
+test("APRV-508: zone values name the database, never a file", () => {
+  for (const zone of ["", "UTC", "Asia/Kolkata", ":Asia/Kolkata", "Etc/GMT+5", "America/Argentina/Buenos_Aires", "IST-5:30", "EST5EDT", "<+0530>-5:30"]) {
+    assert.equal(isZoneValue(zone), true, zone);
+  }
+  for (const zone of ["/etc/shadow", ":/etc/shadow", "../x", "Asia/../../x", "a/./b", "~/z", "Asia/Kolkata/", "/", ":"]) {
+    assert.equal(isZoneValue(zone), false, zone);
+  }
+  assert.equal(isDateAssignment("LC_ALL=C.UTF-8"), true);
+  assert.equal(isDateAssignment("LANGUAGE=en:fr"), true);
+  assert.equal(isDateAssignment("LC_TIME=/x"), false);
+  assert.equal(isDateAssignment("TZDIR=x"), false);
 });
 
 // ---------------------------------------------------------------------------
-// 5. Not widened
+// 5. Where the agents write it: substitutions and pipelines
+// ---------------------------------------------------------------------------
+
+test("APRV-508: date inside $(…) is an inert read substitution", () => {
+  for (const command of [
+    'echo "today is $(date +%F)"',
+    "NOW=$(date -u +%s)",
+    'START=$(date -u -d "1 hour ago" +%Y-%m-%dT%H:%M:%SZ) && echo "$START"',
+    'curl -sS "https://example.com/events?since=$(date -u +%FT%TZ)"',
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, `${command}: ${result.ok ? "" : result.detail}`);
+  }
+  const set = classifyCommand('echo "$(date -s now)"');
+  assert.equal(set.ok, false);
+  if (!set.ok) assert.equal(set.code, "unclassified");
+});
+
+test("APRV-508: date at the end of a four-segment pipeline", () => {
+  const result = classifyCommand("printenv HOME | cut -d/ -f2 | tr a-z A-Z | date -u +%FT%TZ");
+  assert.equal(result.ok, true, result.ok ? "" : result.detail);
+  if (!result.ok) return;
+  assert.deepEqual(result.classes, ["read.shell"]);
+  assert.equal(result.segments[3]?.rule, "date-read");
+});
+
+// ---------------------------------------------------------------------------
+// 6. `[` is `test`
+// ---------------------------------------------------------------------------
+
+test("APRV-508: [ classifies as test does", () => {
+  for (const [bracket, plain] of [
+    ["[ -f README.md ]", "test -f README.md"],
+    ['[ "$(date +%u)" -gt 5 ] && echo weekend', 'test "$(date +%u)" -gt 5 && echo weekend'],
+    ["[ -d /etc ]", "test -d /etc"],
+  ] as const) {
+    const a = classifyCommand(bracket);
+    const b = classifyCommand(plain);
+    assert.equal(a.ok, true, `${bracket}: ${a.ok ? "" : a.detail}`);
+    assert.equal(b.ok, true, plain);
+    if (!a.ok || !b.ok) return;
+    assert.deepEqual(a.classes, b.classes, bracket);
+    assert.equal(a.segments[0]?.rule, "read-shell", bracket);
+  }
+  // A protected or credential path still answers first, as it does for test.
+  assert.equal(classified("[ -f ~/.hermes/.env ]").class, "account.credential");
+});
+
+// ---------------------------------------------------------------------------
+// 7. Not widened
 // ---------------------------------------------------------------------------
 
 test("APRV-508: timedatectl and python3 -c keep their answers", () => {
@@ -249,13 +330,16 @@ test("APRV-508: timedatectl and python3 -c keep their answers", () => {
 // The parser on its own
 // ---------------------------------------------------------------------------
 
-test("APRV-508: parseDateDisplay follows getopt on value-taking flags", () => {
-  // A required value is the next word whatever it looks like.
-  assert.deepEqual(parseDateDisplay(["-d", "-s"]), { references: [] });
-  assert.deepEqual(parseDateDisplay(["--date", "--set"]), { references: [] });
-  // An optional value is attached or absent.
-  assert.equal(parseDateDisplay(["--iso-8601", "seconds"]), null);
-  assert.deepEqual(parseDateDisplay(["--iso-8601=seconds"]), { references: [] });
-  // References come back in order.
-  assert.deepEqual(parseDateDisplay(["-r", "a", "--reference", "b"]), { references: ["a", "b"] });
+test("APRV-508: isDateDisplay holds the stricter of getopt's and clap's reading", () => {
+  // A required value must not look like a flag: clap may read it as one.
+  assert.equal(isDateDisplay(["-d", "-s"]), false);
+  assert.equal(isDateDisplay(["--date", "--set"]), false);
+  assert.equal(isDateDisplay(["-d", "now"]), true);
+  // An optional value is attached, or the next word is an operand.
+  assert.equal(isDateDisplay(["--iso-8601", "seconds"]), false);
+  assert.equal(isDateDisplay(["--iso-8601=seconds"]), true);
+  // Assignments are judged by name AND value.
+  assert.equal(isDateDisplay([], ["TZ=Asia/Kolkata"]), true);
+  assert.equal(isDateDisplay([], ["TZ=/etc/shadow"]), false);
+  assert.equal(isDateDisplay([], ["LD_PRELOAD=./x.so"]), false);
 });

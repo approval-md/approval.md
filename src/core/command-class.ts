@@ -48,7 +48,7 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
-import { DATE_ENV_NAMES, parseDateDisplay } from "./date-argv.js";
+import { isDateDisplay } from "./date-argv.js";
 import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
@@ -1461,10 +1461,10 @@ export interface CommandRule {
    * argv outside it does not match the row at all, so the segment keeps the
    * answer it had before the row existed (`unclassified`, for a binary no other
    * row names). A substituted word declines every shape row before the
-   * predicate is asked, since its text is a hole. `assignedNames` are the
-   * `NAME=value` words in front of the binary, by name.
+   * predicate is asked, since its text is a hole. `assignments` are the
+   * `NAME=value` words in front of the binary, verbatim.
    */
-  shape?: (args: readonly string[], assignedNames: readonly string[]) => boolean;
+  shape?: (args: readonly string[], assignments: readonly string[]) => boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -3459,21 +3459,23 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   // -- reads ---------------------------------------------------------------
   // APRV-508. `date` prints the time or sets the clock, with one binary and
   // overlapping flags, so it is a shape row rather than a seat in the read
-  // table: only the display forms {@link parseDateDisplay} reads match, and
-  // every setting form (`-s`, `--set`, a bare `MMDDhhmm` operand, `-f`) keeps
-  // the `unclassified` refusal it had. The only assignments the row admits are
-  // the zone and the locale (`TZ=Asia/Kolkata date`); any other name in front
-  // of the binary declines it.
+  // table: only the display forms {@link isDateDisplay} reads match, and every
+  // setting form (`-s`, `--set`, a bare `MMDDhhmm` operand), every file-reading
+  // form (`-f`, `-r`) and everything else keeps the `unclassified` refusal it
+  // had. The only assignments the row admits are the zone and the locale, with
+  // values that cannot name a file (`TZ=Asia/Kolkata date`).
   {
     id: "date-read",
     bins: ["date"],
     class: "read.shell",
-    shape: (args, assignedNames) =>
-      assignedNames.every((name) => DATE_ENV_NAMES.includes(name)) && parseDateDisplay(args) !== null,
+    shape: isDateDisplay,
   },
   {
     id: "read-shell",
     bins: [
+      // APRV-508: `[` is `test` under its other name; the closing `]` is an
+      // argument. Both read nothing but their operands and the file modes.
+      "[",
       "basename",
       "cat",
       "cd",
@@ -4171,8 +4173,8 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
  * and the segment keeps the answer it had before (fail closed).
  *
  * A `shape` row (APRV-508) reads the argv through its own predicate, which is
- * handed the assignment NAMES so it can admit the harmless ones (`TZ`) and
- * decline the rest; a substituted word declines it outright.
+ * handed the assignment words so it can admit the harmless ones (`TZ=Zone`)
+ * and decline the rest; a substituted word declines it outright.
  */
 function matchRule(
   bin: string,
@@ -4180,12 +4182,12 @@ function matchRule(
   args: readonly string[],
   substituted = false,
   assigned = false,
-  assignedNames: readonly string[] = [],
+  assignments: readonly string[] = [],
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    if (rule.shape !== undefined && (substituted || !rule.shape(args, assignedNames))) continue;
+    if (rule.shape !== undefined && (substituted || !rule.shape(args, assignments))) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
       rule.skillScript === true &&
@@ -4258,8 +4260,8 @@ function classifySegment(
   while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
   // APRV-502: read by the skill-script shape only ({@link matchRule}).
   const assigned = cursor > 0;
-  // APRV-508: the same words by name, for a `shape` row that admits some.
-  const assignedNames = words.slice(0, cursor).map((word) => word.slice(0, word.indexOf("=")));
+  // APRV-508: the same words, for a `shape` row that admits some.
+  const assignments = words.slice(0, cursor);
 
   // APRV-193. A sandbox wrapper is not a command: it is a room, and what
   // matters is what runs inside it. `approval sandbox -- npm install` is
@@ -4409,7 +4411,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignedNames);
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments);
   if (rule === null) {
     return {
       ok: false,
