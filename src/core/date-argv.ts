@@ -28,16 +28,16 @@
  *   uutils alike;
  * - `-u`, `--utc`, `--universal` (print in UTC);
  * - `-R`, `--rfc-2822`, `--rfc-email`;
- * - `-I` with an optional ATTACHED value (`-Iseconds`), and `--iso-8601` with
- *   an optional `=value`;
- * - `--rfc-3339=FMT` or `--rfc-3339 FMT`;
- * - `-d STRING`, `-dSTRING`, `--date=STRING`, `--date STRING`: the string is
+ * - `-I` alone or with an ATTACHED precision (`-Iseconds`), and `--iso-8601`
+ *   alone or with `=precision`;
+ * - `--rfc-3339=FMT` or `--rfc-3339 FMT`, FMT one of `date`, `seconds`, `ns`;
+ * - `-d STRING`, `-ud STRING`, `--date=STRING`, `--date STRING`: the string is
  *   parsed and printed, never applied to the clock. A `TZ="…"` inside the
  *   string names a zone and is held to {@link isZoneValue};
  * - `--debug`, `--resolution`, `-h`/`--help`, `-V`/`--version`, which print
  *   diagnostics or text and read nothing;
- * - short flags clustered as both parsers allow (`-uR`, `-ud @0`,
- *   `-uIseconds`).
+ * - the clusters `-uR`, `-Ru` and `-ud`, and no other: a cluster is accepted
+ *   only by its exact spelling.
  *
  * Declined, so `unclassified` as before:
  *
@@ -49,7 +49,8 @@
  *   exists for need the clock rather than a file's mtime. Admitting it would
  *   put a second spelling of `stat` behind a row whose whole claim is that it
  *   reads no file, so it stays refused;
- * - BSD's `-j`/`-v`/`-n`, a bare `--`, every long-option abbreviation;
+ * - BSD's `-j`/`-v`/`-n`, a bare `--`, every long-option abbreviation, an
+ *   attached short value (`-d@0`, `-d=@0`), and every cluster not listed;
  * - any word this file cannot read literally: one carrying `$`, a backtick, a
  *   glob or a brace, since the shell may split or expand it into flags this
  *   parse never saw. The classifier also declines a segment with a
@@ -65,7 +66,7 @@ export const DATE_ENV_NAMES: readonly string[] = ["TZ", "LANG", "LANGUAGE", "LC_
 /** Characters the shell may expand into more words, or into other words. */
 const UNREADABLE_WORD = /[$`*?[\]{}]/u;
 
-/** Long options that take no value. */
+/** Long options that take no value, by exact spelling. */
 const LONG_BARE: readonly string[] = [
   "--utc",
   "--universal",
@@ -78,11 +79,21 @@ const LONG_BARE: readonly string[] = [
   "--version",
 ];
 
-/** Long options whose value is required: `--name=value` or `--name value`. */
-const LONG_VALUE: readonly string[] = ["--date", "--rfc-3339"];
+/**
+ * Short words that take no value, by exact spelling. Clusters are admitted
+ * only as listed here: no general cluster parsing, so a letter this file does
+ * not know can never ride inside one.
+ */
+const SHORT_BARE: readonly string[] = ["-u", "-R", "-h", "-V", "-I", "-uR", "-Ru"];
 
-/** Short flags that take no value. */
-const SHORT_BARE: readonly string[] = ["u", "R", "h", "V"];
+/** The `-I` / `--iso-8601` precisions, attached (`-Iseconds`, `--iso-8601=ns`). */
+const ISO_PRECISIONS: readonly string[] = ["date", "hours", "minutes", "seconds", "ns"];
+
+/** The `--rfc-3339` precisions. */
+const RFC3339_PRECISIONS: readonly string[] = ["date", "seconds", "ns"];
+
+/** Words that take the NEXT word as a date string. */
+const DATE_VALUE_WORDS: readonly string[] = ["-d", "-ud", "--date"];
 
 /**
  * A tz database name (`Asia/Kolkata`, `Etc/GMT+5`, `UTC`), optionally behind
@@ -149,55 +160,44 @@ function isRequiredValue(value: string | undefined): boolean {
 /**
  * Is this `date` argv a display form? `args` is the words after the binary,
  * quotes already removed; `assignments` the `NAME=value` words in front of it.
+ *
+ * A strict allow-grammar: every word must be one of the exact spellings below,
+ * a value in a position one of them opens, or the single `+FORMAT` operand.
+ * Anything else (a cluster not listed, an abbreviation, `--`, an `=` joined
+ * to a short flag) answers `false`.
  */
 export function isDateDisplay(args: readonly string[], assignments: readonly string[] = []): boolean {
   if (!assignments.every((word) => isDateAssignment(word))) return false;
   if (args.some((arg) => UNREADABLE_WORD.test(arg))) return false;
+  const seen = new Set<string>();
   let operands = 0;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] as string;
-
-    if (arg.startsWith("--")) {
-      if (LONG_BARE.includes(arg)) continue;
-      const equals = arg.indexOf("=");
-      const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (name === "--iso-8601") continue;
-      if (LONG_VALUE.includes(name)) {
-        if (equals !== -1) {
-          if (!isDateString(arg.slice(equals + 1))) return false;
-          continue;
-        }
-        index += 1;
-        if (!isRequiredValue(args[index])) return false;
-        continue;
-      }
-      // `--set`, `--file`, `--reference`, `--`, abbreviations of anything.
-      return false;
+    // A flag word given twice: clap (uutils) refuses it, getopt takes the last.
+    if (arg.startsWith("-")) {
+      if (seen.has(arg)) return false;
+      seen.add(arg);
     }
-
-    if (arg.startsWith("-") && arg.length > 1) {
-      for (let at = 1; at < arg.length; at += 1) {
-        const flag = arg[at] as string;
-        if (SHORT_BARE.includes(flag)) continue;
-        // -I's value is optional and attached: the rest of the word is it.
-        if (flag === "I") break;
-        if (flag === "d") {
-          if (at === arg.length - 1) {
-            index += 1;
-            if (!isRequiredValue(args[index])) return false;
-          } else {
-            // Attached (`-d@0`), or clap's `-d=@0`.
-            if (!isDateString(arg.slice(at + 1))) return false;
-          }
-          break;
-        }
-        // `-s`, `-f`, `-r`, and every letter this file does not know.
-        return false;
-      }
+    if (LONG_BARE.includes(arg) || SHORT_BARE.includes(arg)) continue;
+    if (arg.startsWith("-I") && ISO_PRECISIONS.includes(arg.slice(2))) continue;
+    if (arg.startsWith("--iso-8601=") && ISO_PRECISIONS.includes(arg.slice("--iso-8601=".length))) continue;
+    if (arg.startsWith("--rfc-3339=") && RFC3339_PRECISIONS.includes(arg.slice("--rfc-3339=".length))) continue;
+    if (arg === "--rfc-3339") {
+      index += 1;
+      if (!RFC3339_PRECISIONS.includes(args[index] ?? "")) return false;
       continue;
     }
-
-    // An operand. Only an output format prints; anything else sets the clock.
+    if (arg.startsWith("--date=")) {
+      if (!isDateString(arg.slice("--date=".length))) return false;
+      continue;
+    }
+    if (DATE_VALUE_WORDS.includes(arg)) {
+      index += 1;
+      if (!isRequiredValue(args[index])) return false;
+      continue;
+    }
+    // An operand: exactly one, and only an output format. Anything else is a
+    // flag this grammar does not list, or a clock setting.
     if (!arg.startsWith("+")) return false;
     operands += 1;
     if (operands > 1) return false;

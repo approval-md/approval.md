@@ -206,6 +206,7 @@ export const READ_TARGET_SHAPES: Readonly<Record<string, ReadTargetShape>> = {
   ls: "all",
   md5sum: "all",
   openssl: "after-pattern",
+  paste: "all",
   rg: "after-pattern",
   sed: "after-pattern",
   sha256sum: "all",

@@ -2268,6 +2268,131 @@ const commandClassVectors = [
     input: { command: "LD_PRELOAD=./x.so date" },
     control: true,
   },
+  {
+    id: "date-end-of-options-refuses",
+    description: "-- then an operand is a clock set to uutils (`date -- 0101`); -- is never admitted",
+    input: { command: 'date -- 0101' },
+    control: true,
+  },
+  {
+    id: "date-unlisted-cluster-refuses",
+    description: "a cluster is admitted only by its exact spelling, so -us (and every cluster not listed) is refused",
+    input: { command: 'date -us now' },
+    control: true,
+  },
+  {
+    id: "date-attached-short-value-refuses",
+    description: "GNU and clap read -d=x differently, so no attached short value is admitted",
+    input: { command: 'date -d=@0' },
+    control: true,
+  },
+  {
+    id: "date-local-binary-refuses",
+    description: "./date is whatever program sits in the working directory; a shape row vouches only for the system's binary",
+    input: { command: './date' },
+    control: true,
+  },
+  {
+    id: "uptime-is-a-read",
+    description: "uptime with no arguments prints the load and touches nothing",
+    input: { command: 'uptime' },
+  },
+  {
+    id: "uptime-file-refuses",
+    description: "uptime FILE reads that utmp file, so an operand is refused",
+    input: { command: 'uptime /var/log/wtmp' },
+    control: true,
+  },
+  {
+    id: "whoami-is-a-read",
+    description: "whoami prints the effective user",
+    input: { command: 'whoami' },
+  },
+  {
+    id: "hostname-is-a-read",
+    description: "hostname with one display flag prints the name",
+    input: { command: 'hostname -s' },
+  },
+  {
+    id: "hostname-operand-sets-refuses",
+    description: "an operand SETS the host name",
+    input: { command: 'hostname newname' },
+    control: true,
+  },
+  {
+    id: "hostname-end-of-options-sets-refuses",
+    description: "-- then a new name sets it as well",
+    input: { command: 'hostname -- newname' },
+    control: true,
+  },
+  {
+    id: "hostname-file-refuses",
+    description: "-F sets the host name from a file",
+    input: { command: 'hostname -F /etc/hostname' },
+    control: true,
+  },
+  {
+    id: "hostname-file-abbreviation-refuses",
+    description: "an abbreviation of --file is --file to the option parser",
+    input: { command: 'hostname --fi=/etc/hostname' },
+    control: true,
+  },
+  {
+    id: "df-is-a-read",
+    description: "df with display flags prints the mount table",
+    input: { command: 'df -hT' },
+  },
+  {
+    id: "df-path-refuses",
+    description: "a path operand is not in the grammar",
+    input: { command: 'df -h /etc' },
+    control: true,
+  },
+  {
+    id: "free-is-a-read",
+    description: "free with display flags prints memory use",
+    input: { command: 'free -h' },
+  },
+  {
+    id: "free-repeat-refuses",
+    description: "-s repeats the report on a timer and holds the turn",
+    input: { command: 'free -s 1' },
+    control: true,
+  },
+  {
+    id: "seq-is-a-read",
+    description: "seq prints numbers",
+    input: { command: 'seq -w 1 10' },
+  },
+  {
+    id: "seq-flag-after-number-refuses",
+    description: "uutils reads a word after a number as another number, GNU as a flag; the grammar admits neither",
+    input: { command: 'seq 1 10 -w' },
+    control: true,
+  },
+  {
+    id: "seq-hex-refuses",
+    description: "only decimal numbers are in the grammar",
+    input: { command: 'seq 0x10' },
+    control: true,
+  },
+  {
+    id: "paste-is-a-read",
+    description: "paste reads its file operands, scoped as cat's are",
+    input: { command: 'paste -d, a.txt b.txt' },
+  },
+  {
+    id: "paste-separate-delimiter-refuses",
+    description: "a separate -d value would be taken for a file by the read scope",
+    input: { command: 'paste -d , a.txt b.txt' },
+    control: true,
+  },
+  {
+    id: "paste-end-of-options-refuses",
+    description: "-- is never admitted",
+    input: { command: 'paste -- a.txt' },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -3448,8 +3573,12 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
-    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Twenty-two
-    // new vectors pin `date` in its display forms as `read.shell` (rule
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Forty-four
+    // new vectors pin the system-information readers (`uptime`, `whoami`,
+    // `hostname`, `df`, `free`, `seq`, `paste`) in their display forms and,
+    // as controls, the forms that set something, read something or parse
+    // differently between GNU and uutils (`hostname NAME`, `hostname -- NAME`,
+    // `seq 1 10 -w`); and `date` in its display forms as `read.shell` (rule
     // `date-read`), inside `$(…)` and at the end of a pipeline, `[` as `test`,
     // and as `unclassified` (the answer every `date` had before) its setting
     // forms, every file-reading form (`-f`, `-r` in any spelling or cluster, a

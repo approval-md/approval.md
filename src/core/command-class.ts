@@ -49,6 +49,14 @@
  */
 
 import { isDateDisplay } from "./date-argv.js";
+import {
+  isBareInfo,
+  isDfDisplay,
+  isFreeDisplay,
+  isHostnameDisplay,
+  isPasteRead,
+  isSeqDisplay,
+} from "./sysinfo-argv.js";
 import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
@@ -1460,8 +1468,10 @@ export interface CommandRule {
    * The general form of `probe` and `skillScript`: the row is a SHAPE, and an
    * argv outside it does not match the row at all, so the segment keeps the
    * answer it had before the row existed (`unclassified`, for a binary no other
-   * row names). A substituted word declines every shape row before the
-   * predicate is asked, since its text is a hole. `assignments` are the
+   * row names). Before the predicate is asked, a shape row is declined by a
+   * substituted word (its text is a hole) and by a binary spelled with a path
+   * outside the system directories ({@link isSystemBinWord}: `./date` is
+   * whatever program sits in the working directory). `assignments` are the
    * `NAME=value` words in front of the binary, verbatim.
    */
   shape?: (args: readonly string[], assignments: readonly string[]) => boolean;
@@ -3470,6 +3480,48 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     class: "read.shell",
     shape: isDateDisplay,
   },
+  // APRV-508. The system-information readers, each a strict allow-grammar in
+  // `sysinfo-argv.ts`: `hostname NAME` sets the host name, `free -s` loops,
+  // `uptime FILE` reads a utmp file, so none of them is a plain seat in the
+  // read table. No assignment rides in front of any of them.
+  {
+    id: "sysinfo-read",
+    bins: ["uptime", "whoami"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isBareInfo(args),
+  },
+  {
+    id: "hostname-read",
+    bins: ["hostname"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isHostnameDisplay(args),
+  },
+  {
+    id: "df-read",
+    bins: ["df"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isDfDisplay(args),
+  },
+  {
+    id: "free-read",
+    bins: ["free"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isFreeDisplay(args),
+  },
+  {
+    id: "seq-read",
+    bins: ["seq"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isSeqDisplay(args),
+  },
+  // `paste` reads the files it names, and the read scope takes them exactly as
+  // it takes `cat`'s (`paste: "all"` in read-scope.ts).
+  {
+    id: "paste-read",
+    bins: ["paste"],
+    class: "read.shell",
+    shape: (args, assignments) => assignments.length === 0 && isPasteRead(args),
+  },
   {
     id: "read-shell",
     bins: [
@@ -4159,6 +4211,21 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
   return null;
 }
 
+/** The directories a shape row's binary may be spelled from, besides a bare name. */
+const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/"];
+
+/**
+ * Is this command word the system's binary rather than a file the agent can
+ * place? A bare name is looked up on PATH; a path in a system directory names
+ * that file. `./date` or `/tmp/x/date` is whatever program sits there, and a
+ * shape row (APRV-508) does not vouch for it.
+ */
+function isSystemBinWord(word: string): boolean {
+  if (!word.includes("/")) return true;
+  if (word.includes("..") || word.includes("//")) return false;
+  return SYSTEM_BIN_DIRS.some((dir) => word.startsWith(dir) && !word.slice(dir.length).includes("/"));
+}
+
 /**
  * Find the first table row matching this binary, subcommand and argv.
  *
@@ -4183,11 +4250,12 @@ function matchRule(
   substituted = false,
   assigned = false,
   assignments: readonly string[] = [],
+  binWord: string = bin,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    if (rule.shape !== undefined && (substituted || !rule.shape(args, assignments))) continue;
+    if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
       rule.skillScript === true &&
@@ -4411,7 +4479,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignments);
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin);
   if (rule === null) {
     return {
       ok: false,

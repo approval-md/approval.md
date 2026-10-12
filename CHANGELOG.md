@@ -63,27 +63,42 @@ before a tag.
 - **`date` reads the clock (APRV-508).** `date` was `unclassified`, so a hosted
   agent behind the gate could not tell what day it was: `date` was refused
   `hook-unclassified` and the `python3 -c` fallback `hook-opaque`. A new shape
-  row, `date-read`, answers `read.shell` for the display forms only: a bare
-  `date`, one `+FORMAT` operand, `-u`/`--utc`/`--universal`,
-  `-R`/`--rfc-2822`/`--rfc-email`, `-I[FMT]`/`--iso-8601[=FMT]`,
-  `--rfc-3339=FMT`, `-d`/`--date STRING`, `--debug`, `--resolution`,
-  `--help`, `--version`, short flags clustered as both getopt and clap allow,
+  row, `date-read`, answers `read.shell` for the display forms only, through
+  an exact-spelling allow-grammar read for GNU and uutils `date` at once (the
+  hosted boxes run uutils 0.10): a bare `date`, one `+FORMAT` operand,
+  `-u`/`--utc`/`--universal`, `-R`/`--rfc-2822`/`--rfc-email`,
+  `-I[precision]`/`--iso-8601[=precision]`, `--rfc-3339 precision`,
+  `-d`/`-ud`/`--date STRING`, `--debug`, `--resolution`, `--help`,
+  `--version`, the clusters `-uR`/`-Ru` and no others, each flag at most once,
   and `TZ=Zone date`. The zone and locale variables are the only assignments
-  admitted, and only with values that name no file. The row is matched for
-  GNU and uutils `date` (the hosted boxes run uutils 0.10) at once, taking the
-  stricter reading where they differ. Every setting form (`-s`, `--set`, a
-  bare `MMDDhhmm[[CC]YY][.ss]` operand), every form that opens a file
-  (`-f`/`--file`, `-r`/`--reference` in any spelling, a zone path in `TZ` or
-  in a `TZ="…"` inside a `-d` string), a value starting with `-`, abbreviated
-  long options, and words carrying `$`, backticks, globs or braces keep the
-  `unclassified` refusal. `timedatectl` and `python3 -c` are unchanged.
+  admitted, and only with values that name no file. Every setting form (`-s`,
+  `--set`, a bare `MMDDhhmm[[CC]YY][.ss]` operand, `--`), every form that opens
+  a file (`-f`, `-r` in any spelling, a zone path in `TZ` or in a `TZ="…"`
+  inside a `-d` string), a value starting with `-`, an attached short value,
+  abbreviations, unlisted clusters, words carrying `$`, backticks, globs or
+  braces, and a `date` spelled from outside the system binary directories
+  (`./date`) keep the `unclassified` refusal. `timedatectl` and `python3 -c`
+  are unchanged.
+- **The system-information readers (APRV-508).** `uptime`, `whoami`,
+  `hostname`, `df`, `free`, `seq` and `paste` are `read.shell` in their display
+  forms, each through its own strict allow-grammar (`sysinfo-read`,
+  `hostname-read`, `df-read`, `free-read`, `seq-read`, `paste-read`): exact
+  flag spellings, listed clusters only, no `--`, no option twice, operands only
+  where the tool's grammar names one (numbers for `seq`, files for `paste`,
+  read-scoped as `cat`'s are). `hostname NAME` and `hostname -F FILE` SET the
+  host name and stay `unclassified`, as do `uptime FILE`, `df PATH`, `free -s`
+  and every other form outside the grammars. A differential test runs every
+  admitted argv from a mixed alphabet against GNU coreutils and, when
+  `APPROVAL_DIFF_UUTILS` names it, uutils coreutils.
 - **`[` reads as `test` does (APRV-508).** It joins the `read-shell` row.
 
 ### Behavior changes for an existing policy
 
-- **Two answers move to a looser class, on purpose** (APRV-508): `date` in its
-  display forms, and `[`, move from `unclassified` to `read.shell`. No setting
-  or file-reading form of `date` moves.
+- **Some answers move to a looser class, on purpose** (APRV-508): `date`,
+  `uptime`, `whoami`, `hostname`, `df`, `free`, `seq` and `paste` in their
+  display forms, and `[`, move from `unclassified` to `read.shell`. No form
+  that sets the clock or the host name, or that opens a file other than
+  `paste`'s scoped operands, moves.
 - **No other answer moves to a looser class.** A command whose `<` target is a
   credential file moves from `read.shell` (or `unclassified`,
   `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,

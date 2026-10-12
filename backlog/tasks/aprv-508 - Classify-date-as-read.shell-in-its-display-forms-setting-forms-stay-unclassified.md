@@ -1,12 +1,12 @@
 ---
 id: APRV-508
 title: >-
-  Classify date as read.shell in its display forms; setting forms stay
-  unclassified
+  Classify date and the system-information readers as read.shell in their
+  display forms; setting and file-reading forms stay unclassified
 status: Done
 assignee: []
 created_date: '2026-10-12 04:14'
-updated_date: '2026-10-12 04:49'
+updated_date: '2026-10-12 05:35'
 labels:
   - classifier
   - agent-village
@@ -23,12 +23,14 @@ Agents on the hosted Agent Village boxes cannot read the clock: approval.md 0.4.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 bare date, date +FORMAT, -u/--utc/--universal, -R/--rfc-2822/--rfc-email, -I[FMT]/--iso-8601[=FMT], --rfc-3339=FMT, -d/--date STRING, --debug, --resolution, --help, --version and TZ=Zone date classify read.shell under rule date-read, for GNU and uutils 0.10 date alike
-- [x] #2 -s/--set, any operand not starting with +, a value starting with -, long-option abbreviations, and words carrying $, backticks, globs or braces stay unclassified
-- [x] #3 No admitted form opens a file: -f/--file and -r/--reference in every spelling and cluster, a zone path in TZ (absolute, :/, ..) or in a TZ="…" inside a -d string, and a locale value that is a path all stay unclassified
-- [x] #4 An environment assignment other than TZ, LANG, LANGUAGE, LC_ALL, LC_TIME declines the row
-- [x] #5 date inside $(…) and at the end of a pipeline classifies read.shell; [ classifies as test does
-- [x] #6 Conformance vectors (allow and refuse) regenerated; command-class suite minor bump; tests and docs rule tables updated
+- [x] #1 bare date, date +FORMAT, -u/--utc/--universal, -R/--rfc-2822/--rfc-email, -I[precision]/--iso-8601[=precision], --rfc-3339 precision, -d/-ud/--date STRING, --debug, --resolution, --help, --version and TZ=Zone date classify read.shell under rule date-read, by an exact-spelling allow-grammar read for GNU and uutils 0.10 date alike
+- [x] #2 -s/--set, --, any operand not starting with +, a value starting with -, attached short values, abbreviations, unlisted clusters, repeated flags, words carrying $, backticks, globs or braces, and a binary spelled outside the system bin directories stay unclassified
+- [x] #3 No admitted date form opens a file: -f/--file and -r/--reference in every spelling and cluster, a zone path in TZ (absolute, :/, ..) or in a TZ="…" inside a -d string, and a locale value that is a path all stay unclassified
+- [x] #4 An environment assignment other than TZ, LANG, LANGUAGE, LC_ALL, LC_TIME declines the date row; no assignment is admitted before the other new rows
+- [x] #5 uptime, whoami, hostname, df, free, seq and paste are read.shell in their listed display forms only; hostname NAME, hostname -- NAME, hostname -F, uptime FILE, df PATH, free -s and every unlisted form stay unclassified; paste's operands are read targets exactly as cat's
+- [x] #6 date and the new readers inside $(…) and pipelines classify read.shell; [ classifies as test does
+- [x] #7 A differential test runs every admitted argv from a mixed alphabet against GNU coreutils and uutils 0.10 (APPROVAL_DIFF_UUTILS) and finds no set attempt, no file open, and no admitted argv the tool rejects
+- [x] #8 Conformance vectors (allow and refuse, including the hostname-sets case) regenerated; command-class suite minor bump; tests and docs rule tables updated
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -51,10 +53,12 @@ Pre-existing gap noticed, NOT changed here: an assignment prefix is stripped bef
 Validation (Node 26.8.2, local): npm test exit 1 with 6177 pass / 2 fail of 6185; the two failures are unrelated to this change: gloss-codex 'Codex runner kills the process group on timeout and removes its empty cwd' fails identically on an unmodified origin/main build (4ef5c209), and adapter-zzz 'ineligible no-token actions touch neither credentials nor adapter precheck' passes on rerun (36/36, exit 0), a load flake. node conformance/run.mjs exit 0 (594/594, 235 controls). npm run lint exit 0, npm run typecheck exit 0. tests/command-class-date.test.ts 91/91, tests/command-class.test.ts 629/629, tests/agent-village-policy.test.ts 10/10 (new end-to-end Hermes case).
 
 Revision (security review, read-scope-bypass in date-argv.ts; fleet audit APPROVAL-OVERBLOCK): -r/--reference is now refused in every spelling, and the reference read-scope shape is removed, so no admitted date form opens a file and read-scope.ts is unchanged from main. Zone and locale VALUES are now judged, not just names: a TZ that is an absolute path, :/path, or carries .. (GNU and uutils open it as a zone file), and the same inside a TZ="…" in a -d string, are refused; locale values with / or .. are refused. Required values starting with - are refused because clap (uutils 0.10, the boxes' date) may read them as the next flag where getopt reads them as the value. --debug, --resolution, -h/--help, -V/--version added (uutils' option set, all harmless). [ added to the read-shell row (it is test).
+
+Revision 2 (second security review, parser-differential / validation bypass in command-class.ts; Carter's scope change). Every new row is now an exact-spelling allow-grammar: listed clusters only, no --, no attached short values, no option given twice in any spelling (clap refuses a repeat, getopt takes the last), flag-shaped separate values refused, and a shape row's binary must be bare or under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (./date is whatever program sits there). New rows: sysinfo-read (uptime, whoami), hostname-read, df-read, free-read, seq-read, paste-read (paste: all in READ_TARGET_SHAPES, scoped as cat). tests/command-class-differential.test.ts enumerates argvs over mixed alphabets and runs every ADMITTED one against GNU coreutils (gdate etc. on macOS, the system tool on Linux) and uutils 0.10 (APPROVAL_DIFF_UUTILS): no set attempt, no canary open, and seq/paste/df/uptime/whoami must accept every admitted argv. It found three real differentials, all fixed: uutils seq reads a word after a number as a number (flags now must precede numbers); clap refuses repeated options (now refused); seq -f --format=x (clap reads the value as a flag; flag-shaped values refused). The file skips under uid 0 so no admitted argv can set the clock for real. Validation at the revision: lint 0, typecheck 0, conformance 0 (624/624), npm test exit 1 with two unrelated failures (gloss-codex fails on unmodified main too; log-lock-reclaim six-writers is a load timeout that passes on rerun, 41/41).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-date is read.shell (rule date-read) in its display forms for GNU and uutils date; every setting form, every file-reading form (-f, -r, zone or locale paths), flag-shaped values, abbreviations, unreadable words and foreign assignments keep the unclassified refusal. [ reads as test. command-class vectors 1.7.0 (+22, 13 controls). Verified by unit, end-to-end Hermes hook and conformance runs.
+date, uptime, whoami, hostname, df, free, seq and paste are read.shell in their display forms through exact-spelling allow-grammars checked differentially against GNU and uutils 0.10; every setting or file-reading form and every unlisted spelling stays unclassified. [ reads as test. command-class vectors 1.7.0 (+44, 28 controls).
 <!-- SECTION:FINAL_SUMMARY:END -->
