@@ -692,6 +692,10 @@ const FIXTURES: readonly Fixture[] = [
 
   { command: "ls -la src", class: "read.shell", rule: "read-shell" },
   { command: "grep -rn TODO src", class: "read.shell", rule: "read-shell" },
+  // APRV-508: the clock, read. The setting forms and the rest of the shape are
+  // pinned in `tests/command-class-date.test.ts`.
+  { command: "date", class: "read.shell", rule: "date-read" },
+  { command: "TZ=Asia/Kolkata date '+%a %F %T %Z'", class: "read.shell", rule: "date-read" },
 
   // -- the read shapes an agent actually types (APRV-283) -------------------
   // Reported as `files.write.workspace` by `approval hook classify`. The bare

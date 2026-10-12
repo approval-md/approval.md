@@ -260,6 +260,36 @@ test("the fixture blocks nothing on representative terminal, write_file and read
   assert.equal(runCli(["log", "verify"], dir).code, 0);
 });
 
+test("APRV-508: a resident can read the clock, and cannot set it", () => {
+  // The lane this task came from: on the hosted boxes `date` was refused
+  // `hook-unclassified`, so no agent could tell what day it was. Through the
+  // real Hermes hook and the village policy, the display forms are allowed and
+  // the setting form keeps its refusal.
+  const dir = tenantStore();
+  // Each call is its own tool call: the envelope's ids are single-use.
+  const call = (command: string, n: number): string => {
+    const event = JSON.parse(envelope(dir, "terminal", { command, workdir: dir })) as Record<string, unknown>;
+    return JSON.stringify({
+      ...event,
+      tool_use_id: `date-${n}`,
+      extra: { turn_id: "turn-1", tool_call_id: `date-${n}` },
+    });
+  };
+  const reads = ["date", "TZ=Asia/Kolkata date '+%a %F %T %Z'", "date -u -Iseconds"];
+  for (const [n, command] of reads.entries()) {
+    const run = runCli(["hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s"], dir, call(command, n));
+    assert.equal(run.code, 0, `${command} was blocked: ${run.stdout}${run.stderr}`);
+    assert.deepEqual(JSON.parse(run.stdout), {}, `${command}: ${run.stdout}`);
+  }
+  const set = runCli(
+    ["hook", "hermes", "--as", "agent:hermes", "--harness-cap", "300s"],
+    dir,
+    call("date -s '2020-01-01 00:00'", reads.length),
+  );
+  assert.equal(set.code, 2, `date -s was not blocked: ${set.stdout}${set.stderr}`);
+  assert.match(set.stdout, /hook-unclassified/u);
+});
+
 test(
   "a propose for intent.publish.inferred.index opens a request; the stated class does not",
   { skip: HAS_PROPOSE ? false : "needs #569's `approval propose` verb in the build" },

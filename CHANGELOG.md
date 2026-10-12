@@ -58,9 +58,30 @@ before a tag.
 - **Conformance.** `command-class` 1.6.0 (twenty-seven new vectors, three of
   them refusal controls; no existing expectation moved). Totals 580/580.
 
+### Classifier
+
+- **`date` reads the clock (APRV-508).** `date` was `unclassified`, so a hosted
+  agent behind the gate could not tell what day it was: `date` was refused
+  `hook-unclassified` and the `python3 -c` fallback `hook-opaque`. A new shape
+  row, `date-read`, answers `read.shell` for the display forms only: a bare
+  `date`, one `+FORMAT` operand, `-u`/`--utc`/`--universal`,
+  `-R`/`--rfc-2822`/`--rfc-email`, `-I[FMT]`/`--iso-8601[=FMT]`,
+  `--rfc-3339=FMT`, `-d`/`--date STRING`, short flags clustered as getopt
+  allows, and `TZ=Zone date` (the zone and locale variables are the only
+  assignments admitted). `-r FILE`/`--reference FILE` prints the file's
+  modification time and is treated as `stat FILE` is: `read.shell`,
+  `account.credential` for a credential path, and a read-scope target. Every
+  setting form (`-s`, `--set`, a bare `MMDDhhmm[[CC]YY][.ss]` operand), `-f`/
+  `--file`, `--reference=FILE`, abbreviated long options, and words carrying
+  `$`, backticks, globs or braces keep the `unclassified` refusal.
+  `timedatectl` and `python3 -c` are unchanged.
+
 ### Behavior changes for an existing policy
 
-- **No answer moves to a looser class.** A command whose `<` target is a
+- **One answer moves to a looser class, on purpose: `date` in its display
+  forms** (APRV-508) moves from `unclassified` to `read.shell`. Its setting
+  forms do not move.
+- **No other answer moves to a looser class.** A command whose `<` target is a
   credential file moves from `read.shell` (or `unclassified`,
   `files.write.workspace`, `network.call`, `vcs.commit.branch` or `exec.local`,
   by binary) to `account.credential`, which every shipped policy holds

@@ -2139,6 +2139,89 @@ const commandClassVectors = [
       "the write side was already covered and is pinned here beside the read side: a write redirection onto the Hermes home's .env is policy.core under redirect-protected",
     input: { command: "echo x > ~/.hermes/.env" },
   },
+  // --- date: the clock, read and never set (APRV-508) ------------------------
+  //
+  // A SHAPE row: the display forms match it and every setting form keeps the
+  // `unclassified` refusal the binary had before the row existed. The refusals
+  // are controls, because each is an input an implementation that read `date`
+  // as a plain reader would wrongly allow.
+  {
+    id: "date-bare-is-a-read",
+    description: "a bare date prints the time and touches nothing",
+    input: { command: "date" },
+  },
+  {
+    id: "date-format-is-a-read",
+    description: "one operand starting with + is an output format",
+    input: { command: "date '+%Y-%m-%d %H:%M:%S %Z'" },
+  },
+  {
+    id: "date-display-flags-are-a-read",
+    description: "-u, -R and -I with its value attached print in another layout; nothing else changes",
+    input: { command: "date -u -R && date -Iseconds && date --rfc-3339=seconds" },
+  },
+  {
+    id: "date-string-is-a-read",
+    description: "-d parses a string and prints it; the clock is not set",
+    input: { command: "date -d 'next monday' +%F" },
+  },
+  {
+    id: "date-zone-assignment-is-a-read",
+    description: "TZ in front of the binary picks the zone it prints in and is the one kind of assignment the row admits",
+    input: { command: "TZ=Asia/Kolkata date" },
+  },
+  {
+    id: "date-reference-is-a-read",
+    description: "-r FILE prints the file's modification time, which is what stat FILE prints, and takes stat's class",
+    input: { command: "date -r README.md" },
+  },
+  {
+    id: "date-reference-to-a-credential-is-a-credential-touch",
+    description: "the same reference on a credential file is account.credential, as stat of that file is",
+    input: { command: "date -r ~/.hermes/.env" },
+  },
+  {
+    id: "date-set-flag-refuses",
+    description: "-s sets the system clock: no rule, as before the row existed",
+    input: { command: "date -s '2020-01-01 00:00'" },
+    control: true,
+  },
+  {
+    id: "date-set-long-refuses",
+    description: "--set is the same act; so is any abbreviation getopt would accept for it",
+    input: { command: "date --set=2020-01-01" },
+    control: true,
+  },
+  {
+    id: "date-bare-operand-refuses",
+    description: "an operand not starting with + is MMDDhhmm[[CC]YY][.ss], which sets the clock on GNU and BSD alike",
+    input: { command: "date 101209002026" },
+    control: true,
+  },
+  {
+    id: "date-file-refuses",
+    description: "-f reads a file's lines and echoes the bad ones back, a read of its contents the row does not name",
+    input: { command: "date -f dates.txt" },
+    control: true,
+  },
+  {
+    id: "date-attached-reference-refuses",
+    description: "--reference=FILE hides the file inside a flag word, out of reach of the credential and read-scope checks",
+    input: { command: "date --reference=README.md" },
+    control: true,
+  },
+  {
+    id: "date-unreadable-word-refuses",
+    description: "an unquoted expansion may split into flags this parse never saw, so a word carrying $ declines the row",
+    input: { command: "date +$FMT" },
+    control: true,
+  },
+  {
+    id: "date-foreign-assignment-refuses",
+    description: "an assignment other than the zone or the locale (LD_PRELOAD, PATH) declines the row",
+    input: { command: "LD_PRELOAD=./x.so date" },
+    control: true,
+  },
 ];
 
 const gateVectors = [
@@ -3319,6 +3402,15 @@ const SUITES = [
     // move (an ordinary file, the policy file under a reader, a quoted `<`,
     // and the write side, which APRV-198 already covered).
     //
+    // 1.7.0 (APRV-508): a MINOR bump, the same shape a sixth time. Fourteen new
+    // `date-*` vectors pin `date` in its display forms as `read.shell` (rule
+    // `date-read`) and its setting forms (`-s`, `--set`, a bare clock operand),
+    // `-f`, the attached reference, an unreadable word and a foreign
+    // assignment as `unclassified`, the answer every `date` had before. No
+    // committed expectation in this file moves: the suite has never carried a
+    // `date` vector. What moved outside it is a refusal becoming an answer,
+    // for the display forms only.
+    //
     // 1.6.0 STAYS 1.6.0 after the refutation's fix round added six
     // `credential-redirect-*` vectors to it, by the rule 1.4.0 set: a version
     // is claimed at merge rather than at branch, and 1.6.0 has not been merged,
@@ -3337,7 +3429,7 @@ const SUITES = [
     // beside the protected class as a second entry, so `classes` carries both.
     // Still 1.6.0, for the same reason: none of those vectors has ever been
     // merged, so no implementation was held to the single-class answer.
-    vectors_version: "1.6.0",
+    vectors_version: "1.7.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
