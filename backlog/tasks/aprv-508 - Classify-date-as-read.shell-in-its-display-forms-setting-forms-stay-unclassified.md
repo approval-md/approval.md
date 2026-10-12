@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-12 04:14'
-updated_date: '2026-10-12 07:52'
+updated_date: '2026-10-12 08:52'
 labels:
   - classifier
   - agent-village
@@ -63,6 +63,8 @@ Revision 4 (recheck at ad26073, 1 M / 3 S). M-R1: classifySegment walked substit
 Revision 5 (security review: command-injection / classifier bypass): audited every position the shell expands. Already classified or refused: argument words, assignment values, array subscripts, nested ${...}, $[...], arithmetic (opaque), backticks (opaque), process substitution and here-strings (unparseable), redirect targets (M-R1). Two holes found and fixed, both live on 0.4.3: unquoted heredoc bodies were never classified (APRV-504, folded in and closed), and a heredoc delimiter carrying $ made the lexer wait for a terminator bash never uses, hiding later commands (now refused unparseable). +12 vectors.
 
 Revision 6 (two more security findings: heredoc-body substitution, and parser-differential). The heredoc-body finding was against 8254257f and is closed by 5db96a10 (bodies classified; quoted delimiters inert; here-strings refused). For the parser differential, added tests/command-class-shell-differential.test.ts: every curated construct the coordinator listed plus 3000 seeded mutations run through a real bash (stub-only PATH; stubs log their names; no real program runs), oracle: an admitted command never runs the unruled stub evil, and a read-only verdict never runs rm. It found one real bypass on the first run, live on 0.4.3: the lexer read # as a word character, so cat #<<EOF opened a heredoc bash never sees and hid the following lines' commands. Fix: a # beginning a word (after start, space, tab, newline or an operator; not after CR, which bash treats as a word char) is a comment to end of line. A scratch harness then ran 46,000 more mutations under bash 3.2: 0 bypasses, with bash running evil in ~9,000 of them. +3 vectors.
+
+Revision 7 (recheck at efc1094: MERGEABLE on security, 0 M / 1 S): the shell differential is gated on bash >= 4 (BASH_VERSINFO probe over /usr/local/bin, /opt/homebrew/bin, /usr/bin, /bin) and skips with the reason printed when none is found or when the oracle self-check does not hold; CI's Linux bash 5 still runs it. Local (bash 3.2) now skips: 'needs bash 4 or later; found /bin/bash (bash 3)'.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
