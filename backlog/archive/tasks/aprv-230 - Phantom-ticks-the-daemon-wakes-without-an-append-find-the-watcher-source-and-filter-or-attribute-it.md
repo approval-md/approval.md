@@ -186,3 +186,5 @@ daemon-tick-cost and daemon-projection were run here and are green.
 
 2026-10-08 sweep (claude-b3/SWEEP-APRV-1): AC5 ticked: docs/cli-reference.md documents --trace-watch (line 6457) and woke_by (line 6448) on origin/main; delivered by merged PR #233 (2cd995a0, commit 521047a5). AC1 (live primary classification) stays open.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, AC1 waits on a live classification on the primary (a human step); the only note since September is the 2026-10-08 sweep ticking AC5.
