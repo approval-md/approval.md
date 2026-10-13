@@ -27,3 +27,5 @@ SPEC.md section 13 lists as a non-goal: No hosted service (local-first; a sync s
 - [ ] #2 docs/proposals/hardened-authorization.md's constraint 6 and its D3 row are updated to cite the new wording, or an explicit note says why D3 remains disqualified under it
 - [ ] #3 approval policy attest --path SPEC.md is run by the human after the edit; the task notes record the attested seq
 <!-- AC:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: shipped/superseded, the section 13 wording is in SPEC.md via APRV-454 (marked Amended APRV-422).

@@ -65,3 +65,5 @@ APRV-348 (lane codex, 2026-09-17) drafted the upstream issue that names the cond
 
 2026-09-18: APRV-348 did not file a new issue; every ask already had one on openai/codex. AC1 of this task now waits on openai/codex 32360 (effective per-call execution directory on the shell pre-event), and the outcome clause of AC2 on 34289. Our evidence is commented on both.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, waits on a human step, no progress note since September.

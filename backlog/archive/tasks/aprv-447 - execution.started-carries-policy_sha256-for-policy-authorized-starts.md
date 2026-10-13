@@ -74,3 +74,5 @@ SPEC amendment text (apply by hand), REVISED, supersedes the earlier hunk in the
 
 Merged: PR #587 at head df99093c, 2026-10-04 11:39Z. The hook's two-read window (verdict from the hook's own policy read, stamp from the write boundary's) is filed as APRV-467. The SPEC section 8 hunk (REVISED) is carried by APRV-454's PR #590. AC 4 stays open for the follower-side pointer from agentvillage-d4; status stays In Progress until it lands.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, the code shipped in PR #587 and the SPEC hunk with APRV-454; AC 4 waits on the agentvillage-d4 follower pointer, no note since 2026-10-04.
