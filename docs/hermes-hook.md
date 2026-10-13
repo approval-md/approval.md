@@ -864,6 +864,30 @@ side.
    the persistent kernel re-fires `pre_tool_call`. Arm the probe to ALLOW one
    `execute_code` call in the scratch project and see whether an envelope appears
    for the inner call. The highest-risk unknown here.
+
+   **Probe prediction, 2026-10-12 (APRV-509), pending the live run.** Read from
+   the fleet's build, Hermes v2026.9.24 (0.21.5), the inner calls are predicted
+   to FIRE `pre_tool_call`, shell hooks and plugin hooks alike. The kernel's
+   `hermes_tools` stubs reach the gateway over an RPC socket, and both RPC
+   transports dispatch through `model_tools.handle_function_call` with
+   `skip_pre_tool_call_hook` left at its default of `False`
+   (`tools/code_kernel.py:266-277`, `tools/code_execution_rpc.py:28-30`;
+   the hook runs at `model_tools.py:775-787`). Only the agent loop passes
+   `True`, and it fires the hook itself first (`agent/tool_executor.py:651-665`
+   and `:1657`). A block is honoured and `fail_closed` applies exactly as on a
+   model's call (`agent/shell_hooks.py:384-415`). The inner envelope differs in
+   two fields: `session_id` and `extra.tool_call_id` arrive empty, because the
+   kernel passes only a task id (`tools/code_kernel.py:277`). Seven tools are
+   reachable at all (`web_search`, `web_extract`, `read_file`, `write_file`,
+   `search_files`, `patch`, `terminal`; `tools/code_execution_tool.py:42-44`);
+   an MCP tool, a plugin tool or `send_message` is refused by the RPC allowlist
+   before any hook runs (`tools/code_execution_rpc.py:48-50`). A Docker run of
+   the same build with a stub allow hook (2026-10-01) saw the hook fire for an
+   inner `terminal`. The prediction leaves the refusal standing: the kernel's own
+   Python (`subprocess`, sockets, file reads) makes no tool call and fires no
+   hook. This page's probe driver cannot arm the trial, since its path jail
+   refuses `execute_code` too (`scripts/probes/hermes-hook.mjs:491`), so the
+   confirmation is a hand-run step on one team test tenant (APRV-509's runbook).
 2. **First-use consent with no TTY.** The gateway pass ran with consent already
    recorded from a terminal, so it proves the hooks fire for gateway sessions and
    nothing about the sandbox case. Clear
