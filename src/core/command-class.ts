@@ -313,6 +313,306 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
   return want.every((segment, index) => segment === segments[offset + index]);
 }
 
+/** The most words one brace-expanded path may stand for before it is judged unknown. */
+const BRACE_EXPANSION_CAP = 256;
+
+/**
+ * The most group expansions one word may take before it is judged unknown
+ * (APRV-511 refuter recheck S(new)). Each step rescans the word once, so this
+ * bounds the work a crafted word can cost, including a long run of groups that
+ * each collapse to one word (`{s..s}{s..s}…`), which the word cap alone would
+ * never stop.
+ */
+const BRACE_EXPANSION_STEPS = 1024;
+
+/**
+ * The words bash's brace expansion makes of `word`, or `null` when there would
+ * be more than {@link BRACE_EXPANSION_CAP}, or making them would take more than
+ * {@link BRACE_EXPANSION_STEPS} expansions (APRV-511 refuter M2, recheck S(new)).
+ *
+ * A group is `{` … `}` holding a top-level comma (`{a,b}`, `{,s}`) or a
+ * sequence (`{1..3}`, `{a..c}`, `{1..9..2}`); a `{` right after `$` opens a
+ * parameter expansion and is never a group, and anything else stays literal,
+ * as it does in bash. Groups nest and multiply. The lexer has already removed
+ * quoting, so a quoted brace pair reads as a group too, which can only make an
+ * answer stricter.
+ *
+ * The expansion is iterative, never recursive: a work list holds the words
+ * still carrying a group, and both bounds are tested BEFORE a word is
+ * expanded further, so no input reaches the stack limit or runs unbounded.
+ * Every caller reads `null` as the stricter class.
+ */
+export function braceExpansions(word: string): string[] | null {
+  const results: string[] = [];
+  const pending: string[] = [word];
+  let steps = 0;
+  while (pending.length > 0) {
+    const text = pending.pop() as string;
+    const group = firstBraceGroup(text);
+    if (group === null) {
+      results.push(text);
+      if (results.length > BRACE_EXPANSION_CAP) return null;
+      continue;
+    }
+    steps += 1;
+    if (steps > BRACE_EXPANSION_STEPS) return null;
+    if (results.length + pending.length + group.alternatives.length > BRACE_EXPANSION_CAP) return null;
+    // Pushed in reverse so the words come out in bash's left-to-right order.
+    for (let index = group.alternatives.length - 1; index >= 0; index -= 1) {
+      const next = text.slice(0, group.open) + (group.alternatives[index] as string) + text.slice(group.close + 1);
+      // Only an expansion that changed the word is expanded again; one that
+      // did not (which a well-formed group never makes) is a literal word.
+      if (next === text) results.push(next);
+      else pending.push(next);
+    }
+  }
+  return results;
+}
+
+/**
+ * The words a path word may stand for once bash has expanded its brace groups,
+ * plus, for any word that still carries a stray `{` or `}` outside a parameter
+ * expansion, the same word with the stray braces removed (APRV-511 review).
+ * Bash keeps a stray brace literally (`{~/.hermes/.op.env` names a directory
+ * called `{~`), but a word whose only distance from an organ or a credential is
+ * a stray brace is judged as that organ: the stricter of the two readings.
+ * `null` when the expansion exceeds {@link BRACE_EXPANSION_CAP}, unless every
+ * group is a sequence or list of plain numbers ({@link numericRepresentative}).
+ */
+export function braceCandidates(word: string): string[] | null {
+  const expanded = braceExpansions(word) ?? numericRepresentative(word);
+  if (expanded === null) return null;
+  const out = [...expanded];
+  for (const each of expanded) {
+    const outsideParameters = each.replace(/\$\{[^{}]*\}/gu, "");
+    if (/[{}]/u.test(outsideParameters)) {
+      const stripped = each.replace(/\$\{[^{}]*\}|[{}]/gu, (match) => (match.length > 1 ? match : ""));
+      if (!out.includes(stripped)) out.push(stripped);
+    }
+  }
+  return out;
+}
+
+/**
+ * A word over the brace cap whose every group yields plain numbers only
+ * (`{1..300}`, `notes{1..500}.md`, `d{1..9}{0..99}`), as its FIRST expansion
+ * (APRV-511 fix round 3, N-a). Its words differ from one another only in runs
+ * of digits, and no organ or credential name turns on a digit, so the first
+ * answers for all of them; `echo {1..300}` stays `read.shell` instead of
+ * refusing as a credential read. `null` when any group yields anything else
+ * (`{a..z}{a..z}` can spell a name), which stays the stricter class.
+ */
+function numericRepresentative(word: string): string[] | null {
+  let text = word;
+  for (let steps = 0; steps < BRACE_EXPANSION_STEPS; steps += 1) {
+    const group = firstBraceGroup(text);
+    if (group === null) return [text];
+    const first = group.alternatives[0];
+    if (first === undefined || !group.alternatives.every((each) => /^-?\d+$/u.test(each))) return null;
+    text = text.slice(0, group.open) + first + text.slice(group.close + 1);
+  }
+  return null;
+}
+
+/** The longest text between a sequence's braces (`-2147483648..2147483647..1` fits). */
+const BRACE_SEQUENCE_MAX = 64;
+
+/**
+ * The first brace group in `text`, with its alternatives, or `null`.
+ *
+ * One left-to-right pass pairs every brace (a `${` opener pairs too, so its
+ * `}` never closes a group, but it never opens one); an unmatched `{` is
+ * literal to bash, which keeps scanning for a later group (APRV-511 review:
+ * `.op.en{v,v}{` still expands its group). The first group is the valid pair
+ * with the leftmost opener. Linear in `text` (APRV-511 recheck S(new)).
+ */
+function firstBraceGroup(text: string): { open: number; close: number; alternatives: string[] } | null {
+  const stack: { open: number; parameter: boolean; commas: number[] }[] = [];
+  let best: { open: number; close: number; commas: number[] } | null = null;
+  for (let at = 0; at < text.length; at += 1) {
+    const ch = text[at];
+    if (ch === "{") stack.push({ open: at, parameter: at > 0 && text[at - 1] === "$", commas: [] });
+    else if (ch === "}") {
+      const pair = stack.pop();
+      if (pair === undefined || pair.parameter) continue;
+      if (best !== null && best.open < pair.open) continue;
+      if (pair.commas.length > 0) best = { open: pair.open, close: at, commas: pair.commas };
+      else if (at - pair.open - 1 <= BRACE_SEQUENCE_MAX && braceSequence(text.slice(pair.open + 1, at)) !== null) {
+        best = { open: pair.open, close: at, commas: [] };
+      }
+    } else if (ch === ",") {
+      const top = stack[stack.length - 1];
+      if (top !== undefined) top.commas.push(at);
+    }
+  }
+  if (best === null) return null;
+  if (best.commas.length === 0) {
+    return { open: best.open, close: best.close, alternatives: braceSequence(text.slice(best.open + 1, best.close)) ?? [] };
+  }
+  const alternatives: string[] = [];
+  let from = best.open + 1;
+  for (const comma of [...best.commas, best.close]) {
+    alternatives.push(text.slice(from, comma));
+    from = comma + 1;
+  }
+  return { open: best.open, close: best.close, alternatives };
+}
+
+/** `1..3`, `a..c`, `1..9..2` as bash expands them, or `null` when not a sequence. */
+function braceSequence(inner: string): string[] | null {
+  const match = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/u.exec(inner);
+  if (match === null) return null;
+  const [, from, to, stepText] = match as unknown as [string, string, string, string | undefined];
+  const numeric = /^-?\d+$/u.test(from) && /^-?\d+$/u.test(to);
+  if (!numeric && (/\d/u.test(from) || /\d/u.test(to))) return null;
+  const start = numeric ? Number(from) : from.charCodeAt(0);
+  const end = numeric ? Number(to) : to.charCodeAt(0);
+  const step = Math.max(1, Math.abs(Number(stepText ?? "1")));
+  const out: string[] = [];
+  for (let value = start; start <= end ? value <= end : value >= end; value += start <= end ? step : -step) {
+    out.push(numeric ? String(value) : String.fromCharCode(value));
+    if (out.length > BRACE_EXPANSION_CAP) break;
+  }
+  return out;
+}
+
+/**
+ * A braced parameter expansion collapsed to its bare name, `${NAME}`, before a
+ * path is split into segments (APRV-511 review round 3). An operator inside the
+ * braces may carry a slash (`${HERMES_HOME:-/x}/config.yaml`), which would
+ * otherwise split the expansion across segments so that neither half reads as
+ * the home; collapsed, `${HERMES_HOME:-/x}` is the home, as it is whenever the
+ * variable is set, and any other name is a variable segment as before.
+ */
+function collapseBracedVariables(candidate: string): string {
+  return candidate.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+}
+
+/**
+ * Does this path segment name a Hermes home (APRV-511)?
+ *
+ * - `"home"`: the `.hermes` segment, compared without case (a case-insensitive
+ *   filesystem, macOS's default, opens `~/.Hermes/plugins` as the home's), or an
+ *   unexpanded `$HERMES_HOME` / `${HERMES_HOME}`, which is the home whatever it
+ *   expands to. Before this the pure classifier read `>> $HERMES_HOME/.env` as
+ *   a workspace write: the Hermes hook's disk pass expanded it, but a caller
+ *   with no disk pass (`approval hook classify`, Claude Code, Cursor) did not.
+ * - `"maybe"`: any other segment carrying an unexpanded variable (`$X`,
+ *   `${OUT}`, `pre$N`), which can expand to the home; only the organ and
+ *   credential rows below it apply, never the bare-home or scheduler rows,
+ *   since `$OUT` alone or `$OUT/scripts/x.sh` is ordinary work far more often.
+ */
+function hermesHomeKind(segment: string): "home" | "maybe" | null {
+  if (segment.toLowerCase() === ".hermes") return "home";
+  if (segment === "$HERMES_HOME" || segment === "${HERMES_HOME}") return "home";
+  if (/\$(?:[A-Za-z_]|\{)/u.test(segment)) return "maybe";
+  return null;
+}
+
+/**
+ * Judge the part of a path below a Hermes home twice, as spelled and with its
+ * `..` segments resolved, and return the strictest answer (APRV-511). A tail
+ * whose `..` climbs out of the home has no resolved reading here; the segment
+ * walk meets any later home on its own. The `.codex` row's rule, that a `..`
+ * under the organ directory is itself the organ, is the precedent; resolving
+ * instead keeps `~/.hermes/workspace/../workspace/x` ordinary.
+ */
+function hermesTailClass(
+  tail: readonly string[],
+  judge: (tail: readonly string[]) => string | null,
+): string | null {
+  const answers = [judge(tail)];
+  const resolved: string[] = [];
+  let escaped = false;
+  for (const part of tail) {
+    if (part === "..") {
+      if (resolved.length === 0) {
+        escaped = true;
+        break;
+      }
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  if (!escaped && tail.includes("..")) answers.push(judge(resolved));
+  for (const strictest of ["policy.core", HERMES_SCHEDULED_SCRIPT_CLASS, "credential"]) {
+    if (answers.includes(strictest)) return strictest;
+  }
+  return null;
+}
+
+/**
+ * The tails a variable segment that MAY be the home can stand over (APRV-511
+ * refuter M1): the tail as written, and the rest after each `..` in it, since
+ * `$X/../plugins/x` is the plugin directory when `$X` is any directory one
+ * level under the home (`$(pwd)/../plugins/x` from the workspace).
+ */
+function maybeHomeTails(tail: readonly string[]): (readonly string[])[] {
+  const tails: (readonly string[])[] = [tail];
+  for (const [at, part] of tail.entries()) if (part === "..") tails.push(tail.slice(at + 1));
+  return tails;
+}
+
+/** The tail below a profile home (`profiles/<p>/...`), or the tail itself. */
+function hermesProfileTail(tail: readonly string[]): readonly string[] {
+  return tail[0]?.toLowerCase() === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
+}
+
+/**
+ * The class a write below a Hermes home takes, by the home's organ rows
+ * (APRV-398, APRV-445, APRV-511). Names compare without case.
+ */
+function hermesOrganClass(fullTail: readonly string[]): string | null {
+  const tail = hermesProfileTail(fullTail);
+  const next = tail[0]?.toLowerCase();
+  if (
+    next === undefined ||
+    next === "config.yaml" ||
+    next === "config.yml" ||
+    next === "agent-hooks" ||
+    next === "approval" ||
+    next === ".env" ||
+    next.startsWith(".env.") ||
+    next === "auth.json" ||
+    next.startsWith("shell-hooks-allowlist.json") ||
+    next.startsWith("hooks") ||
+    next === "hermes-agent" ||
+    next === "plugins" ||
+    next === ".op.env" ||
+    next.startsWith(".op.env.")
+  ) {
+    return "policy.core";
+  }
+  if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
+  return null;
+}
+
+/**
+ * Is the file below a Hermes home credential material (APRV-398, APRV-511)?
+ *
+ * `.env`, `.env.*` and `auth.json`, as before; `.op.env` (and `.op.env.*`),
+ * the 1Password bootstrap file Hermes loads into the gateway; and the source
+ * install's `hermes-agent/.env` and `.env.*`, its PROJECT_ROOT dotenv, except
+ * `.env.example`, the template the install ships. Reading the rest of the
+ * runtime's source is not a credential read. Names compare without case.
+ */
+function hermesCredentialTail(fullTail: readonly string[]): boolean {
+  const tail = hermesProfileTail(fullTail);
+  const next = tail[0]?.toLowerCase();
+  if (next === undefined) return false;
+  if (next === ".env" || next.startsWith(".env.")) return true;
+  if (next === "auth.json") return true;
+  if (next === ".op.env" || next.startsWith(".op.env.")) return true;
+  if (next === "hermes-agent") {
+    const file = tail[1]?.toLowerCase();
+    // `.env.example` exactly: on a case-sensitive filesystem `.env.EXAMPLE` is
+    // another file, and only the template the install ships is exempt.
+    return file !== undefined && (file === ".env" || (file.startsWith(".env.") && tail[1] !== ".env.example"));
+  }
+  return false;
+}
+
 /**
  * Which protected class does this path name, if any? (APRV-198.)
  *
@@ -373,7 +673,23 @@ export function protectedPathClass(
   extra: readonly ProtectedPathEntry[] = [],
 ): string | null {
   if (candidate.length === 0) return null;
-  const segments = pathSegments(candidate);
+  // APRV-511 refuter M2: bash expands an unquoted brace group before the
+  // command sees the word, so `~/.hermes/plugin{s,s}/x` IS the plugin
+  // directory. Each expansion is judged and the strictest answers; a group too
+  // large to expand is the stricter class.
+  const expansions = braceCandidates(candidate);
+  if (expansions === null) return "policy.core";
+  let strictest: string | null = null;
+  for (const expansion of expansions) {
+    const cls = protectedPathClassOfWord(expansion, extra);
+    if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+  }
+  return strictest;
+}
+
+/** {@link protectedPathClass} for one word that brace expansion has already made. */
+function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+  const segments = pathSegments(collapseBracedVariables(candidate));
 
   // 1. The log directory, before anything else that would call it a policy file.
   for (let index = 0; index < segments.length; index += 1) {
@@ -482,28 +798,33 @@ export function protectedPathClass(
     // process it starts, which makes it the switch for the gate itself
     // (`HERMES_ACCEPT_HOOKS`) as well as a secret store. Reads stay
     // `account.credential`.
-    if (segment === ".hermes") {
-      // Recheck 3 (lows): a profile home, `.hermes/profiles/<p>/`, is a home of
-      // its own with the same organs, so its paths are judged one level down.
-      const next =
-        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
-          ? segments[index + 3]
-          : segments[index + 1];
-      if (
-        next === undefined ||
-        next === "config.yaml" ||
-        next === "config.yml" ||
-        next === "agent-hooks" ||
-        next === "approval" ||
-        next === ".env" ||
-        next.startsWith(".env.") ||
-        next === "auth.json" ||
-        next.startsWith("shell-hooks-allowlist.json") ||
-        next.startsWith("hooks")
-      ) {
+    //
+    // APRV-511 adds the home's three other organs, from the custody refutation
+    // (M1) and Hermes v2026.9.24's own loaders. `hermes-agent/` is the runtime's
+    // source install on an Agent Village box: its `.env` is the PROJECT_ROOT
+    // `.env` that `load_hermes_dotenv` loads into the gateway after the home's
+    // (setting any name the home's left absent), its `plugins/` is the bundled
+    // plugin directory, and the rest is the code the gateway runs. `plugins/` is
+    // where user plugins load from, the gate's own `av-approval` among them, so
+    // an edit there is an edit of the gate. `.op.env` is loaded the same way as
+    // the project `.env` (`override=False`). A WRITE to any of them is
+    // `policy.core`; a READ of `.op.env` or `hermes-agent/.env` is
+    // `account.credential` (`isCredentialPath`), and a read of the rest of the
+    // runtime's source stays what it was.
+    // APRV-511: the home is matched by the `.hermes` segment in any case, by an
+    // unexpanded `$HERMES_HOME`/`${HERMES_HOME}` (which IS the home), and by any
+    // other unexpanded variable (which MAY be the home, so only its organ rows
+    // apply); the tail is judged as spelled and with its `..` resolved. See
+    // {@link hermesHomeKind} and {@link hermesOrganClass}.
+    const home = segment === undefined ? null : hermesHomeKind(segment);
+    if (home !== null) {
+      const cls = hermesTailClass(segments.slice(index + 1), hermesOrganClass);
+      if (home === "home" && cls !== null) return cls;
+      if (home === "maybe" && maybeHomeTails(segments.slice(index + 1)).some(
+        (tail) => tail.length > 0 && hermesTailClass(tail, hermesOrganClass) === "policy.core",
+      )) {
         return "policy.core";
       }
-      if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
     }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
@@ -656,7 +977,15 @@ const CREDENTIAL_CLASS = "account.credential";
  */
 export function isCredentialPath(candidate: string): boolean {
   if (candidate.length === 0) return false;
-  const segments = pathSegments(candidate);
+  // APRV-511 refuter M2: any brace expansion that names a credential is one.
+  const expansions = braceCandidates(candidate);
+  if (expansions === null) return true;
+  return expansions.some((expansion) => isCredentialWord(expansion));
+}
+
+/** {@link isCredentialPath} for one word that brace expansion has already made. */
+function isCredentialWord(candidate: string): boolean {
+  const segments = pathSegments(collapseBracedVariables(candidate));
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // APRV-398. Hermes Agent's own home holds two files of credential material
@@ -670,13 +999,15 @@ export function isCredentialPath(candidate: string): boolean {
     // whose organ this codebase now recognises, whose credential files it did
     // not, would be a Never-list item the classifier does not enforce — which is
     // exactly the hole APRV-194 was filed for, one harness along.
-    if (segment === ".hermes") {
-      const next =
-        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
-          ? segments[index + 3]
-          : segments[index + 1];
-      if (next === ".env" || next?.startsWith(".env.") === true) return true;
-      if (next === "auth.json") return true;
+    // APRV-511: the same home matching as `protectedPathClass` (any case, an
+    // unexpanded `$HERMES_HOME`, any other unexpanded variable, `..` resolved
+    // in the tail); see {@link hermesCredentialTail}.
+    const home = segment === undefined ? null : hermesHomeKind(segment);
+    if (home !== null) {
+      const credential = (tail: readonly string[]): boolean =>
+        hermesTailClass(tail, (t) => (hermesCredentialTail(t) ? "credential" : null)) !== null;
+      const tails = home === "maybe" ? maybeHomeTails(segments.slice(index + 1)) : [segments.slice(index + 1)];
+      if (tails.some(credential)) return true;
       continue;
     }
     if (segment !== ".approval") continue;
@@ -858,6 +1189,19 @@ function credentialTouch(
 }
 
 /**
+ * The credential an upload or request-body option reads (fix round 4,
+ * M(L5f-1)): a source path that is a credential file, else an embedded value
+ * whose file the text cannot read ({@link uploadSourcePaths}), which may be
+ * one. The rule id is the argument rule's own.
+ */
+function uploadCredentialTouch(sources: readonly string[], unknown: string | null): CredentialOutcome | null {
+  const named = sources.find((path) => isCredentialPath(path));
+  if (named !== undefined) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+  if (unknown !== null) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: unknown };
+  return null;
+}
+
+/**
  * Is this segment a credential touch through a REDIRECTION? (APRV-503.)
  *
  * The same two shapes {@link credentialTouch} reads from the argument list, read
@@ -918,6 +1262,16 @@ interface LexWord {
   quoted: boolean;
   /** Inner text of each `$(…)` in this word, for recursive classification. */
   substitutions: string[];
+  /**
+   * An UNQUOTED variable or `$(…)` is part of the word, so the shell may split
+   * its value into several words (APRV-511 fix round 3, S(open)).
+   */
+  splits: boolean;
+  /**
+   * An UNQUOTED `{`, `*`, `?` or `[` is part of the word, so brace expansion or
+   * a glob may make it several words or change its head (fix round 3).
+   */
+  expands: boolean;
 }
 
 interface LexRedirect {
@@ -1032,6 +1386,8 @@ function lex(command: string): LexResult {
   const readWord = (): LexWord | null => {
     let text = "";
     let quoted = false;
+    let splits = false;
+    let expands = false;
     const substitutions: string[] = [];
     const start = index;
 
@@ -1095,10 +1451,19 @@ function lex(command: string): LexResult {
         const scan = readSubstitution(command, index + 1);
         if (scan === null) return null;
         substitutions.push(scan.inner);
+        // APRV-511 refuter M1: the substitution's OUTPUT is part of the word,
+        // and a path rule must not read `$(echo ~/.hermes)/plugins/x` as
+        // `/plugins/x`. The sentinel is an unexpanded variable to every rule
+        // after the lexer: it may be the home (the organ and credential rows
+        // apply) and it decides the directory (the Hermes disk pass).
+        text += SUBSTITUTION_SENTINEL;
+        splits = true;
         index = scan.end;
         continue;
       }
 
+      if (ch === "$") splits = true;
+      else if (ch === "{" || ch === "*" || ch === "?" || ch === "[") expands = true;
       text += ch;
     }
 
@@ -1106,7 +1471,7 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
-    return { text, quoted, substitutions };
+    return { text, quoted, substitutions, splits, expands };
   };
 
   while (index < command.length) {
@@ -1208,7 +1573,11 @@ function lex(command: string): LexResult {
         // reading. After `<&` a non-descriptor word is refused.
         while (command[index] === " " || command[index] === "\t") index += 1;
         const target = readWord();
-        if (target === null || target.text === "") {
+        // A target that is nothing but `$(…)` (`>&$(x)`) keeps the refusal it
+        // had before the substitution sentinel (APRV-511): the sentinel stands
+        // for output this classifier cannot settle, and bash may read that
+        // output as a descriptor or a file, so neither answer is admitted.
+        if (target === null || target.text.split(SUBSTITUTION_SENTINEL).join("") === "") {
           return { ok: false, detail: `redirection ${op} has no target` };
         }
         const dup =
@@ -1321,6 +1690,7 @@ function readDoubleQuoted(
       const scan = readSubstitution(command, index + 1);
       if (scan === null) return null;
       substitutions.push(scan.inner);
+      text += SUBSTITUTION_SENTINEL; // APRV-511 refuter M1, as in `readWord`.
       index = scan.end;
       continue;
     }
@@ -1328,6 +1698,14 @@ function readDoubleQuoted(
   }
   return null;
 }
+
+/**
+ * What a `$(…)` leaves in a word's text (APRV-511 refuter M1): an unexpanded
+ * variable, which is exactly what the shell's substitution is to a classifier
+ * that does not run it. The name cannot collide with a real expansion a
+ * command would carry, and it is braced so no brace-expansion reading applies.
+ */
+export const SUBSTITUTION_SENTINEL = "${__APPROVAL_SUBST__}";
 
 /**
  * Scan `(…)` starting at the opening paren, honouring nesting and quotes, and
@@ -1960,7 +2338,113 @@ function refineHarness(ctx: RuleContext): Refinement {
   if (name === undefined) {
     return { opaque: `${ctx.bin} is an agent harness this table cannot name` };
   }
+  if (name === "hermes") {
+    const organWrite = hermesOrganWrite(ctx.args);
+    if (organWrite !== null) return organWrite;
+  }
   return harnessRefinement(name, ctx.args);
+}
+
+/** The rule id a `hermes` subcommand that rewrites the home's organs takes (APRV-511). */
+const HERMES_ORGAN_WRITE_RULE = "hermes-organ-write";
+
+/**
+ * `hermes` subcommands that rewrite the gate's organs, each with the verbs that
+ * only read (APRV-511), read off Hermes v2026.9.24's parsers and dispatchers. A
+ * verb not on the read list is the write, so a verb a later Hermes adds is
+ * assumed to change something. `bare` is what the group does with no verb:
+ * `hermes config` shows the configuration and `hermes hooks` prints usage, while
+ * bare `hermes plugins` opens the interactive enable/disable toggle.
+ *
+ * - `plugins` installs, updates, removes, enables and disables code under
+ *   `$HERMES_HOME/plugins/` and the `plugins.enabled`/`disabled` lists in
+ *   `config.yaml`; `pack install` does the same in bulk.
+ * - `config` `set`/`unset`/`edit`/`migrate` rewrite `config.yaml`.
+ * - `hooks` `revoke` (`remove`, `rm`) rewrites the consent allowlist.
+ * - `update` rewrites `$HERMES_HOME/hermes-agent/`, and `uninstall` removes it.
+ *
+ * A write through the CLI is the same act as the file write it performs, so it
+ * takes the same class, `policy.core`. On an Agent Village box the overlay
+ * installs and enables plugins at provisioning, outside any hooked tool call.
+ * Every other subcommand keeps `harness.launch.hermes`.
+ */
+const HERMES_ORGAN_SUBCOMMANDS: Readonly<Record<string, { reads: readonly string[]; bare: "read" | "write" }>> = {
+  plugins: {
+    reads: ["search", "browse", "validate", "list", "ls", "capabilities", "doctor", "compat", "show", "info"],
+    bare: "write",
+  },
+  config: { reads: ["show", "get", "path", "env-path", "check"], bare: "read" },
+  hooks: { reads: ["list", "ls", "test", "doctor"], bare: "read" },
+  update: { reads: [], bare: "write" },
+  uninstall: { reads: [], bare: "write" },
+};
+
+/**
+ * The `policy.core` answer for a `hermes` argv that rewrites an organ, or
+ * `null` for every other argv (APRV-511).
+ *
+ * The classifier does not know which of Hermes's flags take a value, so a word
+ * directly after a flag written without `=` may be that flag's value, and every
+ * reading below that depends on such a word resolves to the write:
+ *
+ * - The subcommand is the first word that is not a flag, skipping a word that
+ *   directly follows a flag (`hermes -p work plugins install x`). A group word
+ *   in that position is still taken as the group, the stricter reading.
+ * - The verb is the first word after the group that is not a flag. When it
+ *   directly follows a flag (`hermes plugins --source list install x`, where
+ *   `list` may be the value), the verb is unknown and the answer is the write.
+ * - A help request (`--help`, `-h`) keeps the earlier answer only as a flag in
+ *   its own right: argparse prints usage and exits before any handler runs. It
+ *   is not honoured when it directly follows a flag (`hermes plugins install
+ *   --name --help`, where it may be the value), nor after `--`.
+ * - An end-of-options `--` anywhere in the argv makes every later word a
+ *   positional to the real CLI (`hermes plugins install x -- --help` installs),
+ *   so an organ group's argv carrying one is the write, whatever else it says,
+ *   and so is an organ group word after a leading `--` (`hermes -- plugins
+ *   install x`), which argparse still dispatches to the subcommand.
+ *
+ * `hermes plugins --help install x` is a read: the `plugins` parser meets
+ * `--help` before the verb and exits with usage.
+ */
+function hermesOrganWrite(args: readonly string[]): Refinement | null {
+  const write: Refinement = { class: "policy.core", rule: HERMES_ORGAN_WRITE_RULE, path: args.join(" ") };
+  /** Could `args[index]` be the value of the flag before it? */
+  const mayBeValue = (index: number): boolean => {
+    const previous = index === 0 ? undefined : args[index - 1];
+    return previous !== undefined && previous.startsWith("-") && previous !== "--" && !previous.includes("=");
+  };
+  let at = -1;
+  for (const [index, arg] of args.entries()) {
+    if (arg === "--") {
+      // argparse still hands a subcommand word after `--` to its subparsers
+      // (`hermes -- plugins install x`), so an organ group there is the write.
+      return args.slice(index + 1).some((word) => Object.hasOwn(HERMES_ORGAN_SUBCOMMANDS, word)) ? write : null;
+    }
+    if (arg.startsWith("-")) continue;
+    if (Object.hasOwn(HERMES_ORGAN_SUBCOMMANDS, arg)) {
+      at = index;
+      break;
+    }
+    if (mayBeValue(index)) continue;
+    return null;
+  }
+  if (at === -1) return null;
+  if (args.includes("--")) return write;
+  const helped = args.some((arg, index) => (arg === "--help" || arg === "-h") && !mayBeValue(index));
+  if (helped) return null;
+  const spec = HERMES_ORGAN_SUBCOMMANDS[args[at] as string] as { reads: readonly string[]; bare: "read" | "write" };
+  const verbAt = args.findIndex((arg, index) => index > at && !arg.startsWith("-"));
+  if (verbAt === -1) return spec.bare === "read" ? null : write;
+  if (mayBeValue(verbAt)) return write;
+  const verb = args[verbAt] as string;
+  if (spec.reads.includes(verb)) return null;
+  // `plugins pack` writes only in its `install` form.
+  if (args[at] === "plugins" && verb === "pack") {
+    const formAt = args.findIndex((arg, index) => index > verbAt && !arg.startsWith("-"));
+    const form = formAt === -1 ? undefined : args[formAt];
+    if ((form === "show" || form === "export") && !mayBeValue(formAt)) return null;
+  }
+  return write;
 }
 
 /**
@@ -1988,7 +2472,8 @@ const HARNESS_RULES: readonly CommandRule[] = Object.entries(HARNESS_BINS).map((
   id: `${HARNESS_LAUNCH_RULE_PREFIX}${name}`,
   bins: [bin],
   class: `${HARNESS_LAUNCH_PREFIX}${name}`,
-  emits: [HARNESS_PROBE_CLASS],
+  // APRV-511: `hermes plugins install` and its kin rewrite the home's organs.
+  emits: name === "hermes" ? [HARNESS_PROBE_CLASS, "policy.core"] : [HARNESS_PROBE_CLASS],
   refine: refineHarness,
 }));
 
@@ -4054,6 +4539,481 @@ function proseNamingProtectedPath(
 }
 
 /**
+ * How the shell may still change one argv word before the program sees it
+ * (APRV-511 fix round 3, S(open)): `splits`, an unquoted variable or `$(…)` is
+ * in it; `expands`, an unquoted brace or glob character is. A caller that
+ * cannot say passes neither, and only the text is read.
+ */
+export interface ArgExpansion {
+  splits: boolean;
+  expands: boolean;
+}
+
+const LITERAL_ARG: ArgExpansion = { splits: false, expands: false };
+
+/**
+ * Could the shell turn this argv word into an option the program then obeys,
+ * or into a different NUMBER of words (APRV-511 fix round 3, S(open), the class
+ * rule)? For `curl`, `wget`, `cp`, `mv`, `ln` and `install`, an option may name
+ * a write target (`-o`, `-O`, `-t`, `--output-dir`, `-P`), so a word whose
+ * expansion this text cannot see makes the whole argv unknowable:
+ *
+ * - in a slot where the program reads OPTIONS (`option`): a word that begins
+ *   with a variable or a substitution (`$OPTS`, `"$U"`, `${…}`), whose value
+ *   may begin with `-`, quoted or not; an unquoted variable or substitution
+ *   anywhere in it, whose value may split into `-o FILE`; an unquoted glob at
+ *   its head, which may match a file named `-o…`; an unquoted brace group that
+ *   makes a word beginning with `-` or `$`, or too many words to know
+ *   (`curl {-o,~/.hermes/config.yaml}`);
+ * - in an option's VALUE slot: an unquoted variable or substitution, or an
+ *   unquoted brace or glob that may make other than one word, because the
+ *   words after the first are read as options again.
+ *
+ * Words after `--` are operands and never reach this test.
+ */
+function argvWordUnknowable(word: string, flags: ArgExpansion, slot: "option" | "value"): boolean {
+  if (flags.splits) return true;
+  if (slot === "option" && word.startsWith("$")) return true;
+  if (!flags.expands) return false;
+  const words = braceExpansions(word);
+  if (words === null) return true;
+  if (slot === "value") return words.length !== 1 || /[*?[]/u.test(word);
+  return words.some((each) => /^[-$*?[]/u.test(each));
+}
+
+/**
+ * The first word of a `cp`, `mv`, `ln` or `install` argv that makes its write
+ * targets unknowable (APRV-511 fix round 3, S(open)), or `null`. GNU permutes
+ * options, so every word before `--` is in an option slot.
+ */
+export function copyArgvUnknown(args: readonly string[], flags: readonly ArgExpansion[] = []): string | null {
+  for (const [at, arg] of args.entries()) {
+    if (arg === "--") return null;
+    if (argvWordUnknowable(arg, flags[at] ?? LITERAL_ARG, "option")) return arg;
+  }
+  return null;
+}
+
+/**
+ * The destination directories a `cp`, `mv`, `ln` or `install` argv names by
+ * flag (APRV-511 refuter S3, recheck S(open)): `-t DIR`, `-tDIR`, `-t` anywhere
+ * in a short cluster (`-vtDIR`, `-rt DIR`, `-ftDIR`, `-stDIR`), and the long
+ * option by any unique prefix GNU accepts (`--target-directory=DIR`,
+ * `--target-dir=DIR`, `--t DIR`). A cluster is read from its first `t` even
+ * where an earlier letter would have taken the rest as its own value: one more
+ * target judged can only make the answer stricter. Words after `--` are
+ * operands. An absent value is not returned (the operand scan judges the rest).
+ */
+export function copyTargetDirectories(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (name.length === 0 || !"target-directory".startsWith(name)) continue;
+      const value = eq === -1 ? args[at + 1] : arg.slice(eq + 1);
+      if (value !== undefined) out.push(value);
+      continue;
+    }
+    if (!arg.startsWith("-") || arg.length < 2) continue;
+    const t = arg.indexOf("t", 1);
+    if (t === -1) continue;
+    const value = t + 1 < arg.length ? arg.slice(t + 1) : args[at + 1];
+    if (value !== undefined) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * What one `curl` or `wget` option does to the file system (APRV-511 review):
+ * `safe` writes nothing (a value, if it takes one, is not an output path),
+ * `file` names a file it writes, `dir` names the directory it writes
+ * server-chosen names into, `remote` makes curl write the remote name into the
+ * output directory, and `config` reads more options from a file or a string,
+ * so its outputs cannot be known, and `format` is curl's `-w`/`--write-out`,
+ * whose `%output{FILE}` writes FILE (recheck S(open)). `source` names a file
+ * the program READS and sends or reads URLs from (fix round 4, M(L5f-1)): an
+ * upload or request-body flag, judged by {@link uploadSourcePaths} with its
+ * `source` reading. `value` says whether it takes an argument.
+ */
+interface FetchOption {
+  value: boolean;
+  effect: "safe" | "file" | "dir" | "remote" | "config" | "format" | "source";
+  source?: UploadSourceKind;
+}
+
+/**
+ * How an upload or request-body option names the file it reads (fix round 4,
+ * M(L5f-1)): `file`, the value IS the path (`curl -T`, `--upload-file`; wget
+ * `--post-file`, `--body-file`, `--input-file`/`-i`); `data`, a value that
+ * begins with `@` reads the file after it (`-d`, `--data*`, `--json`);
+ * `urlencode`, `@file` or `name@file` (`--data-urlencode`); `form`, `name=@file`
+ * or `name=<file` (`-F`, `--form*`).
+ */
+type UploadSourceKind = "file" | "data" | "urlencode" | "form";
+
+const bodySource = (kind: UploadSourceKind): FetchOption => ({ value: true, effect: "source", source: kind });
+
+const safe = (value: boolean): FetchOption => ({ value, effect: "safe" });
+
+/** curl's long options this classifier knows, by full name. */
+const CURL_LONG_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  output: { value: true, effect: "file" },
+  "dump-header": { value: true, effect: "file" },
+  "cookie-jar": { value: true, effect: "file" },
+  trace: { value: true, effect: "file" },
+  "trace-ascii": { value: true, effect: "file" },
+  stderr: { value: true, effect: "file" },
+  "etag-save": { value: true, effect: "file" },
+  hsts: { value: true, effect: "file" },
+  "alt-svc": { value: true, effect: "file" },
+  libcurl: { value: true, effect: "file" },
+  "write-out": { value: true, effect: "format" },
+  "output-dir": { value: true, effect: "dir" },
+  "remote-name": { value: false, effect: "remote" },
+  "remote-name-all": { value: false, effect: "remote" },
+  config: { value: true, effect: "config" },
+  // Fix round 4 (M(L5f-1)): the files a request body or an upload reads.
+  "upload-file": bodySource("file"),
+  data: bodySource("data"),
+  "data-raw": bodySource("data"),
+  "data-binary": bodySource("data"),
+  "data-ascii": bodySource("data"),
+  json: bodySource("data"),
+  "data-urlencode": bodySource("urlencode"),
+  form: bodySource("form"),
+  "form-string": bodySource("form"),
+  ...Object.fromEntries(
+    [
+      "silent", "show-error", "fail", "fail-with-body", "fail-early", "location", "location-trusted", "insecure",
+      "verbose", "include", "head", "get", "compressed", "http1.0", "http1.1", "http2", "http2-prior-knowledge",
+      "http3", "ipv4", "ipv6", "no-buffer", "no-progress-meter", "progress-bar", "globoff", "netrc",
+      "netrc-optional", "no-keepalive", "raw", "tcp-nodelay", "ssl", "ssl-reqd", "tlsv1", "tlsv1.0", "tlsv1.1",
+      "tlsv1.2", "tlsv1.3", "anyauth", "basic", "digest", "ntlm", "negotiate", "no-sessionid", "disable",
+      "path-as-is", "create-dirs", "remote-header-name", "remote-time", "list-only", "append", "crlf",
+      "ignore-content-length", "junk-session-cookies", "post301", "post302", "post303", "styled-output",
+      "no-styled-output", "suppress-connect-headers", "false-start", "tr-encoding", "ssl-no-revoke",
+      "proxy-insecure", "retry-all-errors", "retry-connrefused", "parallel", "parallel-immediate", "skip-existing",
+      "no-clobber", "no-alpn", "no-npn", "manual", "help", "version", "disable-epsv", "disable-eprt",
+    ].map((name) => [name, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    [
+      "header", "request", "user-agent", "user", "referer", "max-time", "connect-timeout", "retry", "retry-delay",
+      "retry-max-time", "range", "url", "proxy", "proxy-user", "resolve", "connect-to", "cacert", "capath", "cert",
+      "key", "cert-type", "key-type", "pass", "cookie", "max-filesize", "max-redirs", "limit-rate", "speed-limit",
+      "speed-time", "time-cond", "interface", "dns-servers", "oauth2-bearer", "aws-sigv4",
+      "keepalive-time", "expect100-timeout", "local-port", "ciphers", "tls-max", "proto", "proto-redir",
+      "proto-default", "request-target", "unix-socket", "url-query", "parallel-max", "quote", "mail-from",
+      "mail-rcpt", "preproxy", "noproxy", "socks5", "socks5-hostname", "continue-at", "etag-compare", "variable",
+    ].map((name) => [name, safe(true)]),
+  ),
+};
+
+/** curl's short options this classifier knows. */
+const CURL_SHORT_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  o: { value: true, effect: "file" },
+  D: { value: true, effect: "file" },
+  c: { value: true, effect: "file" },
+  w: { value: true, effect: "format" },
+  O: { value: false, effect: "remote" },
+  K: { value: true, effect: "config" },
+  T: bodySource("file"),
+  d: bodySource("data"),
+  F: bodySource("form"),
+  ...Object.fromEntries(
+    ["s", "S", "f", "L", "k", "v", "i", "I", "G", "N", "n", "q", "j", "J", "l", "R", "Z", "0", "1", "2", "3", "4", "6", "#", "a", "B", "M", "p", "g", "h", "V"].map(
+      (letter) => [letter, safe(false)],
+    ),
+  ),
+  ...Object.fromEntries(
+    ["H", "X", "A", "u", "e", "m", "r", "x", "U", "E", "b", "Y", "y", "z", "Q", "C", "t", "P"].map(
+      (letter) => [letter, safe(true)],
+    ),
+  ),
+};
+
+/** wget's long options this classifier knows, by full name. */
+const WGET_LONG_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  "output-document": { value: true, effect: "file" },
+  "output-file": { value: true, effect: "file" },
+  "append-output": { value: true, effect: "file" },
+  "save-cookies": { value: true, effect: "file" },
+  "warc-file": { value: true, effect: "file" },
+  "rejected-log": { value: true, effect: "file" },
+  "directory-prefix": { value: true, effect: "dir" },
+  execute: { value: true, effect: "config" },
+  config: { value: true, effect: "config" },
+  "post-file": bodySource("file"),
+  "body-file": bodySource("file"),
+  "input-file": bodySource("file"),
+  ...Object.fromEntries(
+    [
+      "quiet", "verbose", "no-verbose", "server-response", "spider", "no-check-certificate", "continue",
+      "timestamping", "no-clobber", "inet4-only", "inet6-only", "no-cache", "no-cookies", "ignore-length",
+      "content-disposition", "trust-server-names", "show-progress", "no-dns-cache", "debug", "https-only",
+      "no-parent", "no-directories", "force-directories", "no-host-directories", "adjust-extension",
+      "recursive", "mirror", "page-requisites", "convert-links", "help", "version", "no-config", "keep-session-cookies",
+      "auth-no-challenge", "no-http-keep-alive", "retry-connrefused", "force-html", "span-hosts", "relative",
+    ].map((name) => [name, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    [
+      "tries", "timeout", "wait", "user-agent", "header", "user", "password", "http-user", "http-password",
+      "post-data", "method", "body-data", "limit-rate", "level", "accept", "reject",
+      "domains", "exclude-domains", "referer", "max-redirect", "ca-certificate", "ca-directory", "certificate",
+      "private-key", "base", "dns-timeout", "connect-timeout", "read-timeout", "waitretry", "quota",
+      "restrict-file-names", "local-encoding", "remote-encoding", "progress", "bind-address", "cut-dirs",
+      "load-cookies", "include-directories", "exclude-directories", "secure-protocol", "proxy-user",
+      "proxy-password", "https-proxy", "http-proxy",
+    ].map((name) => [name, safe(true)]),
+  ),
+};
+
+/** wget's short options this classifier knows (`-n` takes its sub-letters). */
+const WGET_SHORT_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  O: { value: true, effect: "file" },
+  o: { value: true, effect: "file" },
+  a: { value: true, effect: "file" },
+  P: { value: true, effect: "dir" },
+  e: { value: true, effect: "config" },
+  // `-b` backgrounds and writes `wget-log` into the working directory.
+  b: { value: false, effect: "remote" },
+  i: bodySource("file"),
+  ...Object.fromEntries(
+    ["q", "v", "V", "h", "S", "c", "N", "r", "m", "p", "k", "K", "E", "H", "L", "x", "4", "6", "F"].map((letter) => [letter, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    ["t", "T", "w", "U", "l", "A", "R", "D", "B", "Q", "I", "X"].map((letter) => [letter, safe(true)]),
+  ),
+};
+
+/**
+ * A long option by its full name or by a unique prefix, as both tools accept
+ * abbreviations (GNU wget always; curl's parser tries the same). `null` when
+ * the name is unknown or ambiguous.
+ */
+function fetchLongOption(table: Readonly<Record<string, FetchOption>>, name: string): FetchOption | null {
+  const exact = table[name];
+  if (exact !== undefined) return exact;
+  const matches = Object.keys(table).filter((known) => known.startsWith(name));
+  return matches.length === 1 ? (table[matches[0] as string] as FetchOption) : null;
+}
+
+/**
+ * Where `curl` and `wget` write (APRV-511 refuter S1 and review): `files`,
+ * paths written by name (`curl -o F`, `-sSLoF`, `--output F`, `--outp=F`,
+ * `-D`, `-c`, `--trace`, `--stderr`; `wget -O F`, `--output-doc=F`, `-o`/`-a`
+ * logs), and `directories`, directories written with a name the server
+ * chooses (`curl -O` into `--output-dir` or `.`; `wget` without `-O` into
+ * `-P`/`--directory-p…` or `.`). `unknown` names the first option that makes
+ * the outputs unknowable: one this table does not know, an ambiguous prefix,
+ * or a config source (`curl -K`/`--config`, `wget -e`/`--execute`/`--config`).
+ * `-` is standard output and writes nothing. Any other binary writes nothing.
+ *
+ * Fix round 4 (M(L5f-1)): `sources` are the files an upload or request-body
+ * option READS ({@link uploadSourcePaths}), in every spelling: separated
+ * (`-T F`, `--data @F`), joined by `=` (`--upload-file=F`, `--data=@F`) and
+ * glued (`-TF`, `-sd@F`, `-Ff=@F`). `sourceUnknown` is the first option word
+ * whose EMBEDDED value names a file this text cannot read (a variable, a
+ * substitution, a glob or a brace in it). A separated value is a word of its
+ * own and is judged as the positional it also is.
+ */
+export function fetchOutputs(
+  bin: string,
+  args: readonly string[],
+  flags: readonly ArgExpansion[] = [],
+): { files: string[]; directories: string[]; unknown: string | null; sources: string[]; sourceUnknown: string | null } {
+  const files: string[] = [];
+  const directories: string[] = [];
+  let unknown: string | null = null;
+  const sources: string[] = [];
+  let sourceUnknown: string | null = null;
+  if (bin !== "curl" && bin !== "wget") return { files, directories, unknown, sources, sourceUnknown };
+  const longTable = bin === "curl" ? CURL_LONG_OPTIONS : WGET_LONG_OPTIONS;
+  const shortTable = bin === "curl" ? CURL_SHORT_OPTIONS : WGET_SHORT_OPTIONS;
+  let remote = false;
+  let named = false;
+  let directory: string | null = null;
+  // curl's `-o`/`--output` values, which `--output-dir` places (recheck S(open)).
+  const curlNamed: string[] = [];
+  // Fix round 3 (S(open)): curl fills `#1`, `#2`… in an output name from the
+  // URL's glob (`'https://e/{s}' -o ~/.hermes/plugin#1/x`), so a value holding
+  // `#<digit>` names a file this text cannot place.
+  const placeable = (value: string): boolean => !value.includes("$") && !/#\d/u.test(value);
+  // `word` is the option word itself when the value is embedded in it.
+  const apply = (option: FetchOption, value: string | undefined, spelled: string, word?: string): void => {
+    if (option.effect === "config") unknown ??= spelled;
+    else if (option.effect === "source") {
+      if (value === undefined) return;
+      const paths = uploadSourcePaths(option.source ?? "file", value);
+      if (paths !== null) sources.push(...paths);
+      else if (word !== undefined) sourceUnknown ??= word;
+    }
+    else if (option.effect === "file") {
+      // Recheck S(open): an absent value, or one a variable or a substitution
+      // decides, is a target this classifier cannot place: the stricter class.
+      if (value === undefined || !placeable(value)) unknown ??= spelled;
+      else {
+        files.push(value);
+        if (bin === "wget" && (spelled === "-O" || spelled.startsWith("--output-d"))) named = true;
+        if (bin === "curl" && (spelled === "-o" || spelled === "--output")) curlNamed.push(value);
+      }
+    } else if (option.effect === "dir") {
+      if (value === undefined || !placeable(value)) unknown ??= spelled;
+      else directory = value;
+    } else if (option.effect === "remote") remote = true;
+    else if (option.effect === "format") {
+      // `-w @FILE` (or `@-`) reads the format from elsewhere, so its
+      // `%output{…}` targets are unknowable; otherwise each `%output{FILE}`
+      // (`%output{>>FILE}` appends) is a file curl writes.
+      if (value === undefined || value.startsWith("@")) {
+        unknown ??= spelled;
+        return;
+      }
+      for (const match of value.matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) {
+        const target = match[1] ?? "";
+        if (target.length === 0 || !placeable(target)) unknown ??= spelled;
+        else files.push(target);
+      }
+      // A `%output{` without its closing brace still names some file.
+      if (/%output\{(?![^}]*\})/u.test(value)) unknown ??= spelled;
+    }
+  };
+  /** Fix round 3 (S(open)): the word at `at`, in `slot`, may become an option. */
+  const unknowable = (at: number, slot: "option" | "value"): boolean =>
+    at < args.length && argvWordUnknowable(args[at] as string, flags[at] ?? LITERAL_ARG, slot);
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (unknowable(at, "option")) {
+      unknown ??= arg;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      // `--no-<option>` turns a boolean off and writes nothing more.
+      const option = fetchLongOption(longTable, name) ?? (name.startsWith("no-") ? fetchLongOption(longTable, name.slice(3)) : null);
+      if (option === null) {
+        unknown ??= arg;
+        continue;
+      }
+      let value: string | undefined;
+      if (option.value) {
+        value = eq === -1 ? args[at + 1] : arg.slice(eq + 1);
+        if (eq === -1) {
+          if (unknowable(at + 1, "value")) unknown ??= arg;
+          at += 1;
+        }
+      }
+      apply(
+        option,
+        value,
+        `--${Object.keys(longTable).find((known) => longTable[known] === option) ?? name}`,
+        eq === -1 ? undefined : arg,
+      );
+      continue;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      const letters = arg.slice(1);
+      for (let index = 0; index < letters.length; index += 1) {
+        const letter = letters[index] as string;
+        if (bin === "wget" && letter === "n") {
+          // `-nv`, `-nc`, `-nd`, `-nH`, `-np`: wget reads every letter after
+          // `n` as one of those; any other letter there is not a known form.
+          if (!/^[vcdHp]+$/u.test(letters.slice(index + 1))) unknown ??= arg;
+          break;
+        }
+        const option = shortTable[letter];
+        if (option === undefined) {
+          unknown ??= arg;
+          break;
+        }
+        if (option.value) {
+          const rest = letters.slice(index + 1);
+          let value: string | undefined = rest;
+          if (rest.length === 0) {
+            value = args[at + 1];
+            if (unknowable(at + 1, "value")) unknown ??= arg;
+            at += 1;
+          }
+          apply(option, value, `-${letter}`, rest.length === 0 ? undefined : arg);
+          break;
+        }
+        apply(option, undefined, `-${letter}`);
+      }
+    }
+  }
+  if (bin === "curl" && remote) directories.push(directory ?? ".");
+  // Recheck S(open): curl stores every `-o` output in `--output-dir` too, so a
+  // named output lands there (`--output-dir <organ> -o x.py`); fix round 3:
+  // an ABSOLUTE one too, as curl joins the two strings whatever the value
+  // (`--output-dir ~/.hermes -o /plugins/x.py` writes `~/.hermes/plugins/x.py`).
+  // The value as spelled stays judged as well: the stricter of the two readings.
+  // (`directory` is assigned inside `apply`, which the compiler cannot follow.)
+  const outputDir = directory as string | null;
+  if (bin === "curl" && outputDir !== null) {
+    for (const value of curlNamed) {
+      if (value !== "-") files.push(`${outputDir.replace(/\/+$/u, "")}/${value.replace(/^\/+/u, "")}`);
+    }
+  }
+  if (bin === "wget" && (!named || remote)) directories.push(directory ?? ".");
+  return { files: files.filter((file) => file !== "-"), directories, unknown, sources, sourceUnknown };
+}
+
+/**
+ * The file an upload or request-body option value reads, for each reading of
+ * it (fix round 4, M(L5f-1)): `[]` when the value reads no file (`--data=hello`,
+ * `-F name=value`), `null` when the text cannot say which file it reads.
+ *
+ * curl reads a `--data`/`-d`/`--json` file only when the value begins with `@`;
+ * `--data-urlencode` when an `@` comes before any `=` (`@F`, `name@F`); `-F`
+ * when the part after the first `=` begins with `@` or `<`, and there the path
+ * may be double-quoted and followed by `;type=…` or a `,` list, so the path is
+ * judged whole, unquoted, and cut at each `;` and `,` (one more path judged can
+ * only be stricter).
+ * `--data-raw` and `--form-string` never read a file, and are read the same
+ * way all the same: the stricter of two answers. The round-3 class rule, for a
+ * value the option word carries: a variable or a substitution (`$`, which
+ * the substitution sentinel also begins with), a glob (`*`, `?`, `[`; curl
+ * globs `-T` itself) or a brace group (`{`) in the path, or a variable where
+ * the `@` would be, makes the file unknowable.
+ */
+function uploadSourcePaths(kind: UploadSourceKind, value: string): string[] | null {
+  const literal = (text: string): boolean => !/[$`*?[{]/u.test(text);
+  if (kind === "file") return literal(value) ? [value] : null;
+  if (kind === "data") {
+    if (value.startsWith("$")) return null;
+    if (!value.startsWith("@")) return [];
+    const file = value.slice(1);
+    return literal(file) ? [file] : null;
+  }
+  if (kind === "urlencode") {
+    const at = value.search(/[@=$]/u);
+    if (at === -1 || value[at] === "=") return [];
+    if (value[at] === "$") return null;
+    const file = value.slice(at + 1);
+    return literal(file) ? [file] : null;
+  }
+  const eq = value.search(/[=$]/u);
+  if (eq === -1) return [];
+  if (value[eq] === "$") return null;
+  const rest = value.slice(eq + 1);
+  if (rest.startsWith("$")) return null;
+  if (!rest.startsWith("@") && !rest.startsWith("<")) return [];
+  const file = rest.slice(1);
+  if (!literal(file)) return null;
+  // curl lets the path be double-quoted (`f=@"x;y";type=…`): judged unquoted too.
+  const unquoted = file.replaceAll('"', "");
+  return [...new Set([file, unquoted, ...file.split(/[;,]/u), ...unquoted.split(/[;,]/u)])].filter(
+    (path) => path.length > 0,
+  );
+}
+
+/**
  * The strictest protected surface named by these words, with the word itself.
  *
  * `null` when none of them is protected. The word is returned verbatim, which
@@ -4446,7 +5406,7 @@ function classifySegment(
     ...segment.words,
     ...segment.redirects.map((redirect) => redirect.target),
     // APRV-504: the `$(…)` of an unquoted heredoc body run when it is read.
-    { text: "", quoted: false, substitutions: segment.bodySubstitutions },
+    { text: "", quoted: false, substitutions: segment.bodySubstitutions, splits: false, expands: false },
   ];
   for (const word of expanded) {
     for (const inner of word.substitutions) {
@@ -4666,12 +5626,33 @@ function classifySegment(
   // protected class, the credential touch is carried beside it as a second
   // class of the command (`also`), never dropped. Write targets need no check
   // here: a protected one has already answered above, carrying it the same way.
-  const credential = credentialTouch(basename, args, positionals);
+  //
+  // Fix round 4 (M(L5f-1)): the file a curl or wget upload or request-body
+  // option reads is judged with the positionals, so `--upload-file=F`, `-TF`,
+  // `--data=@F`, `-Ff=@F`, wget `--post-file=F`, `--body-file=F` and
+  // `--input-file=F` take the class `-T F` and `--data @F` take (a credential
+  // file `account.credential`, an organ its class). An embedded value whose
+  // file the text cannot read is a credential read of an unknown file. The
+  // upload's answer never displaces a download output that outranks the
+  // credential class (`policy.core`, `fetch-output-unknown`): those answer below.
+  const argFlags: ArgExpansion[] = segment.words
+    .slice(cursor + 1)
+    .map((word) => ({ splits: word.splits, expands: word.expands }));
+  const fetched = fetchOutputs(basename, args, argFlags);
+  const judged = fetched.sources.length === 0 ? positionals : [...positionals, ...fetched.sources];
+  const fetchedOutputProtected = strictestProtected(
+    [...fetched.files, ...fetched.directories.filter((directory) => directory !== ".")],
+    protectedPaths,
+  );
+  const fetchOutranksCredential =
+    fetched.unknown !== null || (fetchedOutputProtected !== null && outranksCredential(fetchedOutputProtected.surface));
+  const uploadCredential = fetchOutranksCredential ? null : uploadCredentialTouch(fetched.sources, fetched.sourceUnknown);
+  const credential = credentialTouch(basename, args, positionals) ?? uploadCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
   const outranking =
     credential === null && redirectCredential === null
       ? null
-      : outrankingProtected(positionals, readTargets, credentialWritesOnly(basename, args), protectedPaths);
+      : outrankingProtected(judged, readTargets, credentialWritesOnly(basename, args), protectedPaths);
   if (outranking === null) {
     if (credential !== null) return { ok: true, ...credential };
     if (redirectCredential !== null) return { ok: true, ...redirectCredential };
@@ -4709,6 +5690,46 @@ function classifySegment(
   // matched, verbatim, so an approver is told WHICH refs a deletion names
   // rather than being handed a class and left to re-read the command.
   const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
+
+  // APRV-511 refuter S1: a download's output file is a write target, whatever
+  // class the fetch earned (`curl -o ~/.hermes/plugins/x/__init__.py URL` is
+  // `read.web` by its method). A protected output answers with its class, as a
+  // redirection onto it would.
+  // Refuter S3: the destination directory a copy, move, link or install names
+  // in a flag (`-t<dir>`, `--target-directory=<dir>`) is a write target too;
+  // `-t <dir>` already reaches the positional scan below.
+  const copyFamily = ["cp", "mv", "ln", "install"].includes(basename);
+  const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
+  // Fix round 3 (S(open)): what the shell may still do to each argv word
+  // (`argFlags`, and `fetched` from it, are read above the credential tier).
+  // A directory a download writes server-chosen names into is judged as the
+  // directory: an organ directory, or the home root, is an organ write.
+  const fetchedDirectories = fetched.directories.filter((directory) => directory !== ".");
+  const fetchedProtected = strictestProtected(
+    [...fetched.files, ...targetDirectories, ...fetchedDirectories],
+    protectedPaths,
+  );
+  if (fetchedProtected !== null) {
+    return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
+  }
+  // APRV-511 review: a download whose output this table cannot know (an
+  // option it does not know, an ambiguous prefix, a config file or string) is
+  // a write to an unknown target, and an unknown target may be an organ.
+  if (fetched.unknown !== null) {
+    return { ok: true, class: "policy.core", rule: "fetch-output-unknown", path: fetched.unknown };
+  }
+  // Fix round 3 (S(open)): a copy, move or link argv word the shell may still
+  // turn into an option (`cp $X f`, `cp *.md d/`, `mv {-t,DIR} f`) may name
+  // the destination, so the destination is unknown: `policy.core`, unless a
+  // named path already earns a class at least as strict (the log).
+  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  if (copyUnknown !== null) {
+    const named = strictestProtected([...positionals, ...readTargets], protectedPaths);
+    if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
+      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+    }
+    return { ok: true, class: "policy.core", rule: "copy-target-unknown", path: copyUnknown };
+  }
 
   // A protected path anywhere in an effectful segment takes that path's class:
   // the command is editing the gate, whatever else it is doing. Every
@@ -4758,7 +5779,7 @@ function classifySegment(
         also: deferredCredential,
       };
     }
-    const named = strictestProtected(positionals, protectedPaths, true);
+    const named = strictestProtected(judged, protectedPaths, true);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -4959,6 +5980,8 @@ export interface CommandSegmentShape {
   text: string;
   bin: string | null;
   args: string[];
+  /** What the shell may still do to each of `args` (APRV-511 fix round 3). */
+  argFlags: ArgExpansion[];
   writes: string[];
   /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
   reads: string[];
@@ -4975,6 +5998,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
       text: segment.text,
       bin: words[cursor] ?? null,
       args: words.slice(cursor + 1),
+      argFlags: segment.words.slice(cursor + 1).map((word) => ({ splits: word.splits, expands: word.expands })),
       writes: segment.redirects
         .filter((redirect) => redirect.op !== "<")
         .map((redirect) => redirect.target.text)
