@@ -1,9 +1,10 @@
 ---
 id: APRV-492
 title: A doubled review tap does not lose the note prompt
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 13:40'
+updated_date: '2026-10-08 01:15'
 labels:
   - telegram
   - review
@@ -52,4 +53,6 @@ Fix round 1 (lane claude-edge/A9-fix, after refutation A9 at 21a8f62c, NOT CLEAN
 - Runs: npx tsc -p tsconfig.json exit 0; node scripts/run-tests.mjs --only channels-telegram exit 0, 183/183; npx oxlint on both files exit 0.
 
 Remaining: recheck of the changed seams and the suite of record (orchestrator); not armed; ships in 0.4.1.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; PR #619 merged 5d5318ed (2026-10-05) after refuter recheck CLEAN (CLAIMS 2026-10-05 14:02Z); released in 0.4.1. Follow-up APRV-493 stays open.
 <!-- SECTION:NOTES:END -->

@@ -1,10 +1,10 @@
 ---
 id: APRV-499
 title: Policy-declared tool-name mapping and a default for unmapped harness tools
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 22:48'
-updated_date: '2026-10-05 23:11'
+updated_date: '2026-10-08 01:15'
 labels:
   - hook
   - policy
@@ -103,4 +103,6 @@ A harness `execution.started` whose class came from the policy's tool mapping (a
 - SPEC amendment applied in PR #626, pending sign-off. Hunks 2-6 only: hunk 1 (the 5.1 canonical example gains `unmapped_tool: record`) is DEFERRED, because the example is pinned byte for byte to the scaffold fixture (test 'the fixture's policy half is SPEC.md 5.1 verbatim'), so it moves together with the scaffold and the fixture in a later pass, not at the 0.4.2 cut.
 - Refuter scope (noticed and accepted): see the PR body.
 - Follow-ups not done here: `.mcp.json` is not a built-in protected path (an agent able to write it could name a server a loose entry claims; documented, operator adds it to `protected_paths`); `approval hook classify` has no tool-name form; the open-window path with a mapped tool is covered by code (describeToolCall gets the loaded policy) but by no test.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; PR #623 merged ee151c2f (2026-10-06), SPEC hunks signed off at seq 84047 (PR #626 60d2d2cd), released in 0.4.2 (PR #625 9f796b03).
 <!-- SECTION:NOTES:END -->

@@ -4,11 +4,11 @@ title: >-
   Hermes Agent harness adapter: approval hook hermes answers the pre_tool_call
   envelope, fail_closed is the committed default, and the deciding facts are
   probed live
-status: In Progress
+status: Done
 assignee:
   - '@opus-lane-hermes'
 created_date: '2026-09-20 07:52'
-updated_date: '2026-09-21 02:04'
+updated_date: '2026-10-08 01:13'
 labels:
   - hermes
   - hook
@@ -172,6 +172,8 @@ LIVE PROBE REPORT, 2026-09-21, Carter's hand, on the by-hand install at /Users/c
 PROBE ADDENDA, 2026-09-21. (a) VERSION CONFOUND RESOLVED: the hermes on PATH is the 2026-09-14 install at the user home, v0.21.3 (2026.9.14, upstream 913d4098), 670 commits behind main; hermes hooks list shows only timeout per entry although config.yaml carries fail_closed true, so that build does not know the key and ignores it silently. The three fail-open results are therefore the OLD build's; the same trials on the fresh clone at dev/hermes (main as of 2026-09-20) are still to run. Finding for the doc either way: a Hermes below the version that knows fail_closed fails open with no warning, so the adapter must state a version floor and the harness-version doctor row should pin it. (b) TELEGRAM GATEWAY PASS (hermes gateway run on the old build, HERMES_HOME the new home, consent already recorded from the TTY): the hooks FIRE for gateway sessions, pre and post, envelopes 39 to 44. The python prompt ran because the model chose terminal (a python3 -c command) rather than execute_code; execute_code was not sent. The armed crash trial fell open (post event 115 ms after pre), consistent with (a). The gateway session's envelope cwd was the user HOME directory and the write landed there, outside the scratch project: a gateway deployment must pass --dir explicitly and APRV-415's refusal of relative paths applies with force. Gateway env differs from CLI (HERMES_STARTUP_WATCHDOG_TIMEOUT_S, HERMES_TURN_LEASE_TIMEOUT present; HERMES_INTERACTIVE absent). First-use consent with NO prior TTY approval is still untested. (c) The old install's launchd gateway service (ai.hermes.gateway-f2295b22) had to be stopped for the pass and was restarted after.
 
 PROBE COMPLETE, 2026-09-21, on Hermes main at 118984d7 after hermes update (the 2026-09-14 build v0.21.3 was the earlier confound). FAIL-CLOSED HOLDS, 3 OF 3: the armed crash write was refused (the file is absent from the scratch project; the model then rewrote it under HERMES_HOME/cache/scratch through a second write_file call, which the probe records and does not enforce); the armed garbage write was refused (Carter watched the refusal; the model then wrote the file through terminal, which the probe allows); the armed hang was refused at exactly 300 s, the per-entry cap (pre 23:38:51, post 23:43:51). Verdict forms on main under fail_closed: allow-empty-object CREATED the file, so {} is the allow; deny-action-exit2 REFUSED it. post_tool_call fires even for a blocked call (29 ms after an exit-2 deny) and after a timeout, so a post event is not evidence the tool ran; the adapter reads outcomes from the result, and the doc must say this. Version floor: v0.21.3 (2026.9.14) does not know fail_closed and fails open silently; hermes hooks list renders no fail_closed flag on either build, so the listing cannot be used to check it. Every model retry after a block went to a directory the envelope did not name (HERMES_HOME/cache/scratch for a session launched in the scratch project; the user home for the gateway session), which is APRV-415's case observed. Captures: 60 envelopes in /Users/carter/dev/hermes/probe/envelopes.jsonl. Register verdict and the SPEC row proposal move to APRV-415 with these facts.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; PR #510 merged e6fbcdd4 (approval hook hermes, 2026-09-20); AC1 probe completed per notes, adapter hardened by #532 (APRV-415, 12e7a139); docs/hermes-hook.md present on main.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

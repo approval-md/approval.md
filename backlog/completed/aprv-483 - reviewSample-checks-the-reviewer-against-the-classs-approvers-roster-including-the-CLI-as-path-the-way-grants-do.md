@@ -3,10 +3,10 @@ id: APRV-483
 title: >-
   reviewSample checks the reviewer against the class's approvers roster,
   including the CLI --as path, the way grants do
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 10:26'
+updated_date: '2026-10-08 01:14'
 labels:
   - agentvillage
 dependencies: []
@@ -85,4 +85,6 @@ Fix round 2 (impact-scoped recheck of PR #614).
 - RESIDUAL (outside NF-3, not fixed): eligibility and rate are still judged under the policy in force at the sweep (supervisedExecutions resolves the class under the current load). An action that ran supervised under P1 is never sampled if P2, attested before the sweep, resolves its class to manual or autonomous. Candidate for a follow-up task.
 - UPDATED PROPOSED SPEC HUNK (§5.2, replacing fix round 1's wording): 'read from the policy in force when the action ran: `audit.sampled` names that policy's hash (`payload.policy_sha256`, the latest attestation before the sampled `execution.started`), and the roster is read only from attested bytes with that hash.' The rest of the round-1 hunk is unchanged. SPEC.md is not edited.
 - NF-4: filed as APRV-490; nothing added.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; shipped in PR #614 (APRV-480..483 supervised-retro core) merged 27980de0 on 2026-10-05; released in 0.4.1 (v0.4.1, PR #622 5f9b9c3d).
 <!-- SECTION:NOTES:END -->
