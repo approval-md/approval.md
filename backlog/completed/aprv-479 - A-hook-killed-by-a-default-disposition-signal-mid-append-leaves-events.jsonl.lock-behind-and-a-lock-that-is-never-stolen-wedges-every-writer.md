@@ -3,13 +3,13 @@ id: APRV-479
 title: >-
   A hook killed by a default-disposition signal mid-append leaves
   events.jsonl.lock behind, and a lock that is never stolen wedges every writer
-status: In Progress
+status: Done
 assignee:
   - '@claude-edge-A2'
   - '@claude-edge-A2-r3'
   - '@claude-edge-A2-r4'
 created_date: '2026-10-05 05:49'
-updated_date: '2026-10-05 11:09'
+updated_date: '2026-10-16 17:54'
 labels:
   - security
 dependencies: []
@@ -106,6 +106,8 @@ Round 4 (claude-edge/A2-r4, 2026-10-05, on c0c34ce6): the round-3 refutation's R
 New residue (round 4): a writer stalled between its create and its record for a whole wait (SIGSTOP, a debugger) is indistinguishable from a dead one to a waiting writer (legacy-aged); a dead claimant's take file from another container (not provably gone) stays beside the lock (export-excluded); an empty take file (a claimant killed between its create and its record) likewise.
 
 Remaining: scoped recheck of the round-4 seams, CI, the owner's SPEC sign-off, merge. Not armed.
+
+Closed by the 2026-10-16 backlog sweep (claude-nonav): all ACs ticked; PR #615 merged e58839b1 on 2026-10-05; released in 0.4.1 (tag v0.4.1; CHANGELOG 0.4.1 section). The "Remaining" line above predates the merge.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
