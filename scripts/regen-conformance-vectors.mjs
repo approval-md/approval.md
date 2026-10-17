@@ -2007,6 +2007,77 @@ const commandClassVectors = [
     description: "the control for the six above: an ordinary branch push did not move",
     input: { command: "git push origin feature/x" },
   },
+  // --- git push read through git's own option grammar (APRV-517) ------------
+  {
+    id: "push-delete-short-bundle",
+    description:
+      "a short bundle carrying d deletes: `-ud` is `-u -d`, so it is vcs.ref.delete with the ref bound, not a plain branch push",
+    input: { command: "git push -ud origin lane" },
+  },
+  {
+    id: "push-delete-bundle-other-order",
+    description: "the same bundle in the other order",
+    input: { command: "git push -du origin lane" },
+  },
+  {
+    id: "push-delete-abbreviated-long-option",
+    description:
+      "git takes any unique prefix of a long option: `--del` is `--delete`, and a deletion of the trunk is a deletion, not a trunk push",
+    input: { command: "git push --del origin main" },
+  },
+  {
+    id: "push-delete-shortest-abbreviation",
+    description: "`--de` is the shortest unique prefix of `--delete`",
+    input: { command: "git push --de origin lane" },
+  },
+  {
+    id: "push-delete-ambiguous-abbreviation-refused",
+    description:
+      "`--d` could be `--delete` or `--dry-run`; git refuses it as ambiguous, and so does the classifier, rather than guessing",
+    input: { command: "git push --d origin lane" },
+    control: true,
+  },
+  {
+    id: "push-delete-push-option-value",
+    description:
+      "`-o` takes the rest of its bundle as its value: `-od` sends a push option named d and deletes nothing, while `-do x` deletes",
+    input: { command: "git push -do x origin lane" },
+  },
+  {
+    id: "push-prune-deletes",
+    description:
+      "`--prune` (any unique prefix) removes the remote refs a refspec pattern no longer matches; which refs is a fact about the remote, so nothing is bound",
+    input: { command: "git push --pru --all origin" },
+  },
+  {
+    id: "push-mirror-abbreviation-forces",
+    description: "`--m` is `--mirror`, which forces and deletes: vcs.history.rewrite",
+    input: { command: "git push --m origin" },
+  },
+  {
+    id: "push-global-option-implicit",
+    description:
+      "a global option in front of push does not shift the positionals: `origin` is the remote, the push is implicit, so it is the trunk class",
+    input: { command: "git --no-pager push origin" },
+  },
+  {
+    id: "push-unreadable-word-strictest",
+    description:
+      "a word the shell expands may hold `:main`, `+main` or `-d`, so it takes the strictest class the row emits",
+    input: { command: 'git push origin "$B"' },
+  },
+  {
+    id: "push-far-side-program-refused",
+    description:
+      "`--exec` / `--receive-pack` name the program git starts for the far side, which runs on this machine for a local remote; the classifier does not read that command line",
+    input: { command: "git push --exec=x origin lane" },
+    control: true,
+  },
+  {
+    id: "push-grammar-ordinary-unmoved",
+    description: "the control for the push grammar: `-u` alone is still an ordinary branch push",
+    input: { command: "git push -u origin lane" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5262,7 +5333,29 @@ const SUITES = [
     // Still 1.6.0, for the same reason: none of those vectors has ever been
     // merged, so no implementation was held to the single-class answer.
     //
-    // 1.8.0 (APRV-511): a MINOR bump, the same shape a seventh time. One hundred and three
+    // 1.8.0 (APRV-517): a MINOR bump, the same shape a seventh time. Twelve
+    // new `push-*` vectors pin `git push` read through git 2.50's own option
+    // grammar: a short bundle carrying `d` (`-ud`, `-du`) and a unique-prefix
+    // abbreviation (`--de`, `--del`) are the deletion they spell, `--prune`
+    // deletes, `--m` is `--mirror`, a value-taking `-o` consumes its value, a
+    // global option in front of `push` no longer shifts the positionals, and a
+    // word the shell may expand takes the strictest class the row emits. Two
+    // are refusals pinned as controls: an ambiguous abbreviation (`--d`) and a
+    // far-side program (`--exec=x`).
+    //
+    // Why MINOR and not MAJOR, asked and answered. No committed expectation in
+    // this file moves: regenerating with the new classifier leaves every 1.7.0
+    // vector byte-identical (the eight APRV-352 push vectors use only the
+    // spelled-out flags and plain refspecs, which read the same both ways).
+    // Nothing in this suite's algorithm or description line states a rule about
+    // option spellings (the MAJOR precedent is `policy-resolution` 2.0.0).
+    // What moved outside the file moved stricter only: a deletion that was
+    // `vcs.push.branch` or `vcs.push.main` is `vcs.ref.delete`, and the rest
+    // became refusals or the rewrite class. Two open PRs (#648, #639) also
+    // claim 1.8.0 off this base; by the rule 1.4.0 set, the number is claimed
+    // at merge, so whichever lands second takes 1.9.0.
+    //
+    // 1.9.0 (APRV-511): a MINOR bump, the same shape an eighth time. One hundred and three
     // new `hermes-*` / `other-variable-*` / `lowercase-variable-*` /
     // `substitution-*` / `brace-group-*` / `download-*` / `wget-*` /
     // `attached-target-*` / `curl-*` / `brace-sequence-*` / `brace-expansion-*`
@@ -5278,11 +5371,13 @@ const SUITES = [
     // and one that a `$(…)` deciding a `date` assignment's value is refused
     // (0.4.4 admitted `TZ="$(cat .tz)" date`; no committed vector held it).
     // Regenerating with the new
-    // classifier leaves every earlier vector byte-identical. 1.7.0 belongs to
-    // APRV-508 (PR #636), merged in 0.4.4; this set was rebased onto it and
-    // takes the next MINOR. A version is claimed at merge, so a sibling 0.4.5
-    // PR that also claims 1.8.0 renumbers against whichever lands first.
-    vectors_version: "1.8.0",
+    // classifier leaves every earlier vector byte-identical, main's 1.8.0
+    // `push-*` set included. 1.7.0 belongs to APRV-508 (PR #636), merged in
+    // 0.4.4, and 1.8.0 to APRV-517 (PR #649), which merged first; this set was
+    // first numbered 1.8.0 and takes the next MINOR by the claimed-at-merge
+    // rule. Draft PR #650 also claims 1.9.0 and renumbers when it lands after
+    // this one.
+    vectors_version: "1.9.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

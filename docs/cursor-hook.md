@@ -338,7 +338,8 @@ the classifier is the same file for both harnesses.
 A `git push` that removes a remote ref is `vcs.ref.delete`, rule
 `git-ref-delete`, with the ref names bound to the segment's `path`. Every
 spelling lands there: `--delete`, `-d`, a colon refspec (`:refs/heads/x`, `:x`),
-and bulk forms mixing several. A force push stays `vcs.history.rewrite` and a
+bulk forms mixing several, `--prune`, and every bundle (`-ud`) or unique-prefix
+abbreviation (`--del`) git's option parser accepts (APRV-517). A force push stays `vcs.history.rewrite` and a
 tag deletion stays `release.publish`. The full account, including why the class
 exists and what a policy that has no line for it resolves to, is in
 [docs/claude-code-hook.md](claude-code-hook.md#deleting-a-remote-ref-aprv-352);
@@ -709,6 +710,9 @@ every harness that ever wrote to it.
 The write boundary constrains the SHAPE: one line, printable ASCII, at most 64
 characters. The value is the output of a third-party process going into an
 append-only log, and SPEC.md §11.1 invariant 3 has no exception for provenance.
+What is recorded is the line's printable-ASCII prefix, trimmed (APRV-419): a
+control character or a non-ASCII character ends the value, and a prefix over 64
+characters is refused.
 
 Both fields are OPTIONAL and additive: every record written before they existed
 still validates and still verifies.

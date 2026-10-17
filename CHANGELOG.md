@@ -40,7 +40,81 @@ subshell stay refused, the open
   conformance suite `hook-exec-code` 1.0.0; `refusal-unions` 29.0.0;
   `schema-validation` 3.4.0. SPEC.md §5.2, §7 and §11.2 amended, pending sign-off.
 
-### The Hermes home's other organs (APRV-511; 0.4.5 candidate)
+### Security
+
+**A hole in 0.4.5 that this closes.** A `git push` that deleted a remote
+branch classified as a plain push when the delete flag was bundled or
+abbreviated, so `vcs.ref.delete` was never asked. Under this repository's
+policy that made `git push -ud origin lane` autonomous and `git push --del
+origin main` supervised-retro (it proceeds). Upgrade every install that relies
+on the hook for enforcement.
+
+- **`git push` is read through git 2.50's own option grammar (APRV-517).** The
+  `git-push` row matched flags by exact spelling (`--delete`, `-d`, `--force`,
+  `-f`), and git accepts more than that. Short bundles carrying `d` (`-ud`,
+  `-du`, `-fd`, `-dn`, `-do x`) and every unique prefix of `--delete` (`--de`,
+  `--del`, `--dele`, `--delet`) are now the deletion they spell:
+  `vcs.ref.delete` with the refs bound, or `vcs.history.rewrite` when the same
+  bundle forces. `--prune` in any unique prefix, which removes the remote refs
+  a refspec pattern no longer matches, is `vcs.ref.delete` (rule
+  `git-push-prune`, nothing bound). The same walk reads the force and tag
+  spellings (`-uf`, `--force-w`, `--m` for `--mirror`, `--ta`, `--fol`) and
+  `--all` / `--branches` (the trunk among them, so `vcs.push.main`). A
+  value-taking option consumes its value (`-o x`, `--repo x`), and a global
+  option in front of `push` no longer shifts the positionals: `git --no-pager
+  push origin` was `vcs.push.branch` and is now the implicit trunk push it is.
+- **What the grammar cannot walk is refused or read as the strictest push.**
+  An option git does not know, an ambiguous abbreviation (`--d`, `--forc`,
+  `--v`), a value where none is taken, a missing value, or a global option the
+  classifier does not read past (`git --version push`) is `opaque`; git refuses
+  each of these itself. `--exec` / `--receive-pack` name the program git runs
+  for the far side, which runs on this machine for a local remote, and are
+  `opaque` too. A word the shell may expand (`$B`, `"$B"`, a `$(…)`, a glob, a
+  brace expansion), and an assignment or global option that steers git's
+  configuration (`GIT_*=`, `HOME=`, `XDG_CONFIG_HOME=`, `--git-dir=`,
+  `--work-tree=`, `--config-env=`), are `vcs.history.rewrite` (rule
+  `git-push-unreadable`), because any of them can hold `-d`, `:main` or
+  `+main`; `git --exec-path=… push` is `opaque`. This moves `git push origin $BRANCH` from `vcs.push.main` and `git
+  push origin --delete $BRANCH` from `vcs.ref.delete` to that class: write the
+  ref name out.
+- **Every verdict that moved, moved stricter.** The old word scan stays as a
+  floor under the grammar reading, so no spelling classifies looser than it
+  did. Over a generated corpus of 29,215 `git push` command lines, 15,207
+  classes moved and none moved looser, under the class order and under this
+  repository's APPROVAL.md alike. A real-git differential runs 5,480 admitted
+  argvs against a bare local remote on git 2.50.1 and finds every deletion,
+  forced update, tag change and trunk update classified at least that
+  strictly.
+- Conformance: `command-class` 1.8.0, twelve new `push-*` vectors; no existing
+  expectation moved.
+
+### Harnesses
+
+- **A Hermes record carries its harness version (APRV-419).** `hermes
+  --version` prints `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, and
+  the U+00B7 separator made the write boundary refuse the whole line, so no
+  Hermes `task.registered` or `gate.bypassed` ever carried `harness_version` and
+  `approval doctor` could never compare one. A version line is now recorded as
+  its printable-ASCII prefix, trimmed: everything from the first control or
+  non-ASCII character is cut, and Hermes records `Hermes Agent v0.21.3
+  (2026.9.14)`. A prefix over 64 characters is still refused. The schema is
+  unchanged: every value the new rule records is one the old rule accepted
+  whole. The fail-closed floor still reads the full installed line, because
+  the prefix drops the upstream commit.
+
+### Site
+
+- **The judgy reviewer pages left the repository (APRV-393).** `judgy/` is
+  deleted and approval.md/judgy now answers 404, with no pointer page. The
+  archive is this repository's own history: commit `49574e4d` (APRV-387) is the
+  last one that touches `judgy/`, and its tree there is byte-identical to the
+  one deleted. The judgy research card on `approved/` and the
+  `docs/README-extended.md` link went with it. The packed file list is
+  unchanged (942 paths), because `judgy/` was never in the `files` list;
+  `docs/README-extended.md`, which ships in the package, drops judgy from its
+  directory table.
+
+### The Hermes home's other organs (APRV-511; 0.4.6 candidate)
 
 - **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an
   Agent Village box the agent's uid owns the whole Hermes home, and a write
@@ -179,10 +253,11 @@ subshell stay refused, the open
   landing helpers, a credential `account.credential`, an organ or protected
   path its class, and a file outside the read scope `read.file.out_of_scope`.
   Only ever stricter than 84856f9f; the pure classifier is unchanged.
-- **Conformance.** `command-class` 1.8.0 (one hundred and forty new
+- **Conformance.** `command-class` 1.9.0 (one hundred and forty new
   vectors, thirty-two of them unmoved controls; no existing vector
-  expectation moved, 0.4.4's 1.7.0 set included; one 0.4.4 test row,
-  `TZ="$(cat .tz)" date`, tightened, see the rebase bullet). Totals 809/809.
+  expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set
+  included; one 0.4.4 test row, `TZ="$(cat .tz)" date`, tightened, see the
+  rebase bullet). Totals 896/896.
   SPEC.md §5.2's organ list amended, pending sign-off.
 
 ## 0.4.5 — 2026-10-17

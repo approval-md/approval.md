@@ -49,6 +49,7 @@
  */
 
 import { isDateDisplay } from "./date-argv.js";
+import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
   isDfDisplay,
@@ -2037,6 +2038,12 @@ interface RuleContext {
    * `PYTHONPATH`, `PYTHONSTARTUP`, `HOME`).
    */
   assigned: boolean;
+  /**
+   * Those assignments, verbatim (APRV-517). `git push` reads them: a `GIT_*`
+   * variable or `HOME` decides which configuration the push runs under, and
+   * configuration can carry a deleting refspec.
+   */
+  assignments: readonly string[];
   /** What the caller knows about the machine (APRV-267). Never read from here. */
   context: ClassifierContext;
 }
@@ -2203,15 +2210,49 @@ function deletedRef(refspec: string): string | null {
   return null;
 }
 
+/**
+ * The facts of a `git push` its class turns on (APRV-517). Two readings of one
+ * argv fill it in, and {@link refineGitPush} keeps the stricter answer.
+ */
+interface PushFacts {
+  force: boolean;
+  tags: boolean;
+  remove: boolean;
+  prune: boolean;
+  /** Pushes every branch (`--all`, `--mirror`, a submodule push): the trunk among them. */
+  all: boolean;
+  refspecs: string[];
+}
+
+/**
+ * The reading the classifier has always made: flags by exact spelling, and
+ * every non-flag word after the first a refspec. Kept as a floor beneath the
+ * git-grammar reading, so no spelling classifies looser than it did.
+ */
+function wordPushFacts(args: readonly string[]): PushFacts {
+  return {
+    force: hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"]),
+    tags: hasFlag(args, ["--tags", "--follow-tags"]),
+    remove: hasFlag(args, ["--delete", "-d"]),
+    prune: false,
+    all: false,
+    refspecs: args.filter((arg) => !isFlag(arg)).slice(1),
+  };
+}
+
+/** `git push` classes, strictest first: the order {@link pushFactsClass} checks them in. */
+const PUSH_CLASS_ORDER: readonly string[] = [
+  "vcs.history.rewrite",
+  "release.publish",
+  REF_DELETE_CLASS,
+  "vcs.push.main",
+  "vcs.push.branch",
+];
+
 /** `git push` — force, release, deletion, trunk and branch turn on flags and refspecs. */
-function refineGitPush(ctx: RuleContext): Refinement {
-  const args = ctx.args.slice(1);
-  if (hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"])) {
-    return { class: "vcs.history.rewrite", rule: "git-push-force" };
-  }
-  const positionals = args.filter((arg) => !isFlag(arg));
-  const refspecs = positionals.slice(1);
-  if (refspecs.some((refspec) => refspec.startsWith("+"))) {
+function pushFactsClass(facts: PushFacts): Refinement & { class: string } {
+  const { refspecs } = facts;
+  if (facts.force || refspecs.some((refspec) => refspec.startsWith("+"))) {
     return { class: "vcs.history.rewrite", rule: "git-push-force" };
   }
   // The tag check stays ABOVE the deletion check, deliberately. A tag is the
@@ -2222,7 +2263,7 @@ function refineGitPush(ctx: RuleContext): Refinement {
   // and APRV-352 asks for a class for branch deletions, not a loosening of the
   // tag surface.
   if (
-    hasFlag(args, ["--tags", "--follow-tags"]) ||
+    facts.tags ||
     refspecs.some(isTagRefspec) ||
     refspecs.some((word, index) => word === "tag" && index + 1 < refspecs.length)
   ) {
@@ -2233,12 +2274,18 @@ function refineGitPush(ctx: RuleContext): Refinement {
   // class with nothing bound rather than falling through to a push class: an
   // invocation whose targets cannot be read is the one that least deserves the
   // looser answer.
-  if (hasFlag(args, ["--delete", "-d"])) {
+  if (facts.remove) {
     return {
       class: REF_DELETE_CLASS,
       rule: "git-ref-delete",
       ...(refspecs.length === 0 ? {} : { path: refspecs.join(" ") }),
     };
+  }
+  // `--prune` (APRV-517) removes every remote ref a refspec pattern no longer
+  // matches. Which refs those are is a fact about the remote, so nothing is
+  // bound: the refspecs are not the refs it removes.
+  if (facts.prune) {
+    return { class: REF_DELETE_CLASS, rule: "git-push-prune" };
   }
   if (refspecs.length === 0) {
     return { class: "vcs.push.main", rule: "git-push-implicit" };
@@ -2251,7 +2298,7 @@ function refineGitPush(ctx: RuleContext): Refinement {
   if (deleted.length > 0) {
     return { class: REF_DELETE_CLASS, rule: "git-ref-delete", path: deleted.join(" ") };
   }
-  let sawMain = false;
+  let sawMain = facts.all;
   for (const refspec of refspecs) {
     const colon = refspec.indexOf(":");
     const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
@@ -2265,6 +2312,45 @@ function refineGitPush(ctx: RuleContext): Refinement {
   return sawMain
     ? { class: "vcs.push.main", rule: "git-push-main" }
     : { class: "vcs.push.branch", rule: "git-push-branch" };
+}
+
+/**
+ * `git push`, read twice and answered by the stricter reading (APRV-517).
+ *
+ * The first reading is git's own grammar ({@link parseGitPushArgv}): short
+ * bundles (`-ud`), unique-prefix abbreviations (`--del`), `--prune`, the
+ * values that option words consume, and the global options in front of
+ * `push`. Anything that grammar cannot walk is answered without a guess: a
+ * word the shell may expand, or an environment that steers git's
+ * configuration, is `vcs.history.rewrite` (rule `git-push-unreadable`), the
+ * strictest class this row emits, because such a word can hold `+main`,
+ * `:main` or `-d`; an argv git itself would refuse, or one that names a
+ * far-side program, is opaque.
+ *
+ * The second reading is the word scan this row has always made, kept as a
+ * floor, so a command whose verdict moves only ever moves stricter. Where the
+ * two agree on the class, the grammar's answer is kept: its rule and bound
+ * refs are the ones git will act on.
+ */
+function refineGitPush(ctx: RuleContext): Refinement {
+  const floor = pushFactsClass(wordPushFacts(ctx.args.slice(1)));
+  const split = splitGitPush(ctx.args);
+  if (split === null) return { opaque: "git push: the push subcommand is not where the classifier found it" };
+  const parsed = parseGitPushArgv(split.words, ctx.assignments, ctx.substituted, split.globals);
+  if (!parsed.ok) {
+    if (parsed.kind === "unreadable") return { class: "vcs.history.rewrite", rule: "git-push-unreadable" };
+    return { opaque: parsed.detail };
+  }
+  const { reading } = parsed;
+  const exact = pushFactsClass({
+    force: reading.force,
+    tags: reading.tags,
+    remove: reading.remove,
+    prune: reading.prune,
+    all: reading.all,
+    refspecs: reading.positionals.slice(1),
+  });
+  return PUSH_CLASS_ORDER.indexOf(floor.class) < PUSH_CLASS_ORDER.indexOf(exact.class) ? floor : exact;
 }
 
 /**
@@ -6091,7 +6177,7 @@ function classifySegment(
     };
   }
 
-  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, assigned, context };
+  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, assigned, assignments, context };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
