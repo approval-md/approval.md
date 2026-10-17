@@ -185,7 +185,12 @@ test("review-b N6: a substitution, a mid-name backslash, an escaped + and a cont
   for (const command of ["n$(printf m)=5 ls", "n\\m=5 ls", "n\\+=5 ls", "n\\\nm=5 ls"]) {
     const refused = failure(command);
     assert.equal(refused.code, "unclassified", JSON.stringify(command));
-    assert.match(refused.detail, /quoted or escaped is a command word/u, JSON.stringify(command));
+    // Merged with APRV-511 (#639): the lexer keeps a `$(…)` in the text as an
+    // unexpanded variable (SUBSTITUTION_SENTINEL), so a substituted name reads
+    // like the `n$x=5` row above: neither grammar reads an assignment, and the
+    // word is refused as a program no rule names. Same code.
+    const detail = command.includes("$(") ? /^no rule for /u : /quoted or escaped is a command word/u;
+    assert.match(refused.detail, detail, JSON.stringify(command));
   }
   // The control: the same name unescaped is an assignment.
   assert.equal(answer("nm=5 ls"), answer("n=5 ls"));
