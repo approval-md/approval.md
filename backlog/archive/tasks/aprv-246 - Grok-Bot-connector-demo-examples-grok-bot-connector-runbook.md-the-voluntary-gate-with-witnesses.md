@@ -52,3 +52,5 @@ Grok Bot (xAI's agent product) lets a user add an MCP server as a custom connect
 <!-- SECTION:NOTES:BEGIN -->
 Runbook written from the web-agent template: preflight, the gated tunnel as the opening beat, five rehearsal beats, failure playbook, reset, hard warnings (the server checks no header; guest mode and the caps are the protection; the live gate and ~/demo-gate must not be confused), TBDs. Beat 3 uses vcs.push.branch, which is what the git coverage source now reports for a commit a remote-tracking branch reaches. Coverage output blocks are marked illustrative; confirm columns against approval coverage --help on the morning. README links it from Where to look next. Docs guard passes in the full tier. AC 5 (the rehearsal itself: connector transport, long wait, identity string, tunnel reachability) is Carter's step and keeps the task In Progress.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, waits on a human step, no progress note since September.

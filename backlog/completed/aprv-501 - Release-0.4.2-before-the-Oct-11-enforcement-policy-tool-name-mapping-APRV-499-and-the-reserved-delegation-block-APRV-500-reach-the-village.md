@@ -3,9 +3,10 @@ id: APRV-501
 title: >-
   Release 0.4.2 before the Oct 11 enforcement: policy tool-name mapping
   (APRV-499) and the reserved delegation block (APRV-500) reach the village
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-06 02:30'
+updated_date: '2026-10-16 17:54'
 labels:
   - agent-village
 dependencies:
@@ -23,8 +24,8 @@ ordinal: 385000
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Release PR opened with the 0.4.2 section naming APRV-499 and APRV-500, the H1 known property and the upgrade order; CI green; draft until Carter's SPEC attests
-- [ ] #2 Carter attests the APRV-499 and APRV-500 SPEC amendments; tags and pushes v0.4.2 through the gate; publish run green; read-backs recorded
+- [x] #1 Release PR opened with the 0.4.2 section naming APRV-499 and APRV-500, the H1 known property and the upgrade order; CI green; draft until Carter's SPEC attests
+- [x] #2 Carter attests the APRV-499 and APRV-500 SPEC amendments; tags and pushes v0.4.2 through the gate; publish run green; read-backs recorded
 - [ ] #3 DATA-228 and HOSTED-32 told the version; the checkpoint rebuilt at 0.4.2 before the Oct 11 roll; the template carries tools/unmapped_tool/delegation only after
 <!-- AC:END -->
 
@@ -44,4 +45,8 @@ Targeted checks only (no full suite): `npx tsc -p tsconfig.json` exit 0; `node s
 Draft PR #625 (Release 0.4.2) opened against main.
 
 Remaining: AC #1 needs CI green on the PR head and the SPEC attests (the PR stays a draft until then); AC #2 and #3 are Carter's.
+
+2026-10-08 sweep (claude-b3/SWEEP-APRV-1): AC1 ticked: Release 0.4.2 PR #625 merged 9f796b03 (2026-10-06) after the SPEC attests. AC2 ticked: SPEC amendments #626 (60d2d2cd) signed off at seq 84047 (CLAIMS 2026-10-06); tag v0.4.2, release 2026-10-06T10:29Z, publish run 37447027966 success. AC3 not ticked: no evidence of the DATA-228 tell or checkpoint rebuild.
+
+Closed by the 2026-10-16 backlog sweep (claude-nonav): AC1 and AC2 shipped (PR #625 9f796b03, SPEC attests #626, v0.4.2). AC3 superseded, not done: hosted pins 0.4.3 (e372b55) and the Oct 11 roll has passed; later template rows are tracked by their own tasks.
 <!-- SECTION:NOTES:END -->

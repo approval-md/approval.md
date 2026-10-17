@@ -3,11 +3,11 @@ id: APRV-489
 title: >-
   Minimal Telegram prompt style: a plain-words card with the canonical rendering
   collapsed in the same message (channels.telegram.prompt.style)
-status: In Progress
+status: Done
 assignee:
   - '@agentvillage-d4-C1'
 created_date: '2026-10-05 08:41'
-updated_date: '2026-10-05 10:36'
+updated_date: '2026-10-08 01:15'
 labels:
   - agentvillage
 dependencies: []
@@ -44,7 +44,7 @@ The canonical renderer, display_hash, callback data and the log's event shapes a
 - [x] #8 Minimal cards carry a plain deadline line from the real wait and expiry and label the reject button Deny; callback verbs and recorded events are unchanged; no Defer button
 - [x] #9 The audit record states which style was shown: additive, optional, absent for technical
 - [x] #10 The SPEC 10.3 and 5.2 amendments, docs/cli-reference.md, the policy reference, the CHANGELOG under Unreleased, and examples/agent-village/approval-policy.md are updated; the 10.3 amendment is its own commit
-- [ ] #11 The targeted test files are named in the PR. One refuter pass has run with no open finding
+- [x] #11 The targeted test files are named in the PR. One refuter pass has run with no open finding
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -76,4 +76,6 @@ Fix round 3 (recheck of f6b92d72: R2-B1, R2-B2, should-fix 1, R2-S1..S3): commit
 Fix round 4 (recheck of d9e33c37: R3-B1, R3-S1, R3-S2): commits 4d06359b (code+tests), bfcedf83 (docs, schema descriptions, CHANGELOG), 399caf62 (SPEC only, R1 still pending). R3-B1: commandNotice returns null for any command shown whole (no count line, no 'all shown' claim); cut form says 'This runs at least N commands' (N>=2), else the generic cut wordings. R3-S1: operator does drawn only over opaque payloads; command/file-change/email get the kind phrase with (type: <class>); does for a CLASSIFIER_CLASSES class refused at load (prompt-say-kind); for other classes ignored at draw time, recorded as payload.rendering.say_does_ignored: true. Village classes unchanged (16-render before/after compare: intent, digest, vote, hostile identical). R3-S2: isolate comment and docs corrected; isolating does left out (breaks 3 tests and changes village bytes). Technical hash 8f89b102...5d57 unchanged. Mutations all-shown (4 fail) and operator-wins (2 fail) killed. Targeted tests exit 0: channels-telegram-minimal 53, prompt-layout 33, channels-telegram 156, channels-contract 44, policy-load 79, agent-village-policy 9, policy-vocabulary 3, layering 13, docs-guard 17. Not armed.
 
 Merged main after #614 (lane C1-rebase, 2026-10-05 12:42 UTC): merge commit bf14941d (origin/main 58466608 into 7ef7305d; no rebase, no force-push), test fix 8ecedb97. Conflict: CHANGELOG.md only, both entries kept newest first. Auto-merged telegram.ts, channel-telegram.ts, gate.ts, cli-reference.md re-read: disjoint functions. SPEC.md: #614 edited none of it (its 5.2/8/10.3/11.2 hunks are proposals in the APRV-480..483 notes), so the merged SPEC.md is this branch's; the APRV-299 review paragraph still says 'the card carries no payload region', which #614's pending hunk replaces. Hashes: technical approval cards (16 renders) main = no style = technical = 8f89b102...5d57 (same as rounds 3-4: #614 changed no approval card); minimal renders identical before and after the merge (ca8cb09d...fe36); review flows (10: four offer views, held grade, armed Deny, note prompts, settle) main = no style = technical = minimal = d251c99c...9a9d. payload.rendering (approval.granted/rejected, attemptDecide) and audit.reviewed (reviewSample) share no record and no key. Test fix: requirement 6a now builds #614's card (fullPayload) and runs four tap flows under three styles. Relay (control plane main 998093d, read only): card heading, key line, empty third line, keyboard, labels, callback grammar and the note prompt all still match; one behavioural gap: the relay licenses a note prompt from the grade tap for 10 minutes, and #614 sends the prompt at the later verdict tap, so a reviewer slower than 10 minutes between grade and OK/Deny loses the note (force_reply_unlicensed). Tests each alone, exit 0: channels-telegram-minimal 53, prompt-layout 33, channels-telegram 177, telegram-webhook 38, channels-contract 44, policy-load 79, agent-village-policy 9, gate 95, conformance 31, docs-guard 17, release-notes 27, audit 63, event-schema 33; tsc --noEmit 0; oxlint src tests 0. Not armed.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): AC11 ticked: CLAIMS 2026-10-05 10:38Z records core #616 REVIEW-COMPLETE after four refuter passes (3 blocking, then clean), targeted tests named in the PR; merged as PR #616 aba1b98e (2026-10-05); released in 0.4.1.
 <!-- SECTION:NOTES:END -->

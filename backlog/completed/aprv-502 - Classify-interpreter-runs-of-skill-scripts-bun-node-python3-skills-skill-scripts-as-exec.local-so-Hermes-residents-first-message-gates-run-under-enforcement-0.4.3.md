@@ -4,10 +4,10 @@ title: >-
   Classify interpreter runs of skill scripts (bun/node/python3
   skills/<skill>/scripts/*) as exec.local so Hermes residents' first-message
   gates run under enforcement (0.4.3)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-07 00:32'
-updated_date: '2026-10-07 02:25'
+updated_date: '2026-10-08 01:16'
 labels:
   - agent-village
 dependencies: []
@@ -72,4 +72,6 @@ Remaining (human-only, not this lane)
 - CI on PR #629 at head 8f0a891d: gh pr checks 629 exit 0; full gate node 22 shards 1/3, 2/3, 3/3 pass, classify tier pass, protected paths pass, ci pass (docs guard, node 20 floor and records tier skipped by the workflow's tiering). Not merged: the orchestrator merges after a refuter.
 
 Fix round 1 (lane A502-fix, claude-bountify/A502-fix, 2026-10-07 02:08Z), on the A502-refute report, all four orchestrator rulings: (S1) classifySegment records any NAME=value prefix as RuleContext.assigned and passes it to matchRule beside substituted; the skill-script row declines and refineNode skips node-skill-script under one, so BUN_OPTIONS/NODE_OPTIONS/PYTHONPATH/PYTHONSTARTUP/HOME (and NO_COLOR, whose fixture moved to the negatives) keep unclassified or node-script. (S2) judgeSkillScript lost its protected kind: a credential or protected landing refuses unclassified with the landing and its class named, so AC #3's 'takes that class' is superseded by the ruling (direct bun/python spellings of those paths are refused, so the class substitution could loosen). (Dir symlinks) realpath(root) must equal join(realpath(base), skills, <skill>, scripts), base = cwd or the .hermes / .hermes/profiles/<p> dir (three segments above root in both shapes); symlinked scripts, <skill> and skills dirs deny, a symlinked workdir or .hermes allows; EACCES/ENOENT unchanged. (S3) CHANGELOG gains 'Behavior changes for an existing policy' (node skill script files.write.workspace -> exec.local; say.exec.local with does refused at load prompt-say-kind where 0.4.2 loaded it, quote/note-only now loads), 'no schema' sentence corrected, releases/0.4.3.md lines 34 and 59 corrected. Probes re-run before (4183624b, scratch export) and after: listed in commit 167ad5b8's message. Evidence: npm run build 0; targeted 17-file list 1130/1130 pass exit 0; lint 0; release-notes --check 0; conformance 553/553 exit 0. Resume point: commits 167ad5b8 (code+tests) and the docs commit are pushed to lane/aprv-502-skill-scripts; next is gh pr checks 629 --watch to a verdict, then the CLAIMS line. Not merged; APRV-503 (cat < credential redirect) left to the orchestrator.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; PR #629 merged 5a09699e (2026-10-07) with release 0.4.3 (v0.4.3, 2026-10-07T04:28Z); production proof in CLAIMS (claude-b4 EXEC-LOCAL-proof, 2026-10-07 06:42Z).
 <!-- SECTION:NOTES:END -->

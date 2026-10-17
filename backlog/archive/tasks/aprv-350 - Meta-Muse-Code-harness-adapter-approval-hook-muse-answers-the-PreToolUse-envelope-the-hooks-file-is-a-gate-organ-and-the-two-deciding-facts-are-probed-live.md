@@ -91,3 +91,5 @@ AC5 IS LEFT UNCHECKED, AND THIS IS A DIVERGENCE A HUMAN SHOULD RULE ON. Its cond
 
 The precedent points the same way: APRV-243 met exactly this on Grok Build, which also fails open, and shipped an ordinary adapter with the hazard documented rather than a refuse-early one. So the adapter blocks when healthy and the fail-open finding leads docs/muse-hook.md, the help text and the register entry. THE UPSTREAM ASK, which is the half of AC5 that does apply and which no agent posts: Muse Code needs a fail-closed hook option, so that a hook which crashes, times out or emits output the harness cannot parse BLOCKS the tool call instead of allowing it. The sharpest form is the mixed-dialect case, where being more explicit made the refusal weaker. If a human would rather have refuse-early until that ships, the change is small and the criterion can then be checked as written.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, waits on a human step, no progress note since September.

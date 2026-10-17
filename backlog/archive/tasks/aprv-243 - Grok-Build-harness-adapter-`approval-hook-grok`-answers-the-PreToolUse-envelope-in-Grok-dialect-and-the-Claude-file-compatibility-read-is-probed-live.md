@@ -101,3 +101,5 @@ AC1 IS DELIBERATELY LEFT UNCHECKED. Nothing in this task's evidence changed: no 
 
 Correction to the note above, from the orchestrator's review of PR #541 on 2026-09-22: 'one tap' was the wrong word and the classifier says so. The driver command answers class files.write.workspace under rule node-script, not a harness launch class, because it names no protected path. So there is no request to approve: it is ONE COMMAND YOU RUN, replacing six typed prompts and six arms. And because the class is not human-only, the hook would ALLOW an agent to run it, which an agent still must not do: the harness invocations inside are child processes the shell hook never sees, so a wrapper would put the launch outside the gate that APRV-354 closed for the bare command. Whether a driver like this should be made human-only is an open question for you; docs/grok-hook.md and docs/probe-driver-convention.md both state it as one. The Hermes driver has no such question because its command names the harness home and classifies policy.core.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, waits on a human step, no progress note since September.

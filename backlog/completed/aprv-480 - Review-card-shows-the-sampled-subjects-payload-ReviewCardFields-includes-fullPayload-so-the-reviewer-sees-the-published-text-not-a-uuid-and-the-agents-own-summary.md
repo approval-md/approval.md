@@ -4,10 +4,10 @@ title: >-
   Review card shows the sampled subject's payload: ReviewCardFields includes
   fullPayload so the reviewer sees the published text, not a uuid and the
   agent's own summary
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 06:51'
-updated_date: '2026-10-05 10:25'
+updated_date: '2026-10-08 01:14'
 labels:
   - agentvillage
 dependencies: []
@@ -65,4 +65,6 @@ Evidence: tsc --noEmit exit 0; oxlint src tests exit 0; run-tests --only audit e
 Fix round 2 (impact-scoped recheck of PR #614).
 - NF-2 FIXED in bd57fcb7 (docs dca30922). dispatchReviews makes a sample terminal-only at once only on a deterministic Bot API refusal of the card (isDeterministicSendRefusal: HTTP 400 whose description is "message is too long", "can't parse entities", "message text is empty"/"text must be non-empty", "reply markup is too long", BUTTON_DATA_INVALID, ENTITIES_TOO_LONG). Every other failure (429, timeout, 5xx, network, a non-TelegramApiError throw) counts against a per-sample budget (REVIEW_OFFER_ATTEMPTS = 5) and pauses the review walkthrough for max(backoff, retry_after); backoff 60 s doubling per attempt; retry_after parsed from parameters.retry_after into TelegramApiError.retryAfterSeconds. The same sample is retried first after the pause (the pause is the walkthrough's, so an outage spends one sample's budget at a time, not every sample's). A spent budget prints the coded review-offer-failed line and the queue moves on; a transient failure prints review-offer-retry. chat not found / bot blocked are deliberately not deterministic (chat state, not the card). Process memory, pruned when the sample closes.
 - Tests (channels-telegram): 'PR #614 recheck NF-2: only the Bot API refusing the card itself is deterministic'; '... one 429 does not hide the sample, its retry_after is honoured, and later samples still flow'; '... a deterministic 400 marks the sample terminal-only with the coded line'; '... transient failures spend a per-sample budget with backoff, then the sample is terminal-only'. The F4 offer test now throws a real TelegramApiError 400. Mutations in built JS (terminal on every failure; pause ignored; retry_after ignored; deterministic forced false) each fail a named test.
+
+Closed by the 2026-10-08 backlog sweep (claude-b3/SWEEP-APRV-1): all ACs ticked; shipped in PR #614 (APRV-480..483 supervised-retro core) merged 27980de0 on 2026-10-05; released in 0.4.1 (v0.4.1, PR #622 5f9b9c3d).
 <!-- SECTION:NOTES:END -->

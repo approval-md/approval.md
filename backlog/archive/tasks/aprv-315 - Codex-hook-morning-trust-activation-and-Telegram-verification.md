@@ -58,3 +58,5 @@ One finding for Carter that changes the install location. On the primary checkou
 
 Evidence: run-tests --only docs-guard cli-doctor-codex codex-doctor cli-hook-codex cli-hook gave 169 tests, 169 pass, 0 fail, exit 0. build, typecheck and lint all exit 0. No Codex process was started, no hook was installed on this machine, and no host trust state was read or changed.
 <!-- SECTION:NOTES:END -->
+
+Archived 2026-10-13 by the OPS-1 follow-up: stale, waits on a human step, no progress note since September.
