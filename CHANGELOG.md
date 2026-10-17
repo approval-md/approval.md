@@ -106,6 +106,46 @@ on the hook for enforcement.
   answer to `unclassified` and loosened or reclassified none. Cost: `git
   --git-dir=.git status` and the other `=`-joined spellings, which used to
   classify as their subcommand, now need `cd` or a person.
+- **An environment assignment in front of git no longer hides what git runs
+  (APRV-521).** The classifier skipped every `NAME=value` word in front of the
+  binary and classified `git` by its subcommand alone. Most of git(1)'s
+  ENVIRONMENT section runs a program (`GIT_PAGER`, `GIT_EDITOR`,
+  `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+  `GIT_EXTERNAL_DIFF`), repoints the repository (`GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, ...), redirects the
+  configuration (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_COUNT` with
+  `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`, `HOME`,
+  `XDG_CONFIG_HOME`), moves the helper directory (`GIT_EXEC_PATH`) or writes a
+  file (`GIT_TRACE*=<path>`). So `GIT_PAGER=<cmd> git log` ran `<cmd>` as an
+  autonomous `read.shell`. This is on 0.4.5. Now a git segment with any
+  assignment in front of it is `unclassified`, and the hook refuses it, unless
+  every assignment is on a closed list that can only remove a program or swap
+  it for a no-op: `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`,
+  `GIT_EDITOR=true`, `GIT_EDITOR=:`, `EDITOR=true`, `EDITOR=:`, `VISUAL=true`,
+  `VISUAL=:` (exact words), and `LANG`, `LC_*` or `TZ` with a plain locale or
+  zone name. A variable git or the programs it starts read, set by the line's
+  own shell (a bare `GIT_PAGER=x;`, `export`, `declare -x`, `printf -v`,
+  `${NAME:=x}`), makes every git segment on the line `unclassified` too, and a
+  bare assignment of one is refused on its own as the bare `PATH=` already
+  was. `env`, `exec`, `command` and the other wrappers were already refused and
+  still are. Stricter only: a differential against #651's head (f62dd57e) over
+  21,868,560 generated lines moved 18,534,298 from an answer to `unclassified`
+  and loosened or reclassified none. Cost: `FOO=1 git ...` and any other
+  assignment off the list now needs a person.
+  The assignment is read in every spelling bash accepts (review-b M1). The
+  append operator (`NAME+=value`) and a subscripted name (`NAME[i]=value`,
+  `NAME[i]+=value`) used to stop the classifier's cursor, which took the word
+  for the program and judged the real one as its argument; this was on 0.4.5
+  too. Either spelling now leaves the segment `unclassified`, in front of git,
+  in front of any other program, and on its own. A command word that opens
+  like a subscripted assignment the tokenizer cannot read in full is refused
+  the same way, and the compound array form (`NAME=(…)`) is `unparseable`. The
+  line scan reads the same spellings, a subscripted `${NAME[i]:=x}`, and two
+  more names (`GCONV_PATH`, `GNUPGHOME`). Stricter only: a depth-2 differential
+  against main (2179e128), with those spellings added to its alphabet, moved
+  272,300 of 1,533,105 generated lines to a refusal and loosened or
+  reclassified none. Cost: `n+=1` and other append or array writes now need
+  a person.
 
 ### Harnesses
 
