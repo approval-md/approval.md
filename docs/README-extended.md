@@ -740,9 +740,9 @@ and the reference phone channel is one app, Telegram.
 | [`backlog/`](../backlog/) | Implementation work and remaining acceptance criteria. A task's existence is not a shipped feature. |
 | [`index.html`](../index.html), [`features/`](../features/), [`llms.txt`](../llms.txt), [`llms-full.txt`](../llms-full.txt) | The website and its machine-readable companions. |
 | [`metrics/`](../metrics/), [`brand/`](../brand/) | Agent-hour badge data and visual assets. Badge activity is not an adoption or security certification. |
-| [`hosted/`](../hosted/README.md), [`judgy/`](../judgy/README.md) | Hosting scaffolding and reviewer/demo pages; separate from the core runtime contract. |
+| [`hosted/`](../hosted/README.md) | Hosting scaffolding; separate from the core runtime contract. |
 
-The hosted directory contains a policy builder and tenant launcher, not a complete account system or managed multi-tenant control plane. Judgy's pages render supplied data and retain simulated/replay/not-run provenance labels; a visualization is not a new authorization path. Neither should be advertised as a finished service merely because its directory exists.
+The hosted directory contains a policy builder and tenant launcher, not a complete account system or managed multi-tenant control plane. It should not be advertised as a finished service merely because its directory exists. The judgy reviewer pages that used to sit beside it left the repository under APRV-393; commit `49574e4d` is the last one that holds them.
 
 ### Running the checks
 

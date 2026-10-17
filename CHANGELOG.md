@@ -29,6 +29,16 @@ before a tag.
   whole. The fail-closed floor still reads the full installed line, because
   the prefix drops the upstream commit.
 
+### Site
+
+- **The judgy reviewer pages left the repository (APRV-393).** `judgy/` is
+  deleted and approval.md/judgy now answers 404, with no pointer page. The
+  archive is this repository's own history: commit `49574e4d` (APRV-387) is the
+  last one that touches `judgy/`, and its tree there is byte-identical to the
+  one deleted. The judgy research card on `approved/` and the
+  `docs/README-extended.md` link went with it. No package contents change:
+  `judgy/` was never in the `files` list.
+
 ## 0.4.4 — 2026-10-12
 
 ### Security

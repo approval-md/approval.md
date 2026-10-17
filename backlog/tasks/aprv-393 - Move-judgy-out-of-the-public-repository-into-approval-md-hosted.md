@@ -1,10 +1,11 @@
 ---
 id: APRV-393
 title: Remove judgy/ from the public repository; its destination is undecided
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude-nonav'
 created_date: '2026-09-20 01:32'
-updated_date: '2026-09-20 01:38'
+updated_date: '2026-10-17 01:06'
 labels:
   - site
   - hosting
@@ -34,10 +35,45 @@ Division of labour. Carter decides the destination and confirms a copy lives the
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The destination is decided and recorded here by Carter; until it is, this task stays blocked and no deletion is proposed
-- [ ] #2 Carter confirms a copy of the directory lives at that destination and is at least as current as this one; no agent reads a private repository to establish it
-- [ ] #3 A decision is recorded here on what approval.md/judgy serves after the deletion: nothing (404), or a pointer page, with its content if a pointer
-- [ ] #4 A written inventory of every in-repository reference to the directory and what each one does after removal, including the scripts/site-serve.mjs comment
-- [ ] #5 A pull request removes judgy/ and applies the recorded pointer decision, with the site verified to build and every remaining page reachable
+- [x] #1 The destination is decided and recorded here by Carter; until it is, this task stays blocked and no deletion is proposed
+- [x] #2 Carter confirms a copy of the directory lives at that destination and is at least as current as this one; no agent reads a private repository to establish it
+- [x] #3 A decision is recorded here on what approval.md/judgy serves after the deletion: nothing (404), or a pointer page, with its content if a pointer
+- [x] #4 A written inventory of every in-repository reference to the directory and what each one does after removal, including the scripts/site-serve.mjs comment
+- [x] #5 A pull request removes judgy/ and applies the recorded pointer decision, with the site verified to build and every remaining page reachable
 - [ ] #6 No release artifact changes: the files list in package.json is unaffected and a packed tarball is identical in contents to the one before the change
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Decision (Carter, 17 Oct 2026, relayed by the claude-nonav lead as D-8): the archive is this repository's own git history at 49574e4d (the last commit that touches judgy/; its judgy tree f031c2b5 is byte-identical to origin/main's), judgy/ is deleted, and approval.md/judgy returns 404 with no pointer page.
+
+1. git rm -r judgy/ (13 tracked files, judgy/.nojekyll included).
+2. Remove the in-repository references that would dangle: the judgy research card in approved/index.html (an absolute https://approval.md/judgy/research/ link), the judgy/README.md link in docs/README-extended.md, and /judgy in the scripts/site-serve.mjs header comment. The wandb.ai/bountify/judgy links in approved/index.html point at an external W&B project, not at this path, and stay.
+3. Leave historical text alone: completed tasks (APRV-371, APRV-387), .approval/ log and payloads (never edited by agents).
+4. CHANGELOG Unreleased entry naming the archive sha.
+5. Verify: npm pack --dry-run file list identical before and after; every remaining page served by scripts/site-serve.mjs answers 200 and /judgy/ answers 404 locally; the tier gate.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Decisions recorded (AC1, AC3): Carter, 2026-10-17, relayed by the claude-nonav lead as D-8 of APRV-decisions-batch.md. Destination: this repository's own git history. Archive commit: 49574e4da169f6b3f2e44fa4f67dbd1a7048ca20 (49574e4d, APRV-387), the last commit on main that touches judgy/. What approval.md/judgy serves afterwards: nothing (404), no pointer page. No private repository was read.
+
+AC2 evidence: `git diff --quiet 49574e4d origin/main -- judgy/` exits 0, and `git rev-parse 49574e4d:judgy` equals `origin/main:judgy` (tree f031c2b5bc45b9442262fc1bc64c27713ef10dda), so the archive is byte-identical to the deleted copy. 49574e4d is an ancestor of origin/main 801684f9. Recover with `git checkout 49574e4d -- judgy/` or `git archive 49574e4d judgy`.
+
+AC4 inventory, every in-repository reference outside judgy/ and what each does after removal:
+- approved/index.html, card linking https://approval.md/judgy/research/: removed (it would 404).
+- approved/index.html, five links to wandb.ai/bountify/judgy (nav, a card, two Weave calls): kept; they point at an external W&B project, not at this path.
+- docs/README-extended.md:743-745, table row linking ../judgy/README.md and a sentence on judgy's pages: row narrowed to hosted/, sentence replaced with a pointer to the archive commit. This file ships in the npm package (see AC6).
+- scripts/site-serve.mjs header comment naming /judgy: removed from the list.
+- backlog/tasks/aprv-407 AC4 lists /judgy/ among paths that must return 200 after the site move: NOT edited here (another task's criteria); it is stale after this lands and needs a human or that task's owner to drop /judgy/.
+- backlog/completed/aprv-371 and aprv-387: historical, left as written.
+- .approval/log/events.jsonl and .approval/payloads/: the daemon's records, never edited by agents.
+
+What makes approval.md/judgy 404: GitHub Pages for approval-md/approval.md is build_type legacy, source branch main path / (gh api repos/approval-md/approval.md/pages, read 2026-10-17). GitHub's own pages-build-deployment runs on every push to main, so the merge of this PR is the deploy; nobody deploys by hand. There is no 404.html at the root, so GitHub serves its default 404 page. No redirect config exists (no _redirects, vercel.json, netlify.toml or Pages workflow). Live before the merge, 2026-10-17T01:05Z: approval.md/judgy/ and /judgy/research/ answered 200.
+
+AC5 evidence (local): scripts/site-serve.mjs on the branch answers 200 for /, index.html, features/, rsi/, approved/, approved/slides.html, hosted/policy-builder/, llms.txt, llms-full.txt, site.webmanifest, og-image.png and schema/event.schema.json, and 404 for judgy/, judgy/research/, judgy/live/. A scan of every href/src in the remaining site HTML found 0 same-site links that no longer resolve. The site has no build step (static files served from the root).
+
+AC6, OPEN for a ruling: `npm pack --dry-run --json --ignore-scripts` before and after lists the same 942 paths and judgy contributes none (it was never in package.json files). The one content difference is docs/README-extended.md (75718 to 75661 bytes), the dangling-link removal above, which the build brief asked for. AC6's literal wording ("identical in contents") is therefore not met. Either accept that the deletion itself changes no artifact and check AC6, or drop the README-extended.md hunk from this PR (its link to ../judgy/README.md was already dead inside the tarball, which never carried judgy/).
+<!-- SECTION:NOTES:END -->
