@@ -604,19 +604,29 @@ same is true after a `cd` whose target the text cannot name.
 What stays unclassified or out of reach, stated so nobody assumes otherwise:
 inline programs (`python3 -c`, `node -e`) are refused as opaque unless the policy opens `exec.code` (APRV-510, below); `dd` and
 `install` have no classifier rule and are denied as unclassified; a recursive
-search of an ANCESTOR of the home with a filename filter (`search_files` over
+search of an ANCESTOR of the home reads the secrets without naming a
+directory this hook can recognise: with a filename filter (`search_files` over
 `$HOME` with `file_glob: .env`, Claude Code's `Grep` over the repository with
-`glob: **/env`, or `Grep` with no path) reads the secrets without naming a
-directory this hook can recognise; and a READ through a variable this hook
+`glob: **/env`, or `Grep` with no path), and equally a recursive shell reader
+or a link handed a literal ancestor of the home; and a READ through a variable this hook
 cannot expand is judged by its spelling unless the name is a credential's
 (`cat $X/.env` is `account.credential`, `cat "$F"` is not). A RECURSIVE
 reader of such a word (`grep -r`, `rg`, `find`, `tar`, `du`, a copy, move or
 sync source) is `account.credential` whatever it spells, since the word may
 land on or above a home, and so is a recursive reader of a pattern this hook
 cannot expand; a matched directory that holds credentials is judged as its
-plain spelling is (cred-asymmetry round 2). The cost: such a word that is a
-search pattern (`grep -r "$P" src`, or a regex anchor `'x$'`) goes to a
-person. The same holds
+plain spelling is (cred-asymmetry round 2). The cost: `grep`, `rg` and `find`
+count as recursive readers whatever their flags, so ANY operand of theirs that
+holds a `$` (a variable search pattern, or a regex anchor `'x$'` even in single
+quotes and in a single-file search) goes to a person. A recursive reader that
+names no path walks the working directory, and that directory is judged as its
+operand (round 3). A single-file read of such a word is judged with every `.`
+dropped and every `..` resolved, with its literal directory landed from each
+working directory (relative, after a `cd`, through a symlink), and with bash's
+`~+` read as the working directory (and as the literal name a quoted one keeps) and `~-`, the directory-stack forms and
+`~name` read as unknown: an unknown span right under a home, a profile home,
+the `hermes-agent/` of either or `.approval`, or two unknown segments in a row
+at the end, is `account.credential` (round 3). The same holds
 for a command substitution that makes up the whole path (`cat $(echo
 ~/.hermes/.op.en)v`), an accepted design limit: `cat $(ls | head -1)` must stay
 a read.

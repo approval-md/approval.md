@@ -964,3 +964,181 @@ test("cred-asymmetry round 2: a single-file read of an unresolved word that name
     assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// cred-asymmetry round 3 (review-b r2 read at 05eb9720): M1(a), M1(b), S1, S2, N2
+// ---------------------------------------------------------------------------
+
+/**
+ * Round 3, M1(a): the helper's literal parents were the home and a profile
+ * home only, so an unexpanded span in the LAST segment right under a home's
+ * (or a profile home's) `hermes-agent/` read as `read.shell`, although
+ * `hermes-agent/.env` is one of #639's own credential rows. Synthetic files
+ * only, HOME pointed at the scratch gate.
+ */
+test("cred-asymmetry round 3 M1(a): a span right under a literal hermes-agent directory is account.credential", () => {
+  const { dir, home, env } = credentialLab();
+  mkdirSync(join(home, "profiles", "p", "hermes-agent"), { recursive: true });
+  writeFileSync(join(home, "profiles", "p", "hermes-agent", ".env"), "SYNTHETIC_TOKEN=x\n", "utf8");
+  const rows: Row[] = [];
+  for (const word of [
+    "~/.hermes/hermes-agent/$(echo .env)",
+    "~/.hermes/hermes-agent/.e$(echo nv)",
+    "~/.hermes/profiles/p/hermes-agent/$(echo .env)",
+    "$HOME/.hermes/Hermes-Agent/$(echo .env)",
+    // Two unknown segments in a row at the end may spell `hermes-agent/.env`.
+    "~/.hermes/$(echo hermes-agent)/$(echo .env)",
+  ]) {
+    rows.push({ tool: "terminal", input: { command: `git diff --no-index /dev/null ${word}`, workdir: dir }, env });
+    rows.push({ tool: "terminal", input: { command: `cat ${word}`, workdir: dir }, env });
+  }
+  expectDenied(dir, rows, "account.credential");
+});
+
+/**
+ * Round 3, M1(b): the helper compared the raw segment before the span, so a
+ * `.` or a `..` round trip between the literal home (or `.approval`) and the
+ * span hid the home. The segments are now judged with `.` dropped and again
+ * with `..` resolved lexically.
+ */
+test("cred-asymmetry round 3 M1(b): a dot segment between a literal home and the span is account.credential", () => {
+  const { dir, env } = credentialLab();
+  const rows: Row[] = [];
+  for (const word of [
+    "~/.hermes/./$(echo .env)",
+    "~/.hermes/workspace/../$(echo .env)",
+    "~/.hermes/skills/../$(echo auth.json)",
+    "~/.hermes/profiles/p/./$(echo .env)",
+    "$(pwd)/.approval/./$(echo env)",
+    "~/.approval/x/../$(echo vault.enc)",
+  ]) {
+    rows.push({ tool: "terminal", input: { command: `git diff --no-index /dev/null ${word}`, workdir: dir }, env });
+    rows.push({ tool: "terminal", input: { command: `cat ${word}`, workdir: dir }, env });
+  }
+  expectDenied(dir, rows, "account.credential");
+});
+
+test("cred-asymmetry round 3 M1(b): a dot segment under a non-credential directory still reads", () => {
+  const { dir, home, env } = credentialLab();
+  writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
+  for (const command of [
+    "cat ~/.hermes/workspace/./$(echo notes.md)",
+    "cat ~/.hermes/skills/../workspace/$(echo notes.md)",
+    "git diff --no-index /dev/null ~/.hermes/workspace/./$(echo notes.md)",
+  ]) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+/**
+ * Round 3, S1: the helper read the text only, so an unresolved word whose
+ * literal prefix is relative from a working directory inside a home (or a
+ * `..` up into one), or runs through a symlink to one, was never landed,
+ * although a resolved word with the same prefix is. The literal prefix is now
+ * landed from each working directory (both readings) and the word is judged
+ * again with the prefix replaced by where it lands.
+ */
+test("cred-asymmetry round 3 S1: an unresolved word whose literal prefix lands on a home is account.credential", () => {
+  const { dir, home, env } = credentialLab();
+  const rows: Row[] = [];
+  const at = (command: string, workdir: string): void => {
+    rows.push({ tool: "terminal", input: { command, workdir }, env });
+  };
+  for (const reader of ["cat", "git diff --no-index /dev/null"]) {
+    at(`${reader} ./$(echo .env)`, home);
+    at(`${reader} .e$(echo nv)`, home);
+    at(`${reader} ../$(echo .op.env)`, join(home, "workspace"));
+    at(`${reader} h/$(echo auth.json)`, dir);
+    at(`${reader} ha/$(echo .env)`, dir);
+    at(`${reader} ./$(echo .env)`, join(home, "hermes-agent"));
+    at(`${reader} ./$(echo .env)`, join(home, "profiles", "p"));
+    at(`${reader} ./$(echo env)`, join(dir, ".approval"));
+  }
+  at("cd .hermes && cat ./$(echo .env)", dir);
+  expectDenied(dir, rows, "account.credential");
+});
+
+test("cred-asymmetry round 3 S1: an unresolved word whose prefix lands outside every home still reads", () => {
+  const { dir, home, env } = credentialLab();
+  writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
+  for (const command of ["cat ./$(echo notes.md)", "cat ../workspace/$(echo notes.md)", "git diff --no-index /dev/null ./$(echo notes.md)"]) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+/**
+ * Round 3, S2: only a bare `~` was expanded. Bash's working-directory form is
+ * now judged from each working directory (and as the literal directory name a
+ * quoted spelling keeps), and the previous-directory, directory-stack and
+ * other-user forms are unresolved, like the variable each stands for.
+ */
+test("cred-asymmetry round 3 S2: bash's other tilde prefixes before a credential are account.credential", () => {
+  const { dir, home, env } = credentialLab();
+  const rows: Row[] = [];
+  const at = (command: string, workdir: string): void => {
+    rows.push({ tool: "terminal", input: { command, workdir }, env });
+  };
+  at("cat ~+/.env", home);
+  at("cat ~+/hermes-agent/.env", home);
+  at("git diff --no-index /dev/null ~+/auth.json", home);
+  at("cat ~+/profiles/p/.env", home);
+  at("cat ~-/.op.env", dir);
+  at("git show ~-/.env", dir);
+  at("cat ~1/.env", dir);
+  at("cat ~+1/auth.json", dir);
+  at("cat ~-2/.op.env", dir);
+  at("cat ~someone/.env", dir);
+  at("grep -r SYNTHETIC_TOKEN ~-", dir);
+  at("grep -r SYNTHETIC_TOKEN ~+", home);
+  expectDenied(dir, rows, "account.credential");
+});
+
+test("cred-asymmetry round 3 S2: a working-directory tilde outside every home still reads", () => {
+  const { dir, home, env } = credentialLab();
+  writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
+  for (const command of ["cat ~+/notes.md", "head -1 ~+/notes.md"]) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+/**
+ * Round 3, N2: a recursive reader that names no path walks the working
+ * directory, and no operand named it, so a cwd inside a home was read with no
+ * class. Each working directory is now judged as the operand when no argument
+ * is proven to be a path.
+ */
+test("cred-asymmetry round 3 N2: an operand-less recursive reader in a home is account.credential", () => {
+  const { dir, home, env } = credentialLab();
+  const rows: Row[] = [];
+  const at = (command: string, workdir: string): void => {
+    rows.push({ tool: "terminal", input: { command, workdir }, env });
+  };
+  at("grep -r SYNTHETIC_TOKEN", home);
+  at("grep -rl SYNTHETIC_TOKEN", home);
+  at("grep --recursive -n SYNTHETIC_TOKEN", home);
+  at("grep -r -e SYNTHETIC_TOKEN", home);
+  at("grep -r -m 1 SYNTHETIC_TOKEN", home);
+  at("rg SYNTHETIC_TOKEN", home);
+  at("rg --files", home);
+  at("find -type f", home);
+  at("grep -r SYNTHETIC_TOKEN", join(home, "profiles", "p"));
+  at("cd .hermes && grep -r SYNTHETIC_TOKEN", dir);
+  expectDenied(dir, rows, "account.credential");
+});
+
+test("cred-asymmetry round 3 N2: a recursive reader that names its path, or reads stdin, still reads", () => {
+  const { dir, home, env } = credentialLab();
+  for (const [command, workdir] of [
+    ["grep -r SYNTHETIC_TOKEN", join(home, "workspace")],
+    ["grep -rn SYNTHETIC_TOKEN workspace", home],
+    ["grep SYNTHETIC_TOKEN", home],
+    ["rg SYNTHETIC_TOKEN workspace", home],
+    ["find workspace -type f", home],
+  ] as const) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command} in ${workdir}: ${run.stdout} ${run.stderr}`);
+  }
+});

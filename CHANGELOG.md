@@ -281,9 +281,20 @@ on the hook for enforcement.
   move or sync source) of an unresolved word is `account.credential` outright,
   because the word may land on or above a home, a profile home or an approval
   home; so is a recursive reader of a pattern the hook cannot expand, and one
-  whose pattern matches a directory holding credentials. Cost: a recursive
-  reader's variable search pattern (`grep -r "$P" src`) or `$` regex anchor
-  (`grep -rn 'x$' src`) now goes to a person. Only ever stricter.
+  whose pattern matches a directory holding credentials. Round 3 (review-b's
+  read at 05eb9720): the unresolved-word judge now drops `.` and resolves
+  `..` before it looks for a literal home, counts a home's (or a profile
+  home's) `hermes-agent/` as one, and treats two unknown segments in a row at
+  the end as a possible credential; it also lands the word's literal prefix
+  from each working directory, so a relative, `cd`'d or symlinked prefix into
+  a home is judged where it lands. Bash's `~+` is read as the working
+  directory, and `~-`, the directory-stack forms and `~name` as unknown. A
+  recursive reader that names no path (`grep -r P`, `rg P`, `find -type f`)
+  has its working directory judged as the operand. Cost: `grep`, `rg` and
+  `find` count as recursive whatever their flags, so any operand of theirs
+  holding a `$` (a variable pattern, a `$` regex anchor, single-quoted or not,
+  in a single-file search too) now goes to a person, and so does a single-file
+  read ending in two unexpanded segments (`cat "$DIR/$F"`). Only ever stricter.
 - **Conformance.** `command-class` 1.9.0 (one hundred and forty new
   vectors, thirty-two of them unmoved controls; no existing vector
   expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set

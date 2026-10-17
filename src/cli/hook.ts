@@ -6526,7 +6526,11 @@ function describeToolCall(
  *   reads directories recursively (`grep -r`, `rg`, `find`, `tar`, ...).
  *   Such a reader of a word this hook cannot expand, or of a pattern it cannot
  *   expand, is `account.credential` outright (APRV-511 cred-asymmetry round
- *   2): the word may land on, or above, a home.
+ *   2): the word may land on, or above, a home. A reader of a recursive kind
+ *   that names no path walks the working directory, which is judged as its
+ *   operand (round 3, N2). Any other read of such a word is judged by
+ *   {@link unresolvedReadCouldNameCredential}, as spelled and with its
+ *   literal prefix landed from each working directory (round 3, S1).
  *   The files a `curl`/`wget` upload or body option reads (`-T F`, `-d @F`,
  *   `--post-file F`) are read paths too, and also take the class of a
  *   protected path or organ they land on and, under a read scope, the
@@ -6540,7 +6544,10 @@ function describeToolCall(
  *   so a symlinked parent or working directory is judged by where it lands.
  * - `$HERMES_HOME` / `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
  *   `HERMES_HOME`, from this hook process's environment; `~`, `$HOME` and
- *   `${HOME}` to `HOME`. Under `approval serve` the process is the daemon, so a
+ *   `${HOME}` to `HOME`; `~+` to each working directory (and, as a quoted
+ *   one, to the literal directory it names), and bash's other tilde prefixes
+ *   (`~-`, the directory stack, `~name`) to the unknown variable each stands
+ *   for (round 3, S2). Under `approval serve` the process is the daemon, so a
  *   hosted operator sets `APPROVAL_HERMES_HOME` there; without it, the
  *   conservative rules above apply to the unexpanded spelling.
  *
@@ -6569,6 +6576,7 @@ function resolvedPathClasses(
   // this process's environment.
   const hermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
   const home = env["HOME"] ?? null;
+  const configuredHome = hermesHome !== null && hermesHome.length > 0 ? canonicalPath(hermesHome) : null;
 
   /** The word with the variables this hook can know expanded. */
   const expand = (word: string): { text: string; hermesUnknown: boolean; unresolved: boolean } => {
@@ -6580,7 +6588,12 @@ function resolvedPathClasses(
       else hermesUnknown = true;
     }
     const homeRef = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/u;
-    if (homeRef.test(text) && home !== null && home.length > 0) text = text.replace(homeRef, home);
+    if (homeRef.test(text)) {
+      if (home !== null && home.length > 0) text = text.replace(homeRef, home);
+    } else {
+      // APRV-511 (cred-asymmetry round 3, S2): bash's other tilde prefixes.
+      text = otherTildePrefix(text);
+    }
     return { text, hermesUnknown, unresolved: hermesUnknown || /[$`]/u.test(text) };
   };
 
@@ -6642,11 +6655,12 @@ function resolvedPathClasses(
           cwdUnknown = true;
         }
       } else {
-        const expanded = expand(target);
-        if (expanded.unresolved || hasGlobChars(expanded.text)) {
+        // Round 3 (S2): `cd ~+/x` in both its readings, as a path word is.
+        const spellings = tildeReadings(target).map((spelling) => expand(spelling));
+        if (spellings.some((expanded) => expanded.unresolved || hasGlobChars(expanded.text))) {
           cwdUnknown = true;
         } else {
-          const next = cwds.map((from) => land(from, expanded.text));
+          const next = spellings.flatMap((expanded) => cwds.map((from) => land(from, expanded.text)));
           if (next.some((landing) => landing.unknown)) cwdUnknown = true;
           const reached = next.flatMap((landing) => landing.paths);
           // A directory this command creates or replaces before the `cd`
@@ -6666,7 +6680,7 @@ function resolvedPathClasses(
         add("policy.core");
         return;
       }
-      for (const each of braced) judgeWriteWord(each);
+      for (const each of braced) for (const spelling of tildeReadings(each)) judgeWriteWord(spelling);
     };
     const judgeWriteWord = (word: string): void => {
       const target = expand(word);
@@ -6747,7 +6761,7 @@ function resolvedPathClasses(
         add("account.credential");
         return;
       }
-      for (const each of braced) judgeReadWord(each, recursive);
+      for (const each of braced) for (const spelling of tildeReadings(each)) judgeReadWord(spelling, recursive);
     };
     const judgeReadWord = (word: string, recursive: boolean): void => {
       const target = expand(word);
@@ -6766,6 +6780,24 @@ function resolvedPathClasses(
         // `git diff --no-index /dev/null $(echo ~)/.hermes/.env` (whose `$(...)`
         // the lexer leaves as the substitution sentinel) passed as `read.shell`.
         if (unresolvedReadCouldNameCredential(target.text)) add("account.credential");
+        // APRV-511 (cred-asymmetry round 3, S1): the helper reads the text
+        // alone, so a literal prefix that is relative (`./`, `../`, or no
+        // directory at all, from a working directory inside a home) or runs
+        // through a symlink to a home was never placed, although a resolved
+        // word's is. The prefix is landed here from each working directory in
+        // both readings, and the word is judged again with the prefix replaced
+        // by each landing (and by `$HERMES_HOME` when it is the configured home).
+        const { prefix, rest } = unresolvedPrefix(target.text);
+        for (const from of cwds) {
+          const spelled = spelledAbsolute(from, prefix);
+          const landing = landingPaths(spelled, volatile);
+          if (landing.unknown) add("account.credential");
+          for (const landed of [resolvePathSegments(spelled), ...landing.paths]) {
+            for (const spelling of landedSpellings(landed, rest, configuredHome)) {
+              if (unresolvedReadCouldNameCredential(spelling)) add("account.credential");
+            }
+          }
+        }
         // APRV-511 (cred-asymmetry round 2): a RECURSIVE reader (a recursive
         // search, a copy or move of a directory, an archive, a walk) of a word
         // this hook cannot expand reads everything under wherever the word
@@ -6977,6 +7009,9 @@ function resolvedPathClasses(
 
     if (segment.class.startsWith("read.") || RECURSIVE_READERS.has(bin)) {
       for (const operand of operands) judgeRead(operand, RECURSIVE_READERS.has(bin));
+      // APRV-511 (cred-asymmetry round 3, N2): a recursive reader that no
+      // argument proves names a path walks the working directory.
+      if (walksWorkingDirectory(bin, shape.args)) judgeRead(".", true);
     }
   }
   return found;
@@ -7072,53 +7107,309 @@ function globCouldNameCredential(path: string): boolean {
 }
 
 /**
- * APRV-511 (cred-asymmetry M1): could a read word this hook cannot expand (a
- * variable, `${X:-default}`, the `$(...)` substitution sentinel) name a
- * credential? Fail closed on credential shapes only:
+ * APRV-511 (cred-asymmetry M1, round 3): could a read word this hook cannot
+ * expand (a variable, `${X:-default}`, the `$(...)` substitution sentinel, or
+ * a tilde prefix {@link otherTildePrefix} turned into the variable it stands
+ * for) name a credential? It reads the text only. {@link resolvedPathClasses}
+ * also asks it about the word with its literal prefix replaced by each place
+ * that prefix lands (round 3, S1), which is how a relative or symlinked prefix
+ * is covered.
  *
- * - the classifier's text rule ({@link isCredentialPath}), which reads an
- *   unexpanded segment as a maybe-home;
- * - a pattern that could name one ({@link globCouldNameCredential});
- * - a credential file name (`.env`, `.env.*`, `.op.env`, `.op.env.*`,
- *   `auth.json`) at or after the first unexpanded segment, which may have
- *   expanded to a home, a profile home or a profiles directory;
- * - `env`, `env.*`, `vault*` or `keys` right after an unexpanded segment, which
- *   may have expanded to an approval home;
- * - an unexpanded span in the LAST segment right under a literal Hermes home
- *   (`.hermes`, `$HERMES_HOME`, or a home's `profiles/<p>`), which may spell
- *   `.env`, `.op.env` or `auth.json`, or in any segment right under a literal `.approval`,
- *   which may spell `env`, `vault.enc` or `keys`.
+ * The model, as in {@link isCredentialPath}: an UNKNOWN segment (one holding a
+ * `$` or a backtick, or a leading `~` the hook did not expand) stands for
+ * exactly one path segment of any name. Within that model it fails closed: it
+ * answers false only when no choice of names makes the word a credential
+ * path. It answers true when the classifier's text rule holds
+ * ({@link isCredentialPath}), when a pattern in it could name a credential
+ * ({@link globCouldNameCredential}), or when, in either of two readings of the
+ * segments (`.` dropped with every `..` kept; `.` dropped with every `..`
+ * resolved lexically, where a `..` after an unknown segment leaves an unknown
+ * segment), any of these holds:
  *
- * As in {@link isCredentialPath}, an unexpanded segment stands for one segment.
+ * - the word ENDS in a Hermes credential row, with any unknown segment
+ *   standing for any element: a home (`.hermes` in any case, `$HERMES_HOME`)
+ *   then a credential file (`.env`, `.env.*`, `.op.env`, `.op.env.*`,
+ *   `auth.json`, any case), or a home then `hermes-agent` then the install's
+ *   `.env` or `.env.*` (not `.env.example`), each also under a home's
+ *   `profiles/<p>`. So an unknown last segment right under a literal home, a
+ *   profile home or the `hermes-agent/` of either is a credential, and so are
+ *   two unknown segments in a row at the end;
+ * - ANYWHERE, an approval home (`.approval`, exact case) or an unknown segment
+ *   is followed by `env`, `env.*`, `vault*`, `keys` or an unknown segment;
+ * - a credential file name appears at or after the first unknown segment
+ *   (which may have stood for a home, a profile home or a profiles directory).
+ *
+ * Not covered, by the model: in a single-file read, an unknown segment that
+ * expands to several segments (a `/` or `..` inside it) and so moves the
+ * literal names after it; a recursive reader of any unresolved word is
+ * `account.credential` regardless. `.approval` and its file names in another
+ * case are not matched, as in the classifier's text rule.
  */
 function unresolvedReadCouldNameCredential(text: string): boolean {
   if (isCredentialPath(text) || globCouldNameCredential(text)) return true;
   // One segment per braced variable, so a default's `/` (`${H:-$HOME/.hermes}`) splits nothing.
   const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
   const segments = collapsed.split(/[/\\]+/u).filter((segment) => segment.length > 0);
-  const unknown = (segment: string): boolean => /[$`]/u.test(segment);
+  // A leading `~` this hook did not expand stands for an unknown directory.
+  if (!collapsed.startsWith("/") && segments[0]?.startsWith("~") === true) segments[0] = "$~";
+  return segmentReadings(segments).some(segmentsCouldNameCredential);
+}
+
+/** A path segment holding an unexpanded span. */
+function unknownSegment(segment: string): boolean {
+  return /[$`]/u.test(segment);
+}
+
+/**
+ * The two readings {@link unresolvedReadCouldNameCredential} judges: `.`
+ * dropped with `..` kept, and `.` dropped with each `..` resolved lexically.
+ * A `..` after an unknown segment leaves an unknown segment (the span's parent
+ * is somewhere unknown too); a `..` above the first segment is kept.
+ */
+function segmentReadings(segments: readonly string[]): string[][] {
+  const dropped = segments.filter((segment) => segment !== ".");
+  const resolved: string[] = [];
+  for (const segment of dropped) {
+    const last = resolved[resolved.length - 1];
+    if (segment !== "..") resolved.push(segment);
+    else if (last === undefined || last === "..") resolved.push(segment);
+    else if (unknownSegment(last)) resolved[resolved.length - 1] = "$..";
+    else resolved.pop();
+  }
+  return [dropped, resolved];
+}
+
+/** One reading's segments against the rows {@link unresolvedReadCouldNameCredential} lists. */
+function segmentsCouldNameCredential(segments: readonly string[]): boolean {
+  type Element = (segment: string) => boolean;
+  const named =
+    (name: string): Element =>
+    (segment) =>
+      unknownSegment(segment) || segment.toLowerCase() === name;
   const credentialFile = (segment: string): boolean => {
     const name = segment.toLowerCase();
     return name === ".env" || name.startsWith(".env.") || name === ".op.env" || name.startsWith(".op.env.") || name === "auth.json";
   };
-  const approvalFile = (segment: string): boolean =>
-    segment === "env" || segment.startsWith("env.") || segment.startsWith("vault") || segment === "keys";
-  const hermesHome = (segment: string | undefined): boolean =>
-    segment !== undefined && (segment.toLowerCase() === ".hermes" || segment === "$HERMES_HOME" || segment === "${HERMES_HOME}");
-  const literalHome = (index: number): boolean => {
-    if (segments[index - 1] === ".approval") return true;
-    if (index !== segments.length - 1) return false;
-    if (hermesHome(segments[index - 1])) return true;
-    return segments[index - 2]?.toLowerCase() === "profiles" && hermesHome(segments[index - 3]);
+  const hermesHome: Element = (segment) => unknownSegment(segment) || segment.toLowerCase() === ".hermes";
+  const homeCredential: Element = (segment) => unknownSegment(segment) || credentialFile(segment);
+  const installEnv: Element = (segment) => {
+    const name = segment.toLowerCase();
+    return unknownSegment(segment) || name === ".env" || (name.startsWith(".env.") && segment !== ".env.example");
   };
+  const anyName: Element = () => true;
+  const approvalHome: Element = (segment) => unknownSegment(segment) || segment === ".approval";
+  const approvalFile: Element = (segment) =>
+    unknownSegment(segment) || segment === "env" || segment.startsWith("env.") || segment.startsWith("vault") || segment === "keys";
+
+  const endsWith = (row: readonly Element[]): boolean => {
+    const start = segments.length - row.length;
+    return start >= 0 && row.every((element, at) => element(segments[start + at] as string));
+  };
+  for (const tail of [[homeCredential], [named("hermes-agent"), installEnv]]) {
+    if (endsWith([hermesHome, ...tail])) return true;
+    if (endsWith([hermesHome, named("profiles"), anyName, ...tail])) return true;
+  }
+  for (let index = 0; index + 1 < segments.length; index += 1) {
+    if (approvalHome(segments[index] as string) && approvalFile(segments[index + 1] as string)) return true;
+  }
   let afterUnknown = false;
-  for (const [index, segment] of segments.entries()) {
-    if (unknown(segment) && literalHome(index)) return true;
+  for (const segment of segments) {
     if (afterUnknown && credentialFile(segment)) return true;
-    if (index > 0 && unknown(segments[index - 1] as string) && approvalFile(segment)) return true;
-    if (unknown(segment)) afterUnknown = true;
+    if (unknownSegment(segment)) afterUnknown = true;
   }
   return false;
+}
+
+/**
+ * APRV-511 (cred-asymmetry round 3, S1): an unresolved word split at the last
+ * `/` before its first unexpanded span: the literal directory the span sits
+ * in (`.` when the word names none) and the rest, from the span's segment on.
+ */
+function unresolvedPrefix(text: string): { prefix: string; rest: string } {
+  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const span = collapsed.search(/[$`]/u);
+  const cut = span < 0 ? collapsed.lastIndexOf("/") : collapsed.lastIndexOf("/", span);
+  if (cut < 0) return { prefix: ".", rest: collapsed };
+  return { prefix: cut === 0 ? "/" : collapsed.slice(0, cut), rest: collapsed.slice(cut + 1) };
+}
+
+/**
+ * The spellings an unresolved word's rest is judged in once its prefix has
+ * landed (round 3, S1): under the landing itself, and under `$HERMES_HOME`
+ * when the landing is the configured home or below it (a home whose directory
+ * is not named `.hermes`).
+ */
+function landedSpellings(landed: string, rest: string, configuredHome: string | null): string[] {
+  const spellings = [`${landed.replace(/\/+$/u, "")}/${rest}`];
+  if (configuredHome !== null && (landed === configuredHome || landed.startsWith(`${configuredHome}/`))) {
+    spellings.push(`$HERMES_HOME${landed.slice(configuredHome.length)}/${rest}`);
+  }
+  return spellings;
+}
+
+/**
+ * APRV-511 (cred-asymmetry round 3, S2): bash's tilde prefixes other than a
+ * bare `~` (which the caller expands to `HOME`) and `~+` (which
+ * {@link tildeReadings} answers). `~-` is `$OLDPWD`, `~N`, `~+N` and `~-N` are
+ * entries of the directory stack, and `~name` is that user's home. None of
+ * those is known here, so each becomes the variable it stands for and the word
+ * is unresolved.
+ */
+function otherTildePrefix(text: string): string {
+  const match = /^~([^/]*)(?=\/|$)/u.exec(text);
+  if (match === null) return text;
+  const name = match[1] as string;
+  const rest = text.slice(match[0].length);
+  if (name === "" || name === "+") return text;
+  if (name === "-") return `$OLDPWD${rest}`;
+  if (/^[+-]?\d+$/u.test(name)) return `$DIRSTACK${rest}`;
+  return `$TILDE_HOME${rest}`;
+}
+
+/**
+ * The words a path word is judged as (round 3, S2). Unquoted, bash expands
+ * `~+` to `$PWD`, which is spelled `.` here so it is judged from each working
+ * directory; quoted, it is a literal directory named `~+`, and the lexer has
+ * already removed the quotes. So a word that opens with `~+` is judged both
+ * ways, and the stricter class wins.
+ */
+function tildeReadings(word: string): string[] {
+  return /^~\+(?=\/|$)/u.test(word) ? [word, `.${word.slice(2)}`] : [word];
+}
+
+/** How a recursive reader's argv is read by {@link walksWorkingDirectory}. */
+interface WalkSpec {
+  /** It walks only with one of these flags (`grep`); otherwise always. */
+  readonly recursiveShort: string | null;
+  readonly recursiveLong: readonly string[];
+  /** Its first operand is a pattern unless one of these gives it. */
+  readonly patternOperand: boolean;
+  readonly noPatternShort: string;
+  readonly noPatternLong: readonly string[];
+  /** Short options that take a value (glued, or the next word). */
+  readonly valueShort: string;
+  /** Long options known to take NO value; any other may take the next word. */
+  readonly flagLong: readonly string[];
+}
+
+const GREP_WALK: WalkSpec = {
+  recursiveShort: "rR",
+  recursiveLong: ["--recursive", "--dereference-recursive"],
+  patternOperand: true,
+  noPatternShort: "ef",
+  noPatternLong: ["--regexp", "--file"],
+  valueShort: "ABCDdefm",
+  flagLong: [
+    "--ignore-case", "--line-number", "--files-with-matches", "--files-without-match", "--count", "--invert-match",
+    "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--basic-regexp",
+    "--only-matching", "--with-filename", "--no-filename", "--quiet", "--silent", "--no-messages", "--null", "--text",
+  ],
+};
+
+const WALK_SPECS: ReadonlyMap<string, WalkSpec> = new Map<string, WalkSpec>([
+  ["grep", GREP_WALK],
+  ["egrep", GREP_WALK],
+  ["fgrep", GREP_WALK],
+  [
+    "rg",
+    {
+      recursiveShort: null,
+      recursiveLong: [],
+      patternOperand: true,
+      noPatternShort: "ef",
+      noPatternLong: ["--regexp", "--file", "--files", "--type-list"],
+      valueShort: "ABCEefgjMmrTt",
+      flagLong: [
+        "--files", "--type-list", "--hidden", "--no-ignore", "--ignore-case", "--smart-case", "--line-number",
+        "--follow", "--fixed-strings", "--files-with-matches", "--files-without-match", "--count", "--no-heading",
+        "--with-filename", "--no-filename", "--json", "--text", "--word-regexp", "--invert-match", "--multiline",
+        "--only-matching", "--vimgrep", "--null", "--unrestricted", "--quiet",
+      ],
+    },
+  ],
+  [
+    "du",
+    {
+      recursiveShort: null,
+      recursiveLong: [],
+      patternOperand: false,
+      noPatternShort: "",
+      noPatternLong: [],
+      valueShort: "BdtX",
+      flagLong: ["--all", "--summarize", "--human-readable", "--apparent-size", "--bytes", "--total", "--si"],
+    },
+  ],
+  [
+    "tree",
+    {
+      recursiveShort: null,
+      recursiveLong: [],
+      patternOperand: false,
+      noPatternShort: "",
+      noPatternLong: [],
+      valueShort: "LPIoHT",
+      flagLong: ["--dirsfirst", "--noreport", "--prune", "--du", "--si"],
+    },
+  ],
+]);
+
+/**
+ * APRV-511 (cred-asymmetry round 3, N2): does this reader walk the working
+ * directory because no argument is proven to name a path? `grep` with a
+ * recursive flag, `rg`, `du` and `tree` with no path operand, and `find` with
+ * no path before its expression, each walk `.`. Fails closed: an option this
+ * table does not know may take the next word as its value, so that word is
+ * not counted as a path. (`ag`, `ack` and `zip` have no classifier rule and are
+ * refused as unclassified; `tar` with no file operand reads none.)
+ */
+function walksWorkingDirectory(bin: string | null, args: readonly string[]): boolean {
+  if (bin === "find") {
+    let index = 0;
+    while (index < args.length) {
+      const arg = args[index] as string;
+      if (arg === "-H" || arg === "-L" || arg === "-P" || /^-O\d*$/u.test(arg)) index += 1;
+      else if (arg === "-D") index += 2;
+      else break;
+    }
+    const first = args[index];
+    return first === undefined || first.startsWith("-") || first === "(" || first === "!";
+  }
+  const spec = bin === null ? undefined : WALK_SPECS.get(bin);
+  if (spec === undefined) return false;
+  let recursive = spec.recursiveShort === null;
+  let patternOperand = spec.patternOperand;
+  let words = 0;
+  let endOfOptions = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (endOfOptions || arg === "-" || !arg.startsWith("-")) {
+      words += 1;
+      continue;
+    }
+    if (arg === "--") {
+      endOfOptions = true;
+      continue;
+    }
+    const next = args[index + 1];
+    if (arg.startsWith("--")) {
+      const name = arg.split("=", 1)[0] as string;
+      if (spec.recursiveLong.includes(name)) recursive = true;
+      if (spec.noPatternLong.includes(name)) patternOperand = false;
+      const flag = spec.flagLong.includes(name) || spec.recursiveLong.includes(name);
+      if (!arg.includes("=") && !flag && next !== undefined && !next.startsWith("-")) index += 1;
+      continue;
+    }
+    for (let at = 1; at < arg.length; at += 1) {
+      const letter = arg[at] as string;
+      if (spec.recursiveShort?.includes(letter) === true) recursive = true;
+      if (spec.noPatternShort.includes(letter)) patternOperand = false;
+      if (spec.valueShort.includes(letter)) {
+        if (at === arg.length - 1 && next !== undefined) index += 1;
+        break;
+      }
+    }
+  }
+  return recursive && words - (patternOperand ? 1 : 0) <= 0;
 }
 
 /** The entries a final-component glob matches, or `null` when the directory is unknown. */
