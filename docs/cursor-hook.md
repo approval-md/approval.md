@@ -99,13 +99,15 @@ an addition).
 | rule | binaries | subcommands | classes |
 |---|---|---|---|
 | `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite, vcs.ref.delete |
-| `git-rewrite` | git | rebase \| filter-branch \| filter-repo | vcs.history.rewrite † |
+| `git-rebase` | git | rebase | vcs.history.rewrite †, rule `git-rebase`, `git-rebase-interactive` (`-i`, `--interactive`, `--edit-todo`, `--rebase-merges`, `-r`), `git-rebase-exec` (`--exec`, `-x`, a `-s` strategy git does not ship), `git-rebase-continue` (`--continue`, `--skip`) or `git-rebase-abort` (`--abort`, `--quit`) (APRV-433) |
+| `git-filter` | git | filter-branch \| filter-repo | vcs.history.rewrite † |
 | `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
 | `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
 | `git-branch` | git | branch | read.shell, vcs.commit.branch |
 | `git-tag` | git | tag | read.shell for a listing (`-l`, `--list`, `-n`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, or no argument), rule `git-tag-read`; release.publish for every creation, deletion, force-move and signature, for a bare tag name, and for any flag the listing allowlist does not name (APRV-397) |
 | `git-clone` | git | clone | network.call |
-| `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| pull \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
+| `git-pull` | git | pull | vcs.history.rewrite † for a rebasing pull (`--rebase`, `-r`, `--rebase=<anything but false>`, rule `git-pull-rebase`); vcs.commit.branch, rule `git-write`, for a merging one (APRV-433) |
+| `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
@@ -186,9 +188,9 @@ daemon user cannot read a Hermes home (mode 0700), so on a hosted box the
 classifier's text check is the whole check. Both rule ids are in
 `CODE_EXECUTING_RULES`.
 
-† These rewrites are LOCAL, and the hook refines them against the checkout it
-runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
-`git push --force` is not marked, and never refines.
+† The hook maps every `vcs.history.rewrite` segment, `git push --force`
+included, to `vcs.history.rewrite.local` or `vcs.history.rewrite.shared`
+against the checkout it runs in: see [Splitting history rewrites](#splitting-history-rewrites).
 
 ‡ `files.delete.scratch` needs roots the classifier cannot know and checks it
 cannot make from text: see [Deleting scratch](#deleting-scratch).
@@ -282,8 +284,9 @@ Five overrides sit on top of the table:
   against a shared remote, which is a real-world effect, so they classify by
   name and the policy decides. Under a policy that declares neither, the
   unknown-class default applies and both are manual.
-- **`rewrite-unpublished` → `vcs.commit.branch`.** A local rewrite of history
-  this checkout never published is a commit. See below.
+- **`vcs.history.rewrite.local` / `vcs.history.rewrite.shared`.** Every
+  history rewrite leaves the hook as one of the two members (APRV-433), with
+  the evidence that decided it. See below.
 
 Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
@@ -345,42 +348,98 @@ exists and what a policy that has no line for it resolves to, is in
 [docs/claude-code-hook.md](claude-code-hook.md#deleting-a-remote-ref-aprv-352);
 the classifier is the same file for both harnesses.
 
-### Rewriting unpublished history
+### Splitting history rewrites
 
-`vcs.history.rewrite` guards SHARED history: a force push, a rebase of a branch
-someone else has pulled, an amend of a commit that is already on the remote. An
-agent amending its own unpushed worktree branch destroys nothing anyone can
-observe, so pricing that at a human's attention spends the audit budget on a
-non-event.
+Amended SPEC.md §7 (APRV-433) splits `vcs.history.rewrite` by whether the
+history a rewrite removes is held by anyone else. It replaces APRV-108's
+downgrade of an unpublished rewrite to `vcs.commit.branch`, which left the log
+with no trace that a rewrite happened.
 
-The classifier stays pure and keeps answering `vcs.history.rewrite` from the
-text alone. The hook then applies one impure refinement, in the directory it
-runs in, to any segment classified `vcs.history.rewrite` by a marked (†) rule:
+The classifier stays pure and keeps answering the bare `vcs.history.rewrite`
+from the text alone; its rule id says which spelling it saw. The hook then maps
+every such segment, in the directory it runs in, to exactly one member
+(`src/cli/history-rewrite.ts`):
 
-| git state | `git commit --amend` | `git rebase` / `reset --hard` / `filter-branch` |
+- **`vcs.history.rewrite.local`**: the hook proved from local refs, with no
+  network, that no commit of the rewrite's lost range is shared, that the ref
+  it moves is not a default branch, and that the command moves no other ref.
+  No step that resumes a rebase in progress is ever local (see the table).
+- **`vcs.history.rewrite.shared`**: everything else, including every case a
+  check could not run, timed out (1500 ms for the whole command) or answered
+  ambiguously.
+
+A commit is shared when a remote-tracking ref, the configured upstream of any
+local branch, a `refs/pull/*` ref or a default branch (`main`, `master`, the
+branch `refs/remotes/origin/HEAD` names) reaches it. The lost range per
+spelling:
+
+| spelling | rule | lost range, or verdict |
 |---|---|---|
-| branch has no upstream | `vcs.commit.branch`, rule `rewrite-unpublished` | `vcs.commit.branch`, rule `rewrite-unpublished` |
-| upstream set, HEAD not reachable from it | `vcs.commit.branch`, rule `rewrite-unpublished` | `vcs.history.rewrite` |
-| upstream set, HEAD reachable from it | `vcs.history.rewrite` | `vcs.history.rewrite` |
-| the default branch (`main`, `master`, or whatever `refs/remotes/origin/HEAD` names) | `vcs.history.rewrite` | `vcs.history.rewrite` |
-| detached HEAD, not a repository, no git, any git failure | `vcs.history.rewrite` | `vcs.history.rewrite` |
+| `git commit --amend` | `git-commit-amend` | HEAD alone; any option that takes a value (`-m`, `-C`, `--author`, `--fixup`, …) is shared, `option-unvetted`, so `--no-edit` or `GIT_EDITOR=true` is the judged spelling; a pathspec is shared, `unreadable-target` |
+| `git reset --hard [<rev>]` | `git-reset-hard` | `HEAD --not <rev>`; nothing lost is `no-commits-lost`; only `-q`, `--quiet`, `--no-refresh` and `--refresh` may join `--hard`, and at most one `<rev>` |
+| `git rebase [<upstream> [<branch>]]` | `git-rebase` | `<branch> --not <upstream>`; `--root`, `--onto` and every other option that takes a value (`-s`, `-X`, `-C`, `--whitespace`, `--empty`, `-S<key>`) is shared, `option-unvetted`, as is any option outside a closed list; `--update-refs` or `rebase.updateRefs` is shared, `updates-other-refs`; `rebase.rebaseMerges` is shared, `interactive` |
+| `git rebase --continue`, `--skip`, `--abort`, `--quit` | `git-rebase-continue`, `git-rebase-abort` | always shared, `unreadable-target`, on a real stop as much as on a forged one (APRV-648 fix round 2, a deliberate departure from the D-6 spec text): git reads what each one does from files under the git directory (the branch to move, the commit to move it to, a pending amend of HEAD, the steps left, the refs to delete), and anything that can write the checkout can write those, so the check reads none of them |
+| `git rebase -i`, `--edit-todo`, `--rebase-merges` | `git-rebase-interactive` | always shared, `interactive` |
+| `git rebase --exec`, `-x`, `-s <not built in>` | `git-rebase-exec` | always shared, `runs-commands` |
+| `git filter-branch`, `git filter-repo` | `git-filter` | always shared, `whole-history` |
+| `git push --force` and every push-side spelling | `git-push-force` | always shared, `push-side` |
+| a `git push` whose words the shell may expand, or whose configuration an assignment or a global option steers | `git-push-unreadable` | always shared, `push-side` |
+| `git pull --rebase` | `git-pull-rebase` | `HEAD --not <upstream as last fetched>`, for a pull that names no repository; `--rebase=merges` or `=interactive` is shared, `interactive`; `-s <not built in>` is shared, `runs-commands`; any option that takes a value (`-o`, `--server-option`, `--depth`, …) is shared, `option-unvetted`; a `<repository>` or refspec is shared, `unreadable-target` |
+| bare `git pull` with `pull.rebase` / `branch.<b>.rebase` set | `git-write` | promoted into the family, as `pull --rebase` |
+| bare `git push` with a `+` refspec or `mirror` in remote configuration | `git-push-implicit` | promoted, always shared, `push-side` |
 
-Only two cases downgrade, then: a branch with **no upstream at all**, and an
-**amend whose HEAD is not yet on the upstream**. A rebase or reset names a base
-the text cannot resolve, so on a branch that has published anything it may be
-rewriting published commits and stays a rewrite. Everything push-side
-(`git push --force`, `--force-with-lease`, a `+refspec`) stays
-`vcs.history.rewrite` whatever the branch state is.
+A segment carrying a global option other than `--no-pager`,
+`--no-optional-locks` or `-p` (`--git-dir=`, `--work-tree=`) is shared,
+`global-option`. A `NAME=value` prefix is shared, `env-assignment`, unless it is
+on a closed list of assignments that only silence a prompt or a pager
+(`GIT_EDITOR=true`, `GIT_EDITOR=:`, `EDITOR=true`, `EDITOR=:`, `VISUAL=true`,
+`VISUAL=:`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`), which is
+what lets `GIT_EDITOR=true git commit --amend` be judged. The check reads the
+state before the command line runs, so an earlier segment of the same line
+leaves a rewrite judgeable only when it is `git add`, `git rm` or `git status`
+with no assignment, no global option, no word the shell could change and no
+write redirect except to `/dev/null`; anything else before it (a `cd`, an
+`export`, an `echo >> .git/...`) is shared, `compound-state`, and so is any
+rewrite on a line that joins segments with a pipe or a background `&`. A lost
+range over 1000 commits is shared, `range-too-large`.
 
-The queries are `git rev-parse --abbrev-ref HEAD`, `git symbolic-ref
-refs/remotes/origin/HEAD`, `git for-each-ref --format=%(upstream:short)
-refs/heads/<branch>`, and `git merge-base --is-ancestor HEAD <upstream>`. Every
-one of them failing, or answering ambiguously, leaves the class alone.
+git accepts any unambiguous prefix of a long option and bundles short ones,
+so the text classifier reads those spellings as their full ones: `git push
+-fu`, `--force-w` and `--m` are force pushes, `git commit --am` is an amend,
+`git reset --h` is a hard reset and `git pull --reb` is a rebasing pull. Each
+judge takes only the options on its verb's closed list of options that take
+no value, exact spellings, and never skips an option word (APRV-648 fix round
+3): an abbreviation such as `--inter`, `--exe`, `--am` or `--h`, an option that
+takes a value, `--`, and an unknown option are shared, `option-unvetted`, and
+a positional the judge does not model is shared, `unreadable-target`. The
+text classifier reads a `git pull` argv the way git's parse-options does, so a
+`--no-rebase` that is the value of `-o` or `--server-option` keeps neither the
+rebasing pull out of the family nor the configuration from promoting a bare
+one. Only the bare word `git` is git: `./git status` before a rewrite is
+`compound-state`, and `./git` as the rewrite itself is `global-option`. The restack by merge (`git merge origin/main`, a merging
+`git pull`) is outside the family and runs no git query at all.
+
+**Resolution.** Under a policy with no `vcs.history.rewrite.local`, `.shared`
+or `.*` line, the hook asks the gate about the segment under the class the
+pre-split runtime answered for it (APRV-108's answer: `vcs.commit.branch` for a
+branch with no upstream and for an amend of an unpushed HEAD, otherwise
+`vcs.history.rewrite`), so shipping the split changes no verdict and the record
+carries the class its verdict was drawn from. Under a policy with an own line,
+it asks under the member, which resolves by its exact key, then by
+`vcs.history.rewrite.*`, then exactly as the bare class resolves;
+`vcs.history.rewrite.shared` is never inferred below manual from the family key.
+
+**Evidence.** Every `execution.started` and `approval.requested` the hook
+writes for a refined segment carries `payload.history_rewrite` (`reach`,
+`basis`, `ref`, `old_tip`, `base`, `lost`, `lost_shared`, `witness`). A
+human-only refusal appends nothing, so the deny reason names the basis and the
+witness instead.
 
 `approval hook classify` runs the same refinement in the same directory, so what
-it prints is what the hook decides, and a refined segment shows the rule name
-`rewrite-unpublished`. When the hook refines, its
-`agent_message` says so.
+it prints is what the hook decides: the member, the basis, the witness and the
+pre-split class (`--json` carries them on each segment as `history_rewrite`).
+When the hook refines, its `agent_message` carries a `rewrite-local: <basis>` or
+`rewrite-shared: <basis>, witness <ref>` note.
 
 ### GitHub metadata on your own remote
 

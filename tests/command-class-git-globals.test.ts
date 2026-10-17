@@ -224,7 +224,8 @@ test("plain git subcommands classify as before", () => {
     ["git push --force origin main", "vcs.history.rewrite", "git-push-force"],
     ["git reset --hard", "vcs.history.rewrite", "git-reset-hard"],
     ["git reset HEAD~1", "vcs.commit.branch", "git-reset"],
-    ["git rebase main", "vcs.history.rewrite", "git-rewrite"],
+    // APRV-433 split the old `git-rewrite` row; a plain rebase is `git-rebase`.
+    ["git rebase main", "vcs.history.rewrite", "git-rebase"],
     ["git branch -D lane", "vcs.commit.branch", "git-branch-write"],
     ["git branch", "read.shell", "git-branch-read"],
     ["git commit -m x", "vcs.commit.branch", "git-commit"],

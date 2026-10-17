@@ -1,0 +1,28 @@
+{
+  "seq": 71,
+  "ts": "2026-09-22T08:31:14Z",
+  "event": "approval.requested",
+  "task": "hook:hermes-sess-1:tool-7",
+  "action_key": "hook:hermes-sess-1:tool-7:vcs.history.rewrite.shared",
+  "actor": "agent:hermes",
+  "channel": "telegram",
+  "payload": {
+    "class": "vcs.history.rewrite.shared",
+    "execution": "harness",
+    "harness_cap_ms": 300000,
+    "payload_hash": "5f1c2a6f3e9d4b8a7c0e1d2b3a4958677889aabbccddeeff0011223344556677",
+    "history_rewrite": {
+      "reach": "shared",
+      "basis": "shared-commit",
+      "ref": "refs/heads/lane",
+      "old_tip": "5f1c0de9a3b7e2d4c6f8091a2b3c4d5e6f708192",
+      "base": "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d",
+      "lost": 1,
+      "lost_shared": 1,
+      "witness": "refs/remotes/origin/lane"
+    }
+  },
+  "alg": "sha256/jcs",
+  "prev": "1010101010101010101010101010101010101010101010101010101010101010",
+  "hash": "1111111111111111111111111111111111111111111111111111111111111111"
+}

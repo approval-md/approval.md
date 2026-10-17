@@ -279,6 +279,36 @@ never saw is still rescued by a sign-off at head, which is what that escape
 hatch is for. Hunk evidence keeps the lead, because the evaluator reaches a
 sign-off only after every grant search has failed.
 
+## Rewriting history in a checkout: the restack is a merge (APRV-433)
+
+The per-commit judgment above is one reason history in this repository moves
+forward and is not rewritten. A rewrite of a pushed branch replaces the commits
+a grant was matched against with commits nobody was shown, and the reflog that
+could find the originals lives in a checkout the guard never reads. The runtime
+draws the same line at the hook (amended SPEC.md §7): a history rewrite is
+`vcs.history.rewrite.local` only when no commit it removes is reachable from a
+remote-tracking ref, a branch's configured upstream, a `refs/pull/*` ref or a
+default branch, and `vcs.history.rewrite.shared` otherwise, with every
+push-side spelling shared whatever the checkout says. Under this repository's
+proposed lines (`docs/claude-code-hook.md`, "Splitting history rewrites") a
+shared rewrite stays human-only.
+
+So the route for a pushed branch that has fallen behind, a stacked pull request
+whose base moved included, is a merge: `git merge origin/main` (or the base
+branch), then a plain `git push`. It removes nothing, runs no rewrite check, and
+the merge it adds is judged on its dense combined patch exactly as the section
+above describes. A rebase that has stopped is a person's to finish: `git rebase
+--continue`, `--skip`, `--abort` and `--quit` are always shared, because git
+reads what each one does from files under the git directory that the check
+cannot trust (APRV-648), so they stay human-only under the proposed lines. Do
+not start a rebase at all.
+
+Every rewrite the hook records carries `payload.history_rewrite` on its
+`execution.started` (`reach`, `basis`, `ref`, `old_tip`, `base`, `lost`,
+`lost_shared`, `witness`): object ids and ref names from the checkout's own
+refs, so a reader of the log can tell an amend from a commit and can name the
+shared ref a refused rewrite would have moved under.
+
 ## Demonstrating both layers
 
 `tests/daemon-git-evidence.test.ts` runs the demonstration: commit a log,

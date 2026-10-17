@@ -176,6 +176,13 @@ on the hook for enforcement.
   answer to `unclassified` and loosened or reclassified none. Cost: `git
   --git-dir=.git status` and the other `=`-joined spellings, which used to
   classify as their subcommand, now need `cd` or a person.
+- A force push spelled as a short bundle (`git push -fu`, `-uf`) or as an
+  abbreviated long option (`--force-w`, `--m` for `--mirror`) classified as a
+  plain push (`vcs.push.branch` or `vcs.push.main`). Three more spellings were
+  read loosely the same way: `git commit --am` was a plain commit,
+  `git reset --h` a non-hard reset and `git pull --reb` a merging pull.
+  git's option parser accepts every one of them, and the classifier now reads
+  them as git does (APRV-433).
 - **An environment assignment in front of git no longer hides what git runs
   (APRV-521).** The classifier skipped every `NAME=value` word in front of the
   binary and classified `git` by its subcommand alone. Most of git(1)'s
@@ -216,6 +223,50 @@ on the hook for enforcement.
   272,300 of 1,533,105 generated lines to a refusal and loosened or
   reclassified none. Cost: `n+=1` and other append or array writes now need
   a person.
+
+### Changed
+
+- `vcs.history.rewrite` is split into `vcs.history.rewrite.local` and
+  `vcs.history.rewrite.shared` by the hook, from the checkout's own refs
+  (amended SPEC.md §7 and §8, APRV-433, pending sign-off). It replaces
+  APRV-108's quiet downgrade of an unpublished rewrite to `vcs.commit.branch`.
+  A policy with no `vcs.history.rewrite.local`, `.shared` or `.*` line gets
+  the verdicts it got before, except for the spellings under Security above:
+  a force push spelled as a short bundle (`git push -fu`, `-uf`, `-vf`) or
+  as an abbreviation of `--force-with-lease`, `--force-if-includes` or
+  `--mirror` (`--force-w`, `--force-if`, `--m`), an abbreviated amend
+  (`git commit --am`) and an abbreviated hard reset (`git reset --h`) now
+  resolve as the rewrite class APRV-108 answered, not as a plain push,
+  remote ref deletion, commit or reset. That is stricter wherever
+  `vcs.history.rewrite` is at least as strict as the class it replaces, as
+  in the default classes and in this repository's policy, where
+  `git push -fu origin lane` goes from autonomous to human-only.
+  Every refined start and request now carries `payload.history_rewrite`.
+  A step that resumes a rebase in progress (`git rebase --continue`,
+  `--skip`, `--abort`, `--quit`) is always shared: git reads what it does
+  from files under the git directory that anything able to write the
+  checkout can forge, so the hook reads no rebase state at all (APRV-648,
+  a deliberate departure from the split as first decided). The text
+  classifier's rebase row is split into rule ids by spelling, and
+  `git pull --rebase` is now `vcs.history.rewrite` from the text (it was
+  `vcs.commit.branch`).
+  Every judge that can answer `.local` reads its argv under one closed
+  rule (APRV-648 fix round 3): each option word must be, exactly, on that
+  verb's list of options that take no value. An option that takes a value
+  (`git rebase --onto`, `-s`, `-X`; `git commit --amend -m`; `git reset
+  --hard --pathspec-from-file`; `git pull -o`), `--root`, an abbreviation,
+  `--` and any positional the judge does not model (a pathspec, a pull's
+  `<repository>`) are shared. `git rebase --root <branch>` was judged on
+  HEAD's branch while git rewrites `<branch>`; `git reset --hard
+  --pathspec-from-file <f> <rev>` took `<f>` as the target; and
+  `git pull -r -o --no-rebase` read the server option's value as a merge.
+  The text classifier now skips `git pull`'s option values the way git
+  does, never answering milder than before, and only the bare word `git`
+  counts as git for the earlier-segment list and the judges (`./git
+  status && …` is shared).
+- Conformance: `command-class` 1.9.0, thirty-seven new `rewrite-*` vectors,
+  and `schema-validation` 3.5.0, seven new `payload.history_rewrite` fixtures
+  (3.4.0 went to APRV-510 at merge); no existing expectation moved.
 
 ### Harnesses
 
