@@ -405,6 +405,16 @@ on the hook for enforcement.
   holding a `$` (a variable pattern, a `$` regex anchor, single-quoted or not,
   in a single-file search too) now goes to a person, and so does a single-file
   read ending in two unexpanded segments (`cat "$DIR/$F"`). Only ever stricter.
+  Since the merge of APRV-522 (#653), every unexpanded tilde prefix, `~+`
+  included, fails closed instead. Fix round 4 (review-b's read at 305d7c3c):
+  the unresolved-word judge also reads a `..` right after an unexpanded
+  segment as cancelling it, which is its own one-segment model, so a round
+  trip through a span back to a home's `profiles/` is judged where it lands;
+  the walk test reads a short option it does not know (and ripgrep's
+  one-letter maximum-depth option) as taking the next word, as it already
+  read an unknown long option; and a pattern in the `hermes-agent/` or
+  `profiles/` directory component under a home, before a credential, is a
+  credential read where the hook cannot list the home. Only ever stricter.
 - **Conformance.** `command-class` 1.9.0 (one hundred and forty new
   vectors, thirty-two of them unmoved controls; no existing vector
   expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set

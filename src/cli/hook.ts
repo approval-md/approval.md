@@ -8014,12 +8014,36 @@ function globCouldNameOrgan(path: string): boolean {
   return parentIsHome && ORGAN_NAMES.some((name) => pattern.test(name));
 }
 
-/** SF3b: a read pattern whose directory is unknown, that could name a credential. */
+/**
+ * SF3b: a read pattern whose directory is unknown, that could name a credential.
+ *
+ * Fix round 4 (review-b r3 S2): a pattern in a DIRECTORY component is judged
+ * too, as {@link globCouldNameOrgan} judges one for a write. Each such
+ * component that could name `hermes-agent` or `profiles` (in any case) is
+ * replaced by that name, and the path is judged again by the credential rows
+ * ({@link isCredentialPath}), by this test for its other patterns, and, when
+ * it holds an unexpanded span, by {@link unresolvedReadCouldNameCredential}.
+ * So a pattern for the install directory before its env file, or for the
+ * profiles directory before a profile's credential, is a credential read; the
+ * same pattern before an ordinary file is not.
+ */
 function globCouldNameCredential(path: string): boolean {
   const last = basename(path);
-  if (!hasGlobChars(last)) return globCouldNameGateHome(path);
-  const pattern = globRegex(last);
-  return CREDENTIAL_NAMES.some((name) => pattern.test(name)) || globCouldNameGateHome(path);
+  const lastNames =
+    hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name));
+  if (lastNames || globCouldNameGateHome(path)) return true;
+  const components = path.split(/[/\\]+/u);
+  for (let index = 0; index < components.length - 1; index += 1) {
+    const component = components[index] as string;
+    if (!hasGlobChars(component)) continue;
+    for (const name of ["hermes-agent", "profiles"]) {
+      if (!globRegex(component).test(name) && !globRegex(component.toLowerCase()).test(name)) continue;
+      const named = [...components.slice(0, index), name, ...components.slice(index + 1)].join("/");
+      if (isCredentialPath(named) || globCouldNameCredential(named)) return true;
+      if (/[$`]/u.test(named) && unresolvedReadCouldNameCredential(named)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -8037,10 +8061,11 @@ function globCouldNameCredential(path: string): boolean {
  * answers false only when no choice of names makes the word a credential
  * path. It answers true when the classifier's text rule holds
  * ({@link isCredentialPath}), when a pattern in it could name a credential
- * ({@link globCouldNameCredential}), or when, in either of two readings of the
+ * ({@link globCouldNameCredential}), or when, in any of three readings of the
  * segments (`.` dropped with every `..` kept; `.` dropped with every `..`
  * resolved lexically, where a `..` after an unknown segment leaves an unknown
- * segment), any of these holds:
+ * segment; and the same with that `..` cancelling the unknown segment, as
+ * the model says it does; see {@link segmentReadings}), any of these holds:
  *
  * - the word ENDS in a Hermes credential row, with any unknown segment
  *   standing for any element: a home (`.hermes` in any case, `$HERMES_HOME`)
@@ -8077,22 +8102,31 @@ function unknownSegment(segment: string): boolean {
 }
 
 /**
- * The two readings {@link unresolvedReadCouldNameCredential} judges: `.`
- * dropped with `..` kept, and `.` dropped with each `..` resolved lexically.
- * A `..` after an unknown segment leaves an unknown segment (the span's parent
- * is somewhere unknown too); a `..` above the first segment is kept.
+ * The three readings {@link unresolvedReadCouldNameCredential} judges: `.`
+ * dropped with `..` kept; `.` dropped with each `..` resolved lexically, where
+ * a `..` after an unknown segment leaves an unknown segment (the span may name
+ * a symlink, so its parent is somewhere unknown too); and the same with that
+ * `..` CANCELLING the unknown segment, as it cancels a literal one, which is
+ * the one-segment model itself (fix round 4, review-b r3 M). Without the
+ * third, the unknown left in place shifted every literal after it one segment
+ * deeper, so a round trip through a span back to a home's `profiles/`, then a
+ * literal profile name, then a span, matched no row. A `..` above the first
+ * segment is kept in every reading.
  */
 function segmentReadings(segments: readonly string[]): string[][] {
   const dropped = segments.filter((segment) => segment !== ".");
-  const resolved: string[] = [];
-  for (const segment of dropped) {
-    const last = resolved[resolved.length - 1];
-    if (segment !== "..") resolved.push(segment);
-    else if (last === undefined || last === "..") resolved.push(segment);
-    else if (unknownSegment(last)) resolved[resolved.length - 1] = "$..";
-    else resolved.pop();
-  }
-  return [dropped, resolved];
+  const resolve = (unknownParent: boolean): string[] => {
+    const resolved: string[] = [];
+    for (const segment of dropped) {
+      const last = resolved[resolved.length - 1];
+      if (segment !== "..") resolved.push(segment);
+      else if (last === undefined || last === "..") resolved.push(segment);
+      else if (unknownParent && unknownSegment(last)) resolved[resolved.length - 1] = "$..";
+      else resolved.pop();
+    }
+    return resolved;
+  };
+  return [dropped, resolve(true), resolve(false)];
 }
 
 /** One reading's segments against the rows {@link unresolvedReadCouldNameCredential} lists. */
@@ -8204,6 +8238,12 @@ interface WalkSpec {
   readonly noPatternLong: readonly string[];
   /** Short options that take a value (glued, or the next word). */
   readonly valueShort: string;
+  /**
+   * Short options known to take NO value. A cluster holding any letter in
+   * neither list may take the next word as its value (fix round 4, review-b r3
+   * S1), as an unknown long option already may.
+   */
+  readonly flagShort: string;
   /** Long options known to take NO value; any other may take the next word. */
   readonly flagLong: readonly string[];
 }
@@ -8215,6 +8255,7 @@ const GREP_WALK: WalkSpec = {
   noPatternShort: "ef",
   noPatternLong: ["--regexp", "--file"],
   valueShort: "ABCDdefm",
+  flagShort: "abcEFGHhIiLlnoPqRrsTUuVvwxZz",
   flagLong: [
     "--ignore-case", "--line-number", "--files-with-matches", "--files-without-match", "--count", "--invert-match",
     "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--basic-regexp",
@@ -8234,7 +8275,9 @@ const WALK_SPECS: ReadonlyMap<string, WalkSpec> = new Map<string, WalkSpec>([
       patternOperand: true,
       noPatternShort: "ef",
       noPatternLong: ["--regexp", "--file", "--files", "--type-list"],
-      valueShort: "ABCEefgjMmrTt",
+      // Fix round 4 (review-b r3 S1): `d`, ripgrep's maximum-depth option.
+      valueShort: "ABCdEefgjMmrTt",
+      flagShort: "abcFHhIiLlNnopqSsUuVvwxz0",
       flagLong: [
         "--files", "--type-list", "--hidden", "--no-ignore", "--ignore-case", "--smart-case", "--line-number",
         "--follow", "--fixed-strings", "--files-with-matches", "--files-without-match", "--count", "--no-heading",
@@ -8252,6 +8295,7 @@ const WALK_SPECS: ReadonlyMap<string, WalkSpec> = new Map<string, WalkSpec>([
       noPatternShort: "",
       noPatternLong: [],
       valueShort: "BdtX",
+      flagShort: "aAbcghHklLmnPsSx0",
       flagLong: ["--all", "--summarize", "--human-readable", "--apparent-size", "--bytes", "--total", "--si"],
     },
   ],
@@ -8264,6 +8308,7 @@ const WALK_SPECS: ReadonlyMap<string, WalkSpec> = new Map<string, WalkSpec>([
       noPatternShort: "",
       noPatternLong: [],
       valueShort: "LPIoHT",
+      flagShort: "aAcCdDfFghiJlNnpqQrsStuUvx",
       flagLong: ["--dirsfirst", "--noreport", "--prune", "--du", "--si"],
     },
   ],
@@ -8274,8 +8319,9 @@ const WALK_SPECS: ReadonlyMap<string, WalkSpec> = new Map<string, WalkSpec>([
  * directory because no argument is proven to name a path? `grep` with a
  * recursive flag, `rg`, `du` and `tree` with no path operand, and `find` with
  * no path before its expression, each walk `.`. Fails closed: an option this
- * table does not know may take the next word as its value, so that word is
- * not counted as a path. (`ag`, `ack` and `zip` have no classifier rule and are
+ * table does not know, long or short (a short cluster holding a letter in
+ * neither of its lists; fix round 4), may take the next word as its value, so
+ * that word is not counted as a path. (`ag`, `ack` and `zip` have no classifier rule and are
  * refused as unclassified; `tar` with no file operand reads none.)
  */
 function walksWorkingDirectory(bin: string | null, args: readonly string[]): boolean {
@@ -8315,15 +8361,23 @@ function walksWorkingDirectory(bin: string | null, args: readonly string[]): boo
       if (!arg.includes("=") && !flag && next !== undefined && !next.startsWith("-")) index += 1;
       continue;
     }
+    let unknownLetter = false;
     for (let at = 1; at < arg.length; at += 1) {
       const letter = arg[at] as string;
       if (spec.recursiveShort?.includes(letter) === true) recursive = true;
       if (spec.noPatternShort.includes(letter)) patternOperand = false;
       if (spec.valueShort.includes(letter)) {
         if (at === arg.length - 1 && next !== undefined) index += 1;
+        unknownLetter = false;
         break;
       }
+      if (!spec.flagShort.includes(letter)) unknownLetter = true;
     }
+    // Fix round 4 (review-b r3 S1): fails closed for a short option too. A
+    // cluster holding a letter this table does not know may take the next word
+    // as its value, so that word is not counted as a path (as the long branch
+    // above already reads an unknown long option).
+    if (unknownLetter && next !== undefined && !next.startsWith("-")) index += 1;
   }
   return recursive && words - (patternOperand ? 1 : 0) <= 0;
 }

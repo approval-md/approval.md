@@ -1189,3 +1189,68 @@ test("cred-asymmetry round 3 N2: a recursive reader that names its path, or read
     "account.credential",
   );
 });
+
+/**
+ * Fix round 4 (review-b r3), one deny row and one control per item, through
+ * `approval hook hermes` with HOME in the scratch lab:
+ *
+ * - S1 (review-b's M): a round trip through an unknown directory back to a
+ *   home's `profiles/`, then a literal profile name, then a span, is judged
+ *   in the reading where the `..` cancels the span, which is what the helper's
+ *   one-segment model says. The control is the same shape ending in an
+ *   ordinary file name.
+ * - S2 (review-b's S1): ripgrep's one-letter maximum-depth option takes the
+ *   next word, so an rg with it and no path walks the working directory; a
+ *   short letter the table does not know may take the next word too. The
+ *   control runs the same search from an ordinary directory.
+ * - S3 (review-b's S2): a pattern in the install's DIRECTORY component under
+ *   a home, before its env file, is a credential read. The control is the
+ *   same pattern before the runtime's source file.
+ */
+test("fix round 4 (review-b r3 S1-S3): deny rows and controls", () => {
+  const { dir, home, env } = credentialLab();
+  writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
+  const at = (command: string, workdir: string): Row => ({ tool: "terminal", input: { command, workdir }, env });
+  const workspace = join(home, "workspace");
+  expectDenied(
+    dir,
+    [
+      at("cat ~/.hermes/profiles/$(echo x)/../p/$(echo f)", workspace),
+      at("rg -d 1 SYNTHETIC_TOKEN", home),
+      at("rg -K 1 SYNTHETIC_TOKEN", home),
+      at("cat ~/.hermes/herm*/.env", workspace),
+    ],
+    "account.credential",
+  );
+  for (const row of [
+    at("cat ~/.hermes/profiles/$(echo x)/../p/notes.md", workspace),
+    at("rg -d 1 SYNTHETIC_TOKEN", workspace),
+    at("cat ~/.hermes/herm*/run_agent.py", workspace),
+  ]) {
+    const run = ask(dir, row);
+    assert.equal(verdictOf(run).permission, "allow", `${JSON.stringify(row.input)}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+/**
+ * Fix round 4, S3 where only this pass can answer: under co-location the hook
+ * cannot read a 0700 home, so no disk lookup expands the pattern, and the read
+ * glob test alone decides. A pattern for the install or profiles DIRECTORY
+ * before a credential is account.credential; before an ordinary file it is not.
+ */
+test("fix round 4 S3: a directory-component pattern under an unreadable home", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: a mode-000 directory is still readable");
+    return;
+  }
+  const { dir, home, env } = credentialLab();
+  const at = (command: string): Row => ({ tool: "terminal", input: { command, workdir: dir }, env });
+  chmodSync(home, 0o000);
+  try {
+    expectDenied(dir, [at("cat ~/.hermes/herm*/.env"), at("cat ~/.hermes/prof*/p/.env")], "account.credential");
+    const run = ask(dir, at("cat ~/.hermes/herm*/run_agent.py"));
+    assert.equal(verdictOf(run).permission, "allow", `${run.stdout} ${run.stderr}`);
+  } finally {
+    chmodSync(home, 0o755);
+  }
+});
