@@ -3,10 +3,10 @@ id: APRV-501
 title: >-
   Release 0.4.2 before the Oct 11 enforcement: policy tool-name mapping
   (APRV-499) and the reserved delegation block (APRV-500) reach the village
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-06 02:30'
-updated_date: '2026-10-08 01:13'
+updated_date: '2026-10-16 17:54'
 labels:
   - agent-village
 dependencies:
@@ -47,4 +47,6 @@ Draft PR #625 (Release 0.4.2) opened against main.
 Remaining: AC #1 needs CI green on the PR head and the SPEC attests (the PR stays a draft until then); AC #2 and #3 are Carter's.
 
 2026-10-08 sweep (claude-b3/SWEEP-APRV-1): AC1 ticked: Release 0.4.2 PR #625 merged 9f796b03 (2026-10-06) after the SPEC attests. AC2 ticked: SPEC amendments #626 (60d2d2cd) signed off at seq 84047 (CLAIMS 2026-10-06); tag v0.4.2, release 2026-10-06T10:29Z, publish run 37447027966 success. AC3 not ticked: no evidence of the DATA-228 tell or checkpoint rebuild.
+
+Closed by the 2026-10-16 backlog sweep (claude-nonav): AC1 and AC2 shipped (PR #625 9f796b03, SPEC attests #626, v0.4.2). AC3 superseded, not done: hosted pins 0.4.3 (e372b55) and the Oct 11 roll has passed; later template rows are tracked by their own tasks.
 <!-- SECTION:NOTES:END -->

@@ -4,10 +4,10 @@ title: >-
   Release 0.4.1 before the Oct 11 enforcement: the three post-0.4.0 fail-closed
   fixes (stale-copy off behind a relay, bin signal guard, yielding wait) reach
   the village checkpoint
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-05 02:08'
-updated_date: '2026-10-08 01:13'
+updated_date: '2026-10-16 17:54'
 labels:
   - agent-village
 dependencies:
@@ -41,4 +41,6 @@ Targeted checks only (no full suite): `npx tsc -p tsconfig.json` exit 0; `node s
 Remaining: AC #1 needs CI green on the PR head and claude-edge's review and arming; AC #2 and #3 are Carter's (tag, push, Trusted Publishing, read-backs, DATA-228 rebake with APPROVALD_LISTEN=unix, HOSTED-32 pin).
 
 2026-10-08 sweep (claude-b3/SWEEP-APRV-1): AC1 ticked: Release 0.4.1 PR #622 merged 5f9b9c3d (2026-10-05). AC2 ticked: tag v0.4.1 and GitHub release 2026-10-05T22:36Z; publish run 37381294315 success; CLAIMS 2026-10-05 23:38Z 'Release 0.4.1 published (npm latest 0.4.1, hosted pin merged)'. AC3 not ticked: no evidence of the DATA-228 tell or the checkpoint rebuild.
+
+Closed by the 2026-10-16 backlog sweep (claude-nonav): AC1 and AC2 shipped (v0.4.1). AC3 superseded, not done: the hosted image moved on to 0.4.2 and then 0.4.3 (approval-md-hosted Dockerfile, APPROVAL_MD_COMMIT bd5c7562, e372b55) and the Oct 11 roll has passed; the village checkpoint version is tracked with the 0.4.5 release.
 <!-- SECTION:NOTES:END -->

@@ -1,11 +1,11 @@
 ---
 id: APRV-327
 title: Preserve explicit co-author attribution in generated records and merge commits
-status: In Progress
+status: To Do
 assignee:
   - '@codex-sol'
 created_date: '2026-09-09 22:39'
-updated_date: '2026-09-17 01:58'
+updated_date: '2026-10-16 17:54'
 labels: []
 dependencies: []
 priority: high
@@ -57,4 +57,6 @@ AC4 NOT checked, and it is the only thing left. Its historical half holds: no sh
 Typo correction to the AC3 note above: the cli-reference sentence reads that the trailer does not set an event actor, name an approver, grant authority, or derive an identity from the log. The word was mistyped as ident in the preceding paragraph.
 
 Closeout delivered in pull request #414 (lane/closeouts). AC4 still waits on the repository setting, runbook section 3.
+
+2026-10-16 sweep (claude-nonav): moved back to To Do, nothing in flight since 2026-09-17. AC4 is blocked on Carter's repository setting: read 2026-10-16, merge_commit_message is still PR_TITLE (merge_commit_title MERGE_MESSAGE). After his flip, the first daemon-merged records PR closes AC4.
 <!-- SECTION:NOTES:END -->
