@@ -425,6 +425,95 @@ test("allow-listed words combine, and pass through a sandbox wrapper", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Criterion 5b: path parity. Every route to a git segment refuses the same input
+// ---------------------------------------------------------------------------
+
+/**
+ * Every spelling that reaches a git segment carrying `GIT_PAGER=evil`, with the
+ * refusal code it gets. No wrapper is unwrapped by the classifier except the
+ * login-shell `-c` script (which inherits the line-scoped write) and the
+ * sandbox wrapper (whose leading assignments are read): the rest are refused
+ * whole, as opaque or as a binary with no rule.
+ */
+const PATHS: readonly (readonly [string, "unclassified" | "opaque"])[] = [
+  ["GIT_PAGER=evil git log", "unclassified"],
+  ["env GIT_PAGER=evil git log", "opaque"],
+  ["/usr/bin/env GIT_PAGER=evil git log", "opaque"],
+  ["env -i GIT_PAGER=evil git log", "opaque"],
+  ["env -i git log", "opaque"],
+  ["env -u GIT_DIR git log", "opaque"],
+  ["env -S 'GIT_PAGER=evil git log'", "opaque"],
+  ["env -- GIT_PAGER=evil git log", "opaque"],
+  ["command git log", "unclassified"],
+  ["command -p git log", "unclassified"],
+  ["GIT_PAGER=evil command git log", "unclassified"],
+  ["exec git log", "opaque"],
+  ["GIT_PAGER=evil exec git log", "opaque"],
+  ["builtin git log", "unclassified"],
+  ["nice git log", "unclassified"],
+  ["nohup git log", "opaque"],
+  ["timeout 5 git log", "opaque"],
+  ["time git log", "opaque"],
+  ["xargs git log", "opaque"],
+  ["sudo GIT_PAGER=evil git log", "opaque"],
+  ["export GIT_PAGER=evil; git log", "unclassified"],
+  ["export GIT_PAGER=evil && git log", "unclassified"],
+  ["( GIT_PAGER=evil git log )", "unclassified"],
+  ["{ GIT_PAGER=evil git log; }", "unclassified"],
+  ["echo $(GIT_PAGER=evil git log)", "unclassified"],
+  ['echo "$(GIT_PAGER=evil git log)"', "unclassified"],
+  ["GIT_PAGER=evil; echo $(git log)", "unclassified"],
+  ["printf -v GIT_PAGER %s evil; echo $(git log)", "unclassified"],
+  ["bash -lc 'GIT_PAGER=evil git log'", "unclassified"],
+  ["bash -lc 'export GIT_PAGER=evil; git log'", "unclassified"],
+  ["GIT_PAGER=evil bash -lc 'git log'", "opaque"],
+  ["GIT_PAGER=evil approval sandbox -- git log", "unclassified"],
+  ["approval sandbox -- env GIT_PAGER=evil git log", "opaque"],
+];
+
+/** git's sibling entry points: the push grammar, the refined rows, the reads. */
+const SIBLINGS: readonly string[] = [
+  "push origin lane",
+  "push --force origin main",
+  "push --delete origin lane",
+  "push",
+  "pull",
+  "rebase main",
+  "rebase -i main",
+  "commit -m x",
+  "commit --amend",
+  "reset --hard",
+  "branch -D lane",
+  "remote add x y",
+  "fetch origin",
+  "rm .approval/env",
+  "show HEAD:.approval/env",
+  "-C . log",
+  "status",
+  "log",
+  "diff",
+  "show",
+];
+
+test("path parity: every route to a git segment refuses GIT_PAGER=evil", () => {
+  for (const [command, code] of PATHS) {
+    assert.equal(failure(command).code, code, command);
+  }
+});
+
+test("path parity: the refusal covers every git entry point the classifier treats specially", () => {
+  for (const sub of SIBLINGS) {
+    for (const word of ["GIT_PAGER=evil", "GIT_DIR=/tmp/x", "GIT_CONFIG_COUNT=1", "FOO=1"]) {
+      assertUnclassified(`${word} git ${sub}`, `${nameOf(word)}=… in front of git`);
+    }
+    assert.equal(failure(`export GIT_PAGER=evil; git ${sub}`).code, "unclassified", sub);
+    assert.equal(failure(`printf -v GIT_PAGER %s evil; git ${sub}`).code, "unclassified", sub);
+    assert.equal(failure(`echo $(GIT_PAGER=evil git ${sub})`).code, "unclassified", sub);
+    assert.equal(failure(`bash -lc 'GIT_PAGER=evil git ${sub}'`).code, "unclassified", sub);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Criterion 6: the hook refuses under this repository's APPROVAL.md
 // ---------------------------------------------------------------------------
 
@@ -490,6 +579,11 @@ test("hook: under this repository's policy every steering spelling is refused an
     "printf -v GIT_PAGER %s evil; git log",
     "echo ${GIT_PAGER:=evil}; git log",
     "GIT_PAGER=evil git push origin lane",
+    "GIT_PAGER=evil git push --force origin main",
+    "GIT_PAGER=evil git pull",
+    "GIT_PAGER=evil git rebase main",
+    "GIT_PAGER=evil git commit --amend",
+    "GIT_DIR=/tmp/x git reset --hard",
   ];
   for (const command of refused) {
     const before = logText(dir);
@@ -501,7 +595,7 @@ test("hook: under this repository's policy every steering spelling is refused an
   }
 
   // The wrapper and export spellings are refused too (opaque or unclassified).
-  for (const command of ["env GIT_PAGER=evil git log", "export GIT_PAGER=evil; git log", "command git log"]) {
+  for (const [command] of PATHS) {
     const decided = verdict(dir, command);
     assert.notEqual(decided.permission, "allow", `${command}: ${decided.reason}`);
     assert.match(decided.reason, /^hook-(?:unclassified|opaque): /u, command);
