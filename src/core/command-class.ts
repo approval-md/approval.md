@@ -1569,6 +1569,15 @@ interface LexWord {
    * bytes; every other reader keeps reading `text` exactly as before.
    */
   exact: boolean;
+  /**
+   * Is this word an assignment to bash (APRV-523)? bash decides that on the
+   * word as WRITTEN, before quote removal: the name, an optional subscript, the
+   * `+` and the `=` must carry no quoting or escaping character, and the name
+   * no `$`, backtick or brace. {@link ASSIGNMENT} applied to the source
+   * spelling, not to `text`: a word whose name is quoted or escaped has the
+   * same `text` as an assignment and is a command word, the program bash runs.
+   */
+  assignment: boolean;
 }
 
 interface LexRedirect {
@@ -1815,7 +1824,8 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
-    return { text, quoted, substitutions, splits, expands, exact };
+    const assignment = ASSIGNMENT.test(command.slice(start, index));
+    return { text, quoted, substitutions, splits, expands, exact, assignment };
   };
 
   while (index < command.length) {
@@ -5421,7 +5431,16 @@ const INLINE_SCRIPT_FLAG = /^-[li]*c$/u;
  * - a substitution in any of the three words, whose effect happens before the
  *   shell even starts;
  * - a nested shell inside the script, refused by {@link ClassifierContext} when
- *   the recursion runs (the inner classification unwraps nothing).
+ *   the recursion runs (the inner classification unwraps nothing);
+ * - a shell word that is not the system's binary ({@link isSystemBinWord}): a
+ *   relative path, or an absolute one outside the system-bin directories, is
+ *   whatever program sits there, which its last path segment does not name
+ *   (APRV-523 fix round, review-b S1);
+ * - a shell word that is assignment-shaped, in its source spelling
+ *   ({@link LexWord.assignment}) or its dequoted text ({@link ASSIGNMENT}).
+ *   bash runs a word whose name is quoted or escaped as a program named by the
+ *   whole word, and {@link classifySegment} refuses that segment; unwrapping
+ *   it here would answer before that check runs.
  *
  * The BINDING does not move. `cli/hook.ts` binds the outer command and argv
  * exactly as APRV-362 built them; what this changes is only which text is
@@ -5436,6 +5455,10 @@ export function loginShellScript(segment: LexSegment): string | null {
   if (shell.substitutions.length > 0) return null;
   if (flag.substitutions.length > 0) return null;
   if (script.substitutions.length > 0) return null;
+  // APRV-523 fix round (review-b S1): only the system's shell, named as
+  // written. A bare name and a system-bin path keep the route.
+  if (shell.assignment || ASSIGNMENT.test(shell.text)) return null;
+  if (!isSystemBinWord(shell.text, shell.exact)) return null;
   const base = pathSegments(shell.text).slice(-1)[0] ?? shell.text;
   if (!UNWRAPPABLE_SHELLS.has(base)) return null;
   if (!INLINE_SCRIPT_FLAG.test(flag.text)) return null;
@@ -5465,6 +5488,14 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
  * precedes, so a cursor that stopped at `NAME+=v` took that word for the
  * program and judged the real one as its argument. The compound form
  * `NAME=(…)` never reaches here: the tokenizer refuses it ({@link lex}).
+ *
+ * bash applies this grammar to the word as written (APRV-523). Applied to the
+ * source spelling ({@link LexWord.assignment}) it is bash's rule: a quote, a
+ * backslash, a `$`, a backtick or a brace in the name is none of
+ * `[A-Za-z0-9_]`, so such a word is a command word. Applied to a word's
+ * dequoted `text` it says only that the word is assignment-SHAPED, which is
+ * what the deliberately broad line scans read ({@link gitEnvironmentWrite},
+ * {@link movesNameResolution}): they count both readings and only refuse more.
  */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 
@@ -6467,8 +6498,18 @@ const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bi
  * place? A bare name is looked up on PATH; a path in a system directory names
  * that file. `./date` or `/tmp/x/date` is whatever program sits there, and a
  * shape row (APRV-508) does not vouch for it.
+ *
+ * Only a word whose `text` is the bytes bash runs can be judged by its text
+ * (APRV-523 fix round 2, review-b S1-R and N6). A word that is not
+ * {@link LexWord.exact} still changes under expansion, and bash may then see a
+ * slash this text does not show; a backslash in `text` is a path separator to
+ * {@link pathSegments} but a plain character to bash, so the basename read
+ * from it is not the program's name. Either is refused here, before the bare
+ * name is admitted. Callers holding only a string pass no flag: theirs is
+ * already exact ({@link isExecCodeInterpreter} runs on the exact-only shape).
  */
-function isSystemBinWord(word: string): boolean {
+function isSystemBinWord(word: string, exact = true): boolean {
+  if (!exact || word.includes("\\")) return false;
   if (!word.includes("/")) return true;
   if (word.includes("..") || word.includes("//")) return false;
   return SYSTEM_BIN_DIRS.some((dir) => word.startsWith(dir) && !word.slice(dir.length).includes("/"));
@@ -6504,11 +6545,18 @@ function matchRule(
    * (APRV-510.) Computed by `classifySegment`, which holds the words.
    */
   execShaped = false,
+  /** Is `binWord` the bytes bash runs ({@link LexWord.exact})? (APRV-523 fix round 2, review-b N6.) */
+  binExact = true,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
+    if (
+      rule.shape !== undefined &&
+      (substituted || !isSystemBinWord(binWord, binExact) || !rule.shape(args, assignments))
+    ) {
+      continue;
+    }
     if (rule.execCode === true && !execShaped) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
@@ -6690,6 +6738,24 @@ function classifySegment(
   // other program and on its own: its text does not say what value the
   // command inherits. So does a command word that opens like a subscripted
   // assignment the grammar cannot read in full ({@link ASSIGNMENT_LIKE}).
+  //
+  // APRV-523. The cursor above reads past every assignment-SHAPED word, judged
+  // on its dequoted text. bash reads past only the words it accepts as
+  // assignments as written ({@link LexWord.assignment}): a word whose name is
+  // quoted or escaped is the program bash runs, named by the whole word, and
+  // the word after it is that program's argument. Where the two stop at
+  // different words this classifier would judge a program that does not run,
+  // so the segment is `unclassified`. No program this table admits is named
+  // like an assignment, so the word is refused, not resolved.
+  const bashCursor = bashAssignmentCount(segment.words);
+  if (bashCursor !== assignments.length) {
+    const runs = words[Math.min(bashCursor, assignments.length)] as string;
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${assignmentHead(runs)}…: a word whose name is quoted or escaped is a command word to bash, not an assignment`,
+    };
+  }
   const unplain = assignments.find((word) => !PLAIN_ASSIGNMENT.test(word));
   if (unplain !== undefined) {
     return {
@@ -6949,7 +7015,8 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null);
+  const binExact = (segment.words[cursor] as LexWord).exact;
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
     return {
       ok: false,
@@ -7299,6 +7366,20 @@ export function commandSegmentWriteTargets(command: string): string[][] | null {
 }
 
 /**
+ * How many words open the segment that bash takes as assignments, judged on
+ * each word as written ({@link LexWord.assignment}, APRV-523). The word after
+ * them is the program bash runs: a word whose name is quoted or escaped is
+ * that program, not an assignment, so the shapes below name it as the binary.
+ * On a line the classifier answers the count equals its own cursor's, because
+ * {@link classifySegment} refuses any segment where the two differ.
+ */
+function bashAssignmentCount(words: readonly LexWord[]): number {
+  let cursor = 0;
+  while (cursor < words.length && (words[cursor] as LexWord).assignment) cursor += 1;
+  return cursor;
+}
+
+/**
  * Every segment of `command` with its binary (or `null`), its arguments and the
  * paths it writes through a redirection, from ONE lex of the whole command
  * (APRV-445 recheck). Lexing a segment's text on its own fails for a heredoc,
@@ -7344,8 +7425,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
   if (!lexed.ok) return null;
   return lexed.segments.map((segment) => {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
     const script = loginShellScript(segment);
     return {
       text: segment.text,
@@ -7391,8 +7471,7 @@ export function commandSegmentWords(command: string): CommandSegmentWords[] | nu
   const out: CommandSegmentWords[] = [];
   for (const segment of lexed.segments) {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
     const bin = words[cursor];
     if (bin === undefined) continue;
     out.push({ text: segment.text, bin, args: words.slice(cursor + 1) });

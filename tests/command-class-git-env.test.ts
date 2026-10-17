@@ -783,6 +783,44 @@ function* prefixes(alphabet: readonly string[], max: number): Generator<string[]
 const ONE_PER_NAME: readonly string[] = [...new Map(STEERING.map((word) => [nameOf(word), word])).values()];
 
 /**
+ * APRV-523: assignment-shaped words bash runs as a command word, because the
+ * name is quoted or escaped (or the `=` is, or the whole word is), each for a
+ * steering, an allowed, an ordinary and a program-named assignment.
+ */
+function quotedNameSpellings(word: string): string[] {
+  const equals = word.indexOf("=");
+  const name = word.slice(0, equals);
+  const value = word.slice(equals + 1);
+  return [
+    `"${name}"=${value}`,
+    `'${name}'=${value}`,
+    `\\${name}=${value}`,
+    `${name.slice(0, 1)}"${name.slice(1)}"=${value}`,
+    `${name}"="${value}`,
+    `${name}\\=${value}`,
+    `"${name}=${value}"`,
+    `"${name}"+=${value}`,
+    `"${name}"[0]=${value}`,
+  ];
+}
+
+const QUOTED_NAMES: readonly string[] = [
+  "GIT_PAGER=evil",
+  "GIT_PAGER=cat",
+  "GIT_DIR=/tmp/x/.git",
+  "PATH=/tmp/x",
+  "LANG=C",
+  "n=5",
+  "n=/tmp/x/cat",
+].flatMap(quotedNameSpellings);
+
+/** Does the word read as an assignment once its quotes and backslashes go, but not as written? */
+function hasQuotedName(word: string): boolean {
+  const grammar = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
+  return grammar.test(word.replace(/["'\\]/gu, "")) && !grammar.test(word);
+}
+
+/**
  * ...and every other assignment spelling (review-b M1): the append and the
  * subscript of each of those, the program-named values, the split subscripts
  * (a `GIT_PAGER[x` token joins a `y]=evil` token at depth 2) and the compound
@@ -801,6 +839,7 @@ const CORPUS_ALPHABET: readonly string[] = [
   "n+=1",
   "n[0]=1",
   ...COMPOUND,
+  ...QUOTED_NAMES,
 ];
 
 const CORPUS_TAILS: readonly string[] = [
@@ -836,6 +875,7 @@ const LINE_WRITES: readonly string[] = [
   "GCONV_PATH=/tmp/x",
   "n+=5",
   "n[0]=5",
+  ...QUOTED_NAMES,
 ];
 
 function* corpus(depth: number): Generator<string> {
@@ -871,6 +911,8 @@ function carriesRefusedEnvironment(command: string): boolean {
   // review-b M1: a compound assignment, refused by the tokenizer.
   if (/=\(/u.test(command)) return true;
   const words = command.split(/[\s;&]+/u).filter((word) => word !== "");
+  // APRV-523: a word bash runs as a program because its name is quoted or escaped.
+  if (words.some(hasQuotedName)) return true;
   // Any append or subscripted assignment word, or a split subscript, anywhere
   // a command word could stand.
   if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+=)/u.test(word))) return true;
@@ -928,4 +970,172 @@ test("differential: stricter-only against the base classifier", async (t) => {
   const hole = base.classifyCommand("GIT_PAGER=evil git log");
   assert.equal(hole.ok, true, "the base classifier answered the hole");
   assert.ok(counts.okToRefused > 0);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-523: a quoted or escaped name, stricter-only against #652 and main
+// ---------------------------------------------------------------------------
+
+/** Commands other than git: the class is not git's, so its reads and writes are judged too. */
+const GENERAL_ALPHABET: readonly string[] = [
+  ...["n=5", "n=/tmp/x/cat", "PATH=/tmp/x", "LANG=C", "HOME=/tmp/x"].flatMap(quotedNameSpellings),
+  "n=5",
+  "LANG=C",
+  'n="5"',
+  "n='a b'",
+  "n+=5",
+];
+
+const GENERAL_TAILS: readonly string[] = [
+  "",
+  "ls",
+  "cat f",
+  "wc -l f",
+  "echo x",
+  "rm f",
+  "cat f > out.txt",
+  "cat f > APPROVAL.md",
+  "python3 -c pass",
+];
+
+function* generalCorpus(depth: number): Generator<string> {
+  for (const prefix of prefixes(GENERAL_ALPHABET, depth)) {
+    for (const tail of GENERAL_TAILS) {
+      const command = [...prefix, tail].filter((word) => word !== "").join(" ");
+      if (command === "") continue;
+      yield command;
+      yield `${command}; ls`;
+      yield `ls && ${command}`;
+      yield `echo "$(${command})"`;
+    }
+  }
+}
+
+/**
+ * Login-shell wrappers, `[shell, flag, script]` (review-b S1 and N6): the shell
+ * word bare, at a system-bin path, at any other path, and assignment-shaped
+ * with a plain, quoted or escaped name whose value ends in a shell name.
+ */
+const WRAPPER_SHELLS: readonly string[] = [
+  "bash",
+  "sh",
+  "zsh",
+  '"bash"',
+  "/bin/bash",
+  "/usr/bin/sh",
+  "/usr/local/bin/zsh",
+  "x/bash",
+  "./sh",
+  "/tmp/x/bash",
+  "/tmp/x/bin/zsh",
+  "n=x/bash",
+  ...quotedNameSpellings("n=x/bash"),
+  ...quotedNameSpellings("n=/bin/bash"),
+  // Fix round 2 (review-b S1-R): a literal backslash before the shell name,
+  // after an expansion or a plain prefix.
+  "$d'\\'bash",
+  "$d\\\\zsh",
+  "x'\\'bash",
+  "x\\\\sh",
+];
+
+/** Shape-row binaries (APRV-508), bare, at a system path and spelled as above (review-b N6). */
+const SHAPE_ROW_BINS: readonly string[] = ["date", "/bin/date", "hostname", "$d'\\'date", "x'\\'date", "$d/date", "x\\\\hostname"];
+
+function* wrapperCorpus(): Generator<string> {
+  for (const shell of WRAPPER_SHELLS) {
+    for (const flag of ["-c", "-lc", "-ic"]) {
+      for (const script of ["ls", "cat f", "wc -l f", "rm f", "git log", "cat f > out.txt"]) {
+        const command = `${shell} ${flag} '${script}'`;
+        yield command;
+        yield `${command}; ls`;
+        yield `ls && ${command}`;
+        yield `m=6 ${command}`;
+      }
+    }
+  }
+  for (const bin of SHAPE_ROW_BINS) {
+    for (const args of ["", "-u", "+%s", "--version"]) {
+      const command = [bin, args].filter((word) => word !== "").join(" ");
+      yield command;
+      yield `TZ=UTC ${command}`;
+      yield `ls && ${command}`;
+    }
+  }
+}
+
+/** A command word with an expansion or a literal backslash, and no quoted assignment name (fix round 2). */
+function isInexactBinWord(word: string): boolean {
+  return /[$\\]/u.test(word) && !hasQuotedName(word);
+}
+
+/** A shell spelled by a path outside the system-bin directories, which the wrapper rule no longer unwraps. */
+function isPathSpelledShell(word: string): boolean {
+  const text = word.replace(/["'\\]/gu, "");
+  const value = text.includes("=") ? text.slice(text.indexOf("=") + 1) : text;
+  if (!/\/(?:bash|sh|zsh|dash|ksh|fish)$/u.test(text)) return false;
+  return text !== value || !/^\/(?:usr\/(?:local\/)?)?s?bin\/[^/]+$/u.test(value);
+}
+
+test("differential: a quoted or escaped name is stricter-only against #652 and main (APRV-523)", async (t) => {
+  const bases = [
+    { label: "base", path: process.env["APPROVAL_DIFF_QUOTED_BASE"] },
+    { label: "main", path: process.env["APPROVAL_DIFF_QUOTED_MAIN"] },
+  ].filter((entry): entry is { label: string; path: string } => entry.path !== undefined && entry.path !== "");
+  if (bases.length === 0) {
+    t.skip("APPROVAL_DIFF_QUOTED_BASE / APPROVAL_DIFF_QUOTED_MAIN are not set (paths to those builds' dist/src/core/command-class.js)");
+    return;
+  }
+  const depth = Number(process.env["APPROVAL_DIFF_DEPTH"] ?? "2");
+  for (const { label, path } of bases) {
+    const base = (await import(pathToFileURL(path).href)) as { classifyCommand: (command: string) => CommandClassification };
+    const counts = { total: 0, unchanged: 0, okToRefused: 0, refusedToRefused: 0, loosened: 0, reclassified: 0 };
+    const problems: string[] = [];
+    const commands = function* (): Generator<string> {
+      yield* corpus(depth);
+      yield* generalCorpus(depth);
+      yield* wrapperCorpus();
+    };
+    for (const command of commands()) {
+      counts.total += 1;
+      const before = base.classifyCommand(command);
+      const now = classifyCommand(command);
+      if (same(before, now)) {
+        counts.unchanged += 1;
+        continue;
+      }
+      // Against #652 every move carries a quoted name; against main, #652's own moves join them.
+      const words = command.split(/[\s;&()]+/u).filter((word) => word !== "");
+      const fromAprv521 =
+        carriesRefusedEnvironment(command) || words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+=)/u.test(word));
+      // The fix round (review-b S1): a path-spelled shell is no longer unwrapped.
+      // Fix round 2 (review-b S1-R, N6): so is a word whose text is not the bytes bash runs.
+      const pathShell = words.some(isPathSpelledShell) || words.some(isInexactBinWord);
+      const carried = words.some(hasQuotedName) || pathShell || (label === "main" && fromAprv521);
+      if (!carried) problems.push(`${label}: moved without a quoted name: ${command}`);
+      if (now.ok && !before.ok) {
+        counts.loosened += 1;
+        problems.push(`${label}: loosened: ${command}`);
+      } else if (now.ok && before.ok) {
+        counts.reclassified += 1;
+        problems.push(`${label}: reclassified: ${command}`);
+      } else if (!now.ok && before.ok) {
+        counts.okToRefused += 1;
+        const expected = /=\(/u.test(command) ? "unparseable" : "unclassified";
+        // A path-spelled shell, kept wrapped, is refused as the opaque shell it is.
+        const accepted = now.code === expected || (pathShell && !words.some(hasQuotedName) && now.code === "opaque");
+        if (!accepted) problems.push(`${label}: refused as ${now.code}: ${command}`);
+      } else {
+        counts.refusedToRefused += 1;
+      }
+    }
+    t.diagnostic(`${label} depth ${String(depth)}: ${JSON.stringify(counts)}`);
+    assert.deepEqual(problems.slice(0, 20), []);
+    assert.equal(counts.loosened, 0);
+    assert.equal(counts.reclassified, 0);
+    // The class is in the corpus and this base answered it.
+    const hole = base.classifyCommand('"n"=5 ls');
+    assert.equal(hole.ok, true, `the ${label} classifier answered the class`);
+    assert.ok(counts.okToRefused > 0);
+  }
 });

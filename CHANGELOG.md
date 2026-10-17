@@ -216,6 +216,53 @@ on the hook for enforcement.
   272,300 of 1,533,105 generated lines to a refusal and loosened or
   reclassified none. Cost: `n+=1` and other append or array writes now need
   a person.
+- **An assignment-shaped word whose name is quoted or escaped is the command
+  bash runs (APRV-523).** bash decides whether a word in front of a command is
+  an assignment on the word as written: the name, the `+` and the `=` must
+  carry no quote or backslash, and the name no `$`, backtick or brace. A word
+  that fails that test is the program bash runs, named by the whole word, and
+  the next word is its first argument. The classifier applied the same grammar
+  to the word after quote removal, so it read past such a word as an
+  assignment and judged the next word as the program; the two disagreed about
+  what runs. This was on main and 0.4.5, in front of every program, git
+  included, and with every assignment spelling. The grammar is now read on
+  the source spelling. A segment where the classifier's reading and bash's
+  stop at different words is `unclassified` (the hook refuses it), on its own,
+  after a real assignment, and inside a substitution; a protected redirect
+  still answers first, as for the plain spelling. One path ran before that
+  check (review-b S1). A login-shell wrapper, exactly a shell, an
+  inline-script flag and a script, was unwrapped and answered with the
+  script's class whenever the first word's last path segment named a shell.
+  That held for an assignment-shaped first word with a quoted or escaped name
+  and for a relative path, so the script's class was given to a program the
+  agent can place. A word whose slash came from a parameter expansion, with a
+  literal backslash before the shell name, took the same route (review-b
+  S1-R): the classifier read the backslash as a path separator and saw no
+  slash, while bash ran a path. The wrapper is now unwrapped only when its
+  shell word is the system's, named as written: a bare name, or a path in
+  `/bin`, `/usr/bin`, `/usr/local/bin`, `/sbin` or `/usr/sbin`, with no
+  assignment shape, no backslash, and nothing the shell would still expand.
+  Every other shell word keeps the wrapper opaque or `unclassified`. The
+  same written-as-run test now gates the date, hostname and other shape rows
+  (APRV-508), whose binary had the same backslash reading. The segment shapes the hook,
+  the approval breakdown and the channels read now name the word bash runs as
+  the binary. A quoted value, or a quoted subscript, keeps the word an
+  assignment, unchanged. Stricter only: a depth-2 differential over
+  2,421,383 generated lines (#652's git corpus, with the quoted and escaped
+  spellings added to its alphabet, and a corpus of other programs) moved
+  51,226 from an answer to `unclassified` against #652's head (3a9c33c3) and
+  586,454 against main (2179e128, #652's moves included), and loosened or
+  reclassified none. With login-shell wrappers, the backslash and expansion
+  spellings, and shape-row binaries added to that corpus (2,423,915 lines),
+  it moved 52,712 against main after #653 (7ab156eb), 1,242 against this
+  change before the wrapper rule (e0cb9923, measured before the backslash
+  rows were added) and 244 against the first wrapper rule (d6752ded), and
+  loosened or reclassified none. Cost: none expected for the quoted name; an
+  agent has no reason to quote the name of an assignment. A shell spelled by
+  any other path (a relative one, or a Homebrew shell under `/opt`), or by a
+  word with an expansion or a backslash in it, is no longer unwrapped, and
+  its inline script needs a person; a shape-row binary spelled that way is
+  `unclassified`.
 
 ### Harnesses
 
