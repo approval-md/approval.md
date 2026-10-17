@@ -3392,6 +3392,23 @@ function recordedHarnessVersions(
 }
 
 /**
+ * The fix line for one harness whose binary changed with no gate exercised since.
+ *
+ * Built from the kind that MISMATCHED, never from whichever harness happens to be
+ * registered first: a checkout that registers Claude Code and Hermes and sees
+ * only Hermes change must be told to exercise the Hermes hook. Hermes has its own
+ * line because its event is `pre_tool_call` rather than `PreToolUse`, its hook
+ * refuses anything that registers until `--harness-cap` is stated (APRV-423), and
+ * docs/hermes-hook.md carries no self-test section to point at.
+ */
+function harnessSelfTestFix(kind: HarnessKind, where: string): string {
+  if (kind === "hermes") {
+    return `approval hook hermes --dir ${where} --harness-cap 300s < one pre_tool_call event for a supervised-class command, re-run on the same Hermes build. State the --harness-cap your \`$HERMES_HOME/config.yaml\` entry states (300s for the entry in docs/hermes-hook.md, "Installing it"; that doc has no self-test section). It prompts nobody and writes one task.registered carrying the installed version.`;
+  }
+  return `approval hook ${kind} --dir ${where} < one PreToolUse event for a supervised-class command, the self-test in docs/${kind === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`;
+}
+
+/**
  * Has the harness binary changed under the hook since the log last saw it?
  *
  * ## What this row is for
@@ -3407,8 +3424,10 @@ function recordedHarnessVersions(
  * `<binary> --version` says now, and what the last hook-written record says the
  * binary was. A difference is not evidence of a fault, since most upgrades are
  * fine. It is evidence that the gate has not been exercised since the binary
- * changed, and the remedy is to exercise it. The self-test in
- * `docs/claude-code-hook.md` does that and costs nobody a prompt.
+ * changed, and the remedy is to exercise it. The fix names that remedy for each
+ * harness that changed ({@link harnessSelfTestFix}): the self-test in
+ * `docs/claude-code-hook.md` or `docs/cursor-hook.md`, or for Hermes one
+ * `pre_tool_call` through the same hook command. None of them costs a prompt.
  *
  * ## Why it fails rather than warns
  *
@@ -3442,11 +3461,11 @@ function recordedHarnessVersions(
  * is not. That belongs here rather than in a row of its own because both findings
  * answer one question — is the binary hosting this hook in a state where the gate
  * is known to fire — and a reader who sees this row green has been told both. It
- * is read from `<binary> --version` rather than from a record, because Hermes's
- * build stamp sits behind a non-ASCII separator that the write boundary refuses,
- * so no record can ever carry it. The comparison is on the BUILD DATE and the
- * upstream commit: the two builds that differ on this behaviour report the same
- * semver.
+ * is read from `<binary> --version` rather than from a record, because a record
+ * carries only the printable-ASCII prefix of Hermes's line (APRV-419): the build
+ * date survives, and the upstream commit behind the non-ASCII separator does not.
+ * The comparison is on the BUILD DATE and the upstream commit: the two builds
+ * that differ on this behaviour report the same semver.
  */
 function checkHarnessVersion(dir: string, records: readonly EventRecord[]): DoctorCheck {
   const check = "harness-version-unverified";
@@ -3463,6 +3482,7 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
 
   const recorded = recordedHarnessVersions(records);
   const mismatched: string[] = [];
+  const mismatchedKinds: HarnessKind[] = [];
   const matched: string[] = [];
   const unknown: string[] = [];
   // APRV-415. The VERSION FLOOR, which is a different question from the rest of
@@ -3473,10 +3493,11 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
   // not have stopped anything in the first place.
   //
   // It is read off the INSTALLED build rather than off a record, and that is not
-  // a shortcut: Hermes prints its build stamp behind a non-ASCII separator, so
-  // the write boundary's printable-ASCII rule (SPEC.md §11.1 invariant 3) refuses
-  // the whole line and no record ever carries a Hermes version. The floor would be
-  // permanently unknown if it waited for one.
+  // a shortcut: Hermes prints its upstream commit behind a non-ASCII separator,
+  // and the write boundary keeps only the printable-ASCII prefix of the line
+  // (APRV-419; SPEC.md §11.1 invariant 3), so a record carries the build date and
+  // never the commit. The floor's commit clause would be permanently unknown if
+  // it waited for a record, and a record predating APRV-419 carries nothing.
   const floor: string[] = [];
   const belowFloor: string[] = [];
   if (kinds.includes("hermes")) {
@@ -3522,6 +3543,7 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     mismatched.push(
       `${kind} is installed at ${JSON.stringify(installed)} and the last hook-written record (seq ${String(last.seq)}) was issued by ${JSON.stringify(last.version)}`,
     );
+    mismatchedKinds.push(kind);
   }
 
   // APRV-415: the floor is reported FIRST when it is breached, because it is the
@@ -3541,14 +3563,13 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     };
   }
   if (mismatched.length > 0) {
-    const first = kinds[0] as HarnessKind;
     return {
       check,
       status: "fail",
       detail: `the harness binary changed and the gate has not been exercised since: ${mismatched.join("; ")}. A release can change the hook envelope semantics, so until one record is written under the new binary nothing here shows the hook still fires. The recorded version is self-reported and reduces nothing: a match would not have proved the hook fired either, and what a mismatch says is that nobody has looked.${
         floor.length === 0 ? "" : ` Separately: ${floor.join("; ")}.`
       }`,
-      fix: `approval hook ${first} --dir ${where} < one PreToolUse event for a supervised-class command — the self-test in docs/${first === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`,
+      fix: mismatchedKinds.map((kind) => harnessSelfTestFix(kind, where)).join(" "),
     };
   }
   if (matched.length > 0) {

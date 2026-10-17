@@ -33,6 +33,16 @@ Read the next three sections before you commit anything.
 > notices, because a hook cannot report from inside a failure that did not stop
 > anything.
 >
+> **What a record keeps of that line (APRV-419).** The `harness_version` a
+> Hermes `task.registered` or `gate.bypassed` carries is the line's
+> printable-ASCII prefix, trimmed: `Hermes Agent v0.21.3 (2026.9.14)`. The
+> middle dot is U+00B7, outside the printable-ASCII rule the log's write boundary
+> applies (SPEC.md §11.1 invariant 3), so it and everything after it, the
+> upstream commit included, are cut. Before APRV-419 the whole line was refused
+> and no Hermes record carried a version. The doctor row now compares the
+> recorded prefix against the installed one like any other harness; the floor
+> above is still read from the full installed line, because it needs the commit.
+>
 > **A `post_tool_call` event is NOT evidence the tool ran.** It fired 29ms after
 > an exit-2 deny and again after the refused hang. Hermes reports the end of its
 > own dispatch, not the end of an execution, so the post half reads an outcome
