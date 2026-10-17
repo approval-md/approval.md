@@ -81,17 +81,27 @@ function git(cwd: string, args: readonly string[], input?: string): Ran {
 /** The same, without blocking: the differential runs several fixtures at once. */
 function gitAsync(cwd: string, args: readonly string[], input?: string): Promise<Ran> {
   return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd, env: ENV, stdio: ["pipe", "pipe", "pipe"] });
+    // stdin is a pipe only when there is input to give: `git push` never reads
+    // it, and a write into a pipe git already closed is an EPIPE.
+    const child = spawn("git", args, { cwd, env: ENV, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    child.on("close", (status) => {
+    let settled = false;
+    const settle = (ran: Ran): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
-    });
-    child.stdin.end(input ?? "");
+      resolve(ran);
+    };
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    child.on("error", (error) => settle({ status: null, stdout, stderr: `${stderr}${String(error)}` }));
+    child.on("close", (status) => settle({ status, stdout, stderr }));
+    if (input !== undefined && child.stdin !== null) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
   });
 }
 
