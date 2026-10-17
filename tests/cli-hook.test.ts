@@ -4740,7 +4740,7 @@ test("APRV-410: the timeout deny names who withdraws and what a late grant does"
   assert.match(verdict.reason, /stay open for the 5m retry grace/u);
   assert.match(
     verdict.reason,
-    /NEXT GATED TOOL CALL THIS ACTOR \(agent:claude-code\) MAKES WHOSE CLASS IS NOT A read\.\* CLASS/u,
+    /NEXT NON-READ TOOL CALL THIS ACTOR \(agent:claude-code\) MAKES THAT THE GATE ADMITS OR ASKS ABOUT/u,
   );
   assert.match(verdict.reason, /every class is a read leaves the question pending \(APRV-464\)/u);
   assert.match(verdict.reason, /requester's own \(APRV-106\)/u);
@@ -5000,6 +5000,72 @@ test("APRV-410 AC2 (D-4): past an operator's shorter grace, a write withdraws an
   assert.match(`${late.stdout}${late.stderr}`, /request-withdrawn/u);
   assert.equal(allRecords(dir).some((record) => record["event"] === "approval.granted"), false);
   assert.match(refusedDecisionLine("request-withdrawn"), /^Withdrawn/u);
+  assertClean(dir);
+});
+
+test("APRV-410 residual pin (aprv#646 M1): past an operator's grace a read withdraws nothing, so a tap is recorded as a grant that carries nothing", async () => {
+  // NOT proof of AC2: this pins the residual Carter accepted when AC2 was
+  // ticked (aprv#646 M1, decision (a); refute R4b).
+  // With an operator grace shorter than the TTL, a read past that grace takes
+  // nothing back (APRV-464), so a tap after it lands as an ordinary
+  // approval.granted (main refused it request-withdrawn, because the read had
+  // withdrawn the question first). What keeps it harmless is APRV-410's carry
+  // bound: the identical retry opens a fresh key and asks again. A policy with
+  // no approval_ttl has the same shape under the 5-minute default grace.
+  const dir = ready(POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "30s"'));
+  const key = "hook:sess-1:tu-r4b-a:deps.add";
+  const grace = ["--retry-grace", "2s"] as const;
+  const first = verdictOf(
+    runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", ...grace],
+      dir,
+      bashEvent("npm install left-pad", "tu-r4b-a"),
+    ),
+  );
+  assert.equal(first.permission, "deny", first.reason);
+  const requestedAt = requestedAtMs(dir, key);
+
+  while (Date.now() <= requestedAt + 3_500) await delay(50);
+  const reader = verdictOf(
+    runCli(["hook", "claude-code", ...grace], dir, bashEvent(READ_COMMAND, "tu-r4b-read")),
+  );
+  assert.equal(reader.permission, "allow", reader.reason);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u, "a read withdrew it");
+
+  const late = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+  assert.equal(late.code, 0, `${late.stdout}${late.stderr}`);
+  const granted = allRecords(dir).filter((record) => record["event"] === "approval.granted");
+  assert.equal(granted.length, 1, "the late tap is recorded as a grant");
+  assert.equal((granted[0] as Record<string, unknown>)["action_key"], key);
+
+  // The identical retry carries nothing: it asks again under a fresh key.
+  const retryKey = "hook:sess-1:tu-r4b-retry:deps.add";
+  const retry = verdictOf(
+    runCli(
+      ["hook", "claude-code", "--timeout", "100ms", "--interval", "50ms", ...grace],
+      dir,
+      bashEvent("npm install left-pad", "tu-r4b-retry"),
+    ),
+  );
+  assert.equal(retry.permission, "deny", retry.reason);
+  assert.match(retry.reason, /^hook-timeout: /u);
+  const records = allRecords(dir);
+  assert.deepEqual(
+    records
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    [key, retryKey],
+    "the retry opened a question of its own",
+  );
+  assert.equal(
+    records.some(
+      (record) =>
+        record["event"] === "execution.started" &&
+        (record["action_key"] === key || record["action_key"] === retryKey),
+    ),
+    false,
+    "the late grant authorized no execution",
+  );
   assertClean(dir);
 });
 

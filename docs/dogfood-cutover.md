@@ -395,7 +395,8 @@ tell the two apart: it keeps nothing across a restart, on purpose.
 
 **The live one is on top, and the dead ones are one message** (APRV-425). A
 restart no longer sends a message per pending request. The requests nobody can
-still be holding — older than the hook's wait plus its retry grace — arrive as
+still be holding — past their approval window (APRV-464: the request's own
+expiry, or for one with no TTL the hook's wait plus its retry grace) — arrive as
 one summary with a single `Reject all` (APRV-287), and so do the ones a newer
 pending request has superseded: two requests naming the same payload bytes and
 the same class are two askings of one question, and the older one's session is

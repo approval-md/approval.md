@@ -19,18 +19,22 @@ before a tag.
 
 - **A read no longer takes back a pending question, and the default retry
   grace ends at the policy's TTL (APRV-464).** Past the grace, a hook's
-  pending request is withdrawn only by the same actor's next gated tool call
-  whose class is not `read.*` (or an explicit withdraw); an autonomous `grep`
-  or `ls` leaves it pending. With no `--retry-grace`, the grace is the
-  policy's `approval_ttl` less the wait, so past the grace the request has
-  expired; under a policy with no TTL the default stays 5 minutes. Pass
-  `--retry-grace 5m` for the old behaviour. The `hook-timeout` deny names the
-  window and which later calls withdraw. SPEC.md "A harness wait that
-  expires" is amended (pending sign-off).
+  pending request is withdrawn only by the same actor's next non-read tool
+  call that the gate admits or asks about (or an explicit withdraw); an
+  autonomous `grep` or `ls` leaves it pending. With no `--retry-grace`, the
+  grace is the policy's `approval_ttl` less the wait, so past the grace the
+  request has expired; under a policy with no TTL the default stays 5 minutes,
+  and a tap after it is recorded as a grant that authorizes nothing. Pass
+  `--retry-grace 5m` for the old grace; reads still never withdraw. The
+  `hook-timeout` deny names the window and which later calls withdraw.
+  SPEC.md "A harness wait that expires" is amended (pending sign-off).
 - **A late tap meets an existing refusal (APRV-410 AC2).** Under the default
   grace a decision past the grace is refused `expired` and `approval.expired`
   is recorded; after a withdrawal it is refused `request-withdrawn`. No new
-  refusal code.
+  refusal code. Two accepted residuals authorize nothing: a tap past an
+  operator-shortened `--retry-grace`, or past the 5-minute default grace under
+  a policy with no `approval_ttl`, before any withdrawal, is recorded as a
+  grant, and the retry asks again.
 
 ## 0.4.4 — 2026-10-12
 

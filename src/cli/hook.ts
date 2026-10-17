@@ -5276,13 +5276,15 @@ function* gateHarnessSteps(
         ? ""
         : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
     // APRV-464. Which later calls withdraw, named in the deny itself (AC3): a
-    // gated call of this actor whose class is not a read. Under the default
-    // grace, which ends at the policy's TTL, no later call withdraws before the
-    // request expires, so that form says the window ends at the TTL instead and
-    // names the refusal a late tap meets (`expired`, APRV-410 AC2).
+    // non-read call of this actor that the gate admits or asks about (a call
+    // refused before either sweep, such as human-only, withdraws nothing).
+    // Under the default grace, which ends at the policy's TTL, no later call
+    // withdraws before the request expires, so that form says the window ends
+    // at the TTL instead and names the refusal a late tap meets (`expired`,
+    // APRV-410 AC2).
     const past = run.graceFromTtl
-      ? ` The grace ends when the policy's approval_ttl does (APRV-464), so past it the request has expired: a decision then is refused (expired) rather than granted, the runtime records the lapse as approval.expired, and a retry asks the question fresh. Nothing takes the question back before then: a read never does, no later tool call of this actor (${run.actor}) does under this default grace, and a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you.`
-      : ` Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES WHOSE CLASS IS NOT A read.* CLASS, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you, and a call whose every class is a read leaves the question pending (APRV-464). Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant; it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).`;
+      ? ` The grace ends when the policy's approval_ttl does (APRV-464), so past it the request has expired: a decision then is refused (expired) rather than granted, the runtime records the lapse as approval.expired, and a retry asks the question fresh. Nothing takes the question back before then: a read never does, no later tool call of this actor (${run.actor}) under the same grace does, and a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you.`
+      : ` Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT NON-READ TOOL CALL THIS ACTOR (${run.actor}) MAKES THAT THE GATE ADMITS OR ASKS ABOUT, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you, and a call whose every class is a read leaves the question pending (APRV-464). Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant; it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).`;
     return sayDeny(
       "hook-timeout",
       `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one.${past}${stillLagging}`,

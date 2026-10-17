@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude-nonav'
 created_date: '2026-10-04 09:23'
-updated_date: '2026-10-17 01:33'
+updated_date: '2026-10-17 02:44'
 labels:
   - ergonomics
 dependencies: []
@@ -65,4 +65,6 @@ Planted-bug check: with mayWithdrawAbandoned forced true and the default grace f
 npm run typecheck exit 0; npm run lint (oxlint src tests) exit 0; npm run conformance exit 0, vectors 669 passed 669 failed 0 controls 290.
 node scripts/run-tests.mjs --only cli-hook harness-cap-ttl cli-hook-hermes cli-hook-codex gate harness-enum serve-concurrency hermes-wait-interrupt harness-wait-interrupt cli-hook-hermes-rules channels-telegram codex-bridge: tests 674, pass 674, fail 0, exit 0.
 Status stays In Progress until the PR merges (the post-merge sweep closes it, as for APRV-479/503). Repository has no Postgres suite; the log is the JSONL file, and the tests above run through the real append path.
+
+2026-10-17 fix round 1 (aprv#646 refute, 1 M / 5 S / 6 N). SPEC paragraph (still pending sign-off): the withdrawal deadline is now 'the requester's next non-read call the gate admits or asks about' (S4: a call the hook refuses before either sweep, such as human-only, sandbox-required or the unattended guard, withdraws nothing, as before this branch), and a read is 'a call every class of which is read or a read.* class (a read, as §10.2 counts one)', any other class making it a non-read call (S3, the mixed-call contradiction; N6 resolved by naming bare read as a read, which is what §10.2 and isSideEffectingClass already say, so no code change). hook-timeout deny: 'BY THE NEXT NON-READ TOOL CALL THIS ACTOR (<actor>) MAKES THAT THE GATE ADMITS OR ASKS ABOUT'; the default-grace form says 'no later tool call of this actor under the same grace does' (S5: a later call with its own shorter --retry-grace can still sweep, since abandonedRequests judges against the sweeping call's grace). Telegram first-cycle collapse (S2): staleness comes from the request's own expiry (ttl_remaining_ms, the effective TTL) and falls back to the hook's wait plus the 5m no-TTL grace only when nothing expires the request; the digest says 'older than their approval window' and no longer claims nothing is waiting or that a decision can still authorize a retry. Docs name the second residual (no-TTL policy, M1); CHANGELOG says --retry-grace 5m restores the old grace only (N5); harness-wait.ts states the one-millisecond boundary (N4). Left: N1, N2, N3 (each needs logic, not a wording fix). M1: Carter's decision (a), accept the no-TTL residual with no new code (D-4); it is named in both hook docs and the CHANGELOG, and APRV-410 AC2 stays ticked with the note there.
 <!-- SECTION:NOTES:END -->

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-nonav'
 created_date: '2026-09-20 19:06'
-updated_date: '2026-10-17 01:35'
+updated_date: '2026-10-17 04:10'
 labels:
   - hook
   - log
@@ -106,6 +106,8 @@ CI verdict on PR #538 (run 35676814830): completed / success, gh pr checks 538 -
 2026-10-17 (claude-nonav, branch nonav/aprv-464-withdraw-on-non-read): AC2 met with the refusal codes that already exist, per Carter's D-4 ruling (no new member of channel_decision_refusal_codes, no SPEC 11.2 row, no recorded retry window), on top of APRV-464 in the same branch. Under the default retry grace, which APRV-464 ends at the policy TTL, a decision past the grace is a decision on an expired request: decide refuses expired, materialises approval.expired under a system: actor, and every channel tells the sender 'Expired - the approval window has closed' (refusedDecisionLine). A decision after a withdrawal refuses request-withdrawn, nothing is appended, and the channel says 'Withdrawn ... nothing was recorded'. A read between the request and the tap withdraws nothing (APRV-464), so there is no withdrawal to race. Nothing in src needed wiring for this: the two refusals already existed in core/gate.ts decide; what made AC2 reachable is APRV-464's default grace. The residual, documented in docs/claude-code-hook.md and docs/hermes-hook.md: with an operator-shortened --retry-grace, a tap between that grace and the TTL, before any withdrawal, is still recorded as approval.granted and authorizes nothing, since a retry past the grace does not carry it (#538).
 Tests: tests/cli-hook.test.ts 'APRV-410 AC2 (D-4): a decision past the default grace is refused expired, never granted' (4s TTL policy, default grace, a read past the TTL, then grant: refused expired, one approval.expired on the key, no approval.granted, nothing started on the key) and 'APRV-410 AC2 (D-4): past an operator's shorter grace, a write withdraws and the tap is refused request-withdrawn'. Both pass. Honest note: the expired case also passes with APRV-464's code planted back, because the refusal predates this branch; the case pins the criterion's scenario, while APRV-464's own cases carry the planted-bug check.
 Status: In Progress until the PR merges, then the sweep closes it (every AC is now ticked).
+
+AC2 (2026-10-17, aprv#646 refute M1, Carter's decision (a)): AC2 is ticked with one accepted residual, and no new code (D-4). Under a policy with no approval_ttl the default grace stays 5 minutes and reads no longer withdraw (APRV-464), so a tap after the 5-minute grace, before any withdrawal, is recorded as approval.granted (main refused it request-withdrawn, because a read had usually withdrawn the question first). It authorizes nothing: the identical retry opens a fresh key and asks again. Carter accepted this residual rather than adding a TTL floor; it is named beside the operator-grace residual in docs/claude-code-hook.md ('Two residuals are left') and docs/hermes-hook.md, and in CHANGELOG.md. The operator-grace shape of the same residual is pinned by tests/cli-hook.test.ts 'APRV-410 residual pin' (refute R4b). Refute S1 noted that both AC2 cases above also pass on main: they pin the criterion's scenario, and the APRV-464 cases plus the residual pin carry the regression check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

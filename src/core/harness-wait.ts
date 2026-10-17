@@ -64,8 +64,10 @@ export const HOOK_RETRY_GRACE_MS = 5 * 60_000;
  * `ts` ({@link abandonedAfterMs}), so this choice puts that line exactly at the
  * TTL. A grace that has run out and a request that has expired are then the
  * same moment, which is the property the amendment states: a tap after it is
- * refused `expired` (SPEC.md §11.2) and nothing is ever left between the two
- * windows for a withdrawal to race.
+ * refused `expired` (SPEC.md §11.2), and the only instant left between the two
+ * windows is one millisecond wide: expiry is `now > ts + ttl` while the sweep
+ * fires at `now - ts >= wait + grace`, so a non-read call landing at exactly
+ * `ts + ttl` withdraws a request that would have expired a millisecond later.
  *
  * Why the TTL and not five minutes. On 2026-10-04 a `network.call` request
  * waited out the hook's nine minutes, sat in a five-minute grace, and was taken
