@@ -3442,11 +3442,11 @@ function recordedHarnessVersions(
  * is not. That belongs here rather than in a row of its own because both findings
  * answer one question — is the binary hosting this hook in a state where the gate
  * is known to fire — and a reader who sees this row green has been told both. It
- * is read from `<binary> --version` rather than from a record, because Hermes's
- * build stamp sits behind a non-ASCII separator that the write boundary refuses,
- * so no record can ever carry it. The comparison is on the BUILD DATE and the
- * upstream commit: the two builds that differ on this behaviour report the same
- * semver.
+ * is read from `<binary> --version` rather than from a record, because a record
+ * carries only the printable-ASCII prefix of Hermes's line (APRV-419): the build
+ * date survives, and the upstream commit behind the non-ASCII separator does not.
+ * The comparison is on the BUILD DATE and the upstream commit: the two builds
+ * that differ on this behaviour report the same semver.
  */
 function checkHarnessVersion(dir: string, records: readonly EventRecord[]): DoctorCheck {
   const check = "harness-version-unverified";
@@ -3473,10 +3473,11 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
   // not have stopped anything in the first place.
   //
   // It is read off the INSTALLED build rather than off a record, and that is not
-  // a shortcut: Hermes prints its build stamp behind a non-ASCII separator, so
-  // the write boundary's printable-ASCII rule (SPEC.md §11.1 invariant 3) refuses
-  // the whole line and no record ever carries a Hermes version. The floor would be
-  // permanently unknown if it waited for one.
+  // a shortcut: Hermes prints its upstream commit behind a non-ASCII separator,
+  // and the write boundary keeps only the printable-ASCII prefix of the line
+  // (APRV-419; SPEC.md §11.1 invariant 3), so a record carries the build date and
+  // never the commit. The floor's commit clause would be permanently unknown if
+  // it waited for a record, and a record predating APRV-419 carries nothing.
   const floor: string[] = [];
   const belowFloor: string[] = [];
   if (kinds.includes("hermes")) {

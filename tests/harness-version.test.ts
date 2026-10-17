@@ -51,6 +51,7 @@ import {
   isHarnessKind,
   normalizeHarnessVersion,
   parseHermesVersion,
+  printableAsciiPrefix,
   probeHarnessVersion,
   readHarnessProvenance,
   rawHarnessVersionLine,
@@ -75,6 +76,23 @@ after(() => {
 /** `2.0.14` with a BEL glued on, spelled so this file stays greppable text. */
 const BELL_SUFFIXED = `2.0.14${String.fromCharCode(7)}`;
 
+test("printableAsciiPrefix is the one rule: everything from the first non-printable byte is cut", () => {
+  assert.equal(printableAsciiPrefix("2.0.14 (Claude Code)"), "2.0.14 (Claude Code)");
+  // Every printable ASCII character survives, space and tilde included.
+  const allPrintable = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)).join("");
+  assert.equal(printableAsciiPrefix(allPrintable), allPrintable);
+  // A control character cuts, and what follows it is gone even when printable.
+  assert.equal(printableAsciiPrefix(`v1${String.fromCharCode(7)}v2`), "v1");
+  assert.equal(printableAsciiPrefix("v1\tv2"), "v1");
+  assert.equal(printableAsciiPrefix("v1\r\nv2"), "v1");
+  assert.equal(printableAsciiPrefix(`v1${String.fromCharCode(0x7f)}v2`), "v1", "DEL is a control character");
+  // A non-ASCII character cuts the same way, wherever it sits.
+  assert.equal(printableAsciiPrefix("v1 \u00b7 upstream 913d4098"), "v1 ");
+  assert.equal(printableAsciiPrefix("v1\u00a0v2"), "v1", "a no-break space is not ASCII");
+  assert.equal(printableAsciiPrefix("\u{1f600}v1"), "");
+  assert.equal(printableAsciiPrefix(""), "");
+});
+
 test("normalizeHarnessVersion takes the first line, trimmed, and nothing else", () => {
   assert.equal(normalizeHarnessVersion("2.0.14 (Claude Code)"), "2.0.14 (Claude Code)");
   assert.equal(normalizeHarnessVersion("  2.0.14  \n"), "2.0.14");
@@ -84,8 +102,11 @@ test("normalizeHarnessVersion takes the first line, trimmed, and nothing else", 
   assert.equal(normalizeHarnessVersion("2.0.14\nwarning: token sk-ant-oops"), "2.0.14");
   assert.equal(normalizeHarnessVersion(""), null);
   assert.equal(normalizeHarnessVersion("   "), null);
-  assert.equal(normalizeHarnessVersion(BELL_SUFFIXED), null, "control characters are refused");
-  assert.equal(normalizeHarnessVersion("2.0.14-café"), null, "non-ASCII is refused");
+  // APRV-419: a control character or a non-ASCII character ends the value
+  // rather than refusing the whole line. What comes back is the prefix.
+  assert.equal(normalizeHarnessVersion(BELL_SUFFIXED), "2.0.14", "a control character ends the value");
+  assert.equal(normalizeHarnessVersion("2.0.14-café"), "2.0.14-caf", "a non-ASCII character ends the value");
+  assert.equal(normalizeHarnessVersion("é2.0.14"), null, "no printable prefix at all is absence");
   assert.equal(normalizeHarnessVersion("v".repeat(HARNESS_VERSION_LIMIT)), "v".repeat(HARNESS_VERSION_LIMIT));
   assert.equal(normalizeHarnessVersion("v".repeat(HARNESS_VERSION_LIMIT + 1)), null);
   assert.equal(normalizeHarnessVersion(42), null);
@@ -100,24 +121,32 @@ test("normalizeHarnessVersion takes the first line, trimmed, and nothing else", 
  * What `hermes --version` printed on the build that FAILS OPEN, verbatim.
  *
  * Quoted from the live probe (APRV-398's notes) rather than composed, because the
- * separator is the load-bearing byte: it is U+00B7, so the write boundary's
- * printable-ASCII rule refuses the whole line and no record can carry a Hermes
- * version. That is why the floor is read from the installed binary.
+ * separator is the load-bearing byte: it is U+00B7, so the write boundary keeps
+ * only the printable-ASCII prefix before it (APRV-419) and no record carries the
+ * upstream commit. That is why the floor is read from the installed binary.
  */
 const HERMES_OLD_VERSION = "Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098";
 
 /** The same shape, stamped on or after the floor. */
 const HERMES_FLOOR_VERSION = "Hermes Agent v0.21.3 (2026.9.20) · upstream 118984d7";
 
-test("a Hermes version line is readable raw and unrecordable normalized", () => {
-  // The two readers, side by side, on one string. The log takes nothing from it;
-  // the floor takes everything it needs.
+test("a Hermes version line is readable raw and recordable as its printable-ASCII prefix", () => {
+  // The two readers, side by side, on one string. The log takes the part before
+  // the middle dot (APRV-419); the floor takes everything it needs.
   assert.equal(rawHarnessVersionLine(HERMES_OLD_VERSION), HERMES_OLD_VERSION);
   assert.equal(
     normalizeHarnessVersion(HERMES_OLD_VERSION),
-    null,
-    "the middle dot keeps this line out of the log, which is the write boundary working",
+    "Hermes Agent v0.21.3 (2026.9.14)",
+    "the middle dot ends the recordable value, and the space before it is trimmed",
   );
+  // The prefix keeps the build date, so two builds that share a semver still
+  // record different values; it loses the upstream commit.
+  assert.equal(normalizeHarnessVersion(HERMES_FLOOR_VERSION), "Hermes Agent v0.21.3 (2026.9.20)");
+  // Every recordable value satisfies the schema's pattern and cap unchanged.
+  for (const line of [HERMES_OLD_VERSION, HERMES_FLOOR_VERSION, BELL_SUFFIXED, "2.0.14-café"]) {
+    const value = normalizeHarnessVersion(line);
+    assert.ok(value !== null && /^[\u0020-\u007e]+$/u.test(value) && value.length <= HARNESS_VERSION_LIMIT, line);
+  }
   // A raw line is still one line, still trimmed, still stripped of control
   // characters, and still capped: this is third-party output bound for a terminal.
   assert.equal(rawHarnessVersionLine("  v1 (2026.1.1)  \nbanner"), "v1 (2026.1.1)");
@@ -910,6 +939,54 @@ test("a Hermes version this runtime cannot read is unknown, not a fault", () => 
   assert.notEqual(row.status, "fail");
   assert.match(row.detail, /could not be established/u);
   assert.ok(row.detail.includes(HERMES_FAIL_CLOSED_FLOOR.statement), row.detail);
+});
+
+/** One Hermes `pre_tool_call` for a terminal command, bound to `dir`. */
+function hermesShellEvent(dir: string, command: string): string {
+  return JSON.stringify({
+    hook_event_name: "pre_tool_call",
+    session_id: "hermes-sess-1",
+    tool_use_id: "tool-1",
+    cwd: dir,
+    profile: "default",
+    tool_name: "terminal",
+    tool_input: { command, workdir: dir },
+  });
+}
+
+test("a Hermes record carries the prefix, and doctor compares it (APRV-419)", () => {
+  const dir = ready();
+  const home = hermesHome(dir);
+  const bin = stubHermes(HERMES_FLOOR_VERSION);
+  const before = rawLog(dir);
+  const run = runCli(
+    // The cap Hermes's documented `timeout: 300` gives; without it the adapter
+    // assumes the 30s default and refuses anything that registers.
+    ["hook", "hermes", "--as", "agent:hermes", "--dir", dir, "--harness-cap", "300s"],
+    dir,
+    hermesShellEvent(dir, "git push origin main"),
+    { ...pathWith(bin), HERMES_HOME: home },
+  );
+  assert.equal(run.code, 0, `a supervised Hermes call is allowed: ${run.stdout}${run.stderr}`);
+  const payload = payloadOf(registration(recordsSince(dir, before)));
+  assert.equal(payload["harness"], "hermes");
+  assert.equal(payload["harness_version"], "Hermes Agent v0.21.3 (2026.9.20)");
+  assertClean(dir);
+
+  // The same build installed: a comparison, and a match.
+  const same = doctorRow(dir, { ...pathWith(bin), HERMES_HOME: home });
+  assert.equal(same.status, "pass", same.detail);
+  assert.match(same.detail, /hermes "Hermes Agent v0\.21\.3 \(2026\.9\.20\)" matches the version on the hook record/u);
+  assert.doesNotMatch(same.detail, /no baseline to compare against/u);
+
+  // A later build of the SAME semver is a different recorded value, so the
+  // unverified-change finding can see it.
+  const later = doctorRow(dir, {
+    ...pathWith(stubHermes("Hermes Agent v0.21.3 (2026.9.21) · upstream 0123abcd")),
+    HERMES_HOME: home,
+  });
+  assert.equal(later.status, "fail", later.detail);
+  assert.match(later.detail, /hermes is installed at "Hermes Agent v0\.21\.3 \(2026\.9\.21\)"/u);
 });
 
 // ---------------------------------------------------------------------------

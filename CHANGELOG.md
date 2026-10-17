@@ -15,6 +15,20 @@ before a tag.
 
 ## Unreleased
 
+### Harnesses
+
+- **A Hermes record carries its harness version (APRV-419).** `hermes
+  --version` prints `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, and
+  the U+00B7 separator made the write boundary refuse the whole line, so no
+  Hermes `task.registered` or `gate.bypassed` ever carried `harness_version` and
+  `approval doctor` could never compare one. A version line is now recorded as
+  its printable-ASCII prefix, trimmed: everything from the first control or
+  non-ASCII character is cut, and Hermes records `Hermes Agent v0.21.3
+  (2026.9.14)`. A prefix over 64 characters is still refused. The schema is
+  unchanged: every value the new rule records is one the old rule accepted
+  whole. The fail-closed floor still reads the full installed line, because
+  the prefix drops the upstream commit.
+
 ## 0.4.4 — 2026-10-12
 
 ### Security

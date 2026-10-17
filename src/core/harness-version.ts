@@ -99,29 +99,61 @@ export const HARNESS_BINARY: Readonly<Record<HarnessKind, string>> = {
  */
 export const HARNESS_VERSION_LIMIT = 64;
 
-/** Printable ASCII, no control characters, no newline. The schema pins the same. */
-const PRINTABLE = /^[\x20-\x7e]+$/u;
+/**
+ * The longest leading run of printable ASCII, U+0020 through U+007E.
+ *
+ * The one place the recordable-character rule lives (APRV-419). The run stops
+ * at the first character outside that range, so a non-ASCII character, a
+ * control character (a newline, a tab, a carriage return, a BEL) and EVERYTHING
+ * after any of them is cut, even when what follows would be printable again.
+ * The schema's pattern for `payload.harness_version` (`^[\u0020-\u007e]+$`)
+ * admits exactly the strings this can return, so the rule and the write
+ * boundary cannot drift apart.
+ */
+export function printableAsciiPrefix(text: string): string {
+  return /^[\x20-\x7e]*/u.exec(text)?.[0] ?? "";
+}
 
 /**
  * The one spelling of a harness version this runtime ever writes or compares.
  *
- * First line, trimmed, and nothing else: `claude --version` prints
- * `2.0.14 (Claude Code)` and a future release may add a second line of banner.
- * Both the hook (which records) and doctor (which compares) call this, so the
- * comparison is between two values normalized identically — a row that failed
- * because one side kept a trailing newline would be a false alarm, and a false
- * alarm in a health check trains an operator to ignore it.
+ * First line, trimmed, then its printable-ASCII prefix ({@link
+ * printableAsciiPrefix}), trimmed again. `claude --version` prints
+ * `2.0.14 (Claude Code)` and passes through whole; a future release may add a
+ * second line of banner, which the prefix never reaches. Both the hook (which
+ * records) and doctor (which compares) call this, so the comparison is between
+ * two values normalized identically: a row that failed because one side kept a
+ * trailing newline would be a false alarm, and a false alarm in a health check
+ * trains an operator to ignore it.
+ *
+ * ## Why a prefix rather than a refusal (APRV-419, option (c))
+ *
+ * Until APRV-419 a line holding any byte outside printable ASCII was refused
+ * whole. Hermes prints `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`
+ * and the separator is U+00B7, so no record ever carried a Hermes version and
+ * doctor could never compare one. Carter chose, on 2026-10-17, to record the
+ * prefix instead: for that line, `Hermes Agent v0.21.3 (2026.9.14)`. The
+ * upstream commit after the separator is lost, which is why the fail-closed
+ * floor below still reads the raw line.
+ *
+ * This widens nothing at the write boundary. Every value returned here is a
+ * string the old rule accepted as a whole line (one line, printable ASCII,
+ * 1..64 characters), so the schema, the read side ({@link
+ * readHarnessProvenance}) and every record already written are unchanged, and a
+ * banner that is ASCII from its first byte is bounded exactly as before.
  *
  * Returns `null` for anything that is not a usable version: empty output, a
- * line that is not printable ASCII, or one longer than the cap. Absence is
- * always available and always honest.
+ * line with no printable-ASCII prefix, or a prefix longer than the cap. Over the
+ * cap is a refusal rather than a truncation, because the cap exists to keep a
+ * banner out (SPEC.md §11.1 invariant 3), and a truncated banner is still a
+ * banner. Absence is always available and always honest.
  */
 export function normalizeHarnessVersion(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const first = raw.split("\n", 1)[0] ?? "";
-  const text = first.trim();
+  const text = printableAsciiPrefix(first.trim()).trim();
   if (text.length === 0 || text.length > HARNESS_VERSION_LIMIT) return null;
-  return PRINTABLE.test(text) ? text : null;
+  return text;
 }
 
 /**
@@ -146,9 +178,10 @@ export const HARNESS_PROBE_TIMEOUT_MS = 10_000;
  * the log (only {@link normalizeHarnessVersion}'s output is), and what needs the
  * raw line is a diagnostic that must be able to read a build stamp a harness
  * prints beside its semver. Hermes prints
- * `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, which the log's own
- * rule rejects on the non-ASCII separator alone. Capped and stripped of control
- * characters all the same: this is third-party output on its way to a terminal.
+ * `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, of which the log keeps
+ * only the part before the non-ASCII separator (APRV-419), losing the upstream
+ * commit. Capped and stripped of control characters all the same: this is
+ * third-party output on its way to a terminal.
  */
 export const HARNESS_RAW_VERSION_LIMIT = 200;
 
@@ -157,9 +190,9 @@ export const HARNESS_RAW_VERSION_LIMIT = 200;
  *
  * One line, trimmed, control characters removed, capped. `null` for empty output
  * or a line past the cap. It keeps non-ASCII bytes, which is the whole difference
- * from {@link normalizeHarnessVersion}: a build stamp behind a typographic
+ * from {@link normalizeHarnessVersion}: an upstream commit behind a typographic
  * separator is exactly the fact a version floor has to read, and it is exactly
- * the fact the write boundary will not accept.
+ * the part of the line the write boundary cuts.
  */
 export function rawHarnessVersionLine(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -205,8 +238,8 @@ export function probeHarnessVersionRaw(kind: HarnessKind): string | null {
 /**
  * Run `<binary> --version` once, uncached, and normalize what came back.
  *
- * The recordable form: one line, printable ASCII, capped. Exported for the test
- * that proves the memo below is a memo.
+ * The recordable form: one line, its printable-ASCII prefix, capped. Exported
+ * for the test that proves the memo below is a memo.
  */
 export function probeHarnessVersion(kind: HarnessKind): string | null {
   return normalizeHarnessVersion(probeHarnessVersionRaw(kind));
@@ -219,9 +252,10 @@ export function probeHarnessVersion(kind: HarnessKind): string | null {
  *
  * It holds the RAW line rather than the recordable one, so the two readers — the
  * provenance field and the version floor — still cost ONE spawn per process
- * between them. A harness whose raw line the write boundary rejects has a
- * `null` recordable version and a readable raw one, which is precisely Hermes's
- * case and precisely why the floor is not read off a record.
+ * between them. A harness whose raw line the write boundary cuts has a shorter
+ * recordable version than its raw one, which is precisely Hermes's case (the
+ * record keeps the build date and loses the upstream commit) and precisely why
+ * the floor is not read off a record.
  */
 const probed = new Map<HarnessKind, string | null>();
 

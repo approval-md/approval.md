@@ -3424,9 +3424,13 @@ The checks, at length:
   **fail-closed version floor** (a build at or after `main` `118984d7` of
   2026-09-20) FAILS, because `v0.21.3` ignores `fail_closed` silently and every
   broken hook on it proceeds. That half is read from `hermes --version` rather than
-  from a record — Hermes prints its build stamp behind a non-ASCII separator the
-  write boundary refuses, so no record can carry it — and it compares the build
-  date and the upstream commit, because the two builds report the same semver.
+  from a record, because a record keeps only the printable-ASCII prefix of
+  Hermes's line (APRV-419): the build date survives and the upstream commit
+  behind the non-ASCII separator does not. It compares the build date and the
+  upstream commit, because the two builds report the same semver. Since APRV-419
+  the unverified-change half compares Hermes like any other harness: the prefix,
+  for example `Hermes Agent v0.21.3 (2026.9.14)`, on the newest hook record
+  against the prefix of what `hermes --version` prints now.
 - **live-draw** — whether a daemon is answering `supervised-live` draws for this
   log (APRV-208). SKIP when the policy declares no live class: no draw is ever
   made, and a missing socket is nothing. It FAILS in three shapes, all of them

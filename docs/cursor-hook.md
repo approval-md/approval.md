@@ -706,6 +706,9 @@ every harness that ever wrote to it.
 The write boundary constrains the SHAPE: one line, printable ASCII, at most 64
 characters. The value is the output of a third-party process going into an
 append-only log, and SPEC.md §11.1 invariant 3 has no exception for provenance.
+What is recorded is the line's printable-ASCII prefix, trimmed (APRV-419): a
+control character or a non-ASCII character ends the value, and a prefix over 64
+characters is refused.
 
 Both fields are OPTIONAL and additive: every record written before they existed
 still validates and still verifies.
