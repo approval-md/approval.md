@@ -1576,6 +1576,73 @@ const commandClassVectors = [
     description: "the control for the push grammar: `-u` alone is still an ordinary branch push",
     input: { command: "git push -u origin lane" },
   },
+  // --- git remote writes, and HEAD/@ pushes (APRV-518) ----------------------
+  {
+    id: "remote-add-mirror-arms-a-mirror-push",
+    description:
+      "`git remote add --mirror=push` makes every later refspec-less push to that remote a mirror push, which forces and deletes; it takes the class of the push it arms, vcs.history.rewrite",
+    input: { command: "git remote add --mirror=push m ../r.git" },
+  },
+  {
+    id: "remote-set-url-writes",
+    description:
+      "`git remote set-url` points a remote's configured mirror or push refspecs at another repository; every writing `git remote` form is vcs.history.rewrite",
+    input: { command: "git remote set-url origin https://example.invalid/x.git" },
+  },
+  {
+    id: "remote-rename-writes",
+    description: "`git remote rename` carries a mirror or push refspec onto another name, such as origin",
+    input: { command: "git remote rename m origin" },
+  },
+  {
+    id: "remote-update-prune-writes",
+    description:
+      "`git remote update` is a fetch and reads; with `--prune` (or any other option) it deletes refs and is a write",
+    input: { command: "git remote update --prune" },
+  },
+  {
+    id: "remote-list-reads",
+    description: "the control for the remote writes: `git remote -v` lists and is still read.vcs.remote",
+    input: { command: "git remote -v" },
+  },
+  {
+    id: "remote-show-get-url-read",
+    description: "`git remote show -n` and `git remote get-url --push` print and are still read.vcs.remote",
+    input: { command: "git remote show -n origin && git remote get-url --push origin" },
+  },
+  {
+    id: "push-head-may-be-the-trunk",
+    description:
+      "a colon-less HEAD pushes the current branch, which the text cannot show is not main, so it reads as the trunk push (rule git-push-head)",
+    input: { command: "git push origin HEAD" },
+  },
+  {
+    id: "push-at-may-be-the-trunk",
+    description: "`@` is HEAD under another name, and takes the same reading",
+    input: { command: "git push -u origin @" },
+  },
+  {
+    id: "push-head-explicit-destination-unmoved",
+    description: "the control for HEAD: with an explicit `:refs/heads/lane` the destination is on the line, an ordinary branch push",
+    input: { command: "git push origin HEAD:refs/heads/lane" },
+  },
+  {
+    id: "git-dir-write-arms-a-push",
+    description:
+      "a shell write into .git/config can carry a deleting or mirror push setting the push after it obeys; any write into a .git directory takes the class of the strictest push it can arm, vcs.history.rewrite",
+    input: { command: "printf '[remote \"origin\"]\\n\\tpush = :refs/heads/lane\\n' >> .git/config && git push origin" },
+  },
+  {
+    id: "push-destination-dwim-trunk",
+    description:
+      "git resolves a short destination through refs/<name> first, so `lane:heads/main` updates refs/heads/main: the trunk push",
+    input: { command: "git push origin lane:heads/main" },
+  },
+  {
+    id: "push-tags-prefix-is-a-tag",
+    description: "`tags/t1` is refs/tags/t1 under the same DWIM, a release act",
+    input: { command: "git push origin tags/t1" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -3974,7 +4041,21 @@ const SUITES = [
     // became refusals or the rewrite class. Two open PRs (#648, #639) also
     // claim 1.8.0 off this base; by the rule 1.4.0 set, the number is claimed
     // at merge, so whichever lands second takes 1.9.0.
-    vectors_version: "1.8.0",
+    //
+    // 1.9.0 (APRV-518): MINOR again. Twelve new vectors. Every writing `git
+    // remote` form (`add --mirror=push`, `set-url`, `rename`, `update
+    // --prune`) is `vcs.history.rewrite`, the class of the mirror push it can
+    // arm; the read forms (`-v`, `show -n`, `get-url`) are pinned unmoved. A
+    // colon-less `HEAD` or `@` push is the trunk push (`git-push-head`), with an
+    // explicit-destination control. A shell write into `.git/config` is
+    // `vcs.history.rewrite` (`git-dir-write`), a destination git's ref DWIM
+    // resolves to the trunk (`lane:heads/main`) is the trunk push, and
+    // `tags/t1` is a tag. No committed expectation moves: no earlier vector
+    // names `git remote`, a HEAD refspec, a `.git` path or a `heads/` or `tags/`
+    // short name. 1.9.0 because #649 takes
+    // 1.8.0 and #639 claims 1.8.0 too; by the 1.4.0 rule the number is claimed
+    // at merge, so whichever of these lands later takes the next free one.
+    vectors_version: "1.9.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
