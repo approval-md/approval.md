@@ -81,6 +81,32 @@ on the hook for enforcement.
   answer to `unclassified` and loosened or reclassified none. Cost: `git
   --git-dir=.git status` and the other `=`-joined spellings, which used to
   classify as their subcommand, now need `cd` or a person.
+- **An environment assignment in front of git no longer hides what git runs
+  (APRV-521).** The classifier skipped every `NAME=value` word in front of the
+  binary and classified `git` by its subcommand alone. Most of git(1)'s
+  ENVIRONMENT section runs a program (`GIT_PAGER`, `GIT_EDITOR`,
+  `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+  `GIT_EXTERNAL_DIFF`), repoints the repository (`GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, ...), redirects the
+  configuration (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_COUNT` with
+  `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`, `HOME`,
+  `XDG_CONFIG_HOME`), moves the helper directory (`GIT_EXEC_PATH`) or writes a
+  file (`GIT_TRACE*=<path>`). So `GIT_PAGER=<cmd> git log` ran `<cmd>` as an
+  autonomous `read.shell`. This is on 0.4.5. Now a git segment with any
+  assignment in front of it is `unclassified`, and the hook refuses it, unless
+  every assignment is on a closed list that can only remove a program or swap
+  it for a no-op: `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`,
+  `GIT_EDITOR=true`, `GIT_EDITOR=:`, `EDITOR=true`, `EDITOR=:`, `VISUAL=true`,
+  `VISUAL=:` (exact words), and `LANG`, `LC_*` or `TZ` with a plain locale or
+  zone name. A variable git or the programs it starts read, set by the line's
+  own shell (a bare `GIT_PAGER=x;`, `export`, `declare -x`, `printf -v`,
+  `${NAME:=x}`), makes every git segment on the line `unclassified` too, and a
+  bare assignment of one is refused on its own as the bare `PATH=` already
+  was. `env`, `exec`, `command` and the other wrappers were already refused and
+  still are. Stricter only: a differential against #651's head (f62dd57e) over
+  21,868,560 generated lines moved 18,534,298 from an answer to `unclassified`
+  and loosened or reclassified none. Cost: `FOO=1 git ...` and any other
+  assignment off the list now needs a person.
 
 ### Harnesses
 

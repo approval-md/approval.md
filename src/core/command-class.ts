@@ -48,7 +48,7 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
-import { isDateDisplay } from "./date-argv.js";
+import { isDateDisplay, isZoneValue } from "./date-argv.js";
 import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
@@ -1500,6 +1500,15 @@ export interface ClassifierContext {
    * here, forgetting it cannot loosen anything.
    */
   unwrapShell?: boolean;
+  /**
+   * A variable git could inherit that the command line's own shell sets
+   * (APRV-521, {@link gitEnvironmentWrite}). {@link classifyCommand} fills it
+   * from its own segments and hands it down to a substitution and an
+   * unwrapped script, which run in a shell that inherits it; every `git`
+   * segment under it is `unclassified`. A caller that sets it only refuses
+   * more.
+   */
+  shellEnvWrite?: string;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -2289,6 +2298,229 @@ function gitGlobalRefusal(args: readonly string[]): string | null {
       return `no rule for git ${joined}<value>: the global option repoints what the subcommand acts on`;
     }
     return `no rule for the git global option ${word}: an option this classifier does not know may take the next word as its value`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Environment assignments in front of git (APRV-521)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `NAME=value` words that may stand in front of `git`, compared as whole
+ * words (APRV-521). A CLOSED list: any other assignment in front of `git`
+ * leaves the segment `unclassified`, because git(1)'s ENVIRONMENT section is
+ * mostly variables that run a program (`GIT_PAGER`, `GIT_EDITOR`,
+ * `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+ * `GIT_EXTERNAL_DIFF`), repoint the repository (`GIT_DIR`, `GIT_WORK_TREE`,
+ * `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+ * `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`,
+ * `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`), redirect the
+ * configuration (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`,
+ * `GIT_CONFIG_NOSYSTEM`, and git-config(1)'s `GIT_CONFIG_COUNT`,
+ * `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`; `GIT_CONFIG_PARAMETERS` is the
+ * internal carrier of `-c`), move the helper directory (`GIT_EXEC_PATH`), or
+ * write a file (`GIT_TRACE*=<absolute path>` appends to it). `GIT_PAGER=evil
+ * git log` ran `evil` and classified `read.shell`.
+ *
+ * Each entry below can only remove a program git would otherwise run, or
+ * swap it for a no-op, and none names a path, a repository or configuration:
+ *
+ * - `GIT_TERMINAL_PROMPT=0`: git(1), "If this Boolean environment variable is
+ *   set to false, git will not prompt on the terminal". It silences a prompt.
+ * - `GIT_PAGER=cat`: git(1), "If it is set to an empty string or to the value
+ *   "cat", Git will not launch a pager". No program runs.
+ * - `PAGER=cat`: git(1) GIT_PAGER "overrides $PAGER", and the same `cat` test
+ *   applies to whichever source supplied the pager. Where `GIT_PAGER` or
+ *   `core.pager` is set, that pager runs with or without this word.
+ * - `GIT_EDITOR=true`, `GIT_EDITOR=:`: git(1) GIT_EDITOR "overrides $EDITOR and
+ *   $VISUAL". git skips the editor outright for `:` and runs the no-op `true`
+ *   otherwise, so the file is left as git wrote it. `GIT_SEQUENCE_EDITOR`
+ *   still outranks it for a rebase todo list, exactly as without the word.
+ * - `EDITOR=true`, `EDITOR=:`, `VISUAL=true`, `VISUAL=:`: the fallbacks below
+ *   `GIT_EDITOR` and `core.editor`, set to the same no-ops. These four and the
+ *   two above are APRV-433's (#648) harmless-assignment list, kept equal so a
+ *   spelling that list judges local is not refused here first.
+ *
+ * {@link isHarmlessGitAssignment} also admits the locale and the zone with a
+ * plain value. git(1) names neither: git reads them only through the C library
+ * (`setlocale`, `localtime`), and a value with no `/` and no `..` is looked up
+ * inside the system's locale or zone database, never as a file the agent
+ * chose. `LANGUAGE` is left out (git(1) does not name it either, and its
+ * colon list is read by gettext).
+ */
+const GIT_HARMLESS_ASSIGNMENTS: readonly string[] = [
+  "GIT_TERMINAL_PROMPT=0",
+  "GIT_PAGER=cat",
+  "PAGER=cat",
+  "GIT_EDITOR=true",
+  "GIT_EDITOR=:",
+  "EDITOR=true",
+  "EDITOR=:",
+  "VISUAL=true",
+  "VISUAL=:",
+];
+
+/** The locale variables, POSIX's and glibc's, admitted with a plain value. */
+const GIT_LOCALE_NAMES: readonly string[] = [
+  "LANG",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "LC_ADDRESS",
+  "LC_IDENTIFICATION",
+  "LC_MEASUREMENT",
+  "LC_NAME",
+  "LC_PAPER",
+  "LC_TELEPHONE",
+];
+
+/** A locale name (`C`, `POSIX`, `C.UTF-8`, `en_US.UTF-8`, `sr_RS@latin`), never a path. */
+const PLAIN_LOCALE = /^[A-Za-z][A-Za-z0-9_@.-]*$/u;
+
+/**
+ * May this assignment word stand in front of `git` without changing what the
+ * subcommand runs, reads or writes ({@link GIT_HARMLESS_ASSIGNMENTS})? A word
+ * carrying a command substitution never may: its value is not in the text.
+ */
+function isHarmlessGitAssignment(word: LexWord): boolean {
+  if (word.substitutions.length > 0) return false;
+  const text = word.text;
+  if (GIT_HARMLESS_ASSIGNMENTS.includes(text)) return true;
+  const equals = text.indexOf("=");
+  if (equals <= 0) return false;
+  const name = text.slice(0, equals);
+  const value = text.slice(equals + 1);
+  if (name === "TZ") return isZoneValue(value);
+  if (GIT_LOCALE_NAMES.includes(name)) return PLAIN_LOCALE.test(value) && !value.includes("..");
+  return false;
+}
+
+/**
+ * Why the assignments in front of `git` leave the segment `unclassified`, or
+ * `null` when every one is harmless (APRV-521).
+ */
+function gitAssignmentRefusal(prefix: readonly LexWord[]): string | null {
+  const word = prefix.find((candidate) => !isHarmlessGitAssignment(candidate));
+  if (word === undefined) return null;
+  const name = word.text.slice(0, word.text.indexOf("="));
+  return `no rule for ${name}=… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
+}
+
+/**
+ * Is this a variable git, or a program git starts (its pager, editor, ssh,
+ * askpass helper, hooks), reads to pick a program, a library, a repository,
+ * configuration or a file to write (APRV-521)? Read by the command-line scan
+ * ({@link gitEnvironmentWrite}) and the bare-assignment rule, where a value
+ * reaches git only if the name was already exported: so the scan is bounded
+ * to these names, and an ordinary script variable (`b=$(git branch
+ * --show-current); git push origin "$b"`) is left alone. In front of `git`
+ * itself no name is trusted: {@link gitAssignmentRefusal} is a closed list.
+ */
+function isGitInheritedName(name: string): boolean {
+  if (/^(?:GIT_|XDG_|LESS|LC_|LD_|DYLD_)/u.test(name)) return true;
+  return [
+    "PAGER",
+    "EDITOR",
+    "VISUAL",
+    "LV",
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "SSH_ASKPASS",
+    "BASH_ENV",
+    "ENV",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TZDIR",
+    "LOCPATH",
+  ].includes(name);
+}
+
+/** The builtins that set or export a variable named in their arguments. */
+const SHELL_SETTING_BUILTINS: readonly string[] = ["export", "declare", "typeset", "readonly", "local"];
+
+/**
+ * POSIX's special builtins: an assignment in front of one persists in the
+ * shell (in `sh` and in bash's POSIX mode) rather than reaching that command
+ * alone.
+ */
+const POSIX_SPECIAL_BUILTINS: readonly string[] = [
+  ":",
+  ".",
+  "break",
+  "continue",
+  "eval",
+  "exec",
+  "exit",
+  "export",
+  "readonly",
+  "return",
+  "set",
+  "shift",
+  "times",
+  "trap",
+  "unset",
+];
+
+/** `${NAME=word}` and `${NAME:=word}` assign NAME in the shell that expands them. */
+const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*):?=/u;
+
+/**
+ * The first variable git could inherit ({@link isGitInheritedName}) that this
+ * command line's own shell sets to something other than a harmless value, or
+ * `null` (APRV-521). Counted: a bare `NAME=value` (it reaches every later
+ * command when NAME is already exported), an assignment in front of a POSIX
+ * special builtin, the arguments of `export`, `declare`, `typeset`, `readonly`
+ * and `local` (a bare `export NAME` exports a value the text does not show),
+ * `printf -v NAME`, and `${NAME=word}` / `${NAME:=word}` in any word.
+ *
+ * The whole line is read, not just the part before a `git` segment: a loop
+ * body runs again after its own later assignments. A subshell or a pipeline
+ * stage that keeps its assignment to itself is counted too, which only ever
+ * refuses more.
+ */
+function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
+  const nameOf = (text: string): string => (text.includes("=") ? text.slice(0, text.indexOf("=")) : text);
+  for (const segment of segments) {
+    const words = segment.words;
+    let cursor = 0;
+    while (cursor < words.length && ASSIGNMENT.test((words[cursor] as LexWord).text)) cursor += 1;
+    const binWord = words[cursor];
+    const base = binWord === undefined ? null : (pathSegments(binWord.text).slice(-1)[0] ?? binWord.text);
+    if (base === null || POSIX_SPECIAL_BUILTINS.includes(base)) {
+      for (const word of words.slice(0, cursor)) {
+        if (isGitInheritedName(nameOf(word.text)) && !isHarmlessGitAssignment(word)) return nameOf(word.text);
+      }
+    }
+    if (base !== null && SHELL_SETTING_BUILTINS.includes(base)) {
+      for (const word of words.slice(cursor + 1)) {
+        if (isFlag(word.text)) continue;
+        const name = nameOf(word.text);
+        if (/[$`]/u.test(name)) return name;
+        if (isGitInheritedName(name) && !isHarmlessGitAssignment(word)) return name;
+      }
+    }
+    if (base === "printf") {
+      const args = words.slice(cursor + 1).map((word) => word.text);
+      for (let at = 0; at < args.length; at += 1) {
+        const arg = args[at] as string;
+        if (arg === "--") break;
+        const name = arg === "-v" ? args[at + 1] : arg.startsWith("-v") ? arg.slice(2) : undefined;
+        if (name === undefined) continue;
+        const bare = name.replace(/\[.*$/su, "");
+        if (/[$`]/u.test(bare) || isGitInheritedName(bare)) return bare;
+      }
+    }
+    for (const word of [...words, ...segment.redirects.map((redirect) => redirect.target)]) {
+      const match = PARAMETER_ASSIGNMENT.exec(word.text);
+      if (match !== null && isGitInheritedName(match[1] as string)) return match[1] as string;
+    }
   }
   return null;
 }
@@ -4749,7 +4981,14 @@ function classifySegment(
     // variables that pick which program runs, which libraries it loads, or
     // which file it reads as a zone, a locale or a charset converter are not
     // answered as reads.
-    const steering = assignments.find((word) => isSteeringAssignment(word));
+    // APRV-521: a variable git or its pager, editor, ssh or hooks read joins
+    // them, unless the word is one git(1) shows to be harmless.
+    const steering =
+      assignments.find((word) => isSteeringAssignment(word)) ??
+      segment.words
+        .slice(0, cursor)
+        .find((word) => isGitInheritedName(word.text.slice(0, word.text.indexOf("="))) && !isHarmlessGitAssignment(word))
+        ?.text;
     if (steering !== undefined) {
       return {
         ok: false,
@@ -4794,7 +5033,23 @@ function classifySegment(
   // positional they would read may be the option's value rather than the
   // subcommand, and refused rather than parsed so no spelling of it can turn
   // into an answer.
+  //
+  // APRV-521: so does an environment assignment in front of git that is not on
+  // the closed list git(1) shows to be harmless ({@link gitAssignmentRefusal};
+  // the words before a sandbox wrapper count, since the wrapper passes the
+  // environment on), and a variable git could inherit that the line's own
+  // shell sets ({@link gitEnvironmentWrite}). `GIT_PAGER=<cmd> git log` runs
+  // `<cmd>`, and `GIT_DIR=x git status` reads another repository.
   if (basename === "git") {
+    const assignmentRefusal = gitAssignmentRefusal(segment.words.slice(0, assignments.length));
+    if (assignmentRefusal !== null) return { ok: false, code: "unclassified", detail: assignmentRefusal };
+    if (context.shellEnvWrite !== undefined) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for git after ${context.shellEnvWrite} is set on the same command line: git and the programs it starts inherit the shell's exported environment`,
+      };
+    }
     const refusal = gitGlobalRefusal(args);
     if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
   }
@@ -5046,6 +5301,11 @@ export function classifyCommand(
   if (lexed.segments.length === 0) {
     return { ok: false, code: "unclassified", segment: command.trim(), detail: "empty command" };
   }
+
+  // APRV-521: a variable git could inherit, set by this line's own shell,
+  // reaches every git segment on the line and in its substitutions.
+  const shellEnvWrite = context.shellEnvWrite ?? gitEnvironmentWrite(lexed.segments) ?? undefined;
+  if (shellEnvWrite !== undefined) context = { ...context, shellEnvWrite };
 
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
