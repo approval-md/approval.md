@@ -736,7 +736,8 @@ const FIXTURES: readonly Fixture[] = [
   { command: "curl -X POST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl -XPOST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --request DELETE https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
-  { command: "curl --method PUT https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  // APRV-511 review: curl has no `--method`, so its outputs cannot be known.
+  { command: "curl --method PUT https://example.com", class: "policy.core", rule: "fetch-output-unknown", row: "web-fetch" },
   { command: "curl -d a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --data a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --data-raw a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
@@ -858,8 +859,6 @@ for (const fixture of FIXTURES) {
 const AMBIGUOUS_FETCHES: readonly string[] = [
   // A method the environment supplies, in each spelling of the flag.
   'curl -X "$METHOD" https://example.com',
-  "curl --request $METHOD https://example.com",
-  "curl --request=$METHOD https://example.com",
   "gh api -X $METHOD repos/x/y",
   // A method flag with nothing after it.
   "curl -X",
@@ -867,13 +866,10 @@ const AMBIGUOUS_FETCHES: readonly string[] = [
   // A short-flag bundle we decline to unbundle: the method is in the next word.
   "curl -sSX POST https://example.com",
   "gh api -sX POST repos/x/y",
-  // A config file can carry any option, including a method and a body.
-  "curl -K request.conf https://example.com",
-  "curl --config request.conf https://example.com",
-  "wget --config=wgetrc https://example.com",
+  // A config file can carry any option, including a method and a body: since
+  // APRV-511 an output path too, so those are pinned below as policy.core.
   // A bare expansion is not a URL; it is whatever the environment puts there.
-  "curl $ENDPOINT",
-  "curl $CURL_OPTS https://example.com",
+  // (For curl it may also be an option naming an output: pinned below.)
   "gh api $ROUTE",
   // Flags written after `--`. Real curl reads them as URLs, so this is stricter
   // than curl itself, which is the direction this classifier errs in.
@@ -889,13 +885,36 @@ for (const command of AMBIGUOUS_FETCHES) {
   });
 }
 
-test("a fetch whose argument is a read-only substitution is still network.call", () => {
-  // The substitution itself is inert, so the segment classifies; the word it
-  // produces is not a URL this file can read, so the fetch is not a read.
-  const result = classifyCommand("curl $(cat url.txt)");
-  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
-  if (!result.ok) return;
-  assert.deepEqual(result.classes, ["network.call"]);
+test("a fetch whose config file or string can name its output is a write to an unknown target (APRV-511)", () => {
+  for (const command of [
+    "curl -K request.conf https://example.com",
+    "curl --config request.conf https://example.com",
+    "wget --config=wgetrc https://example.com",
+    "wget -e robots=off https://example.com",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["policy.core"], command);
+  }
+});
+
+test("a fetch whose argv an unquoted expansion may split into options is a write to an unknown target (APRV-511 fix round 3)", () => {
+  // Until fix round 3 these were network.call. An unquoted variable or
+  // substitution may split into `-o FILE`, so the output is unknown:
+  // policy.core, the stricter class. The substitution itself is still inert.
+  for (const command of [
+    "curl --request $METHOD https://example.com",
+    "curl --request=$METHOD https://example.com",
+    "curl $ENDPOINT",
+    "curl $CURL_OPTS https://example.com",
+    "curl $(cat url.txt)",
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["policy.core"], command);
+  }
 });
 
 test("a fetch built by a write substitution is opaque", () => {

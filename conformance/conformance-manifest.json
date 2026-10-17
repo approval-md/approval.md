@@ -5,7 +5,7 @@
     "conformance/run.mjs": "6b1b58c6e190244b0ace06ac7f2ae272b8161c267d8ce2e192f2eab219f19457",
     "conformance/vectors/bridge-decisions.v1.json": "99133576c3e23c58f8d5f81be145a570f49a2616d1485e222c9b32346e224b62",
     "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
-    "conformance/vectors/command-class.v1.json": "b2db5c7216d10c294d6f2c4d42d5f251458e672ccfa8b61a548c7b7fec1d85c6",
+    "conformance/vectors/command-class.v1.json": "9ba762ea3e6111f94a036f38b961fa03e02a0c52769ba7544e63ba6cea6f65f6",
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/hook-exec-code.v1.json": "20a804844fef99d99983ca8e5c9aadddc659aff4369f2060ff9de80578b5fcd5",
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",

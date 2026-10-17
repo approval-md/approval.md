@@ -289,6 +289,13 @@ whatever class they have anywhere else. Single quotes make the same text
 literal, which is the spelling to reach for when a note has to quote a command.
 Quoting that does not balance is `hook-unparseable`, never a guess.
 
+A `curl`, `wget`, `cp`, `mv`, `ln` or `install` argv word the shell may still
+turn into an option (an unquoted variable or `$(…)` anywhere in it, a variable
+at its head quoted or not, an unquoted glob at its head, or a brace group making
+a word that begins with `-`) may name a write target this text cannot see, so
+the command is `policy.core` (`fetch-output-unknown`, `copy-target-unknown`)
+unless the word follows `--` (APRV-511 fix round 3).
+
 ### The rule table
 
 One row per binary group. The first row whose binary and subcommand match
