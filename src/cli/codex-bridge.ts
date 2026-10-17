@@ -213,7 +213,6 @@ import {
   type HookInput,
 } from "./hook.js";
 import type { Streams } from "./main.js";
-import { HOOK_RETRY_GRACE_MS } from "../core/harness-wait.js";
 import { canonicalize } from "../core/jcs.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { recordPreemptedQuestion } from "../core/question-preempted.js";
@@ -1037,7 +1036,8 @@ export function decideExecRequest(
       actor: plan.actor,
       timeoutMs: plan.waitMs,
       intervalMs: plan.intervalMs,
-      graceMs: HOOK_RETRY_GRACE_MS,
+      // APRV-464: the hook's own default, resolved against the policy's TTL.
+      graceMs: null,
       // No open-window lookup was performed, so nothing is carried; the floor
       // and the unattended guard read the log themselves. See the module header
       // for why a window is not honoured here.
@@ -1357,7 +1357,7 @@ export function decideFileChangeRequest(
       actor: plan.actor,
       timeoutMs: plan.waitMs,
       intervalMs: plan.intervalMs,
-      graceMs: HOOK_RETRY_GRACE_MS,
+      graceMs: null,
       windowRecords: null,
     }),
   };

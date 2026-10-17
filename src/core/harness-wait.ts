@@ -2,7 +2,8 @@
  * How long a harness hook waits, and how long the question it opened outlives
  * that wait (APRV-287).
  *
- * Three numbers with two readers each, which is the whole reason they live
+ * Three numbers (and, since APRV-464, the rule that derives the default grace
+ * from a policy's TTL) with two readers each, which is the whole reason they live
  * here rather than beside any one of them. `cli/hook.ts` uses them to decide
  * when a request it opened has been abandoned; `cli/channel-telegram.ts` uses the wait
  * to decide which pending requests on a listener's first cycle are stale enough
@@ -46,11 +47,42 @@ export const HOOK_DEFAULT_WAIT_MS = 55_000;
  * saying exactly what happened: the asker gave up.
  *
  * Five minutes because it is longer than any retry loop this runtime has been
- * observed to take and shorter than the shortest TTL an operator is likely to
- * write. It is a default: `--retry-grace` moves it per invocation, and `0`
- * withdraws at the moment the wait expires.
+ * observed to take. Since APRV-464 it is the default only under a policy that
+ * declares no `approval_ttl`: where the policy declares one, the default is
+ * {@link defaultRetryGraceMs}, which ends the grace at the TTL. `--retry-grace`
+ * still moves it per invocation, and `1ms` withdraws as the wait expires.
  */
 export const HOOK_RETRY_GRACE_MS = 5 * 60_000;
+
+/**
+ * The retry grace a hook holds a question open for when the operator passed no
+ * `--retry-grace` (APRV-464, amended SPEC.md "A harness wait that expires").
+ *
+ * With a policy TTL, the grace is the TTL less the wait, floored at zero. The
+ * grace in this module is how long the question OUTLIVES the wait, and the
+ * abandonment line is the wait plus the grace measured from the request's own
+ * `ts` ({@link abandonedAfterMs}), so this choice puts that line exactly at the
+ * TTL. A grace that has run out and a request that has expired are then the
+ * same moment, which is the property the amendment states: a tap after it is
+ * refused `expired` (SPEC.md §11.2) and nothing is ever left between the two
+ * windows for a withdrawal to race.
+ *
+ * Why the TTL and not five minutes. On 2026-10-04 a `network.call` request
+ * waited out the hook's nine minutes, sat in a five-minute grace, and was taken
+ * back while the approver was restarting the listener that would have shown it
+ * to them; the request had to be asked again, twice. The policy's TTL is the
+ * operator's own statement of how long a question may wait for a human, so it
+ * is the window a human is owed. A request under a harness ceiling is still
+ * bounded by the shorter ceiling-derived window (APRV-423,
+ * {@link harnessCappedTtlMs}); this changes nothing about that.
+ *
+ * Without a TTL nothing ends the question but the grace, so the old default
+ * ({@link HOOK_RETRY_GRACE_MS}) stands rather than an unbounded one.
+ */
+export function defaultRetryGraceMs(policyTtlMs: number | null, waitMs: number): number {
+  if (policyTtlMs === null) return HOOK_RETRY_GRACE_MS;
+  return Math.max(0, policyTtlMs - Math.max(0, waitMs));
+}
 
 /**
  * How old a request opened under `waitMs` must be before the grace has run out.

@@ -135,11 +135,11 @@ import {
 } from "../core/harness-version.js";
 import {
   abandonedAfterMs,
+  defaultRetryGraceMs,
   HARNESS_CAP_MARGIN_MS,
   harnessCapFitsMargin,
   harnessCappedTtlMs,
   HOOK_DEFAULT_WAIT,
-  HOOK_RETRY_GRACE_MS,
 } from "../core/harness-wait.js";
 import {
   harnessLoopFloor,
@@ -348,6 +348,13 @@ export const HOOK_DENY_CODES = [
    * lands as an ordinary grant. What stops that grant authorizing anything is
    * the other half of APRV-410: a retry past the grace does not carry it
    * (`findHarnessCarry`), so it asks again.
+   *
+   * **Which next call (APRV-464).** Only a gated call with a class that is not
+   * `read.*`: a call whose every class is a read leaves the question pending,
+   * because an agent that is still reading has not given up. And with no
+   * `--retry-grace` the grace ends at the policy's TTL, so under the default a
+   * question is never withdrawn before it expires and a late tap meets the
+   * `expired` refusal rather than a grant.
    */
   "hook-timeout",
   /**
@@ -4012,8 +4019,18 @@ interface HookRun {
    *
    * `core/harness-wait.ts` holds the default and the reasoning. Zero withdraws
    * at the moment the wait expires, which is what the tests drive.
+   *
+   * APRV-464: with no `--retry-grace`, this is `defaultRetryGraceMs`, which
+   * puts the end of the grace at the policy's TTL.
    */
   graceMs: number;
+  /**
+   * Whether {@link graceMs} was derived from the policy's `approval_ttl`
+   * because no `--retry-grace` was passed (APRV-464). Wording only: the deny
+   * text then says the grace ends when the request expires, which is the
+   * actual window, rather than naming a grace as if it were a separate one.
+   */
+  graceFromTtl: boolean;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
   /**
@@ -4271,6 +4288,37 @@ function withdrawAbandoned(
     `no retry adopted this question within ${minutesText(abandonedAfterMs(run.timeoutMs, run.graceMs))} of the hook's wait opening it (APRV-287); the asking tool call is gone, so the request is taken back rather than left for a listener to re-deliver`,
     "timeout",
   );
+}
+
+/**
+ * May a call carrying these classes be the one that takes back this actor's
+ * abandoned questions? (APRV-464, amended SPEC.md "A harness wait that
+ * expires".)
+ *
+ * Only when at least one class is not a read. The predicate is
+ * `core/loop.ts`'s {@link isSideEffectingClass}, the one the loop floor
+ * already uses to decide what a read is, so "a read" means one thing on this
+ * surface: `read` or `read.*`, and a class this build has never heard of is
+ * side-effecting by construction (the stricter reading, since an unknown class
+ * that sweeps costs a re-ask and one that is mistaken for a read could be
+ * anything).
+ *
+ * Why the class of the CURRENT call matters at all. A withdrawal past the
+ * grace exists because the asker is gone, and an agent that is still reading
+ * is not gone: it is the session that may yet retry, and its reads are not a
+ * statement that it has given up. On 2026-10-04 an autonomous `grep` in a
+ * sweep took back a pending `network.call` for a `git clone` while the human
+ * was restarting the listener, twice. A call that WRITES is the agent moving
+ * on, which is the signal the withdrawal stands for.
+ *
+ * What this leaves alone: the withdrawal an expiring wait makes of its OWN
+ * keys ({@link withdrawPending} through `ownKeys`). That is the asking call
+ * ending its own question under the grace its operator configured, which the
+ * amendment counts as the requester's own withdrawal rather than a later
+ * call's; under the default grace (APRV-464) it never fires before the TTL.
+ */
+function mayWithdrawAbandoned(classes: readonly string[]): boolean {
+  return classes.some((cls) => isSideEffectingClass(cls));
 }
 
 /**
@@ -4603,7 +4651,7 @@ function announceWait(
     const holdsOpen =
       at !== undefined && windowEndsBeforeGrace(run)
         ? `. The request expires at ${at}, which comes before the ${minutesText(run.graceMs)} retry grace would run out, so that is how long it stays open for a retry; a decision after it is refused rather than granted.`
-        : ` and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${expiryClause(at)}`;
+        : ` and leaving the request open for a ${minutesText(run.graceMs)} retry grace${run.graceFromTtl ? ", which ends when the policy's approval_ttl does (APRV-464)" : ""}.${expiryClause(at)}`;
     streams.err(
       `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${waitText(run)} before denying with hook-timeout${holdsOpen}${adopted}\n`,
     );
@@ -4849,7 +4897,14 @@ function* gateHarnessSteps(
   // whose grace window has run out, and never the bytes this one is about to
   // ask about. The hook is the only writer that can do this: `withdraw` is
   // requester-only, and the requester of a harness request is this actor.
-  const swept = withdrawAbandoned(run, streams, intake.records, intakeTs, hash);
+  //
+  // APRV-464 (amended SPEC.md "A harness wait that expires"): only a call with
+  // a class that is not `read.*` may be the one that withdraws. A gated read (a
+  // manual `read.*` class, or a read the loop floor carved out) leaves every
+  // earlier question pending; see {@link mayWithdrawAbandoned}.
+  const swept = mayWithdrawAbandoned(classes)
+    ? withdrawAbandoned(run, streams, intake.records, intakeTs, hash)
+    : [];
   if (swept.length > 0) {
     streams.err(
       `approval: withdrew ${String(swept.length)} abandoned harness request(s) nothing retried (${swept.join(", ")}); a tap on one of them now authorizes nothing and the channel says so\n`,
@@ -5220,9 +5275,17 @@ function* gateHarnessSteps(
       deadlines.length === 0
         ? ""
         : ` The harness ceiling this hook runs under bounds the question too: the request(s) expire at ${expiresAt}, and a decision after that is refused rather than granted — the runtime records the lapse as approval.expired.`;
+    // APRV-464. Which later calls withdraw, named in the deny itself (AC3): a
+    // gated call of this actor whose class is not a read. Under the default
+    // grace, which ends at the policy's TTL, no later call withdraws before the
+    // request expires, so that form says the window ends at the TTL instead and
+    // names the refusal a late tap meets (`expired`, APRV-410 AC2).
+    const past = run.graceFromTtl
+      ? ` The grace ends when the policy's approval_ttl does (APRV-464), so past it the request has expired: a decision then is refused (expired) rather than granted, the runtime records the lapse as approval.expired, and a retry asks the question fresh. Nothing takes the question back before then: a read never does, no later tool call of this actor (${run.actor}) does under this default grace, and a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you.`
+      : ` Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES WHOSE CLASS IS NOT A read.* CLASS, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you, and a call whose every class is a read leaves the question pending (APRV-464). Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant; it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).`;
     return sayDeny(
       "hook-timeout",
-      `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the question is taken back (approval.withdrawn, reason timeout) BY THE NEXT GATED TOOL CALL THIS ACTOR (${run.actor}) MAKES, which is the only process that may: a withdrawal is the requester's own (APRV-106), so no daemon and no channel can do it for you. Until that next call the request stays pending, and a decision that lands past the grace is recorded as a grant — it authorizes nothing, because a retry past the grace asks again rather than carrying a grant nobody was holding (APRV-410).${stillLagging}`,
+      `${lead} This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once.${expiresText} Retry it after the approver answers; the retry adopts the same question rather than asking a second one.${past}${stillLagging}`,
     );
   };
 
@@ -7115,10 +7178,12 @@ function* runHarnessHook(
   }
   // APRV-287. How long the question outlives the wait, for the retry that
   // adopts it. The duration grammar has no zero, so the shortest window is
-  // `1ms`, which withdraws as the wait expires.
+  // `1ms`, which withdraws as the wait expires. APRV-464: an ABSENT flag is
+  // `null` here and is resolved against the policy's TTL once the policy is
+  // loaded (`defaultRetryGraceMs`), so the default ends the grace at the TTL.
   const graceText = stringFlag(parsed.flags, "--retry-grace");
-  const graceMs = graceText === null ? HOOK_RETRY_GRACE_MS : parseDuration(graceText);
-  if (graceMs === null) {
+  const graceMs = graceText === null ? null : parseDuration(graceText);
+  if (graceText !== null && graceMs === null) {
     return configurationError(
       `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
@@ -7479,7 +7544,13 @@ export interface DecideInput {
   actor: string;
   timeoutMs: number;
   intervalMs: number;
-  graceMs: number;
+  /**
+   * The retry grace the operator stated (`--retry-grace`), or `null` for the
+   * default (APRV-464), which is resolved once the policy is loaded:
+   * `core/harness-wait.ts`'s `defaultRetryGraceMs`, the policy's TTL less the
+   * wait, or five minutes under a policy that declares no TTL.
+   */
+  graceMs: number | null;
   /**
    * The harness's ceiling on this process, in milliseconds, or `null`
    * (APRV-423). See {@link HookRun.harnessCapMs}. A caller that is not run by a
@@ -7663,7 +7734,10 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     actor,
     timeoutMs,
     intervalMs,
-    graceMs,
+    // APRV-464. An operator's `--retry-grace` is taken as stated; with none, the
+    // grace ends at the policy's TTL (or is five minutes when there is none).
+    graceMs: graceMs ?? defaultRetryGraceMs(load.durations.approvalTtlMs, timeoutMs),
+    graceFromTtl: graceMs === null && load.durations.approvalTtlMs !== null,
     ttlMs: load.durations.approvalTtlMs,
     harnessCapMs,
     harnessCapStated,
@@ -7840,7 +7914,13 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     // `keepHash` is this invocation's own bytes, exactly as the intake sweep
     // passes it: a sibling hook process waiting on a question about the same
     // payload is never taken back from under it.
-    if (windowRecords !== null) {
+    //
+    // APRV-464. A command whose every class is a read sweeps nothing: on
+    // 2026-10-04 an autonomous `grep` took back a pending `network.call` while
+    // the approver was restarting the listener that would have shown it to
+    // them. Only a call that is not a read may be the call that withdraws
+    // (amended SPEC.md "A harness wait that expires").
+    if (windowRecords !== null && mayWithdrawAbandoned(classes)) {
       const swept = withdrawAbandoned(
         run,
         streams,

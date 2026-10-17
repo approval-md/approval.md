@@ -4608,13 +4608,15 @@ test("APRV-410: an AUTONOMOUS tool call sweeps the question an earlier wait aban
   assert.match(first.reason, /NOTHING WAS WITHDRAWN/u);
   assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u);
 
-  // A read: `read.shell`, autonomous under this policy, and before APRV-410 it
-  // reached no sweep at all.
+  // A workspace write: `files.write.workspace`, autonomous under this policy,
+  // and before APRV-410 it reached no sweep at all. A write since APRV-464,
+  // because a READ is no longer a call that withdraws (see the APRV-464 cases
+  // below, which pin that the same sequence with `ls -la` withdraws nothing).
   const sweeper = verdictOf(
-    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(READ_COMMAND, "tu-410-read")),
+    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(WRITE_COMMAND, "tu-410-write")),
   );
   assert.equal(sweeper.permission, "allow", sweeper.reason);
-  assert.match(sweeper.reason, /^autonomous: read\.shell/u);
+  assert.match(sweeper.reason, /^autonomous: files\.write\.workspace/u);
 
   const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
   assert.equal(withdrawn.length, 1, JSON.stringify(allRecords(dir).map((r) => r["event"])));
@@ -4721,10 +4723,26 @@ test("APRV-410: the timeout deny names who withdraws and what a late grant does"
   // "the hook takes the question back" with no subject that exists once the
   // process has denied, and it said nothing about the grant that may still be
   // written. Both are now in the sentence.
+  //
+  // APRV-464: an operator-stated grace, because the DEFAULT grace now ends at
+  // the TTL and its deny says so instead (pinned in the APRV-464 cases below).
+  // The sentence also names which later calls withdraw: not a read.
   const dir = ready();
-  const verdict = timedOutInsideGrace(dir, "npm install left-pad", "tu-410-g");
+  const verdict = verdictOf(
+    runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "5m"],
+      dir,
+      bashEvent("npm install left-pad", "tu-410-g"),
+    ),
+  );
   assert.equal(verdict.permission, "deny", verdict.reason);
-  assert.match(verdict.reason, /NEXT GATED TOOL CALL THIS ACTOR \(agent:claude-code\) MAKES/u);
+  assert.match(verdict.reason, /hook:sess-1:tu-410-g:deps\.add/u, "the deny names the key");
+  assert.match(verdict.reason, /stay open for the 5m retry grace/u);
+  assert.match(
+    verdict.reason,
+    /NEXT GATED TOOL CALL THIS ACTOR \(agent:claude-code\) MAKES WHOSE CLASS IS NOT A read\.\* CLASS/u,
+  );
+  assert.match(verdict.reason, /every class is a read leaves the question pending \(APRV-464\)/u);
   assert.match(verdict.reason, /requester's own \(APRV-106\)/u);
   assert.match(verdict.reason, /no daemon and no channel can do it/u);
   assert.match(verdict.reason, /authorizes nothing/u);
@@ -4778,6 +4796,142 @@ test("APRV-410: the withdrawal has no system: spelling, so no daemon can make it
   const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
   assert.equal(withdrawn.length, 1);
   assert.equal(payloadOf(withdrawn[0] as Record<string, unknown>)["reason"], "timeout");
+  assertClean(dir);
+});
+
+// ===========================================================================
+// APRV-464: a read never takes back a pending question, and the default grace
+// ends at the policy's TTL (amended SPEC.md "A harness wait that expires")
+// ===========================================================================
+
+/**
+ * The incident, 2026-10-04: a `network.call` request for a `git clone` waited
+ * the hook's nine minutes, sat in the five-minute grace, and was withdrawn by
+ * the requester's next gated call, which was an autonomous `grep` in a sweep.
+ * The approver was restarting the listener and found nothing to tap; the
+ * request was asked again, twice.
+ *
+ * The rulings this pins (Carter, 2026-10-17, decisions D-4 and D-5): only a
+ * gated call with a class that is not `read.*` may withdraw a question past its
+ * grace; the default grace ends at the policy's TTL; and a decision past it
+ * meets the refusals that already exist (`expired`, `request-withdrawn`), so
+ * no new refusal code was added (APRV-410 AC2).
+ */
+
+/** The fixture policy with every read routed through the GATED path. */
+const POLICY_READS_SUPERVISED = POLICY.replace(
+  "  read.*:\n    autonomy: autonomous",
+  "  read.*:\n    autonomy: supervised",
+);
+
+test("APRV-464: an autonomous READ past the grace leaves the question pending", () => {
+  // The planted-bug check for this task: before APRV-464 this exact sequence
+  // withdrew the question (the APRV-410 sweep ran on every autonomous call).
+  const dir = ready();
+  const first = timedOutInsideGrace(dir, "npm install left-pad", "tu-464-a");
+  assert.equal(first.permission, "deny", first.reason);
+
+  const reader = verdictOf(
+    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(READ_COMMAND, "tu-464-read")),
+  );
+  assert.equal(reader.permission, "allow", reader.reason);
+  assert.match(reader.reason, /^autonomous: read\.shell/u);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u, "a read withdrew it");
+
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.match(queue.stdout, /tu-464-a/u, "the question is still in front of the human");
+
+  // And the same actor's next WRITE, under the same window, is the call that
+  // takes it back: the rule narrowed the trigger and kept the withdrawal.
+  const writer = verdictOf(
+    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(WRITE_COMMAND, "tu-464-write")),
+  );
+  assert.equal(writer.permission, "allow", writer.reason);
+  const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1);
+  assert.equal((withdrawn[0] as Record<string, unknown>)["action_key"], "hook:sess-1:tu-464-a:deps.add");
+  assert.equal(payloadOf(withdrawn[0] as Record<string, unknown>)["reason"], "timeout");
+  assertClean(dir);
+});
+
+test("APRV-464: a mixed command with one write class sweeps; the read in it does not shield it", () => {
+  const dir = ready();
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-464-m");
+  const mixed = verdictOf(
+    runCli(
+      ["hook", "claude-code", ...PAST_GRACE],
+      dir,
+      bashEvent(`${READ_COMMAND} && ${WRITE_COMMAND}`, "tu-464-mixed"),
+    ),
+  );
+  assert.equal(mixed.permission, "allow", mixed.reason);
+  assert.match(mixed.reason, /files\.write\.workspace/u);
+  const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1, JSON.stringify(allRecords(dir).map((r) => r["event"])));
+  assertClean(dir);
+});
+
+test("APRV-464: a GATED read (the intake sweep) leaves the question pending; a gated write takes it back", () => {
+  // The other sweep site: the intake of the gated path, which a supervised or
+  // manual class reaches. Reads are supervised here, so `ls -la` goes through
+  // it and is still a read.
+  const dir = ready(POLICY_READS_SUPERVISED);
+  timedOutInsideGrace(dir, "npm install left-pad", "tu-464-g");
+
+  const reader = verdictOf(
+    runCli(["hook", "claude-code", ...PAST_GRACE], dir, bashEvent(READ_COMMAND, "tu-464-gread")),
+  );
+  assert.equal(reader.permission, "allow", reader.reason);
+  assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u, "a gated read withdrew it");
+
+  const pusher = verdictOf(
+    runCli(
+      ["hook", "claude-code", ...PAST_GRACE],
+      dir,
+      bashEvent("git push origin main", "tu-464-push"),
+    ),
+  );
+  assert.equal(pusher.permission, "allow", pusher.reason);
+  const withdrawn = allRecords(dir).filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1);
+  assert.equal((withdrawn[0] as Record<string, unknown>)["action_key"], "hook:sess-1:tu-464-g:deps.add");
+  assertClean(dir);
+});
+
+test("APRV-464: with no --retry-grace the deny says the grace ends at the policy's TTL", () => {
+  // AC2 at the surface an agent reads: the message states the actual window.
+  // The fixture's TTL is 1h and the wait 1s, so the grace is 3599s ("60m"),
+  // and the line the sweep and the carry use is the TTL itself.
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-464-ttl"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /hook:sess-1:tu-464-ttl:deps\.add/u);
+  assert.match(verdict.reason, /stay open for the 60m retry grace/u);
+  assert.match(verdict.reason, /The grace ends when the policy's approval_ttl does \(APRV-464\)/u);
+  assert.match(verdict.reason, /refused \(expired\) rather than granted/u);
+  assert.match(verdict.reason, /a read never does/u);
+  assert.match(run.stderr, /60m retry grace, which ends when the policy's approval_ttl does/u);
+  assertClean(dir);
+});
+
+test("APRV-464: under a policy with no TTL the default grace is still five minutes", () => {
+  const dir = ready(POLICY.replace('  approval_ttl: "1h"\n', ""));
+  const verdict = verdictOf(
+    runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("npm install left-pad", "tu-464-nottl"),
+    ),
+  );
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /stay open for the 5m retry grace/u);
+  assert.doesNotMatch(verdict.reason, /approval_ttl/u);
   assertClean(dir);
 });
 

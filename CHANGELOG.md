@@ -15,6 +15,19 @@ before a tag.
 
 ## Unreleased
 
+### Behavior changes for an existing policy
+
+- **A read no longer takes back a pending question, and the default retry
+  grace ends at the policy's TTL (APRV-464).** Past the grace, a hook's
+  pending request is withdrawn only by the same actor's next gated tool call
+  whose class is not `read.*` (or an explicit withdraw); an autonomous `grep`
+  or `ls` leaves it pending. With no `--retry-grace`, the grace is the
+  policy's `approval_ttl` less the wait, so past the grace the request has
+  expired; under a policy with no TTL the default stays 5 minutes. Pass
+  `--retry-grace 5m` for the old behaviour. The `hook-timeout` deny names the
+  window and which later calls withdraw. SPEC.md "A harness wait that
+  expires" is amended (pending sign-off).
+
 ## 0.4.4 — 2026-10-12
 
 ### Security
