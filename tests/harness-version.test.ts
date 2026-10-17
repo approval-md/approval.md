@@ -48,6 +48,7 @@ import {
   harnessProvenance,
   hermesFailClosedSupport,
   installedHarnessVersion,
+  installedHarnessVersionRaw,
   isHarnessKind,
   normalizeHarnessVersion,
   parseHermesVersion,
@@ -345,6 +346,36 @@ test("the event's own version is preferred over the probe, and is normalized too
       harness: "claude-code",
       harness_version: "2.0.14",
     });
+  });
+});
+
+/**
+ * The refuter's stub-hermes line (APRV-419 fix round 1): a tab, then a carriage
+ * return that hides `upstream-secret` on a terminal, then the U+00B7 separator.
+ * Built from char codes so the control characters are visible in this file.
+ */
+const HERMES_CONTROL_LINE = `Hermes Agent v0.21.3${String.fromCharCode(9)}(2026.9.14)${String.fromCharCode(13)} upstream-secret \u00b7 upstream 913d4098`;
+
+test("the probe path cuts at a control character exactly as the event path does", () => {
+  // Before the fix the probe stripped control characters BEFORE normalizing, so
+  // the tab and the carriage return vanished and `upstream-secret` was glued on
+  // and recorded. One rule, one place: the recordable value is read off the
+  // untouched first line, so the tab ends it.
+  const dir = stubBin("hermes", `printf '%s\\n' '${HERMES_CONTROL_LINE}'`);
+  withPath(dir, () => {
+    assert.equal(probeHarnessVersion("hermes"), "Hermes Agent v0.21.3");
+    assert.equal(installedHarnessVersion("hermes"), "Hermes Agent v0.21.3");
+    assert.deepEqual(harnessProvenance("hermes"), {
+      harness: "hermes",
+      harness_version: "Hermes Agent v0.21.3",
+    });
+    // The event path on the same bytes records the same value.
+    assert.equal(normalizeHarnessVersion(HERMES_CONTROL_LINE), "Hermes Agent v0.21.3");
+    // The diagnostic reader still gets a terminal-safe line with no control
+    // characters in it, and it is never what is recorded.
+    const raw = installedHarnessVersionRaw("hermes");
+    assert.ok(raw !== null && !/\p{Cc}/u.test(raw), String(raw));
+    assert.ok(raw.includes("upstream-secret"), "the floor reader still sees the whole line");
   });
 });
 
@@ -987,6 +1018,14 @@ test("a Hermes record carries the prefix, and doctor compares it (APRV-419)", ()
   });
   assert.equal(later.status, "fail", later.detail);
   assert.match(later.detail, /hermes is installed at "Hermes Agent v0\.21\.3 \(2026\.9\.21\)"/u);
+  // The fix names the Hermes hook and its own event, never Claude Code's
+  // PreToolUse self-test (refute S3).
+  const fix = later.fix;
+  assert.ok(fix !== undefined, "a failing row carries a fix");
+  assert.ok(fix.startsWith(`approval hook hermes --dir ${dir} --harness-cap `), fix);
+  assert.match(fix, /pre_tool_call/u);
+  assert.match(fix, /docs\/hermes-hook\.md/u);
+  assert.doesNotMatch(fix, /PreToolUse|claude-code/u);
 });
 
 // ---------------------------------------------------------------------------

@@ -136,17 +136,22 @@ export function printableAsciiPrefix(text: string): string {
  * upstream commit after the separator is lost, which is why the fail-closed
  * floor below still reads the raw line.
  *
- * This widens nothing at the write boundary. Every value returned here is a
+ * The SET of recordable values is unchanged. Every value returned here is a
  * string the old rule accepted as a whole line (one line, printable ASCII,
  * 1..64 characters), so the schema, the read side ({@link
- * readHarnessProvenance}) and every record already written are unchanged, and a
- * banner that is ASCII from its first byte is bounded exactly as before.
+ * readHarnessProvenance}) and every record already written are unchanged. What
+ * moved is which part of a line is recorded: the line is cut at its first
+ * non-printable character, and the 64-character cap then applies to that prefix
+ * rather than to the whole line. So a long line whose printable-ASCII prefix
+ * fits the cap now records the prefix where the old rule refused the line, and
+ * at most 64 printable-ASCII characters of any line reach the log (SPEC.md
+ * §11.1 invariant 3).
  *
  * Returns `null` for anything that is not a usable version: empty output, a
- * line with no printable-ASCII prefix, or a prefix longer than the cap. Over the
- * cap is a refusal rather than a truncation, because the cap exists to keep a
- * banner out (SPEC.md §11.1 invariant 3), and a truncated banner is still a
- * banner. Absence is always available and always honest.
+ * line with no printable-ASCII prefix, or a prefix longer than the cap. The cut
+ * at the first non-printable character is the one truncation this applies; a
+ * prefix still over the cap after it is refused whole. Absence is always
+ * available and always honest.
  */
 export function normalizeHarnessVersion(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -193,6 +198,12 @@ export const HARNESS_RAW_VERSION_LIMIT = 200;
  * from {@link normalizeHarnessVersion}: an upstream commit behind a typographic
  * separator is exactly the fact a version floor has to read, and it is exactly
  * the part of the line the write boundary cuts.
+ *
+ * Never the source of a RECORDED value. Removing a control character glues what
+ * followed it onto what preceded it, so text a `\r` hid on a terminal would
+ * reach the log if this line were normalized. The recordable form is read off
+ * the untouched first line instead ({@link installedHarnessVersion}), where the
+ * control character cuts exactly as it does for an event-supplied value (APRV-419).
  */
 export function rawHarnessVersionLine(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -205,7 +216,12 @@ export function rawHarnessVersionLine(raw: unknown): string | null {
 }
 
 /**
- * Run `<binary> --version` once, uncached, and return its raw first line.
+ * Run `<binary> --version` once, uncached, and return its first line UNTOUCHED.
+ *
+ * Untouched means no trim, no strip and no cap: the two readers each apply their
+ * own rule to these bytes ({@link rawHarnessVersionLine} for a terminal,
+ * {@link normalizeHarnessVersion} for the log), and neither sees the other's
+ * output. `null` when the binary gave no answer at all.
  *
  * Every failure is a value rather than an exception, in the manner of
  * {@link spawnGloss}: a missing binary, a non-zero exit and a timeout kill are
@@ -216,7 +232,7 @@ export function rawHarnessVersionLine(raw: unknown): string | null {
  * vault passphrase, and it has no use for either. Nothing is declared, because
  * reading a version is not a granted action.
  */
-export function probeHarnessVersionRaw(kind: HarnessKind): string | null {
+function probeHarnessVersionFirstLine(kind: HarnessKind): string | null {
   let result;
   try {
     result = spawnSync(HARNESS_BINARY[kind], ["--version"], {
@@ -232,17 +248,23 @@ export function probeHarnessVersionRaw(kind: HarnessKind): string | null {
     return null;
   }
   if (result.error !== undefined || result.status !== 0) return null;
-  return rawHarnessVersionLine(result.stdout);
+  return result.stdout.split("\n", 1)[0] ?? "";
+}
+
+/** Run `<binary> --version` once, uncached, and return its first line as a diagnostic may print it. */
+export function probeHarnessVersionRaw(kind: HarnessKind): string | null {
+  return rawHarnessVersionLine(probeHarnessVersionFirstLine(kind));
 }
 
 /**
  * Run `<binary> --version` once, uncached, and normalize what came back.
  *
- * The recordable form: one line, its printable-ASCII prefix, capped. Exported
- * for the test that proves the memo below is a memo.
+ * The recordable form: one line, its printable-ASCII prefix, capped, read off
+ * the untouched first line so a control character cuts here as it does on the
+ * event path. Exported for the test that proves the memo below is a memo.
  */
 export function probeHarnessVersion(kind: HarnessKind): string | null {
-  return normalizeHarnessVersion(probeHarnessVersionRaw(kind));
+  return normalizeHarnessVersion(probeHarnessVersionFirstLine(kind));
 }
 
 /**
@@ -250,32 +272,45 @@ export function probeHarnessVersion(kind: HarnessKind): string | null {
  * PATH, and asking a second time in the same process would pay a second spawn
  * for the same `null`.
  *
- * It holds the RAW line rather than the recordable one, so the two readers — the
- * provenance field and the version floor — still cost ONE spawn per process
- * between them. A harness whose raw line the write boundary cuts has a shorter
- * recordable version than its raw one, which is precisely Hermes's case (the
- * record keeps the build date and loses the upstream commit) and precisely why
- * the floor is not read off a record.
+ * It holds the UNTOUCHED first line rather than either reader's form, so the two
+ * readers (the provenance field and the version floor) still cost ONE spawn per
+ * process between them, and each applies its own rule to the same bytes. A
+ * harness whose line the write boundary cuts has a shorter recordable version
+ * than its raw one, which is precisely Hermes's case (the record keeps the build
+ * date and loses the upstream commit) and precisely why the floor is not read
+ * off a record.
  */
 const probed = new Map<HarnessKind, string | null>();
 
-/** The raw first line of `<binary> --version`, read at most once per process. */
-export function installedHarnessVersionRaw(kind: HarnessKind): string | null {
+/** The untouched first line of `<binary> --version`, read at most once per process. */
+function installedHarnessVersionFirstLine(kind: HarnessKind): string | null {
   const memo = probed.get(kind);
   if (memo !== undefined) return memo;
-  const value = probeHarnessVersionRaw(kind);
+  const value = probeHarnessVersionFirstLine(kind);
   probed.set(kind, value);
   return value;
 }
 
 /**
+ * The first line of `<binary> --version` as a diagnostic may print it (control
+ * characters removed, non-ASCII kept), read at most once per process. For the
+ * version floor and terminal output; never recorded.
+ */
+export function installedHarnessVersionRaw(kind: HarnessKind): string | null {
+  return rawHarnessVersionLine(installedHarnessVersionFirstLine(kind));
+}
+
+/**
  * The installed version of `kind`, read at most once per process.
  *
- * This is the only entry point callers should use for a RECORDABLE version.
- * `probeHarnessVersion` is exported for the test that proves the memo is a memo.
+ * This is the only entry point callers should use for a RECORDABLE version. It
+ * normalizes the untouched first line, never {@link installedHarnessVersionRaw}'s
+ * stripped one, so the recorded value follows the one rule in {@link
+ * printableAsciiPrefix} whichever path supplied it. `probeHarnessVersion` is
+ * exported for the test that proves the memo is a memo.
  */
 export function installedHarnessVersion(kind: HarnessKind): string | null {
-  return normalizeHarnessVersion(installedHarnessVersionRaw(kind));
+  return normalizeHarnessVersion(installedHarnessVersionFirstLine(kind));
 }
 
 /** Drop the memo. TEST ONLY: a process reads a version once, by design. */

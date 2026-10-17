@@ -3392,6 +3392,23 @@ function recordedHarnessVersions(
 }
 
 /**
+ * The fix line for one harness whose binary changed with no gate exercised since.
+ *
+ * Built from the kind that MISMATCHED, never from whichever harness happens to be
+ * registered first: a checkout that registers Claude Code and Hermes and sees
+ * only Hermes change must be told to exercise the Hermes hook. Hermes has its own
+ * line because its event is `pre_tool_call` rather than `PreToolUse`, its hook
+ * refuses anything that registers until `--harness-cap` is stated (APRV-423), and
+ * docs/hermes-hook.md carries no self-test section to point at.
+ */
+function harnessSelfTestFix(kind: HarnessKind, where: string): string {
+  if (kind === "hermes") {
+    return `approval hook hermes --dir ${where} --harness-cap 300s < one pre_tool_call event for a supervised-class command, re-run on the same Hermes build. State the --harness-cap your \`$HERMES_HOME/config.yaml\` entry states (300s for the entry in docs/hermes-hook.md, "Installing it"; that doc has no self-test section). It prompts nobody and writes one task.registered carrying the installed version.`;
+  }
+  return `approval hook ${kind} --dir ${where} < one PreToolUse event for a supervised-class command, the self-test in docs/${kind === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`;
+}
+
+/**
  * Has the harness binary changed under the hook since the log last saw it?
  *
  * ## What this row is for
@@ -3407,8 +3424,10 @@ function recordedHarnessVersions(
  * `<binary> --version` says now, and what the last hook-written record says the
  * binary was. A difference is not evidence of a fault, since most upgrades are
  * fine. It is evidence that the gate has not been exercised since the binary
- * changed, and the remedy is to exercise it. The self-test in
- * `docs/claude-code-hook.md` does that and costs nobody a prompt.
+ * changed, and the remedy is to exercise it. The fix names that remedy for each
+ * harness that changed ({@link harnessSelfTestFix}): the self-test in
+ * `docs/claude-code-hook.md` or `docs/cursor-hook.md`, or for Hermes one
+ * `pre_tool_call` through the same hook command. None of them costs a prompt.
  *
  * ## Why it fails rather than warns
  *
@@ -3463,6 +3482,7 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
 
   const recorded = recordedHarnessVersions(records);
   const mismatched: string[] = [];
+  const mismatchedKinds: HarnessKind[] = [];
   const matched: string[] = [];
   const unknown: string[] = [];
   // APRV-415. The VERSION FLOOR, which is a different question from the rest of
@@ -3523,6 +3543,7 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     mismatched.push(
       `${kind} is installed at ${JSON.stringify(installed)} and the last hook-written record (seq ${String(last.seq)}) was issued by ${JSON.stringify(last.version)}`,
     );
+    mismatchedKinds.push(kind);
   }
 
   // APRV-415: the floor is reported FIRST when it is breached, because it is the
@@ -3542,14 +3563,13 @@ function checkHarnessVersion(dir: string, records: readonly EventRecord[]): Doct
     };
   }
   if (mismatched.length > 0) {
-    const first = kinds[0] as HarnessKind;
     return {
       check,
       status: "fail",
       detail: `the harness binary changed and the gate has not been exercised since: ${mismatched.join("; ")}. A release can change the hook envelope semantics, so until one record is written under the new binary nothing here shows the hook still fires. The recorded version is self-reported and reduces nothing: a match would not have proved the hook fired either, and what a mismatch says is that nobody has looked.${
         floor.length === 0 ? "" : ` Separately: ${floor.join("; ")}.`
       }`,
-      fix: `approval hook ${first} --dir ${where} < one PreToolUse event for a supervised-class command — the self-test in docs/${first === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`,
+      fix: mismatchedKinds.map((kind) => harnessSelfTestFix(kind, where)).join(" "),
     };
   }
   if (matched.length > 0) {
