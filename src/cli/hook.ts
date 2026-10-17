@@ -8026,24 +8026,75 @@ function globCouldNameOrgan(path: string): boolean {
  * So a pattern for the install directory before its env file, or for the
  * profiles directory before a profile's credential, is a credential read; the
  * same pattern before an ordinary file is not.
+ *
+ * Fix round 5 (review-b r4 M1): no recursion. Round 4 judged each replacement
+ * by calling this test again (and, through
+ * {@link unresolvedReadCouldNameCredential}, again), with no cap, so the work
+ * grew factorially in the count of such components. A hook stopped by its
+ * harness's timeout lets the call through on Claude Code. The same choices
+ * are now walked once each, in a loop: every pattern component in a directory
+ * position that could name either directory is kept as written or replaced by
+ * a name it could stand for, and every combination but "all kept" is judged
+ * by the credential rows, by this test's own name tests, and, where a span
+ * remains, by {@link spanReadingsCouldNameCredential}. That is the set round 4
+ * reached, so up to the cap the answer is round 4's. Past
+ * {@link GLOB_DIRECTORY_NAMING_CAP} such components the word is a credential
+ * read without judging it: fail closed, at the cost of one approval.
  */
 function globCouldNameCredential(path: string): boolean {
-  const last = basename(path);
-  const lastNames =
-    hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name));
-  if (lastNames || globCouldNameGateHome(path)) return true;
+  if (globNamesCredentialOrHome(path)) return true;
   const components = path.split(/[/\\]+/u);
+  const choices: { index: number; names: string[] }[] = [];
   for (let index = 0; index < components.length - 1; index += 1) {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
-    for (const name of ["hermes-agent", "profiles"]) {
-      if (!globRegex(component).test(name) && !globRegex(component.toLowerCase()).test(name)) continue;
-      const named = [...components.slice(0, index), name, ...components.slice(index + 1)].join("/");
-      if (isCredentialPath(named) || globCouldNameCredential(named)) return true;
-      if (/[$`]/u.test(named) && unresolvedReadCouldNameCredential(named)) return true;
-    }
+    const names = GLOB_DIRECTORY_NAMES.filter(
+      (name) => globRegex(component).test(name) || globRegex(component.toLowerCase()).test(name),
+    );
+    if (names.length > 0) choices.push({ index, names });
   }
-  return false;
+  if (choices.length === 0) return false;
+  if (choices.length > GLOB_DIRECTORY_NAMING_CAP) return true;
+  // An odometer over the choices: 0 keeps the pattern, n > 0 names names[n - 1].
+  // All zeros (every pattern kept) is the word itself, which the caller judges.
+  const picks = choices.map(() => 0);
+  for (;;) {
+    let at = 0;
+    while (at < picks.length && picks[at] === (choices[at] as { names: string[] }).names.length) {
+      picks[at] = 0;
+      at += 1;
+    }
+    if (at === picks.length) return false;
+    picks[at] = (picks[at] as number) + 1;
+    const named = [...components];
+    for (const [position, choice] of choices.entries()) {
+      const pick = picks[position] as number;
+      if (pick > 0) named[choice.index] = choice.names[pick - 1] as string;
+    }
+    const text = named.join("/");
+    if (globNamesCredentialOrHome(text) || isCredentialPath(text)) return true;
+    if (/[$`]/u.test(text) && spanReadingsCouldNameCredential(text)) return true;
+  }
+}
+
+/** The directory names {@link globCouldNameCredential} reads a directory-component pattern as. */
+const GLOB_DIRECTORY_NAMES: readonly string[] = ["hermes-agent", "profiles"];
+
+/**
+ * How many directory-component patterns that could name the install or
+ * profiles directory {@link globCouldNameCredential} judges (fix round 5,
+ * review-b r4 M1). Each is kept or named, so k of them cost at most 3^k - 1
+ * judgements (80 at this cap); a word with more is a credential read. A `*`
+ * component is already one through {@link globCouldNameGateHome}, so the cap
+ * only ever meets narrower patterns (`h*`, `p*`, `[hp]*`), and rarely.
+ */
+const GLOB_DIRECTORY_NAMING_CAP = 4;
+
+/** A last-component pattern that could name a credential file, or any pattern that could name a home. */
+function globNamesCredentialOrHome(path: string): boolean {
+  const last = basename(path);
+  if (hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name))) return true;
+  return globCouldNameGateHome(path);
 }
 
 /**
@@ -8088,6 +8139,15 @@ function globCouldNameCredential(path: string): boolean {
  */
 function unresolvedReadCouldNameCredential(text: string): boolean {
   if (isCredentialPath(text) || globCouldNameCredential(text)) return true;
+  return spanReadingsCouldNameCredential(text);
+}
+
+/**
+ * The segment rows of {@link unresolvedReadCouldNameCredential}, in its three
+ * readings, without its pattern test. {@link globCouldNameCredential} calls
+ * this one, so neither test calls back into the other (fix round 5).
+ */
+function spanReadingsCouldNameCredential(text: string): boolean {
   // One segment per braced variable, so a default's `/` (`${H:-$HOME/.hermes}`) splits nothing.
   const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
   const segments = collapsed.split(/[/\\]+/u).filter((segment) => segment.length > 0);

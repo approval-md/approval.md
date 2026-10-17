@@ -462,6 +462,12 @@ on the hook for enforcement.
   read an unknown long option; and a pattern in the `hermes-agent/` or
   `profiles/` directory component under a home, before a credential, is a
   credential read where the hook cannot list the home. Only ever stricter.
+  Fix round 5 (review-b's read at cbeaf709, M1): that pattern test judges
+  each combination of directory patterns once, in a loop, where round 4
+  recursed with no bound (work factorial in the count of such patterns, and
+  a hook stopped by its harness's timeout lets the call through on Claude
+  Code); a word with more than four such patterns is a credential read
+  without being judged, so it fails closed.
 - **Conformance.** `command-class` 1.9.0 (one hundred and forty new
   vectors, thirty-two of them unmoved controls; no existing vector
   expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set

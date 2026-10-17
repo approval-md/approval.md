@@ -1254,3 +1254,57 @@ test("fix round 4 S3: a directory-component pattern under an unreadable home", (
     chmodSync(home, 0o755);
   }
 });
+
+/**
+ * Fix round 5 (review-b r4 M1): the read test for a pattern in a DIRECTORY
+ * component is a loop over its choices with a cap, not a recursion. Round 4
+ * called itself once per replacement with no cap, so the work grew
+ * factorially in the count of such components, and a hook its harness stops
+ * on a timeout lets the call through on Claude Code. The words are built in
+ * code: a home, then `count` directory patterns each of which could name the
+ * install directory or the profiles directory (and neither home), then a file
+ * name. Under an unreadable home, so the text test alone decides.
+ * - At the cap every combination is judged and an ordinary file reads (the
+ *   control); one past the cap, and far past it, the word is a credential
+ *   read without being judged (fail closed). Each answer comes back well under
+ *   any harness's hook timeout.
+ * - Below the cap, two patterns that must take DIFFERENT names (the profiles
+ *   directory, then the install directory under a profile) before the
+ *   install's env file are still a credential read: the loop reaches every
+ *   combination round 4 reached.
+ */
+test("fix round 5 (review-b r4 M1): directory-component patterns are judged once each, and past the cap fail closed", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: a mode-000 directory is still readable");
+    return;
+  }
+  const { dir, home, env } = credentialLab();
+  const at = (command: string): Row => ({ tool: "terminal", input: { command, workdir: dir }, env });
+  const pattern = "[hp]*";
+  const word = (count: number, file: string): string =>
+    `~/.hermes/${Array.from({ length: count }, () => pattern).join("/")}/${file}`;
+  const BUDGET_MS = 10_000;
+  const timed = (count: number): Run => {
+    const started = Date.now();
+    const run = ask(dir, at(`cat ${word(count, "notes.md")}`));
+    const took = Date.now() - started;
+    t.diagnostic(`${String(count)} directory patterns: ${String(took)} ms`);
+    assert.ok(took < BUDGET_MS, `${String(count)} directory patterns took ${String(took)} ms`);
+    return run;
+  };
+  chmodSync(home, 0o000);
+  try {
+    const control = timed(4);
+    assert.equal(verdictOf(control).permission, "allow", `${control.stdout} ${control.stderr}`);
+    for (const count of [5, 24]) {
+      const run = timed(count);
+      assert.equal(verdictOf(run).permission, "deny", `${String(count)}: ${run.stdout} ${run.stderr}`);
+      assert.ok(classesOf(run).includes("account.credential"), `${String(count)}: ${run.stdout} ${run.stderr}`);
+    }
+    expectDenied(dir, [at(`cat ~/.hermes/${pattern}/p/${pattern}/.env`)], "account.credential");
+    const ordinary = ask(dir, at(`cat ~/.hermes/${pattern}/p/${pattern}/run_agent.py`));
+    assert.equal(verdictOf(ordinary).permission, "allow", `${ordinary.stdout} ${ordinary.stderr}`);
+  } finally {
+    chmodSync(home, 0o755);
+  }
+});
