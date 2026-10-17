@@ -146,6 +146,29 @@ on the hook for enforcement.
   272,300 of 1,533,105 generated lines to a refusal and loosened or
   reclassified none. Cost: `n+=1` and other append or array writes now need
   a person.
+- **An assignment-shaped word whose name is quoted or escaped is the command
+  bash runs (APRV-523).** bash decides whether a word in front of a command is
+  an assignment on the word as written: the name, the `+` and the `=` must
+  carry no quote or backslash, and the name no `$`, backtick or brace. A word
+  that fails that test is the program bash runs, named by the whole word, and
+  the next word is its first argument. The classifier applied the same grammar
+  to the word after quote removal, so it read past such a word as an
+  assignment and judged the next word as the program; the two disagreed about
+  what runs. This was on main and 0.4.5, in front of every program, git
+  included, and with every assignment spelling. The grammar is now read on
+  the source spelling. A segment where the classifier's reading and bash's
+  stop at different words is `unclassified` (the hook refuses it), on its own,
+  after a real assignment, and inside a substitution; a protected redirect
+  still answers first, as for the plain spelling. The segment shapes the hook,
+  the approval breakdown and the channels read now name the word bash runs as
+  the binary. A quoted value, or a quoted subscript, keeps the word an
+  assignment, unchanged. Stricter only: a depth-2 differential over
+  2,421,383 generated lines (#652's git corpus, with the quoted and escaped
+  spellings added to its alphabet, and a corpus of other programs) moved
+  51,226 from an answer to `unclassified` against #652's head (3a9c33c3) and
+  586,454 against main (2179e128, #652's moves included), and loosened or
+  reclassified none. Cost: none expected; an agent has no reason to quote the
+  name of an assignment.
 
 ### Harnesses
 

@@ -957,6 +957,15 @@ interface LexWord {
    * bytes; every other reader keeps reading `text` exactly as before.
    */
   exact: boolean;
+  /**
+   * Is this word an assignment to bash (APRV-523)? bash decides that on the
+   * word as WRITTEN, before quote removal: the name, an optional subscript, the
+   * `+` and the `=` must carry no quoting or escaping character, and the name
+   * no `$`, backtick or brace. {@link ASSIGNMENT} applied to the source
+   * spelling, not to `text`: a word whose name is quoted or escaped has the
+   * same `text` as an assignment and is a command word, the program bash runs.
+   */
+  assignment: boolean;
 }
 
 interface LexRedirect {
@@ -1192,7 +1201,8 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
-    return { text, quoted, substitutions, exact };
+    const assignment = ASSIGNMENT.test(command.slice(start, index));
+    return { text, quoted, substitutions, exact, assignment };
   };
 
   while (index < command.length) {
@@ -4700,6 +4710,14 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
  * precedes, so a cursor that stopped at `NAME+=v` took that word for the
  * program and judged the real one as its argument. The compound form
  * `NAME=(…)` never reaches here: the tokenizer refuses it ({@link lex}).
+ *
+ * bash applies this grammar to the word as written (APRV-523). Applied to the
+ * source spelling ({@link LexWord.assignment}) it is bash's rule: a quote, a
+ * backslash, a `$`, a backtick or a brace in the name is none of
+ * `[A-Za-z0-9_]`, so such a word is a command word. Applied to a word's
+ * dequoted `text` it says only that the word is assignment-SHAPED, which is
+ * what the deliberately broad line scans read ({@link gitEnvironmentWrite},
+ * {@link movesNameResolution}): they count both readings and only refuse more.
  */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 
@@ -5431,6 +5449,24 @@ function classifySegment(
   // other program and on its own: its text does not say what value the
   // command inherits. So does a command word that opens like a subscripted
   // assignment the grammar cannot read in full ({@link ASSIGNMENT_LIKE}).
+  //
+  // APRV-523. The cursor above reads past every assignment-SHAPED word, judged
+  // on its dequoted text. bash reads past only the words it accepts as
+  // assignments as written ({@link LexWord.assignment}): a word whose name is
+  // quoted or escaped is the program bash runs, named by the whole word, and
+  // the word after it is that program's argument. Where the two stop at
+  // different words this classifier would judge a program that does not run,
+  // so the segment is `unclassified`. No program this table admits is named
+  // like an assignment, so the word is refused, not resolved.
+  const bashCursor = bashAssignmentCount(segment.words);
+  if (bashCursor !== assignments.length) {
+    const runs = words[Math.min(bashCursor, assignments.length)] as string;
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${assignmentHead(runs)}…: a word whose name is quoted or escaped is a command word to bash, not an assignment`,
+    };
+  }
   const unplain = assignments.find((word) => !PLAIN_ASSIGNMENT.test(word));
   if (unplain !== undefined) {
     return {
@@ -5943,6 +5979,20 @@ export function commandSegmentWriteTargets(command: string): string[][] | null {
 }
 
 /**
+ * How many words open the segment that bash takes as assignments, judged on
+ * each word as written ({@link LexWord.assignment}, APRV-523). The word after
+ * them is the program bash runs: a word whose name is quoted or escaped is
+ * that program, not an assignment, so the shapes below name it as the binary.
+ * On a line the classifier answers the count equals its own cursor's, because
+ * {@link classifySegment} refuses any segment where the two differ.
+ */
+function bashAssignmentCount(words: readonly LexWord[]): number {
+  let cursor = 0;
+  while (cursor < words.length && (words[cursor] as LexWord).assignment) cursor += 1;
+  return cursor;
+}
+
+/**
  * Every segment of `command` with its binary (or `null`), its arguments and the
  * paths it writes through a redirection, from ONE lex of the whole command
  * (APRV-445 recheck). Lexing a segment's text on its own fails for a heredoc,
@@ -5962,8 +6012,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
   if (!lexed.ok) return null;
   return lexed.segments.map((segment) => {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
     return {
       text: segment.text,
       bin: words[cursor] ?? null,
@@ -5986,8 +6035,7 @@ export function commandSegmentWords(command: string): CommandSegmentWords[] | nu
   const out: CommandSegmentWords[] = [];
   for (const segment of lexed.segments) {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
     const bin = words[cursor];
     if (bin === undefined) continue;
     out.push({ text: segment.text, bin, args: words.slice(cursor + 1) });
